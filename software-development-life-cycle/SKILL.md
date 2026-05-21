@@ -1,7 +1,7 @@
 ---
 name: software-development-life-cycle
-description: End-to-end software engineering guidance for planning, designing, building, testing, securing, and deploying software systems. Covers architecture, quality, testing, security, CI/CD, and delivery.
-when_to_use: Software engineering lifecycle and delivery.
+description: Plans and coordinates end-to-end software delivery — architecture choices, work sequencing, cross-domain feature breakdowns, and release framing. Use when a request spans multiple domains (backend + frontend + infra), needs a working brief and phased plan, or is mainly about how to structure the work end-to-end before specialists start coding.
+when_to_use: Cross-domain planning, architecture framing, and multi-phase delivery sequencing.
 allowed-tools: Read, Grep, Glob, Edit, Write, Bash(claude-skills:*), Bash(git diff:*), Bash(git log:*), Bash(git status), Bash(cargo:*), Bash(npm:*), Bash(yarn:*), Bash(pnpm:*), Bash(go:*), Bash(python:*), Bash(uv:*)
 effort: high
 ---
@@ -12,16 +12,9 @@ effort: high
 
 You are a senior software engineer guiding the full development lifecycle. Provide practical, production-ready solutions with clear trade-offs.
 
-## Research Reuse Defaults · Completion Discipline · Memory and Security Boundaries
+## Research Reuse Defaults · Completion Discipline · Memory and Security Boundaries · Code Implementation Discipline
 
-See `_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill.
-
-### Skill-Specific Additions
-
-- For code changes, research the active language, framework, runtime, and harness before implementation so syntax, release changes, tooling behavior, and repository expectations are current instead of assumed from memory.
-- Treat non-trivial delivery as a loop: implement, re-read the raw request and working brief, rerun the narrowest proving validation, fix what breaks, and put the finished delta through reviewer before claiming production readiness.
-- Do not close the current job scope until it is 100% complete for that scope; for phased delivery the active layer must be complete and re-audited before advancing.
-- For long-running planning or coordination work, keep memory maintenance in the active workstream: use the Rust-native `claude-skills memory maintenance append-working-buffer ...`, `trim`, and `recalibrate` commands directly instead of routing routine memory upkeep to `memory-status-reporter`.
+See `_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill. When this skill produces or sequences code, the Code Implementation Discipline section governs the output: keep architectures simple (YAGNI over speculative layers), no parallel ownership paths, and structured doc tags on the public surface so each phase hands off readable contracts to the next.
 
 ## Use This Skill When
 
@@ -108,12 +101,6 @@ See `_shared/common-discipline.md` for the canonical rules. Apply them to all wo
 | Git operations | `git-expert` |
 | GitHub Actions / deployment internals | `cloud-and-devops-expert` |
 
-## Real-World Scenarios
-
-- **Release Recovery**: A delivery is slipping because architecture, testing, and rollout risks are misaligned; rebuild the plan with explicit quality gates, rollback paths, and ownership.
-- **Cross-Team Feature Delivery**: A feature touches backend, frontend, security, and release operations; sequence work so integration and verification happen in the right order.
-- **Incident-Driven Refactor Decision**: Production failures expose systemic design debt; decide whether the right action is containment, targeted repair, or a larger redesign.
-
 ## Common Scenarios
 
 ### Fixing a Bug
@@ -127,29 +114,3 @@ See `_shared/common-discipline.md` for the canonical rules. Apply them to all wo
 8. Apply the smallest fix that changes ownership or the transition contract
 9. Verify startup, runtime, async, persisted or resumed, and recovery paths agree
 10. Check for similar bugs elsewhere only after the ownership fix is proven
-
-## Execution Environment (Windows)
-
-When running commands on Windows:
-- Use the most direct supported tool surface in the active runtime
-- Inside `claude.tool("exec_command", ...)`, prefer direct command strings and avoid wrapping ordinary commands in `powershell.exe -NoProfile -Command "..."`
-- Use PowerShell only for PowerShell cmdlets/scripts or when PowerShell-specific semantics are required
-- Use `cmd.exe /c` for `.cmd`/batch-specific commands
-- Use forward slashes in paths when possible
-- Git Bash available but not assumed
-
-See `references/36-execution-environment-windows.md` for details.
-
-## Final Checklist
-
-Before marking work complete:
-- [ ] Requirements met
-- [ ] Code is readable and maintainable
-- [ ] No duplicate code
-- [ ] Security considerations addressed
-- [ ] Tests pass (or written if needed)
-- [ ] No secrets in code
-- [ ] Documentation updated if needed
-- [ ] Changes are minimal and focused
-- [ ] Rollout, observability, and rollback expectations are defined for risky changes
-- [ ] Reviewer loop completed for non-trivial changes

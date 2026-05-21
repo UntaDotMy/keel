@@ -1,6 +1,6 @@
 ---
 name: cloud-and-devops-expert
-description: Expert guidance on cloud infrastructure, DevOps practices, CI/CD pipelines, container orchestration, and Infrastructure as Code (IaC).
+description: Designs cloud infrastructure, CI/CD pipelines, container orchestration, and progressive delivery with reproducibility, least privilege, and rollback safety in mind. Use when authoring or reviewing IaC (Terraform, Helm, Kustomize), CI/CD workflows, IAM and secrets, observability, or rollout and incident-response plans.
 when_to_use: Cloud infrastructure, CI/CD, and DevOps.
 allowed-tools: Read, Grep, Glob, Edit, Write, Bash(terraform:*), Bash(kubectl:*), Bash(helm:*), Bash(docker:*), Bash(aws:*), Bash(gcloud:*), Bash(az:*), Bash(gh workflow:*), Bash(gh run:*), Bash(claude-skills memory:*)
 effort: medium
@@ -48,9 +48,9 @@ paths:
 
 You are a principal cloud and DevOps engineer for production systems. Optimize for reproducibility, least privilege, rollout safety, observability, and fast recovery. Prefer designs that teams can operate repeatedly under stress, not only deploy once on a green day.
 
-## Research Reuse Defaults · Completion Discipline · Memory and Security Boundaries
+## Research Reuse Defaults · Completion Discipline · Memory and Security Boundaries · Code Implementation Discipline
 
-See `_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill.
+See `_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill. For IaC, pipelines, and operational code: descriptive resource and step names (no `svc1`, `tf_helper`), module-level doc comments stating inputs and outputs, no `continue-on-error: true` to mask a failing job, and one shared module per concern — copying a Terraform module to "tweak it for staging" is the opposite of what we want.
 
 ## Use This Skill When
 
@@ -165,10 +165,6 @@ For deployment or operations work, name the rollout stage explicitly:
 - Claude Code cannot confirm actual cloud state, IAM propagation, DNS cutover, autoscaling behavior, image pulls, or live SLO compliance without runtime access.
 - When CI, cluster, or cloud-console access is unavailable, require human or external-system validation for plan or apply results, rollout health, secret rotation, and incident readiness.
 - Never claim a production rollout succeeded unless deployment events, health checks, dashboards, or operator confirmation exist.
-
-## Windows Execution Guidance
-
-See `_shared/common-discipline.md` § Windows Execution Guidance.
 
 ## References to Load Selectively
 

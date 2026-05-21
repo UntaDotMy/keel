@@ -1,5 +1,6 @@
 {
   "name": "claude-core",
+  "displayName": "Claude Core",
   "version": "0.1.0",
   "description": "Native delivery rails for Claude Code — managed specialist skills, subagents, hooks, review gates, and the claude-skills CLI for workflow, memory, and command compaction.",
   "author": {

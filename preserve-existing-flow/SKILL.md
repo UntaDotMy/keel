@@ -1,7 +1,7 @@
 ---
 name: preserve-existing-flow
-description: Use when modifying an existing or brownfield codebase where current behavior, original functions, loops, handlers, state machines, transport flows, firmware flows, protocol flows, or source-of-truth ownership must be preserved. This skill forces architecture-first understanding before edits, prevents direct overwrites of existing behavior, and requires new behavior to be layered through the existing owner flow unless the user explicitly approves an ownership migration.
-when_to_use: Preserve existing flows before brownfield changes.
+description: Traces ownership and current behavior in brownfield code before any edit, so new behavior layers through the existing owner instead of overwriting it. Use proactively before editing any existing source file — handlers, loops, state machines, transport flows, queues, or source-of-truth modules. Returns a working brief with current flow, preserved owner, drift risks, and the safe extension shape.
+when_to_use: Pre-edit ownership trace before changing existing behavior in a brownfield codebase.
 allowed-tools: Read, Grep, Glob, Bash(claude-skills flow:*), Bash(claude-skills memory:*), Bash(git diff:*), Bash(git log:*), Bash(git show:*)
 effort: high
 ---
@@ -21,6 +21,10 @@ Do not modify, replace, bypass, or call around an existing flow until the curren
 Layer new behavior beside the current path, or route it through the same owner pattern, unless the user explicitly approves replacing or migrating the flow.
 
 This is a universal pre-edit gate for existing source files. Run a Preserve Existing Flow check before editing any existing source file unless the task is docs-only, formatting-only, generated-only, or explicitly greenfield.
+
+## Code Implementation Discipline
+
+See `_shared/common-discipline.md` § Code Implementation Discipline for the canonical rules (YAGNI, no shortforms, no silent fallbacks, no duplication, less comments + structured doc tags). They reinforce this skill's core rule: routing through the existing owner is the no-duplication / no-parallel-path principle expressed at the architecture layer. Reject extensions that copy the owner's logic into a new file or wrap it in a "compat shim" instead of extending the owner directly.
 
 ## Required First Step
 

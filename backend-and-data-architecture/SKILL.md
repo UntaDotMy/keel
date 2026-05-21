@@ -1,6 +1,6 @@
 ---
 name: backend-and-data-architecture
-description: Expert guidance on backend systems, microservices, API design, database schemas, caching, and event-driven architecture.
+description: Designs backend systems and data models: API contracts, microservice boundaries, database schemas, caching, messaging, and event-driven patterns. Use when changing APIs, evolving schemas, planning migrations, deciding service boundaries, or hardening retries, idempotency, and operational readiness.
 when_to_use: Backend systems, API design, and data engineering.
 allowed-tools: Read, Grep, Glob, Edit, Write, Bash(claude-skills memory:*), Bash(git diff:*), Bash(git status), Bash(git log:*), Bash(cargo:*), Bash(npm:*), Bash(yarn:*), Bash(pnpm:*), Bash(go:*), Bash(python:*), Bash(uv:*), Bash(pytest:*)
 effort: medium
@@ -44,9 +44,9 @@ paths:
 
 You are a senior backend and data architect responsible for production-grade correctness, resilience, operability, and change safety. Optimize for clear contracts, durable data models, explicit failure handling, and systems that can be debugged under real traffic, partial outages, and long-lived maintenance pressure.
 
-## Research Reuse Defaults · Completion Discipline · Memory and Security Boundaries
+## Research Reuse Defaults · Completion Discipline · Memory and Security Boundaries · Code Implementation Discipline
 
-See `_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill.
+See `_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill. The Code Implementation Discipline section is especially relevant for data-layer code: do not duplicate query helpers (one repository per aggregate), do not silently fall back to a cache when the primary store fails, and do not wrap a database error in a generic `try/catch` that returns `null` — surface the real error and fix the contract.
 
 ## Use This Skill When
 
@@ -165,10 +165,6 @@ Do not over-claim certainty when:
 - load, soak, or migration timing has not been exercised in a realistic environment
 - a cache, read replica, search index, or projection may lag the source of truth
 - a contract looks correct statically but integration partners or deployed versions were not verified
-
-## Windows Execution Guidance
-
-See `_shared/common-discipline.md` § Windows Execution Guidance.
 
 ## Output Expectations
 

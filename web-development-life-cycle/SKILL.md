@@ -1,6 +1,6 @@
 ---
 name: web-development-life-cycle
-description: Web development for websites and web applications. Covers frontend/backend architecture, performance, SEO, accessibility, security, browser compatibility, and deployment.
+description: Builds and ships production-ready websites and web applications with attention to rendering strategy, performance (Core Web Vitals), accessibility, SEO, security, and cross-browser behavior. Use when planning or hardening a web surface: routes, APIs, deployment, framework choice, or release safety.
 when_to_use: Web architecture, quality, and production delivery.
 allowed-tools: Read, Grep, Glob, Edit, Write, Bash(npm:*), Bash(yarn:*), Bash(pnpm:*), Bash(npx:*), Bash(node:*), Bash(vite:*), Bash(next:*), Bash(claude-skills memory:*)
 effort: medium
@@ -34,9 +34,9 @@ paths:
 
 You are a senior web engineer building production-ready websites and web applications. Focus on performance, accessibility, SEO, security, and cross-browser compatibility.
 
-## Research Reuse Defaults · Completion Discipline · Memory and Security Boundaries
+## Research Reuse Defaults · Completion Discipline · Memory and Security Boundaries · Code Implementation Discipline
 
-See `_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill.
+See `_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill. For frontend and API code: descriptive component and hook names (no `Btn`, `usrCtx`, `hdlClick`), TSDoc `@param`/`@returns` on shared components, hooks, and utilities, no silent error boundaries that swallow render failures, and one source of truth for shared state — do not introduce a parallel store "just for this page".
 
 ## Use This Skill When
 
@@ -119,12 +119,6 @@ Deep web knowledge in `references/`:
 
 Load references as needed for specific topics.
 
-## Real-World Scenarios
-
-- **Late-Stage Release Risk**: Performance, accessibility, and SEO regressions appear together near release; use this skill to prioritize fixes by business impact and observability.
-- **Framework Migration Pressure**: A team wants to modernize without breaking routes, hydration, or analytics; use this skill to phase the work with compatibility and rollback checks.
-- **Production Debugging**: A web issue reproduces only under specific browsers, networks, or caching conditions; use this skill to separate what Claude Code can verify locally from what needs external test coverage.
-
 ## Output Expectations
 
 When using this skill, return:
@@ -133,22 +127,3 @@ When using this skill, return:
 - the validation plan across performance, accessibility, SEO, compatibility, security, or release risk as applicable
 - any runtime boundaries, external checks, or live-environment validation still required
 - a clear done statement that names what is complete, what was verified, and what remains open if anything could not be proven in this runtime
-
-## Windows Environment
-
-See `_shared/common-discipline.md` § Windows Execution Guidance, and `../software-development-life-cycle/references/36-execution-environment-windows.md` for details.
-
-## Final Checklist
-
-Before marking web work complete:
-- [ ] Performance optimized (Core Web Vitals pass)
-- [ ] Accessible (WCAG 2.1 AA)
-- [ ] SEO implemented (meta tags, structured data)
-- [ ] Security headers configured
-- [ ] Cross-browser tested
-- [ ] Mobile responsive
-- [ ] Tests passing (unit, integration, E2E)
-- [ ] Error tracking configured
-- [ ] Monitoring in place
-- [ ] Documentation updated
-- [ ] Rollout and rollback path verified for production-impacting changes

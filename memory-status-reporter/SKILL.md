@@ -1,6 +1,6 @@
 ---
 name: memory-status-reporter
-description: Produces human-style memory status reports from Claude Code memory files. Use for requests like "what did you learn today", "show memory status", "what mistakes happened and are they resolved", "how is memory growing", or "summarize what you understand about my needs."
+description: Produces human-style memory status reports from Claude Code memory artifacts: learning recap, mistake ledger, rewarded patterns, research-cache health, and remembered user needs. Use when the user asks "what did you learn today", "show memory status", "what mistakes happened and are they resolved", "how is memory growing", or "summarize what you understand about my needs".
 when_to_use: Human-style memory health and learning reports.
 allowed-tools: Read, Grep, Glob, Bash(claude-skills memory:*)
 effort: low
@@ -14,16 +14,9 @@ Turn Claude Code memory artifacts into a human-readable status report that feels
 
 Use this skill only when the user explicitly wants a memory-health report, learning recap, mistake ledger, user-needs summary, or heuristic growth report. Routine durable memory, planning, progress, and closure updates belong to the main lane through the Rust-native `claude-skills memory ...` commands, which should keep the writable global second-layer store under `~/.claude/memoriesv2/` synchronized.
 
-## Research Reuse Defaults · Completion Discipline · Memory and Security Boundaries
+## Research Reuse Defaults · Completion Discipline · Memory and Security Boundaries · Code Implementation Discipline
 
-See `_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill.
-
-### Skill-Specific Additions
-
-- If the requested work in one file exposes another fixable in-scope flaw elsewhere that must be corrected for the delivered item to be clean and production-ready, fix it before final delivery instead of turning it into "next steps" prose. Do not widen into unrelated features or unrelated cleanup.
-- A progress, recap, audit, or "what is done or not done" request is an honest checkpoint, not a closing condition; if fixable in-scope work remains, keep going after the status summary until the requested job is actually complete.
-- For non-trivial tasks, track explicit user requirements in the scoped completion ledger with `claude-skills memory completion-gate ...` and treat the final `check` result as the closure gate instead of relying on narrative judgment alone.
-- After non-trivial work, confirm the main lane has made durable memory updates explicit: refresh session state for corrections, keep the working brief current, update the completion ledger, and record reusable research or mistakes before final delivery.
+See `_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill. The reporting code itself follows the same discipline: descriptive identifiers in scripts and queries, no `try/catch` that swallows a missing memory file (surface the gap in the report), no duplicate aggregation helpers, and structured doc comments on any shared utility so the next maintainer reads contract from the source.
 
 ## WAL and Working Buffer Protocol
 
@@ -170,12 +163,6 @@ Always produce these sections unless the user narrows the scope:
 - Do not claim a rewarded pattern unless the artifacts show a validated win, a clear reuse success, or durable guidance that future work should prefer.
 - Do not claim research-cache reuse or staleness unless the artifacts actually record that update.
 - Do not present unresolved work as complete when the user asked for a finished status report or closure decision.
-
-## Real-World Scenarios
-
-- **Daily Delivery Check-In**: A user asks what Claude Code learned today, what mistakes were resolved, and whether momentum is improving; use this skill to turn raw memory into a concise status report.
-- **Repeated Failure Pattern**: Similar tool or workflow failures keep resurfacing; use this skill to surface the mistake trail, current resolution state, and the prevention pattern future runs should follow.
-- **Preference Recall Audit**: A user wants confirmation that Claude Code still remembers their working style, validation expectations, and recurring project constraints; use this skill to summarize those remembered needs without inventing new ones.
 
 ## References
 

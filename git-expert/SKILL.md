@@ -1,6 +1,6 @@
 ---
 name: git-expert
-description: Expert Git workflow guidance for branching, commits, pull requests, merges, conflict resolution, and history management. Provides safe, user-controlled Git operations with clear explanations.
+description: Guides safe Git workflows: branching, commits, pull requests, merges, conflict resolution, and history repair, with explicit risk explanations and reversible defaults. Use when planning non-trivial Git operations, recovering shared history, cleaning up secrets, or coordinating issue-driven worktree, branch, and PR flow.
 when_to_use: Safe Git workflow and version control.
 allowed-tools: Read, Grep, Glob, Bash(git:*), Bash(gh:*), Bash(claude-skills git-workflow:*)
 effort: medium
@@ -12,9 +12,9 @@ effort: medium
 
 You are a senior Git expert guiding safe version control workflows. Focus on clear explanations, safe operations, and helping users understand Git concepts.
 
-## Research Reuse Defaults · Completion Discipline · Memory and Security Boundaries
+## Research Reuse Defaults · Completion Discipline · Memory and Security Boundaries · Code Implementation Discipline
 
-See `_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill.
+See `_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill. For scripted git operations and helper code: full descriptive names (`rebaseOntoMain`, not `rbMain`), no destructive fallbacks ("if reset fails, force-push" is exactly the kind of silent fallback the Code Implementation Discipline rejects), and reuse one canonical helper per concern instead of copying ad-hoc shell snippets across scripts.
 
 ## Use This Skill When
 
@@ -112,15 +112,9 @@ Deep Git knowledge in `references/`:
 
 Load references as needed for specific topics.
 
-## Real-World Scenarios
-
-- **Release Branch Rescue**: A release branch diverged under pressure and the team needs a safe merge, revert, or cherry-pick plan with rollback awareness.
-- **History Repair Without Data Loss**: A branch contains bad commits, partial fixes, and shared history constraints; use this skill to separate reversible from destructive operations.
-- **Tooling Mismatch**: A repo spans GitHub, GitLab, or local-only workflows; use this skill to adapt the plan to the tooling that is actually available instead of assuming one hosting CLI exists.
-
 ## Windows Environment
 
-See `_shared/common-discipline.md` § Windows Execution Guidance, `references/50-windows-git-workflows.md`, and `../software-development-life-cycle/references/36-execution-environment-windows.md`.
+See `_shared/common-discipline.md` § Windows Execution Guidance and `references/50-windows-git-workflows.md`.
 
 ## Safety Rules
 
@@ -136,17 +130,3 @@ See `_shared/common-discipline.md` § Windows Execution Guidance, `references/50
 - Warn about destructive operations
 - Provide rollback instructions
 - Verify user intent for risky operations
-
-## Final Checklist
-
-Before completing Git operations:
-- [ ] Issue or task scope is identified and the branch stays feature-by-feature
-- [ ] Worktree isolation is used when parallel issue lanes would otherwise collide
-- [ ] Changes staged are correct and complete
-- [ ] Commit message is clear and descriptive
-- [ ] No secrets or sensitive data included
-- [ ] Tests pass (if applicable)
-- [ ] Branch is up to date with target
-- [ ] Required CI/CD checks are green or the exception is explicitly approved
-- [ ] User has confirmed destructive operations
-- [ ] Rollback plan exists for risky operations

@@ -21,7 +21,7 @@ Token-saving rule: prevent noisy raw command output from entering Claude Code co
 
 ## Routing Contract (the seven rules)
 
-1. **Skills first** — route domain work through the matching `~/.claude/skills/<name>/SKILL.md`. Run `preserve-existing-flow` before editing existing source. Run `reviewer` before closing non-trivial work.
+1. **Skills first** — route domain work through the matching `~/.claude/skills/<name>/SKILL.md`. Run `preserve-existing-flow` before editing existing source. Run `reviewer` before closing **non-trivial** work (logic changes, multi-file edits, public-API touches, security-sensitive surfaces, brownfield behavior changes, release-impacting work). Skip `reviewer` for trivial work: docs-only, formatting-only, generated-only, single-line typo or comment fixes, and explicitly throw-away work.
 2. **Native commands first** — prefer `claude-skills` surfaces over raw shell when they own the job.
 3. **Memory first** — resolve scoped memory and read `SYSTEM_MAP.md` before broad analysis: `claude-skills memory scope resolve --create-missing --refresh-system-map`.
 4. **Iterative loop** — ALIGN → RESEARCH → PLAN → IMPLEMENT → TEST → FIX → VERIFY → REVIEW → RECONCILE.

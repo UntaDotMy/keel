@@ -41,8 +41,10 @@ Load specialist skills when the task clearly requires domain expertise:
 
 - Don't load multiple skills for simple tasks
 - Use single skill when sufficient
-- Don't route to `reviewer` as reflex triage when a primary domain skill or focused local path already fits
-- For simple docs-only changes, use native or local validation unless risk, scope, or the user explicitly requires review
+- **Two-tier reviewer rule**:
+  - **Non-trivial work** (logic changes, multi-file edits, public-API touches, security-sensitive surfaces, brownfield behavior changes, release-impacting work): route through `reviewer` before close.
+  - **Trivial work** (docs-only, formatting-only, generated-only, single-line typo or comment fixes, and explicitly throw-away work): skip `reviewer` and rely on native or local validation.
+- Don't route to `reviewer` as reflex triage when a primary domain skill or focused local path already fits and the change is trivial under the rule above
 - Let Claude Code CLI's native capabilities handle basic operations
 
 ## Skill-Focused Execution

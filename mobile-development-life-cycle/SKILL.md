@@ -1,6 +1,6 @@
 ---
 name: mobile-development-life-cycle
-description: Mobile app development for Android and iOS. Covers lifecycle management, permissions, offline sync, security, testing, app store release, performance, and battery optimization.
+description: Builds and ships production-ready Android and iOS apps with platform-correct lifecycle, permissions, offline sync, secure storage, and store-readiness. Use when working on mobile-specific risk: device-only failures, OS-version differences, battery and performance, app-store submission, or staged mobile rollouts.
 when_to_use: Mobile architecture, quality, and release.
 allowed-tools: Read, Grep, Glob, Edit, Write, Bash(gradle:*), Bash(./gradlew:*), Bash(xcodebuild:*), Bash(pod:*), Bash(adb:*), Bash(flutter:*), Bash(npx react-native:*), Bash(claude-skills memory:*)
 effort: medium
@@ -34,9 +34,9 @@ paths:
 
 You are a senior mobile engineer building production-ready Android and iOS apps. Focus on platform-specific best practices, user experience, and app store requirements.
 
-## Research Reuse Defaults · Completion Discipline · Memory and Security Boundaries
+## Research Reuse Defaults · Completion Discipline · Memory and Security Boundaries · Code Implementation Discipline
 
-See `_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill.
+See `_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill. For mobile code: full identifiers in lifecycle handlers (`onActivityResumed`, not `onActRes`), KDoc / Javadoc / Swift doc comments with `@param`/`@returns` on public APIs, no `try/catch` that masks platform permission denials or background-task failures, and reuse the shared offline-sync / secure-storage helpers instead of re-implementing them per screen.
 
 ## Use This Skill When
 
@@ -115,12 +115,6 @@ Deep mobile knowledge in `references/`:
 
 Load references as needed for specific topics.
 
-## Real-World Scenarios
-
-- **Intermittent Device-Only Failure**: A bug appears only on specific OS versions, battery states, or background/foreground transitions; use this skill to structure the repro matrix and isolate what still requires device evidence.
-- **Offline/Sync Regression**: A release changes local persistence, retries, or conflict handling; use this skill to define resilience tests, observability markers, and rollback boundaries before rollout.
-- **Store Readiness Review**: A build is functionally correct but risky on permissions, privacy, crash handling, or release gating; use this skill to convert it into a production-ready release plan.
-
 ## Output Expectations
 
 When using this skill, return:
@@ -129,22 +123,3 @@ When using this skill, return:
 - the validation plan across device coverage, offline behavior, permissions, privacy, performance, crash risk, or rollout safety as applicable
 - any runtime boundaries, store-review dependencies, or real-device checks still required
 - a clear done statement that names what is complete, what was verified, and what remains open if this runtime could not prove it
-
-## Windows Environment
-
-See `_shared/common-discipline.md` § Windows Execution Guidance, and `../software-development-life-cycle/references/36-execution-environment-windows.md` for details.
-
-## Final Checklist
-
-Before marking mobile work complete:
-- [ ] Tested on real devices (iOS and/or Android)
-- [ ] Lifecycle handled (background, foreground, process death)
-- [ ] Permissions requested contextually with rationale
-- [ ] Offline behavior implemented
-- [ ] Performance optimized (startup, scrolling, memory)
-- [ ] Battery impact minimized
-- [ ] Security best practices followed
-- [ ] Crashes monitored and fixed
-- [ ] App store guidelines followed
-- [ ] Beta tested before production release
-- [ ] Staged rollout, telemetry checks, and rollback path are defined for risky changes
