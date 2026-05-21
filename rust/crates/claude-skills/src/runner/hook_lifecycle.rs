@@ -27,6 +27,12 @@ const RAW_OUTPUT_DEFAULT_RETENTION_DAYS: u64 = 14;
 const MANAGED_PRE_TOOL_USE_EVENT: &str = "PreToolUse";
 const MANAGED_PRE_TOOL_USE_COMMAND_SUFFIX: &str = "hook pre-tool-use";
 
+/// SYSTEM_MAP.md is rebuilt every N edit-class tool calls so the workspace
+/// pointer stays in sync with the repo without paying refresh cost on every
+/// tool call. Tunable via `CLAUDE_SKILLS_SYSTEM_MAP_REFRESH_INTERVAL`; setting
+/// it to `0` disables the periodic refresh.
+const SYSTEM_MAP_REFRESH_DEFAULT_THRESHOLD: u64 = 10;
+
 /// Iterate canonical hook event names. Single-line wrapper around the table so
 /// existing for-loops keep their `for event in claude_hook_event_names()` shape
 /// without caring that the source is a typed row table.
@@ -64,6 +70,12 @@ pub fn run_hook_command(
 
         // PreToolUse runs the transparent rewriter and emits hookSpecificOutput.
         "pre-tool-use" => run_hook_pre_tool_use(standard_output, standard_error),
+
+        // PostToolUse counts edit-class tool calls and refreshes SYSTEM_MAP.md
+        // every N edits. The lifecycle context for this event stays empty
+        // (silent per the prompt-cache budget rule), so we own the dispatch
+        // here instead of going through run_hook_lifecycle.
+        "post-tool-use" => run_hook_post_tool_use(standard_error),
 
         // Stop and SubagentStop must never return a non-zero exit code. Claude Code
         // treats a failing Stop hook as a signal to re-run the turn, which cascades
@@ -404,6 +416,131 @@ fn run_hook_pre_tool_use(standard_output: &mut dyn Write, standard_error: &mut d
     }
 }
 
+/// PostToolUse handler.
+///
+/// Two responsibilities:
+///   1. Count edit-class tool calls (Edit, Write, MultiEdit, NotebookEdit) in a
+///      per-workspace counter file under `<claude_home>/state/system-map-edit-counter/<key>`.
+///   2. Refresh SYSTEM_MAP.md every N edits so the workspace pointer stays in
+///      sync with the repo. N defaults to 10; override via
+///      `CLAUDE_SKILLS_SYSTEM_MAP_REFRESH_INTERVAL` (`0` disables).
+///
+/// PostToolUse stays silent on `additionalContext` (the model already sees the
+/// tool result), so we never emit JSON — only do the side-effect and return 0.
+fn run_hook_post_tool_use(standard_error: &mut dyn Write) -> u8 {
+    let input_text = match std::io::read_to_string(std::io::stdin()) {
+        Ok(text) => text,
+
+        // PostToolUse must never fail loudly: a non-zero exit teaches Claude
+        // Code that the post-tool hook itself is broken. Log to stderr and
+        // exit 0 — the lifecycle event is observability, not a gate.
+        Err(error) => {
+            let _ = writeln!(
+                standard_error,
+                "claude-skills post-tool-use: unable to read hook input: {error}"
+            );
+
+            return 0;
+        }
+    };
+
+    let input: JsonDocument = match serde_json::from_str(&input_text) {
+        Ok(value) => value,
+
+        Err(error) => {
+            let _ = writeln!(
+                standard_error,
+                "claude-skills post-tool-use: unable to decode hook input: {error}"
+            );
+
+            return 0;
+        }
+    };
+
+    let tool_name = input
+        .get("tool_name")
+        .and_then(JsonDocument::as_str)
+        .unwrap_or_default();
+
+    if !is_edit_class_tool(tool_name) {
+        return 0;
+    }
+
+    let threshold = system_map_refresh_threshold();
+
+    if threshold == 0 {
+        return 0;
+    }
+
+    let Some(counter_path) = system_map_edit_counter_path() else {
+        return 0;
+    };
+
+    let next_count = match increment_counter_file(&counter_path) {
+        Ok(value) => value,
+        Err(error) => {
+            let _ = writeln!(
+                standard_error,
+                "claude-skills post-tool-use: counter update failed: {error}"
+            );
+
+            return 0;
+        }
+    };
+
+    if next_count >= threshold {
+        let _ = refresh_memory_scope_for_current_directory(standard_error);
+        let _ = reset_counter_file(&counter_path);
+    }
+
+    0
+}
+
+fn is_edit_class_tool(tool_name: &str) -> bool {
+    matches!(tool_name, "Edit" | "Write" | "MultiEdit" | "NotebookEdit")
+}
+
+fn system_map_refresh_threshold() -> u64 {
+    std::env::var("CLAUDE_SKILLS_SYSTEM_MAP_REFRESH_INTERVAL")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(SYSTEM_MAP_REFRESH_DEFAULT_THRESHOLD)
+}
+
+fn system_map_edit_counter_path() -> Option<PathBuf> {
+    let claude_home = resolve_claude_home("").ok()?;
+    let workspace_root = std::env::current_dir().ok()?;
+    let workspace_key = sanitize_memory_key(&display_path(&workspace_root));
+
+    Some(
+        claude_home
+            .join("state")
+            .join("system-map-edit-counter")
+            .join(workspace_key),
+    )
+}
+
+fn increment_counter_file(path: &Path) -> std::io::Result<u64> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let current = fs::read_to_string(path)
+        .ok()
+        .and_then(|text| text.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+
+    let next = current.saturating_add(1);
+
+    fs::write(path, next.to_string())?;
+
+    Ok(next)
+}
+
+fn reset_counter_file(path: &Path) -> std::io::Result<()> {
+    fs::write(path, "0")
+}
+
 fn run_hook_lifecycle(
     subcommand: &str,
 
@@ -489,14 +626,25 @@ fn lifecycle_additional_context(subcommand: &str) -> String {
 
         "post-compact" => post_compact_context(),
 
-        // Silenced events. UserPromptSubmit fires on every prompt — paying
-        // full input-token cost for content that already lives in CLAUDE.md
-        // and SessionStart (replayed from transcript on resume). Stop /
-        // SubagentStop / SessionEnd / PostToolUse fire per turn end or per
-        // tool call and emitted generic boilerplate. Emit nothing.
-        "user-prompt-submit" | "stop" | "subagent-stop" | "session-end" | "post-tool-use" => {
-            String::new()
-        }
+        // UserPromptSubmit injects a short research-first pointer so the
+        // model reads the workspace SYSTEM_MAP and consults the right skill
+        // before writing code. The text is intentionally compact (~50 tokens)
+        // because it lands per-prompt; everything else stays in CLAUDE.md.
+        "user-prompt-submit" => user_prompt_submit_context(),
+
+        // PostToolBatch fires after a batch of parallel tools resolves, just
+        // before the next model turn. We inject a reviewer-on-close reminder
+        // here because Stop/SubagentStop don't support additionalContext per
+        // the official Claude Code hooks schema. Trivial work (docs-only,
+        // formatting, single-line typo) stays exempt per the two-tier rule
+        // documented in CLAUDE.md.
+        "post-tool-batch" => post_tool_batch_context(),
+
+        // Silenced events. Stop/SubagentStop/SessionEnd fire per turn end and
+        // the schema rejects context injection on them. PostToolUse handles
+        // its side-effect (the SYSTEM_MAP edit counter) inside
+        // run_hook_post_tool_use; the context stays empty.
+        "stop" | "subagent-stop" | "session-end" | "post-tool-use" => String::new(),
 
         _ => String::new(),
     }
@@ -523,6 +671,31 @@ fn post_compact_context() -> String {
         memory_scope_summary()
 
     )
+}
+
+/// Per-prompt research-first nudge.
+///
+/// Compact by design: the schema lets us inject as much text as we want, but
+/// every byte lands per prompt and is paid as input tokens for the rest of
+/// the cache window. The standing operating contract (skill catalog, two-tier
+/// reviewer rule, etc.) lives in CLAUDE.md; this hook only points the model at
+/// the workspace pointer that CLAUDE.md cannot know in advance.
+fn user_prompt_submit_context() -> String {
+    format!(
+        "Research-first: read the workspace SYSTEM_MAP before making repo-structure claims, identify the owning module, read the existing implementation, then propose changes. No assumptions. {}",
+        memory_scope_summary()
+    )
+}
+
+/// Reviewer-on-close reminder.
+///
+/// Fires after every batch of parallel tool calls, just before the model's
+/// next turn. We rely on the model to apply the two-tier rule from CLAUDE.md
+/// (trivial work skips reviewer; non-trivial routes through it) — we just
+/// surface the question rather than gating with `decision: "block"`, which
+/// would force a review on every tool batch including read-only research.
+fn post_tool_batch_context() -> String {
+    "Closeout check: if this batch changed code (Edit/Write/MultiEdit on non-trivial files), run the reviewer skill before final closeout per the two-tier rule in CLAUDE.md. Trivial work (docs-only, formatting, single-line typo) is exempt.".to_string()
 }
 
 fn prune_raw_output_store(standard_error: &mut dyn Write) {
@@ -1570,21 +1743,18 @@ mod tests {
     }
 
     #[test]
-    fn high_frequency_hooks_emit_no_additional_context() {
-        // UserPromptSubmit fires per prompt; PostToolUse fires per tool call;
-        // Stop/SubagentStop/SessionEnd fire per turn end. Any text we emit on
-        // these events lands after the prompt-cache breakpoint and is paid as
-        // input tokens for every prompt for the rest of the session. The
-        // operating contract belongs in CLAUDE.md and SessionStart, both of
-        // which are paid for once per cache window. These events must stay
-        // silent.
-        for subcommand in [
-            "user-prompt-submit",
-            "post-tool-use",
-            "stop",
-            "subagent-stop",
-            "session-end",
-        ] {
+    fn silenced_high_frequency_hooks_emit_no_additional_context() {
+        // PostToolUse / Stop / SubagentStop / SessionEnd fire per tool call or
+        // turn end. They either (a) don't support hookSpecificOutput per the
+        // official Claude Code schema or (b) carry a prompt-cache cost that
+        // outweighs the value of any per-call reminder. The operating contract
+        // belongs in CLAUDE.md and SessionStart, both paid once per cache
+        // window. These events must stay silent.
+        //
+        // UserPromptSubmit and PostToolBatch are deliberately *not* in this
+        // list: they emit short research-first / reviewer-on-close pointers,
+        // gated by their own dedicated tests below.
+        for subcommand in ["post-tool-use", "stop", "subagent-stop", "session-end"] {
             let mut stdout = Vec::new();
             let mut stderr = Vec::new();
 
@@ -1601,6 +1771,126 @@ mod tests {
                 stdout.is_empty(),
                 "{subcommand} must emit no additional context to avoid per-prompt token cost; got: {}",
                 String::from_utf8_lossy(&stdout)
+            );
+        }
+    }
+
+    #[test]
+    fn user_prompt_submit_emits_research_first_pointer() {
+        // UserPromptSubmit lands per-prompt, so the injected text must be
+        // short and pointer-shaped (workspace SYSTEM_MAP location, no
+        // assumptions, read existing implementation). The full operating
+        // contract still lives in CLAUDE.md.
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let code = run_hook_lifecycle("user-prompt-submit", &mut stdout, &mut stderr);
+
+        assert_eq!(
+            code,
+            0,
+            "stderr for user-prompt-submit: {}",
+            String::from_utf8_lossy(&stderr)
+        );
+
+        let output: JsonDocument = serde_json::from_slice(&stdout).expect("valid JSON");
+
+        let context = output
+            .get("hookSpecificOutput")
+            .and_then(|node| node.get("additionalContext"))
+            .and_then(JsonDocument::as_str)
+            .expect("UserPromptSubmit must emit additionalContext");
+
+        assert!(context.contains("Research-first"));
+        assert!(context.contains("SYSTEM_MAP"));
+        assert!(context.contains("No assumptions"));
+
+        let event_name = output
+            .get("hookSpecificOutput")
+            .and_then(|node| node.get("hookEventName"))
+            .and_then(JsonDocument::as_str);
+
+        assert_eq!(event_name, Some("UserPromptSubmit"));
+    }
+
+    #[test]
+    fn post_tool_batch_emits_reviewer_on_close_reminder() {
+        // PostToolBatch fires after a batch of parallel tools resolves, just
+        // before the model's next turn. It's the officially-supported event
+        // for "before close" reminders — Stop/SubagentStop don't accept
+        // hookSpecificOutput per the schema.
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let code = run_hook_lifecycle("post-tool-batch", &mut stdout, &mut stderr);
+
+        assert_eq!(
+            code,
+            0,
+            "stderr for post-tool-batch: {}",
+            String::from_utf8_lossy(&stderr)
+        );
+
+        let output: JsonDocument = serde_json::from_slice(&stdout).expect("valid JSON");
+
+        let context = output
+            .get("hookSpecificOutput")
+            .and_then(|node| node.get("additionalContext"))
+            .and_then(JsonDocument::as_str)
+            .expect("PostToolBatch must emit additionalContext");
+
+        assert!(context.contains("reviewer"));
+        assert!(context.contains("two-tier"));
+        assert!(context.contains("Trivial"));
+
+        let event_name = output
+            .get("hookSpecificOutput")
+            .and_then(|node| node.get("hookEventName"))
+            .and_then(JsonDocument::as_str);
+
+        assert_eq!(event_name, Some("PostToolBatch"));
+    }
+
+    #[test]
+    fn edit_counter_increments_and_resets_at_threshold() {
+        // The counter file is the bridge between PostToolUse fires (one per
+        // tool call) and the periodic SYSTEM_MAP refresh. Verify the file
+        // round-trips correctly so the threshold check in run_hook_post_tool_use
+        // sees the right value.
+        let dir =
+            std::env::temp_dir().join(format!("claude-skills-edit-counter-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let counter = dir.join("counter");
+
+        for expected in 1..=3 {
+            let next = increment_counter_file(&counter).unwrap();
+            assert_eq!(next, expected);
+        }
+
+        reset_counter_file(&counter).unwrap();
+        assert_eq!(std::fs::read_to_string(&counter).unwrap(), "0");
+
+        let after_reset = increment_counter_file(&counter).unwrap();
+        assert_eq!(after_reset, 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn edit_class_tools_match_documented_set() {
+        // Only edit-class tools should bump the counter; read-only tools must
+        // not, otherwise the SYSTEM_MAP refresh fires on every Read/Grep too.
+        for tool in ["Edit", "Write", "MultiEdit", "NotebookEdit"] {
+            assert!(
+                is_edit_class_tool(tool),
+                "{tool} should count as edit-class"
+            );
+        }
+        for tool in ["Read", "Grep", "Glob", "Bash", "Task"] {
+            assert!(
+                !is_edit_class_tool(tool),
+                "{tool} must not count as edit-class"
             );
         }
     }
