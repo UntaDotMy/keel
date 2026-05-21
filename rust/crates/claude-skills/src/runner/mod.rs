@@ -173,7 +173,7 @@ pub fn run_replay_command(
         );
         return 1;
     }
-    let (program, args) = replay_shell_parts(&meta.command);
+    let (program, args) = crate::runtime::platform_shell_command_parts(&meta.command);
     match run_command(&program, &args, Some(&meta.cwd)) {
         Ok(result) => {
             let _ = standard_output.write_all(&result.stdout);
@@ -260,18 +260,4 @@ fn run_raw_prune(
 
 fn parse_days(value: &str) -> Option<u64> {
     value.trim_end_matches('d').parse().ok()
-}
-
-fn replay_shell_parts(command: &str) -> (String, Vec<String>) {
-    if cfg!(windows) {
-        (
-            "cmd".to_string(),
-            vec!["/C".to_string(), command.to_string()],
-        )
-    } else {
-        (
-            "bash".to_string(),
-            vec!["-lc".to_string(), command.to_string()],
-        )
-    }
 }

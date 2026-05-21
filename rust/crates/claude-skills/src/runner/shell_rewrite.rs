@@ -562,7 +562,7 @@ fn normalize_command_fields(words: &[String]) -> Vec<String> {
         .collect()
 }
 
-fn is_env_assignment(value: &str) -> bool {
+pub fn is_env_assignment(value: &str) -> bool {
     let Some((name, _)) = value.split_once('=') else {
         return false;
     };

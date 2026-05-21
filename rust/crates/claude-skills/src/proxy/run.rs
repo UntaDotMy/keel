@@ -18,6 +18,40 @@ use crate::proxy::raw_store::{RawRun, RawStore, RunMeta};
 use crate::proxy::token_meter::TokenMeter;
 use crate::runtime::{display_path, run_command, ProcessResult};
 
+/// Decide whether the proxy should run in capture mode (with compaction, raw
+/// recovery, gain analytics) or fall back to a transparent passthrough.
+///
+/// The proxy exists to save tokens on output the *agent* will read. Running it
+/// in a developer's plain shell is wrong: it captures their stdout, writes raw
+/// recovery files they didn't ask for, and pollutes gain analytics with their
+/// interactive runs. We detect a hook-launched invocation by checking for env
+/// vars Claude Code reliably sets:
+///
+///   - `CLAUDE_SKILLS_HOOK`: our own opt-in marker — set by the install path,
+///     manually exportable for testing, and immune to upstream rename.
+///   - `CLAUDE_PROJECT_DIR`: documented Claude Code hook variable (see
+///     code.claude.com/docs/en/hooks). Present whenever a hook fires.
+///   - `CLAUDE_PLUGIN_ROOT`: present for plugin-scoped hooks.
+///   - `CLAUDE_AGENT` / `CLAUDE_SKILLS_AGENT`: legacy markers some integrations
+///     set when launching us; preserved so existing automations keep working.
+///
+/// Any one of those being non-empty signals "this is a Claude Code-driven run."
+/// Absence means "user typed `claude-skills run --` themselves" — passthrough.
+pub fn running_under_claude_code() -> bool {
+    const SIGNALS: &[&str] = &[
+        "CLAUDE_SKILLS_HOOK",
+        "CLAUDE_PROJECT_DIR",
+        "CLAUDE_PLUGIN_ROOT",
+        "CLAUDE_AGENT",
+        "CLAUDE_SKILLS_AGENT",
+    ];
+    SIGNALS.iter().any(|name| {
+        std::env::var(name)
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
+    })
+}
+
 pub fn run_proxy(
     arguments: &[String],
     standard_output: &mut dyn Write,
@@ -59,6 +93,17 @@ pub fn run_proxy(
         return 1;
     }
 
+    // Phase B gate: only run the capture+compaction proxy when Claude Code
+    // (or our own opt-in marker) launched us. A developer typing
+    // `claude-skills run -- cargo test` in a plain shell expects to see their
+    // command's output, not a "[claude-skills] compacted command output" wrapper
+    // and a recovery artifact they never asked for. The token-saver is only
+    // valuable when the consumer is the agent transcript; when it is the
+    // human terminal, passthrough is the correct behaviour.
+    if !running_under_claude_code() {
+        return run_proxy_passthrough(&command_arguments, standard_error);
+    }
+
     let ast = match crate::proxy::classify::classify_command(&command_arguments) {
         Some(ast) => ast,
         None => {
@@ -92,7 +137,7 @@ pub fn run_proxy(
     let (program, args) = if let Some(executable_ast) = executable_ast {
         (executable_ast.program, executable_ast.args)
     } else if ast.has_shell_syntax && !ast.shell_wrapped {
-        shell_command_parts(&shell_join(&command_arguments))
+        crate::runtime::platform_shell_command_parts(&shell_join(&command_arguments))
     } else {
         (
             command_arguments.first().cloned().unwrap_or_default(),
@@ -128,6 +173,11 @@ pub fn run_proxy(
                 adapter_name: adapter.name().to_string(),
                 raw_path: std::path::PathBuf::new(),
                 compact_path: std::path::PathBuf::new(),
+                // The capture path only runs when `running_under_claude_code()`
+                // returned true above, so defaulting to "claude-code" reflects
+                // verified state — not an assumption. CLAUDE_SKILLS_AGENT and
+                // CLAUDE_AGENT remain explicit overrides for forks or test
+                // harnesses that want a custom label.
                 agent: std::env::var("CLAUDE_SKILLS_AGENT")
                     .or_else(|_| std::env::var("CLAUDE_AGENT"))
                     .unwrap_or_else(|_| "claude-code".to_string()),
@@ -249,17 +299,36 @@ pub fn run_proxy(
     }
 }
 
-fn shell_command_parts(command: &str) -> (String, Vec<String>) {
-    if cfg!(windows) {
-        (
-            "cmd".to_string(),
-            vec!["/C".to_string(), command.to_string()],
-        )
+/// Transparent passthrough used when the proxy is invoked outside Claude Code.
+/// Mirrors what the user would see if they had run the program directly: stdio
+/// inherited, no capture, no analytics, exit code propagated. Falls back to a
+/// platform shell wrapper if the arguments contain shell metacharacters that
+/// only a shell can interpret (`|`, `&&`, `>`, env-var assignments, etc.).
+fn run_proxy_passthrough(command_arguments: &[String], standard_error: &mut dyn Write) -> u8 {
+    let needs_shell = command_arguments.iter().any(|argument| {
+        argument.chars().any(|character| {
+            matches!(
+                character,
+                '|' | '&' | ';' | '<' | '>' | '`' | '$' | '(' | ')'
+            )
+        })
+    });
+
+    let (program, args) = if needs_shell {
+        crate::runtime::platform_shell_command_parts(&shell_join(command_arguments))
     } else {
         (
-            "bash".to_string(),
-            vec!["-lc".to_string(), command.to_string()],
+            command_arguments.first().cloned().unwrap_or_default(),
+            command_arguments.iter().skip(1).cloned().collect(),
         )
+    };
+
+    match crate::runtime::run_command_inherit(&program, &args, None) {
+        Ok(code) => code.clamp(0, 255) as u8,
+        Err(error) => {
+            let _ = writeln!(standard_error, "Unable to execute command: {error}");
+            1
+        }
     }
 }
 
@@ -471,5 +540,129 @@ fn read_stream<R: std::io::Read + Send + 'static>(
         {
             break;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// Env-var lookups are process-global, so the gate tests have to run
+    /// serially. A static mutex around the env mutation keeps `cargo test`'s
+    /// thread pool from racing on `CLAUDE_PROJECT_DIR`.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    const SIGNAL_VARS: &[&str] = &[
+        "CLAUDE_SKILLS_HOOK",
+        "CLAUDE_PROJECT_DIR",
+        "CLAUDE_PLUGIN_ROOT",
+        "CLAUDE_AGENT",
+        "CLAUDE_SKILLS_AGENT",
+    ];
+
+    fn snapshot_signals() -> Vec<(&'static str, Option<String>)> {
+        SIGNAL_VARS
+            .iter()
+            .map(|name| (*name, std::env::var(name).ok()))
+            .collect()
+    }
+
+    fn restore_signals(snapshot: &[(&'static str, Option<String>)]) {
+        for (name, value) in snapshot {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+    }
+
+    fn clear_signals() {
+        for name in SIGNAL_VARS {
+            std::env::remove_var(name);
+        }
+    }
+
+    #[test]
+    fn gate_blocks_capture_when_no_claude_code_signal_is_present() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let snapshot = snapshot_signals();
+        clear_signals();
+
+        assert!(
+            !running_under_claude_code(),
+            "with all CLAUDE_* signals cleared, the gate must report 'not under Claude Code'"
+        );
+
+        restore_signals(&snapshot);
+    }
+
+    #[test]
+    fn gate_allows_capture_when_claude_project_dir_is_set() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let snapshot = snapshot_signals();
+        clear_signals();
+        std::env::set_var("CLAUDE_PROJECT_DIR", "/tmp/example-project");
+
+        assert!(
+            running_under_claude_code(),
+            "Claude Code documents CLAUDE_PROJECT_DIR as a hook-execution variable; \
+             setting it must satisfy the gate"
+        );
+
+        restore_signals(&snapshot);
+    }
+
+    #[test]
+    fn gate_allows_capture_when_explicit_opt_in_marker_is_set() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let snapshot = snapshot_signals();
+        clear_signals();
+        std::env::set_var("CLAUDE_SKILLS_HOOK", "1");
+
+        assert!(
+            running_under_claude_code(),
+            "operators must be able to opt into capture mode for tests and tooling"
+        );
+
+        restore_signals(&snapshot);
+    }
+
+    #[test]
+    fn gate_treats_blank_signal_value_as_absence() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let snapshot = snapshot_signals();
+        clear_signals();
+        std::env::set_var("CLAUDE_PROJECT_DIR", "   ");
+
+        assert!(
+            !running_under_claude_code(),
+            "an empty or whitespace-only env value is the same as 'not set' — otherwise \
+             a stale export from a previous shell could silently re-enable capture"
+        );
+
+        restore_signals(&snapshot);
+    }
+
+    #[test]
+    fn shell_command_parts_uses_platform_appropriate_shell() {
+        let (program, args) =
+            crate::runtime::platform_shell_command_parts("cargo test --workspace");
+        if cfg!(windows) {
+            assert_eq!(program, "cmd");
+            assert_eq!(args[0], "/C");
+        } else {
+            assert_eq!(program, "bash");
+            assert_eq!(args[0], "-lc");
+        }
+        assert_eq!(args[1], "cargo test --workspace");
     }
 }
