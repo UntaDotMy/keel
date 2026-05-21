@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{Map as JsonMap, Value as JsonDocument};
 
 use crate::args::FlagSet;
+use crate::hooks::claude::{event_by_name, event_by_slug, HookEvent, HOOK_EVENTS};
 use crate::json::{write_indented, Value};
 use crate::proxy::raw_store::RawStore;
 use crate::runner::shell_rewrite::{
@@ -23,13 +24,15 @@ use crate::utility;
 
 const RAW_OUTPUT_DEFAULT_RETENTION_DAYS: u64 = 14;
 
-const CLAUDE_HOOK_EVENTS: &[&str] = crate::hooks::claude::EVENTS;
 const MANAGED_PRE_TOOL_USE_EVENT: &str = "PreToolUse";
-const MANAGED_PRE_TOOL_USE_MATCHER: &str = crate::hooks::claude::pre_tool_matcher();
-const MANAGED_POST_TOOL_USE_MATCHER: &str = crate::hooks::claude::post_tool_matcher();
 const MANAGED_PRE_TOOL_USE_COMMAND_SUFFIX: &str = "hook pre-tool-use";
-const MANAGED_PRE_TOOL_USE_STATUS: &str =
-    "Transparently rewriting noisy commands via claude-skills run";
+
+/// Iterate canonical hook event names. Single-line wrapper around the table so
+/// existing for-loops keep their `for event in claude_hook_event_names()` shape
+/// without caring that the source is a typed row table.
+fn claude_hook_event_names() -> impl Iterator<Item = &'static str> {
+    HOOK_EVENTS.iter().map(|event| event.name)
+}
 const BASE64_ALPHABET: &[u8; 64] =
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
@@ -46,48 +49,39 @@ pub fn run_hook_command(
         return if arguments.is_empty() { 1 } else { 0 };
     }
 
-    match arguments[0].as_str() {
+    let slug = arguments[0].as_str();
+
+    match slug {
         "install" => run_hook_install(standard_output, standard_error),
 
         "uninstall" => run_hook_uninstall(standard_output, standard_error),
 
-        "list" => run_hook_list(standard_output, standard_error),
-
-        "show" => run_hook_list(standard_output, standard_error),
+        "list" | "show" => run_hook_list(standard_output, standard_error),
 
         "instructions" => run_hook_instructions(&arguments[1..], standard_output, standard_error),
 
         "diagnose" => run_hook_diagnose(&arguments[1..], standard_output, standard_error),
 
+        // PreToolUse runs the transparent rewriter and emits hookSpecificOutput.
         "pre-tool-use" => run_hook_pre_tool_use(standard_output, standard_error),
 
-        // Stop and SubagentStop must never return a non-zero exit code.
-        // Claude Code treats a failing Stop hook as a signal to re-run the
-        // turn, which cascades into a stop loop. lifecycle_additional_context
-        // already returns empty string for these events, but routing them
-        // through run_hook_lifecycle leaves a regression surface — any future
-        // change that introduces context, mishandles serde, or panics could
-        // re-introduce the cascade. Short-circuit here so no downstream change
-        // can accidentally bring back the bug.
+        // Stop and SubagentStop must never return a non-zero exit code. Claude Code
+        // treats a failing Stop hook as a signal to re-run the turn, which cascades
+        // into a stop loop. lifecycle_additional_context already returns empty
+        // string for these events, but routing them through run_hook_lifecycle
+        // leaves a regression surface — any future change that introduces context,
+        // mishandles serde, or panics could re-introduce the cascade. Short-circuit
+        // here so no downstream change can accidentally bring back the bug.
         "stop" | "subagent-stop" => 0,
 
-        "post-tool-use"
-        | "post-tool-use-failure"
-        | "post-tool-batch"
-        | "permission-request"
-        | "notification"
-        | "user-prompt-submit"
-        | "task-created"
-        | "task-completed"
-        | "teammate-idle"
-        | "worktree-create"
-        | "worktree-remove"
-        | "cwd-changed"
-        | "pre-compact"
-        | "post-compact"
-        | "session-start"
-        | "session-end" => {
-            run_hook_lifecycle(arguments[0].as_str(), standard_output, standard_error)
+        // Every other slug is dispatched if and only if it appears in the canonical
+        // event table. Using the same table that drives `settings.json` installation
+        // means a stale binary cannot reject an event the install path advertises:
+        // the dispatch list IS the canonical list. This is the structural fix for
+        // the `Unknown hook command: post-tool-use-failure` regression seen on
+        // Windows when the dispatch arm and the EVENTS array drifted apart.
+        other if event_by_slug(other).is_some() => {
+            run_hook_lifecycle(other, standard_output, standard_error)
         }
 
         other => {
@@ -273,9 +267,8 @@ fn run_hook_instructions(
             (
                 "supportedHookEvents".into(),
                 Value::Array(
-                    CLAUDE_HOOK_EVENTS
-                        .iter()
-                        .map(|event| Value::String((*event).into()))
+                    claude_hook_event_names()
+                        .map(|event| Value::String(event.into()))
                         .collect(),
                 ),
             ),
@@ -305,7 +298,7 @@ fn run_hook_instructions(
     let _ = writeln!(
         standard_output,
         "Claude Code exposes hook events including: {}.",
-        CLAUDE_HOOK_EVENTS.join(", ")
+        claude_hook_event_names().collect::<Vec<_>>().join(", ")
     );
 
     let _ = writeln!(
@@ -358,7 +351,7 @@ fn run_hook_pre_tool_use(standard_output: &mut dyn Write, standard_error: &mut d
         .get("tool_name")
         .and_then(JsonDocument::as_str)
         .unwrap_or_default()
-        != MANAGED_PRE_TOOL_USE_MATCHER
+        != crate::hooks::claude::pre_tool_matcher()
     {
         return 0;
     }
@@ -418,39 +411,38 @@ fn run_hook_lifecycle(
 
     standard_error: &mut dyn Write,
 ) -> u8 {
-    let event_name = hook_event_name_from_subcommand(subcommand);
+    // Look up the canonical row once; every behaviour below comes from that row.
+    let event = match event_by_slug(subcommand) {
+        Some(row) => row,
+        // Unreachable in practice — `run_hook_command` only routes valid slugs to
+        // us. Falling back to SessionStart preserves the legacy default that the
+        // previous string-based mapping returned for unknown subcommands.
+        None => event_by_name("SessionStart").expect("SessionStart row missing"),
+    };
 
-    if event_name == "SessionStart" {
+    if event.name == "SessionStart" {
         let _ = refresh_memory_scope_for_current_directory(standard_error);
     }
 
-    if event_name == "SessionEnd" {
+    if event.name == "SessionEnd" {
         prune_raw_output_store(standard_error);
     }
 
-    let context = lifecycle_additional_context(subcommand);
+    let context = lifecycle_additional_context(event.slug);
 
     if context.trim().is_empty() {
         return 0;
     }
 
-    // Only PreToolUse, UserPromptSubmit, PostToolUse, and PostToolBatch
-
-    // support hookSpecificOutput in Claude Code's hook schema. Other events
-
-    // (Stop, SessionStart, etc.) must use top-level fields only.
-
-    let supports_hook_specific = matches!(
-        event_name,
-        "PreToolUse" | "UserPromptSubmit" | "PostToolUse" | "PostToolBatch"
-    );
-
-    let payload = if supports_hook_specific {
+    // Whether this event accepts `hookSpecificOutput` or must fall back to a
+    // top-level `systemMessage` lives on the event row, so adding a new event
+    // to the table automatically picks up the right schema.
+    let payload = if event.supports_hook_specific_output {
         serde_json::json!({
 
             "hookSpecificOutput": {
 
-                "hookEventName": event_name,
+                "hookEventName": event.name,
 
                 "additionalContext": context,
 
@@ -487,48 +479,8 @@ fn run_hook_lifecycle(
     }
 }
 
-fn hook_event_name_from_subcommand(subcommand: &str) -> &'static str {
-    match subcommand {
-        "post-tool-use" => "PostToolUse",
-
-        "post-tool-use-failure" => "PostToolUseFailure",
-
-        "post-tool-batch" => "PostToolBatch",
-
-        "permission-request" => "PermissionRequest",
-
-        "notification" => "Notification",
-
-        "user-prompt-submit" => "UserPromptSubmit",
-
-        "stop" => "Stop",
-
-        "subagent-stop" => "SubagentStop",
-
-        "task-created" => "TaskCreated",
-
-        "task-completed" => "TaskCompleted",
-
-        "teammate-idle" => "TeammateIdle",
-
-        "worktree-create" => "WorktreeCreate",
-
-        "worktree-remove" => "WorktreeRemove",
-
-        "cwd-changed" => "CwdChanged",
-
-        "pre-compact" => "PreCompact",
-
-        "post-compact" => "PostCompact",
-
-        "session-start" => "SessionStart",
-
-        "session-end" => "SessionEnd",
-
-        _ => "SessionStart",
-    }
-}
-
+/// Look up the PascalCase event name for a kebab slug. Used by callers that have a
+/// slug in hand but need to reason in Claude Code's PascalCase vocabulary.
 fn lifecycle_additional_context(subcommand: &str) -> String {
     match subcommand {
         "session-start" => session_start_context(),
@@ -895,7 +847,22 @@ fn settings_points_at_installed_executable(
     document: &JsonDocument,
     installed_executable: &Path,
 ) -> bool {
-    let installed_lower = display_path(installed_executable).to_ascii_lowercase();
+    // Casefold paths only on Windows. NTFS and `cmd /C` arguments are
+    // case-insensitive, so the rendered hook command may carry the same path
+    // with a different casing than `display_path()` returns. On Linux and
+    // macOS, filesystems are case-sensitive and `~/.claude/claude-skills` is a
+    // genuinely different file from `~/.Claude/claude-skills` — lowercasing
+    // would mask a real misconfiguration. `casefold` is therefore the identity
+    // on Unix and `to_ascii_lowercase` only on Windows.
+    let casefold = |value: &str| -> String {
+        if cfg!(windows) {
+            value.to_ascii_lowercase()
+        } else {
+            value.to_string()
+        }
+    };
+
+    let installed_normalized = casefold(&display_path(installed_executable));
     // Path matches must be full path. A file-name-only fallback would
     // accept stale settings that point at a sibling executable (e.g.
     // claude_home/elsewhere/claude-skills.exe) just because the file name
@@ -926,13 +893,18 @@ fn settings_points_at_installed_executable(
                     continue;
                 }
                 managed_seen = true;
-                let command_lower = command.to_ascii_lowercase();
-                let decoded_lower = decode_powershell_encoded_command(command)
+                let command_normalized = casefold(command);
+                // The PowerShell encoded payload is always produced from a
+                // Windows host and uses Windows path conventions, so its
+                // decoded form is matched case-insensitively regardless of
+                // the host running the doctor.
+                let decoded_normalized = decode_powershell_encoded_command(command)
                     .map(|decoded| decoded.to_ascii_lowercase());
-                let plain_match = command_lower.contains(&installed_lower);
-                let decoded_match = decoded_lower
+                let installed_for_decoded = display_path(installed_executable).to_ascii_lowercase();
+                let plain_match = command_normalized.contains(&installed_normalized);
+                let decoded_match = decoded_normalized
                     .as_ref()
-                    .map(|decoded| decoded.contains(&installed_lower))
+                    .map(|decoded| decoded.contains(&installed_for_decoded))
                     .unwrap_or(false);
                 if !(plain_match || decoded_match) {
                     all_managed_point_at_installed = false;
@@ -1086,14 +1058,14 @@ fn append_managed_hooks(document: &mut JsonDocument, hook_command: &str) -> Resu
         .and_then(JsonDocument::as_object_mut)
         .ok_or_else(|| "settings.json missing hooks object".to_string())?;
 
-    for event in CLAUDE_HOOK_EVENTS {
+    for event in HOOK_EVENTS {
         let event_entries = hooks
-            .entry((*event).to_string())
+            .entry(event.name.to_string())
             .or_insert_with(|| JsonDocument::Array(Vec::new()));
 
         let event_array = event_entries
             .as_array_mut()
-            .ok_or_else(|| format!("{event} hooks entry is not an array"))?;
+            .ok_or_else(|| format!("{} hooks entry is not an array", event.name))?;
 
         let (matcher, command, status) = managed_hook_entry_for_event(event, hook_command);
 
@@ -1119,32 +1091,22 @@ fn append_managed_hooks(document: &mut JsonDocument, hook_command: &str) -> Resu
     Ok(())
 }
 
+/// Pull matcher / command / status straight from the event row. The PreToolUse
+/// command is the only one that flows in from the outside (it carries the rewriter
+/// payload built in `managed_hook_command`); every other event derives its command
+/// from `managed_lifecycle_command(slug)`.
 fn managed_hook_entry_for_event(
-    event: &str,
+    event: &HookEvent,
 
     pre_tool_use_command: &str,
 ) -> (&'static str, String, &'static str) {
-    if event == "PreToolUse" {
-        return (
-            MANAGED_PRE_TOOL_USE_MATCHER,
-            pre_tool_use_command.to_string(),
-            MANAGED_PRE_TOOL_USE_STATUS,
-        );
-    }
-
-    let subcommand = crate::hooks::claude::lifecycle_subcommand(event);
-
-    let matcher = if event == "PostToolUse" {
-        MANAGED_POST_TOOL_USE_MATCHER
+    let command = if event.name == MANAGED_PRE_TOOL_USE_EVENT {
+        pre_tool_use_command.to_string()
     } else {
-        ""
+        managed_lifecycle_command(event.slug)
     };
 
-    (
-        matcher,
-        managed_lifecycle_command(subcommand),
-        crate::hooks::claude::status_message(event),
-    )
+    (event.matcher, command, event.status)
 }
 
 fn sort_hook_events(hooks: &mut JsonMap<String, JsonDocument>) {
@@ -1169,11 +1131,9 @@ fn is_managed_hook_command_with_depth(command: &str, depth: usize) -> bool {
 
     let normalized = command.to_ascii_lowercase();
 
-    let has_any_lifecycle = CLAUDE_HOOK_EVENTS.iter().any(|event| {
-        let subcommand = crate::hooks::claude::lifecycle_subcommand(event);
-
-        normalized.contains(&format!("hook {subcommand}"))
-    });
+    let has_any_lifecycle = HOOK_EVENTS
+        .iter()
+        .any(|event| normalized.contains(&format!("hook {}", event.slug)));
 
     let plain_managed = normalized.contains("claude-skills")
         && (has_any_lifecycle || normalized.contains("hook instructions --format json"));
@@ -1199,6 +1159,36 @@ pub fn managed_lifecycle_command(subcommand: &str) -> String {
     }
 }
 
+/// Build the platform-correct shell command Claude Code should invoke for a
+/// given hook subcommand.
+///
+/// **Linux / macOS** use a plain `bash`-style invocation: the executable path
+/// is shell-quoted and concatenated with the subcommand arguments. POSIX
+/// shells parse this exactly as a user would type it.
+///
+/// **Windows** is more delicate. Claude Code's hook runner spawns commands
+/// through PowerShell, and the hook command is a single string the user will
+/// see in `settings.json`. Three problems show up if we naively emit
+/// `& 'C:\Users\Some User\.claude\claude-skills.exe' hook pre-tool-use`:
+///
+///   1. PowerShell single-quote rules differ from bash; embedded apostrophes
+///      in user-profile paths (`C:\Users\O'Brien\...`) are easy to mis-quote.
+///   2. The string ends up serialized into JSON, then re-parsed by Claude
+///      Code, then handed to PowerShell. Each round trip is a chance for
+///      backslashes or quotes to be re-interpreted.
+///   3. UTF-16 paths (Cyrillic profile names, accented characters) get
+///      corrupted by the UTF-8 → ANSI conversion PowerShell does on positional
+///      argument strings.
+///
+/// PowerShell's `-EncodedCommand` flag sidesteps all three: the script is
+/// encoded as UTF-16 LE, base64-wrapped, and handed to PowerShell verbatim.
+/// PowerShell decodes it as UTF-16 directly, so no transcoding happens. The
+/// JSON serializer only sees a base64 string with no special characters, so
+/// the round trip is lossless.
+///
+/// `is_managed_hook_command` decodes the same encoding when checking whether
+/// a settings.json entry is one of ours, so doctor and uninstall paths can
+/// reason about Windows hook commands without re-implementing the parsing.
 pub fn hook_command_for_executable_args(path: &Path, arguments: &str) -> String {
     if cfg!(windows) {
         let script = platform_default_command_for_executable_args(path, arguments);
@@ -1459,9 +1449,9 @@ mod tests {
             .and_then(JsonDocument::as_object)
             .unwrap();
 
-        for event in CLAUDE_HOOK_EVENTS {
+        for event in claude_hook_event_names() {
             let commands = hooks
-                .get(*event)
+                .get(event)
                 .and_then(JsonDocument::as_array)
                 .and_then(|entries| entries.first())
                 .and_then(|entry| entry.get("hooks"))
@@ -1727,7 +1717,7 @@ mod tests {
         // was registered against an old path that no longer exists).
         let other_path = claude_home
             .join("elsewhere")
-            .join(executable_file_name_local());
+            .join(crate::runtime::executable_file_name());
         std::fs::create_dir_all(other_path.parent().unwrap()).unwrap();
         let other_command = hook_command_for_executable_args(&other_path, "hook pre-tool-use");
         let settings_path = claude_home.join(crate::hooks::claude::SETTINGS_FILE_NAME);
@@ -1760,8 +1750,10 @@ mod tests {
         std::fs::write(&settings_path, &payload).unwrap();
 
         // Drop a legacy stale sibling.
-        let orphan =
-            executable.with_file_name(format!("{}.stale-1778857819", executable_file_name_local()));
+        let orphan = executable.with_file_name(format!(
+            "{}.stale-1778857819",
+            crate::runtime::executable_file_name()
+        ));
         std::fs::write(&orphan, b"legacy").unwrap();
 
         let report = collect_hook_diagnostics(&claude_home);
@@ -1791,14 +1783,6 @@ mod tests {
         assert!(rendered.contains("issues found"));
 
         let _ = std::fs::remove_dir_all(&claude_home);
-    }
-
-    fn executable_file_name_local() -> String {
-        if cfg!(windows) {
-            "claude-skills.exe".to_string()
-        } else {
-            "claude-skills".to_string()
-        }
     }
 
     #[test]

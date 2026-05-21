@@ -244,12 +244,16 @@ pub fn config_path(claude_home: &Path) -> PathBuf {
     claude_home.join("config.toml")
 }
 
-pub fn installed_executable_path(claude_home: &Path) -> PathBuf {
+pub fn executable_file_name() -> String {
     if cfg!(windows) {
-        claude_home.join("claude-skills.exe")
+        "claude-skills.exe".to_string()
     } else {
-        claude_home.join("claude-skills")
+        "claude-skills".to_string()
     }
+}
+
+pub fn installed_executable_path(claude_home: &Path) -> PathBuf {
+    claude_home.join(executable_file_name())
 }
 
 pub fn ensure_parent_directory(path: &Path) -> Result<(), String> {
@@ -313,6 +317,51 @@ pub fn run_command(
         stdout: output.stdout,
         stderr: output.stderr,
     })
+}
+
+/// Run a command as the *direct* parent of the child: no pipes, no capture, no
+/// rewriting. Stdin/stdout/stderr are inherited so the user sees output exactly
+/// as if they had run the program themselves. Used by the proxy passthrough
+/// gate: when `claude-skills run -- ...` is invoked from a plain shell (not a
+/// Claude Code hook), capturing output and writing recovery artifacts would
+/// surprise the user — we behave as a transparent forwarder instead.
+pub fn run_command_inherit(
+    program: &str,
+    arguments: &[String],
+    working_directory: Option<&Path>,
+) -> Result<i32, String> {
+    let mut command = Command::new(program);
+    command.args(arguments);
+    if let Some(directory) = working_directory {
+        command.current_dir(directory);
+    }
+    command.stdin(Stdio::inherit());
+    command.stdout(Stdio::inherit());
+    command.stderr(Stdio::inherit());
+    let status = command
+        .status()
+        .map_err(|error| format!("execute {program}: {error}"))?;
+    Ok(status.code().unwrap_or(1))
+}
+
+/// Wrap a single shell command string into the (program, args) pair appropriate
+/// for the current platform: `cmd /C "<command>"` on Windows, `bash -lc
+/// "<command>"` everywhere else. Used by call sites that need to delegate a
+/// composite shell expression (with pipes, redirects, env-var assignments, or
+/// other shell metacharacters) to the host shell rather than executing one
+/// program directly.
+pub fn platform_shell_command_parts(command: &str) -> (String, Vec<String>) {
+    if cfg!(windows) {
+        (
+            "cmd".to_string(),
+            vec!["/C".to_string(), command.to_string()],
+        )
+    } else {
+        (
+            "bash".to_string(),
+            vec!["-lc".to_string(), command.to_string()],
+        )
+    }
 }
 
 pub fn forward_process_result(

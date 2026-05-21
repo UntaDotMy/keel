@@ -1,7 +1,7 @@
 //! Purpose: Doctor and hook probe logic for claude-skills manager.
 //! Caller: commands.rs via run_doctor_command.
 //! Dependencies: std::fs, std::io, std::path, std::process, crate::runtime, crate::hooks, crate::runner, crate::proxy.
-//! Main Functions: run_doctor_command, hook_blocks_raw_command, hook_accepts_wrapped_command, run_hook_probe, write_doctor_check, find_on_path.
+//! Main Functions: run_doctor_command, hook_rewrites_raw_command, hook_accepts_wrapped_command, run_hook_probe, write_doctor_check, find_on_path.
 //! Side Effects: Runs hook probe commands, writes doctor check output.
 
 use std::fs;
@@ -100,11 +100,11 @@ pub fn run_doctor_command(
             && hooks_text.contains(crate::hooks::claude::pre_tool_matcher()),
         "PreToolUse Bash matcher installed",
     );
-    let dry_run_blocks = hook_blocks_raw_command();
+    let dry_run_rewrites = hook_rewrites_raw_command();
     write_doctor_check(
         standard_output,
-        dry_run_blocks,
-        "dry-run raw command is blocked with rerun guidance",
+        dry_run_rewrites,
+        "raw command is transparently rewritten via PreToolUse",
     );
     write_doctor_check(
         standard_output,
@@ -127,12 +127,28 @@ pub fn run_doctor_command(
     0
 }
 
-fn hook_blocks_raw_command() -> bool {
+/// Probe the PreToolUse hook with a noisy command and confirm it produces a
+/// transparent rewrite payload. The current contract (Claude Code hook schema)
+/// is `hookSpecificOutput.permissionDecision = "allow"` plus
+/// `hookSpecificOutput.updatedInput.command = "claude-skills run -- ..."` — the
+/// agent never sees a "Rerun that as:" string, so checking for that legacy text
+/// would silently fail for everyone on the current contract. Asserting the
+/// schema fields is what makes the doctor useful as a real health check.
+fn hook_rewrites_raw_command() -> bool {
     run_hook_probe("cargo test --workspace")
-        .map(|output| output.contains("permissionDecision") && output.contains("Rerun that as:"))
+        .map(|output| {
+            output.contains("\"permissionDecision\"")
+                && output.contains("\"allow\"")
+                && output.contains("\"updatedInput\"")
+                && output.contains("run -- ")
+        })
         .unwrap_or(false)
 }
 
+/// Probe the PreToolUse hook with an already-wrapped command and confirm it
+/// short-circuits — emitting empty stdout (no `hookSpecificOutput`) so Claude
+/// Code runs the command unchanged. If the hook re-rewrote a wrapped command we
+/// would loop on every turn.
 fn hook_accepts_wrapped_command() -> bool {
     let executable = std::env::current_exe()
         .map(|path| display_path(&path))

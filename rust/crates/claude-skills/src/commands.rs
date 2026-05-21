@@ -6,7 +6,7 @@
 
 use std::env;
 use std::io::Write;
-use std::path::{Component, Path, PathBuf};
+use std::path::PathBuf;
 
 use claude_skills_flow::{
     load_check, new_template_check, resolve_artifact_path, validate_check, write_check,
@@ -21,6 +21,7 @@ use claude_skills_releaseassets::{
 use crate::args::FlagSet;
 use crate::help::render_help_surface;
 use crate::json::{write_indented, Value};
+use crate::runtime::clean_path;
 use crate::{manager, review, runner, utility};
 
 const FOUNDATION_PHASE_NAME: &str = "phase-1-foundation";
@@ -667,24 +668,6 @@ fn resolve_flow_repository_root(repository_root: &str) -> PathBuf {
     clean_path(&absolute_repository_root)
 }
 
-fn clean_path(raw_path: &Path) -> PathBuf {
-    let mut cleaned_path = PathBuf::new();
-    for component in raw_path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                cleaned_path.pop();
-            }
-            other_component => cleaned_path.push(other_component.as_os_str()),
-        }
-    }
-    if cleaned_path.as_os_str().is_empty() {
-        PathBuf::from(".")
-    } else {
-        cleaned_path
-    }
-}
-
 fn resolve_default_claude_home_directory() -> Result<String, String> {
     if let Ok(override_value) = env::var("CLAUDE_TARGET_OVERRIDE") {
         let trimmed = override_value.trim();
@@ -729,6 +712,7 @@ fn path_to_display_string(path: &std::path::Path) -> String {
 mod tests {
     use super::*;
     use claude_skills_flow::Check;
+    use std::path::Path;
 
     #[test]
     fn flow_command_runs_start_check_finish_lifecycle() {

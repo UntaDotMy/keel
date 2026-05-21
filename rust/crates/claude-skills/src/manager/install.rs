@@ -17,8 +17,8 @@ use claude_skills_platform::detect_current_target;
 use crate::args::FlagSet;
 use crate::runtime::{
     agent_profiles_directory, agents_directory, config_path, discover_repository_layout,
-    display_path, git_short_head, installed_executable_path, read_text_if_exists,
-    remove_path_if_exists, repository_layout_is_complete, resolve_claude_home,
+    display_path, executable_file_name, git_short_head, installed_executable_path,
+    read_text_if_exists, remove_path_if_exists, repository_layout_is_complete, resolve_claude_home,
     resolve_repository_root, run_command, skills_directory, state_directory, write_lines,
     write_text, RepositoryLayout, SKILL_SYNC_DIRECTORIES,
 };
@@ -597,14 +597,6 @@ fn remove_executable_orphans(claude_home: &Path) -> Result<usize, String> {
         }
     }
     Ok(removed)
-}
-
-fn executable_file_name() -> String {
-    if cfg!(windows) {
-        "claude-skills.exe".to_string()
-    } else {
-        "claude-skills".to_string()
-    }
 }
 
 fn write_install_metadata(

@@ -5,6 +5,7 @@
 //! Side Effects: Reads current working directory when classification is requested.
 
 use crate::proxy::command_ast::CommandAst;
+use crate::runner::shell_rewrite::{command_base_name, is_env_assignment};
 
 pub fn classify_command(command_arguments: &[String]) -> Option<CommandAst> {
     let original_command = command_arguments.join(" ");
@@ -106,31 +107,12 @@ fn has_shell_syntax(words: &[String]) -> bool {
         .any(|word| matches!(word.as_str(), "|" | "||" | "&&" | ";" | "<" | ">" | ">>"))
 }
 
-fn is_env_assignment(value: &str) -> bool {
-    let Some((name, _)) = value.split_once('=') else {
-        return false;
-    };
-    !name.is_empty()
-        && name
-            .chars()
-            .all(|character| character == '_' || character.is_ascii_alphanumeric())
-        && name
-            .chars()
-            .next()
-            .map(|character| character == '_' || character.is_ascii_alphabetic())
-            .unwrap_or(false)
-}
-
+/// Case-insensitive base-name used by classification matchers (`bash`, `sudo`,
+/// `env`, ...) so that `BASH.EXE` and `bash` collapse to the same key. Defers
+/// to the canonical `command_base_name` for the path stripping and
+/// extension-trim logic, then lower-cases the result.
 fn base_name(command: &str) -> String {
-    let normalized = command.replace('\\', "/");
-    normalized
-        .rsplit('/')
-        .next()
-        .unwrap_or(command)
-        .trim_end_matches(".exe")
-        .trim_end_matches(".cmd")
-        .trim_end_matches(".bat")
-        .to_ascii_lowercase()
+    command_base_name(command).to_ascii_lowercase()
 }
 
 fn split_shell_words(command: &str) -> Vec<String> {
