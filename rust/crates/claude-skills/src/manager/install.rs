@@ -446,14 +446,31 @@ pub fn publish_native_executable(
     claude_home: &Path,
 ) -> Result<bool, String> {
     let target = detect_current_target().map_err(|error| format!("detect target: {error}"))?;
-    let source_path = repository_root
+    // Two source layouts must be supported:
+    //   1. Cargo-built source tree: <repo_root>/target/<triple>/release/claude-skills.exe.
+    //      This is what `cargo build --release` produces and what local
+    //      contributors have on disk.
+    //   2. Release archive bundle: <repo_root>/claude-skills.exe. The release
+    //      workflow stages the binary at the bundle root (.github/workflows/release.yml
+    //      step "Stage release bundle"), and install.ps1/install.sh pass that
+    //      bundle directory as --repo-root.
+    // Without the fallback, install.ps1 ran against a fresh release archive
+    // returns Ok(false) and silently leaves a stale executable on disk —
+    // which is the regression that reproduced "Unknown hook command:
+    // post-tool-use-failure" against a binary that predated PR #54.
+    let cargo_built = repository_root
         .join("target")
         .join(target.directory_name())
         .join("release")
         .join(executable_file_name());
-    if !source_path.is_file() {
+    let bundle_root = repository_root.join(executable_file_name());
+    let source_path = if cargo_built.is_file() {
+        cargo_built
+    } else if bundle_root.is_file() {
+        bundle_root
+    } else {
         return Ok(false);
-    }
+    };
     let target_path = installed_executable_path(claude_home);
     if executables_are_identical(&source_path, &target_path) {
         return Ok(false);
@@ -922,6 +939,63 @@ mod tests {
             repo_version_from_metadata_or_build(metadata, "dev").as_deref(),
             Some("8c0eb1c")
         );
+    }
+
+    #[test]
+    fn publish_native_executable_falls_back_to_bundle_root_binary() {
+        // Release archives stage the binary at <bundle>/claude-skills.exe and
+        // call `claude-skills install --repo-root <bundle>`. The cargo path
+        // (<repo_root>/target/<triple>/release/<exe>) does not exist in that
+        // layout. Without the fallback, publish_native_executable returns
+        // Ok(false) and silently leaves the previously-installed binary in
+        // place — which is the regression that surfaced as "Unknown hook
+        // command: post-tool-use-failure" against a stale on-disk binary.
+        let (bundle, claude_home) = unique_paths("publish-bundle-root");
+        fs::create_dir_all(&bundle).unwrap();
+        fs::create_dir_all(&claude_home).unwrap();
+
+        let bundle_executable = bundle.join(executable_file_name());
+        fs::write(&bundle_executable, b"new-binary-contents").unwrap();
+
+        let installed = installed_executable_path(&claude_home);
+        fs::write(&installed, b"old-binary-contents").unwrap();
+
+        let published = publish_native_executable(&bundle, &claude_home).unwrap();
+        assert!(
+            published,
+            "publish must report true when copying from bundle root"
+        );
+        assert_eq!(fs::read(&installed).unwrap(), b"new-binary-contents");
+
+        let _ = fs::remove_dir_all(&bundle);
+        let _ = fs::remove_dir_all(&claude_home);
+    }
+
+    #[test]
+    fn publish_native_executable_prefers_cargo_built_over_bundle_root() {
+        // When both layouts exist (a developer running `install` from a
+        // source tree with a residual sibling exe), the cargo-built binary
+        // wins — that's the freshly compiled artifact the contributor
+        // intended to install.
+        let (repo, claude_home) = unique_paths("publish-prefer-cargo");
+        fs::create_dir_all(&claude_home).unwrap();
+
+        let target = detect_current_target().unwrap();
+        let cargo_dir = repo
+            .join("target")
+            .join(target.directory_name())
+            .join("release");
+        fs::create_dir_all(&cargo_dir).unwrap();
+        fs::write(cargo_dir.join(executable_file_name()), b"cargo-built").unwrap();
+        fs::write(repo.join(executable_file_name()), b"bundle-root").unwrap();
+
+        let installed = installed_executable_path(&claude_home);
+        let published = publish_native_executable(&repo, &claude_home).unwrap();
+        assert!(published);
+        assert_eq!(fs::read(&installed).unwrap(), b"cargo-built");
+
+        let _ = fs::remove_dir_all(&repo);
+        let _ = fs::remove_dir_all(&claude_home);
     }
 
     fn create_minimal_layout(name: &str) -> PathBuf {
