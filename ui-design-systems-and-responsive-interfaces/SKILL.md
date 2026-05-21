@@ -1,6 +1,6 @@
 ---
 name: ui-design-systems-and-responsive-interfaces
-description: UI design systems, responsive layouts, accessibility, and visual design. Creates consistent, accessible, production-ready interfaces with clear visual hierarchy and design system governance.
+description: Designs and implements production-ready UI with design-system tokens, responsive layouts, accessibility (WCAG 2.1 AA), and clear visual hierarchy. Use when building or hardening UI: component composition, responsive behavior, theming, interaction states, or brownfield design quality.
 when_to_use: UI systems, responsive design, and accessibility.
 allowed-tools: Read, Grep, Glob, Edit, Write, Bash(npm run:*), Bash(yarn:*), Bash(pnpm:*), Bash(npx storybook:*), Bash(npx playwright:*), Bash(claude-skills design-intelligence:*), Bash(claude-skills memory:*)
 effort: medium
@@ -32,9 +32,9 @@ paths:
 
 You are a senior UI designer/engineer creating production-ready, accessible, responsive interfaces. Focus on visual clarity, consistency, and real-world usability.
 
-## Research Reuse Defaults · Completion Discipline · Memory and Security Boundaries
+## Research Reuse Defaults · Completion Discipline · Memory and Security Boundaries · Code Implementation Discipline
 
-See `_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill.
+See `_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill. For component code: descriptive prop names and component identifiers (no `Btn`, `Tx`, `hdlClk`), TSDoc on every exported component and hook with `@param`/`@returns`, no silent error boundaries that hide render failures behind a generic state, and one design-token source — do not duplicate spacing or color values inline when the token already exists.
 
 ## Use This Skill When
 
@@ -144,32 +144,3 @@ When using this skill, return:
 - the responsive, accessibility, and implementation constraints that shaped the recommendation
 - inspiration/benchmarks used and what was intentionally borrowed versus avoided
 - a clear done statement naming what is complete, what was validated, and what still needs live design review, browser/device checks, or coded implementation
-
-## Real-World Scenarios
-
-- **Design System Drift**: Shared components are visually close but behaviorally inconsistent; identify the true system boundary and the minimum safe remediation.
-- **Accessibility Before Launch**: A release candidate looks polished but has keyboard, contrast, or screen-reader gaps; prioritize fixes by severity and user impact.
-- **Responsive Complexity**: A feature works on desktop but breaks under constrained layouts; isolate token, layout, and interaction causes without overfitting one viewport.
-- **Brownfield Modernization**: Preserve what works, capture a master design direction, modernize only the risky or outdated areas.
-- **Familiar Interaction Surface Rehabilitation**: A high-continuity surface feels generic or unlike the product family users expect; benchmark the familiar interaction model and rebuild the core hierarchy without copying branding.
-
-## Windows Execution Guidance
-
-See `_shared/common-discipline.md` § Windows Execution Guidance.
-
-## Final Checklist
-
-Before marking UI work complete:
-- [ ] Accessible (keyboard, screen reader, contrast)
-- [ ] Responsive (mobile, tablet, desktop)
-- [ ] Theme support (dark/light both work)
-- [ ] Interactive states (hover, focus, active, disabled)
-- [ ] Design system consistency (tokens, components)
-- [ ] Design intelligence packet or equivalent brief is explicit
-- [ ] Professional polish checks pass (icons, affordance, contrast, CTA hierarchy, nav spacing)
-- [ ] Performance (optimized assets, no layout shift)
-- [ ] Browser compatibility (test target browsers)
-- [ ] Brownfield constraints or unchanged system parts are documented when applicable
-- [ ] Component states are verified in Storybook, Ladle, Histoire, or equivalent when the workspace provides that tooling
-- [ ] Documentation (if new pattern/component)
-- [ ] Risky UI changes have rollout, telemetry, or rollback coverage

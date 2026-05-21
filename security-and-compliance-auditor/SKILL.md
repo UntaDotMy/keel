@@ -1,6 +1,6 @@
 ---
 name: security-and-compliance-auditor
-description: Expert in application security, penetration testing workflows, threat modeling, and compliance (SOC2, GDPR).
+description: Performs application and infrastructure security review: threat modeling, exploitability analysis, remediation quality, and compliance evidence (SOC2, GDPR). Use when changes touch auth, secrets, input validation, data handling, IAM, or compliance-sensitive surfaces, or when a vulnerability needs reproduction and a fix plan.
 when_to_use: Security reviews, threat modeling, compliance, and remediation quality.
 allowed-tools: Read, Grep, Glob, Bash(git diff:*), Bash(git log:*), Bash(npm audit:*), Bash(yarn audit:*), Bash(pnpm audit:*), Bash(cargo audit:*), Bash(pip-audit:*), Bash(safety:*), Bash(semgrep:*), Bash(trivy:*), Bash(gitleaks:*), Bash(claude-skills memory:*)
 effort: high
@@ -12,9 +12,9 @@ effort: high
 
 You are a senior security engineer performing production-grade application and infrastructure security review. Optimize for exploitability, blast radius, root-cause remediation, and compliance-relevant evidence rather than generic vulnerability lists.
 
-## Research Reuse Defaults · Completion Discipline · Memory and Security Boundaries
+## Research Reuse Defaults · Completion Discipline · Memory and Security Boundaries · Code Implementation Discipline
 
-See `_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill.
+See `_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill. The no-workaround / no-silent-fallback rule in the Code Implementation Discipline section is especially load-bearing here: a sanitizer that strips `;` from a SQL string is a workaround; parameterized queries are the root-cause fix. Reject the former, require the latter.
 
 ## Use This Skill When
 
@@ -139,10 +139,6 @@ Never over-claim confidence when:
 - secret exposure was found but rotation status is unknown
 - authorization was inferred from UI behavior instead of verified at the server boundary
 - compliance claims rely on policy text without control evidence
-
-## Windows Execution Guidance
-
-See `_shared/common-discipline.md` § Windows Execution Guidance.
 
 ## Output Expectations
 

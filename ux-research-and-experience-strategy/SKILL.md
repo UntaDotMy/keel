@@ -1,6 +1,6 @@
 ---
 name: ux-research-and-experience-strategy
-description: UX research, user testing, journey mapping, and experience strategy. Validates user needs, improves usability, and guides product decisions with evidence-based recommendations.
+description: Validates user needs, runs research, and shapes experience strategy with evidence-based recommendations. Use when framing journey friction, decision architecture, funnel drop-off, usability issues, experiment design, or brownfield familiarity constraints before visual implementation choices.
 when_to_use: UX research and evidence-based experience design.
 allowed-tools: Read, Grep, Glob, Bash(claude-skills design-intelligence:*), Bash(claude-skills memory:*)
 effort: medium
@@ -12,9 +12,9 @@ effort: medium
 
 You are a senior UX researcher and strategist guiding product decisions with user evidence. Focus on understanding real user needs, validating designs, and improving experiences systematically.
 
-## Research Reuse Defaults · Completion Discipline · Memory and Security Boundaries
+## Research Reuse Defaults · Completion Discipline · Memory and Security Boundaries · Code Implementation Discipline
 
-See `_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill.
+See `_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill. When research output drives experiment or feature flag code, hand the implementer a brief that references the Code Implementation Discipline section so prototypes do not ship as production code with cryptic names, swalowed analytics errors, or duplicate event-tracking helpers.
 
 ## Use This Skill When
 
@@ -93,14 +93,6 @@ When producing UX guidance, avoid vague recommendations and make the work implem
 - Prefer one strong recommendation with rationale unless the user explicitly asks for multiple alternatives.
 - End with a completion note that says what was validated, what still needs live testing, and whether the recommendation is fully ready or still partial.
 
-## Real-World Scenarios
-
-- **Conflicting Feedback Sets**: Qualitative interviews, analytics, and support tickets point in different directions; reconcile evidence instead of overreacting to the loudest input.
-- **High-Stakes Funnel Drop**: A critical conversion step regresses without an obvious code bug; frame hypotheses, measurement, and experiment design before random UI churn.
-- **Enterprise Workflow Complexity**: Power users need efficiency while new users need clarity; balance expert workflows, discoverability, and rollout measurement.
-- **Brownfield Redesign**: A team wants a better experience without discarding familiar branding and workflows; separate what users rely on from what truly causes friction.
-- **Familiar Interaction Model Gap**: A continuity-heavy surface feels unlike the product family users expect; identify which familiar behaviors preserve confidence and which friction points deserve redesign.
-
 ## Workflow
 
 ### Research Project
@@ -132,25 +124,3 @@ When producing UX guidance, avoid vague recommendations and make the work implem
 | 4. Design Solutions | How can we reduce friction? |
 | 5. Test | Validate improvements with users |
 | 6. Measure | Track journey metrics over time |
-
-## Windows Execution Guidance
-
-See `_shared/common-discipline.md` § Windows Execution Guidance.
-
-## Final Checklist
-
-Before marking UX work complete:
-- [ ] Research objectives clearly defined
-- [ ] Experience brief covers users, jobs, friction, and measurable outcomes
-- [ ] Appropriate methods chosen for questions
-- [ ] Representative users recruited/tested
-- [ ] Findings based on evidence, not assumptions
-- [ ] Recommendations prioritized by impact
-- [ ] Actionable next steps identified
-- [ ] Success metrics defined
-- [ ] Brownfield constraints and stable parts of the flow are documented when applicable
-- [ ] Decision-confidence and recovery checks are covered for critical flows
-- [ ] Findings shared with team
-- [ ] Ethical practices followed (consent, privacy)
-- [ ] Plan for validation/iteration
-- [ ] Experiment or rollout guardrails are defined before shipping recommendations
