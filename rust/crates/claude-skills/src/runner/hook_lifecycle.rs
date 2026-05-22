@@ -626,10 +626,12 @@ fn lifecycle_additional_context(subcommand: &str) -> String {
 
         "post-compact" => post_compact_context(),
 
-        // UserPromptSubmit injects a short research-first pointer so the
-        // model reads the workspace SYSTEM_MAP and consults the right skill
-        // before writing code. The text is intentionally compact (~50 tokens)
-        // because it lands per-prompt; everything else stays in CLAUDE.md.
+        // UserPromptSubmit injects a short research-first iron-law restatement
+        // so the bootstrap skill that SessionStart delivered stays top-of-mind
+        // on every turn. The text is intentionally compact (~80 tokens)
+        // because it lands per-prompt; the full bootstrap (Red Flags table,
+        // skill catalog, decision flow) lives in using-claude-core/SKILL.md
+        // and is delivered once via SessionStart.
         "user-prompt-submit" => user_prompt_submit_context(),
 
         // PostToolBatch fires after a batch of parallel tools resolves, just
@@ -650,13 +652,27 @@ fn lifecycle_additional_context(subcommand: &str) -> String {
     }
 }
 
+/// Bootstrap skill text embedded at compile time.
+///
+/// The file lives at the repository root so `discover_repository_layout` picks
+/// it up alongside the other skills and `sync_skills` installs it under
+/// `~/.claude/skills/using-claude-core/SKILL.md`. We *also* embed it here so
+/// SessionStart can inject the full text directly into `additionalContext`,
+/// which Claude Code caches for the rest of the session. CLAUDE.md and the
+/// individual SKILL.md files are read by the skill matcher on demand; this
+/// single block is what the model sees up front, so it doubles as the
+/// research-first iron law and the catalog of every other invokable skill.
+const BOOTSTRAP_SKILL: &str = include_str!("../../../../../using-claude-core/SKILL.md");
+
 fn session_start_context() -> String {
-    // The static operating contract lives in CLAUDE.md and AGENTS.md, both of
-    // which Claude Code reads into the cached prompt prefix. Repeating it here
-    // would double the token cost without adding context the model does not
-    // already see. SessionStart only contributes the runtime-resolved memory
-    // pointer, which CLAUDE.md cannot know in advance.
-    memory_scope_summary()
+    // SessionStart fires once per session and the payload is cached for the
+    // rest of the cache window, so this is the right place to deliver the
+    // bootstrap skill. Per-prompt cost is zero after the first turn.
+    //
+    // Layout: full bootstrap skill (iron law + Red Flags + skill catalog +
+    // workspace pointers) followed by the runtime-resolved memory pointer
+    // that CLAUDE.md cannot know in advance.
+    format!("{BOOTSTRAP_SKILL}\n\n{}", memory_scope_summary())
 }
 
 fn pre_compact_context() -> String {
@@ -673,16 +689,16 @@ fn post_compact_context() -> String {
     )
 }
 
-/// Per-prompt research-first nudge.
+/// Per-prompt research-first iron law.
 ///
 /// Compact by design: the schema lets us inject as much text as we want, but
 /// every byte lands per prompt and is paid as input tokens for the rest of
-/// the cache window. The standing operating contract (skill catalog, two-tier
-/// reviewer rule, etc.) lives in CLAUDE.md; this hook only points the model at
-/// the workspace pointer that CLAUDE.md cannot know in advance.
+/// the cache window. The full bootstrap (skill catalog, Red Flags table,
+/// decision flow) is delivered once via SessionStart; this hook only
+/// restates the iron law so it stays top-of-mind on each turn.
 fn user_prompt_submit_context() -> String {
     format!(
-        "Research-first: read the workspace SYSTEM_MAP before making repo-structure claims, identify the owning module, read the existing implementation, then propose changes. No assumptions. {}",
+        "Research-first: trust the codebase, not your knowledge base. Read SYSTEM_MAP and the owning module before claiming behavior. Invoke any relevant skill via the Skill tool BEFORE responding — even a 1% chance it applies means use it. Find the root cause, not just the surface symptom. No assumptions. {}",
         memory_scope_summary()
     )
 }
@@ -1778,9 +1794,10 @@ mod tests {
     #[test]
     fn user_prompt_submit_emits_research_first_pointer() {
         // UserPromptSubmit lands per-prompt, so the injected text must be
-        // short and pointer-shaped (workspace SYSTEM_MAP location, no
-        // assumptions, read existing implementation). The full operating
-        // contract still lives in CLAUDE.md.
+        // short and pointer-shaped. The iron law (trust the codebase, invoke
+        // skills before responding, find root cause) restates the bootstrap
+        // skill that SessionStart already delivered, so it stays top-of-mind
+        // on each turn even after the cache window rolls.
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
 
@@ -1803,6 +1820,9 @@ mod tests {
 
         assert!(context.contains("Research-first"));
         assert!(context.contains("SYSTEM_MAP"));
+        assert!(context.contains("trust the codebase"));
+        assert!(context.contains("Skill tool"));
+        assert!(context.contains("root cause"));
         assert!(context.contains("No assumptions"));
 
         let event_name = output
@@ -1896,23 +1916,48 @@ mod tests {
     }
 
     #[test]
-    fn session_start_context_emits_only_runtime_memory_pointer() {
-        // The static operating contract lives in CLAUDE.md and AGENTS.md, both
-        // of which Claude Code reads into the cached prompt prefix. SessionStart
-        // must not duplicate that text — it only contributes the runtime-resolved
-        // workspace memory pointer (or its missing-pointer fallback), which
-        // CLAUDE.md cannot know in advance.
+    fn session_start_context_embeds_bootstrap_skill_and_memory_pointer() {
+        // SessionStart fires once per session and the payload is cached for
+        // the rest of the cache window, so it carries the bootstrap skill
+        // (iron law + Red Flags + skill catalog) plus the runtime-resolved
+        // workspace memory pointer. Both pieces have to be there: the skill
+        // delivers the operating contract, the pointer delivers the
+        // workspace-specific memory path that CLAUDE.md cannot know in
+        // advance.
         let context = session_start_context();
 
-        assert!(context.contains("Workspace memory system map"));
-
+        // Bootstrap skill markers — these come from
+        // <repo>/using-claude-core/SKILL.md via include_str! and are what
+        // make the model treat skill invocation as non-optional.
         assert!(
-            !context.contains("claude-skills automatic operating contract"),
-            "SessionStart must not duplicate the operating contract that already lives in CLAUDE.md/AGENTS.md"
+            context.contains("EXTREMELY_IMPORTANT"),
+            "SessionStart must embed the bootstrap skill iron-law block"
         );
         assert!(
-            !context.contains("review pre-pr"),
-            "SessionStart must not duplicate review-gate guidance that already lives in CLAUDE.md/AGENTS.md"
+            context.contains("Trust the codebase, not your knowledge base"),
+            "SessionStart must restate the trust-the-codebase rule"
+        );
+        assert!(
+            context.contains("Red Flags"),
+            "SessionStart must embed the Red Flags rationalization table"
+        );
+        // Catalog spot-check: a couple of representative skill names so the
+        // model knows what is invokable. Full enumeration lives in the skill
+        // file; this assertion just guards that the catalog survived the
+        // include.
+        assert!(
+            context.contains("preserve-existing-flow"),
+            "SessionStart skill catalog must list preserve-existing-flow"
+        );
+        assert!(
+            context.contains("reviewer"),
+            "SessionStart skill catalog must list the reviewer skill"
+        );
+
+        // Runtime memory pointer.
+        assert!(
+            context.contains("Workspace memory system map"),
+            "SessionStart must include the runtime memory pointer"
         );
     }
 
