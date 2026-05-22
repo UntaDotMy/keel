@@ -1,7 +1,7 @@
 //! Purpose: Install, sync, update, and uninstall logic for claude-skills manager.
 //! Caller: commands.rs via run_install_command, run_update_command, run_uninstall_command.
 //! Dependencies: std::fs, std::io, std::path, std::process, std::thread, std::time, claude_skills_platform, crate::args, crate::runtime.
-//! Main Functions: install_from_flags, install_from_paths, sync_root_files, sync_skills, sync_agents, publish_native_executable, run_update_command, run_uninstall_command.
+//! Main Functions: install_from_flags, install_from_paths, sync_root_files, sync_skills, sync_shared_resources, sync_agents, publish_native_executable, run_update_command, run_uninstall_command.
 //! Side Effects: Copies managed skill-pack files, writes Claude home config/state, publishes the Rust binary, runs git commands, and removes managed files during uninstall.
 
 use std::collections::BTreeSet;
@@ -30,6 +30,7 @@ pub struct InstallSummary {
     pub synced_skills: usize,
     pub synced_agents: usize,
     pub synced_root_files: usize,
+    pub synced_shared_resources: usize,
     pub removed_stale_files: usize,
     pub removed_executable_orphans: usize,
     pub published_executable: bool,
@@ -117,16 +118,20 @@ pub fn install_from_paths(
 
     let previous_files = read_inventory_set(&managed_files_inventory_path(claude_home));
     let previous_skills = read_inventory_set(&managed_skills_inventory_path(claude_home));
+    let previous_shared_resources =
+        read_inventory_set(&managed_shared_resources_inventory_path(claude_home));
     let mut tracker = FileTracker::new(claude_home);
 
     let synced_root_files = sync_root_files(&layout, claude_home, &mut tracker)?;
     let synced_skills = sync_skills(&layout, claude_home, &mut tracker)?;
+    let synced_shared_resources = sync_shared_resources(&layout, claude_home, &mut tracker)?;
     let synced_agents = sync_agents(&layout, claude_home, &mut tracker)?;
 
     let removed_stale_files = remove_orphans(
         claude_home,
         &previous_files,
         &previous_skills,
+        &previous_shared_resources,
         &layout,
         &tracker,
     )?;
@@ -140,6 +145,7 @@ pub fn install_from_paths(
         synced_skills,
         synced_agents,
         synced_root_files,
+        synced_shared_resources,
         removed_stale_files,
         removed_executable_orphans,
         published_executable,
@@ -158,10 +164,19 @@ fn managed_agents_inventory_path(claude_home: &Path) -> PathBuf {
     state_directory(claude_home).join("managed-agents.txt")
 }
 
+/// Inventory of top-level shared-resource directory names (currently `_shared`)
+/// that the installer has staged into `<claude_home>/skills/`. Tracked
+/// separately from `managed-skills.txt` because shared resources have no
+/// `SKILL.md` and follow directory-level orphan cleanup, not file-level.
+fn managed_shared_resources_inventory_path(claude_home: &Path) -> PathBuf {
+    state_directory(claude_home).join("managed-shared-resources.txt")
+}
+
 fn remove_orphans(
     claude_home: &Path,
     previous_files: &BTreeSet<String>,
     previous_skills: &BTreeSet<String>,
+    previous_shared_resources: &BTreeSet<String>,
     layout: &RepositoryLayout,
     tracker: &FileTracker,
 ) -> Result<usize, String> {
@@ -177,6 +192,12 @@ fn remove_orphans(
         let skill_directory = skills_directory(claude_home).join(orphan_skill);
         removed += remove_path_if_exists_counted(&skill_directory)?;
     }
+    let current_shared_resources: BTreeSet<String> =
+        layout.shared_resource_directories.iter().cloned().collect();
+    for orphan_shared in previous_shared_resources.difference(&current_shared_resources) {
+        let shared_directory = skills_directory(claude_home).join(orphan_shared);
+        removed += remove_path_if_exists_counted(&shared_directory)?;
+    }
     Ok(removed)
 }
 
@@ -187,6 +208,11 @@ pub fn write_install_summary(summary: &InstallSummary, output: &mut dyn Write) {
     let _ = writeln!(output, "  Synced skills: {}", summary.synced_skills);
     let _ = writeln!(output, "  Synced agents: {}", summary.synced_agents);
     let _ = writeln!(output, "  Synced root files: {}", summary.synced_root_files);
+    let _ = writeln!(
+        output,
+        "  Synced shared resources: {}",
+        summary.synced_shared_resources
+    );
     let _ = writeln!(
         output,
         "  Removed stale files: {}",
@@ -232,6 +258,12 @@ fn uninstall_managed_files(claude_home: &Path) -> Result<usize, String> {
         let skill_path = skills_directory(claude_home).join(skill_name);
         removed_count += remove_path_if_exists_counted(&skill_path)?;
     }
+    let installed_shared_resources =
+        read_inventory_set(&managed_shared_resources_inventory_path(claude_home));
+    for shared_name in &installed_shared_resources {
+        let shared_path = skills_directory(claude_home).join(shared_name);
+        removed_count += remove_path_if_exists_counted(&shared_path)?;
+    }
     let installed_agents = read_inventory_set(&managed_agents_inventory_path(claude_home));
     for agent_name in &installed_agents {
         let agent_path = agents_directory(claude_home).join(agent_name);
@@ -243,6 +275,7 @@ fn uninstall_managed_files(claude_home: &Path) -> Result<usize, String> {
         managed_files_inventory_path(claude_home),
         managed_skills_inventory_path(claude_home),
         managed_agents_inventory_path(claude_home),
+        managed_shared_resources_inventory_path(claude_home),
     ] {
         let _ = remove_path_if_exists_counted(&inventory)?;
     }
@@ -382,6 +415,28 @@ fn sync_skills(
         }
     }
     Ok(synced_count)
+}
+
+/// Copy cross-skill resource directories (currently `_shared/`) verbatim into
+/// `<claude_home>/skills/<name>/`. Skill files reference these via relative
+/// paths like `_shared/common-discipline.md`; without this step, the path
+/// resolves to a missing file at runtime even though the source lives in the
+/// repo. Files are recorded in the tracker so per-file orphan cleanup picks
+/// up renames and deletions just like skill references do. Returns the count
+/// of shared-resource directories staged this run (zero when the repo has
+/// none).
+fn sync_shared_resources(
+    layout: &RepositoryLayout,
+    claude_home: &Path,
+    tracker: &mut FileTracker,
+) -> Result<usize, String> {
+    for shared_directory_name in &layout.shared_resource_directories {
+        let source_directory = layout.root_path.join(shared_directory_name);
+        let target_directory = skills_directory(claude_home).join(shared_directory_name);
+        let mut stats = SyncStats::default();
+        sync_directory_delta(&source_directory, &target_directory, &mut stats, tracker)?;
+    }
+    Ok(layout.shared_resource_directories.len())
 }
 
 fn sync_agents(
@@ -672,6 +727,10 @@ fn write_inventories(
     write_lines(
         &managed_agents_inventory_path(claude_home),
         &layout.agent_names,
+    )?;
+    write_lines(
+        &managed_shared_resources_inventory_path(claude_home),
+        &layout.shared_resource_directories,
     )?;
     let file_paths: Vec<String> = tracker.files.iter().cloned().collect();
     write_lines(&managed_files_inventory_path(claude_home), &file_paths)?;
@@ -1146,6 +1205,93 @@ mod tests {
         assert!(
             managed_files_inventory_path(&home).is_file(),
             "per-file inventory must be written"
+        );
+        let _ = fs::remove_dir_all(&repo);
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn install_copies_shared_resources_alongside_skills() {
+        // SKILL.md files reference _shared/common-discipline.md via relative
+        // paths. Without this install step, the on-disk layout under
+        // ~/.claude/skills/ is missing the _shared sibling and every reference
+        // resolves to a missing file. The test seeds a repo with a _shared
+        // directory and asserts the installer mirrors it into the skills
+        // directory tree, including nested files. It also asserts a renamed
+        // shared file is cleaned up by the existing per-file orphan sweep —
+        // the shared resources go through the same FileTracker as skill
+        // references, so renames behave identically.
+        let (repo, home) = unique_paths("shared-resources");
+        seed_repo(&repo);
+        write_skill_with_reference(&repo, "reviewer", "10-r.md");
+        let shared_dir = repo.join("_shared");
+        fs::create_dir_all(shared_dir.join("nested")).unwrap();
+        fs::write(shared_dir.join("common-discipline.md"), "discipline body\n").unwrap();
+        fs::write(shared_dir.join("nested/extra.md"), "nested body\n").unwrap();
+
+        install_from_paths("dev", &repo, &home).unwrap();
+
+        let installed_shared = home.join("skills/_shared");
+        assert!(
+            installed_shared.join("common-discipline.md").is_file(),
+            "top-level shared file must be installed alongside skills"
+        );
+        assert!(
+            installed_shared.join("nested/extra.md").is_file(),
+            "nested shared file must be installed alongside skills"
+        );
+
+        // Rename and reinstall — the previously installed file should be
+        // cleaned up exactly like a renamed skill reference.
+        fs::remove_file(shared_dir.join("common-discipline.md")).unwrap();
+        fs::write(
+            shared_dir.join("common-discipline-v2.md"),
+            "discipline body\n",
+        )
+        .unwrap();
+        install_from_paths("dev", &repo, &home).unwrap();
+
+        assert!(
+            !installed_shared.join("common-discipline.md").is_file(),
+            "renamed shared file must be removed from claude home"
+        );
+        assert!(
+            installed_shared.join("common-discipline-v2.md").is_file(),
+            "new shared file must be installed"
+        );
+        let _ = fs::remove_dir_all(&repo);
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn install_removes_shared_resource_directory_when_dropped_from_repo() {
+        // When the entire `_shared/` directory is removed from the repo
+        // upstream, the previously-installed copy under
+        // `<claude_home>/skills/_shared/` must be cleaned up — both files
+        // and the now-empty directory. Without the directory-level orphan
+        // sweep, an empty `_shared/` directory would persist on disk.
+        let (repo, home) = unique_paths("shared-dropped");
+        seed_repo(&repo);
+        write_skill_with_reference(&repo, "reviewer", "10-r.md");
+        let shared_dir = repo.join("_shared");
+        fs::create_dir_all(&shared_dir).unwrap();
+        fs::write(shared_dir.join("common-discipline.md"), "discipline body\n").unwrap();
+
+        install_from_paths("dev", &repo, &home).unwrap();
+        let installed_shared = home.join("skills/_shared");
+        assert!(installed_shared.is_dir(), "first install seeds shared dir");
+
+        // Drop the whole _shared directory from the repo and reinstall.
+        fs::remove_dir_all(&shared_dir).unwrap();
+        install_from_paths("dev", &repo, &home).unwrap();
+
+        assert!(
+            !installed_shared.exists(),
+            "removed shared directory must be cleaned up entirely (not just its files)"
+        );
+        assert!(
+            home.join("skills/reviewer/SKILL.md").is_file(),
+            "untouched skill must stay in place"
         );
         let _ = fs::remove_dir_all(&repo);
         let _ = fs::remove_dir_all(&home);
