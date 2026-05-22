@@ -52,7 +52,9 @@ Thumbs.db
 plan.md
 todo.md
 todo.local.md
+.scratch/
 
 # Local validation and flow artifacts
 VALIDATION_REPORT.md
 flow-check.json
+verify_*.ps1
