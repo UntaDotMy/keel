@@ -149,6 +149,15 @@ jobs:
               cp -R "$dir" "$target_dir/"
             fi
           done
+          # Stage cross-skill resource directories that SKILL.md files
+          # reference via relative paths (for example _shared/common-discipline.md).
+          # Mirrors SHARED_RESOURCE_DIRECTORIES in rust/.../runtime.rs — keep in
+          # sync when adding new shared resource directories.
+          for shared_dir in _shared; do
+            if [ -d "$shared_dir" ]; then
+              cp -R "$shared_dir" "$target_dir/"
+            fi
+          done
           cat > "$target_dir/claude-skills-release-manifest.json" <<EOF
           {
             "package_kind": "packaged_release_bundle",
