@@ -3,6 +3,7 @@
 ## Project Overview
 
 This is the claude-core project — native delivery rails for Claude Code. It provides:
+- 1 bootstrap **skill** (`using-claude-core/SKILL.md`) injected verbatim at every `SessionStart` to establish the research-first iron law and list every other skill
 - 13 specialist Claude Code **skills** for software delivery (`<name>/SKILL.md`)
 - 13 matching Claude Code **subagents** for token-efficient delegation (`.claude/agents/<name>.md`)
 - 13 internal **managed profiles** consumed by the CLI (`<name>/agents/claude.yaml`)
@@ -62,7 +63,7 @@ Other official optional fields not currently used here include `disable-model-in
 
 ## Routing Rules
 
-1. Routing is driven by Claude Code's native skill matcher against the installed `~/.claude/skills/<name>/SKILL.md` files — each skill's frontmatter (`description`, `when_to_use`) is what triggers selection. The `UserPromptSubmit` hook is intentionally silent to preserve cache; the static operating contract is delivered once per session via `SessionStart` `additionalContext` and the project CLAUDE.md, then cached for the rest of the session.
+1. Routing is driven by Claude Code's native skill matcher against the installed `~/.claude/skills/<name>/SKILL.md` files — each skill's frontmatter (`description`, `when_to_use`) is what triggers selection. The bootstrap skill `using-claude-core/SKILL.md` is injected verbatim into `SessionStart` `additionalContext` so the iron law (research first, invoke skills before responding, find the root cause) and the full skill catalog are cached for the rest of the session. `UserPromptSubmit` then restates the iron law in compact form on every turn.
 2. Run `preserve-existing-flow` before editing any existing source file.
 3. Run `reviewer` before closing **non-trivial** work. Trivial exemptions: docs-only, formatting-only, generated-only, single-line typo or comment fixes, and explicitly throw-away work the user asked for. Everything else (logic changes, multi-file edits, public-API touches, security-sensitive surfaces, brownfield rewrites) goes through `reviewer` before close.
 4. Delegate to the matching `.claude/agents/<name>.md` subagent for heavy work that benefits from an isolated context window (saves main-thread tokens).

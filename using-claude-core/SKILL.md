@@ -1,0 +1,111 @@
+---
+name: using-claude-core
+description: Bootstrap skill loaded at every SessionStart. Establishes the research-first operating contract — trust the codebase over knowledge-base recall, invoke relevant skills before responding, find the root problem before coding. Lists every claude-core skill and subagent so the model knows what is invokable. Read once per session and applied to every prompt thereafter.
+when_to_use: Always. This skill is auto-loaded at SessionStart and frames every other skill in this repo.
+allowed-tools: Read, Grep, Glob, Bash(claude-skills memory:*)
+effort: low
+---
+
+# Using claude-core
+
+<EXTREMELY_IMPORTANT>
+
+You are working in claude-core. **Trust the codebase, not your knowledge base.**
+Knowledge-base recall is stale. Memories drift. The repository is the source of truth.
+
+Before you respond to anything that could touch code, configuration, or
+architecture:
+
+1. **Read first.** Read SYSTEM_MAP, CLAUDE.md, the owning module, and the existing
+   implementation. Do not propose changes against an imagined version of the file.
+2. **Invoke relevant skills.** If there is even a 1% chance a skill applies, use the
+   Skill tool to invoke it BEFORE writing code or giving a final answer. This
+   is not negotiable. You cannot rationalize your way out of it.
+3. **Find the root cause.** User stories and prompts are vague. Take the symptom
+   as a starting point, not the specification. The real problem is usually one
+   layer below what was asked.
+
+If an invoked skill turns out not to apply, fine — you spent a few hundred tokens
+checking. The cost of skipping a skill that did apply is shipping a regression.
+
+</EXTREMELY_IMPORTANT>
+
+## Red Flags (rationalizations to ignore)
+
+| Thought | Reality |
+|---|---|
+| "I remember this codebase" | Memories drift. Read SYSTEM_MAP and the owning file before claiming behavior. |
+| "The user story is clear" | Stories are summaries, not specs. Find the root cause. |
+| "I'll just code this quickly" | Skills tell you HOW. Check first. |
+| "This is just a simple question" | Questions are tasks. Check for skills before answering. |
+| "I need more context first" | Skill check comes BEFORE clarifying questions. |
+| "I'll explore the codebase my own way" | `preserve-existing-flow` exists for a reason. Use it. |
+| "The skill is overkill" | Simple things become complex. Use the skill. |
+| "I know what that code does" | Knowing the concept ≠ knowing the current implementation. Read it. |
+| "Tests already passed earlier" | Re-run before claiming. No completion claims without fresh evidence. |
+
+## Decision flow
+
+```
+prompt arrives
+    │
+    ▼
+Does any skill below match the request, even at 1% confidence?
+    ├── yes → invoke that skill via the Skill tool, then act on its output
+    └── no  → Are you about to read or edit existing code?
+                ├── yes → invoke preserve-existing-flow first
+                └── no  → answer normally, but verify claims against the repo
+```
+
+After implementation work, before claiming completion:
+- Run the project's build/test/lint commands. Do not claim "tests pass" without
+  running them in this turn.
+- For non-trivial changes (logic, multi-file, public API, security-sensitive,
+  brownfield rewrite), invoke the `reviewer` skill before close. Trivial work
+  (docs-only, formatting, single-line typo) is exempt — that is the two-tier
+  rule documented in CLAUDE.md.
+
+## Skill catalog (13 skills installed under ~/.claude/skills/)
+
+Source: each `<name>/SKILL.md` in this repo. Use the Skill tool with the bare
+name (e.g. `Skill("reviewer")`).
+
+- `software-development-life-cycle` — Cross-domain planning, architecture framing, multi-phase delivery sequencing.
+- `web-development-life-cycle` — Web architecture, quality, and production delivery (Core Web Vitals, SEO, accessibility).
+- `mobile-development-life-cycle` — Mobile architecture, quality, and release (Android/iOS lifecycle, store submission).
+- `backend-and-data-architecture` — Backend systems, API design, and data engineering (schemas, messaging, microservice boundaries).
+- `cloud-and-devops-expert` — Cloud infrastructure, CI/CD, and DevOps (IaC, container orchestration, progressive delivery).
+- `qa-and-automation-engineer` — QA, automated testing, and release reliability (Smoke → Functional → Integration → UI → Load → Stress → Security ladder).
+- `security-and-compliance-auditor` — Security reviews, threat modeling, compliance (SOC2, GDPR), remediation quality.
+- `git-expert` — Safe Git workflow and version control (branching, conflict resolution, history repair, secret cleanup).
+- `preserve-existing-flow` — Pre-edit ownership trace before changing existing behavior in a brownfield codebase.
+- `reviewer` — Production-readiness review and quality gate after implementation. Returns Pass / Conditional Pass / Fail.
+- `ui-design-systems-and-responsive-interfaces` — UI systems, responsive design, accessibility (WCAG 2.1 AA).
+- `ux-research-and-experience-strategy` — UX research and evidence-based experience design (journeys, funnels, usability).
+- `memory-status-reporter` — Human-style memory health and learning reports.
+
+## Subagent catalog (13 delegation targets in .claude/agents/)
+
+Use these via the Agent tool when the work benefits from an isolated context
+window. Same names as the skills — pick the subagent when token-saving delegation
+matters, pick the skill when the work belongs in the main thread.
+
+- `software-development-life-cycle`, `web-development-life-cycle`,
+  `mobile-development-life-cycle`, `backend-and-data-architecture`,
+  `cloud-and-devops-expert`, `qa-and-automation-engineer`,
+  `security-and-compliance-auditor`, `git-expert`, `preserve-existing-flow`,
+  `reviewer`, `ui-design-systems-and-responsive-interfaces`,
+  `ux-research-and-experience-strategy`, `memory-status-reporter`.
+
+## Workspace pointers
+
+- `CLAUDE.md` (repo root) — project guide, terminology, schema notes, routing rules.
+- `AGENTS.md` (repo root) — operating doctrine, section-to-reference map.
+- `WORKFLOW.md` (repo root) — branch naming, commit format, completion rules.
+- `00-skill-routing-and-escalation.md` (repo root) — read first for routing.
+- Workspace `SYSTEM_MAP.md` lives at `~/.claude/memories/workspaces/<workspace-key>/reference/SYSTEM_MAP.md` and is auto-refreshed by `claude-skills memory scope resolve --refresh-system-map`. Read it before making structural claims.
+
+## The one-line summary, if you only remember one thing
+
+**Research first. Invoke relevant skills before responding. Find the root cause.
+The repository — not your training data — is the source of truth.**
