@@ -29,12 +29,23 @@ pub const SKILL_SYNC_DIRECTORIES: &[&str] = &[
     "assets",
 ];
 
+/// Top-level repository directories that hold cross-skill resources referenced
+/// by `SKILL.md` files via relative paths (for example `_shared/common-discipline.md`).
+/// Listed explicitly so the installer never picks up build outputs, scratch
+/// folders, or other transient siblings of the skill directories.
+pub const SHARED_RESOURCE_DIRECTORIES: &[&str] = &["_shared"];
+
 #[derive(Debug, Clone)]
 pub struct RepositoryLayout {
     pub root_path: PathBuf,
     pub root_files: Vec<String>,
     pub skills: Vec<SkillDefinition>,
     pub agent_names: Vec<String>,
+    /// Names of directories from `SHARED_RESOURCE_DIRECTORIES` that exist on
+    /// disk under `root_path`. These are copied verbatim to `<claude_home>/skills/<name>/`
+    /// so SKILL.md relative references like `_shared/common-discipline.md`
+    /// resolve from the installed skills directory.
+    pub shared_resource_directories: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -75,6 +86,11 @@ pub fn discover_repository_layout(repository_root: &Path) -> Result<RepositoryLa
             .collect(),
         skills: Vec::new(),
         agent_names: Vec::new(),
+        shared_resource_directories: SHARED_RESOURCE_DIRECTORIES
+            .iter()
+            .filter(|name| repository_root.join(name).is_dir())
+            .map(|name| name.to_string())
+            .collect(),
     };
 
     for entry_result in directory_entries {

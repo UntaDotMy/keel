@@ -94,6 +94,17 @@ fn verify_install(
             skill.name
         );
     }
+    for shared_directory_name in &layout.shared_resource_directories {
+        compare_directory_subset(
+            &repository_root.join(shared_directory_name),
+            &skills_directory(&claude_home).join(shared_directory_name),
+        )?;
+        let _ = writeln!(
+            standard_output,
+            "Content verified for shared resources: {}",
+            shared_directory_name
+        );
+    }
     for agent_name in &layout.agent_names {
         if !agent_profiles_directory(&claude_home)
             .join(format!("{agent_name}.toml"))

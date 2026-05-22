@@ -39,6 +39,21 @@ fn install_generates_reasoning_without_model_pin() {
         "generated reviewer profile must not pin a model:\n{reviewer_profile}"
     );
 
+    // Every skill references _shared/common-discipline.md via a relative path
+    // that resolves against ~/.claude/skills/<skill>/. If the installer does
+    // not stage the _shared directory, the references silently dangle even
+    // though the source file lives in the repo. Assert the file lands where
+    // skill text expects it.
+    let installed_shared_discipline = claude_home
+        .join("skills")
+        .join("_shared")
+        .join("common-discipline.md");
+    assert!(
+        installed_shared_discipline.is_file(),
+        "installer must stage _shared/common-discipline.md so skill references resolve: {}",
+        installed_shared_discipline.display()
+    );
+
     let _ = fs::remove_dir_all(claude_home);
 }
 
