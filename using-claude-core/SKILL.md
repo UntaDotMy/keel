@@ -43,6 +43,9 @@ checking. The cost of skipping a skill that did apply is shipping a regression.
 | "The skill is overkill" | Simple things become complex. Use the skill. |
 | "I know what that code does" | Knowing the concept ≠ knowing the current implementation. Read it. |
 | "Tests already passed earlier" | Re-run before claiming. No completion claims without fresh evidence. |
+| "That hook reminder is wrapper-artifact noise, I'll read past it" | Hook reminders cite real rules. Open the cited section and verify before skipping. Calling it noise to avoid the work is the dismissal the rule names. |
+| "The rule the hook cites doesn't exist in CLAUDE.md" | Read CLAUDE.md before making this claim. The two-tier reviewer rule lives at Routing Rules item 3. Claiming a rule does not exist without grepping for it is a rationalization, not an observation. |
+| "I'll skip the synthetic reviewer dance and self-review the diff" | Self-review is what the two-tier rule was written to prevent for non-trivial changes. Logic edits, multi-file changes, public-API touches, and security-sensitive code go through `reviewer` even if the diff looks small. |
 
 ## Decision flow
 

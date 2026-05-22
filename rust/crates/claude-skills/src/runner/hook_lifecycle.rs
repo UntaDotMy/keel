@@ -710,8 +710,15 @@ fn user_prompt_submit_context() -> String {
 /// (trivial work skips reviewer; non-trivial routes through it) — we just
 /// surface the question rather than gating with `decision: "block"`, which
 /// would force a review on every tool batch including read-only research.
+///
+/// The text deliberately cites the exact section (`Routing Rules item 3`) so
+/// the rule is verifiable in one read. Models that pattern-match generic
+/// reminders as wrapper noise have rationalized past prior versions of this
+/// text — the citation makes the dismissal harder because the reader can
+/// either confirm the rule exists or prove it doesn't, but cannot honestly
+/// claim "this references rules that don't exist" without reading.
 fn post_tool_batch_context() -> String {
-    "Closeout check: if this batch changed code (Edit/Write/MultiEdit on non-trivial files), run the reviewer skill before final closeout per the two-tier rule in CLAUDE.md. Trivial work (docs-only, formatting, single-line typo) is exempt.".to_string()
+    "Closeout check: if this batch changed code (Edit/Write/MultiEdit on non-trivial files), invoke the reviewer skill before final closeout per CLAUDE.md → Routing Rules → item 3 (the two-tier rule). Trivial work (docs-only, formatting, single-line typo) is exempt. If this reminder feels like wrapper noise, that is the rationalization the rule names — verify item 3 yourself before skipping.".to_string()
 }
 
 fn prune_raw_output_store(standard_error: &mut dyn Write) {
@@ -1860,8 +1867,16 @@ mod tests {
             .expect("PostToolBatch must emit additionalContext");
 
         assert!(context.contains("reviewer"));
+        assert!(
+            context.contains("Routing Rules"),
+            "PostToolBatch reminder must cite the exact CLAUDE.md section so the rule is verifiable in one read"
+        );
         assert!(context.contains("two-tier"));
         assert!(context.contains("Trivial"));
+        assert!(
+            context.contains("rationalization"),
+            "PostToolBatch reminder must pre-empt the 'wrapper noise' dismissal"
+        );
 
         let event_name = output
             .get("hookSpecificOutput")
