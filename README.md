@@ -528,18 +528,17 @@ The project-scoped global `SYSTEM_MAP.md` target lives under Claude Code-managed
 Useful memory commands:
 
 ```bash
-claude-skills memory working-brief record-summary --workspace-root "$PWD" --workstream-key feature-branch --user-story "Ship the native workflow layer"
-claude-skills memory completion-gate record-requirement --workspace-root "$PWD" --workstream-key feature-branch --requirement-id workflow-primary --text "Ship the native workflow layer" --status in_progress
-claude-skills memory completion-gate check --workspace-root "$PWD" --workstream-key feature-branch --require-closure-ready
-claude-skills memoriesv2 scope resolve --workspace-root "$PWD" --workstream-key feature-branch --create-missing
-claude-skills memoriesv2 retrieve --workspace-root "$PWD" --workstream-key feature-branch --query "stable cache" --semantic-recall-mode blended
+claude-skills memory working-brief write --request "Ship the native workflow layer" --constraints "no Go fallback" --acceptance-criteria "tests green"
+claude-skills memory working-brief list
+claude-skills memory completion-gate check --id <entry-id> --proof "tests green"
+claude-skills memoriesv2 scope resolve --workspace-root "$PWD" --create-missing --refresh-system-map
+claude-skills memoriesv2 working-brief list
 ```
 
 Advanced memory and search surfaces:
 
-- claude-skills memoriesv2 retrieve now supports first-class entity recall plus graph-backed semantic recall modes: `direct`, `bridge`, and `blended`.
-- claude-skills memoriesv2 entity upsert|list|query manages typed graph entities.
-- claude-skills memoriesv2 hook capture records explicit save-loop or precompact-style events.
+- The Rust runtime currently implements `scope`, `system-map`, `working-brief`, and `completion-gate check` for both `memory` and `memoriesv2` command groups.
+- Agent-registry, research-cache, maintenance, loop-guard, agent-packets, retrieval packets, ledger append/show, graph add/list/query, and consolidate are not yet implemented and return non-zero with a "not implemented" message.
 - Code-search demo details live at [./docs/code-search-demo-and-gap-map.md](./docs/code-search-demo-and-gap-map.md).
 
 ## Manager and Operator Surfaces
@@ -567,13 +566,7 @@ Routine work stays in the main lane. Specialist profiles are for the moments whe
 
 ## Legacy Command Compatibility
 
-The native CLI is the primary surface, but these older command shapes remain visible:
-
-- `claude-skills memory working-brief save` still maps to `record-summary`.
-- `claude-skills memory working-brief save --validation-plan ...` still maps to the native `--validation` field.
-- `claude-skills memory completion-gate upsert` still maps to `record-requirement`.
-- `claude-skills orchestration task begin|progress|complete --task ... --status ... --requirement ... --skill ...` still maps those legacy flags onto the native task fields.
-- `claude-skills orchestration task complete --phase complete` still normalizes to the native reconcile closeout phase.
+The native CLI is the primary surface. Earlier docs referenced richer subcommand shapes (`memory working-brief record-summary`, `memory completion-gate record-requirement`, `memoriesv2 retrieve|ledger|graph|entity|hook`, `orchestration task begin|progress|complete`, `orchestration checkpoint`, `memory report`, `memory agent-registry|research-cache|maintenance|loop-guard|agent-packets`). Those surfaces are **not yet implemented in the Rust runtime** and now return non-zero with a "not implemented" message instead of silently succeeding. The surface that does work today is listed under [Memory and System Map](#memory-and-system-map) above and in `claude-skills help advanced`.
 
 ## Documentation Map
 

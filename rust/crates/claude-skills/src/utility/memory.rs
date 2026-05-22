@@ -44,13 +44,6 @@ pub fn run_memory_command(
             standard_output,
             standard_error,
         ),
-        "status" | "report" => {
-            let _ = writeln!(
-                standard_output,
-                "{command_group} status: rust memory directories are available"
-            );
-            0
-        }
         "working-brief" => run_working_brief_command(
             command_group,
             &arguments[1..],
@@ -63,14 +56,14 @@ pub fn run_memory_command(
             standard_output,
             standard_error,
         ),
-        "agent-registry" | "research-cache" | "maintenance" | "agent-packets" | "loop-guard"
-        | "retrieve" | "index" | "entity" | "hook" => {
+        "status" | "report" | "agent-registry" | "research-cache" | "maintenance"
+        | "agent-packets" | "loop-guard" | "retrieve" | "index" | "entity" | "hook" => {
             let _ = writeln!(
-                standard_output,
-                "{command_group} {}: Rust native placeholder completed without Go fallback",
+                standard_error,
+                "{command_group} {}: not implemented in the Rust runtime; expected scope|system-map|working-brief|completion-gate",
                 arguments[0]
             );
-            0
+            1
         }
         other => {
             let _ = writeln!(standard_error, "Unknown {command_group} command: {other}");
@@ -302,11 +295,11 @@ fn run_orchestration_task(
     match arguments[0].as_str() {
         "begin" | "progress" | "complete" => {
             let _ = writeln!(
-                standard_output,
-                "orchestration task {}: rust-native placeholder (no ledger write yet)",
+                standard_error,
+                "orchestration task {}: not implemented in the Rust runtime (no ledger writer yet)",
                 arguments[0]
             );
-            0
+            1
         }
         other => {
             let _ = writeln!(
@@ -321,7 +314,7 @@ fn run_orchestration_task(
 fn run_orchestration_checkpoint(
     arguments: &[String],
     standard_output: &mut dyn Write,
-    _standard_error: &mut dyn Write,
+    standard_error: &mut dyn Write,
 ) -> u8 {
     if !arguments.is_empty() && is_help_argument(&arguments[0]) {
         let _ = writeln!(
@@ -331,10 +324,10 @@ fn run_orchestration_checkpoint(
         return 0;
     }
     let _ = writeln!(
-        standard_output,
-        "orchestration checkpoint: rust-native placeholder (no ledger write yet)"
+        standard_error,
+        "orchestration checkpoint: not implemented in the Rust runtime (no ledger writer yet)"
     );
-    0
+    1
 }
 
 pub fn run_workflow_command(
@@ -2699,7 +2692,7 @@ mod tests {
     }
 
     #[test]
-    fn orchestration_task_known_action_succeeds() {
+    fn orchestration_task_known_action_reports_not_implemented() {
         let mut stdout: Vec<u8> = Vec::new();
         let mut stderr: Vec<u8> = Vec::new();
         let exit_code = run_orchestration_command(
@@ -2707,25 +2700,25 @@ mod tests {
             &mut stdout,
             &mut stderr,
         );
-        assert_eq!(exit_code, 0);
-        let output = String::from_utf8_lossy(&stdout).to_string();
+        assert_eq!(exit_code, 1);
+        let stderr_text = String::from_utf8_lossy(&stderr).to_string();
         assert!(
-            output.contains("orchestration task begin:"),
-            "stdout: {output}"
+            stderr_text.contains("orchestration task begin: not implemented"),
+            "stderr: {stderr_text}"
         );
     }
 
     #[test]
-    fn orchestration_checkpoint_returns_zero() {
+    fn orchestration_checkpoint_reports_not_implemented() {
         let mut stdout: Vec<u8> = Vec::new();
         let mut stderr: Vec<u8> = Vec::new();
         let exit_code =
             run_orchestration_command(&["checkpoint".to_string()], &mut stdout, &mut stderr);
-        assert_eq!(exit_code, 0);
-        let output = String::from_utf8_lossy(&stdout).to_string();
+        assert_eq!(exit_code, 1);
+        let stderr_text = String::from_utf8_lossy(&stderr).to_string();
         assert!(
-            output.contains("orchestration checkpoint:"),
-            "stdout: {output}"
+            stderr_text.contains("orchestration checkpoint: not implemented"),
+            "stderr: {stderr_text}"
         );
     }
 
