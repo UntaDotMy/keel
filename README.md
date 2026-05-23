@@ -167,7 +167,7 @@ Manual prune (any time):
 The hook lifecycle is tuned to preserve Claude Code's prompt cache and minimize per-prompt input tokens.
 
 - **What stays cached:** the system prompt, tool definitions, `CLAUDE.md`, and the SessionStart context are read at the cache breakpoint. Reuse costs ~10% of normal input tokens for ~5 minutes after each write.
-- **What gets paid every prompt:** anything emitted via `additionalContext` from `UserPromptSubmit` lands after the cache breakpoint. We emit nothing on `UserPromptSubmit` — the operating contract lives in `CLAUDE.md` and SessionStart instead, where it is paid for once per cache window rather than once per prompt.
+- **What gets paid every prompt:** anything emitted via `additionalContext` from `UserPromptSubmit` lands after the cache breakpoint. We emit nothing on `UserPromptSubmit` — the operating contract lives in `CLAUDE.md` and SessionStart instead, where it is delivered once per session rather than once per prompt.
 - **What gets paid every turn end / tool call:** `Stop`, `SubagentStop`, `SessionEnd`, and `PostToolUse` are silent. They previously emitted ~50 tokens of generic closeout text that the model never acted on. Your turn-end exchange is now hook-cost zero.
 - **Why this matters:** in a 30-tool-call session with 20 prompts, the previous lifecycle cost ~80×20 + ~50×30 = ~3,100 tokens of pure overhead. The current lifecycle costs zero outside of SessionStart and PreToolUse rewrite hints — both of which carry information the model genuinely uses.
 
