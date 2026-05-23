@@ -93,6 +93,12 @@ Use these via the Agent tool when the work benefits from an isolated context
 window. Same names as the skills — pick the subagent when token-saving delegation
 matters, pick the skill when the work belongs in the main thread.
 
+Subagents do not inherit this SessionStart bootstrap — each spawns with a fresh
+context window. To keep them aligned with the same research-first contract, every
+`.claude/agents/*.md` definition opens with an instruction to read
+`_shared/subagent-iron-law.md`. That file restates this contract in condensed
+form so subagents do not fall back to memory-based defaults.
+
 - `software-development-life-cycle`, `web-development-life-cycle`,
   `mobile-development-life-cycle`, `backend-and-data-architecture`,
   `cloud-and-devops-expert`, `qa-and-automation-engineer`,
