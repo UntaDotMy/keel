@@ -557,7 +557,14 @@ fn run_hook_lifecycle(
         None => event_by_name("SessionStart").expect("SessionStart row missing"),
     };
 
-    if event.name == "SessionStart" {
+    // Refresh the workspace system map at the three natural transition
+    // points: session start, before compaction (so the post-compact window
+    // resumes against a fresh map), and session end (so the next session
+    // starts from the latest layout). The agent does not have to remember
+    // to invoke `claude-skills memory scope resolve` — these hooks fire it
+    // automatically. The single source of truth is `should_refresh_system_map`
+    // so the test for the trigger set stays pure and deterministic.
+    if should_refresh_system_map(event.name) {
         let _ = refresh_memory_scope_for_current_directory(standard_error);
     }
 
@@ -737,6 +744,28 @@ fn prune_raw_output_store(standard_error: &mut dyn Write) {
     }
 }
 
+/// Lifecycle events that should auto-refresh the workspace SYSTEM_MAP.
+///
+/// The agent has historically forgotten to refresh the map by hand, so we
+/// fire it at the three natural transition points instead of trusting the
+/// model to remember:
+///
+/// - `SessionStart` — first turn, the map needs to reflect today's layout
+///   before the model reasons about the repo.
+/// - `PreCompact` — context is about to be compacted; the post-compact
+///   window resumes against a fresh map written *now*, so the layout the
+///   model recovers matches reality even if files moved earlier in the
+///   conversation.
+/// - `SessionEnd` — the next session starts from the freshest possible map
+///   without paying the cost on its first prompt.
+///
+/// Kept as a small slug-named function so the trigger set is testable in
+/// isolation and the call site at `run_hook_lifecycle` reads as a single
+/// predicate instead of a chain of equality checks.
+fn should_refresh_system_map(event_name: &str) -> bool {
+    matches!(event_name, "SessionStart" | "PreCompact" | "SessionEnd")
+}
+
 fn refresh_memory_scope_for_current_directory(standard_error: &mut dyn Write) -> Option<PathBuf> {
     let workspace_root = std::env::current_dir().ok()?;
 
@@ -781,7 +810,7 @@ fn memory_scope_summary() -> String {
 
         Some(path) => format!(
 
-            "Workspace memory system map: {}. Read it before making repo-structure claims; refresh happened automatically at session start when possible.",
+            "Workspace memory system map: {}. Read it before making repo-structure claims; refresh happens automatically at session start, pre-compact, and session end.",
 
             display_path(&path)
 
@@ -1794,6 +1823,47 @@ mod tests {
                 stdout.is_empty(),
                 "{subcommand} must emit no additional context to avoid per-prompt token cost; got: {}",
                 String::from_utf8_lossy(&stdout)
+            );
+        }
+    }
+
+    #[test]
+    fn system_map_refresh_fires_on_session_start_pre_compact_and_session_end() {
+        // The agent has historically forgotten to invoke memory scope
+        // resolve / system-map refresh by hand. The lifecycle handler now
+        // does it automatically at the three natural transition points so
+        // SYSTEM_MAP.md is fresh when a new session starts, when context is
+        // about to be compacted, and after the session ends. Any change to
+        // this trigger set is a behavior change the user should see — this
+        // test pins it.
+        for event_name in ["SessionStart", "PreCompact", "SessionEnd"] {
+            assert!(
+                should_refresh_system_map(event_name),
+                "{event_name} must auto-refresh the workspace SYSTEM_MAP"
+            );
+        }
+    }
+
+    #[test]
+    fn system_map_refresh_does_not_fire_on_per_prompt_or_per_tool_events() {
+        // Per-prompt and per-tool-call events fire too often to pay the
+        // SYSTEM_MAP refresh cost on each. The PostToolUse path has its own
+        // edit-counter gate (see run_hook_post_tool_use); these slugs must
+        // stay out of the lifecycle auto-refresh trigger set.
+        for event_name in [
+            "UserPromptSubmit",
+            "PostToolUse",
+            "PostToolBatch",
+            "Stop",
+            "SubagentStop",
+            "SubagentStart",
+            "PostCompact",
+            "Notification",
+            "PermissionRequest",
+        ] {
+            assert!(
+                !should_refresh_system_map(event_name),
+                "{event_name} must not auto-refresh the workspace SYSTEM_MAP"
             );
         }
     }
