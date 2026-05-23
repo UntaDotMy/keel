@@ -54,6 +54,21 @@ fn install_generates_reasoning_without_model_pin() {
         installed_shared_discipline.display()
     );
 
+    // Subagents read `_shared/subagent-iron-law.md` from their CWD (the repo
+    // root, which they inherit from the parent). When the user's CWD is
+    // outside the repo, the same file must still be reachable through the
+    // installed shared-resource directory. Assert the installer stages it
+    // alongside common-discipline.md.
+    let installed_iron_law = claude_home
+        .join("skills")
+        .join("_shared")
+        .join("subagent-iron-law.md");
+    assert!(
+        installed_iron_law.is_file(),
+        "installer must stage _shared/subagent-iron-law.md so subagents can find the bootstrap from a clean install: {}",
+        installed_iron_law.display()
+    );
+
     let _ = fs::remove_dir_all(claude_home);
 }
 
@@ -180,4 +195,69 @@ fn repository_root() -> PathBuf {
 
 fn unique_temp_dir(prefix: &str) -> PathBuf {
     std::env::temp_dir().join(format!("{prefix}-{}", std::process::id()))
+}
+
+/// Every project-scoped subagent definition under `.claude/agents/` must point
+/// at `_shared/subagent-iron-law.md` so the spawned subagent rebootstraps the
+/// research-first contract without relying on the parent's SessionStart skill,
+/// which never reaches the subagent's context window. The bootstrap file
+/// itself must exist at that exact relative path. This test guards both
+/// invariants so a future agent file does not silently ship without the
+/// preamble.
+#[test]
+fn project_subagents_reference_iron_law_bootstrap() {
+    let repository_root = repository_root();
+    let bootstrap_path = repository_root.join("_shared").join("subagent-iron-law.md");
+    assert!(
+        bootstrap_path.is_file(),
+        "subagent iron-law bootstrap must exist at {}",
+        bootstrap_path.display()
+    );
+    let bootstrap_text =
+        fs::read_to_string(&bootstrap_path).expect("read subagent iron-law bootstrap");
+    assert!(
+        bootstrap_text.contains("Trust the codebase"),
+        "bootstrap text should restate the research-first contract; got:\n{bootstrap_text}"
+    );
+
+    let agents_directory = repository_root.join(".claude").join("agents");
+    let entries = fs::read_dir(&agents_directory).unwrap_or_else(|error| {
+        panic!(
+            "list project agent definitions at {}: {error}",
+            agents_directory.display()
+        )
+    });
+
+    let mut agent_files: Vec<PathBuf> = entries
+        .filter_map(|entry_result| entry_result.ok())
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("md"))
+        .collect();
+    agent_files.sort();
+
+    assert!(
+        !agent_files.is_empty(),
+        "expected at least one .md subagent definition under {}",
+        agents_directory.display()
+    );
+
+    let mut missing_reference: Vec<String> = Vec::new();
+    for agent_file in &agent_files {
+        let body = fs::read_to_string(agent_file)
+            .unwrap_or_else(|error| panic!("read {}: {error}", agent_file.display()));
+        if !body.contains("_shared/subagent-iron-law.md") {
+            missing_reference.push(
+                agent_file
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("<unnamed>")
+                    .to_string(),
+            );
+        }
+    }
+
+    assert!(
+        missing_reference.is_empty(),
+        "every .claude/agents/*.md must reference _shared/subagent-iron-law.md; missing in: {missing_reference:?}"
+    );
 }

@@ -5,6 +5,8 @@ tools: Read, Grep, Glob, Bash
 model: sonnet
 ---
 
+**Before doing anything else, read `_shared/subagent-iron-law.md` (relative to the repo root, where you spawned).** It contains the research-first contract every subagent in this repo follows. Apply it for the rest of this invocation.
+
 You are the git-expert subagent for safe version-control operations.
 
 ## Operating principles
