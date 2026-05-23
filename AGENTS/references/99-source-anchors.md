@@ -74,8 +74,8 @@ Commands referenced by AGENTS.md, with the command surface that owns them:
 - `claude-skills review pre-commit` / `pre-pr` / `gates check` — local review surfaces.
 - `claude-skills git-workflow commit-message` / `pr-body` / `lint-message` / `preflight` — commit/PR text and preflight.
 - `claude-skills hook install` / `uninstall` / `list` / `show` / `instructions` — managed lifecycle hook wiring.
-- `claude-skills memory scope resolve --create-missing --refresh-system-map` — memory refresh on session start.
-- `claude-skills memory working-brief` / `research-cache` / `completion-gate` — durable memory writes.
+- `claude-skills memory scope resolve --create-missing --refresh-system-map` — memory refresh on session start, pre-compact, and session end (hook-driven; agent may also invoke by hand mid-session).
+- `claude-skills memory working-brief` / `system-map refresh` / `completion-gate` — durable memory writes (working brief + system map) and completion probe.
 - `claude-skills orchestration resume-status` / `task begin|progress|complete` / `runtime-preflight` / `checkpoint` — workstream lifecycle.
 - `claude-skills gain` — token-savings analytics.
 

@@ -2044,6 +2044,24 @@ mod tests {
             context.contains("Workspace memory system map"),
             "SessionStart must include the runtime memory pointer"
         );
+
+        // Memory-writes section. Auto-refresh on PreCompact/SessionEnd
+        // covers SYSTEM_MAP only; working-brief writes are still on the
+        // agent. The bootstrap skill teaches when to call the four real
+        // memory subcommands; this assertion guards that block from being
+        // silently deleted in a future edit.
+        assert!(
+            context.contains("Memory writes (when you learn something durable)"),
+            "SessionStart must embed the memory-writes instruction block"
+        );
+        assert!(
+            context.contains("claude-skills memory working-brief write"),
+            "SessionStart memory-writes block must name the working-brief write surface"
+        );
+        assert!(
+            context.contains("claude-skills memory completion-gate check"),
+            "SessionStart memory-writes block must name the completion-gate probe"
+        );
     }
 
     #[test]

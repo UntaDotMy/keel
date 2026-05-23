@@ -112,7 +112,27 @@ form so subagents do not fall back to memory-based defaults.
 - `AGENTS.md` (repo root) — operating doctrine, section-to-reference map.
 - `WORKFLOW.md` (repo root) — branch naming, commit format, completion rules.
 - `00-skill-routing-and-escalation.md` (repo root) — read first for routing.
-- Workspace `SYSTEM_MAP.md` lives at `~/.claude/memories/workspaces/<workspace-key>/reference/SYSTEM_MAP.md` and is auto-refreshed by `claude-skills memory scope resolve --refresh-system-map`. Read it before making structural claims.
+- Workspace `SYSTEM_MAP.md` lives at `~/.claude/memories/workspaces/<workspace-key>/reference/SYSTEM_MAP.md` and is auto-refreshed by `claude-skills memory scope resolve --refresh-system-map` at session start, pre-compact, and session end. Read it before making structural claims.
+
+## Memory writes (when you learn something durable)
+
+Your working memory only lives in the current context window. Anything you want to survive compaction or the next session has to land on disk. Four memory subcommands actually write — call them when the trigger fires, do not wait for "later":
+
+| Subcommand | Writes | Trigger — call it when |
+|---|---|---|
+| `claude-skills memory scope resolve --workspace-root <abs> --create-missing --refresh-system-map` | `~/.claude/memories/workspaces/<slug>/reference/SYSTEM_MAP.md` | files moved, packages added, or you noticed the map is stale mid-session. Hooks already fire it at session start, pre-compact, and session end — only call by hand on top of that. |
+| `claude-skills memory system-map refresh` | same SYSTEM_MAP.md path | shorthand for the scope-resolve refresh when the workspace is already resolved. |
+| `claude-skills memory working-brief write` | `~/.claude/working-briefs/<id>.json` | starting non-trivial work. Capture the user's request, acceptance criteria, and the files you expect to touch *before* coding so completion can be reconciled against it. Update with `working-brief write` again as scope shifts. |
+| `claude-skills memory completion-gate check` | nothing (probe-only) | before claiming a task complete. Returns the gate's verdict; failures point at the requirement that has no evidence yet. |
+
+The other `claude-skills memory <verb>` arms (`status`, `report`, `agent-registry`, `research-cache`, `maintenance`, `agent-packets`, `loop-guard`, `retrieve`, `index`, `entity`, `hook`) exit 1 with "not implemented" today. Do not pretend a command exists by trying it; check the dispatcher in `rust/crates/claude-skills/src/utility/memory.rs` if you are unsure.
+
+| Thought | Reality |
+|---|---|
+| "I'll remember this for the next turn" | Memory drifts mid-session. Hook auto-refresh covers SYSTEM_MAP only — working briefs are on you. |
+| "The session will end soon, the hook will save it" | SessionEnd refreshes the map, not the brief. If you have a brief worth saving, write it now. |
+| "Completion-gate is optional ceremony" | It is the only check that catches "I forgot a requirement" before the user does. Run it before claiming done. |
+| "The map looks stale but I'll just guess the layout" | Refresh first: one command, bounded cost. Guessing is what landed us in this PR series in the first place. |
 
 ## The one-line summary, if you only remember one thing
 
