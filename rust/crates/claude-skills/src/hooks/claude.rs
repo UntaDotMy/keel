@@ -24,10 +24,14 @@ pub const SETTINGS_FILE_NAME: &str = "settings.json";
 ///   - `"Bash"` for the two we narrow to shell invocations so the rewriter doesn't
 ///     spawn on every tool call
 ///
-/// `supports_hook_specific_output`: only PreToolUse, UserPromptSubmit, PostToolUse,
-/// and PostToolBatch accept the `hookSpecificOutput` shape. Other events must use
-/// top-level `systemMessage`. Keeping the flag on the row prevents `hook_lifecycle`
-/// from re-stating the rule in a parallel `matches!`.
+/// `supports_hook_specific_output`: events the official Claude Code schema
+/// documents as accepting `hookSpecificOutput.additionalContext`. Per
+/// code.claude.com/docs/en/hooks that set is SessionStart, Setup,
+/// UserPromptSubmit, UserPromptExpansion, PreToolUse, PostToolUse,
+/// PostToolUseFailure, and PostToolBatch. Other events must use top-level
+/// fields (`systemMessage`, `decision`, etc). Keeping the flag on the row
+/// prevents `hook_lifecycle` from re-stating the rule in a parallel
+/// `matches!`.
 pub struct HookEvent {
     pub name: &'static str,
     pub slug: &'static str,
@@ -58,7 +62,7 @@ pub const HOOK_EVENTS: &[HookEvent] = &[
         slug: "post-tool-use-failure",
         matcher: "",
         status: "Recording tool failure for routing and recovery",
-        supports_hook_specific_output: false,
+        supports_hook_specific_output: true,
     },
     HookEvent {
         name: "PostToolBatch",
@@ -100,7 +104,7 @@ pub const HOOK_EVENTS: &[HookEvent] = &[
         slug: "user-prompt-expansion",
         matcher: "",
         status: "Recording prompt expansion lifecycle",
-        supports_hook_specific_output: false,
+        supports_hook_specific_output: true,
     },
     HookEvent {
         name: "Stop",
@@ -191,7 +195,7 @@ pub const HOOK_EVENTS: &[HookEvent] = &[
         slug: "session-start",
         matcher: "",
         status: "Preparing native session state",
-        supports_hook_specific_output: false,
+        supports_hook_specific_output: true,
     },
     HookEvent {
         name: "SessionEnd",
@@ -205,7 +209,7 @@ pub const HOOK_EVENTS: &[HookEvent] = &[
         slug: "setup",
         matcher: "",
         status: "Preparing project setup state",
-        supports_hook_specific_output: false,
+        supports_hook_specific_output: true,
     },
     HookEvent {
         name: "InstructionsLoaded",
@@ -415,12 +419,17 @@ mod tests {
 
     #[test]
     fn hook_specific_output_flag_matches_claude_code_schema() {
-        // Per code.claude.com/docs/en/hooks, only these four events accept
-        // hookSpecificOutput. Everything else must use top-level systemMessage.
+        // Per code.claude.com/docs/en/hooks, these events accept
+        // `hookSpecificOutput.additionalContext`. Everything else must use
+        // top-level fields (`systemMessage`, `decision`, etc).
         let allowed = [
-            "PreToolUse",
+            "SessionStart",
+            "Setup",
             "UserPromptSubmit",
+            "UserPromptExpansion",
+            "PreToolUse",
             "PostToolUse",
+            "PostToolUseFailure",
             "PostToolBatch",
         ];
         for event in HOOK_EVENTS {

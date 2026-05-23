@@ -578,9 +578,10 @@ fn run_hook_lifecycle(
         return 0;
     }
 
-    // Whether this event accepts `hookSpecificOutput` or must fall back to a
-    // top-level `systemMessage` lives on the event row, so adding a new event
-    // to the table automatically picks up the right schema.
+    // Whether this event accepts `hookSpecificOutput.additionalContext`
+    // or must fall back to a top-level `systemMessage` lives on the event
+    // row, so adding a new event to the table automatically picks up the
+    // right schema.
     let payload = if event.supports_hook_specific_output {
         serde_json::json!({
 
@@ -643,7 +644,8 @@ fn lifecycle_additional_context(subcommand: &str) -> String {
 
         // PostToolBatch fires after a batch of parallel tools resolves, just
         // before the next model turn. We inject a reviewer-on-close reminder
-        // here because Stop/SubagentStop don't support additionalContext per
+        // here because Stop/SubagentStop are documented with top-level
+        // decision fields only — they do not accept additionalContext per
         // the official Claude Code hooks schema. Trivial work (docs-only,
         // formatting, single-line typo) stays exempt per the two-tier rule
         // documented in CLAUDE.md.
@@ -664,17 +666,20 @@ fn lifecycle_additional_context(subcommand: &str) -> String {
 /// The file lives at the repository root so `discover_repository_layout` picks
 /// it up alongside the other skills and `sync_skills` installs it under
 /// `~/.claude/skills/using-claude-core/SKILL.md`. We *also* embed it here so
-/// SessionStart can inject the full text directly into `additionalContext`,
-/// which Claude Code caches for the rest of the session. CLAUDE.md and the
-/// individual SKILL.md files are read by the skill matcher on demand; this
-/// single block is what the model sees up front, so it doubles as the
-/// research-first iron law and the catalog of every other invokable skill.
+/// SessionStart can inject the full text directly into
+/// `hookSpecificOutput.additionalContext` per the official Claude Code hooks
+/// schema. CLAUDE.md and the individual SKILL.md files are read by the skill
+/// matcher on demand; this single block is what the model sees up front, so
+/// it doubles as the research-first iron law and the catalog of every other
+/// invokable skill.
 const BOOTSTRAP_SKILL: &str = include_str!("../../../../../using-claude-core/SKILL.md");
 
 fn session_start_context() -> String {
-    // SessionStart fires once per session and the payload is cached for the
-    // rest of the cache window, so this is the right place to deliver the
-    // bootstrap skill. Per-prompt cost is zero after the first turn.
+    // SessionStart fires once per session and is the documented entry point
+    // for delivering durable model context via
+    // `hookSpecificOutput.additionalContext`. Per-prompt token cost is paid
+    // at most once per session, so this is the right place to deliver the
+    // bootstrap skill instead of restating it on every UserPromptSubmit.
     //
     // Layout: full bootstrap skill (iron law + Red Flags + skill catalog +
     // workspace pointers) followed by the runtime-resolved memory pointer
@@ -699,10 +704,10 @@ fn post_compact_context() -> String {
 /// Per-prompt research-first iron law.
 ///
 /// Compact by design: the schema lets us inject as much text as we want, but
-/// every byte lands per prompt and is paid as input tokens for the rest of
-/// the cache window. The full bootstrap (skill catalog, Red Flags table,
-/// decision flow) is delivered once via SessionStart; this hook only
-/// restates the iron law so it stays top-of-mind on each turn.
+/// every byte lands per prompt and is paid as input tokens. The full
+/// bootstrap (skill catalog, Red Flags table, decision flow) is delivered
+/// once via SessionStart; this hook only restates the iron law so it stays
+/// top-of-mind on each turn.
 fn user_prompt_submit_context() -> String {
     format!(
         "Research-first: trust the codebase, not your knowledge base. Read SYSTEM_MAP and the owning module before claiming behavior. Invoke any relevant skill via the Skill tool BEFORE responding — even a 1% chance it applies means use it. Find the root cause, not just the surface symptom. No assumptions. {}",
@@ -1797,11 +1802,12 @@ mod tests {
     #[test]
     fn silenced_high_frequency_hooks_emit_no_additional_context() {
         // PostToolUse / Stop / SubagentStop / SessionEnd fire per tool call or
-        // turn end. They either (a) don't support hookSpecificOutput per the
-        // official Claude Code schema or (b) carry a prompt-cache cost that
-        // outweighs the value of any per-call reminder. The operating contract
-        // belongs in CLAUDE.md and SessionStart, both paid once per cache
-        // window. These events must stay silent.
+        // turn end. They either (a) are documented with top-level decision
+        // fields only and don't accept additionalContext per the official
+        // Claude Code schema, or (b) carry a per-prompt token cost that
+        // outweighs the value of any per-call reminder. The operating
+        // contract belongs in CLAUDE.md and SessionStart, both paid at most
+        // once per session. These events must stay silent.
         //
         // UserPromptSubmit and PostToolBatch are deliberately *not* in this
         // list: they emit short research-first / reviewer-on-close pointers,
@@ -1874,7 +1880,7 @@ mod tests {
         // short and pointer-shaped. The iron law (trust the codebase, invoke
         // skills before responding, find root cause) restates the bootstrap
         // skill that SessionStart already delivered, so it stays top-of-mind
-        // on each turn even after the cache window rolls.
+        // on each turn.
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
 
@@ -2002,13 +2008,12 @@ mod tests {
 
     #[test]
     fn session_start_context_embeds_bootstrap_skill_and_memory_pointer() {
-        // SessionStart fires once per session and the payload is cached for
-        // the rest of the cache window, so it carries the bootstrap skill
-        // (iron law + Red Flags + skill catalog) plus the runtime-resolved
-        // workspace memory pointer. Both pieces have to be there: the skill
-        // delivers the operating contract, the pointer delivers the
-        // workspace-specific memory path that CLAUDE.md cannot know in
-        // advance.
+        // SessionStart is the documented entry point for delivering durable
+        // model context, so it carries the bootstrap skill (iron law + Red
+        // Flags + skill catalog) plus the runtime-resolved workspace memory
+        // pointer. Both pieces have to be there: the skill delivers the
+        // operating contract, the pointer delivers the workspace-specific
+        // memory path that CLAUDE.md cannot know in advance.
         let context = session_start_context();
 
         // Bootstrap skill markers — these come from
@@ -2065,11 +2070,17 @@ mod tests {
     }
 
     #[test]
-    fn stop_hook_uses_top_level_system_message_not_hook_specific_output() {
+    fn top_level_only_hooks_use_system_message_not_hook_specific_output() {
+        // Per code.claude.com/docs/en/hooks, these events are documented
+        // with top-level decision fields only — they don't accept
+        // `hookSpecificOutput.additionalContext`. When we have something
+        // to say on one of them we must wrap it in a top-level
+        // `systemMessage` string, not the per-event `additionalContext`
+        // shape that PreToolUse/PostToolUse/UserPromptSubmit/PostToolBatch/
+        // SessionStart/Setup/UserPromptExpansion/PostToolUseFailure use.
         for subcommand in [
             "stop",
             "subagent-stop",
-            "session-start",
             "session-end",
             "notification",
             "permission-request",
@@ -2095,7 +2106,7 @@ mod tests {
 
             assert!(
                 output.get("hookSpecificOutput").is_none(),
-                "{subcommand} must not emit hookSpecificOutput — Claude Code only allows it for PreToolUse/UserPromptSubmit/PostToolUse/PostToolBatch"
+                "{subcommand} must not emit hookSpecificOutput — the official Claude Code schema documents top-level decision fields only for this event"
             );
 
             assert!(
@@ -2106,6 +2117,52 @@ mod tests {
                 "{subcommand} must emit systemMessage as a top-level string"
             );
         }
+    }
+
+    #[test]
+    fn session_start_emits_hook_specific_output_additional_context() {
+        // SessionStart is the documented entry point for delivering durable
+        // model context via `hookSpecificOutput.additionalContext` per
+        // code.claude.com/docs/en/hooks. The bootstrap skill must land in
+        // that field, not in the user-facing top-level `systemMessage`
+        // warning slot. The inner-string assertions live in
+        // `session_start_context_embeds_bootstrap_skill_and_memory_pointer`;
+        // this test pins the wrapper shape.
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let code = run_hook_lifecycle("session-start", &mut stdout, &mut stderr);
+
+        assert_eq!(
+            code,
+            0,
+            "stderr for session-start: {}",
+            String::from_utf8_lossy(&stderr)
+        );
+
+        let output: JsonDocument = serde_json::from_slice(&stdout).expect("valid JSON");
+
+        let event_name = output
+            .get("hookSpecificOutput")
+            .and_then(|node| node.get("hookEventName"))
+            .and_then(JsonDocument::as_str)
+            .expect("SessionStart must emit hookSpecificOutput.hookEventName");
+        assert_eq!(event_name, "SessionStart");
+
+        let context = output
+            .get("hookSpecificOutput")
+            .and_then(|node| node.get("additionalContext"))
+            .and_then(JsonDocument::as_str)
+            .expect("SessionStart must emit hookSpecificOutput.additionalContext");
+        assert!(
+            !context.trim().is_empty(),
+            "SessionStart additionalContext must not be empty"
+        );
+
+        assert!(
+            output.get("systemMessage").is_none(),
+            "SessionStart must not emit top-level systemMessage — additionalContext is the documented vehicle for model-context injection"
+        );
     }
 
     #[test]
