@@ -28,7 +28,10 @@ pub fn run_memory_command(
     standard_error: &mut dyn Write,
 ) -> u8 {
     if arguments.is_empty() || is_help_argument(&arguments[0]) {
-        let _ = writeln!(standard_output, "Usage: claude-skills {command_group} [scope|status|working-brief|completion-gate|agent-registry|research-cache|maintenance|report] ...");
+        let _ = writeln!(
+            standard_output,
+            "Usage: claude-skills {command_group} [scope|system-map|working-brief|completion-gate] ..."
+        );
         return if arguments.is_empty() { 1 } else { 0 };
     }
     match arguments[0].as_str() {
@@ -80,7 +83,7 @@ pub fn run_orchestration_command(
     if arguments.is_empty() || is_help_argument(&arguments[0]) {
         let _ = writeln!(
             standard_output,
-            "Usage: claude-skills orchestration [resume-status|task|runtime-preflight|checkpoint] ..."
+            "Usage: claude-skills orchestration [runtime-preflight|resume-status] ..."
         );
         return if arguments.is_empty() { 1 } else { 0 };
     }
@@ -349,11 +352,11 @@ pub fn run_workflow_command(
         "resume" => run_workflow_resume(&arguments[1..], standard_output, standard_error),
         "await" | "shutdown" | "guide" | "first-run" | "setup" | "guided-setup" | "branch" => {
             let _ = writeln!(
-                standard_output,
-                "workflow {}: stage=rust-native proof_state=ready go_fallback=false next_command=claude-skills validate --profile smoke",
+                standard_error,
+                "workflow {}: not implemented in the Rust runtime; expected start|resume|finish|status|cockpit|dashboard|watch|route",
                 arguments[0]
             );
-            0
+            1
         }
         other => {
             let _ = writeln!(standard_error, "Unknown workflow command: {other}");
@@ -2006,10 +2009,26 @@ fn run_system_map_show(
 fn render_workflow_help(standard_output: &mut dyn Write) {
     let _ = writeln!(standard_output, "Usage: claude-skills workflow [command]");
     let _ = writeln!(standard_output, "Commands:");
-    let _ = writeln!(standard_output, "  start          Start new workflow");
-    let _ = writeln!(standard_output, "  resume         Resume workflow");
-    let _ = writeln!(standard_output, "  status         Show workflow status");
-    let _ = writeln!(standard_output, "  finish         Finish workflow");
+    let _ = writeln!(
+        standard_output,
+        "  start                       Start new workflow"
+    );
+    let _ = writeln!(
+        standard_output,
+        "  resume                      Resume an open workflow"
+    );
+    let _ = writeln!(
+        standard_output,
+        "  finish                      Finish a workflow"
+    );
+    let _ = writeln!(
+        standard_output,
+        "  status|cockpit|dashboard|watch  Show workflow board"
+    );
+    let _ = writeln!(
+        standard_output,
+        "  route                       Route a request to a specialist agent"
+    );
 }
 
 fn is_help_argument(argument: &str) -> bool {
@@ -2563,7 +2582,10 @@ mod tests {
             stdout_text.contains("runtime-preflight"),
             "stdout: {stdout_text}"
         );
-        assert!(stdout_text.contains("checkpoint"), "stdout: {stdout_text}");
+        assert!(
+            !stdout_text.contains("checkpoint"),
+            "stub subcommand still in help: {stdout_text}"
+        );
         assert!(
             !stdout_text.contains("route-plan"),
             "stale subcommand still in help: {stdout_text}"
