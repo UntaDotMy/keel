@@ -72,13 +72,13 @@ impl Application {
             "bootstrap-info" => {
                 self.run_bootstrap_info_command(command_arguments, standard_output, standard_error)
             }
-            "install" | "i" | "sync" | "s" => manager::run_install_command(
+            "install" => manager::run_install_command(
                 &self.effective_build_version(),
                 command_arguments,
                 standard_output,
                 standard_error,
             ),
-            "update" | "u" | "github-update" | "gu" | "upgrade" => manager::run_update_command(
+            "update" => manager::run_update_command(
                 &self.effective_build_version(),
                 command_arguments,
                 standard_output,
@@ -158,9 +158,6 @@ impl Application {
             "gain" => utility::run_gain_command(command_arguments, standard_output, standard_error),
             "session" => {
                 utility::run_session_command(command_arguments, standard_output, standard_error)
-            }
-            "discover" => {
-                utility::run_discover_command(command_arguments, standard_output, standard_error)
             }
             "bench" => {
                 utility::run_bench_command(command_arguments, standard_output, standard_error)

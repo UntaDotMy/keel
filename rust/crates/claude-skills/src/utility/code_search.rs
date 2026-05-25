@@ -19,26 +19,12 @@ pub fn run_code_search_command(
     if arguments.is_empty() || is_help_argument(&arguments[0]) {
         let _ = writeln!(
             standard_output,
-            "Usage: claude-skills code-search [search|index|status] [flags]"
+            "Usage: claude-skills code-search search [flags]"
         );
         return if arguments.is_empty() { 1 } else { 0 };
     }
     match arguments[0].as_str() {
         "search" => run_code_search_search(&arguments[1..], standard_output, standard_error),
-        "index" => {
-            let _ = writeln!(
-                standard_output,
-                "code-search index: Rust native search scans the workspace live"
-            );
-            0
-        }
-        "status" => {
-            let _ = writeln!(
-                standard_output,
-                "code-search status: rust live-search ready"
-            );
-            0
-        }
         other => {
             let _ = writeln!(standard_error, "Unknown code-search command: {other}");
             1

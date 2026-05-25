@@ -1,7 +1,7 @@
 //! Purpose: Token savings analytics from native command compaction events
 //! Caller: commands.rs via utility dispatcher
 //! Dependencies: std::fs, std::io, std::path, crate::args, crate::json, crate::runtime
-//! Main Functions: run_gain_command, run_discover_command, load_gain_summary, run_gain_reset
+//! Main Functions: run_gain_command, load_gain_summary, run_gain_reset
 //! Side Effects: Reads compaction event log, writes analytics to stdout
 
 use std::fs;
@@ -175,18 +175,6 @@ pub fn run_gain_command(
             );
         }
     }
-    0
-}
-
-pub fn run_discover_command(
-    _arguments: &[String],
-    standard_output: &mut dyn Write,
-    _standard_error: &mut dyn Write,
-) -> u8 {
-    let _ = writeln!(
-        standard_output,
-        "discover: rust native placeholder completed without Go fallback"
-    );
     0
 }
 

@@ -101,7 +101,7 @@ pub fn run_orchestration_command(
         other => {
             let _ = writeln!(
                 standard_error,
-                "Unknown orchestration command: {other} (expected resume-status|task|runtime-preflight|checkpoint)"
+                "Unknown orchestration command: {other} (expected runtime-preflight|resume-status|task|checkpoint)"
             );
             1
         }
@@ -1639,7 +1639,7 @@ fn run_scope_command(
     if arguments.is_empty() || is_help_argument(&arguments[0]) {
         let _ = writeln!(
             standard_output,
-            "Usage: claude-skills {command_group} scope [resolve|status] [flags]"
+            "Usage: claude-skills {command_group} scope resolve [flags]"
         );
         return if arguments.is_empty() { 1 } else { 0 };
     }
@@ -1650,13 +1650,6 @@ fn run_scope_command(
             standard_output,
             standard_error,
         ),
-        "status" => {
-            let _ = writeln!(
-                standard_output,
-                "{command_group} scope status: rust native scope resolution ready"
-            );
-            0
-        }
         other => {
             let _ = writeln!(
                 standard_error,
@@ -2011,11 +2004,15 @@ fn render_workflow_help(standard_output: &mut dyn Write) {
     let _ = writeln!(standard_output, "Commands:");
     let _ = writeln!(
         standard_output,
+        "  route                       Route a request to a specialist agent"
+    );
+    let _ = writeln!(
+        standard_output,
         "  start                       Start new workflow"
     );
     let _ = writeln!(
         standard_output,
-        "  resume                      Resume an open workflow"
+        "  cockpit|status|dashboard|watch  Show workflow board"
     );
     let _ = writeln!(
         standard_output,
@@ -2023,11 +2020,7 @@ fn render_workflow_help(standard_output: &mut dyn Write) {
     );
     let _ = writeln!(
         standard_output,
-        "  status|cockpit|dashboard|watch  Show workflow board"
-    );
-    let _ = writeln!(
-        standard_output,
-        "  route                       Route a request to a specialist agent"
+        "  resume                      Resume an open workflow"
     );
 }
 
