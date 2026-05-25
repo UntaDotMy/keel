@@ -43,9 +43,9 @@ checking. The cost of skipping a skill that did apply is shipping a regression.
 | "The skill is overkill" | Simple things become complex. Use the skill. |
 | "I know what that code does" | Knowing the concept ≠ knowing the current implementation. Read it. |
 | "Tests already passed earlier" | Re-run before claiming. No completion claims without fresh evidence. |
-| "That hook reminder is wrapper-artifact noise, I'll read past it" | Hook reminders cite real rules. Open the cited section and verify before skipping. Calling it noise to avoid the work is the dismissal the rule names. |
-| "The rule the hook cites doesn't exist in CLAUDE.md" | Read CLAUDE.md before making this claim. The two-tier reviewer rule lives at Routing Rules item 3. Claiming a rule does not exist without grepping for it is a rationalization, not an observation. |
-| "I'll skip the synthetic reviewer dance and self-review the diff" | Self-review is what the two-tier rule was written to prevent for non-trivial changes. Logic edits, multi-file changes, public-API touches, and security-sensitive code go through `reviewer` even if the diff looks small. |
+| "That hook reminder is wrapper-artifact noise, I'll read past it" | Hook reminders state the rule inline so they are self-contained in any repo. Re-read the diff against the rule before skipping. Calling it noise to avoid the work is the dismissal the rule names. |
+| "The hook references files that don't exist in this repo" | The closeout reminder is portable; it states the trivial/non-trivial split inline and treats project-level CLAUDE.md/AGENTS.md as an optional override, not a required citation. Missing convention files do not exempt non-trivial code from a reviewer pass. |
+| "I'll skip the synthetic reviewer dance and self-review the diff" | Self-review is what the rule prevents for non-trivial changes. Logic edits, multi-file changes, public-API touches, and security-sensitive code go through a reviewer pass even if the diff looks small. |
 
 ## Decision flow
 
@@ -64,9 +64,10 @@ After implementation work, before claiming completion:
 - Run the project's build/test/lint commands. Do not claim "tests pass" without
   running them in this turn.
 - For non-trivial changes (logic, multi-file, public API, security-sensitive,
-  brownfield rewrite), invoke the `reviewer` skill before close. Trivial work
-  (docs-only, formatting, single-line typo) is exempt — that is the two-tier
-  rule documented in CLAUDE.md.
+  brownfield rewrite), route the diff through a reviewer pass before close.
+  Trivial work (docs-only, formatting, single-line typo) is exempt. If a
+  project-level CLAUDE.md or AGENTS.md defines stricter routing rules, those
+  take precedence; otherwise the inline rule in this paragraph is the standard.
 
 ## Skill catalog (13 skills installed under ~/.claude/skills/)
 

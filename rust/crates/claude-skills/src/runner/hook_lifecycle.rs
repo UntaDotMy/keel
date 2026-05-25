@@ -655,9 +655,10 @@ fn lifecycle_additional_context(subcommand: &str) -> String {
         // before the next model turn. We inject a reviewer-on-close reminder
         // here because Stop/SubagentStop are documented with top-level
         // decision fields only — they do not accept additionalContext per
-        // the official Claude Code hooks schema. Trivial work (docs-only,
-        // formatting, single-line typo) stays exempt per the two-tier rule
-        // documented in CLAUDE.md.
+        // the official Claude Code hooks schema. The reminder is portable:
+        // it states the trivial/non-trivial split inline so it works in any
+        // host repo, and treats project-level CLAUDE.md/AGENTS.md as an
+        // optional override rather than a required citation.
         "post-tool-batch" => post_tool_batch_context(),
 
         // Silenced events. Stop/SubagentStop/SessionEnd fire per turn end and
@@ -727,19 +728,20 @@ fn user_prompt_submit_context() -> String {
 /// Reviewer-on-close reminder.
 ///
 /// Fires after every batch of parallel tool calls, just before the model's
-/// next turn. We rely on the model to apply the two-tier rule from CLAUDE.md
-/// (trivial work skips reviewer; non-trivial routes through it) — we just
-/// surface the question rather than gating with `decision: "block"`, which
-/// would force a review on every tool batch including read-only research.
+/// next turn. We surface the question rather than gating with
+/// `decision: "block"`, which would force a review on every tool batch
+/// including read-only research.
 ///
-/// The text deliberately cites the exact section (`Routing Rules item 3`) so
-/// the rule is verifiable in one read. Models that pattern-match generic
-/// reminders as wrapper noise have rationalized past prior versions of this
-/// text — the citation makes the dismissal harder because the reader can
-/// either confirm the rule exists or prove it doesn't, but cannot honestly
-/// claim "this references rules that don't exist" without reading.
+/// `claude-skills` installs globally, so this hook fires in every host
+/// repo — most of which have no `CLAUDE.md`, no `AGENTS.md`, and no
+/// `reviewer` skill. The text therefore states the trivial/non-trivial
+/// split inline so the rule is self-contained in any project, and treats
+/// project-level convention files as an optional override rather than a
+/// required citation. We still pre-empt the "wrapper noise" rationalization
+/// because models that pattern-match generic reminders as noise have
+/// rationalized past prior versions of this text.
 fn post_tool_batch_context() -> String {
-    "Closeout check: if this batch changed code (Edit/Write/MultiEdit on non-trivial files), invoke the reviewer skill before final closeout per CLAUDE.md → Routing Rules → item 3 (the two-tier rule). Trivial work (docs-only, formatting, single-line typo) is exempt. If this reminder feels like wrapper noise, that is the rationalization the rule names — verify item 3 yourself before skipping.".to_string()
+    "Closeout check: if this batch changed code with logic edits, multi-file changes, public-API touches, or security-sensitive surfaces, route the diff through a reviewer pass before final closeout. Trivial work (docs-only, formatting-only, single-line typo or comment fixes, generated-only) is exempt. The standard is: non-trivial code does not self-review. If a project-level CLAUDE.md or AGENTS.md defines stricter routing rules, those take precedence. If this reminder feels like wrapper noise, that is the rationalization the rule names — re-read the diff and decide deliberately before skipping.".to_string()
 }
 
 fn prune_raw_output_store(standard_error: &mut dyn Write) {
@@ -1985,13 +1987,32 @@ mod tests {
             .and_then(JsonDocument::as_str)
             .expect("PostToolBatch must emit additionalContext");
 
-        assert!(context.contains("reviewer"));
         assert!(
-            context.contains("Routing Rules"),
-            "PostToolBatch reminder must cite the exact CLAUDE.md section so the rule is verifiable in one read"
+            context.contains("reviewer pass"),
+            "PostToolBatch reminder must surface the reviewer-pass closeout requirement"
         );
-        assert!(context.contains("two-tier"));
-        assert!(context.contains("Trivial"));
+        assert!(
+            context.contains("non-trivial"),
+            "PostToolBatch reminder must state the trivial/non-trivial split inline so the rule works in any host repo"
+        );
+        assert!(
+            context.contains("Trivial"),
+            "PostToolBatch reminder must spell out the exempt trivial cases"
+        );
+        assert!(
+            context.contains("CLAUDE.md") && context.contains("AGENTS.md"),
+            "PostToolBatch reminder must mention CLAUDE.md/AGENTS.md as an optional override, not a required citation"
+        );
+        assert!(
+            context.contains("take precedence")
+                || context.contains("optional")
+                || context.contains("override"),
+            "PostToolBatch reminder must frame project-level convention files as optional, not mandatory"
+        );
+        assert!(
+            !context.contains("Routing Rules"),
+            "PostToolBatch reminder must not cite a repo-specific section name; the rule is stated inline so it works across host repos"
+        );
         assert!(
             context.contains("rationalization"),
             "PostToolBatch reminder must pre-empt the 'wrapper noise' dismissal"
