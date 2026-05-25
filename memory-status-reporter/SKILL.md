@@ -26,8 +26,8 @@ See `_shared/common-discipline.md` for the canonical rules. Apply them to all wo
 - When an explicit memory report is requested, inspect the scoped memory files and native `claude-skills memory ...` outputs as evidence, but keep routine durable writes in the active workstream instead of treating this skill as the default memory writer.
 - Use `SESSION-STATE.md` only for durable corrections, decisions, names, preferences, exact values, or confirmed constraints.
 - Use `working-buffer.md` only for long-running or high-context work, not for every turn.
-- Use `claude-skills memory research-cache record ...` only after reusable external research with freshness guidance.
-- Use `claude-skills memory completion-gate ...` only for non-trivial explicit asks that need tracked closure.
+- Capture reusable external research and freshness notes inside the scoped working brief (`claude-skills memory working-brief write`) so the next task can reread and re-validate them before acting.
+- Use `claude-skills memory completion-gate check` only for non-trivial explicit asks that need tracked closure.
 - When the runtime exposes context usage, start writing the working buffer at roughly 60 percent usage; otherwise switch on the buffer as soon as context pressure is high or a long task is still unfolding so the next turn can reconstruct the work after compaction.
 
 ## Security and Anti-Loop Guardrails
@@ -70,69 +70,52 @@ Always produce these sections unless the user narrows the scope:
 ## Workflow
 
 1. Determine the reporting window. Default to today in the local timezone unless the user asks for a different period.
-2. Resolve the workspace scope first so the report can prefer agent-instance, workstream, and workspace files over broad global memory. When the scoped folders do not exist yet, create them:
-   ```javascript
-   await claude.tool("exec_command", {
-     cmd: 'claude-skills memory scope resolve --memory-base ~/.claude/memories --workspace-root "$PWD" --agent-role reviewer --workstream-key active-workstream --agent-instance reviewer-main --create-missing'
-   })
+2. Resolve the workspace scope first so the report can prefer agent-instance, workstream, and workspace files over broad global memory. When the scoped folders do not exist yet, create them on the same call:
+   ```bash
+   claude-skills memory scope resolve --workspace-root "$PWD" --create-missing --format json
    ```
-3. Run the native report command through the most direct supported tool surface; the example below uses `js_repl` with `claude.tool("exec_command", ...)` only for runtimes where JavaScript-side orchestration is the clearest fit:
-   ```javascript
-   await claude.tool("exec_command", {
-     cmd: 'claude-skills memory report --memory-base ~/.claude/memories --workspace-root "$PWD" --agent-role reviewer'
-   })
+3. Refresh the scoped system map when the workspace layout has changed since the last report so the source-priority lookup walks an accurate tree:
+   ```bash
+   claude-skills memory system-map refresh --workspace-root "$PWD"
    ```
-4. Before starting a new live research loop, check the shared workspace research cache:
-   ```javascript
-   await claude.tool("exec_command", {
-     cmd: 'claude-skills memory research-cache lookup --memory-base ~/.claude/memories --workspace-root "$PWD" --workstream-key active-workstream --agent-instance reviewer-main --query "your research question"'
-   })
+4. Read the scoped artifacts directly with `Read`, `Grep`, and `Glob`, walking the Source Priority list below. The report itself is composed from those files; there is no native `memory report` command, so do not invent one.
+5. Inspect the latest scoped working brief and any open completion-gate entries to anchor "what is in progress" and "what is unresolved":
+   ```bash
+   claude-skills memory working-brief list --json
+   claude-skills memory working-brief show --id <brief-id> --json
    ```
-5. For a final-answer footer or quick check-in, use the compact report mode:
-   ```javascript
-   await claude.tool("exec_command", {
-     cmd: 'claude-skills memory report --memory-base ~/.claude/memories --workspace-root "$PWD" --format compact'
-   })
+6. For non-trivial tasks that have a tracked completion gate, surface its current state in the report:
+   ```bash
+   claude-skills memory completion-gate check --id <entry-id> --json
    ```
-7. Read the command output before responding. Do not paraphrase away uncertainty.
+7. Read every command output before responding. Do not paraphrase away uncertainty.
 8. If tool-use mistakes were part of the work, ensure the rollout summary captures the tool name, failure symptom, cause, verified fix, and prevention note so future reports can surface it.
-9. If research produced a reusable finding, record or refresh it in the scoped cache with source, freshness, and reinforcement status before you finish, and archive stale or superseded entries instead of replaying them forever.
-10. If the user wants a saved artifact, rerun with `--output ~/.claude/memories/reports/<date>-memory-status.md`.
-11. If the user wants a broader window, use `--days 7` for a trailing seven-day view ending on the anchor date, or pair it with a specific `--date`.
-12. When the user supplies a durable correction or decision, have the main lane write it first with the maintenance helper before this skill summarizes the updated memory state:
-   ```javascript
-   await claude.tool("exec_command", {
-     cmd: 'claude-skills memory maintenance write-session-state --memory-base ~/.claude/memories --workspace-root "$PWD" --workstream-key active-workstream --agent-instance reviewer-main --category decision --detail "Option B is the confirmed direction."'
-   })
+9. If research produced a reusable finding, record it inside the scoped working brief so the next task rereads it with source and freshness context, and archive stale or superseded entries instead of replaying them forever.
+10. If the user wants a saved artifact, write the composed report to a file with the `Write` tool under `~/.claude/memories/reports/<date>-memory-status.md`.
+11. If the user wants a broader window, widen the file walk to a trailing seven-day slice ending on the anchor date by filtering scoped files by their dated names or modification times.
+12. When the user supplies a durable correction or decision, the main lane should persist it through the right layer before this skill summarizes the updated memory state. For corrections that must survive a single task (a name spelling, a permanent preference, a confirmed constraint), append to `SESSION-STATE.md` with the `Write` tool. For task-scoped decisions tied to active work, capture them in the scoped working brief instead:
+   ```bash
+   claude-skills memory working-brief write \
+     --request "Option B is the confirmed direction." \
+     --acceptance-criteria "Subsequent reports reflect Option B."
    ```
-13. For high-context work only, append the newest breadcrumb to the working buffer before the thread gets noisy:
-   ```javascript
-   await claude.tool("exec_command", {
-     cmd: 'claude-skills memory maintenance append-working-buffer --memory-base ~/.claude/memories --workspace-root "$PWD" --workstream-key active-workstream --agent-instance reviewer-main --text "Validated the sync validator after the rollout-memory patch."'
-   })
+13. For high-context work only, append the newest breadcrumb to the scoped `working-buffer.md` with the `Write` tool before the thread gets noisy. Keep entries terse and dated.
+14. For non-trivial or compaction-prone work, persist the scoped working brief before the thread gets noisy:
+   ```bash
+   claude-skills memory working-brief write \
+     --id req-1 \
+     --request "Persist the working brief" \
+     --acceptance-criteria "working-brief show returns req-1." \
+     --constraints "No drift between brief and live work."
    ```
-14. For non-trivial or compaction-prone work, persist the scoped working brief and explicit task list before the thread gets noisy:
-   ```javascript
-   await claude.tool("exec_command", {
-     cmd: 'claude-skills memory working-brief record-summary --memory-base ~/.claude/memories --workspace-root "$PWD" --workstream-key active-workstream --agent-instance reviewer-main --user-story "Ship the native Claude Code workflow without drift." --desired-outcome "Resume the same plan after compaction." --task "Persist the working brief" --validation "working-brief show returns the brief."'
-   })
-   await claude.tool("exec_command", {
-     cmd: 'claude-skills memory working-brief record-plan-item --memory-base ~/.claude/memories --workspace-root "$PWD" --workstream-key active-workstream --agent-instance reviewer-main --item-id req-1 --title "Persist the working brief" --status in_progress --breakdown "Write the summary before compaction." --validation-target "working-brief show includes req-1."'
-   })
-   ```
-15. For non-trivial tasks that truly need tracked closure, record the scoped requirement ledger before the work gets noisy:
-   ```javascript
-   await claude.tool("exec_command", {
-     cmd: 'claude-skills memory completion-gate record-requirement --memory-base ~/.claude/memories --workspace-root "$PWD" --workstream-key active-workstream --agent-instance reviewer-main --requirement-id req-1 --text "Ship the scoped completion gate wiring." --status in_progress --evidence "Planning patch is in progress."'
-   })
-   await claude.tool("exec_command", {
-     cmd: 'claude-skills memory completion-gate check --memory-base ~/.claude/memories --workspace-root "$PWD" --workstream-key active-workstream --agent-instance reviewer-main'
-   })
+15. For non-trivial tasks that already have a workflow ledger entry (one created by `claude-skills workflow start` in the active lane), surface the scoped completion gate before delivering the final answer. `completion-gate check` is read-only and exits 1 if the id has no entry, so this step only runs when the main lane has already opened the ledger:
+   ```bash
+   claude-skills memory completion-gate check --id <entry-id> --proof "Evidence summary."
    ```
 16. When a memory write is requested, report what changed and which scoped files were touched before final delivery.
-17. Use `trim` to archive overflow from L1 memory files instead of letting always-read files grow without bound.
-18. Use `recalibrate` to re-read the scoped L1 files and compare observed behavior notes against the current canonical rules when long sessions or repeated mistakes suggest drift.
-19. Use `claude-skills memory loop-guard ...` when the same tool shape or plan keeps failing. Record the failure signature, check whether the retry budget is exhausted, and change approach before repeating the same failure a third time.
+17. Archive overflow from L1 memory files instead of letting always-read files grow without bound. Move stale entries into the scoped `archive/` folder with the `Write` tool.
+18. When long sessions or repeated mistakes suggest drift, re-read the scoped L1 files and compare observed behavior notes against the current canonical rules, then capture the reconciliation in the working brief.
+19. When the same tool shape or plan keeps failing, record the failure signature in the scoped working brief, check whether the retry budget is exhausted, and change approach before repeating the same failure a third time.
 20. Keep local runtime state and memory storage separate from model-visible context unless they are intentionally exposed. Prefer concise scope notes over replaying full histories, choose one conversation continuation strategy per thread unless there is an explicit reconciliation plan, and preserve workflow names plus validation evidence for non-trivial reports.
 21. Before the final answer, reconcile every explicit user requirement against current evidence, rerun the scoped completion gate for non-trivial tasks, and do not present unresolved work as complete.
 
