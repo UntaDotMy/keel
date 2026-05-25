@@ -24,13 +24,13 @@ The goal is to keep the supported entry points explicit for both human operators
 
 | Surface | In repo root | Outside repo root with `--repo-root` | Installed global CLI | Hosted automation | Notes |
 | --- | --- | --- | --- | --- | --- |
-| `help`, `help advanced`, `version`, `platform`, `workflow guide` | Supported | Supported | Supported | Supported | Safe discovery surfaces for both operators and agents. |
+| `help`, `help advanced`, `version`, `platform` | Supported | Supported | Supported | Supported | Safe discovery surfaces for both operators and agents. |
 | `install`, `update`, `status`, `doctor`, `verify`, `uninstall` | Supported | Supported | Supported | Supported | Managed-pack lifecycle works from the native CLI. |
 | `workflow route`, `workflow start`, `workflow cockpit`, `workflow watch`, `workflow finish` | Supported | Supported | Supported | Supported but mainly interactive | Primary operator and agent workflow surface once the repo context is known. These surfaces now share the same compact shell summary fields: `stage`, `active_lane`, `proof_state`, `blocker`, `next_command`, and `recovery_path`. |
 | `review pre-commit`, `review pre-pr`, `review gates check` | Supported | Supported | Supported | Supported | Native review surfaces are the default deterministic proof path. |
 | `git-workflow preflight` | Supported | Supported | Supported | Supported | Main branch and PR hygiene gate before publish or merge. |
-| `memoriesv2 scope resolve`, `memoriesv2 retrieve`, `memoriesv2 entity upsert|list|query`, `memoriesv2 hook capture` | Supported | Supported | Supported | Supported | Native second-layer memory surfaces stay local, scoped, and agent-friendly. |
-| `code-search index`, `code-search search`, `code-search demo`, `code-search status`, `code-search reset` | Supported | Supported | Supported | Supported | Repo-aware discovery surface for targeted code retrieval plus an honest shared demo path. |
+| `memory scope`, `memory system-map`, `memory working-brief`, `memory completion-gate` (and the same set under `memoriesv2`) | Supported | Supported | Supported | Supported | The four implemented memory surfaces. Earlier docs referenced `memoriesv2 retrieve|graph|entity|consolidate|ledger|hook|index`; those subcommands return a "not implemented" message in the current Rust runtime. |
+| `code-search search` | Supported | Supported | Supported | Supported | The single implemented code-search subcommand. `code-search index|demo|status|reset` are referenced in older docs but are not implemented today. |
 
 ## Agent execution guidance
 

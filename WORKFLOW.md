@@ -79,17 +79,16 @@ Reject or request a split when:
 ## Practical Branch Flow
 
 1. Start from the target branch.
-2. If the request is still broad, run `claude-skills workflow route --request "..."` first so the lane choice is explicit.
-   If the operator needs one concrete native starting point first, run `claude-skills workflow setup` or follow [docs/first-success-path.md](docs/first-success-path.md) before widening into custom flows. The older `claude-skills workflow first-run` command remains the static guided reference.
-3. Create one new feature branch, or isolate it immediately with `claude-skills workflow worktree start --repo-root . --path ../feature-branch --branch feat/feature-branch --workstream-key feature-branch`.
+2. If the request is still broad, run `claude-skills workflow route --request "..."` first so the lane choice is explicit. See [docs/first-success-path.md](docs/first-success-path.md) when an operator wants the named end-to-end path before widening into custom flows.
+3. Create one new feature branch with normal Git tooling (e.g. `git switch -c feat/<name>`).
 4. Implement only that feature.
-5. Keep `claude-skills workflow cockpit` or `claude-skills workflow watch` visible while the branch is active so stage, active lane, proof state, proof-board gates, blockers, the next command, and the recovery path stay easy to scan.
+5. Keep `claude-skills workflow cockpit`, `claude-skills workflow status`, or `claude-skills workflow watch` visible while the branch is active so stage, active lane, proof state, blockers, and the next command stay easy to scan.
 6. Use `git add -p` when selective staging is required.
 7. Review `git diff --cached`.
 8. Commit with the tracked feature prefix.
    If a commit body is included, keep it professional, make the title and body match the committed diff exactly, include only the sections the change genuinely needs, and keep this order when a section is present: `Problem`, `Solution`, `Summary`, `Notes`, `What Changed`, `Test Result`. Omit `Problem` and `Solution` when the commit is additive, preventive, or housekeeping rather than fixing a concrete issue, and keep `Test Result` limited to validation that directly proves the committed change.
    do not mention Claude Code, claude-skills, or tool-brand validation in commit or PR text unless the change itself is about those surfaces.
-9. Run `claude-skills workflow branch show` when the team needs the full branch-lifecycle path in one place.
+9. Run `claude-skills workflow status` or `claude-skills workflow cockpit` when the team needs the current ledger state in one place.
 10. Run `claude-skills git-workflow preflight`.
 11. Push and open one merge request.
 12. Repeat on a new branch for the next feature.
@@ -121,10 +120,8 @@ Automation cannot prove semantic single-feature scope perfectly. Human review an
 - If the audit still shows an open task, active plan item, unresolved requirement, non-terminal required lane, or missing proof, the work is not finished.
 - Do not trust the first green rerun after a fix as closure by itself; rerun the narrow proving checks and re-audit the broader impacted system before handoff.
 - Use \`claude-skills workflow route\` when the request is broad and the right lane is not obvious yet; the route surface should explain why the recommended path fits the job before any stateful work begins.
-- Use \`claude-skills workflow cockpit\` for the live operator console, live proof-board gates, blockers, recovery path, and closeout commands, \`claude-skills workflow status\` for the broad state, \`claude-skills workflow watch\` for lane health and stalled work, and \`claude-skills workflow audit\` for the final closure decision.
-- Use \`claude-skills workflow finish\` when the workstream is ready to close and the team needs the next operator command to be explicit, and use \`claude-skills workflow branch finish\` when branch closeout should lead directly into merge-ready PR guidance.
-- Use \`claude-skills workflow branch show\` when the branch needs one visible Claude Code-first path from routing through hosted green checks and final shutdown.
-- Use \`claude-skills workflow worktree start\`, \`claude-skills workflow worktree finish\`, and \`claude-skills workflow worktree discard\` when the branch should be isolated and cleaned up through the workflow surface instead of ad hoc Git commands.
+- Use \`claude-skills workflow cockpit\` for the live operator console with stage, active entries, blockers, and the next command, \`claude-skills workflow status\` and \`claude-skills workflow dashboard\` for the broader ledger state, and \`claude-skills workflow watch\` for ongoing lane health.
+- Use \`claude-skills workflow finish --id <entry-id> --proof "..."\` when the workstream is ready to close so the closure proof lands on the workflow ledger entry. Use \`claude-skills workflow resume --id <entry-id>\` to reopen a tracked workstream.
 
 ## Spawned Agent Discipline
 
@@ -151,7 +148,7 @@ Automation cannot prove semantic single-feature scope perfectly. Human review an
 - After opening or updating the PR, wait at least 20 seconds so the hosted lanes have time to appear, then inspect the real hosted checks with \`gh pr checks --watch\` or the equivalent hosted watcher.
 - If a hosted lane fails, inspect the failing logs, identify the root cause, add or tighten the regression guard, push the fix to the same branch, and wait again.
 - Never rush a required spawned agent, required validation lane, or other required dependent lane. Careful review, debugging, and specialist work are slower by design, and waiting is better than self-certifying early.
-- When hosted lanes fail, use \`claude-skills workflow branch hosted fix-loop\` so the repair path records the failing lane, root cause, regression requirement, and rerun proof commands together.
+- When hosted lanes fail, capture the failing lane name, root cause, regression requirement, and rerun proof commands together in the working brief or PR notes so the repair path is explicit and reusable.
 - Do not open a second PR for the same feature just to recover from a failing check; keep fixing the same PR until the hosted lanes are green or a real blocker is documented.
 - Treat repeated hosted failures as reusable knowledge. The goal is to understand the failure class so the same mistake does not need to be rediscovered on the next feature.
 - Do not end the task or the turn while a required validation command, hosted check, or other dependent process is still running, failing, or unresolved when the issue is fixable in scope.

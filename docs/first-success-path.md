@@ -4,23 +4,25 @@ This guide is the fastest honest path through the current native workflow surfac
 
 It is for a new operator who already has `claude_skills` installed and wants one satisfying end-to-end run without memorizing every workflow command first.
 
-If you want the named native operator path first, run:
-
-```bash
-claude-skills workflow setup
-```
-
-The older `claude-skills workflow first-run` command remains supported as the static guided reference path.
-
-Use `claude-skills workflow setup --request "..." --workstream-key feature-branch` when you want the same operator path with your own request text and tracked workstream key. The command refreshes install, runs doctor, routes the request, starts the workstream, and returns the live cockpit shell in one pass.
-
 ## Goal
 
-Start from one broad request, enter a tracked workstream, keep the operator view visible, prove the branch, and only then close it out.
+Start from one broad request, open a tracked workflow ledger entry, keep the live operator view visible, prove the branch, and only then close the entry with the proof recorded.
+
+## What the runtime actually exposes
+
+The Rust runtime currently routes these workflow subcommands to real handlers:
+
+- `claude-skills workflow route --request "..."` — recommends a preset for a broad request
+- `claude-skills workflow start --request "..." [--preset autopilot|debug|tdd|review|eco|parallel]` — opens a ledger entry
+- `claude-skills workflow status` / `workflow cockpit` / `workflow dashboard` / `workflow watch` — read the same ledger from different angles
+- `claude-skills workflow resume --id <entry-id>` — reopens an existing entry
+- `claude-skills workflow finish --id <entry-id> --proof "..."` — closes an entry with proof attached
+
+Subcommands like `workflow setup`, `workflow first-run`, `workflow guide`, `workflow branch`, `workflow worktree`, `workflow team`, `workflow lead`, `workflow finisher`, `workflow audit`, `workflow tiers`, `workflow hooks`, `workflow await`, and `workflow shutdown` are not implemented in the Rust runtime today — invoking them returns a "not implemented" error rather than starting work. Earlier docs referenced flags such as `--workstream-key` and `--mode` on `workflow start`; the current handler accepts only `--request`, `--preset`, `--claude-home`, and `--json`.
 
 ## Five-Minute Path
 
-1. Refresh the native shell and verify readiness.
+### 1. Refresh the native shell and verify readiness
 
 ```bash
 claude-skills install
@@ -28,90 +30,75 @@ claude-skills doctor
 ```
 
 What to look for:
-- managed install and wrapper health
+- managed install and binary health
 - doctor follow-up guidance if the environment is not ready yet
 
-2. Start from one broad request.
+### 2. Route the broad request to a recommended preset
 
 ```bash
 claude-skills workflow route --request "Compare the current repo, fix the biggest gaps, and carry the branch to closure"
 ```
 
 What to look for:
-- the short `Start Now` command
-- the recommended mode
-- the plain-language mode summary
+- the recommended preset name (`autopilot`, `debug`, `tdd`, `review`, `eco`, or `parallel`)
+- the short rationale for that preset
 
-3. Enter the workstream with the recommended lane.
-
-```bash
-claude-skills workflow start --mode auto --workstream-key feature-branch --request "Compare the current repo, fix the biggest gaps, and carry the branch to closure"
-```
-
-If you already know the work is coordinated, it is also valid to start the explicit team lane:
+### 3. Open the workflow ledger entry
 
 ```bash
-claude-skills workflow start --mode team --workstream-key feature-branch --request "Coordinate the next multi-lane task"
+claude-skills workflow start --preset autopilot --request "Compare the current repo, fix the biggest gaps, and carry the branch to closure"
 ```
+
+The command writes a workflow ledger entry under `~/.claude/workflow/` and prints the new entry id (`wf-...`). Hold onto that id — `cockpit`, `resume`, and `finish` operate against it.
 
 Preset shorthand when the job shape is already obvious:
 
 - `autopilot`
-  - `claude-skills workflow start --preset autopilot --workstream-key feature-branch --request "Carry the current task to closure"`
+  - `claude-skills workflow start --preset autopilot --request "Carry the current task to closure"`
   - Use when broad feature or maintenance work needs one owner driving to closure.
-  - Proof to expect: the brief, completion gate, cockpit proof board, review pass, and native finish checks stay current.
-  - If interrupted: reopen with `claude-skills workflow status --workstream-key feature-branch`, `claude-skills workflow cockpit --workstream-key feature-branch`, and `claude-skills workflow resume --workstream-key feature-branch`.
+  - Proof to expect: brief, completion gate, cockpit, review pass, and native finish checks stay current.
+  - If interrupted: reopen with `workflow status`, `workflow cockpit`, and `workflow resume --id <entry-id>`.
 - `debug`
-  - `claude-skills workflow start --preset debug --workstream-key feature-branch --request "Trace the failing behavior, fix it, and prove it"`
+  - `claude-skills workflow start --preset debug --request "Trace the failing behavior, fix it, and prove it"`
   - Use when the root cause is still unclear or the failure crosses runtime or recovery boundaries.
   - Proof to expect: traced behavior mismatch, narrow repro or regression proof, and hosted-check repair proof when relevant.
-  - If interrupted: return through `claude-skills workflow cockpit --workstream-key feature-branch`, `claude-skills workflow resume --workstream-key feature-branch`, and `claude-skills workflow branch hosted fix-loop --workstream-key feature-branch` for hosted failures.
+  - If interrupted: return through `workflow cockpit` and `workflow resume --id <entry-id>`; use `gh pr checks --watch` for hosted failures.
 - `tdd`
-  - `claude-skills workflow start --preset tdd --workstream-key feature-branch --request "Write the proving test first, then implement the feature"`
+  - `claude-skills workflow start --preset tdd --request "Write the proving test first, then implement the feature"`
   - Use when failing-test-first discipline is the safest way to hold scope and prove the change.
   - Proof to expect: failing proof first, fix proof second, regression proof third, plus the normal review and finish checks.
-  - If interrupted: use `claude-skills workflow cockpit --workstream-key feature-branch`, `claude-skills workflow resume --workstream-key feature-branch`, and `claude-skills memory completion-gate check --workstream-key feature-branch --require-closure-ready`.
+  - If interrupted: use `workflow cockpit`, `workflow resume --id <entry-id>`, and `claude-skills memory completion-gate check --id <entry-id> --proof "..."`.
 - `review`
-  - `claude-skills workflow start --preset review --workstream-key feature-branch --request "Audit the current branch and call out the real gaps"`
+  - `claude-skills workflow start --preset review --request "Audit the current branch and call out the real gaps"`
   - Use when verification is the primary job and implementation is secondary.
-  - Proof to expect: workflow audit, reviewer proof, and closeout checks drive the decision.
-  - If interrupted: recover from `claude-skills workflow audit --workstream-key feature-branch`, `claude-skills workflow cockpit --workstream-key feature-branch`, and `claude-skills workflow resume --workstream-key feature-branch`.
+  - Proof to expect: reviewer evidence and closeout checks drive the decision.
+  - If interrupted: recover from `workflow cockpit` and `workflow resume --id <entry-id>`.
 - `eco`
-  - `claude-skills workflow start --preset eco --workstream-key feature-branch --request "Carry the small maintenance task to closure"`
+  - `claude-skills workflow start --preset eco --request "Carry the small maintenance task to closure"`
   - Use when the task is smaller but still deserves tracked closure.
-  - Proof to expect: the same brief, cockpit, and finish structure, with the narrowest honest proving validation for the touched scope.
-  - If interrupted: reopen with `claude-skills workflow status --workstream-key feature-branch`, `claude-skills workflow cockpit --workstream-key feature-branch`, and `claude-skills workflow resume --workstream-key feature-branch`.
+  - Proof to expect: same brief, cockpit, and finish structure with the narrowest honest proving validation for the touched scope.
 - `parallel`
-  - `claude-skills workflow start --preset parallel --workstream-key feature-branch --request "Coordinate the next multi-lane task"`
-  - Use when the work already implies specialist or parallel lanes.
-  - Proof to expect: the lane board, required-lane completion, proof board, and finish blockers stay visible until every required lane is terminal.
-  - If interrupted: recover from `claude-skills workflow cockpit --workstream-key feature-branch`, `claude-skills workflow team resume --workstream-key feature-branch`, and `claude-skills workflow team await --workstream-key feature-branch --timeout-seconds 300 --poll-seconds 15`.
+  - `claude-skills workflow start --preset parallel --request "Coordinate the next multi-lane task"`
+  - Use when the work already implies specialist or parallel lanes coordinated by the operator.
+  - Proof to expect: every required lane terminal before the entry closes.
 
-4. Keep the live watch surface open while the work is moving.
-
-```bash
-claude-skills workflow dashboard --workstream-key feature-branch
-```
-
-Use the dashboard to watch:
-- live runtime state and next action
-- team-health status for active, stalled, and required lanes
-- active and stalled lanes
-- closure blockers
-- audit pass or fail state
-
-5. Use the proof-board console when you need route, blockers, and closeout guidance in one place.
+### 4. Keep a live watch surface open
 
 ```bash
-claude-skills workflow cockpit --workstream-key feature-branch
+claude-skills workflow dashboard
 ```
 
-Use the cockpit to watch:
-- route and next command
-- active phase, requirement, and blocker state
-- hosted check summary when a PR exists
+Use the dashboard, `workflow status`, or `workflow watch` to see open and recently closed ledger entries.
 
-6. Turn local work into proof before you call it done.
+### 5. Use the proof-board console when you need one place to look
+
+```bash
+claude-skills workflow cockpit
+```
+
+Cockpit shows open entries with stage, preset, and request, and the recent tail of closed entries.
+
+### 6. Turn local work into proof before you call it done
 
 ```bash
 cargo test --workspace
@@ -119,38 +106,37 @@ claude-skills review pre-pr --base-ref origin/main
 claude-skills git-workflow preflight --repo-root . --base-ref origin/main
 ```
 
-7. If the branch is on GitHub, wait for the real hosted result.
+### 7. If the branch is on GitHub, wait for the real hosted result
 
 ```bash
 gh pr checks --watch
 ```
 
-If a hosted lane fails, fix the root cause on the same branch, push again, and wait again.
+If a hosted lane fails, fix the root cause on the same branch, push again, and rerun `gh pr checks --watch`.
 
-8. Close the workstream only after the proof is real.
+### 8. Close the ledger entry only after the proof is real
 
 ```bash
-claude-skills workflow finish --workstream-key feature-branch
+claude-skills workflow finish --id <entry-id> --proof "cargo test --workspace passed; review pre-pr passed; hosted checks green"
 ```
 
-If the PR is already green and the branch is in the closeout lane, `claude-skills workflow branch finish --workstream-key feature-branch` is the shorter merge-oriented shortcut.
+The `--proof` text is recorded on the closed ledger entry so future audits can see what was claimed when the work was closed.
 
-## Why This Is The First Success Path
+## Why this is the first success path
 
 - It starts from a broad request instead of forcing workflow vocabulary first.
-- It now exposes one named native operator path instead of leaving install, doctor, route, start, and the live shell to be assembled manually.
-- It uses the existing native workflow surface instead of a separate onboarding-only path.
-- It keeps one visible route from intake to proof to closeout.
-- It ends with real proof, not just a confident-looking summary.
+- It uses only commands the runtime actually implements today.
+- It keeps one visible route from intake to proof to closeout against the workflow ledger.
+- It ends with real proof attached to the entry, not a confident-looking summary.
 
-## If You Want The Slightly Shorter Version
+## If you want the slightly shorter version
 
 When the task is single-owner and you do not need to route first:
 
 ```bash
-claude-skills workflow start
+claude-skills workflow start --request "Carry the current task to closure"
 claude-skills workflow cockpit
-claude-skills workflow finish
+claude-skills workflow finish --id <entry-id> --proof "tests green"
 ```
 
-That is the default operator path, but the routed path above is the better first run when the request still feels broad.
+That is the lower-friction default. The routed path above is the better first run when the request still feels broad.
