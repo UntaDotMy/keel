@@ -46,9 +46,8 @@ Example: a raw `cargo test --workspace` may produce `Rerun that as: claude-skill
 | --- | --- | --- |
 | First install, no Rust required | Download a release, extract it, run `./claude-skills install` or `.\claude-skills.exe install` | Installs the native binary and managed skills into Claude Code home. |
 | Check the install | `~/.claude/claude-skills status` or `%USERPROFILE%\.claude\claude-skills.exe status` | Confirms the managed Claude Code-home surface. |
-| First guided run | `claude-skills workflow setup --request "Carry this task to closure"` | The named native operator path for onboarding. |
-| Static guide | `claude-skills workflow first-run` | First Success Path guidance without starting state. |
-| Start normal work | `claude-skills workflow start` | The lowest-friction first run. |
+| Start normal work | `claude-skills workflow start --request "..."` | The lowest-friction first run. |
+| Route a broad request first | `claude-skills workflow route --request "..."` | Picks the recommended preset before starting. |
 | See live state | `claude-skills workflow cockpit` | Shows stage, proof, blockers, and next command. |
 | Close a branch | `claude-skills workflow finish` | The default closeout path. |
 
@@ -167,9 +166,9 @@ Manual prune (any time):
 The hook lifecycle is tuned to preserve Claude Code's prompt cache and minimize per-prompt input tokens.
 
 - **What stays cached:** the system prompt, tool definitions, `CLAUDE.md`, and the SessionStart context are read at the cache breakpoint. Reuse costs ~10% of normal input tokens for ~5 minutes after each write.
-- **What gets paid every prompt:** anything emitted via `additionalContext` from `UserPromptSubmit` lands after the cache breakpoint. We emit nothing on `UserPromptSubmit` — the operating contract lives in `CLAUDE.md` and SessionStart instead, where it is delivered once per session rather than once per prompt.
-- **What gets paid every turn end / tool call:** `Stop`, `SubagentStop`, `SessionEnd`, and `PostToolUse` are silent. They previously emitted ~50 tokens of generic closeout text that the model never acted on. Your turn-end exchange is now hook-cost zero.
-- **Why this matters:** in a 30-tool-call session with 20 prompts, the previous lifecycle cost ~80×20 + ~50×30 = ~3,100 tokens of pure overhead. The current lifecycle costs zero outside of SessionStart and PreToolUse rewrite hints — both of which carry information the model genuinely uses.
+- **What gets paid every prompt:** `UserPromptSubmit` injects a short research-first iron-law restatement (~80 tokens) via `additionalContext`. The full bootstrap skill, Red Flags table, and skill catalog ride on `SessionStart` so per-prompt cost stays small while the iron law stays top-of-mind every turn.
+- **What gets paid every turn end / tool call:** `Stop`, `SubagentStop`, `SessionEnd`, and `PostToolUse` are silent. `PostToolBatch` injects a short reviewer-on-close reminder before the next model turn. Earlier versions of the lifecycle emitted ~50 tokens of generic closeout text on every tool call; that overhead is gone.
+- **Why this matters:** the per-prompt and per-batch hooks are sized to carry information the model genuinely uses. The system prompt, tool definitions, `CLAUDE.md`, and `SessionStart` context stay above the cache breakpoint so they reuse cleanly within the 5-minute cache window.
 
 If you customize hooks downstream and want to see exactly what the lifecycle emits for an event:
 
@@ -185,11 +184,10 @@ Empty stdout means the hook is intentionally silent for that event.
 | Job | Commands |
 | --- | --- |
 | Route a broad request | `claude-skills workflow route --request "..."` |
-| Start single-owner work | `claude-skills workflow start --preset autopilot --request "..."` |
-| Start team work | `claude-skills workflow start --mode team --request "Coordinate the next multi-lane task"` |
+| Start work | `claude-skills workflow start --preset autopilot --request "..."` |
 | Watch live state | `claude-skills workflow cockpit`, `claude-skills workflow dashboard`, `claude-skills workflow watch` |
 | Review locally | `claude-skills review pre-commit`, `claude-skills review pre-pr`, `claude-skills review gates check` |
-| Finish a branch | `claude-skills workflow branch show`, `claude-skills workflow branch finish`, `gh pr checks --watch` |
+| Finish a workstream | `claude-skills workflow finish --id <entry-id> --proof "..."`, `gh pr checks --watch` |
 | Compact noisy commands | `claude-skills rewrite "cargo test --workspace"`, `claude-skills run -- grep -RIn TODO rust` |
 | Refresh memory map | `claude-skills memory scope resolve --create-missing --refresh-system-map` |
 | Advanced help | `claude-skills help advanced` |
@@ -210,47 +208,46 @@ Quick labels: Feature work: Bug fixing: PR rescue: TDD-first implementation: Bou
 
 ```bash
 claude-skills workflow route --request "Add the next feature and carry it to closure"
-claude-skills workflow start --preset autopilot --workstream-key feature-branch --request "Add the next feature and carry it to closure"
-claude-skills workflow cockpit --workstream-key feature-branch
-claude-skills workflow finish --workstream-key feature-branch
+claude-skills workflow start --preset autopilot --request "Add the next feature and carry it to closure"
+claude-skills workflow cockpit
+claude-skills workflow finish --id <entry-id> --proof "tests green"
 ```
 
 ### Bug fixing
 
 ```bash
 claude-skills workflow route --request "Trace the regression, fix the root cause, and prove it"
-claude-skills workflow start --preset debug --workstream-key bugfix-root-cause --request "Trace the regression, fix the root cause, and prove it"
-claude-skills workflow branch hosted fix-loop --workstream-key bugfix-root-cause
-claude-skills workflow finish --workstream-key bugfix-root-cause
+claude-skills workflow start --preset debug --request "Trace the regression, fix the root cause, and prove it"
+claude-skills workflow cockpit
+claude-skills workflow finish --id <entry-id> --proof "regression covered by tests"
 ```
 
 ### Review
 
 ```bash
 claude-skills workflow route --request "Audit the current branch and call out the real gaps"
-claude-skills workflow start --preset review --workstream-key review-branch --request "Audit the current branch and call out the real gaps"
-claude-skills workflow audit --workstream-key review-branch
-claude-skills workflow finish --workstream-key review-branch
+claude-skills workflow start --preset review --request "Audit the current branch and call out the real gaps"
+claude-skills workflow cockpit
+claude-skills workflow finish --id <entry-id> --proof "review notes recorded"
 ```
 
 ### TDD-first implementation
 
 ```bash
-claude-skills workflow start --preset tdd --workstream-key tdd-feature --request "Write the failing test first, implement the smallest fix that makes it pass, and close with regression proof"
-claude-skills workflow cockpit --workstream-key tdd-feature
-claude-skills workflow finish --workstream-key tdd-feature
+claude-skills workflow start --preset tdd --request "Write the failing test first, implement the smallest fix that makes it pass, and close with regression proof"
+claude-skills workflow cockpit
+claude-skills workflow finish --id <entry-id> --proof "failing -> fix -> regression proof"
 ```
 
 ### Common job shapes
 
-Feature work, Bug fixing, PR rescue, TDD-first implementation, and Bounded parallel work all use the same visible loop: route, start, cockpit, prove, finish. Branch finish uses `workflow branch finish`, and hosted failures go through `workflow branch hosted fix-loop`.
+Feature work, Bug fixing, PR rescue, TDD-first implementation, and Bounded parallel work all use the same visible loop: route, start, cockpit, prove, finish. Hosted-check failures are repaired on the same PR with `gh pr checks --watch` and another push.
 
 ### Native guidance tracks
 
 Brainstorming:
 
 ```bash
-claude-skills workflow guide
 claude-skills workflow route --request "Brainstorm the approach, compare the options, and recommend the right next lane"
 ```
 
@@ -278,10 +275,10 @@ Code review:
 claude-skills workflow start --preset review --request "Review the branch, call out the real gaps, and decide if it is ready"
 ```
 
-Branch finish:
+Workstream finish:
 
 ```bash
-claude-skills workflow branch finish
+claude-skills workflow finish --id <entry-id> --proof "tests green; review pre-pr passed"
 ```
 
 ### Native plan surface
@@ -290,7 +287,7 @@ Use exact file targets, verification steps, and recovery checkpoints before codi
 
 - File targets: list every expected write target before the first edit.
 - Verification steps: name the narrow proving checks first.
-- Recovery checkpoints: if interrupted, reopen the workstream with `workflow status`, `workflow cockpit`, and `workflow resume` before changing the plan.
+- Recovery checkpoints: if interrupted, reopen the workstream with `workflow status`, `workflow cockpit`, and `workflow resume --id <entry-id>` before changing the plan.
 
 ### Native engineering principles
 
@@ -305,9 +302,9 @@ The guide now teaches TDD, YAGNI, and DRY as native workflow prompts and example
 
 Keep the native CLI as the primary surface instead of drifting back toward a prompt-library-only identity. The router prints a short "Start Now" command first, keeps a scoped variant available for traceable workstreams, and cockpit shows route, active lanes, proof state, a live proof board, blockers, and the next command in one place. The branch path keeps proof-board gate status visible.
 
-Useful workflow command shelf: `claude-skills workflow lead start`, `claude-skills workflow team start`, `claude-skills workflow team resume`, `claude-skills workflow team await`, `claude-skills workflow team shutdown`, `claude-skills workflow finisher start`, `claude-skills workflow finisher resume`, `claude-skills workflow finisher await`, `claude-skills workflow finisher shutdown`, `claude-skills workflow status`, `claude-skills workflow audit`, `claude-skills workflow worktree start`, `claude-skills workflow worktree finish`, `claude-skills workflow worktree discard`, `claude-skills workflow tiers show`, and `claude-skills workflow hooks show`.
+Useful workflow command shelf: `claude-skills workflow route`, `claude-skills workflow start --preset <preset> --request "..."`, `claude-skills workflow cockpit`, `claude-skills workflow status`, `claude-skills workflow dashboard`, `claude-skills workflow watch`, `claude-skills workflow resume --id <entry-id>`, and `claude-skills workflow finish --id <entry-id> --proof "..."`.
 
-The dashboard includes a synthesized runtime-state summary and team-health summary so operators do not have to reconstruct that picture from raw memory artifacts. Cockpit surfaces the same runtime-state summary and team-health summary alongside the proof board, with a lighter day-to-day shell summary. Finish starts with a lighter closeout summary. `workflow finish` now leads with the next closeout command, and `workflow branch finish` can point straight at the merge command when the PR is already green.
+The dashboard includes a synthesized runtime-state summary and team-health summary so operators do not have to reconstruct that picture from raw memory artifacts. Cockpit surfaces the same runtime-state summary and team-health summary alongside the proof board, with a lighter day-to-day shell summary. Finish starts with a lighter closeout summary and records the supplied proof against the workflow ledger entry.
 
 ## Presets
 
@@ -327,7 +324,7 @@ Each preset now says what it owns, what it does not own, and what done means at 
 `autopilot`: the default first-run preset.
 When to use: broad feature or maintenance work where one owner should keep moving from alignment through closure.
 Proof it expects: the working brief, completion gate, cockpit proof board, review pass, and native finish checks stay current before closeout.
-If interrupted: reopen the workstream with `workflow status`, `workflow cockpit`, and `workflow resume`.
+If interrupted: reopen the workstream with `workflow status`, `workflow cockpit`, and `workflow resume --id <entry-id>`.
 
 `debug`: the focused preset for stateful bugs.
 `tdd`: the preset for test-first delivery.
@@ -335,7 +332,7 @@ Proof it expects: failing proof first, fix proof second, regression proof third,
 `review`: the preset for audit, production-readiness, gap-finding, and final validation.
 `eco`: the lighter preset for bounded maintenance.
 `parallel`: the preset for bounded multi-lane work.
-If interrupted: recover from `workflow cockpit`, `workflow team resume`, and `workflow team await`.
+If interrupted: recover from `workflow status`, `workflow cockpit`, and `workflow resume --id <entry-id>`.
 
 The lighter `autopilot` preset and `standard` tier power the default low-friction path.
 
@@ -385,7 +382,7 @@ Hosted PR discipline:
 3. Open the PR.
 4. Wait at least 20 seconds for hosted checks to appear. In checklists this is written as: wait at least 20 seconds.
 5. Watch `gh pr checks --watch`.
-6. If a hosted lane fails, use `workflow branch hosted fix-loop` and fix the root cause on the same PR.
+6. If a hosted lane fails, inspect the failing logs, fix the root cause on the same PR, push again, and rerun `gh pr checks --watch`.
 
 Run `claude-skills git-workflow preflight --repo-root . --base-ref origin/main` before push or merge-request creation.
 
@@ -417,7 +414,6 @@ What is implemented today:
 - `hook install` writes the documented global Claude Code lifecycle hook set, with `PreToolUse` handling block-and-rerun command compaction.
 - `hook instructions` prints the agent-facing rerun contract in markdown or JSON.
 - `gain` reads native compaction events from the Claude Code home and reports observed commands, compacted/passthrough counts, exact tokens before/after/saved, savings percentage, adapter breakdowns, and top commands.
-- `discover` scans existing local logs for likely missed high-output commands and recommends `claude-skills run -- ...` or future adapters.
 - `doctor` checks the binary, raw store, event log, adapter registry, rewrite behavior, and hook/proxy setup with ok/warn/fix-style output.
 - The runtime never shells out to Go for compaction, hooks, or command dispatch.
 
@@ -486,7 +482,7 @@ The one-line installer refreshes the managed Claude Code hooks automatically, an
 }
 ```
 
-The hook contract is explicit rerun guidance rather than hidden command mutation. The Rust hook installer manages every supported lifecycle event (`PreToolUse`, `PermissionRequest`, `PostToolUse`, `PreCompact`, `PostCompact`, `SessionStart`, `UserPromptSubmit`, and `Stop`). `PreToolUse` owns command compaction before noisy output exists; the other lifecycle hooks are native no-op/checkpoint surfaces reserved for memory and recovery wiring without shell-profile wrappers.
+The hook contract is explicit rerun guidance rather than hidden command mutation. The Rust hook installer manages 27 of the 28 Claude Code lifecycle events documented at code.claude.com/docs/en/hooks, writing them to `~/.claude/settings.json`: `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PostToolBatch`, `PermissionRequest`, `PermissionDenied`, `Notification`, `UserPromptSubmit`, `UserPromptExpansion`, `Stop`, `StopFailure`, `SubagentStart`, `SubagentStop`, `TaskCreated`, `TaskCompleted`, `TeammateIdle`, `WorktreeCreate`, `WorktreeRemove`, `CwdChanged`, `PreCompact`, `PostCompact`, `SessionStart`, `SessionEnd`, `Setup`, `InstructionsLoaded`, `ConfigChange`, `Elicitation`, and `ElicitationResult`. `PreToolUse` owns command compaction before noisy output exists. `SessionStart` delivers the bootstrap skill once per session, `UserPromptSubmit` injects a short research-first iron-law restatement per prompt, and `PostToolBatch` injects the reviewer-on-close reminder before each next turn. The remaining lifecycle hooks are silent checkpoint surfaces reserved for memory and recovery wiring without shell-profile wrappers. The 28th event, `FileChanged`, is defined in the dispatch table but skipped on install because its `matcher` doubles as a per-repo file watch list and an empty matcher would ship dead config; ad-hoc invocations like `claude-skills hook file-changed` still work.
 
 ## Preserve Existing Flow Evidence
 
