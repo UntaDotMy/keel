@@ -21,18 +21,23 @@
   git-workflow lint-message [--allow-claude-code-wording] [--format json|markdown|compact] <file>
   run [--recovery-dir <path>] [--json] [--stream] -- <command...>
   rewrite "<command>"
+  raw [--path] <raw-id>
+  raw list
+  raw prune --older-than <Nd>
+  replay <raw-id>
   hook install|uninstall|list|show|instructions
   code-search search --workspace-root <path> --query <text> [--format json|compact]
-  code-search index|status
   design-intelligence recommend [request...]
   memory scope resolve [--memory-base <path>] [--workspace-root <path>] [--create-missing] [--refresh-system-map] [--format json|compact]
   memory system-map refresh [--memory-base <path>] [--workspace-root <path>] [--format json|compact]
+  memory system-map show [--memory-base <path>] [--workspace-root <path>]
   memory working-brief|completion-gate
   memoriesv2 scope resolve [same flags as memory scope resolve]
   memoriesv2 system-map refresh [same flags as memory system-map refresh]
+  memoriesv2 system-map show [same flags as memory system-map show]
   memoriesv2 working-brief|completion-gate
   orchestration runtime-preflight|resume-status
-  workflow start|resume|finish|status|cockpit|dashboard|watch|route
+  workflow route|start|cockpit|status|dashboard|watch|finish|resume
   gain [reset]
   session [--since today|7d|30d|all] [--json]
   bench [--fixtures] [--exact] [--json] [--compare raw]
