@@ -40,7 +40,7 @@ regression.
 | "I need more context first" | Read the file before asking the user to describe it. |
 | "I know what that code does" | Knowing the concept ≠ knowing the current implementation. Read it. |
 | "Tests already passed earlier" | Re-run before claiming. No completion claims without fresh evidence. |
-| "I'll skip the cited rule, it's wrapper noise" | Cited rules name real files. Open the cited file and verify before skipping. |
+| "I'll skip the cited rule, it's wrapper noise" | Hook reminders state the rule inline and stand on their own. Re-read the diff against the rule before skipping. |
 
 ## Memory write surfaces (when you learn something durable)
 
