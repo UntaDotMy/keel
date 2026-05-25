@@ -25,17 +25,27 @@ pub const SETTINGS_FILE_NAME: &str = "settings.json";
 /// `supports_hook_specific_output`: events the official Claude Code schema
 /// documents as accepting `hookSpecificOutput.additionalContext`. Per
 /// code.claude.com/docs/en/hooks that set is SessionStart, Setup,
-/// UserPromptSubmit, UserPromptExpansion, PreToolUse, PostToolUse,
-/// PostToolUseFailure, and PostToolBatch. Other events must use top-level
-/// fields (`systemMessage`, `decision`, etc). Keeping the flag on the row
-/// prevents `hook_lifecycle` from re-stating the rule in a parallel
+/// SubagentStart, UserPromptSubmit, UserPromptExpansion, PreToolUse,
+/// PostToolUse, PostToolUseFailure, and PostToolBatch. Other events must use
+/// top-level fields (`systemMessage`, `decision`, etc). Keeping the flag on
+/// the row prevents `hook_lifecycle` from re-stating the rule in a parallel
 /// `matches!`.
+///
+/// `installs_in_settings`: whether `claude-skills hook install` should write
+/// a stanza for this event into `settings.json`. The dispatch table still
+/// recognises every official event so ad-hoc invocations like
+/// `claude-skills hook file-changed` work, but a stanza in settings.json
+/// only makes sense when we have a meaningful default. FileChanged is the
+/// known exception — per the official docs the matcher *is* the watch list,
+/// so installing with `matcher: ""` produces a stanza Claude Code never
+/// fires. We skip those rows on install rather than ship a dead stanza.
 pub struct HookEvent {
     pub name: &'static str,
     pub slug: &'static str,
     pub matcher: &'static str,
     pub status: &'static str,
     pub supports_hook_specific_output: bool,
+    pub installs_in_settings: bool,
 }
 
 /// Canonical Claude Code hook events. Order is stable so rendered settings.json entries
@@ -47,6 +57,7 @@ pub const HOOK_EVENTS: &[HookEvent] = &[
         matcher: "Bash",
         status: "Transparently rewriting noisy commands via claude-skills run",
         supports_hook_specific_output: true,
+        installs_in_settings: true,
     },
     HookEvent {
         name: "PostToolUse",
@@ -54,6 +65,7 @@ pub const HOOK_EVENTS: &[HookEvent] = &[
         matcher: "Bash",
         status: "Recording post-tool lifecycle",
         supports_hook_specific_output: true,
+        installs_in_settings: true,
     },
     HookEvent {
         name: "PostToolUseFailure",
@@ -61,6 +73,7 @@ pub const HOOK_EVENTS: &[HookEvent] = &[
         matcher: "",
         status: "Recording tool failure for routing and recovery",
         supports_hook_specific_output: true,
+        installs_in_settings: true,
     },
     HookEvent {
         name: "PostToolBatch",
@@ -68,6 +81,7 @@ pub const HOOK_EVENTS: &[HookEvent] = &[
         matcher: "",
         status: "Recording post-tool batch lifecycle",
         supports_hook_specific_output: true,
+        installs_in_settings: true,
     },
     HookEvent {
         name: "PermissionRequest",
@@ -75,6 +89,7 @@ pub const HOOK_EVENTS: &[HookEvent] = &[
         matcher: "",
         status: "Recording permission lifecycle",
         supports_hook_specific_output: false,
+        installs_in_settings: true,
     },
     HookEvent {
         name: "PermissionDenied",
@@ -82,6 +97,7 @@ pub const HOOK_EVENTS: &[HookEvent] = &[
         matcher: "",
         status: "Recording denied permission for routing",
         supports_hook_specific_output: false,
+        installs_in_settings: true,
     },
     HookEvent {
         name: "Notification",
@@ -89,6 +105,7 @@ pub const HOOK_EVENTS: &[HookEvent] = &[
         matcher: "",
         status: "Recording notification lifecycle",
         supports_hook_specific_output: false,
+        installs_in_settings: true,
     },
     HookEvent {
         name: "UserPromptSubmit",
@@ -96,6 +113,7 @@ pub const HOOK_EVENTS: &[HookEvent] = &[
         matcher: "",
         status: "Routing prompt to the right skill",
         supports_hook_specific_output: true,
+        installs_in_settings: true,
     },
     HookEvent {
         name: "UserPromptExpansion",
@@ -103,6 +121,7 @@ pub const HOOK_EVENTS: &[HookEvent] = &[
         matcher: "",
         status: "Recording prompt expansion lifecycle",
         supports_hook_specific_output: true,
+        installs_in_settings: true,
     },
     HookEvent {
         name: "Stop",
@@ -110,6 +129,7 @@ pub const HOOK_EVENTS: &[HookEvent] = &[
         matcher: "",
         status: "Closing native session state",
         supports_hook_specific_output: false,
+        installs_in_settings: true,
     },
     HookEvent {
         name: "StopFailure",
@@ -117,13 +137,15 @@ pub const HOOK_EVENTS: &[HookEvent] = &[
         matcher: "",
         status: "Recording stop failure for recovery",
         supports_hook_specific_output: false,
+        installs_in_settings: true,
     },
     HookEvent {
         name: "SubagentStart",
         slug: "subagent-start",
         matcher: "",
         status: "Opening subagent lifecycle",
-        supports_hook_specific_output: false,
+        supports_hook_specific_output: true,
+        installs_in_settings: true,
     },
     HookEvent {
         name: "SubagentStop",
@@ -131,6 +153,7 @@ pub const HOOK_EVENTS: &[HookEvent] = &[
         matcher: "",
         status: "Closing subagent lifecycle",
         supports_hook_specific_output: false,
+        installs_in_settings: true,
     },
     HookEvent {
         name: "TaskCreated",
@@ -138,6 +161,7 @@ pub const HOOK_EVENTS: &[HookEvent] = &[
         matcher: "",
         status: "Recording task creation in workflow ledger",
         supports_hook_specific_output: false,
+        installs_in_settings: true,
     },
     HookEvent {
         name: "TaskCompleted",
@@ -145,6 +169,7 @@ pub const HOOK_EVENTS: &[HookEvent] = &[
         matcher: "",
         status: "Recording task completion in workflow ledger",
         supports_hook_specific_output: false,
+        installs_in_settings: true,
     },
     HookEvent {
         name: "TeammateIdle",
@@ -152,6 +177,7 @@ pub const HOOK_EVENTS: &[HookEvent] = &[
         matcher: "",
         status: "Recording teammate idle lifecycle",
         supports_hook_specific_output: false,
+        installs_in_settings: true,
     },
     HookEvent {
         name: "WorktreeCreate",
@@ -159,6 +185,7 @@ pub const HOOK_EVENTS: &[HookEvent] = &[
         matcher: "",
         status: "Recording worktree creation lifecycle",
         supports_hook_specific_output: false,
+        installs_in_settings: true,
     },
     HookEvent {
         name: "WorktreeRemove",
@@ -166,6 +193,7 @@ pub const HOOK_EVENTS: &[HookEvent] = &[
         matcher: "",
         status: "Recording worktree removal lifecycle",
         supports_hook_specific_output: false,
+        installs_in_settings: true,
     },
     HookEvent {
         name: "CwdChanged",
@@ -173,6 +201,7 @@ pub const HOOK_EVENTS: &[HookEvent] = &[
         matcher: "",
         status: "Recording working directory change",
         supports_hook_specific_output: false,
+        installs_in_settings: true,
     },
     HookEvent {
         name: "PreCompact",
@@ -180,6 +209,7 @@ pub const HOOK_EVENTS: &[HookEvent] = &[
         matcher: "",
         status: "Checkpointing before compaction",
         supports_hook_specific_output: false,
+        installs_in_settings: true,
     },
     HookEvent {
         name: "PostCompact",
@@ -187,6 +217,7 @@ pub const HOOK_EVENTS: &[HookEvent] = &[
         matcher: "",
         status: "Resuming after compaction",
         supports_hook_specific_output: false,
+        installs_in_settings: true,
     },
     HookEvent {
         name: "SessionStart",
@@ -194,6 +225,7 @@ pub const HOOK_EVENTS: &[HookEvent] = &[
         matcher: "",
         status: "Preparing native session state",
         supports_hook_specific_output: true,
+        installs_in_settings: true,
     },
     HookEvent {
         name: "SessionEnd",
@@ -201,6 +233,7 @@ pub const HOOK_EVENTS: &[HookEvent] = &[
         matcher: "",
         status: "Recording session end",
         supports_hook_specific_output: false,
+        installs_in_settings: true,
     },
     HookEvent {
         name: "Setup",
@@ -208,6 +241,7 @@ pub const HOOK_EVENTS: &[HookEvent] = &[
         matcher: "",
         status: "Preparing project setup state",
         supports_hook_specific_output: true,
+        installs_in_settings: true,
     },
     HookEvent {
         name: "InstructionsLoaded",
@@ -215,6 +249,7 @@ pub const HOOK_EVENTS: &[HookEvent] = &[
         matcher: "",
         status: "Recording loaded instruction context",
         supports_hook_specific_output: false,
+        installs_in_settings: true,
     },
     HookEvent {
         name: "ConfigChange",
@@ -222,13 +257,22 @@ pub const HOOK_EVENTS: &[HookEvent] = &[
         matcher: "",
         status: "Recording configuration change",
         supports_hook_specific_output: false,
+        installs_in_settings: true,
     },
+    // FileChanged: per code.claude.com/docs/en/hooks the `matcher` value
+    // doubles as the watch list — segments split on `|` are registered as
+    // literal filenames in the working directory. With `matcher: ""` no
+    // file is watched, so installing this stanza ships dead config Claude
+    // Code never fires. We keep the row so dispatch still works for ad-hoc
+    // invocations like `claude-skills hook file-changed`, but skip it on
+    // install until a per-repo watch list is meaningful.
     HookEvent {
         name: "FileChanged",
         slug: "file-changed",
         matcher: "",
         status: "Recording file-change lifecycle",
         supports_hook_specific_output: false,
+        installs_in_settings: false,
     },
     HookEvent {
         name: "Elicitation",
@@ -236,6 +280,7 @@ pub const HOOK_EVENTS: &[HookEvent] = &[
         matcher: "",
         status: "Recording elicitation prompt",
         supports_hook_specific_output: false,
+        installs_in_settings: true,
     },
     HookEvent {
         name: "ElicitationResult",
@@ -243,6 +288,7 @@ pub const HOOK_EVENTS: &[HookEvent] = &[
         matcher: "",
         status: "Recording elicitation result",
         supports_hook_specific_output: false,
+        installs_in_settings: true,
     },
 ];
 
@@ -412,6 +458,25 @@ mod tests {
     }
 
     #[test]
+    fn only_file_changed_opts_out_of_install() {
+        // Pins the install-allowlist invariant: FileChanged is the single known
+        // opt-out (its matcher value IS the watch list per the official docs, so
+        // it cannot be installed via settings.json the same way as other events).
+        // If you intentionally flip another row's `installs_in_settings` to false,
+        // update this test deliberately so the regression is reviewed.
+        let opt_outs: Vec<&'static str> = HOOK_EVENTS
+            .iter()
+            .filter(|event| !event.installs_in_settings)
+            .map(|event| event.name)
+            .collect();
+        assert_eq!(
+            opt_outs,
+            ["FileChanged"],
+            "unexpected installs_in_settings=false rows; update this test if intentional"
+        );
+    }
+
+    #[test]
     fn hook_specific_output_flag_matches_claude_code_schema() {
         // Per code.claude.com/docs/en/hooks, these events accept
         // `hookSpecificOutput.additionalContext`. Everything else must use
@@ -419,6 +484,7 @@ mod tests {
         let allowed = [
             "SessionStart",
             "Setup",
+            "SubagentStart",
             "UserPromptSubmit",
             "UserPromptExpansion",
             "PreToolUse",
