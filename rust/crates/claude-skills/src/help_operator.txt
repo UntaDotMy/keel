@@ -27,11 +27,12 @@
   design-intelligence recommend [request...]
   memory scope resolve [--memory-base <path>] [--workspace-root <path>] [--create-missing] [--refresh-system-map] [--format json|compact]
   memory system-map refresh [--memory-base <path>] [--workspace-root <path>] [--format json|compact]
-  memory status|report|working-brief|completion-gate|agent-registry|research-cache|maintenance|agent-packets|loop-guard|retrieve|index|entity|hook
+  memory working-brief|completion-gate
   memoriesv2 scope resolve [same flags as memory scope resolve]
-  memoriesv2 status|report|working-brief|completion-gate|agent-registry|research-cache|maintenance|agent-packets|loop-guard|retrieve|index|entity|hook
-  orchestration route-plan|task|start-run|finish-run|runtime-preflight|resume-status|checkpoint|trace
-  workflow start|resume|await|shutdown|finish|status|cockpit|dashboard|watch|route|guide|first-run|setup|guided-setup|branch
+  memoriesv2 system-map refresh [same flags as memory system-map refresh]
+  memoriesv2 working-brief|completion-gate
+  orchestration runtime-preflight|resume-status
+  workflow start|resume|finish|status|cockpit|dashboard|watch|route
   gain [reset]
   session [--since today|7d|30d|all] [--json]
   bench [--fixtures] [--exact] [--json] [--compare raw]

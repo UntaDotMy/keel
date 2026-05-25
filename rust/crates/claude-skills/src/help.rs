@@ -79,7 +79,7 @@ fn parse_command_tokens(line: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utility::{run_memory_command, run_orchestration_command};
+    use crate::utility::{run_memory_command, run_orchestration_command, run_workflow_command};
 
     /// Every command advertised in help_advanced.txt must route to a real dispatcher arm.
     ///
@@ -129,6 +129,82 @@ mod tests {
                 !combined.contains("Unknown"),
                 "advertised command does not route to a known dispatcher arm: {raw_line:?}\noutput: {combined}"
             );
+        }
+    }
+
+    /// Same guarantee as `every_advertised_advanced_command_routes_to_real_dispatcher`,
+    /// but for the operator-tier help surface in `help_operator.txt`.
+    ///
+    /// The operator file mixes top-level commands (help, version, install, ...) with
+    /// group commands (memory, memoriesv2, orchestration, workflow). Top-level commands
+    /// are matched in `commands.rs` directly and don't have the phantom-subcommand
+    /// failure mode this test guards against, so we only inspect lines whose first
+    /// token is a group dispatcher. Group-command lines may use pipe-separated
+    /// alternations (e.g. `workflow start|resume|finish`); each alternative is tested
+    /// independently.
+    #[test]
+    fn every_advertised_operator_command_routes_to_real_dispatcher() {
+        for raw_line in OPERATOR_HELP_COMMAND_LINES.lines() {
+            let trimmed = raw_line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let tokens = parse_command_tokens(raw_line);
+            if tokens.is_empty() {
+                continue;
+            }
+            let group = tokens[0].clone();
+            if !matches!(
+                group.as_str(),
+                "memory" | "memoriesv2" | "orchestration" | "workflow"
+            ) {
+                continue;
+            }
+            assert!(
+                tokens.len() >= 2,
+                "group help line must advertise at least one subcommand: {raw_line:?}"
+            );
+
+            // The second token may be a pipe-alternation list. Expand it so each
+            // alternative is checked. Any tokens after the second are kept verbatim
+            // (e.g. `memory scope resolve` -> ["scope", "resolve"]).
+            let alternation = tokens[1].split('|').map(|s| s.to_string());
+            let trailing: Vec<String> = tokens[2..].to_vec();
+
+            for first_subcommand in alternation {
+                let mut subcommand_args: Vec<String> = vec![first_subcommand];
+                subcommand_args.extend(trailing.iter().cloned());
+
+                let mut stdout: Vec<u8> = Vec::new();
+                let mut stderr: Vec<u8> = Vec::new();
+                let _ = match group.as_str() {
+                    "memory" | "memoriesv2" => run_memory_command(
+                        group.as_str(),
+                        &subcommand_args,
+                        &mut stdout,
+                        &mut stderr,
+                    ),
+                    "orchestration" => {
+                        run_orchestration_command(&subcommand_args, &mut stdout, &mut stderr)
+                    }
+                    "workflow" => run_workflow_command(&subcommand_args, &mut stdout, &mut stderr),
+                    _ => unreachable!(),
+                };
+
+                let combined = format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&stdout),
+                    String::from_utf8_lossy(&stderr)
+                );
+                assert!(
+                    !combined.contains("not implemented"),
+                    "advertised command is a phantom (dispatcher reports 'not implemented'): {raw_line:?} arg={subcommand_args:?}\noutput: {combined}"
+                );
+                assert!(
+                    !combined.contains("Unknown"),
+                    "advertised command does not route to a known dispatcher arm: {raw_line:?} arg={subcommand_args:?}\noutput: {combined}"
+                );
+            }
         }
     }
 
