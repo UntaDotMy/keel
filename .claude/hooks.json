@@ -26,7 +26,7 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "",
+        "matcher": "Bash",
         "hooks": [
           {
             "type": "command",
@@ -308,18 +308,6 @@
             "type": "command",
             "command": "claude-skills hook config-change",
             "statusMessage": "Recording configuration change"
-          }
-        ]
-      }
-    ],
-    "FileChanged": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "claude-skills hook file-changed",
-            "statusMessage": "Recording file-change lifecycle"
           }
         ]
       }

@@ -582,29 +582,7 @@ fn run_hook_lifecycle(
     // or must fall back to a top-level `systemMessage` lives on the event
     // row, so adding a new event to the table automatically picks up the
     // right schema.
-    let payload = if event.supports_hook_specific_output {
-        serde_json::json!({
-
-            "hookSpecificOutput": {
-
-                "hookEventName": event.name,
-
-                "additionalContext": context,
-
-            },
-
-            "suppressOutput": true,
-
-        })
-    } else {
-        serde_json::json!({
-
-            "systemMessage": context,
-
-            "suppressOutput": true,
-
-        })
-    };
+    let payload = render_lifecycle_payload(event, &context);
 
     match serde_json::to_string_pretty(&payload) {
         Ok(rendered) => {
@@ -621,6 +599,37 @@ fn run_hook_lifecycle(
 
             1
         }
+    }
+}
+
+/// Wrap `context` in the JSON payload Claude Code expects for `event`.
+///
+/// Events whose schema accepts `hookSpecificOutput.additionalContext` get
+/// the per-event shape; everything else falls back to top-level
+/// `systemMessage`. The split lives on the event row so adding a new event
+/// to `HOOK_EVENTS` automatically picks up the right schema.
+///
+/// Pulled out of `run_hook_lifecycle` so tests can exercise both branches
+/// without setting up the surrounding side-effects (system map refresh,
+/// raw-output prune). The previous in-line shape was effectively
+/// untestable: the only events whose `lifecycle_additional_context`
+/// returned non-empty all had `supports_hook_specific_output: true`, so
+/// the `systemMessage` branch was dead code in tests and a regression
+/// could have shipped silently.
+pub(crate) fn render_lifecycle_payload(event: &HookEvent, context: &str) -> JsonDocument {
+    if event.supports_hook_specific_output {
+        serde_json::json!({
+            "hookSpecificOutput": {
+                "hookEventName": event.name,
+                "additionalContext": context,
+            },
+            "suppressOutput": true,
+        })
+    } else {
+        serde_json::json!({
+            "systemMessage": context,
+            "suppressOutput": true,
+        })
     }
 }
 
@@ -868,13 +877,30 @@ fn sanitize_memory_key(value: &str) -> String {
 }
 
 fn render_hook_help(standard_output: &mut dyn Write) {
-    let _ = writeln!(
+    // Build the slug list straight from HOOK_EVENTS so the help line
+    // cannot drift from the dispatch table. The earlier hard-coded list
+    // shipped with 14 missing slugs (post-tool-batch, user-prompt-expansion,
+    // setup, file-changed, ...) that dispatched correctly but were
+    // invisible to anyone who ran `claude-skills hook` to learn what was
+    // available. Pulling from the table makes "advertised == dispatched"
+    // a structural property.
+    let admin_verbs = [
+        "install",
+        "uninstall",
+        "list",
+        "show",
+        "instructions",
+        "diagnose",
+    ];
+    let event_slugs: Vec<&'static str> = HOOK_EVENTS.iter().map(|event| event.slug).collect();
+    let joined = admin_verbs
+        .iter()
+        .copied()
+        .chain(event_slugs)
+        .collect::<Vec<_>>()
+        .join("|");
 
-        standard_output,
-
-        "Usage: claude-skills hook [install|uninstall|list|show|instructions|diagnose|pre-tool-use|post-tool-use|post-tool-use-failure|permission-request|notification|user-prompt-submit|stop|subagent-stop|task-created|task-completed|pre-compact|post-compact|session-start|session-end]"
-
-    );
+    let _ = writeln!(standard_output, "Usage: claude-skills hook [{joined}]");
 }
 
 fn run_hook_diagnose(
@@ -1289,6 +1315,17 @@ fn append_managed_hooks(document: &mut JsonDocument, hook_command: &str) -> Resu
         .ok_or_else(|| "settings.json missing hooks object".to_string())?;
 
     for event in HOOK_EVENTS {
+        // Some events declare themselves not installable into settings.json
+        // because their canonical config requires per-repo decisions we
+        // can't make at install time (FileChanged in particular: per
+        // code.claude.com/docs/en/hooks the matcher value is the watch
+        // list, so installing with `matcher: ""` would ship dead config).
+        // Dispatch still works for ad-hoc invocations; we just skip the
+        // settings stanza.
+        if !event.installs_in_settings {
+            continue;
+        }
+
         let event_entries = hooks
             .entry(event.name.to_string())
             .or_insert_with(|| JsonDocument::Array(Vec::new()));
@@ -1679,24 +1716,30 @@ mod tests {
             .and_then(JsonDocument::as_object)
             .unwrap();
 
-        for event in claude_hook_event_names() {
+        for event in HOOK_EVENTS {
+            if !event.installs_in_settings {
+                // FileChanged (and any future opt-out) is not written to
+                // settings.json by `claude-skills hook install`, so the
+                // payload won't contain a stanza for it.
+                continue;
+            }
             let commands = hooks
-                .get(event)
+                .get(event.name)
                 .and_then(JsonDocument::as_array)
                 .and_then(|entries| entries.first())
                 .and_then(|entry| entry.get("hooks"))
                 .and_then(JsonDocument::as_array)
-                .unwrap();
+                .unwrap_or_else(|| panic!("missing hooks entry for {}", event.name));
 
             let command = commands
                 .first()
                 .and_then(|hook| hook.get("command"))
                 .and_then(JsonDocument::as_str)
-                .unwrap();
+                .unwrap_or_else(|| panic!("missing command for {}", event.name));
 
-            let expected = expected_managed_command_for_event(event, &pre_tool_command);
+            let expected = expected_managed_command_for_event(event.name, &pre_tool_command);
 
-            assert_eq!(command, expected, "unexpected command for {event}");
+            assert_eq!(command, expected, "unexpected command for {}", event.name);
 
             if cfg!(windows) {
                 assert!(command.starts_with(
@@ -2071,50 +2114,64 @@ mod tests {
 
     #[test]
     fn top_level_only_hooks_use_system_message_not_hook_specific_output() {
-        // Per code.claude.com/docs/en/hooks, these events are documented
-        // with top-level decision fields only — they don't accept
-        // `hookSpecificOutput.additionalContext`. When we have something
-        // to say on one of them we must wrap it in a top-level
-        // `systemMessage` string, not the per-event `additionalContext`
-        // shape that PreToolUse/PostToolUse/UserPromptSubmit/PostToolBatch/
-        // SessionStart/Setup/UserPromptExpansion/PostToolUseFailure use.
-        for subcommand in [
-            "stop",
-            "subagent-stop",
-            "session-end",
-            "notification",
-            "permission-request",
-        ] {
-            let mut stdout = Vec::new();
-            let mut stderr = Vec::new();
+        // Per code.claude.com/docs/en/hooks, every event row carries a
+        // `supports_hook_specific_output` flag. Events with `true` accept
+        // `hookSpecificOutput.additionalContext`; everything else must use
+        // top-level fields like `systemMessage`. This test exercises the
+        // wrapper directly with a non-empty context for *every* event so
+        // both branches are reached. The earlier version called
+        // `run_hook_lifecycle` with five hand-picked events that all
+        // produce empty stdout in tests, so the assertions never ran and
+        // a regression in either branch would have shipped silently.
+        const SAMPLE_CONTEXT: &str = "non-empty test payload";
 
-            let code = run_hook_lifecycle(subcommand, &mut stdout, &mut stderr);
+        for event in HOOK_EVENTS {
+            let payload = render_lifecycle_payload(event, SAMPLE_CONTEXT);
 
-            if stdout.is_empty() {
-                continue;
+            if event.supports_hook_specific_output {
+                let hook_specific = payload
+                    .get("hookSpecificOutput")
+                    .unwrap_or_else(|| panic!("{} must emit hookSpecificOutput", event.name));
+                assert_eq!(
+                    hook_specific
+                        .get("hookEventName")
+                        .and_then(JsonDocument::as_str),
+                    Some(event.name),
+                    "{}: hookSpecificOutput.hookEventName must match the event row",
+                    event.name
+                );
+                assert_eq!(
+                    hook_specific
+                        .get("additionalContext")
+                        .and_then(JsonDocument::as_str),
+                    Some(SAMPLE_CONTEXT),
+                    "{}: hookSpecificOutput.additionalContext must carry the context",
+                    event.name
+                );
+                assert!(
+                    payload.get("systemMessage").is_none(),
+                    "{}: schema-supported events must not duplicate context into top-level systemMessage",
+                    event.name
+                );
+            } else {
+                assert!(
+                    payload.get("hookSpecificOutput").is_none(),
+                    "{}: top-level-only events must not emit hookSpecificOutput — the official Claude Code schema documents top-level decision fields only for this event",
+                    event.name
+                );
+                assert_eq!(
+                    payload.get("systemMessage").and_then(JsonDocument::as_str),
+                    Some(SAMPLE_CONTEXT),
+                    "{}: top-level-only events must wrap context in systemMessage",
+                    event.name
+                );
             }
 
             assert_eq!(
-                code,
-                0,
-                "stderr for {subcommand}: {}",
-                String::from_utf8_lossy(&stderr)
-            );
-
-            let output: JsonDocument = serde_json::from_slice(&stdout)
-                .unwrap_or_else(|error| panic!("invalid JSON for {subcommand}: {error}"));
-
-            assert!(
-                output.get("hookSpecificOutput").is_none(),
-                "{subcommand} must not emit hookSpecificOutput — the official Claude Code schema documents top-level decision fields only for this event"
-            );
-
-            assert!(
-                output
-                    .get("systemMessage")
-                    .and_then(JsonDocument::as_str)
-                    .is_some(),
-                "{subcommand} must emit systemMessage as a top-level string"
+                payload.get("suppressOutput").and_then(JsonDocument::as_bool),
+                Some(true),
+                "{}: every payload must set suppressOutput=true so plain stdout doesn't leak into the transcript",
+                event.name
             );
         }
     }
@@ -2163,6 +2220,45 @@ mod tests {
             output.get("systemMessage").is_none(),
             "SessionStart must not emit top-level systemMessage — additionalContext is the documented vehicle for model-context injection"
         );
+    }
+
+    #[test]
+    fn hook_help_lists_every_official_event_slug() {
+        // Regression guard: an earlier hand-maintained help string was
+        // missing 14 of the 29 official slugs. Anyone running
+        // `claude-skills hook` to discover what's available saw a partial
+        // list even though every slug dispatched. Generate the help line
+        // from HOOK_EVENTS so the "advertised == dispatched" invariant is
+        // structural rather than habit.
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let exit = run_hook_command(&[], &mut stdout, &mut stderr);
+        // No-args invocation prints help and exits 1 — that's intentional
+        // so a misconfigured pipeline can't silently no-op.
+        assert_eq!(exit, 1);
+        let rendered = String::from_utf8(stdout).expect("help is UTF-8");
+        for event in HOOK_EVENTS {
+            assert!(
+                rendered.contains(event.slug),
+                "hook help is missing slug `{}`; rendered: {rendered}",
+                event.slug
+            );
+        }
+        // Admin verbs must also be present.
+        for verb in [
+            "install",
+            "uninstall",
+            "list",
+            "show",
+            "instructions",
+            "diagnose",
+        ] {
+            assert!(
+                rendered.contains(verb),
+                "hook help is missing admin verb `{verb}`; rendered: {rendered}"
+            );
+        }
+        let _ = stderr;
     }
 
     #[test]
