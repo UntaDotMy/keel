@@ -117,11 +117,6 @@ pub fn run_doctor_command(
     );
     let _ = writeln!(
         standard_output,
-        "hook hosts: {}",
-        crate::hooks::supported_hosts().join(", ")
-    );
-    let _ = writeln!(
-        standard_output,
         "Run `claude-skills validate --profile smoke` for local proof."
     );
     0
