@@ -69,6 +69,35 @@ After implementation work, before claiming completion:
   project-level CLAUDE.md or AGENTS.md defines stricter routing rules, those
   take precedence; otherwise the inline rule in this paragraph is the standard.
 
+## Code Implementation Discipline (every code-touching turn)
+
+Four pillars govern every change. They apply on every turn, not only when a
+skill matcher fires. The full text and the tactical rules they imply live in
+`_shared/common-discipline.md` § Code Implementation Discipline.
+
+1. **Think Before Coding** — state assumptions, surface tradeoffs, and ask
+   when uncertain. Do not silently pick one of several interpretations. If a
+   simpler approach exists, name it and push back.
+2. **Simplicity First** — minimum code that solves the problem. No features
+   beyond what was asked, no abstractions for single-use code, no
+   "flexibility" the user did not request, no error handling for impossible
+   scenarios. If 200 lines could be 50, rewrite before review.
+3. **Surgical Changes** — touch only what the task requires. Do not
+   "improve" adjacent code or refactor things that are not broken. Match
+   existing style. Every changed line traces directly to the user's request.
+   Mention unrelated dead code; do not delete it without being asked.
+4. **Goal-Driven Execution** — turn vague tasks into verifiable goals before
+   coding ("Fix the bug" → "Write a test that reproduces it, then make it
+   pass"). For multi-step work, state a short plan with per-step verify
+   checks. Weak success criteria force re-asking and produce drift.
+
+| Thought | Reality |
+|---|---|
+| "I'll just code this and see" | Step 1 (Think Before Coding) failed. Stop and state the assumption. |
+| "While I'm here, I'll clean up the file" | Step 3 (Surgical Changes) violated. Revert the unrelated cleanup. |
+| "I'll add a config knob in case we need it" | Step 2 (Simplicity First) violated. Add it when a second caller exists. |
+| "Make it work" is a goal | Step 4 (Goal-Driven Execution) failed. State the verifiable check that proves done. |
+
 ## Skill catalog (13 skills installed under ~/.claude/skills/)
 
 Source: each `<name>/SKILL.md` in this repo. Use the Skill tool with the bare
