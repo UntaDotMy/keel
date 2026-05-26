@@ -822,12 +822,12 @@ fn post_compact_context() -> String {
 /// bootstrap (skill catalog, Red Flags table, decision flow, four
 /// implementation-discipline pillars) is delivered once via SessionStart;
 /// this hook only restates the iron law and names the four pillars so they
-/// stay top-of-mind on each turn. Body weight is roughly 160 tokens before
+/// stay top-of-mind on each turn. Body weight is roughly 200 tokens before
 /// `memory_scope_summary()` — within budget for a per-prompt injection but
 /// expensive enough that adding more text needs a deliberate reason.
 fn user_prompt_submit_context() -> String {
     format!(
-        "Research-first: trust the codebase, not your knowledge base. Read SYSTEM_MAP and the owning module before claiming behavior. Invoke any relevant skill via the Skill tool BEFORE responding — even a 1% chance it applies means use it. Find the root cause, not just the surface symptom. No assumptions. Implementation discipline applies on every code-touching turn — Think Before Coding (state assumptions, ask when uncertain), Simplicity First (minimum code, no speculative features or abstractions), Surgical Changes (every changed line traces to the request), Goal-Driven Execution (turn the task into a verifiable goal before coding). {}",
+        "Research-first: trust the codebase, not your knowledge base. Read SYSTEM_MAP and the owning module before claiming behavior. Invoke any relevant skill via the Skill tool BEFORE responding — even a 1% chance it applies means use it. Find the root cause, not just the surface symptom: suspicion is a hypothesis, not a finding — trace the symptom end-to-end with file:line evidence and confirm the suspect is on that path before changing it. No assumptions. No jumping from \"this may be the case\" to a patch. Implementation discipline applies on every code-touching turn — Think Before Coding (state assumptions, deep-dive any suspected target before changing it), Simplicity First (minimum code, no speculative features or abstractions), Surgical Changes (every changed line traces to the request), Goal-Driven Execution (reproduce or trace the symptom before naming a root cause; turn the task into a verifiable goal before coding). {}",
         memory_scope_summary()
     )
 }
@@ -2126,6 +2126,26 @@ mod tests {
         assert!(context.contains("root cause"));
         assert!(context.contains("No assumptions"));
 
+        // Deep-dive cues — the per-prompt pointer must keep the model from
+        // jumping from suspicion to fix. These two phrases name the failure
+        // mode ("this may be the case" → patch) and the required discipline
+        // (trace the symptom and confirm the suspect is on that path before
+        // changing it). They live here, not just in the bootstrap, because
+        // SessionStart context drops out of the working window after a few
+        // turns while UserPromptSubmit lands per prompt.
+        assert!(
+            context.contains("suspicion is a hypothesis"),
+            "UserPromptSubmit must restate that suspicion is a hypothesis, not a finding"
+        );
+        assert!(
+            context.contains("trace the symptom"),
+            "UserPromptSubmit must require tracing the symptom before naming a root cause"
+        );
+        assert!(
+            context.contains("this may be the case"),
+            "UserPromptSubmit must name the \"this may be the case\" jump as the failure mode"
+        );
+
         // Implementation-discipline pillars — UserPromptSubmit lands per
         // prompt, so naming the four pillars by name keeps them top-of-mind
         // even after the SessionStart bootstrap drops out of the model's
@@ -2347,6 +2367,21 @@ mod tests {
         assert!(
             context.contains("Goal-Driven Execution"),
             "SessionStart must embed the Goal-Driven Execution pillar"
+        );
+
+        // Root-cause deep-dive guard — the bootstrap must teach that
+        // suspicion is a hypothesis, not a finding, so the model does not
+        // jump from "this looks like the cause" to a patch. The exact
+        // phrasing lives in using-claude-core/SKILL.md; this assertion
+        // protects the rule from being silently trimmed during a future
+        // edit of the bootstrap.
+        assert!(
+            context.contains("Suspicion is a hypothesis, not a finding"),
+            "SessionStart must restate that suspicion is a hypothesis, not a finding"
+        );
+        assert!(
+            context.contains("Oh this may be the case"),
+            "SessionStart Red Flags must name the \"Oh this may be the case\" jump"
         );
     }
 
