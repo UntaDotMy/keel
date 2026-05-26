@@ -6,6 +6,7 @@
 
 pub mod hook_lifecycle;
 pub mod shell_rewrite;
+pub mod tool_timings;
 
 use std::fs;
 use std::io::Write;
