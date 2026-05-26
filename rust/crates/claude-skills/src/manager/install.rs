@@ -1,7 +1,7 @@
 //! Purpose: Install, sync, update, and uninstall logic for claude-skills manager.
 //! Caller: commands.rs via run_install_command, run_update_command, run_uninstall_command.
 //! Dependencies: std::fs, std::io, std::path, std::process, std::thread, std::time, claude_skills_platform, crate::args, crate::runtime.
-//! Main Functions: install_from_flags, install_from_paths, sync_root_files, sync_skills, sync_shared_resources, sync_agents, publish_native_executable, run_update_command, run_uninstall_command.
+//! Main Functions: install_from_flags, install_from_paths, sync_root_files, sync_skills, sync_shared_resources, sync_agents, sync_subagent_definitions, publish_native_executable, run_update_command, run_uninstall_command.
 //! Side Effects: Copies managed skill-pack files, writes Claude home config/state, publishes the Rust binary, runs git commands, and removes managed files during uninstall.
 
 use std::collections::BTreeSet;
@@ -29,6 +29,7 @@ use super::agent_config::{parse_agent_config, render_agent_toml, unix_timestamp}
 pub struct InstallSummary {
     pub synced_skills: usize,
     pub synced_agents: usize,
+    pub synced_subagent_definitions: usize,
     pub synced_root_files: usize,
     pub synced_shared_resources: usize,
     pub removed_stale_files: usize,
@@ -126,6 +127,8 @@ pub fn install_from_paths(
     let synced_skills = sync_skills(&layout, claude_home, &mut tracker)?;
     let synced_shared_resources = sync_shared_resources(&layout, claude_home, &mut tracker)?;
     let synced_agents = sync_agents(&layout, claude_home, &mut tracker)?;
+    let synced_subagent_definitions =
+        sync_subagent_definitions(&layout, claude_home, &mut tracker)?;
 
     let removed_stale_files = remove_orphans(
         claude_home,
@@ -144,6 +147,7 @@ pub fn install_from_paths(
     Ok(InstallSummary {
         synced_skills,
         synced_agents,
+        synced_subagent_definitions,
         synced_root_files,
         synced_shared_resources,
         removed_stale_files,
@@ -207,6 +211,11 @@ pub fn write_install_summary(summary: &InstallSummary, output: &mut dyn Write) {
     let _ = writeln!(output, "Summary:");
     let _ = writeln!(output, "  Synced skills: {}", summary.synced_skills);
     let _ = writeln!(output, "  Synced agents: {}", summary.synced_agents);
+    let _ = writeln!(
+        output,
+        "  Synced subagent definitions: {}",
+        summary.synced_subagent_definitions
+    );
     let _ = writeln!(output, "  Synced root files: {}", summary.synced_root_files);
     let _ = writeln!(
         output,
@@ -264,6 +273,13 @@ fn uninstall_managed_files(claude_home: &Path) -> Result<usize, String> {
         let shared_path = skills_directory(claude_home).join(shared_name);
         removed_count += remove_path_if_exists_counted(&shared_path)?;
     }
+    // `managed-agents.txt` stores bare agent names (no extension), one per
+    // YAML config under `<skill>/agents/*.yaml`. Each name maps to a managed
+    // agent profile under `<home>/agent-profiles/<name>.toml` plus an
+    // optional matching directory entry under `<home>/agents/<name>` from
+    // earlier installer revisions. Subagent `.md` definitions installed by
+    // `sync_subagent_definitions` are tracked separately via
+    // `managed-files.txt` and removed by the per-file inventory loop above.
     let installed_agents = read_inventory_set(&managed_agents_inventory_path(claude_home));
     for agent_name in &installed_agents {
         let agent_path = agents_directory(claude_home).join(agent_name);
@@ -456,6 +472,49 @@ fn sync_agents(
             }
             tracker.record(&target_path);
         }
+    }
+    Ok(synced_count)
+}
+
+/// Copy Claude Code subagent definitions from `<repo>/.claude/agents/*.md`
+/// into `<claude_home>/agents/<name>.md` so they load globally for any host
+/// repo. Without this step the subagent `.md` files only resolve when Claude
+/// Code spawns inside the claude_core checkout itself, because Claude Code
+/// reads project-scoped `.claude/agents/` only from the active project root.
+///
+/// Each copied file is recorded via the tracker so the existing per-file
+/// orphan sweep removes renamed or deleted definitions on the next install,
+/// and the uninstall path reaches them via `managed-files.txt`.
+fn sync_subagent_definitions(
+    layout: &RepositoryLayout,
+    claude_home: &Path,
+    tracker: &mut FileTracker,
+) -> Result<usize, String> {
+    let source_directory = layout.root_path.join(".claude").join("agents");
+    if !source_directory.is_dir() {
+        return Ok(0);
+    }
+    let target_directory = agents_directory(claude_home);
+    fs::create_dir_all(&target_directory)
+        .map_err(|error| format!("create {}: {error}", display_path(&target_directory)))?;
+    let mut synced_count = 0;
+    for entry_result in fs::read_dir(&source_directory)
+        .map_err(|error| format!("read {}: {error}", display_path(&source_directory)))?
+    {
+        let entry = entry_result.map_err(|error| format!("read directory entry: {error}"))?;
+        let source_path = entry.path();
+        if source_path.extension().and_then(|value| value.to_str()) != Some("md") {
+            continue;
+        }
+        let file_name = match source_path.file_name() {
+            Some(name) => name.to_owned(),
+            None => continue,
+        };
+        let target_path = target_directory.join(&file_name);
+        if copy_file_if_changed(&source_path, &target_path)? {
+            synced_count += 1;
+        }
+        tracker.record(&target_path);
     }
     Ok(synced_count)
 }
@@ -1383,6 +1442,76 @@ mod tests {
         assert_eq!(removed, 1, "abandoned .new must be cleaned up");
         assert!(!dot_new.is_file());
         assert!(executable.is_file());
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn install_copies_subagent_definitions_into_user_global_agents_directory() {
+        // Without this step, the project-scoped `.claude/agents/<name>.md`
+        // subagent definitions only resolve when Claude Code spawns inside the
+        // claude_core checkout. Host repos see no subagents at all. The
+        // installer must mirror them under `<claude_home>/agents/<name>.md`
+        // so the Agent tool finds them globally. Renamed definitions must be
+        // cleaned up by the existing per-file orphan sweep.
+        let (repo, home) = unique_paths("subagent-defs");
+        seed_repo(&repo);
+        write_skill_with_reference(&repo, "reviewer", "10-r.md");
+        let agents_source = repo.join(".claude").join("agents");
+        fs::create_dir_all(&agents_source).unwrap();
+        fs::write(
+            agents_source.join("reviewer.md"),
+            "---\nname: reviewer\n---\nbody\n",
+        )
+        .unwrap();
+        fs::write(
+            agents_source.join("git-expert.md"),
+            "---\nname: git-expert\n---\nbody\n",
+        )
+        .unwrap();
+
+        let summary = install_from_paths("dev", &repo, &home).unwrap();
+        assert_eq!(
+            summary.synced_subagent_definitions, 2,
+            "first install must report two newly written subagent definitions"
+        );
+
+        let installed_reviewer = home.join("agents/reviewer.md");
+        let installed_git = home.join("agents/git-expert.md");
+        assert!(
+            installed_reviewer.is_file(),
+            "reviewer subagent definition must land in user-global agents dir"
+        );
+        assert!(
+            installed_git.is_file(),
+            "git-expert subagent definition must land in user-global agents dir"
+        );
+
+        // Reinstall with no source change must report zero writes.
+        let summary = install_from_paths("dev", &repo, &home).unwrap();
+        assert_eq!(
+            summary.synced_subagent_definitions, 0,
+            "no-op reinstall must not rewrite unchanged subagent definitions"
+        );
+
+        // Rename one definition and reinstall — the old file must be cleaned
+        // up by the same per-file orphan sweep that handles skill references.
+        fs::remove_file(agents_source.join("git-expert.md")).unwrap();
+        fs::write(
+            agents_source.join("git-helper.md"),
+            "---\nname: git-helper\n---\nbody\n",
+        )
+        .unwrap();
+        install_from_paths("dev", &repo, &home).unwrap();
+
+        assert!(
+            !installed_git.is_file(),
+            "renamed subagent definition must be removed from claude home"
+        );
+        assert!(
+            home.join("agents/git-helper.md").is_file(),
+            "new subagent definition must be installed"
+        );
+        let _ = fs::remove_dir_all(&repo);
         let _ = fs::remove_dir_all(&home);
     }
 }
