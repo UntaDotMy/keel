@@ -22,6 +22,14 @@ use crate::utility;
 
 const RAW_OUTPUT_DEFAULT_RETENTION_DAYS: u64 = 14;
 
+/// Tool-timings JSONL rows are tiny (one short line per tool call) compared
+/// to raw-output directories, so a longer default retention is fine. 30 days
+/// gives an analyzer a useful month-long sample without letting the directory
+/// grow unbounded across long sessions. Tunable via
+/// `CLAUDE_SKILLS_TIMINGS_RETENTION_DAYS`; setting it to `0` disables the
+/// SessionEnd prune.
+const TIMINGS_DEFAULT_RETENTION_DAYS: u64 = 30;
+
 const MANAGED_PRE_TOOL_USE_EVENT: &str = "PreToolUse";
 
 /// SYSTEM_MAP.md is rebuilt every N edit-class tool calls so the workspace
@@ -670,6 +678,7 @@ fn run_hook_lifecycle(
 
     if event.name == "SessionEnd" {
         prune_raw_output_store(standard_error);
+        prune_tool_timings_store(standard_error);
     }
 
     let context = lifecycle_additional_context(event.slug);
@@ -863,6 +872,35 @@ fn prune_raw_output_store(standard_error: &mut dyn Write) {
         let _ = writeln!(
             standard_error,
             "claude-skills raw-output prune failed: {error}"
+        );
+    }
+}
+
+/// Drop tool-timings JSONL rows older than the configured retention.
+///
+/// Mirrors `prune_raw_output_store` in shape: SessionEnd-only, env var
+/// override, swallow errors so a telemetry housekeeping failure cannot
+/// fail the hook. The store is per-day JSONL files under
+/// `<claude_home>/state/tool-timings/`; the prune helper in
+/// `tool_timings::prune_older_than` parses the date out of each filename
+/// and removes files older than the cutoff.
+///
+/// `pub(crate)` so the env-var override and `retention=0` disable paths
+/// are exercisable from the `tool_timings` module's existing isolated
+/// `with_isolated_claude_home` test harness without duplicating the
+/// `CLAUDE_TARGET_OVERRIDE` plumbing here.
+pub(crate) fn prune_tool_timings_store(standard_error: &mut dyn Write) {
+    let retention_days = std::env::var("CLAUDE_SKILLS_TIMINGS_RETENTION_DAYS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(TIMINGS_DEFAULT_RETENTION_DAYS);
+    if retention_days == 0 {
+        return;
+    }
+    if let Err(error) = tool_timings::prune_older_than(retention_days) {
+        let _ = writeln!(
+            standard_error,
+            "claude-skills tool-timings prune failed: {error}"
         );
     }
 }

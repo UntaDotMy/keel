@@ -103,14 +103,9 @@ fn effort_level_from(input: &JsonDocument) -> String {
 /// None when claude_home cannot be resolved — the caller treats that as
 /// "telemetry disabled" and exits silently rather than failing the hook.
 fn timings_path_for_today() -> Option<PathBuf> {
-    let claude_home = resolve_claude_home("").ok()?;
+    let directory = timings_directory()?;
     let date = chrono::Local::now().format("%Y-%m-%d").to_string();
-    Some(
-        claude_home
-            .join("state")
-            .join("tool-timings")
-            .join(format!("{date}.jsonl")),
-    )
+    Some(directory.join(format!("{date}.jsonl")))
 }
 
 fn now_ms() -> u64 {
@@ -118,6 +113,64 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|delta| delta.as_millis() as u64)
         .unwrap_or(0)
+}
+
+/// Resolve `<claude_home>/state/tool-timings/`. Returns None when claude_home
+/// cannot be resolved — the caller treats that as "telemetry disabled" and
+/// exits silently rather than failing.
+fn timings_directory() -> Option<PathBuf> {
+    let claude_home = resolve_claude_home("").ok()?;
+    Some(claude_home.join("state").join("tool-timings"))
+}
+
+/// Delete per-day JSONL files whose filename date is older than `days` ago.
+///
+/// The date is encoded in the filename (`YYYY-MM-DD.jsonl`), written by
+/// `timings_path_for_today`. Filename parsing is preferred over file mtime
+/// here because the date is the structural truth — an unrelated `touch`
+/// would not move a row's logical age. Files that do not match the
+/// `YYYY-MM-DD.jsonl` shape are left untouched: the directory is owned
+/// by `record_tool_timing`, but a future writer might drop sidecar files
+/// (a README, a manifest) and we do not delete what we did not write.
+///
+/// Returns the number of files removed. `Ok(0)` when the directory does
+/// not exist yet (no rows have ever been recorded). Errors propagate so
+/// the SessionEnd caller can log them; the caller already swallows the
+/// `Err` to keep telemetry pruning non-fatal.
+pub fn prune_older_than(days: u64) -> std::io::Result<usize> {
+    let Some(directory) = timings_directory() else {
+        return Ok(0);
+    };
+    if !directory.exists() {
+        return Ok(0);
+    }
+
+    let today = chrono::Local::now().date_naive();
+    let cutoff = match today.checked_sub_days(chrono::Days::new(days)) {
+        Some(date) => date,
+        // `days` so large it underflowed the calendar — nothing to prune.
+        None => return Ok(0),
+    };
+
+    let mut removed = 0usize;
+    for entry in fs::read_dir(&directory)? {
+        let entry = entry?;
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else {
+            continue;
+        };
+        let Some(stem) = name.strip_suffix(".jsonl") else {
+            continue;
+        };
+        let Ok(file_date) = chrono::NaiveDate::parse_from_str(stem, "%Y-%m-%d") else {
+            continue;
+        };
+        if file_date < cutoff {
+            fs::remove_file(entry.path())?;
+            removed += 1;
+        }
+    }
+    Ok(removed)
 }
 
 #[cfg(test)]
@@ -409,6 +462,199 @@ mod tests {
                 parsed.get("effort_level").and_then(JsonDocument::as_str),
                 Some(""),
             );
+        });
+    }
+
+    #[test]
+    fn prune_older_than_removes_only_files_older_than_cutoff() {
+        // Three fixture files: today, 5 days ago, 30 days ago. With a 10-day
+        // retention only the 30-day file is older than the cutoff and gets
+        // removed; today and 5-days-ago survive. Asserting the survivors as
+        // well as the removed count guards against an "off by one" cutoff
+        // that would also delete the 5-day file.
+        with_isolated_claude_home("prune-selective", |root| {
+            let timings = root.join("state").join("tool-timings");
+            fs::create_dir_all(&timings).expect("create timings dir");
+
+            let today = chrono::Local::now().date_naive();
+            let fresh = today;
+            let middle = today
+                .checked_sub_days(chrono::Days::new(5))
+                .expect("sub 5 days");
+            let stale = today
+                .checked_sub_days(chrono::Days::new(30))
+                .expect("sub 30 days");
+
+            for date in [fresh, middle, stale] {
+                let path = timings.join(format!("{}.jsonl", date.format("%Y-%m-%d")));
+                fs::write(&path, "{}\n").expect("write fixture row");
+            }
+
+            let removed = prune_older_than(10).expect("prune");
+            assert_eq!(removed, 1, "only the 30-day file should be removed");
+
+            assert!(
+                timings
+                    .join(format!("{}.jsonl", fresh.format("%Y-%m-%d")))
+                    .exists(),
+                "today's file must survive"
+            );
+            assert!(
+                timings
+                    .join(format!("{}.jsonl", middle.format("%Y-%m-%d")))
+                    .exists(),
+                "5-day-old file must survive a 10-day retention"
+            );
+            assert!(
+                !timings
+                    .join(format!("{}.jsonl", stale.format("%Y-%m-%d")))
+                    .exists(),
+                "30-day-old file must be removed by a 10-day retention"
+            );
+        });
+    }
+
+    #[test]
+    fn prune_older_than_returns_zero_when_directory_missing() {
+        // No rows have ever been recorded — the directory does not exist.
+        // Prune must succeed with zero removed rather than erroring out.
+        with_isolated_claude_home("prune-missing", |root| {
+            assert!(!root.join("state").join("tool-timings").exists());
+            let removed = prune_older_than(30).expect("prune missing dir");
+            assert_eq!(removed, 0);
+        });
+    }
+
+    #[test]
+    fn prune_older_than_skips_files_that_do_not_match_date_shape() {
+        // The store directory could contain a future sidecar file (README,
+        // manifest) that the prune helper did not write. Filename parsing
+        // protects those: anything that does not strip cleanly into a
+        // `YYYY-MM-DD` stem is left in place even if it happens to be
+        // older than the cutoff.
+        with_isolated_claude_home("prune-skip-foreign", |root| {
+            let timings = root.join("state").join("tool-timings");
+            fs::create_dir_all(&timings).expect("create timings dir");
+
+            // A genuine ancient row that *should* be pruned.
+            let stale_date = chrono::Local::now()
+                .date_naive()
+                .checked_sub_days(chrono::Days::new(100))
+                .expect("sub 100 days");
+            let stale_row = timings.join(format!("{}.jsonl", stale_date.format("%Y-%m-%d")));
+            fs::write(&stale_row, "{}\n").expect("write stale row");
+
+            // Foreign files: wrong extension, wrong stem shape, plain README.
+            let foreign_paths = [
+                timings.join("README.md"),
+                timings.join("not-a-date.jsonl"),
+                timings.join("2026-13-01.jsonl"), // invalid month → won't parse
+            ];
+            for path in &foreign_paths {
+                fs::write(path, b"sidecar").expect("write foreign file");
+            }
+
+            let removed = prune_older_than(30).expect("prune");
+            assert_eq!(removed, 1, "only the matching JSONL must be removed");
+            assert!(!stale_row.exists(), "stale row must be removed");
+            for path in &foreign_paths {
+                assert!(
+                    path.exists(),
+                    "foreign file must survive: {}",
+                    path.display()
+                );
+            }
+        });
+    }
+
+    /// Sentinel env var name for the SessionEnd timings prune retention.
+    /// Hard-coded here so a rename in `hook_lifecycle.rs` would break this
+    /// test instead of silently disabling the env override at the wiring
+    /// layer.
+    const TIMINGS_RETENTION_ENV_VAR: &str = "CLAUDE_SKILLS_TIMINGS_RETENTION_DAYS";
+
+    /// Set `TIMINGS_RETENTION_ENV_VAR`, run the closure, restore prior
+    /// state. Pairs with `with_isolated_claude_home` which already holds
+    /// the process-wide `ENV_LOCK` for the duration of the test, so this
+    /// helper does not need its own lock — it just guarantees the env
+    /// var leaves the process in the same state it was found.
+    fn with_timings_retention_env<F: FnOnce() -> R, R>(value: Option<&str>, run: F) -> R {
+        let previous = std::env::var(TIMINGS_RETENTION_ENV_VAR).ok();
+        match value {
+            Some(v) => std::env::set_var(TIMINGS_RETENTION_ENV_VAR, v),
+            None => std::env::remove_var(TIMINGS_RETENTION_ENV_VAR),
+        }
+        let result = run();
+        match previous {
+            Some(v) => std::env::set_var(TIMINGS_RETENTION_ENV_VAR, v),
+            None => std::env::remove_var(TIMINGS_RETENTION_ENV_VAR),
+        }
+        result
+    }
+
+    #[test]
+    fn prune_tool_timings_store_honors_env_var_override() {
+        // Wiring-layer test: with `CLAUDE_SKILLS_TIMINGS_RETENTION_DAYS=2`
+        // a 5-day-old file gets pruned even though the compiled-in default
+        // (30 days) would have kept it. Confirms the env var name in
+        // `hook_lifecycle.rs` matches the contract documented for
+        // operators and that the parse + override path is reachable.
+        with_isolated_claude_home("prune-env-override", |root| {
+            with_timings_retention_env(Some("2"), || {
+                let timings = root.join("state").join("tool-timings");
+                fs::create_dir_all(&timings).expect("create timings dir");
+
+                let stale_date = chrono::Local::now()
+                    .date_naive()
+                    .checked_sub_days(chrono::Days::new(5))
+                    .expect("sub 5 days");
+                let stale_row = timings.join(format!("{}.jsonl", stale_date.format("%Y-%m-%d")));
+                fs::write(&stale_row, "{}\n").expect("write stale row");
+
+                let mut stderr = Vec::new();
+                crate::runner::hook_lifecycle::prune_tool_timings_store(&mut stderr);
+
+                assert!(
+                    !stale_row.exists(),
+                    "5-day-old file must be removed when env var sets retention to 2 days"
+                );
+                assert!(
+                    stderr.is_empty(),
+                    "successful prune must not write to stderr: {}",
+                    String::from_utf8_lossy(&stderr)
+                );
+            });
+        });
+    }
+
+    #[test]
+    fn prune_tool_timings_store_disabled_when_retention_is_zero() {
+        // Wiring-layer test: `CLAUDE_SKILLS_TIMINGS_RETENTION_DAYS=0` is
+        // the documented escape hatch for operators who want to retain
+        // every row indefinitely. The function must early-return without
+        // touching the directory, even when an obviously-ancient file
+        // exists.
+        with_isolated_claude_home("prune-env-disabled", |root| {
+            with_timings_retention_env(Some("0"), || {
+                let timings = root.join("state").join("tool-timings");
+                fs::create_dir_all(&timings).expect("create timings dir");
+
+                let ancient_date = chrono::Local::now()
+                    .date_naive()
+                    .checked_sub_days(chrono::Days::new(365))
+                    .expect("sub 365 days");
+                let ancient_row =
+                    timings.join(format!("{}.jsonl", ancient_date.format("%Y-%m-%d")));
+                fs::write(&ancient_row, "{}\n").expect("write ancient row");
+
+                let mut stderr = Vec::new();
+                crate::runner::hook_lifecycle::prune_tool_timings_store(&mut stderr);
+
+                assert!(
+                    ancient_row.exists(),
+                    "retention=0 must disable the prune even for a 365-day-old file"
+                );
+            });
         });
     }
 }
