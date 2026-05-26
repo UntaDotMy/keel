@@ -560,26 +560,52 @@ pub fn publish_native_executable(
     claude_home: &Path,
 ) -> Result<bool, String> {
     let target = detect_current_target().map_err(|error| format!("detect target: {error}"))?;
-    // Two source layouts must be supported:
-    //   1. Cargo-built source tree: <repo_root>/target/<triple>/release/claude-skills.exe.
-    //      This is what `cargo build --release` produces and what local
-    //      contributors have on disk.
-    //   2. Release archive bundle: <repo_root>/claude-skills.exe. The release
-    //      workflow stages the binary at the bundle root (.github/workflows/release.yml
-    //      step "Stage release bundle"), and install.ps1/install.sh pass that
-    //      bundle directory as --repo-root.
-    // Without the fallback, install.ps1 ran against a fresh release archive
-    // returns Ok(false) and silently leaves a stale executable on disk —
-    // which is the regression that reproduced "Unknown hook command:
-    // post-tool-use-failure" against a binary that predated PR #54.
-    let cargo_built = repository_root
+    // Three source layouts must be supported, probed in this priority order:
+    //
+    //   1. Cargo cross-build / CI: <repo_root>/target/<triple>/release/claude-skills.exe.
+    //      Produced when `cargo build --release --target <triple>` is invoked
+    //      explicitly (the release workflow does this for cross-compile).
+    //      Probed first so a CI build that staged both layouts still picks
+    //      the targeted artifact over a host-arch leftover.
+    //
+    //   2. Cargo host-default: <repo_root>/target/release/claude-skills.exe.
+    //      Produced by plain `cargo build --release` without `--target`,
+    //      which is what local contributors run by default. Without this
+    //      probe, `claude-skills install` from a Cargo-direct workspace
+    //      silently returns Ok(false), prints "Published executable: false",
+    //      and leaves the previously-installed binary in place — the exact
+    //      "stale binary" regression that surfaced as `claude-skills memory
+    //      working-brief write` returning the long-deleted "Rust native
+    //      placeholder completed without Go fallback" error against a
+    //      workspace where source had moved 18+ commits past the install.
+    //
+    //   3. Release archive bundle: <repo_root>/claude-skills.exe. The release
+    //      workflow stages the binary at the bundle root (.github/workflows/
+    //      release.yml step "Stage release bundle"), and install.ps1/install.sh
+    //      pass that bundle directory as --repo-root. Probed last so a
+    //      Cargo-built workspace prefers its own fresh artifact over any
+    //      bundle-root leftover from a previous archive install.
+    //
+    // Without the bundle fallback, install.ps1 ran against a fresh release
+    // archive returns Ok(false) and silently leaves a stale executable on
+    // disk — the regression that reproduced "Unknown hook command:
+    // post-tool-use-failure" against a binary that predated PR #54. The
+    // fix here keeps both legacy probes intact and adds the missing
+    // host-default probe between them.
+    let cargo_targeted = repository_root
         .join("target")
         .join(target.directory_name())
         .join("release")
         .join(executable_file_name());
+    let cargo_host_default = repository_root
+        .join("target")
+        .join("release")
+        .join(executable_file_name());
     let bundle_root = repository_root.join(executable_file_name());
-    let source_path = if cargo_built.is_file() {
-        cargo_built
+    let source_path = if cargo_targeted.is_file() {
+        cargo_targeted
+    } else if cargo_host_default.is_file() {
+        cargo_host_default
     } else if bundle_root.is_file() {
         bundle_root
     } else {
@@ -1111,6 +1137,106 @@ mod tests {
         let published = publish_native_executable(&repo, &claude_home).unwrap();
         assert!(published);
         assert_eq!(fs::read(&installed).unwrap(), b"cargo-built");
+
+        let _ = fs::remove_dir_all(&repo);
+        let _ = fs::remove_dir_all(&claude_home);
+    }
+
+    #[test]
+    fn publish_native_executable_picks_up_cargo_host_default_layout() {
+        // Plain `cargo build --release` (no --target) writes to
+        // <repo>/target/release/<exe>, NOT the triple-suffixed
+        // <repo>/target/<os>-<arch>/release/<exe>. Local contributors and
+        // anyone who runs `claude-skills update` from a source tree get
+        // this layout. Without the host-default probe, publish returned
+        // Ok(false), the install summary printed "Published executable:
+        // false", and the previously-installed binary stayed in place —
+        // which is the regression that surfaced as `claude-skills memory
+        // working-brief write` returning the long-deleted "Rust native
+        // placeholder completed without Go fallback" error against a
+        // workspace 18+ commits past the install.
+        let (repo, claude_home) = unique_paths("publish-host-default");
+        fs::create_dir_all(&claude_home).unwrap();
+
+        let host_default_dir = repo.join("target").join("release");
+        fs::create_dir_all(&host_default_dir).unwrap();
+        fs::write(
+            host_default_dir.join(executable_file_name()),
+            b"host-default-build",
+        )
+        .unwrap();
+
+        let installed = installed_executable_path(&claude_home);
+        fs::write(&installed, b"old-binary-contents").unwrap();
+
+        let published = publish_native_executable(&repo, &claude_home).unwrap();
+        assert!(
+            published,
+            "publish must report true when copying from target/release host-default layout"
+        );
+        assert_eq!(fs::read(&installed).unwrap(), b"host-default-build");
+
+        let _ = fs::remove_dir_all(&repo);
+        let _ = fs::remove_dir_all(&claude_home);
+    }
+
+    #[test]
+    fn publish_native_executable_prefers_cargo_targeted_over_host_default() {
+        // CI / cross-compile runs use `cargo build --release --target <triple>`
+        // and may also leave a host-default artifact behind from an earlier
+        // local build. When both exist, the targeted artifact wins because
+        // it is the one the operator explicitly asked to build for the
+        // install host.
+        let (repo, claude_home) = unique_paths("publish-prefer-targeted");
+        fs::create_dir_all(&claude_home).unwrap();
+
+        let target = detect_current_target().unwrap();
+        let targeted_dir = repo
+            .join("target")
+            .join(target.directory_name())
+            .join("release");
+        let host_default_dir = repo.join("target").join("release");
+        fs::create_dir_all(&targeted_dir).unwrap();
+        fs::create_dir_all(&host_default_dir).unwrap();
+        fs::write(targeted_dir.join(executable_file_name()), b"cargo-targeted").unwrap();
+        fs::write(
+            host_default_dir.join(executable_file_name()),
+            b"host-default",
+        )
+        .unwrap();
+
+        let installed = installed_executable_path(&claude_home);
+        let published = publish_native_executable(&repo, &claude_home).unwrap();
+        assert!(published);
+        assert_eq!(fs::read(&installed).unwrap(), b"cargo-targeted");
+
+        let _ = fs::remove_dir_all(&repo);
+        let _ = fs::remove_dir_all(&claude_home);
+    }
+
+    #[test]
+    fn publish_native_executable_prefers_host_default_over_bundle_root() {
+        // When a Cargo-direct workspace also has a leftover bundle-root
+        // exe (from a previous archive install staged into the same tree),
+        // the freshly built host-default artifact wins. Rationale: a
+        // contributor running `claude-skills install` after `cargo build`
+        // expects their new binary to ship, not a stale archive sibling.
+        let (repo, claude_home) = unique_paths("publish-host-over-bundle");
+        fs::create_dir_all(&claude_home).unwrap();
+
+        let host_default_dir = repo.join("target").join("release");
+        fs::create_dir_all(&host_default_dir).unwrap();
+        fs::write(
+            host_default_dir.join(executable_file_name()),
+            b"host-default-fresh",
+        )
+        .unwrap();
+        fs::write(repo.join(executable_file_name()), b"bundle-leftover").unwrap();
+
+        let installed = installed_executable_path(&claude_home);
+        let published = publish_native_executable(&repo, &claude_home).unwrap();
+        assert!(published);
+        assert_eq!(fs::read(&installed).unwrap(), b"host-default-fresh");
 
         let _ = fs::remove_dir_all(&repo);
         let _ = fs::remove_dir_all(&claude_home);
