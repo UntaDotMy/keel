@@ -97,6 +97,16 @@ pub fn run_hook_command(
         // here so no downstream change can accidentally bring back the bug.
         "stop" | "subagent-stop" => 0,
 
+        // Notification fires when Claude Code wants the user's attention
+        // (permission prompt, idle reminder). CC 2.1.141 added the
+        // `terminalSequence` field to hook JSON output for exactly this case
+        // — emitting bells/desktop notifications without a controlling
+        // terminal. We ring the BEL so the user hears it even when the
+        // terminal is in the background. Notification is documented as
+        // top-level-only (no hookSpecificOutput), so we own dispatch here
+        // rather than going through the lifecycle path.
+        "notification" => run_hook_notification(standard_output),
+
         // Every other slug is dispatched if and only if it appears in the canonical
         // event table. Using the same table that drives `settings.json` installation
         // means a stale binary cannot reject an event the install path advertises:
@@ -564,6 +574,33 @@ fn run_hook_post_tool_use_failure(standard_error: &mut dyn Write) -> u8 {
 
     0
 }
+
+/// Notification handler.
+///
+/// CC 2.1.141 added a `terminalSequence` top-level field to hook JSON output
+/// so hooks can emit desktop notifications, window titles, and bells without
+/// a controlling terminal. The Notification event fires when Claude Code
+/// raises a permission prompt or an idle "needs your attention" cue, so it
+/// is the natural place to ring the BEL. Allowed payload per the docs is
+/// OSC 0/1/2/9/99/777 and BEL — `\u{0007}` is the BEL and is in the
+/// allowlist. `suppressOutput` keeps the transcript clean.
+///
+/// The handler is input-agnostic: the JSON output is the same regardless of
+/// what stdin contains, so we don't read it. Claude Code does not require
+/// the hook to drain the pipe.
+fn run_hook_notification(standard_output: &mut dyn Write) -> u8 {
+    let _ = writeln!(standard_output, "{NOTIFICATION_BELL_OUTPUT}");
+
+    0
+}
+
+/// Hook JSON emitted by Notification. BEL is in the CC 2.1.141
+/// `terminalSequence` allowlist and is JSON-escaped as `\u0007` per
+/// RFC 8259 (control characters U+0000–U+001F MUST be escaped inside a
+/// JSON string). Claude Code unescapes the value before writing it to the
+/// terminal, which is what produces the audible bell. `suppressOutput`
+/// hides this row from the transcript so the bell is the only side effect.
+const NOTIFICATION_BELL_OUTPUT: &str = "{\"suppressOutput\":true,\"terminalSequence\":\"\\u0007\"}";
 
 fn is_edit_class_tool(tool_name: &str) -> bool {
     matches!(tool_name, "Edit" | "Write" | "MultiEdit" | "NotebookEdit")
@@ -2508,6 +2545,52 @@ mod tests {
                 String::from_utf8_lossy(&stderr)
             );
         }
+    }
+
+    #[test]
+    fn notification_emits_bell_terminal_sequence() {
+        // CC 2.1.141: Notification fires when Claude Code wants the user's
+        // attention (permission prompt, idle reminder). Our handler emits a
+        // top-level `terminalSequence` carrying the BEL so the user hears
+        // it even when the terminal is in the background. The output also
+        // sets `suppressOutput` so the bell is the only visible side
+        // effect. The hook must always exit 0 — a non-zero notification
+        // exit is treated as a permission denial in some CC builds.
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let code = run_hook_command(&["notification".to_string()], &mut stdout, &mut stderr);
+
+        assert_eq!(
+            code,
+            0,
+            "notification must exit 0; stderr: {}",
+            String::from_utf8_lossy(&stderr)
+        );
+        assert!(
+            stderr.is_empty(),
+            "notification must emit no stderr; got: {}",
+            String::from_utf8_lossy(&stderr)
+        );
+
+        // Stdout is one JSON object terminated by a newline.
+        let rendered = String::from_utf8(stdout).expect("notification output is UTF-8");
+        let trimmed = rendered.strip_suffix('\n').unwrap_or(&rendered);
+
+        let parsed: JsonDocument =
+            serde_json::from_str(trimmed).expect("notification output is valid JSON");
+        assert_eq!(
+            parsed.get("suppressOutput").and_then(JsonDocument::as_bool),
+            Some(true),
+            "notification must set suppressOutput so the row stays out of the transcript",
+        );
+        assert_eq!(
+            parsed
+                .get("terminalSequence")
+                .and_then(JsonDocument::as_str),
+            Some("\u{0007}"),
+            "terminalSequence must be the BEL byte (CC 2.1.141 allowlist)",
+        );
     }
 
     #[test]
