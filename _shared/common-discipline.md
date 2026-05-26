@@ -46,13 +46,20 @@ The block is split into two layers: four **behavioral pillars** that govern how 
 
 ### Think Before Coding
 
-**Don't assume. Don't hide confusion. Surface tradeoffs.**
+**Don't assume. Don't hide confusion. Surface tradeoffs. Suspicion is a hypothesis, not a finding.**
 
 - State assumptions explicitly before implementing. If uncertain, ask instead of guessing.
 - If multiple interpretations exist, present them. Do not silently pick one.
 - If a simpler approach exists, say so and push back on the requested approach when warranted.
 - If something is unclear, stop. Name what is confusing. Ask.
 - "I'll just code this and see" is the failure mode this pillar exists to prevent.
+
+**Deep dive before declaring a target.** When you suspect a function, module, or branch is the cause:
+
+- Verify it sits on the user-story symptom's execution path. Read the function in full, trace its callers and callees against the failing trigger. A function that *looks like* the cause is a hypothesis, not a finding.
+- "Oh this may be the case" is a stop signal, not a green light. Either gather the evidence that confirms it (file:line, log line, repro trace) or keep reading.
+- If the suspected target hides a sub-problem (a helper that fails, a branch that misroutes, a state that drifts), understand that sub-problem fully before changing anything. Patching the wrong layer leaves the symptom in place and burns review cycles.
+- Map findings as you go: update the working-brief with the path you traced and the evidence you cited, and refresh `SYSTEM_MAP` when structural facts emerge. The investigation has to survive compaction; recall comes from disk, not from working memory.
 
 ### Simplicity First
 
@@ -85,12 +92,18 @@ The test: every changed line should trace directly back to the user's request. L
 
 ### Goal-Driven Execution
 
-**Define success criteria. Loop until verified.**
+**Define success criteria. Reproduce the symptom before chasing it. Loop until verified.**
 
 Transform vague tasks into verifiable goals before writing code:
 - "Add validation" → "Write tests for invalid inputs, then make them pass."
-- "Fix the bug" → "Write a test that reproduces it, then make it pass."
+- "Fix the bug" → "Reproduce or trace the symptom end-to-end with file:line evidence, write a test that captures it, then make it pass."
 - "Refactor X" → "Ensure the existing tests pass before and after."
+
+For bug fixes and incident work, the goal is not "patch the function that looks suspicious." It is:
+
+1. Reproduce the symptom from the user story, or trace it end-to-end against the running code (input → handler → failing branch → observable effect). Cite file:line at every hop.
+2. Confirm the suspected target is actually on that traced path. If it is not, the target is wrong — go back to step 1, do not "fix" it anyway.
+3. Only then write the failing test or define the verifiable check that proves done.
 
 For multi-step tasks, state a brief plan with per-step verification:
 

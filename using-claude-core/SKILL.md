@@ -23,7 +23,12 @@ architecture:
    is not negotiable. You cannot rationalize your way out of it.
 3. **Find the root cause.** User stories and prompts are vague. Take the symptom
    as a starting point, not the specification. The real problem is usually one
-   layer below what was asked.
+   layer below what was asked. Suspecting a function is not the same as
+   confirming it: trace the symptom end-to-end against the running code with
+   file:line evidence, verify the suspected target sits on that path, and
+   understand any sub-problem on it before changing anything. Persist the
+   trace in the working-brief and SYSTEM_MAP so the investigation survives
+   compaction.
 
 If an invoked skill turns out not to apply, fine — you spent a few hundred tokens
 checking. The cost of skipping a skill that did apply is shipping a regression.
@@ -42,6 +47,7 @@ checking. The cost of skipping a skill that did apply is shipping a regression.
 | "I'll explore the codebase my own way" | `preserve-existing-flow` exists for a reason. Use it. |
 | "The skill is overkill" | Simple things become complex. Use the skill. |
 | "I know what that code does" | Knowing the concept ≠ knowing the current implementation. Read it. |
+| "Oh this may be the case" | Suspicion is a hypothesis, not a finding. Confirm the suspected target sits on the symptom's traced path with file:line evidence before changing it. |
 | "Tests already passed earlier" | Re-run before claiming. No completion claims without fresh evidence. |
 | "That hook reminder is wrapper-artifact noise, I'll read past it" | Hook reminders state the rule inline so they are self-contained in any repo. Re-read the diff against the rule before skipping. Calling it noise to avoid the work is the dismissal the rule names. |
 | "The hook references files that don't exist in this repo" | The closeout reminder is portable; it states the trivial/non-trivial split inline and treats project-level CLAUDE.md/AGENTS.md as an optional override, not a required citation. Missing convention files do not exempt non-trivial code from a reviewer pass. |
@@ -77,7 +83,10 @@ skill matcher fires. The full text and the tactical rules they imply live in
 
 1. **Think Before Coding** — state assumptions, surface tradeoffs, and ask
    when uncertain. Do not silently pick one of several interpretations. If a
-   simpler approach exists, name it and push back.
+   simpler approach exists, name it and push back. Treat suspicion as a
+   hypothesis: when you spot a function that "looks like" the cause, deep
+   dive — read it, trace its callers and callees against the failing
+   trigger, and confirm any sub-problem on it before changing anything.
 2. **Simplicity First** — minimum code that solves the problem. No features
    beyond what was asked, no abstractions for single-use code, no
    "flexibility" the user did not request, no error handling for impossible
@@ -87,13 +96,17 @@ skill matcher fires. The full text and the tactical rules they imply live in
    existing style. Every changed line traces directly to the user's request.
    Mention unrelated dead code; do not delete it without being asked.
 4. **Goal-Driven Execution** — turn vague tasks into verifiable goals before
-   coding ("Fix the bug" → "Write a test that reproduces it, then make it
-   pass"). For multi-step work, state a short plan with per-step verify
-   checks. Weak success criteria force re-asking and produce drift.
+   coding ("Fix the bug" → "Reproduce or trace the symptom from the user
+   story end-to-end with file:line evidence, write a test that captures it,
+   then make it pass"). For multi-step work, state a short plan with
+   per-step verify checks. Persist the trace in the working-brief so the
+   investigation survives compaction. Weak success criteria force re-asking
+   and produce drift.
 
 | Thought | Reality |
 |---|---|
 | "I'll just code this and see" | Step 1 (Think Before Coding) failed. Stop and state the assumption. |
+| "Oh this may be the case, I'll patch it" | Step 1 (Think Before Coding) failed. Suspicion is a hypothesis. Trace the symptom and confirm the suspect is on its path before changing it. |
 | "While I'm here, I'll clean up the file" | Step 3 (Surgical Changes) violated. Revert the unrelated cleanup. |
 | "I'll add a config knob in case we need it" | Step 2 (Simplicity First) violated. Add it when a second caller exists. |
 | "Make it work" is a goal | Step 4 (Goal-Driven Execution) failed. State the verifiable check that proves done. |
