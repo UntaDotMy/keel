@@ -15,10 +15,7 @@ use crate::args::FlagSet;
 use crate::hooks::claude::{event_by_name, event_by_slug, HookEvent, HOOK_EVENTS};
 use crate::json::{write_indented, Value};
 use crate::proxy::raw_store::RawStore;
-use crate::runner::shell_rewrite::{
-    bash_command_for_executable_args, platform_default_command_for_executable_args,
-    rewrite_command_text_for_shell, RewriteShell,
-};
+use crate::runner::shell_rewrite::{rewrite_command_text_for_shell, RewriteShell};
 use crate::runner::tool_timings;
 use crate::runtime::{display_path, installed_executable_path, resolve_claude_home, write_text};
 use crate::utility;
@@ -26,7 +23,6 @@ use crate::utility;
 const RAW_OUTPUT_DEFAULT_RETENTION_DAYS: u64 = 14;
 
 const MANAGED_PRE_TOOL_USE_EVENT: &str = "PreToolUse";
-const MANAGED_PRE_TOOL_USE_COMMAND_SUFFIX: &str = "hook pre-tool-use";
 
 /// SYSTEM_MAP.md is rebuilt every N edit-class tool calls so the workspace
 /// pointer stays in sync with the repo without paying refresh cost on every
@@ -40,8 +36,6 @@ const SYSTEM_MAP_REFRESH_DEFAULT_THRESHOLD: u64 = 10;
 fn claude_hook_event_names() -> impl Iterator<Item = &'static str> {
     HOOK_EVENTS.iter().map(|event| event.name)
 }
-const BASE64_ALPHABET: &[u8; 64] =
-    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 pub fn run_hook_command(
     arguments: &[String],
@@ -140,8 +134,8 @@ fn run_hook_install(standard_output: &mut dyn Write, standard_error: &mut dyn Wr
 
     let hook_path = claude_home.join(crate::hooks::claude::SETTINGS_FILE_NAME);
 
-    let hook_command = match managed_hook_command() {
-        Ok(command) => command,
+    let executable = match resolve_current_executable() {
+        Ok(path) => path,
 
         Err(error) => {
             let _ = writeln!(standard_error, "{error}");
@@ -150,7 +144,7 @@ fn run_hook_install(standard_output: &mut dyn Write, standard_error: &mut dyn Wr
         }
     };
 
-    let hook_payload = match build_hooks_payload(&hook_path, &hook_command) {
+    let hook_payload = match build_hooks_payload(&hook_path, &executable) {
         Ok(payload) => payload,
 
         Err(error) => {
@@ -1253,19 +1247,27 @@ fn settings_points_at_installed_executable(
                 continue;
             };
             for command_entry in commands {
+                if !is_managed_hook_entry(command_entry) {
+                    continue;
+                }
+                // Unreachable for any entry that passed the gate above: both
+                // the args-form and legacy-string-form detectors require
+                // `command` to be a present string. Kept as a defensive skip
+                // so a future entry shape (e.g. one that ships only `args`)
+                // never panics here, and so `managed_seen` doesn't get flipped
+                // on an entry the doctor can't actually reason about.
                 let Some(command) = command_entry.get("command").and_then(JsonDocument::as_str)
                 else {
                     continue;
                 };
-                if !is_managed_hook_command(command) {
-                    continue;
-                }
                 managed_seen = true;
                 let command_normalized = casefold(command);
-                // The PowerShell encoded payload is always produced from a
-                // Windows host and uses Windows path conventions, so its
-                // decoded form is matched case-insensitively regardless of
-                // the host running the doctor.
+                // Legacy single-string PowerShell-encoded entries embed the
+                // path inside a base64 UTF-16 LE script. Decode and match
+                // case-insensitively so doctor recognizes upgrades from older
+                // claude-skills versions that haven't been re-installed yet.
+                // Args-form entries store the path directly in `command`, so
+                // the plain match below covers them without needing decode.
                 let decoded_normalized = decode_powershell_encoded_command(command)
                     .map(|decoded| decoded.to_ascii_lowercase());
                 let installed_for_decoded = display_path(installed_executable).to_ascii_lowercase();
@@ -1288,20 +1290,55 @@ fn is_help_argument(argument: &str) -> bool {
     matches!(argument, "help" | "--help" | "-h")
 }
 
-pub fn managed_hook_command() -> Result<String, String> {
-    std::env::current_exe()
-        .map(|path| hook_command_for_executable_args(&path, MANAGED_PRE_TOOL_USE_COMMAND_SUFFIX))
-        .map_err(|error| format!("resolve current executable: {error}"))
+/// One managed hook entry as Claude Code's `args` exec form (added in CC 2.1.139).
+///
+/// `command` is the bare executable path; `args` is the argv that follows. Claude
+/// Code spawns the binary directly without going through a shell, so neither
+/// field needs shell quoting. Per code.claude.com/docs/en/hooks the `args` form
+/// supersedes the historical single-string `command` shape that required
+/// platform-specific quoting (PowerShell `-EncodedCommand` on Windows, shell
+/// quoting on POSIX).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedHookEntry {
+    pub command: String,
+    pub args: Vec<String>,
 }
 
-pub fn build_hooks_payload(hook_path: &Path, hook_command: &str) -> Result<String, String> {
+/// Build the args-form managed hook entry for `slug` against `executable`.
+///
+/// The result drops straight into settings.json under
+/// `hooks[<event>][N].hooks[0]` once `type` and `statusMessage` are added by
+/// the caller.
+pub fn managed_hook_entry(executable: &Path, slug: &str) -> ManagedHookEntry {
+    ManagedHookEntry {
+        command: display_path(executable),
+        args: vec!["hook".to_string(), slug.to_string()],
+    }
+}
+
+fn resolve_current_executable() -> Result<PathBuf, String> {
+    std::env::current_exe().map_err(|error| format!("resolve current executable: {error}"))
+}
+
+/// Human-readable summary of what `claude-skills hook install` writes for the
+/// PreToolUse event. Used by `claude-skills hook diagnose` to surface the
+/// expected hook command in JSON output. Not a shell-runnable string — just a
+/// diagnostic.
+pub fn managed_hook_command() -> Result<String, String> {
+    resolve_current_executable().map(|path| {
+        let entry = managed_hook_entry(&path, "pre-tool-use");
+        format!("{} {}", entry.command, entry.args.join(" "))
+    })
+}
+
+pub fn build_hooks_payload(hook_path: &Path, executable: &Path) -> Result<String, String> {
     let mut document = read_hooks_document(hook_path)?;
 
     ensure_hooks_object(&mut document)?;
 
     remove_managed_hooks(&mut document);
 
-    append_managed_hooks(&mut document, hook_command)?;
+    append_managed_hooks(&mut document, executable)?;
 
     ensure_skill_listing_budget_fraction(&mut document)?;
 
@@ -1401,13 +1438,7 @@ pub fn remove_managed_hooks(document: &mut JsonDocument) {
                 continue;
             };
 
-            commands.retain(|command_entry| {
-                !command_entry
-                    .get("command")
-                    .and_then(JsonDocument::as_str)
-                    .map(is_managed_hook_command)
-                    .unwrap_or(false)
-            });
+            commands.retain(|command_entry| !is_managed_hook_entry(command_entry));
         }
 
         entries.retain(|matcher_entry| {
@@ -1420,7 +1451,7 @@ pub fn remove_managed_hooks(document: &mut JsonDocument) {
     }
 }
 
-fn append_managed_hooks(document: &mut JsonDocument, hook_command: &str) -> Result<(), String> {
+fn append_managed_hooks(document: &mut JsonDocument, executable: &Path) -> Result<(), String> {
     let hooks = document
         .get_mut("hooks")
         .and_then(JsonDocument::as_object_mut)
@@ -1446,19 +1477,21 @@ fn append_managed_hooks(document: &mut JsonDocument, hook_command: &str) -> Resu
             .as_array_mut()
             .ok_or_else(|| format!("{} hooks entry is not an array", event.name))?;
 
-        let (matcher, command, status) = managed_hook_entry_for_event(event, hook_command);
+        let entry = managed_hook_entry(executable, event.slug);
 
         event_array.push(serde_json::json!({
 
-            "matcher": matcher,
+            "matcher": event.matcher,
 
             "hooks": [{
 
                 "type": "command",
 
-                "command": command,
+                "command": entry.command,
 
-                "statusMessage": status
+                "args": entry.args,
+
+                "statusMessage": event.status
 
             }]
 
@@ -1468,24 +1501,6 @@ fn append_managed_hooks(document: &mut JsonDocument, hook_command: &str) -> Resu
     sort_hook_events(hooks);
 
     Ok(())
-}
-
-/// Pull matcher / command / status straight from the event row. The PreToolUse
-/// command is the only one that flows in from the outside (it carries the rewriter
-/// payload built in `managed_hook_command`); every other event derives its command
-/// from `managed_lifecycle_command(slug)`.
-fn managed_hook_entry_for_event(
-    event: &HookEvent,
-
-    pre_tool_use_command: &str,
-) -> (&'static str, String, &'static str) {
-    let command = if event.name == MANAGED_PRE_TOOL_USE_EVENT {
-        pre_tool_use_command.to_string()
-    } else {
-        managed_lifecycle_command(event.slug)
-    };
-
-    (event.matcher, command, event.status)
 }
 
 fn sort_hook_events(hooks: &mut JsonMap<String, JsonDocument>) {
@@ -1499,6 +1514,73 @@ fn sort_hook_events(hooks: &mut JsonMap<String, JsonDocument>) {
     for (key, value) in sorted {
         hooks.insert(key, value);
     }
+}
+
+/// True if `command_entry` is a managed claude-skills hook (either the modern
+/// args-form CC 2.1.139+ or any legacy single-string shape we shipped earlier).
+///
+/// Detection is permissive on purpose. `claude-skills hook uninstall` runs
+/// against arbitrary user settings that may have been written by an older
+/// version of this binary, so we accept both shapes:
+///
+///   1. Args form: `{"command": "<exe>", "args": ["hook", "<slug>"]}` where
+///      `<exe>` ends in `claude-skills` (with or without `.exe`) and `<slug>`
+///      matches a row in `HOOK_EVENTS`.
+///
+///   2. Legacy string form: `{"command": "<single-string>"}` where the string
+///      mentions `claude-skills` together with `hook <slug>` or
+///      `hook instructions --format json`. Windows historically wrapped that
+///      string in `powershell.exe -EncodedCommand <base64>`; we decode and
+///      retry once so PowerShell-encoded entries from older installs still get
+///      cleaned up.
+pub fn is_managed_hook_entry(command_entry: &JsonDocument) -> bool {
+    if is_managed_args_form(command_entry) {
+        return true;
+    }
+
+    command_entry
+        .get("command")
+        .and_then(JsonDocument::as_str)
+        .map(is_managed_hook_command)
+        .unwrap_or(false)
+}
+
+fn is_managed_args_form(command_entry: &JsonDocument) -> bool {
+    let Some(command) = command_entry.get("command").and_then(JsonDocument::as_str) else {
+        return false;
+    };
+
+    if !command_path_is_managed_executable(command) {
+        return false;
+    }
+
+    let Some(args) = command_entry.get("args").and_then(JsonDocument::as_array) else {
+        return false;
+    };
+
+    let mut iter = args.iter().filter_map(JsonDocument::as_str);
+    let first = iter.next();
+    let second = iter.next();
+
+    matches!(first, Some("hook"))
+        && second
+            .map(|slug| HOOK_EVENTS.iter().any(|event| event.slug == slug))
+            .unwrap_or(false)
+}
+
+/// True if `command` resolves to the claude-skills binary (case-insensitive
+/// basename match — Windows file systems are case-insensitive and the args
+/// form embeds the exact path string CC will invoke).
+fn command_path_is_managed_executable(command: &str) -> bool {
+    let basename = Path::new(command)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.to_ascii_lowercase());
+
+    matches!(
+        basename.as_deref(),
+        Some("claude-skills") | Some("claude-skills.exe")
+    )
 }
 
 pub fn is_managed_hook_command(command: &str) -> bool {
@@ -1528,102 +1610,6 @@ fn is_managed_hook_command_with_depth(command: &str, depth: usize) -> bool {
     decode_powershell_encoded_command(command)
         .map(|decoded| is_managed_hook_command_with_depth(&decoded, depth + 1))
         .unwrap_or(false)
-}
-
-pub fn managed_lifecycle_command(subcommand: &str) -> String {
-    match std::env::current_exe() {
-        Ok(path) => hook_command_for_executable_args(&path, &format!("hook {subcommand}")),
-
-        Err(_) => format!("claude-skills hook {subcommand}"),
-    }
-}
-
-/// Build the platform-correct shell command Claude Code should invoke for a
-/// given hook subcommand.
-///
-/// **Linux / macOS** use a plain `bash`-style invocation: the executable path
-/// is shell-quoted and concatenated with the subcommand arguments. POSIX
-/// shells parse this exactly as a user would type it.
-///
-/// **Windows** is more delicate. Claude Code's hook runner spawns commands
-/// through PowerShell, and the hook command is a single string the user will
-/// see in `settings.json`. Three problems show up if we naively emit
-/// `& 'C:\Users\Some User\.claude\claude-skills.exe' hook pre-tool-use`:
-///
-///   1. PowerShell single-quote rules differ from bash; embedded apostrophes
-///      in user-profile paths (`C:\Users\O'Brien\...`) are easy to mis-quote.
-///   2. The string ends up serialized into JSON, then re-parsed by Claude
-///      Code, then handed to PowerShell. Each round trip is a chance for
-///      backslashes or quotes to be re-interpreted.
-///   3. UTF-16 paths (Cyrillic profile names, accented characters) get
-///      corrupted by the UTF-8 → ANSI conversion PowerShell does on positional
-///      argument strings.
-///
-/// PowerShell's `-EncodedCommand` flag sidesteps all three: the script is
-/// encoded as UTF-16 LE, base64-wrapped, and handed to PowerShell verbatim.
-/// PowerShell decodes it as UTF-16 directly, so no transcoding happens. The
-/// JSON serializer only sees a base64 string with no special characters, so
-/// the round trip is lossless.
-///
-/// `is_managed_hook_command` decodes the same encoding when checking whether
-/// a settings.json entry is one of ours, so doctor and uninstall paths can
-/// reason about Windows hook commands without re-implementing the parsing.
-pub fn hook_command_for_executable_args(path: &Path, arguments: &str) -> String {
-    if cfg!(windows) {
-        let script = platform_default_command_for_executable_args(path, arguments);
-
-        format!(
-            "powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand {}",
-            powershell_encoded_command(&script)
-        )
-    } else {
-        bash_command_for_executable_args(path, arguments)
-    }
-}
-
-fn powershell_encoded_command(script: &str) -> String {
-    let mut bytes = Vec::with_capacity(script.len() * 2);
-
-    for unit in script.encode_utf16() {
-        bytes.push((unit & 0x00ff) as u8);
-
-        bytes.push((unit >> 8) as u8);
-    }
-
-    base64_encode(&bytes)
-}
-
-fn base64_encode(bytes: &[u8]) -> String {
-    let mut rendered = String::with_capacity(bytes.len().div_ceil(3) * 4);
-
-    for chunk in bytes.chunks(3) {
-        let first = chunk[0];
-
-        let second = *chunk.get(1).unwrap_or(&0);
-
-        let third = *chunk.get(2).unwrap_or(&0);
-
-        rendered.push(BASE64_ALPHABET[(first >> 2) as usize] as char);
-
-        rendered
-            .push(BASE64_ALPHABET[(((first & 0b0000_0011) << 4) | (second >> 4)) as usize] as char);
-
-        if chunk.len() > 1 {
-            rendered.push(
-                BASE64_ALPHABET[(((second & 0b0000_1111) << 2) | (third >> 6)) as usize] as char,
-            );
-        } else {
-            rendered.push('=');
-        }
-
-        if chunk.len() > 2 {
-            rendered.push(BASE64_ALPHABET[(third & 0b0011_1111) as usize] as char);
-        } else {
-            rendered.push('=');
-        }
-    }
-
-    rendered
 }
 
 fn base64_decode(value: &str) -> Option<Vec<u8>> {
@@ -1774,11 +1760,8 @@ mod tests {
         )
         .unwrap();
 
-        let rendered = build_hooks_payload(
-            &hook_path,
-            r#""C:\tools\claude-skills.exe" hook pre-tool-use"#,
-        )
-        .unwrap();
+        let rendered =
+            build_hooks_payload(&hook_path, Path::new(r"C:\tools\claude-skills.exe")).unwrap();
 
         assert!(rendered.contains("PostToolUse"));
 
@@ -1802,7 +1785,11 @@ mod tests {
 
         assert!(rendered.contains("post_write_figma_parity_check"));
 
-        assert!(rendered.contains("hook pre-tool-use"));
+        // Args-form: each managed entry now carries the slug in `args`, not in
+        // the command string. The legacy single-string entry that lived in the
+        // fixture's PreToolUse stanza must be gone (replaced by our managed
+        // args-form entry).
+        assert!(rendered.contains("\"pre-tool-use\""));
 
         assert!(!rendered.contains("hook instructions --format json"));
 
@@ -1817,9 +1804,9 @@ mod tests {
 
         std::fs::write(&hook_path, r#"{"hooks": {}}"#).unwrap();
 
-        let pre_tool_command = managed_hook_command().unwrap();
+        let executable = std::env::current_exe().unwrap();
 
-        let rendered = build_hooks_payload(&hook_path, &pre_tool_command).unwrap();
+        let rendered = build_hooks_payload(&hook_path, &executable).unwrap();
 
         let document: JsonDocument = serde_json::from_str(&rendered).unwrap();
 
@@ -1828,6 +1815,8 @@ mod tests {
             .and_then(JsonDocument::as_object)
             .unwrap();
 
+        let expected_command = display_path(&executable);
+
         for event in HOOK_EVENTS {
             if !event.installs_in_settings {
                 // FileChanged (and any future opt-out) is not written to
@@ -1835,86 +1824,151 @@ mod tests {
                 // payload won't contain a stanza for it.
                 continue;
             }
-            let commands = hooks
+            let entry = hooks
                 .get(event.name)
                 .and_then(JsonDocument::as_array)
                 .and_then(|entries| entries.first())
                 .and_then(|entry| entry.get("hooks"))
                 .and_then(JsonDocument::as_array)
+                .and_then(|commands| commands.first())
                 .unwrap_or_else(|| panic!("missing hooks entry for {}", event.name));
 
-            let command = commands
-                .first()
-                .and_then(|hook| hook.get("command"))
+            // CC 2.1.139 args exec form: command is the bare executable path,
+            // args carries `["hook", <slug>]`, no shell wrapping.
+            let command = entry
+                .get("command")
                 .and_then(JsonDocument::as_str)
                 .unwrap_or_else(|| panic!("missing command for {}", event.name));
+            assert_eq!(
+                command, expected_command,
+                "command must be the bare executable for {}",
+                event.name
+            );
 
-            let expected = expected_managed_command_for_event(event.name, &pre_tool_command);
+            let args: Vec<&str> = entry
+                .get("args")
+                .and_then(JsonDocument::as_array)
+                .unwrap_or_else(|| panic!("missing args for {}", event.name))
+                .iter()
+                .map(|value| value.as_str().expect("args entries are strings"))
+                .collect();
+            assert_eq!(
+                args,
+                vec!["hook", event.slug],
+                "args must be [\"hook\", \"{}\"] for {}",
+                event.slug,
+                event.name
+            );
 
-            assert_eq!(command, expected, "unexpected command for {}", event.name);
-
-            if cfg!(windows) {
-                assert!(command.starts_with(
-                    "powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand "
-                ));
-            } else {
-                assert!(!command.starts_with("& "));
-            }
+            assert!(
+                !command.contains("powershell"),
+                "args form must not wrap the command in PowerShell for {}",
+                event.name
+            );
+            assert!(
+                !command.starts_with("& "),
+                "args form must not use the PowerShell call operator for {}",
+                event.name
+            );
         }
 
         let _ = std::fs::remove_dir_all(hook_path.parent().unwrap());
     }
 
     #[test]
-    fn powershell_encoded_command_roundtrips_to_runnable_script() {
-        // The hook entry on Windows is shipped as a base64-encoded UTF-16 LE
-        // PowerShell script. Claude Code launches it with `powershell.exe
-        // -EncodedCommand <payload>`, so the payload must decode back to a
-        // script that references the installed executable and the requested
-        // hook subcommand. A regression in base64_encode (chunk loop), UTF-16
-        // endianness, or the script template would silently produce a
-        // command Claude Code can run but that does nothing useful — and
-        // because is_managed_hook_command does its own decode, the entry
-        // would still look "managed" while pointing at gibberish.
+    fn managed_hook_detection_recognizes_args_form_and_legacy_string_form() {
         let executable = if cfg!(windows) {
             Path::new(r"C:\Users\Example User\.claude\claude-skills.exe")
         } else {
             Path::new("/home/example/.claude/claude-skills")
         };
-        for subcommand in ["pre-tool-use", "session-start", "post-compact", "stop"] {
-            let arguments = format!("hook {subcommand}");
-            let command = hook_command_for_executable_args(executable, &arguments);
 
-            if cfg!(windows) {
-                let decoded = decode_powershell_encoded_command(&command)
-                    .unwrap_or_else(|| panic!("decode failed for {subcommand}: {command}"));
-                let executable_lower = executable.to_string_lossy().to_ascii_lowercase();
-                assert!(
-                    decoded.to_ascii_lowercase().contains(&executable_lower),
-                    "decoded script for {subcommand} must reference the installed executable; got: {decoded}"
-                );
-                assert!(
-                    decoded.contains(&arguments),
-                    "decoded script for {subcommand} must include `{arguments}`; got: {decoded}"
-                );
-            } else {
-                // Unix wrappers are already plain bash; no encoding to verify.
-                assert!(command.contains(&arguments));
-            }
-        }
+        // Args form: managed entry built by managed_hook_entry.
+        let entry = managed_hook_entry(executable, "session-start");
+        let args_form = serde_json::json!({
+            "type": "command",
+            "command": entry.command,
+            "args": entry.args,
+            "statusMessage": "test",
+        });
+        assert!(is_managed_hook_entry(&args_form));
+
+        // Legacy single-string form (older claude-skills versions): plain
+        // string mentioning `claude-skills` and a known slug. Detector must
+        // still flag it so uninstall cleans up upgrades from older builds.
+        let legacy_plain = serde_json::json!({
+            "type": "command",
+            "command": "claude-skills hook session-start",
+        });
+        assert!(is_managed_hook_entry(&legacy_plain));
+
+        // Legacy PowerShell-encoded form (Windows installs from older
+        // claude-skills versions). Hand-rolled snapshot of what the previous
+        // encoder produced for `& 'claude-skills' hook session-start` so we
+        // don't depend on the deleted encoder. The base64 below decodes via
+        // the still-present decode_powershell_encoded_command helper.
+        let encoded_script = "& 'claude-skills' hook session-start";
+        let encoded_bytes: Vec<u8> = encoded_script
+            .encode_utf16()
+            .flat_map(|unit| unit.to_le_bytes())
+            .collect();
+        let encoded = base64_encode_for_test(&encoded_bytes);
+        let legacy_encoded_command = format!("powershell.exe -NoProfile -EncodedCommand {encoded}");
+        let legacy_encoded = serde_json::json!({
+            "type": "command",
+            "command": legacy_encoded_command,
+        });
+        assert!(is_managed_hook_entry(&legacy_encoded));
+
+        // Unrelated entries must not be flagged.
+        let unrelated = serde_json::json!({
+            "type": "command",
+            "command": "./scripts/format.sh",
+        });
+        assert!(!is_managed_hook_entry(&unrelated));
+
+        let unrelated_encoded = serde_json::json!({
+            "type": "command",
+            "command": "powershell.exe -NoProfile -EncodedCommand SQBuAHYAYQBsAGkAZAA=",
+        });
+        assert!(!is_managed_hook_entry(&unrelated_encoded));
+
+        // Args form with the right binary basename but a slug that isn't in
+        // HOOK_EVENTS must be rejected, so a hand-rolled user entry for a
+        // future or experimental subcommand isn't auto-removed by uninstall.
+        let unknown_slug = serde_json::json!({
+            "type": "command",
+            "command": entry.command,
+            "args": ["hook", "not-a-real-slug"],
+        });
+        assert!(!is_managed_hook_entry(&unknown_slug));
     }
 
-    #[test]
-    fn managed_hook_detection_handles_encoded_powershell_commands() {
-        let path = Path::new(r"C:\Users\Example User\.claude\claude-skills.exe");
-
-        let command = hook_command_for_executable_args(path, "hook session-start");
-
-        assert!(is_managed_hook_command(&command));
-
-        assert!(!is_managed_hook_command(
-            "powershell.exe -NoProfile -EncodedCommand SQBuAHYAYQBsAGkAZAA="
-        ));
+    fn base64_encode_for_test(bytes: &[u8]) -> String {
+        const ALPHABET: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut rendered = String::with_capacity(bytes.len().div_ceil(3) * 4);
+        for chunk in bytes.chunks(3) {
+            let first = chunk[0];
+            let second = *chunk.get(1).unwrap_or(&0);
+            let third = *chunk.get(2).unwrap_or(&0);
+            rendered.push(ALPHABET[(first >> 2) as usize] as char);
+            rendered
+                .push(ALPHABET[(((first & 0b0000_0011) << 4) | (second >> 4)) as usize] as char);
+            if chunk.len() > 1 {
+                rendered.push(
+                    ALPHABET[(((second & 0b0000_1111) << 2) | (third >> 6)) as usize] as char,
+                );
+            } else {
+                rendered.push('=');
+            }
+            if chunk.len() > 2 {
+                rendered.push(ALPHABET[(third & 0b0011_1111) as usize] as char);
+            } else {
+                rendered.push('=');
+            }
+        }
+        rendered
     }
 
     #[test]
@@ -1925,7 +1979,7 @@ mod tests {
 
         std::fs::write(&hook_path, r#"{"hooks": {}}"#).unwrap();
 
-        let rendered = build_hooks_payload(&hook_path, "claude-skills hook pre-tool-use").unwrap();
+        let rendered = build_hooks_payload(&hook_path, Path::new("claude-skills")).unwrap();
 
         let document: JsonDocument = serde_json::from_str(&rendered).unwrap();
 
@@ -2410,9 +2464,8 @@ mod tests {
         let executable = crate::runtime::installed_executable_path(&claude_home);
         std::fs::write(&executable, b"installed").unwrap();
 
-        let pre_tool_command = hook_command_for_executable_args(&executable, "hook pre-tool-use");
         let settings_path = claude_home.join(crate::hooks::claude::SETTINGS_FILE_NAME);
-        let payload = build_hooks_payload(&settings_path, &pre_tool_command).unwrap();
+        let payload = build_hooks_payload(&settings_path, &executable).unwrap();
         std::fs::write(&settings_path, &payload).unwrap();
 
         let report = collect_hook_diagnostics(&claude_home);
@@ -2447,9 +2500,8 @@ mod tests {
             .join("elsewhere")
             .join(crate::runtime::executable_file_name());
         std::fs::create_dir_all(other_path.parent().unwrap()).unwrap();
-        let other_command = hook_command_for_executable_args(&other_path, "hook pre-tool-use");
         let settings_path = claude_home.join(crate::hooks::claude::SETTINGS_FILE_NAME);
-        let payload = build_hooks_payload(&settings_path, &other_command).unwrap();
+        let payload = build_hooks_payload(&settings_path, &other_path).unwrap();
         std::fs::write(&settings_path, &payload).unwrap();
 
         let report = collect_hook_diagnostics(&claude_home);
@@ -2472,9 +2524,8 @@ mod tests {
         let executable = crate::runtime::installed_executable_path(&claude_home);
         std::fs::write(&executable, b"installed").unwrap();
 
-        let pre_tool_command = hook_command_for_executable_args(&executable, "hook pre-tool-use");
         let settings_path = claude_home.join(crate::hooks::claude::SETTINGS_FILE_NAME);
-        let payload = build_hooks_payload(&settings_path, &pre_tool_command).unwrap();
+        let payload = build_hooks_payload(&settings_path, &executable).unwrap();
         std::fs::write(&settings_path, &payload).unwrap();
 
         // Drop a legacy stale sibling.
@@ -2600,14 +2651,6 @@ mod tests {
         assert_eq!(key, "c-users-riezh-onedrive-documents-test-claude-core");
     }
 
-    fn expected_managed_command_for_event(event: &str, pre_tool_command: &str) -> String {
-        if event == "PreToolUse" {
-            return pre_tool_command.to_string();
-        }
-
-        managed_lifecycle_command(crate::hooks::claude::lifecycle_subcommand(event))
-    }
-
     fn temp_hook_path(name: &str) -> PathBuf {
         let unique = format!("{}-{}", name, std::process::id());
 
@@ -2620,8 +2663,8 @@ mod tests {
         std::fs::create_dir_all(hook_path.parent().unwrap()).unwrap();
         std::fs::write(&hook_path, r#"{"hooks": {}}"#).unwrap();
 
-        let pre_tool_command = managed_hook_command().unwrap();
-        let rendered = build_hooks_payload(&hook_path, &pre_tool_command).unwrap();
+        let executable = std::env::current_exe().unwrap();
+        let rendered = build_hooks_payload(&hook_path, &executable).unwrap();
         let document: JsonDocument = serde_json::from_str(&rendered).unwrap();
 
         assert_eq!(
@@ -2644,8 +2687,8 @@ mod tests {
         )
         .unwrap();
 
-        let pre_tool_command = managed_hook_command().unwrap();
-        let rendered = build_hooks_payload(&hook_path, &pre_tool_command).unwrap();
+        let executable = std::env::current_exe().unwrap();
+        let rendered = build_hooks_payload(&hook_path, &executable).unwrap();
         let document: JsonDocument = serde_json::from_str(&rendered).unwrap();
 
         assert_eq!(

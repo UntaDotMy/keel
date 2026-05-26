@@ -723,7 +723,6 @@ pub fn compaction_command_prefix(shell: RewriteShell) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runner::hook_lifecycle::hook_command_for_executable_args;
 
     #[test]
     fn rewrite_only_wraps_supported_noisy_commands() {
@@ -851,8 +850,6 @@ mod tests {
 
         let platform_command = platform_default_command_for_executable_args(path, "run --");
 
-        let hook_command = hook_command_for_executable_args(path, "hook session-start");
-
         if cfg!(windows) {
             assert_eq!(
                 bash_command,
@@ -863,11 +860,6 @@ mod tests {
                 platform_command,
                 r#"& 'C:\Users\Example User''s Folder\.claude\claude-skills.exe' run --"#
             );
-
-            assert!(hook_command
-                .starts_with("powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand "));
-
-            assert!(!hook_command.contains("Example User"));
         } else {
             assert_eq!(
                 bash_command,
@@ -875,11 +867,6 @@ mod tests {
             );
 
             assert_eq!(platform_command, bash_command);
-
-            assert_eq!(
-                hook_command,
-                r#"'/home/example user'\''s folder/.claude/claude-skills' hook session-start"#
-            );
         }
     }
 
