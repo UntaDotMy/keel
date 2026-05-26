@@ -24,7 +24,7 @@ This is a universal pre-edit gate for existing source files. Run a Preserve Exis
 
 ## Code Implementation Discipline
 
-See `_shared/common-discipline.md` § Code Implementation Discipline for the canonical rules (YAGNI, no shortforms, no silent fallbacks, no duplication, less comments + structured doc tags). They reinforce this skill's core rule: routing through the existing owner is the no-duplication / no-parallel-path principle expressed at the architecture layer. Reject extensions that copy the owner's logic into a new file or wrap it in a "compat shim" instead of extending the owner directly.
+See `_shared/common-discipline.md` § Code Implementation Discipline for the canonical rules — four behavioral pillars (Think Before Coding, Simplicity First, Surgical Changes, Goal-Driven Execution) plus tactical rules (YAGNI, no shortforms, no silent fallbacks, no duplication, less comments + structured doc tags). They reinforce this skill's core rule: routing through the existing owner is the no-duplication / no-parallel-path principle expressed at the architecture layer. Surgical Changes maps directly to "do not refactor adjacent code while extending the owner". Reject extensions that copy the owner's logic into a new file or wrap it in a "compat shim" instead of extending the owner directly.
 
 ## Required First Step
 

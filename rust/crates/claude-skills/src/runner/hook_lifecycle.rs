@@ -819,12 +819,15 @@ fn post_compact_context() -> String {
 ///
 /// Compact by design: the schema lets us inject as much text as we want, but
 /// every byte lands per prompt and is paid as input tokens. The full
-/// bootstrap (skill catalog, Red Flags table, decision flow) is delivered
-/// once via SessionStart; this hook only restates the iron law so it stays
-/// top-of-mind on each turn.
+/// bootstrap (skill catalog, Red Flags table, decision flow, four
+/// implementation-discipline pillars) is delivered once via SessionStart;
+/// this hook only restates the iron law and names the four pillars so they
+/// stay top-of-mind on each turn. Body weight is roughly 160 tokens before
+/// `memory_scope_summary()` — within budget for a per-prompt injection but
+/// expensive enough that adding more text needs a deliberate reason.
 fn user_prompt_submit_context() -> String {
     format!(
-        "Research-first: trust the codebase, not your knowledge base. Read SYSTEM_MAP and the owning module before claiming behavior. Invoke any relevant skill via the Skill tool BEFORE responding — even a 1% chance it applies means use it. Find the root cause, not just the surface symptom. No assumptions. {}",
+        "Research-first: trust the codebase, not your knowledge base. Read SYSTEM_MAP and the owning module before claiming behavior. Invoke any relevant skill via the Skill tool BEFORE responding — even a 1% chance it applies means use it. Find the root cause, not just the surface symptom. No assumptions. Implementation discipline applies on every code-touching turn — Think Before Coding (state assumptions, ask when uncertain), Simplicity First (minimum code, no speculative features or abstractions), Surgical Changes (every changed line traces to the request), Goal-Driven Execution (turn the task into a verifiable goal before coding). {}",
         memory_scope_summary()
     )
 }
@@ -2123,6 +2126,28 @@ mod tests {
         assert!(context.contains("root cause"));
         assert!(context.contains("No assumptions"));
 
+        // Implementation-discipline pillars — UserPromptSubmit lands per
+        // prompt, so naming the four pillars by name keeps them top-of-mind
+        // even after the SessionStart bootstrap drops out of the model's
+        // working window. The full text lives in the bootstrap and in
+        // _shared/common-discipline.md; this hook only restates the names.
+        assert!(
+            context.contains("Think Before Coding"),
+            "UserPromptSubmit must name the Think Before Coding pillar"
+        );
+        assert!(
+            context.contains("Simplicity First"),
+            "UserPromptSubmit must name the Simplicity First pillar"
+        );
+        assert!(
+            context.contains("Surgical Changes"),
+            "UserPromptSubmit must name the Surgical Changes pillar"
+        );
+        assert!(
+            context.contains("Goal-Driven Execution"),
+            "UserPromptSubmit must name the Goal-Driven Execution pillar"
+        );
+
         let event_name = output
             .get("hookSpecificOutput")
             .and_then(|node| node.get("hookEventName"))
@@ -2300,6 +2325,28 @@ mod tests {
         assert!(
             context.contains("claude-skills memory completion-gate check"),
             "SessionStart memory-writes block must name the completion-gate probe"
+        );
+
+        // Implementation-discipline pillars — the bootstrap skill carries
+        // the full Code Implementation Discipline section so the model
+        // gets the four pillars on every session start, not only when an
+        // on-demand skill match fires. Each pillar name is asserted so a
+        // future trim of the SKILL.md cannot silently drop them.
+        assert!(
+            context.contains("Think Before Coding"),
+            "SessionStart must embed the Think Before Coding pillar"
+        );
+        assert!(
+            context.contains("Simplicity First"),
+            "SessionStart must embed the Simplicity First pillar"
+        );
+        assert!(
+            context.contains("Surgical Changes"),
+            "SessionStart must embed the Surgical Changes pillar"
+        );
+        assert!(
+            context.contains("Goal-Driven Execution"),
+            "SessionStart must embed the Goal-Driven Execution pillar"
         );
     }
 

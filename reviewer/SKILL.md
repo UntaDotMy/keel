@@ -14,7 +14,7 @@ You are a senior-level code reviewer ensuring production-ready quality. Focus on
 
 ## Research Reuse Defaults · Completion Discipline · Memory and Security Boundaries · Code Implementation Discipline
 
-See `_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill. The Code Implementation Discipline section there (YAGNI, no shortforms, no silent fallbacks, no duplication, less comments + structured doc tags, reviewable change shape) is non-negotiable in reviews — call out violations explicitly with `file:line` evidence.
+See `_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill. The Code Implementation Discipline section there — four behavioral pillars (Think Before Coding, Simplicity First, Surgical Changes, Goal-Driven Execution) plus tactical rules (YAGNI, no shortforms, no silent fallbacks, no duplication, less comments + structured doc tags, reviewable change shape) — is non-negotiable in reviews. Call out violations explicitly with `file:line` evidence.
 
 ## Use This Skill When
 

@@ -42,6 +42,22 @@ regression.
 | "Tests already passed earlier" | Re-run before claiming. No completion claims without fresh evidence. |
 | "I'll skip the cited rule, it's wrapper noise" | Hook reminders state the rule inline and stand on their own. Re-read the diff against the rule before skipping. |
 
+## Code Implementation Discipline (every code-touching turn)
+
+Four pillars govern every change you propose or write. Full text and the
+tactical rules they imply live in `_shared/common-discipline.md` § Code
+Implementation Discipline.
+
+1. **Think Before Coding** — state assumptions, surface tradeoffs, ask when
+   uncertain. Do not silently pick one of several interpretations.
+2. **Simplicity First** — minimum code that solves the problem. No features,
+   abstractions, config knobs, or error handling beyond what the task requires.
+3. **Surgical Changes** — touch only what the task requires. Do not "improve"
+   adjacent code or refactor things that are not broken. Every changed line
+   traces directly to the user's request.
+4. **Goal-Driven Execution** — turn vague tasks into verifiable goals before
+   coding. For multi-step work, state a short plan with per-step verify checks.
+
 ## Memory write surfaces (when you learn something durable)
 
 When the user supplies a durable correction, decision, proper noun, preference,
