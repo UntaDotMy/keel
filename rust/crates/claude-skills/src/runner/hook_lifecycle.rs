@@ -19,6 +19,7 @@ use crate::runner::shell_rewrite::{
     bash_command_for_executable_args, platform_default_command_for_executable_args,
     rewrite_command_text_for_shell, RewriteShell,
 };
+use crate::runner::tool_timings;
 use crate::runtime::{display_path, installed_executable_path, resolve_claude_home, write_text};
 use crate::utility;
 
@@ -76,6 +77,16 @@ pub fn run_hook_command(
         // (silent per the prompt-cache budget rule), so we own the dispatch
         // here instead of going through run_hook_lifecycle.
         "post-tool-use" => run_hook_post_tool_use(standard_error),
+
+        // PostToolUseFailure carries the same `duration_ms` field PostToolUse
+        // does (CC 2.1.119) and we want failed tool timings on the same JSONL
+        // as successes so an analyzer can compare them. The event has no
+        // additionalContext to inject, so we own dispatch here too rather
+        // than letting the lifecycle wildcard route it through an empty
+        // context render. Keeping the slug in the canonical event table is
+        // still important — that table is the dispatch invariant from the
+        // earlier `Unknown hook command: post-tool-use-failure` regression.
+        "post-tool-use-failure" => run_hook_post_tool_use_failure(standard_error),
 
         // Stop and SubagentStop must never return a non-zero exit code. Claude Code
         // treats a failing Stop hook as a signal to re-run the turn, which cascades
@@ -462,6 +473,18 @@ fn run_hook_post_tool_use(standard_error: &mut dyn Write) -> u8 {
         .and_then(JsonDocument::as_str)
         .unwrap_or_default();
 
+    // Record `duration_ms` for every tool, not just edit-class ones. CC 2.1.119
+    // documents the field as "tool execution time, excluding permission
+    // prompts and PreToolUse hooks", and we want a uniform sample so a slow
+    // Bash or Read shows up alongside slow Edits. Errors (disk full, perm)
+    // log to stderr and are swallowed — telemetry must never fail the hook.
+    if let Err(error) = tool_timings::record_tool_timing("PostToolUse", &input) {
+        let _ = writeln!(
+            standard_error,
+            "claude-skills post-tool-use: tool-timings record failed: {error}"
+        );
+    }
+
     if !is_edit_class_tool(tool_name) {
         return 0;
     }
@@ -491,6 +514,52 @@ fn run_hook_post_tool_use(standard_error: &mut dyn Write) -> u8 {
     if next_count >= threshold {
         let _ = refresh_memory_scope_for_current_directory(standard_error);
         let _ = reset_counter_file(&counter_path);
+    }
+
+    0
+}
+
+/// PostToolUseFailure handler.
+///
+/// PostToolUseFailure (CC 2.1.119+) carries the same `duration_ms` field as
+/// PostToolUse so we can see how long failing tool calls took before they
+/// errored. The handler reads stdin, records the timing alongside the
+/// success entries, and returns 0. No edit-counter touch — a failing tool
+/// call did not change files, so nudging the SYSTEM_MAP refresh would be
+/// noise.
+///
+/// Like PostToolUse, this handler must never fail the hook: any I/O or
+/// parse error is logged to stderr and swallowed.
+fn run_hook_post_tool_use_failure(standard_error: &mut dyn Write) -> u8 {
+    let input_text = match std::io::read_to_string(std::io::stdin()) {
+        Ok(text) => text,
+        Err(error) => {
+            let _ = writeln!(
+                standard_error,
+                "claude-skills post-tool-use-failure: unable to read hook input: {error}"
+            );
+
+            return 0;
+        }
+    };
+
+    let input: JsonDocument = match serde_json::from_str(&input_text) {
+        Ok(value) => value,
+        Err(error) => {
+            let _ = writeln!(
+                standard_error,
+                "claude-skills post-tool-use-failure: unable to decode hook input: {error}"
+            );
+
+            return 0;
+        }
+    };
+
+    if let Err(error) = tool_timings::record_tool_timing("PostToolUseFailure", &input) {
+        let _ = writeln!(
+            standard_error,
+            "claude-skills post-tool-use-failure: tool-timings record failed: {error}"
+        );
     }
 
     0
@@ -662,10 +731,14 @@ fn lifecycle_additional_context(subcommand: &str) -> String {
         "post-tool-batch" => post_tool_batch_context(),
 
         // Silenced events. Stop/SubagentStop/SessionEnd fire per turn end and
-        // the schema rejects context injection on them. PostToolUse handles
-        // its side-effect (the SYSTEM_MAP edit counter) inside
-        // run_hook_post_tool_use; the context stays empty.
-        "stop" | "subagent-stop" | "session-end" | "post-tool-use" => String::new(),
+        // the schema rejects context injection on them. PostToolUse and
+        // PostToolUseFailure are owned by their dedicated dispatch arms in
+        // run_hook_command (they record duration_ms via tool_timings), so the
+        // lifecycle path returns empty for them too — the explicit listing
+        // is a documentation receipt, not a behaviour change.
+        "stop" | "subagent-stop" | "session-end" | "post-tool-use" | "post-tool-use-failure" => {
+            String::new()
+        }
 
         _ => String::new(),
     }
@@ -1857,7 +1930,13 @@ mod tests {
         // UserPromptSubmit and PostToolBatch are deliberately *not* in this
         // list: they emit short research-first / reviewer-on-close pointers,
         // gated by their own dedicated tests below.
-        for subcommand in ["post-tool-use", "stop", "subagent-stop", "session-end"] {
+        for subcommand in [
+            "post-tool-use",
+            "post-tool-use-failure",
+            "stop",
+            "subagent-stop",
+            "session-end",
+        ] {
             let mut stdout = Vec::new();
             let mut stderr = Vec::new();
 
