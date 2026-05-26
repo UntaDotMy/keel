@@ -35,10 +35,7 @@ pub const TIMING_INPUT_FIELD: &str = "duration_ms";
 /// `event` is the canonical PascalCase Claude Code event name, e.g.
 /// `"PostToolUse"` or `"PostToolUseFailure"` — recorded verbatim in the JSONL
 /// row so a single analyzer can split success from failure.
-pub fn record_tool_timing(
-    event: &str,
-    input: &JsonDocument,
-) -> std::io::Result<bool> {
+pub fn record_tool_timing(event: &str, input: &JsonDocument) -> std::io::Result<bool> {
     // Accept either an integer or a float so we still record if Claude Code
     // ever emits the field as a JSON number from a JS source (e.g. `1234.0`).
     // `as_u64()` alone would return None on a float and silently drop the
@@ -68,10 +65,7 @@ pub fn record_tool_timing(
         "cwd": input.get("cwd").and_then(JsonDocument::as_str).unwrap_or_default(),
     });
 
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)?;
+    let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
 
     writeln!(file, "{line}")?;
 
@@ -114,7 +108,9 @@ mod tests {
     /// Use a unique `CLAUDE_TARGET_OVERRIDE` per test so concurrent runs in
     /// `cargo test` do not stomp on each other's state directory.
     fn with_isolated_claude_home<F: FnOnce(&PathBuf) -> R, R>(suffix: &str, run: F) -> R {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -164,12 +160,30 @@ mod tests {
             let line = body.lines().next().expect("at least one line");
             let parsed: JsonDocument = serde_json::from_str(line).expect("valid jsonl");
 
-            assert_eq!(parsed.get("event").and_then(JsonDocument::as_str), Some("PostToolUse"));
-            assert_eq!(parsed.get("tool_name").and_then(JsonDocument::as_str), Some("Bash"));
-            assert_eq!(parsed.get("duration_ms").and_then(JsonDocument::as_u64), Some(1234));
-            assert_eq!(parsed.get("session_id").and_then(JsonDocument::as_str), Some("session-abc"));
-            assert_eq!(parsed.get("cwd").and_then(JsonDocument::as_str), Some("/tmp/example"));
-            assert!(parsed.get("recorded_at_ms").and_then(JsonDocument::as_u64).is_some());
+            assert_eq!(
+                parsed.get("event").and_then(JsonDocument::as_str),
+                Some("PostToolUse")
+            );
+            assert_eq!(
+                parsed.get("tool_name").and_then(JsonDocument::as_str),
+                Some("Bash")
+            );
+            assert_eq!(
+                parsed.get("duration_ms").and_then(JsonDocument::as_u64),
+                Some(1234)
+            );
+            assert_eq!(
+                parsed.get("session_id").and_then(JsonDocument::as_str),
+                Some("session-abc")
+            );
+            assert_eq!(
+                parsed.get("cwd").and_then(JsonDocument::as_str),
+                Some("/tmp/example")
+            );
+            assert!(parsed
+                .get("recorded_at_ms")
+                .and_then(JsonDocument::as_u64)
+                .is_some());
         });
     }
 
