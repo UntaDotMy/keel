@@ -46,3 +46,4 @@
   flow start --target-file <path> [--target-function <name>] [--repo-root <path>] [--output <path>] [--json]
   flow check [--repo-root <path>] [--artifact <path>] [--json]
   flow finish [--repo-root <path>] [--artifact <path>] [--json]
+  mcp serve

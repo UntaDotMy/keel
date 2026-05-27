@@ -14,6 +14,7 @@ mod help;
 mod hooks;
 mod json;
 mod manager;
+mod mcp;
 pub mod proxy;
 mod review;
 mod runner;

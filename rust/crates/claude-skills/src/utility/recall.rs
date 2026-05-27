@@ -561,6 +561,87 @@ pub fn recall_database_path(claude_home: &Path) -> PathBuf {
     claude_home.join("recall-index.sqlite3")
 }
 
+/// Snapshot of recall-index health used by surfaces that just need to read
+/// the current document count, last sync timestamp, and on-disk index path.
+/// Built on top of the same `sync_recall_index` + `count_documents` pair the
+/// `recall status` command uses, so callers see exactly the values an explicit
+/// status invocation would print.
+#[derive(Debug, Clone)]
+pub struct RecallStatusSnapshot {
+    pub claude_home: PathBuf,
+    pub index_path: PathBuf,
+    pub schema_version: String,
+    pub document_count: u64,
+    pub last_indexed_at_millis: u128,
+    pub added_since_last_sync: u64,
+    pub updated_since_last_sync: u64,
+    pub removed_since_last_sync: u64,
+}
+
+/// Result of a programmatic recall search: the canonicalized FTS query that
+/// was executed plus the matching hits. The query is exposed so callers can
+/// echo it back to consumers (the MCP `recall` tool, for example) without
+/// re-running `build_fts_query` themselves.
+#[derive(Debug, Clone)]
+pub struct RecallSearchResult {
+    pub claude_home: PathBuf,
+    pub query: String,
+    pub fts_query: String,
+    pub hits: Vec<RecallHit>,
+}
+
+/// Run the same auto-sync + FTS5 query path as `recall <query>` without
+/// touching stdout/stderr. Returns the prepared FTS expression alongside the
+/// hits so callers (the MCP `recall` tool, programmatic embedders) can render
+/// their own JSON envelope. `Ok(None)` means the query had no searchable
+/// terms after stripping punctuation, mirroring the CLI's "no terms" branch.
+pub fn search_recall_index(
+    claude_home: &Path,
+    raw_query: &str,
+    limit: usize,
+) -> Result<Option<RecallSearchResult>, String> {
+    let trimmed_query = raw_query.trim();
+    if trimmed_query.is_empty() {
+        return Ok(None);
+    }
+    let database_path = recall_database_path(claude_home);
+    let mut connection = open_recall_connection(&database_path)?;
+    sync_recall_index(&mut connection, claude_home, false)?;
+    let fts_query = match build_fts_query(trimmed_query) {
+        Some(query) => query,
+        None => return Ok(None),
+    };
+    let hits = query_recall_index(&connection, &fts_query, limit)?;
+    Ok(Some(RecallSearchResult {
+        claude_home: claude_home.to_path_buf(),
+        query: trimmed_query.to_string(),
+        fts_query,
+        hits,
+    }))
+}
+
+/// Open (and if necessary create) the recall index under `claude_home`, run a
+/// non-forced sync, then return a snapshot of the resulting health metrics.
+/// Used by the MCP `recall_status` tool and the `claude_core://recall/status`
+/// resource so they share the same code path as `recall status` rather than
+/// reaching into the schema directly.
+pub fn recall_status_snapshot(claude_home: &Path) -> Result<RecallStatusSnapshot, String> {
+    let database_path = recall_database_path(claude_home);
+    let mut connection = open_recall_connection(&database_path)?;
+    let report = sync_recall_index(&mut connection, claude_home, false)?;
+    let document_count = count_documents(&connection)?;
+    Ok(RecallStatusSnapshot {
+        claude_home: claude_home.to_path_buf(),
+        index_path: database_path,
+        schema_version: SCHEMA_VERSION.to_string(),
+        document_count,
+        last_indexed_at_millis: report.last_indexed_at_millis,
+        added_since_last_sync: report.added,
+        updated_since_last_sync: report.updated,
+        removed_since_last_sync: report.removed,
+    })
+}
+
 pub fn default_search_roots(claude_home: &Path) -> Vec<PathBuf> {
     DEFAULT_RECALL_ROOTS
         .iter()

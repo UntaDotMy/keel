@@ -22,7 +22,7 @@ use crate::args::FlagSet;
 use crate::help::render_help_surface;
 use crate::json::{write_indented, Value};
 use crate::runtime::clean_path;
-use crate::{manager, review, runner, utility};
+use crate::{manager, mcp, review, runner, utility};
 
 const FOUNDATION_PHASE_NAME: &str = "phase-1-foundation";
 
@@ -163,6 +163,7 @@ impl Application {
                 utility::run_bench_command(command_arguments, standard_output, standard_error)
             }
             "flow" => self.run_flow_command(command_arguments, standard_output, standard_error),
+            "mcp" => mcp::run_mcp_command(command_arguments, standard_output, standard_error),
             "__self-replace" => {
                 manager::run_self_replace_command(command_arguments, standard_error)
             }

@@ -165,6 +165,16 @@ form so subagents do not fall back to memory-based defaults.
 - `00-skill-routing-and-escalation.md` (repo root) — read first for routing.
 - Workspace `SYSTEM_MAP.md` lives at `~/.claude/memories/workspaces/<workspace-key>/reference/SYSTEM_MAP.md` and is auto-refreshed by `claude-skills memory scope resolve --refresh-system-map` at session start, pre-compact, and session end. Read it before making structural claims.
 
+## MCP server (`claude-skills mcp serve`)
+
+`.claude-plugin/plugin.json` registers `mcpServers.claude_core`, so Claude Code auto-discovers the server when the plugin is installed and you do not invoke it by hand. The server exposes four tools and two resources over JSON-RPC 2.0 stdio:
+
+- Tool `recall` — full-text search over `~/.claude/memories`, `memoriesv2`, `working-briefs` via the FTS5 index. Same code path as `claude-skills memory recall`.
+- Tool `system_map` — returns the workspace SYSTEM_MAP.md (auto-refreshed copy preferred, freshly rendered fallback).
+- Tool `run_command` — runs a shell command through the proxy capture+compaction pipeline; the compacted output lands in context instead of the raw stream.
+- Tool `recall_status` — recall index health snapshot (document count, schema version, last-sync timestamp).
+- Resource `claude_core://system-map` (`text/markdown`) and `claude_core://recall/status` (`application/json`).
+
 ## Memory writes (when you learn something durable)
 
 Your working memory only lives in the current context window. Anything you want to survive compaction or the next session has to land on disk. Four memory subcommands actually write — call them when the trigger fires, do not wait for "later":
