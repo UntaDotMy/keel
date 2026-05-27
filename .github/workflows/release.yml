@@ -130,6 +130,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu
           echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+          # The `rusqlite` bundled feature compiles SQLite C source via the `cc`
+          # crate, which needs an explicit cross-compiler when the host triple
+          # differs from the target. The linker alone is not enough.
+          echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+          echo "AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar" >> "$GITHUB_ENV"
       - name: Build
         env:
           RUSTFLAGS: -D warnings

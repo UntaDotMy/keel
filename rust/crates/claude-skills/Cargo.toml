@@ -12,6 +12,7 @@ claude-skills-flow = { workspace = true }
 claude-skills-platform = { workspace = true }
 claude-skills-releaseassets = { workspace = true }
 claude-skills-professionaltext = { workspace = true }
+rusqlite = { workspace = true }
 serde_json = { workspace = true }
 serde = { workspace = true }
 tiktoken-rs = { workspace = true }
