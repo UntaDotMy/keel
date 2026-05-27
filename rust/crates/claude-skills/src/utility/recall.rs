@@ -97,7 +97,10 @@ fn render_recall_help(command_group: &str, standard_output: &mut dyn Write) {
         standard_output,
         "Usage: claude-skills {command_group} recall <query> [--limit N] [--json] [--claude-home PATH]"
     );
-    let _ = writeln!(standard_output, "       claude-skills {command_group} recall reindex [--force] [--claude-home PATH]");
+    let _ = writeln!(
+        standard_output,
+        "       claude-skills {command_group} recall reindex [--force] [--claude-home PATH]"
+    );
     let _ = writeln!(
         standard_output,
         "       claude-skills {command_group} recall status [--json] [--claude-home PATH]"
@@ -256,16 +259,14 @@ fn run_recall_reindex(
         }
     };
     let database_path = recall_database_path(&claude_home);
-    if flag_set.bool_value("force") {
-        if database_path.exists() {
-            if let Err(io_error) = fs::remove_file(&database_path) {
-                let _ = writeln!(
-                    standard_error,
-                    "{command_group} recall reindex: remove {}: {io_error}",
-                    display_path(&database_path)
-                );
-                return 1;
-            }
+    if flag_set.bool_value("force") && database_path.exists() {
+        if let Err(io_error) = fs::remove_file(&database_path) {
+            let _ = writeln!(
+                standard_error,
+                "{command_group} recall reindex: remove {}: {io_error}",
+                display_path(&database_path)
+            );
+            return 1;
         }
     }
     let mut connection = match open_recall_connection(&database_path) {
@@ -452,8 +453,12 @@ fn parse_limit(raw_value: &str) -> Result<usize, String> {
     }
     match trimmed.parse::<usize>() {
         Ok(parsed) if parsed > 0 => Ok(parsed),
-        Ok(_) => Err(format!("--limit must be a positive integer, got {trimmed:?}")),
-        Err(_) => Err(format!("--limit must be a positive integer, got {trimmed:?}")),
+        Ok(_) => Err(format!(
+            "--limit must be a positive integer, got {trimmed:?}"
+        )),
+        Err(_) => Err(format!(
+            "--limit must be a positive integer, got {trimmed:?}"
+        )),
     }
 }
 
@@ -466,9 +471,7 @@ pub fn build_fts_query(raw_query: &str) -> Option<String> {
     for token in raw_query.split_whitespace() {
         let cleaned: String = token
             .chars()
-            .filter(|character| {
-                character.is_alphanumeric() || matches!(character, '-' | '_' | '.')
-            })
+            .filter(|character| character.is_alphanumeric() || matches!(character, '-' | '_' | '.'))
             .collect();
         if !cleaned.is_empty() {
             tokens.push(format!("\"{cleaned}\"*"));
@@ -708,10 +711,7 @@ struct DocumentRecord {
     size_bytes: i64,
 }
 
-fn collect_markdown_files(
-    directory: &Path,
-    out: &mut Vec<DocumentRecord>,
-) -> Result<(), String> {
+fn collect_markdown_files(directory: &Path, out: &mut Vec<DocumentRecord>) -> Result<(), String> {
     let read_dir = match fs::read_dir(directory) {
         Ok(read_dir) => read_dir,
         Err(_) => return Ok(()),
@@ -792,7 +792,13 @@ pub fn query_recall_index(
     let close_marker = SNIPPET_CLOSE_MARKER.to_string();
     let query_iterator = prepared_statement
         .query_map(
-            params![open_marker, close_marker, SNIPPET_TOKENS, fts_query, limit as i64],
+            params![
+                open_marker,
+                close_marker,
+                SNIPPET_TOKENS,
+                fts_query,
+                limit as i64
+            ],
             |row| {
                 let absolute_path: String = row.get(0)?;
                 let score: f64 = row.get(1)?;
@@ -804,8 +810,8 @@ pub fn query_recall_index(
         .map_err(|database_error| format!("query: {database_error}"))?;
     let mut hits: Vec<RecallHit> = Vec::new();
     for row_result in query_iterator {
-        let (absolute_path, score, snippet_text, content) = row_result
-            .map_err(|database_error| format!("read result row: {database_error}"))?;
+        let (absolute_path, score, snippet_text, content) =
+            row_result.map_err(|database_error| format!("read result row: {database_error}"))?;
         let line = locate_first_match_line(&content, &snippet_text);
         let display_snippet = render_snippet_for_display(&snippet_text);
         hits.push(RecallHit {
@@ -973,7 +979,10 @@ mod tests {
     #[test]
     fn build_fts_query_strips_punctuation_and_quotes_each_token() {
         let rendered = build_fts_query("OpenAPI diff! breaking-change?").expect("non-empty query");
-        assert_eq!(rendered, "\"OpenAPI\"* AND \"diff\"* AND \"breaking-change\"*");
+        assert_eq!(
+            rendered,
+            "\"OpenAPI\"* AND \"diff\"* AND \"breaking-change\"*"
+        );
     }
 
     #[test]
@@ -1007,25 +1016,22 @@ mod tests {
 
             let mut stdout: Vec<u8> = Vec::new();
             let mut stderr: Vec<u8> = Vec::new();
-            let exit_code = run_recall_command(
-                "memory",
-                &["openapi".to_string()],
-                &mut stdout,
-                &mut stderr,
-            );
-            assert_eq!(
-                exit_code,
-                0,
-                "stderr: {}",
-                String::from_utf8_lossy(&stderr)
-            );
+            let exit_code =
+                run_recall_command("memory", &["openapi".to_string()], &mut stdout, &mut stderr);
+            assert_eq!(exit_code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
             let rendered = String::from_utf8_lossy(&stdout);
             assert!(
                 rendered.contains("memory recall: query=\"openapi\""),
                 "rendered: {rendered}"
             );
-            assert!(rendered.contains("memories/notes/openapi.md"), "rendered: {rendered}");
-            assert!(rendered.contains("working-briefs/today.md"), "rendered: {rendered}");
+            assert!(
+                rendered.contains("memories/notes/openapi.md"),
+                "rendered: {rendered}"
+            );
+            assert!(
+                rendered.contains("working-briefs/today.md"),
+                "rendered: {rendered}"
+            );
         });
     }
 
@@ -1045,17 +1051,18 @@ mod tests {
                 &mut stdout,
                 &mut stderr,
             );
-            assert_eq!(
-                exit_code,
-                0,
-                "stderr: {}",
-                String::from_utf8_lossy(&stderr)
-            );
+            assert_eq!(exit_code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
             let rendered = String::from_utf8_lossy(&stdout);
-            assert!(rendered.contains("\"query\": \"webhook\""), "rendered: {rendered}");
+            assert!(
+                rendered.contains("\"query\": \"webhook\""),
+                "rendered: {rendered}"
+            );
             assert!(rendered.contains("\"count\":"), "rendered: {rendered}");
             assert!(rendered.contains("\"score\":"), "rendered: {rendered}");
-            assert!(rendered.contains("memories/security/incident.md"), "rendered: {rendered}");
+            assert!(
+                rendered.contains("memories/security/incident.md"),
+                "rendered: {rendered}"
+            );
         });
     }
 
@@ -1075,7 +1082,12 @@ mod tests {
                 &mut stdout,
                 &mut stderr,
             );
-            assert_eq!(first_code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
+            assert_eq!(
+                first_code,
+                0,
+                "stderr: {}",
+                String::from_utf8_lossy(&stderr)
+            );
             assert!(String::from_utf8_lossy(&stdout).contains("memories/draft.md"));
 
             // Sleep just enough that mtime changes on filesystems with
@@ -1148,15 +1160,16 @@ mod tests {
                 &mut stdout,
                 &mut stderr,
             );
-            assert_eq!(
-                exit_code,
-                0,
-                "stderr: {}",
-                String::from_utf8_lossy(&stderr)
-            );
+            assert_eq!(exit_code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
             let rendered = String::from_utf8_lossy(&stdout);
-            assert!(rendered.contains("\"documentsAdded\":"), "rendered: {rendered}");
-            assert!(rendered.contains("\"documentsIndexed\":"), "rendered: {rendered}");
+            assert!(
+                rendered.contains("\"documentsAdded\":"),
+                "rendered: {rendered}"
+            );
+            assert!(
+                rendered.contains("\"documentsIndexed\":"),
+                "rendered: {rendered}"
+            );
         });
     }
 
@@ -1173,14 +1186,12 @@ mod tests {
                 &mut stdout,
                 &mut stderr,
             );
-            assert_eq!(
-                exit_code,
-                0,
-                "stderr: {}",
-                String::from_utf8_lossy(&stderr)
-            );
+            assert_eq!(exit_code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
             let rendered = String::from_utf8_lossy(&stdout);
-            assert!(rendered.contains("\"documents\": 2"), "rendered: {rendered}");
+            assert!(
+                rendered.contains("\"documents\": 2"),
+                "rendered: {rendered}"
+            );
             assert!(
                 rendered.contains("\"schemaVersion\": \"1\""),
                 "rendered: {rendered}"
@@ -1204,11 +1215,7 @@ mod tests {
     #[test]
     fn recall_returns_zero_matches_for_unknown_term() {
         run_with_home("claude-skills-recall-no-hits", |claude_home| {
-            write_memory(
-                claude_home,
-                "memories/note.md",
-                "# Note\nplain old text\n",
-            );
+            write_memory(claude_home, "memories/note.md", "# Note\nplain old text\n");
             let mut stdout: Vec<u8> = Vec::new();
             let mut stderr: Vec<u8> = Vec::new();
             let exit_code = run_recall_command(
@@ -1217,12 +1224,7 @@ mod tests {
                 &mut stdout,
                 &mut stderr,
             );
-            assert_eq!(
-                exit_code,
-                0,
-                "stderr: {}",
-                String::from_utf8_lossy(&stderr)
-            );
+            assert_eq!(exit_code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
             let rendered = String::from_utf8_lossy(&stdout);
             assert!(rendered.contains("matches=0"), "rendered: {rendered}");
         });
@@ -1271,14 +1273,12 @@ mod tests {
                 &mut stdout,
                 &mut stderr,
             );
-            assert_eq!(
-                exit_code,
-                0,
-                "stderr: {}",
-                String::from_utf8_lossy(&stderr)
-            );
+            assert_eq!(exit_code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
             let rendered = String::from_utf8_lossy(&stdout);
-            assert!(rendered.starts_with("memoriesv2 recall:"), "rendered: {rendered}");
+            assert!(
+                rendered.starts_with("memoriesv2 recall:"),
+                "rendered: {rendered}"
+            );
             assert!(
                 rendered.contains("memoriesv2/library/postgres.md"),
                 "rendered: {rendered}"
