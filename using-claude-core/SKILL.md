@@ -111,7 +111,7 @@ skill matcher fires. The full text and the tactical rules they imply live in
 | "I'll add a config knob in case we need it" | Step 2 (Simplicity First) violated. Add it when a second caller exists. |
 | "Make it work" is a goal | Step 4 (Goal-Driven Execution) failed. State the verifiable check that proves done. |
 
-## Skill catalog (13 skills installed under ~/.claude/skills/)
+## Skill catalog (18 skills installed under ~/.claude/skills/)
 
 Source: each `<name>/SKILL.md` in this repo. Use the Skill tool with the bare
 name (e.g. `Skill("reviewer")`).
@@ -129,8 +129,13 @@ name (e.g. `Skill("reviewer")`).
 - `ui-design-systems-and-responsive-interfaces` — UI systems, responsive design, accessibility (WCAG 2.1 AA).
 - `ux-research-and-experience-strategy` — UX research and evidence-based experience design (journeys, funnels, usability).
 - `memory-status-reporter` — Human-style memory health and learning reports.
+- `api-contract-design` — REST, GraphQL, and gRPC contract evolution; breaking-change classification, error taxonomy, idempotency, pagination, and SDK migration windows.
+- `react-performance-audit` — React render-cost tracing, memoization, bundle-size analysis, list virtualization, Core Web Vitals on React routes.
+- `postgres-migration-safety` — Live-traffic Postgres schema changes, lock-level analysis, expand-and-contract sequencing, bounded backfills, rollback paths.
+- `stripe-integration` — Stripe Checkout, Payment Intents, Subscriptions, Connect, Webhooks, refunds, disputes, idempotency, and 3DS/SCA.
+- `websocket-realtime-design` — WebSocket, SSE, fan-out, reconnect/resume, backpressure, ordering and dedup, auth lifecycle on long-lived connections.
 
-## Subagent catalog (13 delegation targets in .claude/agents/)
+## Subagent catalog (18 delegation targets in .claude/agents/)
 
 Use these via the Agent tool when the work benefits from an isolated context
 window. Same names as the skills — pick the subagent when token-saving delegation
@@ -147,7 +152,10 @@ form so subagents do not fall back to memory-based defaults.
   `cloud-and-devops-expert`, `qa-and-automation-engineer`,
   `security-and-compliance-auditor`, `git-expert`, `preserve-existing-flow`,
   `reviewer`, `ui-design-systems-and-responsive-interfaces`,
-  `ux-research-and-experience-strategy`, `memory-status-reporter`.
+  `ux-research-and-experience-strategy`, `memory-status-reporter`,
+  `api-contract-design`, `react-performance-audit`,
+  `postgres-migration-safety`, `stripe-integration`,
+  `websocket-realtime-design`.
 
 ## Workspace pointers
 

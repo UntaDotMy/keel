@@ -1,7 +1,7 @@
 <!--
 Purpose: Authoritative sources for the rules in AGENTS.md so contributors can verify a rule against its origin.
 Caller: AGENTS.md and contributors reconciling drift between AGENTS.md and references.
-Dependencies: AGENTS.md, the 13 specialist SKILL.md files, claude-skills CLI surface.
+Dependencies: AGENTS.md, the 18 specialist SKILL.md files, claude-skills CLI surface.
 Main Functions: Map AGENTS.md sections to reference files, list related skills, list owning commands.
 Side Effects: None — this file is informational.
 -->
@@ -62,6 +62,11 @@ These skills hand off to or from the AGENTS.md doctrine. Load the matching `<nam
 - `ui-design-systems-and-responsive-interfaces/SKILL.md` — design systems, responsive UI, accessibility.
 - `ux-research-and-experience-strategy/SKILL.md` — research planning, journey mapping, recovery-path quality.
 - `memory-status-reporter/SKILL.md` — memory health, learning recaps, mistake ledgers.
+- `api-contract-design/SKILL.md` — REST/GraphQL/gRPC contract evolution and breaking-change governance.
+- `react-performance-audit/SKILL.md` — React render cost, bundle size, virtualization, Core Web Vitals.
+- `postgres-migration-safety/SKILL.md` — live-traffic Postgres schema changes, backfills, rollback paths.
+- `stripe-integration/SKILL.md` — Checkout, Payment Intents, Subscriptions, Webhooks, Connect, refunds, disputes.
+- `websocket-realtime-design/SKILL.md` — WebSocket, SSE, fan-out, reconnect, backpressure, auth lifecycle.
 
 ## Tooling Anchors
 

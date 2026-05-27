@@ -1,7 +1,7 @@
 <!--
 Purpose: Compact entry point for skill routing rules and the specialist roster. Detailed doctrine lives under AGENTS/references/.
 Caller: Synced Claude Code guidance files and contributors needing the routing summary.
-Dependencies: AGENTS.md, AGENTS/references/20-skill-routing.md, the 13 specialist SKILL.md files.
+Dependencies: AGENTS.md, AGENTS/references/20-skill-routing.md, the 18 specialist SKILL.md files.
 Main Functions: Provide the short routing contract, ownership map, and pointers to depth references.
 Side Effects: Changes to this file affect every Claude Code session; keep it tight.
 -->
@@ -52,7 +52,7 @@ Token-saving rule: prevent noisy raw command output from entering Claude Code co
             └────────────────────────────────────┘
 ```
 
-## Specialist Roster (13)
+## Specialist Roster (18)
 
 1. **software-development-life-cycle** — full SDLC, architecture, cross-domain coordination
 2. **preserve-existing-flow** — brownfield ownership tracing before existing-source edits
@@ -67,6 +67,11 @@ Token-saving rule: prevent noisy raw command output from entering Claude Code co
 11. **git-expert** — version control, branching strategy, PR/MR hygiene
 12. **memory-status-reporter** — memory health, learning recaps, mistake ledgers
 13. **reviewer** — production readiness, final quality gate
+14. **api-contract-design** — REST, GraphQL, gRPC contract evolution and breaking-change governance
+15. **react-performance-audit** — render cost, bundle size, virtualization, Core Web Vitals on React apps
+16. **postgres-migration-safety** — live-traffic Postgres schema changes, backfills, indexes, rollback plans
+17. **stripe-integration** — Checkout, Payment Intents, Subscriptions, Webhooks, Connect, refunds, disputes
+18. **websocket-realtime-design** — WebSocket, SSE, fan-out, reconnect, backpressure, auth lifecycle
 
 ## Pointers to Depth
 

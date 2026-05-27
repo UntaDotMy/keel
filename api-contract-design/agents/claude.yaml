@@ -1,0 +1,9 @@
+# Reasoning: Use the repo-managed high reasoning baseline so this skill
+# can push deeper on contract evolution and breaking-change analysis without a model pin.
+reasoning_effort: "high"
+interface:
+  display_name: "API Contract Design"
+  short_description: "REST, GraphQL, and gRPC contract evolution with breaking-change governance"
+  default_prompt: "Use $api-contract-design when the main risk is API contracts — adding or removing endpoints, evolving fields, classifying change as additive non-breaking, behavioral non-breaking, or breaking, defining error taxonomy, idempotency, pagination, or planning generated-client and SDK migration windows. Start from the canonical schema, name the change classification, and choose the smallest compatibility window that preserves consumer trust. Shared execution policy is appended from the central managed catalog during install."
+policy:
+  allow_implicit_invocation: true

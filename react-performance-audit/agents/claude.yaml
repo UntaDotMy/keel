@@ -1,0 +1,9 @@
+# Reasoning: Use the repo-managed high reasoning baseline so this skill
+# can push deeper on render cost, bundle analysis, and Core Web Vitals without a model pin.
+reasoning_effort: "high"
+interface:
+  display_name: "React Performance Audit"
+  short_description: "React render cost, bundle size, list virtualization, and Core Web Vitals tuning"
+  default_prompt: "Use $react-performance-audit when the main risk is React runtime performance — slow renders, wasteful re-renders, oversized bundles, jank on long lists, or regressions in LCP/INP/CLS. Start from a profile or vitals snapshot, name the hotspot (component, route, dependency), pick the smallest fix that survives a regression check, and separate measured findings from inferred ones. Shared execution policy is appended from the central managed catalog during install."
+policy:
+  allow_implicit_invocation: true

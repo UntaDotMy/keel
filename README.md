@@ -57,7 +57,7 @@ The cast file ships in this repo. Render to GIF with `agg docs/demos/quickstart.
 | Review gates | Native `.claude-review.json`, `review pre-pr`, and CI-ready artifacts so non-trivial code never self-reviews. |
 | Memory | Working briefs, completion ledgers, scoped `SYSTEM_MAP.md`, and durable recovery state under `~/.claude/memories/`. |
 | Command compaction | `claude-skills run -- <cmd>` produces compact output for noisy test/build/lint/log/search commands without dropping diagnostic signal. |
-| Specialist skills | 13 managed specialist profiles synced into `~/.claude/agent-profiles/*.toml`, invokable via the Skill tool. |
+| Specialist skills | 18 managed specialist profiles synced into `~/.claude/agent-profiles/*.toml`, invokable via the Skill tool. |
 
 ## Use as a Claude Code Plugin
 
@@ -583,9 +583,9 @@ Release download overrides are available for controlled environments:
 
 ## Managed Agent Profiles
 
-The managed install mirrors these 13 specialist lanes into `~/.claude/agent-profiles/*.toml`:
+The managed install mirrors these 18 specialist lanes into `~/.claude/agent-profiles/*.toml`:
 
-`backend-and-data-architecture`, `cloud-and-devops-expert`, `git-expert`, `memory-status-reporter`, `mobile-development-life-cycle`, `preserve-existing-flow`, `qa-and-automation-engineer`, `reviewer`, `security-and-compliance-auditor`, `software-development-life-cycle`, `ui-design-systems-and-responsive-interfaces`, `ux-research-and-experience-strategy`, and `web-development-life-cycle`.
+`api-contract-design`, `backend-and-data-architecture`, `cloud-and-devops-expert`, `git-expert`, `memory-status-reporter`, `mobile-development-life-cycle`, `postgres-migration-safety`, `preserve-existing-flow`, `qa-and-automation-engineer`, `react-performance-audit`, `reviewer`, `security-and-compliance-auditor`, `software-development-life-cycle`, `stripe-integration`, `ui-design-systems-and-responsive-interfaces`, `ux-research-and-experience-strategy`, `web-development-life-cycle`, and `websocket-realtime-design`.
 
 Routine work stays in the main lane. Specialist profiles are for the moments where domain ownership or independent verification is worth the extra context.
 

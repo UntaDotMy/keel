@@ -4,9 +4,9 @@
 
 This is the claude-core project — native delivery rails for Claude Code. It provides:
 - 1 bootstrap **skill** (`using-claude-core/SKILL.md`) injected verbatim at every `SessionStart` to establish the research-first iron law and list every other skill
-- 13 specialist Claude Code **skills** for software delivery (`<name>/SKILL.md`)
-- 13 matching Claude Code **subagents** for token-efficient delegation (`.claude/agents/<name>.md`)
-- 13 internal **managed profiles** consumed by the CLI (`<name>/agents/claude.yaml`)
+- 18 specialist Claude Code **skills** for software delivery (`<name>/SKILL.md`)
+- 18 matching Claude Code **subagents** for token-efficient delegation (`.claude/agents/<name>.md`)
+- 18 internal **managed profiles** consumed by the CLI (`<name>/agents/claude.yaml`)
 - Workflow routing and escalation rules
 - Review gates (pre-commit, pre-PR)
 - Professional text templates
@@ -43,7 +43,7 @@ Each specialist contains three artifacts:
 - `<name>/agents/claude.yaml` — Managed profile (CLI runtime configuration)
 - `<name>/references/` — Deep knowledge files referenced by SKILL.md
 
-13 specialists: `software-development-life-cycle`, `web-development-life-cycle`, `mobile-development-life-cycle`, `backend-and-data-architecture`, `cloud-and-devops-expert`, `qa-and-automation-engineer`, `security-and-compliance-auditor`, `git-expert`, `preserve-existing-flow`, `reviewer`, `ui-design-systems-and-responsive-interfaces`, `ux-research-and-experience-strategy`, `memory-status-reporter`.
+18 specialists: `software-development-life-cycle`, `web-development-life-cycle`, `mobile-development-life-cycle`, `backend-and-data-architecture`, `cloud-and-devops-expert`, `qa-and-automation-engineer`, `security-and-compliance-auditor`, `git-expert`, `preserve-existing-flow`, `reviewer`, `ui-design-systems-and-responsive-interfaces`, `ux-research-and-experience-strategy`, `memory-status-reporter`, `api-contract-design`, `react-performance-audit`, `postgres-migration-safety`, `stripe-integration`, `websocket-realtime-design`.
 
 ## Schema Compliance Notes
 

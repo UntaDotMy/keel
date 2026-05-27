@@ -1,0 +1,9 @@
+# Reasoning: Use the repo-managed high reasoning baseline so this skill
+# can push deeper on lock analysis, expand-and-contract sequencing, and rollback safety without a model pin.
+reasoning_effort: "high"
+interface:
+  display_name: "PostgreSQL Migration Safety"
+  short_description: "Live-traffic Postgres schema changes, backfills, indexes, and rollback planning"
+  default_prompt: "Use $postgres-migration-safety when the main risk is a PostgreSQL schema change under live traffic — adding or dropping columns, changing types, adding constraints, building indexes, or backfilling large tables. Start from the lock level each statement takes, sequence expand-and-contract across separate deploys, set statement_timeout and lock_timeout, plan bounded-batch backfills, and write the rollback path before deploy. Shared execution policy is appended from the central managed catalog during install."
+policy:
+  allow_implicit_invocation: true

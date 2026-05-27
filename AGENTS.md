@@ -1,7 +1,7 @@
 <!--
 Purpose: Thin entry point and index for the managed Claude Code routing, memory, validation, and delivery doctrine.
 Caller: Claude Code agents using the synced claude_skills native guidance surface.
-Dependencies: AGENTS/references/*.md, the 13 specialist SKILL.md files, claude-skills CLI surface.
+Dependencies: AGENTS/references/*.md, the 18 specialist SKILL.md files, claude-skills CLI surface.
 Main Functions: Route to the correct reference file in AGENTS/references/ for the section a reader needs.
 Side Effects: None — this file is informational.
 -->
