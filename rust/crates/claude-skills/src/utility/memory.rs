@@ -2385,16 +2385,23 @@ mod tests {
 
     #[test]
     fn route_stripe_payment_targets_stripe_skill() {
-        let (exit_code, stdout, _) = route("verify our stripe webhook signature handling on the payment intent");
+        let (exit_code, stdout, _) =
+            route("verify our stripe webhook signature handling on the payment intent");
         assert_eq!(exit_code, 0);
-        assert!(stdout.contains("specialist: stripe-integration"), "stdout: {stdout}");
+        assert!(
+            stdout.contains("specialist: stripe-integration"),
+            "stdout: {stdout}"
+        );
     }
 
     #[test]
     fn route_websocket_request_targets_realtime_skill() {
         let (exit_code, stdout, _) = route("design a websocket reconnection protocol");
         assert_eq!(exit_code, 0);
-        assert!(stdout.contains("specialist: websocket-realtime-design"), "stdout: {stdout}");
+        assert!(
+            stdout.contains("specialist: websocket-realtime-design"),
+            "stdout: {stdout}"
+        );
     }
 
     #[test]
@@ -2402,7 +2409,10 @@ mod tests {
         let (exit_code, stdout, _) =
             route("plan a postgres migration to add a not null column on a 50M row table");
         assert_eq!(exit_code, 0);
-        assert!(stdout.contains("specialist: postgres-migration-safety"), "stdout: {stdout}");
+        assert!(
+            stdout.contains("specialist: postgres-migration-safety"),
+            "stdout: {stdout}"
+        );
     }
 
     #[test]
@@ -2410,7 +2420,10 @@ mod tests {
         let (exit_code, stdout, _) =
             route("the react profiler shows a render storm on the dashboard");
         assert_eq!(exit_code, 0);
-        assert!(stdout.contains("specialist: react-performance-audit"), "stdout: {stdout}");
+        assert!(
+            stdout.contains("specialist: react-performance-audit"),
+            "stdout: {stdout}"
+        );
     }
 
     #[test]
@@ -2418,7 +2431,10 @@ mod tests {
         let (exit_code, stdout, _) =
             route("plan the openapi diff for breaking changes before the release");
         assert_eq!(exit_code, 0);
-        assert!(stdout.contains("specialist: api-contract-design"), "stdout: {stdout}");
+        assert!(
+            stdout.contains("specialist: api-contract-design"),
+            "stdout: {stdout}"
+        );
     }
 
     #[test]
