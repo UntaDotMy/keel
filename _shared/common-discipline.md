@@ -1,6 +1,6 @@
 # Shared Discipline — Common Standards Across Skills
 
-This file factors out instructions that previously repeated verbatim in 12 of 13 SKILL.md files. Each skill now references this file instead of duplicating the text. Loaded on demand by the active skill — saves tokens on every skill activation.
+This file factors out instructions that previously repeated verbatim across the specialist SKILL.md files. Each skill now references this file instead of duplicating the text. Loaded on demand by the active skill — saves tokens on every skill activation.
 
 ## Research Reuse Defaults
 

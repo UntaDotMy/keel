@@ -1,0 +1,9 @@
+# Reasoning: Use the repo-managed high reasoning baseline so this skill
+# can push deeper on payment flows, idempotency, and webhook reconciliation without a model pin.
+reasoning_effort: "high"
+interface:
+  display_name: "Stripe Integration"
+  short_description: "Stripe Checkout, Payment Intents, Subscriptions, Webhooks, and Connect with PCI-scope discipline"
+  default_prompt: "Use $stripe-integration when the main risk is a Stripe payment flow — Checkout, Payment Intents, Subscriptions, Connect, refunds, disputes, or 3DS/SCA. Treat Stripe as the source of truth for payment state, require signed webhooks and idempotency keys on every mutating call, store money as integer minor units with an explicit currency, and grant entitlements only on succeeded events. Choose the smallest API surface that meets the requirement and document the PCI scope. Shared execution policy is appended from the central managed catalog during install."
+policy:
+  allow_implicit_invocation: true

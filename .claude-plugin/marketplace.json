@@ -5,7 +5,7 @@
     "url": "https://github.com/UntaDotMy"
   },
   "metadata": {
-    "description": "Discipline as code for Claude Code — iron-law hooks, workflow rails, review gates, memory, command compaction, and 13 managed specialist skills. Single Rust binary, no Node or Python.",
+    "description": "Discipline as code for Claude Code — iron-law hooks, workflow rails, review gates, memory, command compaction, and 18 managed specialist skills. Single Rust binary, no Node or Python.",
     "version": "0.1.0",
     "homepage": "https://github.com/UntaDotMy/claude_core",
     "license": "MIT"
@@ -14,7 +14,7 @@
     {
       "name": "claude-core",
       "source": "./",
-      "description": "Bootstrap skill, 13 specialist skills, subagents, hooks, and the claude-skills CLI. Loads the iron-law contract on every SessionStart and restates it on every UserPromptSubmit.",
+      "description": "Bootstrap skill, 18 specialist skills, subagents, hooks, and the claude-skills CLI. Loads the iron-law contract on every SessionStart and restates it on every UserPromptSubmit.",
       "version": "0.1.0",
       "category": "workflow",
       "tags": [

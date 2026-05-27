@@ -1,0 +1,9 @@
+# Reasoning: Use the repo-managed high reasoning baseline so this skill
+# can push deeper on reconnect, backpressure, ordering, and fan-out semantics without a model pin.
+reasoning_effort: "high"
+interface:
+  display_name: "WebSocket and Realtime Design"
+  short_description: "WebSocket, SSE, and realtime fan-out with reconnect, backpressure, and auth boundaries"
+  default_prompt: "Use $websocket-realtime-design when the main risk is a long-lived realtime connection — WebSocket, SSE, or WebRTC data channels. Define the frame envelope and close-code taxonomy, pick delivery semantics (at-most-once / at-least-once / exactly-once), bound reconnect with buffered resume and a RESYNC fallback, set per-connection backpressure caps, plan multi-process fan-out through an external broker, and re-authenticate on reconnect. Shared execution policy is appended from the central managed catalog during install."
+policy:
+  allow_implicit_invocation: true

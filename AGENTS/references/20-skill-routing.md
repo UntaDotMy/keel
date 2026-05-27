@@ -1,7 +1,7 @@
 <!--
 Purpose: Capture skill routing rules, the specialist roster, skill-focused execution, and agent profiles previously inline in AGENTS.md.
 Caller: AGENTS.md when picking a primary skill, deciding whether to compose, or wiring agent-profile TOMLs.
-Dependencies: The 13 specialist SKILL.md files and the matching .claude/agents/<name>.md subagent files.
+Dependencies: The 18 specialist SKILL.md files and the matching .claude/agents/<name>.md subagent files.
 Main Functions: Define routing defaults, the specialist matrix, composition discipline, and agent-profile expectations.
 Side Effects: None — this file is informational.
 -->
@@ -36,6 +36,11 @@ Load specialist skills when the task clearly requires domain expertise:
 - **ux-research-and-experience-strategy**: UX research, user testing, journey friction, decision architecture, and recovery-path quality
 - **git-expert**: Complex git operations, issue-driven worktree flow, branching strategy, and clean push hygiene
 - **memory-status-reporter**: Memory health, daily learnings, mistake ledgers, heuristic status reporting, and explicit recap reporting
+- **api-contract-design**: REST, GraphQL, and gRPC contract evolution; breaking-change classification, error taxonomy, idempotency, pagination, generated-client and SDK migration windows
+- **react-performance-audit**: React render-cost tracing, memoization decisions, bundle-size analysis, list virtualization, Suspense and concurrent rendering, Core Web Vitals on React routes
+- **postgres-migration-safety**: Live-traffic PostgreSQL schema changes — lock-level analysis, expand-and-contract sequencing, bounded backfills, `CREATE INDEX CONCURRENTLY`, and rollback planning
+- **stripe-integration**: Stripe Checkout, Payment Intents, Subscriptions, Connect, webhook reconciliation, idempotency, money handling, refunds, disputes, and 3DS/SCA
+- **websocket-realtime-design**: WebSocket, SSE, and realtime fan-out — frame envelope, reconnect/resume, backpressure, ordering and dedup, multi-process broker choice, auth lifecycle on long-lived connections
 
 ### Keep It Simple
 
@@ -56,7 +61,7 @@ Load specialist skills when the task clearly requires domain expertise:
 
 ### Agent Profiles
 
-Your managed Claude Code home should expose these 13 skill-owned agent profiles under `~/.claude/agent-profiles/*.toml`:
+Your managed Claude Code home should expose these 18 skill-owned agent profiles under `~/.claude/agent-profiles/*.toml`:
 
 - **backend-and-data-architecture**: Backend systems, APIs, data models, caching, and messaging
 - **cloud-and-devops-expert**: Infrastructure, CI/CD, containers, and IaC
@@ -71,8 +76,13 @@ Your managed Claude Code home should expose these 13 skill-owned agent profiles 
 - **ui-design-systems-and-responsive-interfaces**: Responsive UI, accessibility, design systems, and visual consistency
 - **ux-research-and-experience-strategy**: Research planning, usability evidence, and experience strategy
 - **web-development-life-cycle**: Web app architecture, browser behavior, performance, SEO, and deployment
+- **api-contract-design**: REST, GraphQL, and gRPC contracts; breaking-change classification and SDK migration windows
+- **react-performance-audit**: React render cost, bundle size, virtualization, and Core Web Vitals
+- **postgres-migration-safety**: Live-traffic Postgres schema changes, backfills, indexes, and rollback paths
+- **stripe-integration**: Stripe Checkout, Payment Intents, Subscriptions, Webhooks, Connect, refunds, and disputes
+- **websocket-realtime-design**: WebSocket, SSE, and realtime fan-out with reconnect, backpressure, and auth boundaries
 
-The old generic `default`, `explorer`, `worker`, `architect`, and `awaiter` TOMLs are not the repo-managed profile surface anymore. Runtime helper roles may still exist inside Claude Code, but the managed install should mirror these 13 specialist skill profiles instead.
+The old generic `default`, `explorer`, `worker`, `architect`, and `awaiter` TOMLs are not the repo-managed profile surface anymore. Runtime helper roles may still exist inside Claude Code, but the managed install should mirror these 18 specialist skill profiles instead.
 
 ## Routing Principles (Detailed)
 

@@ -68,18 +68,25 @@
       "match_paths": [
         "AGENTS.md",
         "README.md",
+        "api-contract-design/**",
         "backend-and-data-architecture/**",
         "cloud-and-devops-expert/**",
         "git-expert/**",
         "memory-status-reporter/**",
         "mobile-development-life-cycle/**",
+        "postgres-migration-safety/**",
+        "preserve-existing-flow/**",
         "qa-and-automation-engineer/**",
+        "react-performance-audit/**",
         "reviewer/**",
         "security-and-compliance-auditor/**",
         "software-development-life-cycle/**",
+        "stripe-integration/**",
         "ui-design-systems-and-responsive-interfaces/**",
+        "using-claude-core/**",
         "ux-research-and-experience-strategy/**",
-        "web-development-life-cycle/**"
+        "web-development-life-cycle/**",
+        "websocket-realtime-design/**"
       ],
       "required_changed_path_patterns": [
         "rust/**/*.rs",
