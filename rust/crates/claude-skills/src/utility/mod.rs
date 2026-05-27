@@ -7,6 +7,7 @@
 pub mod code_search;
 pub mod gain;
 pub mod memory;
+pub mod recall;
 pub mod session;
 pub mod system_map;
 pub mod workflow_ledger;

@@ -32,10 +32,12 @@
   memory system-map refresh [--memory-base <path>] [--workspace-root <path>] [--format json|compact]
   memory system-map show [--memory-base <path>] [--workspace-root <path>]
   memory working-brief|completion-gate
+  memory recall <query>
   memoriesv2 scope resolve [same flags as memory scope resolve]
   memoriesv2 system-map refresh [same flags as memory system-map refresh]
   memoriesv2 system-map show [same flags as memory system-map show]
   memoriesv2 working-brief|completion-gate
+  memoriesv2 recall <query>
   orchestration runtime-preflight|resume-status
   workflow route|start|cockpit|status|dashboard|watch|finish|resume
   gain [reset]

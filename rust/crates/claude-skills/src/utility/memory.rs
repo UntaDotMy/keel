@@ -59,6 +59,12 @@ pub fn run_memory_command(
             standard_output,
             standard_error,
         ),
+        "recall" => crate::utility::recall::run_recall_command(
+            command_group,
+            &arguments[1..],
+            standard_output,
+            standard_error,
+        ),
         "status" | "report" | "agent-registry" | "research-cache" | "maintenance"
         | "agent-packets" | "loop-guard" | "retrieve" | "index" | "entity" | "hook" => {
             let _ = writeln!(
