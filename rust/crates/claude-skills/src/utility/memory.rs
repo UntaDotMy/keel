@@ -1368,6 +1368,104 @@ const ROUTING_RULES: &[RoutingRule] = &[
     },
     RoutingRule {
         keywords: &[
+            "stripe",
+            "payment intent",
+            "payment intents",
+            "checkout session",
+            "subscription billing",
+            "webhook signature",
+            "stripe webhook",
+            "stripe connect",
+            "chargeback",
+            "dispute",
+            "refund",
+            "sca",
+            "3ds",
+            "pci",
+        ],
+        specialist: "stripe-integration",
+        reason: "Stripe payments, subscriptions, webhooks, or PCI scope",
+    },
+    RoutingRule {
+        keywords: &[
+            "websocket",
+            "web socket",
+            "socket.io",
+            "socketio",
+            "server-sent events",
+            "sse",
+            "realtime",
+            "real-time",
+            "presence",
+            "fan-out",
+            "fanout",
+            "long-polling",
+            "webrtc data channel",
+        ],
+        specialist: "websocket-realtime-design",
+        reason: "WebSocket, SSE, or realtime fan-out architecture",
+    },
+    RoutingRule {
+        keywords: &[
+            "postgres migration",
+            "postgresql migration",
+            "schema migration",
+            "alter table",
+            "expand and contract",
+            "expand-and-contract",
+            "backfill",
+            "create index concurrently",
+            "lock_timeout",
+            "statement_timeout",
+            "not valid constraint",
+        ],
+        specialist: "postgres-migration-safety",
+        reason: "PostgreSQL migration, lock analysis, or backfill strategy",
+    },
+    RoutingRule {
+        keywords: &[
+            "react performance",
+            "react perf",
+            "react re-render",
+            "react rerender",
+            "memoization",
+            "usememo",
+            "usecallback",
+            "react.memo",
+            "hydration mismatch",
+            "suspense waterfall",
+            "bundle size",
+            "code splitting",
+            "core web vitals",
+            "lcp",
+            "inp",
+            "react profiler",
+        ],
+        specialist: "react-performance-audit",
+        reason: "React render audit, bundle triage, or Core Web Vitals",
+    },
+    RoutingRule {
+        keywords: &[
+            "api contract",
+            "openapi",
+            "swagger",
+            "api version",
+            "breaking change",
+            "schema evolution",
+            "asyncapi",
+            "json schema",
+            "grpc proto",
+            "proto file",
+            "graphql schema",
+            "idempotency key",
+            "error taxonomy",
+            "cursor pagination",
+        ],
+        specialist: "api-contract-design",
+        reason: "API contract design, schema evolution, or breaking-change review",
+    },
+    RoutingRule {
+        keywords: &[
             "api",
             "microservice",
             "microservices",
@@ -2283,6 +2381,44 @@ mod tests {
         assert_eq!(exit_code, 0);
         assert!(stdout.contains("specialist: software-development-life-cycle"));
         assert!(stdout.contains("default lane"));
+    }
+
+    #[test]
+    fn route_stripe_payment_targets_stripe_skill() {
+        let (exit_code, stdout, _) = route("verify our stripe webhook signature handling on the payment intent");
+        assert_eq!(exit_code, 0);
+        assert!(stdout.contains("specialist: stripe-integration"), "stdout: {stdout}");
+    }
+
+    #[test]
+    fn route_websocket_request_targets_realtime_skill() {
+        let (exit_code, stdout, _) = route("design a websocket reconnection protocol");
+        assert_eq!(exit_code, 0);
+        assert!(stdout.contains("specialist: websocket-realtime-design"), "stdout: {stdout}");
+    }
+
+    #[test]
+    fn route_postgres_migration_targets_migration_skill() {
+        let (exit_code, stdout, _) =
+            route("plan a postgres migration to add a not null column on a 50M row table");
+        assert_eq!(exit_code, 0);
+        assert!(stdout.contains("specialist: postgres-migration-safety"), "stdout: {stdout}");
+    }
+
+    #[test]
+    fn route_react_perf_targets_perf_audit_skill() {
+        let (exit_code, stdout, _) =
+            route("the react profiler shows a render storm on the dashboard");
+        assert_eq!(exit_code, 0);
+        assert!(stdout.contains("specialist: react-performance-audit"), "stdout: {stdout}");
+    }
+
+    #[test]
+    fn route_api_contract_targets_contract_skill() {
+        let (exit_code, stdout, _) =
+            route("plan the openapi diff for breaking changes before the release");
+        assert_eq!(exit_code, 0);
+        assert!(stdout.contains("specialist: api-contract-design"), "stdout: {stdout}");
     }
 
     #[test]

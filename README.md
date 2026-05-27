@@ -7,11 +7,70 @@ Side Effects: Sets contributor and operator expectations for the repo-managed na
 -->
 [![Validate](https://github.com/UntaDotMy/claude_core/actions/workflows/validate.yml/badge.svg)](https://github.com/UntaDotMy/claude_core/actions/workflows/validate.yml)
 
-# claude_skills
+# claude-core
 
-Native delivery rails for Claude Code.
+**Discipline as code for Claude Code.** A single Rust binary that forces the agent to read the codebase before answering, restate the iron law on every prompt, refresh a structural project map across compactions, write a working brief before non-trivial work, and run a reviewer pass before closeout. No Node, no Python, no daemon.
 
-Claude Code stays the runtime. This repo adds the repeatable parts around it: skills, workflow routing, review gates, memory, command-output compaction, and branch-closeout proof.
+## The Iron Law
+
+Three rules are restated to the agent on every prompt. You cannot skip them.
+
+- **Read first.** Read SYSTEM_MAP, CLAUDE.md, the owning module, and the existing implementation. Do not propose changes against an imagined version of the file.
+- **Invoke relevant skills.** If there is even a 1% chance a skill applies, use the Skill tool *before* writing code or giving a final answer. The cost of skipping a skill that did apply is shipping a regression.
+- **Find the root cause.** Take the symptom as a starting point, not the spec. The real problem is usually one layer below what was asked. Trace the symptom end-to-end against the running code with file:line evidence before changing anything.
+
+## Install in One Paste
+
+```bash
+# macOS / Linux
+curl -fsSL https://raw.githubusercontent.com/UntaDotMy/claude_core/main/install.sh | bash
+```
+
+```powershell
+# Windows PowerShell
+irm https://raw.githubusercontent.com/UntaDotMy/claude_core/main/install.ps1 | iex
+```
+
+```bat
+:: Windows CMD
+curl -fsSL https://raw.githubusercontent.com/UntaDotMy/claude_core/main/install.cmd -o install.cmd && install.cmd && del install.cmd
+```
+
+The installer detects your OS and architecture, pulls the matching prebuilt binary from [GitHub Releases](https://github.com/UntaDotMy/claude_core/releases/latest), runs `claude-skills install`, verifies `status`, and cleans up. No Rust toolchain required. Pin a version with `CLAUDE_SKILLS_VERSION=vX.Y.Z`.
+
+## Demo
+
+A 30-second walkthrough of `workflow start -> cockpit -> finish`:
+
+```bash
+asciinema play docs/demos/quickstart.cast
+```
+
+The cast file ships in this repo. Render to GIF with `agg docs/demos/quickstart.cast docs/demos/quickstart.gif` if your viewer prefers a static asset.
+
+## What You Get
+
+| Surface | What it gives you |
+| --- | --- |
+| Iron-law hooks | SessionStart loads the bootstrap skill, UserPromptSubmit restates the three rules, PostToolBatch nudges a reviewer pass, PreCompact refreshes SYSTEM_MAP. |
+| Workflow CLI | `workflow start`, `workflow route`, `workflow cockpit`, `workflow finish` — proof-first delivery rails. |
+| Review gates | Native `.claude-review.json`, `review pre-pr`, and CI-ready artifacts so non-trivial code never self-reviews. |
+| Memory | Working briefs, completion ledgers, scoped `SYSTEM_MAP.md`, and durable recovery state under `~/.claude/memories/`. |
+| Command compaction | `claude-skills run -- <cmd>` produces compact output for noisy test/build/lint/log/search commands without dropping diagnostic signal. |
+| Specialist skills | 13 managed specialist profiles synced into `~/.claude/agent-profiles/*.toml`, invokable via the Skill tool. |
+
+## Use as a Claude Code Plugin
+
+This repo ships a `.claude-plugin/plugin.json` manifest. From inside Claude Code:
+
+```text
+/plugin marketplace add UntaDotMy/claude_core
+/plugin install claude-core@claude_core
+```
+
+That mounts the skills, agents, and hooks without running the native installer. Use the one-paste installer above when you want the full `claude-skills` CLI for workflow, memory, and command-compaction surfaces.
+
+---
 
 ## Native Command Routing — Must Follow First
 
@@ -60,44 +119,14 @@ After install, the preferred global CLI path for agents on supported operating s
 
 This matters because the install metadata remembers the source bundle or checkout so `status`, `update`, `verify`, `doctor`, and `menu` can still work when the installed binary is called from another project. For AI-agent or shell contexts where PATH resolution is not guaranteed, prefer the explicit installed path in the Claude Code home root. `--repo-root <path>` is an advanced override for CI, unusual layouts, or running the binary from a different folder than the extracted release/source checkout.
 
-## Why Use It
+## Install Details
 
-Use `claude_skills` when the team needs delivery work to be easier to inspect and harder to fake as done.
-
-| Surface | What it gives you |
-| --- | --- |
-| Workflow | Intake, routing, cockpit, hosted-check repair, and finish gates. |
-| Review | Native `.claude-review.json`, local review gates, and CI-ready artifacts. |
-| Memory | Working briefs, completion ledgers, scoped `SYSTEM_MAP.md`, and durable recovery state. |
-| Command compaction | Native benchmark-style output reduction through `claude-skills run --`: hook-integrated shell rewrite, semantic reducers, bounded streaming with `--stream`, raw recovery, and savings analytics without third-party runtime dependencies. |
-| Profiles | 13 managed specialist profiles synced into `~/.claude/agent-profiles/*.toml`. |
-
-## Quick Install
-
-### Native Install (Recommended)
-
-macOS or Linux:
+After running the one-paste installer above, verify with:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/UntaDotMy/claude_core/main/install.sh | bash
-~/.claude/claude-skills status
+~/.claude/claude-skills status              # macOS / Linux
+& "$env:USERPROFILE\.claude\claude-skills.exe" status   # Windows PowerShell
 ```
-
-Windows PowerShell:
-
-```powershell
-irm https://raw.githubusercontent.com/UntaDotMy/claude_core/main/install.ps1 | iex
-& "$env:USERPROFILE\.claude\claude-skills.exe" status
-```
-
-Windows CMD:
-
-```bat
-curl -fsSL https://raw.githubusercontent.com/UntaDotMy/claude_core/main/install.cmd -o install.cmd && install.cmd && del install.cmd
-%USERPROFILE%\.claude\claude-skills.exe status
-```
-
-The bootstrap installer detects your OS and architecture, downloads the matching GitHub release archive into a temporary directory, extracts it, runs `claude-skills install`, verifies `status`, and deletes the temporary files. Set `CLAUDE_SKILLS_VERSION=vX.Y.Z` to install a specific release instead of the latest release.
 
 ### Manual Release Install
 
