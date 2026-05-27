@@ -122,11 +122,29 @@ fn run_recall_search(
     standard_output: &mut dyn Write,
     standard_error: &mut dyn Write,
 ) -> u8 {
+    // Recall accepts the search query as positional words mixed with flags
+    // anywhere in the argument vector (for example `recall webhook --json`).
+    // The shared FlagSet parser stops flag parsing at the first positional, so
+    // we sieve known flags out first and hand the remaining tokens to FlagSet
+    // as a contiguous positional run. This keeps the rest of the command
+    // surface (which depends on the flags-then-positionals contract) unchanged.
+    let (flag_arguments, query_arguments) = match split_flags_and_query(arguments) {
+        Ok(pair) => pair,
+        Err(error_message) => {
+            let _ = writeln!(standard_error, "{command_group} recall: {error_message}");
+            return 2;
+        }
+    };
+    let mut combined: Vec<String> = flag_arguments;
+    if !query_arguments.is_empty() {
+        combined.push("--".to_string());
+        combined.extend(query_arguments);
+    }
     let mut flag_set = FlagSet::new(format!("{command_group} recall"));
     flag_set.string_flag("limit", "");
     flag_set.string_flag("claude-home", "");
     flag_set.bool_flag("json", false);
-    if let Err(parse_error) = flag_set.parse(arguments) {
+    if let Err(parse_error) = flag_set.parse(&combined) {
         let _ = writeln!(standard_error, "{}", parse_error.message);
         return 2;
     }
@@ -460,6 +478,61 @@ fn parse_limit(raw_value: &str) -> Result<usize, String> {
             "--limit must be a positive integer, got {trimmed:?}"
         )),
     }
+}
+
+/// Sieve recall's known flags out of the argument vector ahead of FlagSet
+/// parsing. Returns `(flag_arguments, query_arguments)` so the caller can
+/// rebuild a FlagSet-compatible vector with all flags first and the query
+/// after a `--` terminator. Returns an `Err(message)` for value-bearing flags
+/// that are missing their value, matching FlagSet's diagnostic shape.
+///
+/// Flag handling matches FlagSet: `--limit` and `--claude-home` accept
+/// `--flag value` or `--flag=value`; `--json` is a bool with optional
+/// `--json=true|false`. A bare `--` terminates flag scanning and forces all
+/// remaining tokens into the query, matching standard Unix conventions.
+fn split_flags_and_query(arguments: &[String]) -> Result<(Vec<String>, Vec<String>), String> {
+    const VALUE_FLAGS: &[&str] = &["--limit", "--claude-home"];
+    const BOOL_FLAGS: &[&str] = &["--json"];
+    let mut flag_arguments: Vec<String> = Vec::new();
+    let mut query_arguments: Vec<String> = Vec::new();
+    let mut index = 0;
+    while index < arguments.len() {
+        let token = &arguments[index];
+        if token == "--" {
+            query_arguments.extend(arguments[index + 1..].iter().cloned());
+            return Ok((flag_arguments, query_arguments));
+        }
+        let (head, has_inline_value) = match token.split_once('=') {
+            Some((head, _)) => (head, true),
+            None => (token.as_str(), false),
+        };
+        if VALUE_FLAGS.contains(&head) {
+            if has_inline_value {
+                flag_arguments.push(token.clone());
+                index += 1;
+            } else {
+                if index + 1 >= arguments.len() {
+                    return Err(format!("flag needs an argument: {head}"));
+                }
+                flag_arguments.push(token.clone());
+                flag_arguments.push(arguments[index + 1].clone());
+                index += 2;
+            }
+            continue;
+        }
+        if BOOL_FLAGS.contains(&head) {
+            flag_arguments.push(token.clone());
+            index += 1;
+            continue;
+        }
+        // Unknown token — treat as part of the query. FlagSet would have
+        // rejected an unknown `--flag`, but at this layer we prefer to let
+        // the user pass arbitrary words (including ones that happen to
+        // start with `-`) without surprises.
+        query_arguments.push(token.clone());
+        index += 1;
+    }
+    Ok((flag_arguments, query_arguments))
 }
 
 /// Quote each token in the user query for FTS5 and AND them together so the
@@ -961,7 +1034,16 @@ mod tests {
     where
         F: FnOnce(&Path),
     {
-        let _guard = ENV_LOCK.lock().expect("lock environment override");
+        // Recover from a poisoned guard so an assertion failure in one test
+        // does not cascade through the rest of the suite. Each test in this
+        // module clones into its own tempdir and sets `CLAUDE_TARGET_OVERRIDE`
+        // to that tempdir on entry, so a stale override from a panicked
+        // predecessor is overwritten before the next test reads it. The
+        // tradeoff is that we lose the loud "all subsequent tests fail"
+        // signal that an `.expect` would have produced; the original panic
+        // is still reported by the test runner, which is the failure that
+        // actually matters.
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
         let temporary_directory = tempdir_under(label);
         let claude_home = temporary_directory.join("claude-home");
         fs::create_dir_all(&claude_home).expect("create claude home");
@@ -1255,6 +1337,67 @@ mod tests {
         );
         let rendered = render_snippet_for_display(&snippet);
         assert_eq!(rendered, "before [match] after");
+    }
+
+    #[test]
+    fn split_flags_and_query_pulls_known_flags_out_of_argument_vector() {
+        // `recall webhook --json` is the canonical case from the JSON test:
+        // the flag follows the positional. The shared FlagSet would have
+        // stopped at `webhook` and treated `--json` as a literal query word.
+        let arguments = vec!["webhook".to_string(), "--json".to_string()];
+        let (flag_arguments, query_arguments) =
+            split_flags_and_query(&arguments).expect("split succeeds");
+        assert_eq!(flag_arguments, vec!["--json".to_string()]);
+        assert_eq!(query_arguments, vec!["webhook".to_string()]);
+
+        // Value-bearing flags consume their next token even when interleaved.
+        let arguments = vec![
+            "openapi".to_string(),
+            "--limit".to_string(),
+            "5".to_string(),
+            "diff".to_string(),
+        ];
+        let (flag_arguments, query_arguments) =
+            split_flags_and_query(&arguments).expect("split succeeds");
+        assert_eq!(flag_arguments, vec!["--limit".to_string(), "5".to_string()]);
+        assert_eq!(
+            query_arguments,
+            vec!["openapi".to_string(), "diff".to_string()]
+        );
+
+        // `--flag=value` form keeps the inline value attached.
+        let arguments = vec!["--limit=10".to_string(), "stripe".to_string()];
+        let (flag_arguments, query_arguments) =
+            split_flags_and_query(&arguments).expect("split succeeds");
+        assert_eq!(flag_arguments, vec!["--limit=10".to_string()]);
+        assert_eq!(query_arguments, vec!["stripe".to_string()]);
+
+        // Bool flags accept the explicit-value form too. FlagSet parses the
+        // `false` half itself; we only need to keep the whole token together.
+        let arguments = vec!["webhook".to_string(), "--json=false".to_string()];
+        let (flag_arguments, query_arguments) =
+            split_flags_and_query(&arguments).expect("split succeeds");
+        assert_eq!(flag_arguments, vec!["--json=false".to_string()]);
+        assert_eq!(query_arguments, vec!["webhook".to_string()]);
+
+        // `--` terminates flag scanning so a literal `--json` can be searched.
+        let arguments = vec![
+            "--".to_string(),
+            "--json".to_string(),
+            "literal".to_string(),
+        ];
+        let (flag_arguments, query_arguments) =
+            split_flags_and_query(&arguments).expect("split succeeds");
+        assert!(flag_arguments.is_empty(), "flags: {flag_arguments:?}");
+        assert_eq!(
+            query_arguments,
+            vec!["--json".to_string(), "literal".to_string()]
+        );
+
+        // Missing value for a value-bearing flag surfaces a parse error.
+        let arguments = vec!["webhook".to_string(), "--limit".to_string()];
+        let error_message = split_flags_and_query(&arguments).expect_err("missing value");
+        assert!(error_message.contains("--limit"), "error: {error_message}");
     }
 
     #[test]
