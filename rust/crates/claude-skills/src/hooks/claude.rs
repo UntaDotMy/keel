@@ -60,9 +60,27 @@ pub const HOOK_EVENTS: &[HookEvent] = &[
         installs_in_settings: true,
     },
     HookEvent {
+        // PostToolUse fires after every tool call, not just Bash. Two
+        // responsibilities depend on that breadth:
+        //   1. `tool_timings::record_tool_timing` records `duration_ms` for
+        //      every tool — Edit/Read/Write/Grep are not Bash and we want them
+        //      sampled too so the per-session row count matches reality and the
+        //      compression-discipline nudge fires when context fills with
+        //      file reads, not only with shell commands.
+        //   2. The edit-class counter that drives the every-N-edits SYSTEM_MAP
+        //      refresh only ever fires when Edit/Write/MultiEdit/NotebookEdit
+        //      run. With matcher="Bash", the handler was unreachable for those
+        //      events — the counter directory never existed on disk and the
+        //      auto-refresh path was dead code. The handler itself filters
+        //      edit-class tools at runtime via `is_edit_class_tool`, so an
+        //      empty matcher is the matcher that actually delivers the
+        //      documented behavior.
+        // Cost: spawning claude-skills on every tool call is microseconds.
+        // Telemetry writes are append-only JSONL, daily-rotated, and pruned at
+        // SessionEnd, so growth stays bounded.
         name: "PostToolUse",
         slug: "post-tool-use",
-        matcher: "Bash",
+        matcher: "",
         status: "Recording post-tool lifecycle",
         supports_hook_specific_output: true,
         installs_in_settings: true,
@@ -315,12 +333,14 @@ pub fn pre_tool_matcher() -> &'static str {
         .unwrap_or("Bash")
 }
 
-/// PostToolUse matcher (`Bash`) so the post-shell hook only runs on commands with output.
+/// PostToolUse matcher (`""`) so the post-tool hook fires for every tool, not
+/// just Bash. The handler gates edit-counter work on `is_edit_class_tool`, so
+/// the empty matcher is what delivers the documented behavior.
 #[cfg(test)]
 pub fn post_tool_matcher() -> &'static str {
     event_by_name("PostToolUse")
         .map(|event| event.matcher)
-        .unwrap_or("Bash")
+        .unwrap_or("")
 }
 
 /// Map a Claude Code hook event name to the `claude-skills hook <subcommand>` kebab-case slug.
@@ -453,7 +473,7 @@ mod tests {
             }
         }
         assert_eq!(event_by_name("PreToolUse").unwrap().matcher, "Bash");
-        assert_eq!(event_by_name("PostToolUse").unwrap().matcher, "Bash");
+        assert_eq!(event_by_name("PostToolUse").unwrap().matcher, "");
         assert_eq!(event_by_name("Stop").unwrap().matcher, "");
     }
 
@@ -515,7 +535,7 @@ mod tests {
         assert_eq!(status_message("Stop"), "Closing native session state");
         assert_eq!(status_message("ZZZ"), "Native lifecycle hook");
         assert_eq!(pre_tool_matcher(), "Bash");
-        assert_eq!(post_tool_matcher(), "Bash");
+        assert_eq!(post_tool_matcher(), "");
     }
 
     #[test]
