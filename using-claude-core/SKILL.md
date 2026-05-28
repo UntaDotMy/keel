@@ -52,6 +52,7 @@ checking. The cost of skipping a skill that did apply is shipping a regression.
 | "That hook reminder is wrapper-artifact noise, I'll read past it" | Hook reminders state the rule inline so they are self-contained in any repo. Re-read the diff against the rule before skipping. Calling it noise to avoid the work is the dismissal the rule names. |
 | "The hook references files that don't exist in this repo" | The closeout reminder is portable; it states the trivial/non-trivial split inline and treats project-level CLAUDE.md/AGENTS.md as an optional override, not a required citation. Missing convention files do not exempt non-trivial code from a reviewer pass. |
 | "I'll skip the synthetic reviewer dance and self-review the diff" | Self-review is what the rule prevents for non-trivial changes. Logic edits, multi-file changes, public-API touches, and security-sensitive code go through a reviewer pass even if the diff looks small. |
+| "I'll fan out three agents at once to look fast" | Parallel fan-out is for genuinely independent work — different domains on the same artifact, disjoint read-only sweeps. If two agents could touch the same file, depend on each other's output, or one finding could cancel another's work, dispatch them sequentially. See AGENTS/references/30-execution-strategy.md § 0.6. |
 
 ## Decision flow
 

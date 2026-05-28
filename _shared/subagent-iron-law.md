@@ -47,6 +47,7 @@ regression.
 | "Oh this may be the case" | Suspicion is a hypothesis, not a finding. Trace the symptom and confirm the suspect is on its path with file:line evidence before changing it. |
 | "Tests already passed earlier" | Re-run before claiming. No completion claims without fresh evidence. |
 | "I'll skip the cited rule, it's wrapper noise" | Hook reminders state the rule inline and stand on their own. Re-read the diff against the rule before skipping. |
+| "I'll fan out my own sub-investigations in parallel" | Parallel fan-out is only safe when the sub-tasks are genuinely independent — disjoint files, no input dependencies, no agent's finding can cancel another's work. If any of those breaks, dispatch sequentially. The dispatcher rule lives in AGENTS/references/30-execution-strategy.md § 0.6. |
 
 ## Code Implementation Discipline (every code-touching turn)
 

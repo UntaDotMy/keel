@@ -81,6 +81,42 @@ Side Effects: None — this file is informational.
 - Broad repo scans are replaced by targeted retrieval whenever possible.
 - The implementation path is grounded in the current user story, not stale earlier assumptions.
 
+## 0.6 Parallel Fan-Out Doctrine
+
+**Spawn multiple agents in one message only when the work is genuinely independent.** Concurrent dispatch is a real accelerant for research that splits cleanly — a security audit, a performance audit, and a UX audit on the same diff have nothing to coordinate, so running them in parallel saves wall time without inviting drift. The same pattern applies to surveying three unrelated subsystems for a cross-cutting question, or fanning a "find every reference to X" sweep across distinct directories. Concurrency is dangerous when the sub-tasks share writable state, depend on each other's findings, or land on the same file: two agents editing the same module produce merge garbage, and an agent that needs the result of another's investigation cannot be launched in the same batch.
+
+**Independence test before fan-out (all four must hold):**
+- No agent's input depends on another's output.
+- No two agents touch the same file or git index.
+- No agent needs to be cancelled or steered based on another's interim result.
+- The batched work fits the current task scope; do not invent parallel side-quests to keep agents busy.
+
+If any of those fails, dispatch sequentially. The cost of one wasted agent run is much less than the cost of cleaning up a corrupted working tree or reconciling two contradictory findings written against stale assumptions.
+
+**When to use fan-out:**
+- Multi-domain review of a single artifact: security + performance + accessibility + a11y on the same diff.
+- Cross-subsystem inventory that splits by directory or layer with no shared writes.
+- Independent research questions that share no premises.
+- Read-only sweeps with disjoint scope (locate every callsite of A, every callsite of B, every callsite of C).
+
+**When to dispatch sequentially:**
+- Implementation work where one step's output is the next step's input.
+- Edits to overlapping files, modules, or generated artifacts.
+- Investigations where a finding could redirect or cancel later work.
+- Ladder-style validation where each rung gates the next (Smoke → Functional → Integration → ...).
+
+**Coordination rules when fan-out is allowed:**
+- Each agent's prompt names its scope in disjoint terms; do not rely on the agents to negotiate file ownership at runtime.
+- The dispatcher reads every agent's full report before integrating; do not merge partial outputs.
+- If two agents disagree on a fact, treat both as hypotheses and verify against the repo before acting.
+- After fan-out completes, re-read the touched surface yourself before claiming completion. Fan-out widens coverage, not your accountability for the final state.
+
+**Exit criteria:**
+- Every parallel batch was launched only when independence holds on all four checks.
+- No two parallel agents wrote to the same file in the same turn.
+- The dispatcher reconciled the full set of reports before claiming completion.
+- Sequential work was not artificially parallelized to inflate apparent throughput.
+
 ## 1. Research Loop (3-Round Escalation)
 
 **When to research:**
