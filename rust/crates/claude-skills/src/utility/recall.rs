@@ -578,14 +578,13 @@ pub struct RecallStatusSnapshot {
     pub removed_since_last_sync: u64,
 }
 
-/// Result of a programmatic recall search: the canonicalized FTS query that
-/// was executed plus the matching hits. The query is exposed so callers can
-/// echo it back to consumers (the MCP `recall` tool, for example) without
-/// re-running `build_fts_query` themselves.
+/// Result of a programmatic recall search: the canonicalized FTS expression
+/// that was executed plus the matching hits. Callers already know the
+/// `claude_home` and raw query they passed in, so this struct only carries
+/// values they cannot trivially recompute (`fts_query` is produced by
+/// `build_fts_query` against the trimmed input).
 #[derive(Debug, Clone)]
 pub struct RecallSearchResult {
-    pub claude_home: PathBuf,
-    pub query: String,
     pub fts_query: String,
     pub hits: Vec<RecallHit>,
 }
@@ -612,12 +611,7 @@ pub fn search_recall_index(
         None => return Ok(None),
     };
     let hits = query_recall_index(&connection, &fts_query, limit)?;
-    Ok(Some(RecallSearchResult {
-        claude_home: claude_home.to_path_buf(),
-        query: trimmed_query.to_string(),
-        fts_query,
-        hits,
-    }))
+    Ok(Some(RecallSearchResult { fts_query, hits }))
 }
 
 /// Open (and if necessary create) the recall index under `claude_home`, run a
