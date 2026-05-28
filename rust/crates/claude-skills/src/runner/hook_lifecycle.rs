@@ -109,6 +109,14 @@ pub fn run_hook_command(
         // rather than going through the lifecycle path.
         "notification" => run_hook_notification(standard_output),
 
+        // UserPromptSubmit reads the same stdin payload Claude Code delivers to
+        // PreToolUse so we can read `session_id` and apply the optional
+        // compression-discipline nudge when that session has accumulated enough
+        // tool-timings rows to suggest the context window is filling. The
+        // sibling function owns stdin parsing; the slug-only `run_hook_lifecycle`
+        // path stays the test surface for every event that does NOT need stdin.
+        "user-prompt-submit" => run_hook_user_prompt_submit(standard_output, standard_error),
+
         // Every other slug is dispatched if and only if it appears in the canonical
         // event table. Using the same table that drives `settings.json` installation
         // means a stale binary cannot reject an event the install path advertises:
@@ -752,13 +760,13 @@ fn lifecycle_additional_context(subcommand: &str) -> String {
 
         "post-compact" => post_compact_context(),
 
-        // UserPromptSubmit injects a short research-first iron-law restatement
-        // so the bootstrap skill that SessionStart delivered stays top-of-mind
-        // on every turn. The text is intentionally compact (~80 tokens)
-        // because it lands per-prompt; the full bootstrap (Red Flags table,
-        // skill catalog, decision flow) lives in using-claude-core/SKILL.md
-        // and is delivered once via SessionStart.
-        "user-prompt-submit" => user_prompt_submit_context(),
+        // UserPromptSubmit is intercepted before this match in `run_hook_command`
+        // by the dedicated `run_hook_user_prompt_submit` dispatcher, which reads
+        // stdin to extract `session_id` and applies the optional
+        // compression-discipline nudge. Do NOT add an arm for "user-prompt-submit"
+        // here — if the dedicated dispatcher is ever removed by mistake the
+        // missing arm will surface as a hard test failure rather than silently
+        // falling back to a stdin-blind path that drops the nudge.
 
         // PostToolBatch fires after a batch of parallel tools resolves, just
         // before the next model turn. We inject a reviewer-on-close reminder
@@ -839,6 +847,176 @@ fn user_prompt_submit_context() -> String {
         "Research-first: trust the codebase, not your knowledge base. Read SYSTEM_MAP and the owning module before claiming behavior. Invoke any relevant skill via the Skill tool BEFORE responding — even a 1% chance it applies means use it. Find the root cause, not just the surface symptom: suspicion is a hypothesis, not a finding — trace the symptom end-to-end with file:line evidence and confirm the suspect is on that path before changing it. No assumptions. No jumping from \"this may be the case\" to a patch. Implementation discipline applies on every code-touching turn — Think Before Coding (state assumptions, deep-dive any suspected target before changing it), Simplicity First (minimum code, no speculative features or abstractions), Surgical Changes (every changed line traces to the request), Goal-Driven Execution (reproduce or trace the symptom before naming a root cause; turn the task into a verifiable goal before coding). {}",
         memory_scope_summary()
     )
+}
+
+/// UserPromptSubmit dispatcher that reads stdin and composes the per-prompt
+/// `additionalContext`.
+///
+/// Claude Code delivers a JSON payload on stdin for this event with at least
+/// `session_id`, `transcript_path`, `cwd`, and `prompt`. We use `session_id`
+/// to read today's tool-timings JSONL and decide whether enough tool calls
+/// have already happened in this session to merit the compression-discipline
+/// nudge. Every failure path (no stdin, unparseable stdin, missing session id,
+/// missing JSONL, no claude_home) falls back to the unchanged base text so
+/// the existing back-compat test keeps passing and a hook misconfiguration
+/// can never break the per-prompt injection.
+fn run_hook_user_prompt_submit(
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    // SessionStart already refreshed the system map at session boot; on every
+    // prompt afterwards `should_refresh_system_map("UserPromptSubmit")` is
+    // false, so this dispatcher does not duplicate that work.
+    let stdin_payload: Option<JsonDocument> = match std::io::read_to_string(std::io::stdin()) {
+        Ok(text) if !text.trim().is_empty() => serde_json::from_str(&text).ok(),
+        _ => None,
+    };
+
+    let session_id = stdin_payload
+        .as_ref()
+        .and_then(|payload| payload.get("session_id"))
+        .and_then(JsonDocument::as_str)
+        .unwrap_or_default();
+
+    let claude_home = resolve_claude_home("").ok();
+
+    let base_context = user_prompt_submit_context();
+    let final_context = match (session_id.is_empty(), claude_home.as_ref()) {
+        (false, Some(home)) => match maybe_compression_hint(home, session_id) {
+            Some(hint) => format!("{base_context}\n\n{hint}"),
+            None => base_context,
+        },
+        _ => append_compression_hint_when_forced(base_context),
+    };
+
+    let event = match event_by_name("UserPromptSubmit") {
+        Some(row) => row,
+        None => {
+            let _ = writeln!(
+                standard_error,
+                "UserPromptSubmit row missing from canonical event table"
+            );
+            return 1;
+        }
+    };
+
+    let payload = render_lifecycle_payload(event, &final_context);
+
+    match serde_json::to_string_pretty(&payload) {
+        Ok(rendered) => {
+            let _ = writeln!(standard_output, "{rendered}");
+            0
+        }
+        Err(error) => {
+            let _ = writeln!(
+                standard_error,
+                "Unable to render Claude Code lifecycle hook output: {error}"
+            );
+            1
+        }
+    }
+}
+
+/// Per-session compression-discipline nudge.
+///
+/// Returns `Some(text)` when the heuristic decides this turn would benefit
+/// from a reminder to compress tool output, or `None` to leave the per-prompt
+/// payload unchanged.
+///
+/// Heuristic (deterministic):
+///   * `CLAUDE_SKILLS_COMPRESSION_HINT=off`  -> always None
+///   * `CLAUDE_SKILLS_COMPRESSION_HINT=force` -> always Some
+///   * Otherwise: Some when this session has recorded at least
+///     `CLAUDE_SKILLS_COMPRESSION_HINT_AFTER` tool-timings rows in today's
+///     JSONL (default 40), None below that threshold.
+///
+/// Telemetry rule: any read failure (no JSONL, unreadable file, malformed
+/// rows) returns None silently. A telemetry hiccup must never fail the hook.
+fn maybe_compression_hint(claude_home: &Path, session_id: &str) -> Option<&'static str> {
+    match std::env::var("CLAUDE_SKILLS_COMPRESSION_HINT")
+        .ok()
+        .as_deref()
+        .map(str::trim)
+    {
+        Some("off") => return None,
+        Some("force") => return Some(compression_hint_text()),
+        _ => {}
+    }
+
+    if session_id.is_empty() {
+        return None;
+    }
+
+    let threshold = std::env::var("CLAUDE_SKILLS_COMPRESSION_HINT_AFTER")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(COMPRESSION_HINT_DEFAULT_THRESHOLD);
+    if threshold == 0 {
+        return None;
+    }
+
+    let row_count = count_session_tool_timing_rows(claude_home, session_id);
+    if row_count >= threshold {
+        Some(compression_hint_text())
+    } else {
+        None
+    }
+}
+
+/// Honor `CLAUDE_SKILLS_COMPRESSION_HINT=force` even when stdin or
+/// claude_home are unavailable so test scaffolding and operators can demand
+/// the nudge for diagnostic runs without populating a real JSONL.
+fn append_compression_hint_when_forced(base_context: String) -> String {
+    match std::env::var("CLAUDE_SKILLS_COMPRESSION_HINT")
+        .ok()
+        .as_deref()
+        .map(str::trim)
+    {
+        Some("force") => format!("{base_context}\n\n{}", compression_hint_text()),
+        _ => base_context,
+    }
+}
+
+/// Default threshold of 40 tool calls is calibrated against the per-day
+/// tool-timings JSONL: a heavy investigation session typically logs 60-100
+/// rows, so 40 fires the hint roughly halfway through and gives the model
+/// real budget headroom for the back half of the work. Operators can tune
+/// via `CLAUDE_SKILLS_COMPRESSION_HINT_AFTER`; setting it to 0 disables.
+const COMPRESSION_HINT_DEFAULT_THRESHOLD: usize = 40;
+
+/// The compression-discipline reminder. Three concrete actions, ~50 tokens.
+///
+/// Compact by design: this lands per-prompt in addition to the existing
+/// research-first iron law text. Token cost matters. Keep it surgical and
+/// actionable.
+fn compression_hint_text() -> &'static str {
+    "Output compression is on for this turn — context is heavy. Read narrower line ranges (offset+limit) instead of whole files. Search before reading: use Grep/Glob to locate the exact symbol, then Read only the relevant window. Summarize logs and command output instead of pasting them in full. Skill: compression-discipline."
+}
+
+/// Count tool-timings JSONL rows for `session_id` recorded today. Returns 0
+/// for any failure (missing file, unreadable, malformed lines). Each
+/// matching row counts once; non-matching rows and parse errors are
+/// silently skipped so a single corrupt line cannot poison the count.
+fn count_session_tool_timing_rows(claude_home: &Path, session_id: &str) -> usize {
+    let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let path = claude_home
+        .join("state")
+        .join("tool-timings")
+        .join(format!("{date}.jsonl"));
+    let body = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(_) => return 0,
+    };
+    body.lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| serde_json::from_str::<JsonDocument>(line).ok())
+        .filter(|row| {
+            row.get("session_id")
+                .and_then(JsonDocument::as_str)
+                .map(|recorded| recorded == session_id)
+                .unwrap_or(false)
+        })
+        .count()
 }
 
 /// Reviewer-on-close reminder.
@@ -2137,10 +2315,32 @@ mod tests {
         // skills before responding, find root cause) restates the bootstrap
         // skill that SessionStart already delivered, so it stays top-of-mind
         // on each turn.
+        //
+        // Production path: `run_hook_command` routes the slug to
+        // `run_hook_user_prompt_submit`, which reads stdin for `session_id`
+        // and applies the optional compression-discipline nudge. This test
+        // exercises that dispatcher directly. Test-process stdin is empty
+        // (no JSON payload), so the fail-open branch yields the base
+        // `user_prompt_submit_context()` with no compression nudge appended,
+        // which is exactly the back-compat contract.
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous_mode = std::env::var("CLAUDE_SKILLS_COMPRESSION_HINT").ok();
+        // Make the assertion deterministic: even if some operator has
+        // CLAUDE_SKILLS_COMPRESSION_HINT=force exported in the test
+        // environment, this test asserts the unforced base contract.
+        std::env::remove_var("CLAUDE_SKILLS_COMPRESSION_HINT");
+
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
 
-        let code = run_hook_lifecycle("user-prompt-submit", &mut stdout, &mut stderr);
+        let code = run_hook_user_prompt_submit(&mut stdout, &mut stderr);
+
+        match previous_mode {
+            Some(value) => std::env::set_var("CLAUDE_SKILLS_COMPRESSION_HINT", value),
+            None => std::env::remove_var("CLAUDE_SKILLS_COMPRESSION_HINT"),
+        }
 
         assert_eq!(
             code,
@@ -2819,5 +3019,365 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(hook_path.parent().unwrap());
+    }
+
+    // ----- Compression-discipline hint tests -----
+    //
+    // The following tests exercise the auto compression-output heuristic that
+    // gates the optional per-prompt nudge appended to UserPromptSubmit. They
+    // mutate process-global env vars `CLAUDE_SKILLS_COMPRESSION_HINT` and
+    // `CLAUDE_SKILLS_COMPRESSION_HINT_AFTER`, so each one takes the shared
+    // `crate::test_support::ENV_LOCK` before touching the environment. See
+    // the doc comment on that lock for the full design note.
+
+    fn compression_hint_tempdir(label: &str) -> PathBuf {
+        let unique_suffix: u128 = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        let candidate = std::env::temp_dir().join(format!("{label}-{unique_suffix}"));
+        std::fs::create_dir_all(&candidate).expect("create tempdir");
+        candidate
+    }
+
+    fn write_session_timing_rows(claude_home: &Path, session_id: &str, count: usize) {
+        let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let dir = claude_home.join("state").join("tool-timings");
+        std::fs::create_dir_all(&dir).expect("create timings dir");
+        let path = dir.join(format!("{date}.jsonl"));
+        let mut body = String::new();
+        for index in 0..count {
+            body.push_str(&format!(
+                r#"{{"recorded_at_ms":{index},"event":"PostToolUse","tool_name":"Read","duration_ms":12,"session_id":"{session_id}","cwd":"","effort_level":""}}"#
+            ));
+            body.push('\n');
+        }
+        std::fs::write(&path, body).expect("write timings fixture");
+    }
+
+    #[test]
+    fn compression_hint_text_names_three_actions() {
+        // Pure text assertion — no env mutation, so no lock needed. The hint
+        // must name the three discipline points so a model that sees only
+        // this fragment still gets actionable guidance.
+        let hint = compression_hint_text();
+        assert!(
+            hint.contains("narrower line ranges"),
+            "compression hint must point at narrower line ranges"
+        );
+        assert!(
+            hint.contains("Search before reading"),
+            "compression hint must point at search-before-read"
+        );
+        assert!(
+            hint.contains("Summarize logs"),
+            "compression hint must point at summarizing logs"
+        );
+        assert!(
+            hint.contains("compression-discipline"),
+            "compression hint must reference the compression-discipline skill"
+        );
+    }
+
+    #[test]
+    fn maybe_compression_hint_returns_none_when_threshold_not_reached() {
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp = compression_hint_tempdir("claude-skills-hint-below-threshold");
+        let claude_home = temp.join("claude-home");
+        std::fs::create_dir_all(&claude_home).expect("create claude home");
+        write_session_timing_rows(&claude_home, "session-A", 5);
+
+        let previous_after = std::env::var("CLAUDE_SKILLS_COMPRESSION_HINT_AFTER").ok();
+        let previous_mode = std::env::var("CLAUDE_SKILLS_COMPRESSION_HINT").ok();
+        std::env::remove_var("CLAUDE_SKILLS_COMPRESSION_HINT");
+        std::env::set_var("CLAUDE_SKILLS_COMPRESSION_HINT_AFTER", "40");
+
+        let hint = maybe_compression_hint(&claude_home, "session-A");
+        assert!(
+            hint.is_none(),
+            "5 rows is below threshold of 40, must not inject hint"
+        );
+
+        match previous_after {
+            Some(value) => std::env::set_var("CLAUDE_SKILLS_COMPRESSION_HINT_AFTER", value),
+            None => std::env::remove_var("CLAUDE_SKILLS_COMPRESSION_HINT_AFTER"),
+        }
+        match previous_mode {
+            Some(value) => std::env::set_var("CLAUDE_SKILLS_COMPRESSION_HINT", value),
+            None => std::env::remove_var("CLAUDE_SKILLS_COMPRESSION_HINT"),
+        }
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn maybe_compression_hint_returns_some_when_threshold_reached() {
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp = compression_hint_tempdir("claude-skills-hint-at-threshold");
+        let claude_home = temp.join("claude-home");
+        std::fs::create_dir_all(&claude_home).expect("create claude home");
+        write_session_timing_rows(&claude_home, "session-B", 50);
+
+        let previous_after = std::env::var("CLAUDE_SKILLS_COMPRESSION_HINT_AFTER").ok();
+        let previous_mode = std::env::var("CLAUDE_SKILLS_COMPRESSION_HINT").ok();
+        std::env::remove_var("CLAUDE_SKILLS_COMPRESSION_HINT");
+        std::env::set_var("CLAUDE_SKILLS_COMPRESSION_HINT_AFTER", "40");
+
+        let hint = maybe_compression_hint(&claude_home, "session-B");
+        assert!(
+            hint.is_some(),
+            "50 rows exceeds threshold of 40, must inject hint"
+        );
+
+        match previous_after {
+            Some(value) => std::env::set_var("CLAUDE_SKILLS_COMPRESSION_HINT_AFTER", value),
+            None => std::env::remove_var("CLAUDE_SKILLS_COMPRESSION_HINT_AFTER"),
+        }
+        match previous_mode {
+            Some(value) => std::env::set_var("CLAUDE_SKILLS_COMPRESSION_HINT", value),
+            None => std::env::remove_var("CLAUDE_SKILLS_COMPRESSION_HINT"),
+        }
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn maybe_compression_hint_respects_off_override() {
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp = compression_hint_tempdir("claude-skills-hint-off");
+        let claude_home = temp.join("claude-home");
+        std::fs::create_dir_all(&claude_home).expect("create claude home");
+        write_session_timing_rows(&claude_home, "session-C", 1000);
+
+        let previous_after = std::env::var("CLAUDE_SKILLS_COMPRESSION_HINT_AFTER").ok();
+        let previous_mode = std::env::var("CLAUDE_SKILLS_COMPRESSION_HINT").ok();
+        std::env::set_var("CLAUDE_SKILLS_COMPRESSION_HINT", "off");
+
+        let hint = maybe_compression_hint(&claude_home, "session-C");
+        assert!(
+            hint.is_none(),
+            "CLAUDE_SKILLS_COMPRESSION_HINT=off must override even at 1000 rows"
+        );
+
+        match previous_after {
+            Some(value) => std::env::set_var("CLAUDE_SKILLS_COMPRESSION_HINT_AFTER", value),
+            None => std::env::remove_var("CLAUDE_SKILLS_COMPRESSION_HINT_AFTER"),
+        }
+        match previous_mode {
+            Some(value) => std::env::set_var("CLAUDE_SKILLS_COMPRESSION_HINT", value),
+            None => std::env::remove_var("CLAUDE_SKILLS_COMPRESSION_HINT"),
+        }
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn maybe_compression_hint_respects_force_override_below_threshold() {
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp = compression_hint_tempdir("claude-skills-hint-force");
+        let claude_home = temp.join("claude-home");
+        std::fs::create_dir_all(&claude_home).expect("create claude home");
+        // Deliberately no JSONL on disk: force override must win even when the
+        // heuristic would normally fail open.
+
+        let previous_after = std::env::var("CLAUDE_SKILLS_COMPRESSION_HINT_AFTER").ok();
+        let previous_mode = std::env::var("CLAUDE_SKILLS_COMPRESSION_HINT").ok();
+        std::env::set_var("CLAUDE_SKILLS_COMPRESSION_HINT", "force");
+
+        let hint = maybe_compression_hint(&claude_home, "session-D");
+        assert!(
+            hint.is_some(),
+            "CLAUDE_SKILLS_COMPRESSION_HINT=force must inject the hint even with no JSONL on disk"
+        );
+
+        match previous_after {
+            Some(value) => std::env::set_var("CLAUDE_SKILLS_COMPRESSION_HINT_AFTER", value),
+            None => std::env::remove_var("CLAUDE_SKILLS_COMPRESSION_HINT_AFTER"),
+        }
+        match previous_mode {
+            Some(value) => std::env::set_var("CLAUDE_SKILLS_COMPRESSION_HINT", value),
+            None => std::env::remove_var("CLAUDE_SKILLS_COMPRESSION_HINT"),
+        }
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn maybe_compression_hint_returns_none_for_missing_jsonl() {
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp = compression_hint_tempdir("claude-skills-hint-missing-jsonl");
+        let claude_home = temp.join("claude-home");
+        std::fs::create_dir_all(&claude_home).expect("create claude home");
+        // No state/tool-timings/<date>.jsonl on purpose. Heuristic must fail
+        // open silently — telemetry hiccups never break the hook.
+
+        let previous_after = std::env::var("CLAUDE_SKILLS_COMPRESSION_HINT_AFTER").ok();
+        let previous_mode = std::env::var("CLAUDE_SKILLS_COMPRESSION_HINT").ok();
+        std::env::remove_var("CLAUDE_SKILLS_COMPRESSION_HINT");
+        std::env::set_var("CLAUDE_SKILLS_COMPRESSION_HINT_AFTER", "40");
+
+        let hint = maybe_compression_hint(&claude_home, "session-E");
+        assert!(
+            hint.is_none(),
+            "missing JSONL must yield no hint (fail-open)"
+        );
+
+        match previous_after {
+            Some(value) => std::env::set_var("CLAUDE_SKILLS_COMPRESSION_HINT_AFTER", value),
+            None => std::env::remove_var("CLAUDE_SKILLS_COMPRESSION_HINT_AFTER"),
+        }
+        match previous_mode {
+            Some(value) => std::env::set_var("CLAUDE_SKILLS_COMPRESSION_HINT", value),
+            None => std::env::remove_var("CLAUDE_SKILLS_COMPRESSION_HINT"),
+        }
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn count_session_tool_timing_rows_filters_to_named_session() {
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp = compression_hint_tempdir("claude-skills-count-session-rows");
+        let claude_home = temp.join("claude-home");
+        std::fs::create_dir_all(&claude_home).expect("create claude home");
+        // Mix two sessions in the same JSONL: the count must only attribute
+        // rows whose session_id matches the query.
+        write_session_timing_rows(&claude_home, "session-mine", 7);
+        let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let path = claude_home
+            .join("state")
+            .join("tool-timings")
+            .join(format!("{date}.jsonl"));
+        let mut existing = std::fs::read_to_string(&path).expect("read fixture");
+        for index in 0..3 {
+            existing.push_str(&format!(
+                r#"{{"recorded_at_ms":{index},"event":"PostToolUse","tool_name":"Read","duration_ms":12,"session_id":"session-other","cwd":"","effort_level":""}}"#
+            ));
+            existing.push('\n');
+        }
+        // Add a deliberately malformed row to confirm parse errors are
+        // skipped silently.
+        existing.push_str("not-json\n");
+        std::fs::write(&path, existing).expect("rewrite fixture");
+
+        let count = count_session_tool_timing_rows(&claude_home, "session-mine");
+        assert_eq!(
+            count, 7,
+            "must count only the 7 rows tagged with session-mine, ignore session-other and malformed rows"
+        );
+
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn maybe_compression_hint_returns_none_when_threshold_is_zero() {
+        // Operator escape hatch: setting CLAUDE_SKILLS_COMPRESSION_HINT_AFTER=0
+        // disables the heuristic by short-circuiting before the JSONL is read.
+        // This is a different code path from CLAUDE_SKILLS_COMPRESSION_HINT=off
+        // and deserves its own coverage so a future change cannot remove the
+        // `if threshold == 0` guard without surfacing as a test failure.
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp = compression_hint_tempdir("claude-skills-hint-threshold-zero");
+        let claude_home = temp.join("claude-home");
+        std::fs::create_dir_all(&claude_home).expect("create claude home");
+        write_session_timing_rows(&claude_home, "session-Z", 1000);
+
+        let previous_after = std::env::var("CLAUDE_SKILLS_COMPRESSION_HINT_AFTER").ok();
+        let previous_mode = std::env::var("CLAUDE_SKILLS_COMPRESSION_HINT").ok();
+        std::env::remove_var("CLAUDE_SKILLS_COMPRESSION_HINT");
+        std::env::set_var("CLAUDE_SKILLS_COMPRESSION_HINT_AFTER", "0");
+
+        let hint = maybe_compression_hint(&claude_home, "session-Z");
+        assert!(
+            hint.is_none(),
+            "CLAUDE_SKILLS_COMPRESSION_HINT_AFTER=0 must disable the heuristic even at 1000 rows"
+        );
+
+        match previous_after {
+            Some(value) => std::env::set_var("CLAUDE_SKILLS_COMPRESSION_HINT_AFTER", value),
+            None => std::env::remove_var("CLAUDE_SKILLS_COMPRESSION_HINT_AFTER"),
+        }
+        match previous_mode {
+            Some(value) => std::env::set_var("CLAUDE_SKILLS_COMPRESSION_HINT", value),
+            None => std::env::remove_var("CLAUDE_SKILLS_COMPRESSION_HINT"),
+        }
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn append_compression_hint_when_forced_injects_hint_under_force() {
+        // The fallback path used when stdin or claude_home are unavailable
+        // re-reads CLAUDE_SKILLS_COMPRESSION_HINT independently of
+        // maybe_compression_hint so diagnostic runs (force override, no real
+        // session) still emit the nudge. Cover the force arm directly.
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous_mode = std::env::var("CLAUDE_SKILLS_COMPRESSION_HINT").ok();
+        std::env::set_var("CLAUDE_SKILLS_COMPRESSION_HINT", "force");
+
+        let result = append_compression_hint_when_forced("base context".to_string());
+        assert!(
+            result.contains("base context"),
+            "force path must preserve base context"
+        );
+        assert!(
+            result.contains("Output compression is on"),
+            "force path must append the compression hint"
+        );
+
+        match previous_mode {
+            Some(value) => std::env::set_var("CLAUDE_SKILLS_COMPRESSION_HINT", value),
+            None => std::env::remove_var("CLAUDE_SKILLS_COMPRESSION_HINT"),
+        }
+    }
+
+    #[test]
+    fn append_compression_hint_when_forced_is_noop_without_force() {
+        // The fallback must NOT inject the hint when no force override is set,
+        // even if stdin was unavailable. Keeps the default behaviour exactly
+        // equal to the unchanged base context.
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous_mode = std::env::var("CLAUDE_SKILLS_COMPRESSION_HINT").ok();
+        std::env::remove_var("CLAUDE_SKILLS_COMPRESSION_HINT");
+
+        let result = append_compression_hint_when_forced("base context".to_string());
+        assert_eq!(
+            result, "base context",
+            "fallback must be a no-op without the force override"
+        );
+
+        match previous_mode {
+            Some(value) => std::env::set_var("CLAUDE_SKILLS_COMPRESSION_HINT", value),
+            None => std::env::remove_var("CLAUDE_SKILLS_COMPRESSION_HINT"),
+        }
+    }
+
+    #[test]
+    fn lifecycle_additional_context_does_not_handle_user_prompt_submit() {
+        // Invariant guard for the dispatch split between run_hook_command and
+        // lifecycle_additional_context. The "user-prompt-submit" slug is
+        // handled exclusively by run_hook_user_prompt_submit because that
+        // dispatcher reads stdin to extract session_id. If anyone re-adds an
+        // arm for it in lifecycle_additional_context the per-prompt nudge
+        // would silently regress to a stdin-blind path. This test asserts
+        // the wildcard fall-through (-> empty string) is in force, which is
+        // exactly the contract the dispatcher relies on.
+        let result = lifecycle_additional_context("user-prompt-submit");
+        assert!(
+            result.is_empty(),
+            "lifecycle_additional_context must not handle user-prompt-submit; got: {result:?}"
+        );
     }
 }
