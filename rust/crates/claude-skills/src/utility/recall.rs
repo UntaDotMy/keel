@@ -1083,9 +1083,7 @@ fn relativize(claude_home: &Path, absolute_path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    use crate::test_support::ENV_LOCK;
 
     fn tempdir_under(label: &str) -> PathBuf {
         let unique_suffix: u128 = SystemTime::now()
@@ -1118,7 +1116,9 @@ mod tests {
         // signal that an `.expect` would have produced; the original panic
         // is still reported by the test runner, which is the failure that
         // actually matters.
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let temporary_directory = tempdir_under(label);
         let claude_home = temporary_directory.join("claude-home");
         fs::create_dir_all(&claude_home).expect("create claude home");

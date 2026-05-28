@@ -19,6 +19,8 @@ pub mod proxy;
 mod review;
 mod runner;
 mod runtime;
+#[cfg(test)]
+mod test_support;
 mod utility;
 
 pub use commands::Application;

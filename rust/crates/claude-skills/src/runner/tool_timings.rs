@@ -176,15 +176,8 @@ pub fn prune_older_than(days: u64) -> std::io::Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::ENV_LOCK;
     use serde_json::json;
-    use std::sync::Mutex;
-
-    /// `CLAUDE_TARGET_OVERRIDE` and `CLAUDE_EFFORT` are process-global. Cargo
-    /// runs tests in threads, so two tests that set them concurrently would
-    /// each see the other's value and read from the wrong path / record the
-    /// wrong effort. Serialize with a Mutex so each test gets exclusive
-    /// ownership of the env for its run.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     /// Use a unique `CLAUDE_TARGET_OVERRIDE` per test so concurrent runs in
     /// `cargo test` do not stomp on each other's state directory. Also clears

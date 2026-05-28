@@ -546,12 +546,7 @@ fn read_stream<R: std::io::Read + Send + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    /// Env-var lookups are process-global, so the gate tests have to run
-    /// serially. A static mutex around the env mutation keeps `cargo test`'s
-    /// thread pool from racing on `CLAUDE_PROJECT_DIR`.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    use crate::test_support::ENV_LOCK;
 
     const SIGNAL_VARS: &[&str] = &[
         "CLAUDE_SKILLS_HOOK",
