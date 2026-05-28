@@ -844,13 +844,14 @@ fn post_compact_context() -> String {
 /// every byte lands per prompt and is paid as input tokens. The full
 /// bootstrap (skill catalog, Red Flags table, decision flow, four
 /// implementation-discipline pillars) is delivered once via SessionStart;
-/// this hook only restates the iron law and names the four pillars so they
-/// stay top-of-mind on each turn. Body weight is roughly 200 tokens before
+/// this hook only restates the iron law, names the four pillars, and adds
+/// the one-line parallel-fan-out independence test so they stay top-of-mind
+/// on each turn. Body weight is roughly 230 tokens before
 /// `memory_scope_summary()` — within budget for a per-prompt injection but
 /// expensive enough that adding more text needs a deliberate reason.
 fn user_prompt_submit_context() -> String {
     format!(
-        "Research-first: trust the codebase, not your knowledge base. Read SYSTEM_MAP and the owning module before claiming behavior. Invoke any relevant skill via the Skill tool BEFORE responding — even a 1% chance it applies means use it. Find the root cause, not just the surface symptom: suspicion is a hypothesis, not a finding — trace the symptom end-to-end with file:line evidence and confirm the suspect is on that path before changing it. No assumptions. No jumping from \"this may be the case\" to a patch. Implementation discipline applies on every code-touching turn — Think Before Coding (state assumptions, deep-dive any suspected target before changing it), Simplicity First (minimum code, no speculative features or abstractions), Surgical Changes (every changed line traces to the request), Goal-Driven Execution (reproduce or trace the symptom before naming a root cause; turn the task into a verifiable goal before coding). {}",
+        "Research-first: trust the codebase, not your knowledge base. Read SYSTEM_MAP and the owning module before claiming behavior. Invoke any relevant skill via the Skill tool BEFORE responding — even a 1% chance it applies means use it. Find the root cause, not just the surface symptom: suspicion is a hypothesis, not a finding — trace the symptom end-to-end with file:line evidence and confirm the suspect is on that path before changing it. No assumptions. No jumping from \"this may be the case\" to a patch. Implementation discipline applies on every code-touching turn — Think Before Coding (state assumptions, deep-dive any suspected target before changing it), Simplicity First (minimum code, no speculative features or abstractions), Surgical Changes (every changed line traces to the request), Goal-Driven Execution (reproduce or trace the symptom before naming a root cause; turn the task into a verifiable goal before coding). Parallel fan-out: only batch agents in the same message when all four hold — no shared inputs, no shared file or git-index writes, no need to cancel/steer one based on another's interim result, and the work fits the current task scope. If any check fails, dispatch sequentially. {}",
         memory_scope_summary()
     )
 }
