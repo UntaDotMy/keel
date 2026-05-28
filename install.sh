@@ -113,4 +113,32 @@ fi
 
 "$installed_binary" status --repo-root "$bundle_root"
 "$installed_binary" hook install
+
+# Register the claude_core MCP server in Claude Code's user-scope config so the
+# recall, system_map, run_command, and recall_status tools are reachable without
+# manual setup. `claude mcp add` exits non-zero with the exact message
+# "MCP server claude_core already exists in user config" on re-runs — we
+# substring-match "already exists" so the install stays idempotent. If
+# Anthropic ever changes that wording, the install still completes (the call
+# falls through to the warning branch). We suppress errexit around the call so
+# the assignment can capture both stdout and stderr without triggering set -e,
+# then classify the result. If the `claude` CLI is not on PATH (rare; users
+# without Claude Code installed yet), skip the step with a warning rather than
+# failing the whole install.
+if command -v claude >/dev/null 2>&1; then
+  set +e
+  mcp_output="$(claude mcp add claude_core --scope user -- "$installed_binary" mcp serve 2>&1)"
+  mcp_exit=$?
+  set -e
+  if [ "$mcp_exit" -eq 0 ]; then
+    printf 'Registered claude_core MCP server in Claude Code user config\n'
+  elif printf '%s' "$mcp_output" | grep -q 'already exists'; then
+    printf 'claude_core MCP server already registered in Claude Code user config\n'
+  else
+    printf 'Warning: claude mcp add failed (exit %s): %s\n' "$mcp_exit" "$mcp_output" >&2
+  fi
+else
+  printf 'Warning: claude CLI not found on PATH; skipping MCP registration. Run `claude mcp add claude_core --scope user -- %s mcp serve` after installing Claude Code.\n' "$installed_binary" >&2
+fi
+
 printf 'claude-skills installed successfully at %s\n' "$installed_binary"
