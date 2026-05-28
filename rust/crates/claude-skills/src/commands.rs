@@ -163,6 +163,9 @@ impl Application {
                 utility::run_bench_command(command_arguments, standard_output, standard_error)
             }
             "flow" => self.run_flow_command(command_arguments, standard_output, standard_error),
+            "telemetry" => {
+                runner::run_telemetry_command(command_arguments, standard_output, standard_error)
+            }
             "mcp" => mcp::run_mcp_command(command_arguments, standard_output, standard_error),
             "__self-replace" => {
                 manager::run_self_replace_command(command_arguments, standard_error)

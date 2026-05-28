@@ -123,6 +123,48 @@ fn timings_directory() -> Option<PathBuf> {
     Some(claude_home.join("state").join("tool-timings"))
 }
 
+/// Enumerate the per-day JSONL files that cover today and the prior `days - 1`
+/// days, returning each surviving `(date, path)` pair sorted oldest-to-newest.
+///
+/// `days == 0` yields an empty list so a caller passing `--days 0` does not
+/// collapse to "today implicitly". Missing files (a day where no rows were
+/// recorded) are silently skipped — the reader contract is fail-open by
+/// design, mirroring `record_tool_timing` and `prune_older_than`. Returns
+/// `Ok(empty)` when the directory itself does not exist (no rows have ever
+/// been recorded) so the caller does not need to special-case the cold path.
+///
+/// Encapsulates the private `timings_directory` helper; callers outside this
+/// module must not promote that helper to `pub` because the directory layout
+/// is owned here.
+pub fn iter_day_files(days: u64) -> std::io::Result<Vec<(chrono::NaiveDate, PathBuf)>> {
+    if days == 0 {
+        return Ok(Vec::new());
+    }
+    let Some(directory) = timings_directory() else {
+        return Ok(Vec::new());
+    };
+    if !directory.exists() {
+        return Ok(Vec::new());
+    }
+
+    let today = chrono::Local::now().date_naive();
+    let mut day_files: Vec<(chrono::NaiveDate, PathBuf)> = Vec::new();
+    // Walk backward from today inclusive; collect oldest-first by reversing
+    // at the end. `checked_sub_days` returning None means the requested
+    // window underflowed the calendar — we stop early rather than panic.
+    for offset in 0..days {
+        let Some(date) = today.checked_sub_days(chrono::Days::new(offset)) else {
+            break;
+        };
+        let path = directory.join(format!("{}.jsonl", date.format("%Y-%m-%d")));
+        if path.exists() {
+            day_files.push((date, path));
+        }
+    }
+    day_files.sort_by_key(|(date, _)| *date);
+    Ok(day_files)
+}
+
 /// Delete per-day JSONL files whose filename date is older than `days` ago.
 ///
 /// The date is encoded in the filename (`YYYY-MM-DD.jsonl`), written by
@@ -454,6 +496,102 @@ mod tests {
             assert_eq!(
                 parsed.get("effort_level").and_then(JsonDocument::as_str),
                 Some(""),
+            );
+        });
+    }
+
+    #[test]
+    fn iter_day_files_returns_empty_when_directory_missing() {
+        // Cold path: nothing has ever been recorded. The reader contract
+        // says "missing dir → empty", not "missing dir → error", so a
+        // brand-new install does not surface an IO error to the caller.
+        with_isolated_claude_home("iter-missing-dir", |root| {
+            assert!(!root.join("state").join("tool-timings").exists());
+            let result = iter_day_files(7).expect("iter missing dir");
+            assert!(
+                result.is_empty(),
+                "missing dir must yield empty: {result:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn iter_day_files_returns_empty_for_zero_days() {
+        // Zero days is the "explicitly nothing" knob — callers passing
+        // --days 0 must not collapse to "today implicitly". Pre-create a
+        // today file to prove the early-return wins over the directory walk.
+        with_isolated_claude_home("iter-zero-days", |root| {
+            let timings = root.join("state").join("tool-timings");
+            fs::create_dir_all(&timings).expect("create timings dir");
+            let today = chrono::Local::now().date_naive();
+            let path = timings.join(format!("{}.jsonl", today.format("%Y-%m-%d")));
+            fs::write(&path, "{}\n").expect("write fixture");
+
+            let result = iter_day_files(0).expect("iter zero days");
+            assert!(result.is_empty(), "zero days must yield empty: {result:?}");
+        });
+    }
+
+    #[test]
+    fn iter_day_files_returns_only_existing_files_oldest_first() {
+        // Three fixture files (today, 2 days ago, 5 days ago) and a window
+        // of 7 days. The 5-day file falls inside the window; results must
+        // be sorted oldest-to-newest so the caller can stream rows in
+        // chronological order without a second sort. The "skipped middle"
+        // (no fixture for 1, 3, 4, 6 days ago) confirms missing files are
+        // silently dropped, not turned into errors.
+        with_isolated_claude_home("iter-multi-day", |root| {
+            let timings = root.join("state").join("tool-timings");
+            fs::create_dir_all(&timings).expect("create timings dir");
+
+            let today = chrono::Local::now().date_naive();
+            let two = today
+                .checked_sub_days(chrono::Days::new(2))
+                .expect("sub 2 days");
+            let five = today
+                .checked_sub_days(chrono::Days::new(5))
+                .expect("sub 5 days");
+            for date in [today, two, five] {
+                let path = timings.join(format!("{}.jsonl", date.format("%Y-%m-%d")));
+                fs::write(&path, "{}\n").expect("write fixture");
+            }
+
+            let result = iter_day_files(7).expect("iter");
+            let dates: Vec<chrono::NaiveDate> = result.iter().map(|(date, _)| *date).collect();
+            assert_eq!(dates, vec![five, two, today], "must be oldest-first");
+            for (_date, path) in result {
+                assert!(path.exists(), "every returned path must exist: {path:?}");
+            }
+        });
+    }
+
+    #[test]
+    fn iter_day_files_respects_window_boundary() {
+        // The 6-day file is outside a 5-day window. Confirms the boundary
+        // is inclusive of "today plus N-1 prior days" (i.e. days=5 covers
+        // today, -1, -2, -3, -4 — five total) and excludes -5/-6.
+        with_isolated_claude_home("iter-window-boundary", |root| {
+            let timings = root.join("state").join("tool-timings");
+            fs::create_dir_all(&timings).expect("create timings dir");
+
+            let today = chrono::Local::now().date_naive();
+            let outside = today
+                .checked_sub_days(chrono::Days::new(6))
+                .expect("sub 6 days");
+            let inside = today
+                .checked_sub_days(chrono::Days::new(4))
+                .expect("sub 4 days");
+            for date in [outside, inside, today] {
+                let path = timings.join(format!("{}.jsonl", date.format("%Y-%m-%d")));
+                fs::write(&path, "{}\n").expect("write fixture");
+            }
+
+            let result = iter_day_files(5).expect("iter");
+            let dates: Vec<chrono::NaiveDate> = result.iter().map(|(date, _)| *date).collect();
+            assert_eq!(
+                dates,
+                vec![inside, today],
+                "5-day window includes today + 4 prior days; -6 is outside"
             );
         });
     }
