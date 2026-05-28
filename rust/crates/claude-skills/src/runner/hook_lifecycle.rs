@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map as JsonMap, Value as JsonDocument};
@@ -115,7 +115,13 @@ pub fn run_hook_command(
         // tool-timings rows to suggest the context window is filling. The
         // sibling function owns stdin parsing; the slug-only `run_hook_lifecycle`
         // path stays the test surface for every event that does NOT need stdin.
-        "user-prompt-submit" => run_hook_user_prompt_submit(standard_output, standard_error),
+        // Stdin is injected explicitly so tests can pass `&mut std::io::empty()`
+        // to avoid blocking when cargo's parent process holds an open console
+        // handle (real symptom on Windows under PowerShell).
+        "user-prompt-submit" => {
+            let mut stdin = std::io::stdin().lock();
+            run_hook_user_prompt_submit(&mut stdin, standard_output, standard_error)
+        }
 
         // Every other slug is dispatched if and only if it appears in the canonical
         // event table. Using the same table that drives `settings.json` installation
@@ -861,15 +867,24 @@ fn user_prompt_submit_context() -> String {
 /// the existing back-compat test keeps passing and a hook misconfiguration
 /// can never break the per-prompt injection.
 fn run_hook_user_prompt_submit(
+    standard_input: &mut dyn Read,
     standard_output: &mut dyn Write,
     standard_error: &mut dyn Write,
 ) -> u8 {
     // SessionStart already refreshed the system map at session boot; on every
     // prompt afterwards `should_refresh_system_map("UserPromptSubmit")` is
     // false, so this dispatcher does not duplicate that work.
-    let stdin_payload: Option<JsonDocument> = match std::io::read_to_string(std::io::stdin()) {
-        Ok(text) if !text.trim().is_empty() => serde_json::from_str(&text).ok(),
-        _ => None,
+    //
+    // `standard_input` is injected by the caller — production passes a locked
+    // stdin handle (which Claude Code closes after writing the JSON payload),
+    // tests pass `std::io::empty()` so the read returns EOF immediately
+    // instead of blocking on an inherited console handle.
+    let stdin_payload: Option<JsonDocument> = {
+        let mut text = String::new();
+        match standard_input.read_to_string(&mut text) {
+            Ok(_) if !text.trim().is_empty() => serde_json::from_str(&text).ok(),
+            _ => None,
+        }
     };
 
     let session_id = stdin_payload
@@ -2319,10 +2334,13 @@ mod tests {
         // Production path: `run_hook_command` routes the slug to
         // `run_hook_user_prompt_submit`, which reads stdin for `session_id`
         // and applies the optional compression-discipline nudge. This test
-        // exercises that dispatcher directly. Test-process stdin is empty
-        // (no JSON payload), so the fail-open branch yields the base
-        // `user_prompt_submit_context()` with no compression nudge appended,
-        // which is exactly the back-compat contract.
+        // exercises that dispatcher directly with an empty reader so the
+        // fail-open branch yields the base `user_prompt_submit_context()`
+        // with no compression nudge appended — exactly the back-compat
+        // contract. The empty reader is also what makes this test safe to
+        // run from a parent process that holds an open stdin handle (e.g.
+        // PowerShell on Windows); reading the real stdin handle there
+        // blocks indefinitely.
         let _guard = crate::test_support::ENV_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -2332,10 +2350,11 @@ mod tests {
         // environment, this test asserts the unforced base contract.
         std::env::remove_var("CLAUDE_SKILLS_COMPRESSION_HINT");
 
+        let mut stdin = std::io::empty();
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
 
-        let code = run_hook_user_prompt_submit(&mut stdout, &mut stderr);
+        let code = run_hook_user_prompt_submit(&mut stdin, &mut stdout, &mut stderr);
 
         match previous_mode {
             Some(value) => std::env::set_var("CLAUDE_SKILLS_COMPRESSION_HINT", value),
@@ -2412,6 +2431,75 @@ mod tests {
             .and_then(JsonDocument::as_str);
 
         assert_eq!(event_name, Some("UserPromptSubmit"));
+    }
+
+    #[test]
+    fn user_prompt_submit_consumes_injected_stdin_payload_without_blocking() {
+        // Regression test for the stdin-blocking hang fixed in this commit.
+        // Before the fix, `run_hook_user_prompt_submit` read directly from
+        // `std::io::stdin()`, which on Windows under PowerShell hangs
+        // indefinitely because the parent's open console handle is inherited
+        // by the test runner. The fix injects the reader, so this test can
+        // pass real JSON bytes through `&mut &[u8]` and prove the parser
+        // actually consumed them. If this test ever hangs, the fix has
+        // regressed: the function is reading the global stdin handle again.
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous_mode = std::env::var("CLAUDE_SKILLS_COMPRESSION_HINT").ok();
+        std::env::remove_var("CLAUDE_SKILLS_COMPRESSION_HINT");
+
+        // Real Claude Code payload shape — UserPromptSubmit always carries a
+        // `session_id`. The hook fail-opens to the base context when the
+        // session-keyed compression-hint heuristic returns None (no JSONL
+        // rows recorded yet for this session in the current claude_home),
+        // so the assertion here is just "exit 0 + base context present"
+        // rather than "compression hint included," which keeps the test
+        // stable across hosts that may or may not have CLAUDE_TARGET_OVERRIDE
+        // populated.
+        let payload = br#"{"session_id":"test-session-stdin-injection","hook_event_name":"UserPromptSubmit"}"#;
+        let mut stdin: &[u8] = payload;
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let code = run_hook_user_prompt_submit(&mut stdin, &mut stdout, &mut stderr);
+
+        match previous_mode {
+            Some(value) => std::env::set_var("CLAUDE_SKILLS_COMPRESSION_HINT", value),
+            None => std::env::remove_var("CLAUDE_SKILLS_COMPRESSION_HINT"),
+        }
+
+        assert_eq!(
+            code,
+            0,
+            "stderr for injected-payload user-prompt-submit: {}",
+            String::from_utf8_lossy(&stderr)
+        );
+
+        let output: JsonDocument =
+            serde_json::from_slice(&stdout).expect("valid JSON for injected payload");
+        let context = output
+            .get("hookSpecificOutput")
+            .and_then(|node| node.get("additionalContext"))
+            .and_then(JsonDocument::as_str)
+            .expect("UserPromptSubmit must emit additionalContext for injected payload");
+        assert!(
+            context.contains("Research-first"),
+            "base context must still appear when stdin carries a real payload"
+        );
+
+        // Reader was fully consumed. `&[u8]` advances on read, so a
+        // post-call slice length of 0 proves the function read the whole
+        // payload (the fix is exercising the injection point) and did not
+        // silently drop straight to the empty-stdin fallback. Combined
+        // with the function having exactly one read path (line 870), this
+        // is sufficient: a regression that re-introduced a global stdin
+        // read would have to also remove this read of the injected reader,
+        // which would leave the byte slice non-empty.
+        assert!(
+            stdin.is_empty(),
+            "function must drain the injected reader; remaining bytes signal a regression"
+        );
     }
 
     #[test]
