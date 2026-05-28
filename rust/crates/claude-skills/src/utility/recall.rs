@@ -561,6 +561,81 @@ pub fn recall_database_path(claude_home: &Path) -> PathBuf {
     claude_home.join("recall-index.sqlite3")
 }
 
+/// Snapshot of recall-index health used by surfaces that just need to read
+/// the current document count, last sync timestamp, and on-disk index path.
+/// Built on top of the same `sync_recall_index` + `count_documents` pair the
+/// `recall status` command uses, so callers see exactly the values an explicit
+/// status invocation would print.
+#[derive(Debug, Clone)]
+pub struct RecallStatusSnapshot {
+    pub claude_home: PathBuf,
+    pub index_path: PathBuf,
+    pub schema_version: String,
+    pub document_count: u64,
+    pub last_indexed_at_millis: u128,
+    pub added_since_last_sync: u64,
+    pub updated_since_last_sync: u64,
+    pub removed_since_last_sync: u64,
+}
+
+/// Result of a programmatic recall search: the canonicalized FTS expression
+/// that was executed plus the matching hits. Callers already know the
+/// `claude_home` and raw query they passed in, so this struct only carries
+/// values they cannot trivially recompute (`fts_query` is produced by
+/// `build_fts_query` against the trimmed input).
+#[derive(Debug, Clone)]
+pub struct RecallSearchResult {
+    pub fts_query: String,
+    pub hits: Vec<RecallHit>,
+}
+
+/// Run the same auto-sync + FTS5 query path as `recall <query>` without
+/// touching stdout/stderr. Returns the prepared FTS expression alongside the
+/// hits so callers (the MCP `recall` tool, programmatic embedders) can render
+/// their own JSON envelope. `Ok(None)` means the query had no searchable
+/// terms after stripping punctuation, mirroring the CLI's "no terms" branch.
+pub fn search_recall_index(
+    claude_home: &Path,
+    raw_query: &str,
+    limit: usize,
+) -> Result<Option<RecallSearchResult>, String> {
+    let trimmed_query = raw_query.trim();
+    if trimmed_query.is_empty() {
+        return Ok(None);
+    }
+    let database_path = recall_database_path(claude_home);
+    let mut connection = open_recall_connection(&database_path)?;
+    sync_recall_index(&mut connection, claude_home, false)?;
+    let fts_query = match build_fts_query(trimmed_query) {
+        Some(query) => query,
+        None => return Ok(None),
+    };
+    let hits = query_recall_index(&connection, &fts_query, limit)?;
+    Ok(Some(RecallSearchResult { fts_query, hits }))
+}
+
+/// Open (and if necessary create) the recall index under `claude_home`, run a
+/// non-forced sync, then return a snapshot of the resulting health metrics.
+/// Used by the MCP `recall_status` tool and the `claude_core://recall/status`
+/// resource so they share the same code path as `recall status` rather than
+/// reaching into the schema directly.
+pub fn recall_status_snapshot(claude_home: &Path) -> Result<RecallStatusSnapshot, String> {
+    let database_path = recall_database_path(claude_home);
+    let mut connection = open_recall_connection(&database_path)?;
+    let report = sync_recall_index(&mut connection, claude_home, false)?;
+    let document_count = count_documents(&connection)?;
+    Ok(RecallStatusSnapshot {
+        claude_home: claude_home.to_path_buf(),
+        index_path: database_path,
+        schema_version: SCHEMA_VERSION.to_string(),
+        document_count,
+        last_indexed_at_millis: report.last_indexed_at_millis,
+        added_since_last_sync: report.added,
+        updated_since_last_sync: report.updated,
+        removed_since_last_sync: report.removed,
+    })
+}
+
 pub fn default_search_roots(claude_home: &Path) -> Vec<PathBuf> {
     DEFAULT_RECALL_ROOTS
         .iter()
@@ -1008,9 +1083,7 @@ fn relativize(claude_home: &Path, absolute_path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    use crate::test_support::ENV_LOCK;
 
     fn tempdir_under(label: &str) -> PathBuf {
         let unique_suffix: u128 = SystemTime::now()
@@ -1043,7 +1116,9 @@ mod tests {
         // signal that an `.expect` would have produced; the original panic
         // is still reported by the test runner, which is the failure that
         // actually matters.
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let temporary_directory = tempdir_under(label);
         let claude_home = temporary_directory.join("claude-home");
         fs::create_dir_all(&claude_home).expect("create claude home");

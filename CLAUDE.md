@@ -61,6 +61,8 @@ Other official optional fields not currently used here include `disable-model-in
 
 **Token-saving proxy**: command-output compaction lives in `rust/crates/claude-skills/src/proxy/`. The native `claude-skills run -- <command>`, `claude-skills rewrite`, and `claude-skills gain` surfaces own this work. When Claude Code introduces native compaction primitives, prefer them and keep this layer thin.
 
+**MCP server**: `claude-skills mcp serve` runs a JSON-RPC 2.0 stdio server registered through `.claude-plugin/plugin.json` `mcpServers.claude_core`. Claude Code auto-discovers it and gets four tools (`recall`, `system_map`, `run_command`, `recall_status`) plus two resources (`claude_core://system-map`, `claude_core://recall/status`). The `run_command` tool runs through the same proxy capture+compaction pipeline as `claude-skills run --`, so command-output compaction now also applies when Claude Code reaches for the MCP tool surface instead of the bash tool.
+
 ## Routing Rules
 
 1. Routing is driven by Claude Code's native skill matcher against the installed `~/.claude/skills/<name>/SKILL.md` files — each skill's frontmatter (`description`, `when_to_use`) is what triggers selection. The bootstrap skill `using-claude-core/SKILL.md` is injected verbatim into `SessionStart` `hookSpecificOutput.additionalContext` per the official Claude Code hooks schema, so the iron law (research first, invoke skills before responding, find the root cause) and the full skill catalog land in model context once at session start. `UserPromptSubmit` then restates the iron law in compact form on every turn.

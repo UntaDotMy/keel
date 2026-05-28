@@ -57,6 +57,7 @@ The cast file ships in this repo. Render to GIF with `agg docs/demos/quickstart.
 | Review gates | Native `.claude-review.json`, `review pre-pr`, and CI-ready artifacts so non-trivial code never self-reviews. |
 | Memory | Working briefs, completion ledgers, scoped `SYSTEM_MAP.md`, and durable recovery state under `~/.claude/memories/`. |
 | Command compaction | `claude-skills run -- <cmd>` produces compact output for noisy test/build/lint/log/search commands without dropping diagnostic signal. |
+| MCP server | `claude-skills mcp serve` is registered through the plugin manifest so Claude Code auto-discovers `recall`, `system_map`, `run_command`, and `recall_status` tools plus the system-map and recall-status resources. |
 | Specialist skills | 18 managed specialist profiles synced into `~/.claude/agent-profiles/*.toml`, invokable via the Skill tool. |
 
 ## Use as a Claude Code Plugin

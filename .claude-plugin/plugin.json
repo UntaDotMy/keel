@@ -41,5 +41,12 @@
     "./websocket-realtime-design"
   ],
   "agents": "./.claude/agents/",
-  "hooks": "./.claude/hooks.json"
+  "hooks": "./.claude/hooks.json",
+  "mcpServers": {
+    "claude_core": {
+      "command": "claude-skills",
+      "args": ["mcp", "serve"],
+      "env": {}
+    }
+  }
 }

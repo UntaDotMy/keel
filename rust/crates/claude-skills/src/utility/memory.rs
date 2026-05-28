@@ -2171,13 +2171,13 @@ fn benchmark_fixtures() -> Vec<BenchmarkFixture> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    use crate::test_support::ENV_LOCK;
 
     #[test]
     fn memory_scope_defaults_to_global_workspace_reference_map() {
-        let _guard = ENV_LOCK.lock().expect("lock environment override");
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let temporary_directory = tempdir_under("claude-skills-memory-scope-global");
         let claude_home = temporary_directory.join("claude-home");
         let workspace_root = temporary_directory.join("workspace");
@@ -2229,7 +2229,9 @@ mod tests {
 
     #[test]
     fn memoriesv2_scope_uses_second_layer_global_base() {
-        let _guard = ENV_LOCK.lock().expect("lock environment override");
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let temporary_directory = tempdir_under("claude-skills-memoriesv2-scope-global");
         let claude_home = temporary_directory.join("claude-home");
         let workspace_root = temporary_directory.join("workspace");
