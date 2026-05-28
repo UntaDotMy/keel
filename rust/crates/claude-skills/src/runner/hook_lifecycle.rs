@@ -2206,7 +2206,15 @@ mod tests {
     }
 
     #[test]
-    fn pre_and_post_tool_use_matchers_scope_to_bash() {
+    fn pre_tool_use_scopes_to_bash_and_post_tool_use_fires_for_all_tools() {
+        // PreToolUse stays Bash-scoped: the rewriter only operates on shell
+        // commands. PostToolUse must fire for every tool — the handler gates
+        // the edit-counter path on `is_edit_class_tool` (Edit/Write/MultiEdit/
+        // NotebookEdit) at runtime, which would be unreachable if Claude Code
+        // only delivered Bash events. The empty matcher also lets
+        // `tool_timings::record_tool_timing` sample non-Bash tools so the
+        // compression-discipline nudge fires when context fills with file
+        // reads and edits, not only with shell output.
         let hook_path = temp_hook_path("claude-skills-hook-matcher-scope");
 
         std::fs::create_dir_all(hook_path.parent().unwrap()).unwrap();
@@ -2224,7 +2232,7 @@ mod tests {
 
         for (event, expected_matcher) in [
             ("PreToolUse", "Bash"),
-            ("PostToolUse", "Bash"),
+            ("PostToolUse", ""),
             ("UserPromptSubmit", ""),
             ("SessionStart", ""),
         ] {
