@@ -113,6 +113,32 @@ try {
         throw "claude-skills hook install failed with exit code $LASTEXITCODE"
     }
 
+    # Register the claude_core MCP server in Claude Code's user-scope config so
+    # the recall, system_map, run_command, and recall_status tools are reachable
+    # without manual setup. `claude mcp add` returns non-zero with the exact
+    # message "MCP server claude_core already exists in user config" on
+    # re-runs — we substring-match "already exists" so the install is
+    # idempotent. If Anthropic ever changes that wording, the install still
+    # completes (the call falls through to the warning branch). If the
+    # `claude` CLI is not on PATH (rare; users without Claude Code installed
+    # yet), skip the step with a warning rather than failing the whole install.
+    # Quote $InstalledBinary so usernames with spaces (e.g. "John Doe") don't
+    # split the path into multiple argv entries.
+    $ClaudeCli = (Get-Command claude -ErrorAction SilentlyContinue)
+    if ($null -eq $ClaudeCli) {
+        Write-Warning "claude CLI not found on PATH; skipping MCP registration. Run 'claude mcp add claude_core --scope user -- $InstalledBinary mcp serve' after installing Claude Code."
+    } else {
+        $McpOutput = & claude mcp add claude_core --scope user -- "$InstalledBinary" mcp serve 2>&1
+        $McpExit = $LASTEXITCODE
+        if ($McpExit -eq 0) {
+            Write-Host "Registered claude_core MCP server in Claude Code user config"
+        } elseif ($McpOutput -match "already exists") {
+            Write-Host "claude_core MCP server already registered in Claude Code user config"
+        } else {
+            Write-Warning "claude mcp add failed (exit $McpExit): $McpOutput"
+        }
+    }
+
     Write-Host "claude-skills installed successfully at $InstalledBinary"
 } finally {
     if (Test-Path $TemporaryDirectory) {
