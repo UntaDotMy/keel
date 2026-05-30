@@ -3,6 +3,8 @@ name: ui-design-systems-and-responsive-interfaces
 description: UI design systems and responsive interface specialist. Use for design system governance (tokens, components, patterns), responsive layout (mobile-first, fluid grids, container queries), accessibility (WCAG 2.2 AA), and visual hierarchy.
 tools: Read, Grep, Glob, Edit, Write, Bash
 model: inherit
+skills:
+  - ui-design-systems-and-responsive-interfaces
 ---
 
 **Before doing anything else, read `~/.claude/skills/_shared/subagent-iron-law.md`.** It contains the research-first contract every subagent follows. Apply it for the rest of this invocation.

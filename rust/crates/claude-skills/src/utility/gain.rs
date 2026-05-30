@@ -20,6 +20,9 @@ pub fn run_gain_command(
     if arguments.first().map(String::as_str) == Some("reset") {
         return run_gain_reset(standard_output, standard_error);
     }
+    if arguments.first().map(String::as_str) == Some("discover") {
+        return run_gain_discover(&arguments[1..], standard_output, standard_error);
+    }
     let mut flag_set = FlagSet::new("gain");
     flag_set.bool_flag("json", false);
     flag_set.string_flag("since", "today");
@@ -210,6 +213,190 @@ fn run_gain_reset(standard_output: &mut dyn Write, standard_error: &mut dyn Writ
     }
 }
 
+/// `discover` surfaces missed-savings opportunities: commands that ran through
+/// the proxy but were NOT compacted (passthrough), grouped by command with the
+/// estimated tokens that entered context uncompacted. This is the RTK-style
+/// "you left savings on the table" probe — `gain` reports what we saved,
+/// `discover` reports what we did not.
+fn run_gain_discover(
+    arguments: &[String],
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let mut flag_set = FlagSet::new("gain discover");
+    flag_set.bool_flag("json", false);
+    flag_set.string_flag("since", "today");
+    flag_set.string_flag("top", "10");
+    if let Err(parse_error) = flag_set.parse(arguments) {
+        let _ = writeln!(standard_error, "{}", parse_error.message);
+        return 1;
+    }
+    let since_timestamp = gain_since_timestamp_v2(&flag_set);
+    let top_count: usize = flag_set.string_value("top").parse().unwrap_or(10).min(100);
+    let missed = load_missed_opportunities(Some(since_timestamp));
+
+    if flag_set.bool_value("json") {
+        let opportunities: Vec<Value> = missed
+            .commands
+            .iter()
+            .take(top_count)
+            .map(|item| {
+                Value::Object(vec![
+                    ("command".into(), Value::String(item.command.clone())),
+                    (
+                        "uncompactedTokens".into(),
+                        Value::Number(item.uncompacted_tokens.to_string()),
+                    ),
+                    ("runs".into(), Value::Number(item.count.to_string())),
+                ])
+            })
+            .collect();
+        let payload = Value::Object(vec![
+            (
+                "passthroughCommands".into(),
+                Value::Number(missed.passthrough_commands.to_string()),
+            ),
+            (
+                "uncompactedTokens".into(),
+                Value::Number(missed.uncompacted_tokens.to_string()),
+            ),
+            ("opportunities".into(), Value::Array(opportunities)),
+        ]);
+        return render_gain_json(standard_output, standard_error, &payload);
+    }
+
+    let _ = writeln!(standard_output, "Missed Savings Opportunities");
+    let _ = writeln!(
+        standard_output,
+        "Passthrough commands (ran without compaction): {}",
+        missed.passthrough_commands
+    );
+    let _ = writeln!(
+        standard_output,
+        "Estimated uncompacted tokens that entered context: {}",
+        missed.uncompacted_tokens
+    );
+    if missed.commands.is_empty() {
+        let _ = writeln!(
+            standard_output,
+            "\nNo passthrough commands recorded — every observed command was compacted, or none ran in this window."
+        );
+        return 0;
+    }
+    let _ = writeln!(standard_output, "\nTop uncompacted commands:");
+    for (index, item) in missed.commands.iter().take(top_count).enumerate() {
+        let _ = writeln!(
+            standard_output,
+            "  {}. {} - ~{} uncompacted tokens ({} runs)",
+            index + 1,
+            item.command,
+            item.uncompacted_tokens,
+            item.count
+        );
+    }
+    let _ = writeln!(
+        standard_output,
+        "\nRoute these through `claude-skills run -- <command>` to capture the savings."
+    );
+    0
+}
+
+fn render_gain_json(
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+    value: &Value,
+) -> u8 {
+    if let Err(error) = write_indented(standard_output, value) {
+        let _ = writeln!(standard_error, "Unable to render gain JSON output: {error}");
+        return 1;
+    }
+    0
+}
+
+/// Read passthrough (non-compacted) events from the same event log `gain` uses
+/// and group them by command. `uncompacted_tokens` is the `tokens_before` of
+/// each passthrough run — the volume that entered context without compaction.
+fn load_missed_opportunities(since_timestamp: Option<u64>) -> MissedOpportunities {
+    let Some(path) = gain_events_path() else {
+        return MissedOpportunities::default();
+    };
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(_) => return MissedOpportunities::default(),
+    };
+    parse_missed_opportunities(&text, since_timestamp)
+}
+
+/// Pure parser over the JSONL event text, split out from `load_missed_opportunities`
+/// so it is testable without touching the filesystem or Claude home.
+fn parse_missed_opportunities(text: &str, since_timestamp: Option<u64>) -> MissedOpportunities {
+    let mut passthrough_commands: u64 = 0;
+    let mut uncompacted_tokens: u64 = 0;
+    let mut command_map: std::collections::HashMap<String, (u64, u64)> =
+        std::collections::HashMap::new();
+    for line in text.lines() {
+        let event: serde_json::Value = match serde_json::from_str(line) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        let timestamp = event
+            .get("timestamp")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        if let Some(cutoff) = since_timestamp {
+            if timestamp < cutoff {
+                continue;
+            }
+        }
+        let compacted = event
+            .get("compacted")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        if compacted {
+            continue;
+        }
+        let before = event
+            .get("tokens_before")
+            .or_else(|| event.get("tokensBefore"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        passthrough_commands += 1;
+        uncompacted_tokens += before;
+        if let Some(command) = event.get("command").and_then(serde_json::Value::as_str) {
+            let entry = command_map.entry(command.to_string()).or_insert((0, 0));
+            entry.0 += before;
+            entry.1 += 1;
+        }
+    }
+    let mut commands: Vec<MissedCommand> = command_map
+        .into_iter()
+        .map(|(command, (uncompacted_tokens, count))| MissedCommand {
+            command,
+            uncompacted_tokens,
+            count,
+        })
+        .collect();
+    commands.sort_by_key(|item| std::cmp::Reverse(item.uncompacted_tokens));
+    MissedOpportunities {
+        passthrough_commands,
+        uncompacted_tokens,
+        commands,
+    }
+}
+
+#[derive(Default)]
+struct MissedOpportunities {
+    passthrough_commands: u64,
+    uncompacted_tokens: u64,
+    commands: Vec<MissedCommand>,
+}
+
+struct MissedCommand {
+    command: String,
+    uncompacted_tokens: u64,
+    count: u64,
+}
+
 fn load_gain_summary(since_timestamp: Option<u64>, adapter_filter: Option<&str>) -> GainSummary {
     let Some(path) = gain_events_path() else {
         return GainSummary::default();
@@ -383,4 +570,50 @@ struct GainDimensionSummary {
     name: String,
     tokens_saved: u64,
     count: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const EVENTS: &str = concat!(
+        r#"{"timestamp":1000,"command":"aws s3 ls","compacted":false,"tokens_before":500}"#,
+        "\n",
+        r#"{"timestamp":1100,"command":"aws s3 ls","compacted":false,"tokens_before":700}"#,
+        "\n",
+        r#"{"timestamp":1200,"command":"cargo test","compacted":true,"tokens_before":900,"tokens_after":100}"#,
+        "\n",
+        r#"{"timestamp":1300,"command":"terraform plan","compacted":false,"tokens_before":300}"#,
+        "\n",
+        "not json - must be skipped\n",
+    );
+
+    #[test]
+    fn discover_groups_passthrough_commands_and_excludes_compacted() {
+        let missed = parse_missed_opportunities(EVENTS, None);
+        // 3 passthrough events (two aws, one terraform); the compacted cargo test excluded.
+        assert_eq!(missed.passthrough_commands, 3);
+        assert_eq!(missed.uncompacted_tokens, 500 + 700 + 300);
+        // Highest uncompacted command first: aws s3 ls (1200 across 2 runs).
+        assert_eq!(missed.commands[0].command, "aws s3 ls");
+        assert_eq!(missed.commands[0].uncompacted_tokens, 1200);
+        assert_eq!(missed.commands[0].count, 2);
+        // The compacted command must not appear as an opportunity.
+        assert!(!missed.commands.iter().any(|c| c.command == "cargo test"));
+    }
+
+    #[test]
+    fn discover_since_cutoff_filters_old_events() {
+        // Cutoff at 1150 keeps only the 1200 terraform passthrough.
+        let missed = parse_missed_opportunities(EVENTS, Some(1150));
+        assert_eq!(missed.passthrough_commands, 1);
+        assert_eq!(missed.commands[0].command, "terraform plan");
+    }
+
+    #[test]
+    fn discover_empty_log_yields_no_opportunities() {
+        let missed = parse_missed_opportunities("", None);
+        assert_eq!(missed.passthrough_commands, 0);
+        assert!(missed.commands.is_empty());
+    }
 }

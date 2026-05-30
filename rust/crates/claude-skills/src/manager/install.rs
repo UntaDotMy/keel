@@ -1,7 +1,7 @@
 //! Purpose: Install, sync, update, and uninstall logic for claude-skills manager.
 //! Caller: commands.rs via run_install_command, run_update_command, run_uninstall_command.
 //! Dependencies: std::fs, std::io, std::path, std::process, std::thread, std::time, claude_skills_platform, crate::args, crate::runtime.
-//! Main Functions: install_from_flags, install_from_paths, sync_root_files, sync_skills, sync_shared_resources, sync_agents, sync_subagent_definitions, publish_native_executable, run_update_command, run_uninstall_command.
+//! Main Functions: install_from_flags, install_from_paths, sync_root_files, sync_skills, sync_shared_resources, sync_agents, sync_subagent_definitions, sync_commands, publish_native_executable, run_update_command, run_uninstall_command.
 //! Side Effects: Copies managed skill-pack files, writes Claude home config/state, publishes the Rust binary, runs git commands, and removes managed files during uninstall.
 
 use std::collections::BTreeSet;
@@ -16,11 +16,12 @@ use claude_skills_platform::detect_current_target;
 
 use crate::args::FlagSet;
 use crate::runtime::{
-    agent_profiles_directory, agents_directory, config_path, discover_repository_layout,
-    display_path, executable_file_name, git_short_head, installed_executable_path,
-    read_text_if_exists, remove_path_if_exists, repository_layout_is_complete, resolve_claude_home,
-    resolve_repository_root, run_command, skills_directory, state_directory, write_lines,
-    write_text, RepositoryLayout, SKILL_SYNC_DIRECTORIES,
+    agent_profiles_directory, agents_directory, commands_directory, config_path,
+    discover_repository_layout, display_path, executable_file_name, git_short_head,
+    installed_executable_path, read_text_if_exists, remove_path_if_exists,
+    repository_layout_is_complete, resolve_claude_home, resolve_repository_root, run_command,
+    skills_directory, state_directory, write_lines, write_text, RepositoryLayout,
+    SKILL_SYNC_DIRECTORIES,
 };
 
 use super::agent_config::{parse_agent_config, render_agent_toml, unix_timestamp};
@@ -30,6 +31,7 @@ pub struct InstallSummary {
     pub synced_skills: usize,
     pub synced_agents: usize,
     pub synced_subagent_definitions: usize,
+    pub synced_commands: usize,
     pub synced_root_files: usize,
     pub synced_shared_resources: usize,
     pub removed_stale_files: usize,
@@ -129,6 +131,7 @@ pub fn install_from_paths(
     let synced_agents = sync_agents(&layout, claude_home, &mut tracker)?;
     let synced_subagent_definitions =
         sync_subagent_definitions(&layout, claude_home, &mut tracker)?;
+    let synced_commands = sync_commands(&layout, claude_home, &mut tracker)?;
 
     let removed_stale_files = remove_orphans(
         claude_home,
@@ -148,6 +151,7 @@ pub fn install_from_paths(
         synced_skills,
         synced_agents,
         synced_subagent_definitions,
+        synced_commands,
         synced_root_files,
         synced_shared_resources,
         removed_stale_files,
@@ -216,6 +220,7 @@ pub fn write_install_summary(summary: &InstallSummary, output: &mut dyn Write) {
         "  Synced subagent definitions: {}",
         summary.synced_subagent_definitions
     );
+    let _ = writeln!(output, "  Synced commands: {}", summary.synced_commands);
     let _ = writeln!(output, "  Synced root files: {}", summary.synced_root_files);
     let _ = writeln!(
         output,
@@ -495,6 +500,51 @@ fn sync_subagent_definitions(
         return Ok(0);
     }
     let target_directory = agents_directory(claude_home);
+    fs::create_dir_all(&target_directory)
+        .map_err(|error| format!("create {}: {error}", display_path(&target_directory)))?;
+    let mut synced_count = 0;
+    for entry_result in fs::read_dir(&source_directory)
+        .map_err(|error| format!("read {}: {error}", display_path(&source_directory)))?
+    {
+        let entry = entry_result.map_err(|error| format!("read directory entry: {error}"))?;
+        let source_path = entry.path();
+        if source_path.extension().and_then(|value| value.to_str()) != Some("md") {
+            continue;
+        }
+        let file_name = match source_path.file_name() {
+            Some(name) => name.to_owned(),
+            None => continue,
+        };
+        let target_path = target_directory.join(&file_name);
+        if copy_file_if_changed(&source_path, &target_path)? {
+            synced_count += 1;
+        }
+        tracker.record(&target_path);
+    }
+    Ok(synced_count)
+}
+
+/// Copy custom slash-command definitions from `<repo>/commands/*.md` into
+/// `<claude_home>/commands/<name>.md` so `/claude-core:<name>` commands resolve
+/// globally for any host repo. Claude Code reads project-scoped
+/// `.claude/commands/` only from the active project root, so without this step
+/// the commands ship only through the plugin install path, never the native
+/// `claude-skills install`.
+///
+/// Mirrors `sync_subagent_definitions`: only `.md` files are copied, each is
+/// recorded via the tracker so the per-file orphan sweep removes renamed or
+/// deleted commands on the next install, and the uninstall path reaches them
+/// through `managed-files.txt`.
+fn sync_commands(
+    layout: &RepositoryLayout,
+    claude_home: &Path,
+    tracker: &mut FileTracker,
+) -> Result<usize, String> {
+    let source_directory = layout.root_path.join("commands");
+    if !source_directory.is_dir() {
+        return Ok(0);
+    }
+    let target_directory = commands_directory(claude_home);
     fs::create_dir_all(&target_directory)
         .map_err(|error| format!("create {}: {error}", display_path(&target_directory)))?;
     let mut synced_count = 0;
@@ -1636,6 +1686,81 @@ mod tests {
         assert!(
             home.join("agents/git-helper.md").is_file(),
             "new subagent definition must be installed"
+        );
+        let _ = fs::remove_dir_all(&repo);
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn install_copies_slash_commands_into_user_global_commands_directory() {
+        // Custom slash commands live in `<repo>/commands/*.md` and ship through
+        // the plugin manifest, but the native `claude-skills install` must also
+        // mirror them under `<claude_home>/commands/<name>.md` so
+        // `/claude-core:<name>` resolves globally for any host repo. Renamed
+        // commands must be cleaned up by the existing per-file orphan sweep.
+        let (repo, home) = unique_paths("slash-commands");
+        seed_repo(&repo);
+        write_skill_with_reference(&repo, "reviewer", "10-r.md");
+        let commands_source = repo.join("commands");
+        fs::create_dir_all(&commands_source).unwrap();
+        fs::write(
+            commands_source.join("workflow.md"),
+            "---\ndescription: drive a workflow\n---\nbody\n",
+        )
+        .unwrap();
+        fs::write(
+            commands_source.join("recall.md"),
+            "---\ndescription: search memory\n---\nbody\n",
+        )
+        .unwrap();
+        // A non-markdown sibling must be ignored, matching the .md-only filter.
+        fs::write(commands_source.join("notes.txt"), "ignore me\n").unwrap();
+
+        let summary = install_from_paths("dev", &repo, &home).unwrap();
+        assert_eq!(
+            summary.synced_commands, 2,
+            "first install must report two newly written command definitions"
+        );
+
+        let installed_workflow = home.join("commands/workflow.md");
+        let installed_recall = home.join("commands/recall.md");
+        assert!(
+            installed_workflow.is_file(),
+            "workflow command must land in user-global commands dir"
+        );
+        assert!(
+            installed_recall.is_file(),
+            "recall command must land in user-global commands dir"
+        );
+        assert!(
+            !home.join("commands/notes.txt").is_file(),
+            "non-markdown files must not be copied"
+        );
+
+        // Reinstall with no source change must report zero writes.
+        let summary = install_from_paths("dev", &repo, &home).unwrap();
+        assert_eq!(
+            summary.synced_commands, 0,
+            "no-op reinstall must not rewrite unchanged command definitions"
+        );
+
+        // Rename one command and reinstall — the old file must be cleaned up by
+        // the same per-file orphan sweep that handles skill references.
+        fs::remove_file(commands_source.join("recall.md")).unwrap();
+        fs::write(
+            commands_source.join("gain.md"),
+            "---\ndescription: report savings\n---\nbody\n",
+        )
+        .unwrap();
+        install_from_paths("dev", &repo, &home).unwrap();
+
+        assert!(
+            !installed_recall.is_file(),
+            "renamed command must be removed from claude home"
+        );
+        assert!(
+            home.join("commands/gain.md").is_file(),
+            "new command must be installed"
         );
         let _ = fs::remove_dir_all(&repo);
         let _ = fs::remove_dir_all(&home);

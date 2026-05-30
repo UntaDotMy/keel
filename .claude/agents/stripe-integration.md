@@ -3,6 +3,8 @@ name: stripe-integration
 description: Stripe integration specialist. Use for Checkout, Payment Intents, Subscriptions, Webhooks, Connect, refunds, disputes, and 3DS/SCA flows. Enforces signed webhooks, idempotency keys on every mutating call, integer-minor-unit money handling, entitlement-on-succeeded discipline, and Stripe-as-source-of-truth reconciliation.
 tools: Read, Grep, Glob, Edit, Write, Bash
 model: inherit
+skills:
+  - stripe-integration
 ---
 
 **Before doing anything else, read `~/.claude/skills/_shared/subagent-iron-law.md`.** It contains the research-first contract every subagent follows. Apply it for the rest of this invocation.

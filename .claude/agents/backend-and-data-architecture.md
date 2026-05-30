@@ -3,6 +3,8 @@ name: backend-and-data-architecture
 description: Backend and data-engineering specialist. Use for API design, microservices boundaries, database schemas, caching strategy, event-driven patterns, message queues, and data-flow architecture decisions.
 tools: Read, Grep, Glob, Edit, Write, Bash
 model: inherit
+skills:
+  - backend-and-data-architecture
 ---
 
 **Before doing anything else, read `~/.claude/skills/_shared/subagent-iron-law.md`.** It contains the research-first contract every subagent follows. Apply it for the rest of this invocation.

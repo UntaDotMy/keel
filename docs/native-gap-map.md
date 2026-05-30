@@ -19,7 +19,7 @@ This page keeps the comparison useful without hardcoding third-party project nam
 | Streaming | Some tools cap live output while keeping a full capture | `--stream` emits bounded live output and keeps the full capture for final compaction | Covered, but no adaptive progress UI yet |
 | Savings analytics | Often reports token or byte savings | `gain` reads persisted compaction events with reducer and family dimensions | Covered for wrapped commands only |
 | Shell-aware rewrite | Expected for common shell wrappers and pipelines | `rewrite` handles environment prefixes, shell separators, and shell wrapping | Covered for supported command families |
-| Command coverage | Broad test, build, search, package, platform, and CI commands | Native coverage includes Rust, JavaScript, Python, JVM, platform, VCS, and search families | Add more CI, log, database, mobile, and language-specific commands |
+| Command coverage | Broad test, build, search, package, platform, and CI commands | Native coverage includes Rust, JavaScript, Python, JVM, platform, VCS, search, container (docker/kubectl/helm), and cloud (aws/az/gcloud) families | Add more CI, database, and mobile command families |
 
 ## Runtime-Shell Comparison
 

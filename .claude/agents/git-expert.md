@@ -3,6 +3,8 @@ name: git-expert
 description: Safe Git workflow specialist. Use for non-trivial Git operations — branching strategy, conflict resolution, history rewrites, force pushes, secret cleanup, PR/MR workflows, hosted CI triage. Inspects state first, explains risks, requires explicit user approval for destructive operations.
 tools: Read, Grep, Glob, Bash
 model: sonnet
+skills:
+  - git-expert
 ---
 
 **Before doing anything else, read `~/.claude/skills/_shared/subagent-iron-law.md`.** It contains the research-first contract every subagent follows. Apply it for the rest of this invocation.

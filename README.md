@@ -58,6 +58,7 @@ The cast file ships in this repo. Render to GIF with `agg docs/demos/quickstart.
 | Memory | Working briefs, completion ledgers, scoped `SYSTEM_MAP.md`, and durable recovery state under `~/.claude/memories/`. |
 | Command compaction | `claude-skills run -- <cmd>` produces compact output for noisy test/build/lint/log/search commands without dropping diagnostic signal. |
 | MCP server | `claude-skills mcp serve` is registered through the plugin manifest so Claude Code auto-discovers `recall`, `system_map`, `run_command`, and `recall_status` tools plus the system-map and recall-status resources. |
+| Slash commands | `/claude-core:workflow`, `/claude-core:review`, `/claude-core:recall`, `/claude-core:gain` — discoverable `/`-menu wrappers over the implemented CLI surfaces. Shipped via the plugin manifest `commands` key. |
 | Specialist skills | 18 managed specialist profiles synced into `~/.claude/agent-profiles/*.toml`, invokable via the Skill tool. |
 
 ## Use as a Claude Code Plugin
@@ -190,6 +191,58 @@ Manual prune (any time):
 ```bash
 ~/.claude/claude-skills.exe raw prune --older-than 30d
 ```
+
+## Slash Commands
+
+When installed as a plugin, claude-core registers four namespaced slash commands
+(see the `commands` key in `.claude-plugin/plugin.json`). Each is a thin,
+discoverable `/`-menu wrapper over an **implemented** `claude-skills` CLI surface
+— none of them invoke planned-but-unimplemented commands.
+
+| Command | Wraps | Use it for |
+| --- | --- | --- |
+| `/claude-core:workflow [route\|start\|cockpit\|finish] <args>` | `workflow` ledger | Drive a proof-first workstream. |
+| `/claude-core:review [pre-commit\|pre-pr\|gates] [base-ref]` | `review` gates | Deterministic local quality gate on the diff. |
+| `/claude-core:recall <terms>` | `memory recall` | FTS5 search over durable memory. |
+| `/claude-core:gain [since]` | `gain` | Report command-output compaction savings. |
+
+Command files live at the plugin root `commands/`. They ship through the plugin
+install path; the native `claude-skills install` does not yet sync them into
+`~/.claude/commands/` (tracked follow-up — the installer has `sync_skills` and
+`sync_agents` but no `sync_commands` arm yet).
+
+## Statusline (opt-in)
+
+A cross-platform statusline script renders the active model, context usage, and a
+**compaction-savings badge** sourced from `claude-skills gain --json` (the badge
+is omitted when the binary or savings data is unavailable, and the line never
+errors). It is opt-in — claude-core does not overwrite your `statusLine` setting.
+
+`statusline/statusline-claude-core.sh` (macOS/Linux) and
+`statusline/statusline-claude-core.ps1` (Windows). To enable, point your
+`settings.json` `statusLine.command` at the script:
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "~/.claude/statusline-claude-core.sh"
+  }
+}
+```
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "powershell -NoProfile -ExecutionPolicy Bypass -File %USERPROFILE%\\.claude\\statusline-claude-core.ps1"
+  }
+}
+```
+
+Both scripts read the documented statusline session JSON on stdin and print one
+line such as `Opus | ctx 8% | saved 3800 tok`.
+
 
 ### Cache Hygiene and Token Economy
 
@@ -429,6 +482,7 @@ claude-skills run --json -- pytest tests -q
 claude-skills run -- git status
 claude-skills run -- rg "CompactResult" rust
 claude-skills gain --since today
+claude-skills gain discover --since today
 claude-skills raw <raw_id>
 claude-skills doctor
 ```
@@ -438,12 +492,13 @@ What is implemented today:
 - `run` executes the requested command, saves `stdout.log`, `stderr.log`, `command.txt`, `meta.json`, and `compact.txt`, and returns compact output with `raw: claude-skills raw <raw_id>`.
 - `run --json` returns `command`, `exit_code`, `adapter_name`, `compacted`, `raw_id`, `raw_path`, exact token fields, `summary`, `stdout`, and `stderr`.
 - `run --full` and `run --no-compact` pass through raw output while still recording metadata; `--adapter <name>`, `--list-adapters`, `--max-lines <n>`, and `--recovery-dir <path>` are available for debugging and control.
-- Built-in adapters cover `tests`, `git`, `search`, `files`, `build`, `lint`, `logs`, and `generic` fallback. Test adapters handle cargo/pytest/go/JS-style failure signals; git/search/files adapters summarize diffs, matches, and large reads.
+- Built-in adapters cover `tests`, `git`, `search`, `files`, `build`, `lint`, `containers`, `cloud`, `database`, `logs`, and `generic` fallback. Test adapters handle cargo/pytest/go/JS-style failure signals; git/search/files adapters summarize diffs, matches, and large reads; the `containers` adapter compacts docker/kubectl/helm; the `cloud` adapter reduces aws/az/gcloud output (structure-only JSON, secret redaction, failure-first); the `database` adapter reduces psql/mysql/sqlite3/redis-cli/mongosh result sets (header + sampled rows, structure-only JSON, credential redaction).
 - `raw <raw_id>`, `raw --path <raw_id>`, `raw list`, `raw prune --older-than 30d`, and `replay <raw_id>` provide local recovery and retention controls.
 - `rewrite --json "<command>"` returns supported/reason/rewritten-command metadata and understands common shell wrappers, environment prefixes, and pipelines by routing them through `bash -lc` when needed.
 - `hook install` writes the documented global Claude Code lifecycle hook set, with `PreToolUse` handling block-and-rerun command compaction.
 - `hook instructions` prints the agent-facing rerun contract in markdown or JSON.
 - `gain` reads native compaction events from the Claude Code home and reports observed commands, compacted/passthrough counts, exact tokens before/after/saved, savings percentage, adapter breakdowns, and top commands.
+- `gain discover` reports missed-savings opportunities: commands that ran through the proxy but were not compacted (passthrough), grouped by command with the estimated uncompacted tokens that entered context. `gain` reports what was saved; `discover` reports what was left on the table.
 - `doctor` checks the binary, raw store, event log, adapter registry, rewrite behavior, and hook/proxy setup with ok/warn/fix-style output.
 - The runtime never shells out to Go for compaction, hooks, or command dispatch.
 
@@ -512,7 +567,7 @@ The one-line installer refreshes the managed Claude Code hooks automatically, an
 }
 ```
 
-The hook contract is explicit rerun guidance rather than hidden command mutation. The Rust hook installer manages 27 of the 28 Claude Code lifecycle events documented at code.claude.com/docs/en/hooks, writing them to `~/.claude/settings.json`: `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PostToolBatch`, `PermissionRequest`, `PermissionDenied`, `Notification`, `UserPromptSubmit`, `UserPromptExpansion`, `Stop`, `StopFailure`, `SubagentStart`, `SubagentStop`, `TaskCreated`, `TaskCompleted`, `TeammateIdle`, `WorktreeCreate`, `WorktreeRemove`, `CwdChanged`, `PreCompact`, `PostCompact`, `SessionStart`, `SessionEnd`, `Setup`, `InstructionsLoaded`, `ConfigChange`, `Elicitation`, and `ElicitationResult`. `PreToolUse` owns command compaction before noisy output exists. `SessionStart` delivers the bootstrap skill once per session, `UserPromptSubmit` injects a short research-first iron-law restatement per prompt, and `PostToolBatch` injects the reviewer-on-close reminder before each next turn. The remaining lifecycle hooks are silent checkpoint surfaces reserved for memory and recovery wiring without shell-profile wrappers. The 28th event, `FileChanged`, is defined in the dispatch table but skipped on install because its `matcher` doubles as a per-repo file watch list and an empty matcher would ship dead config; ad-hoc invocations like `claude-skills hook file-changed` still work.
+The hook contract is explicit rerun guidance rather than hidden command mutation. The Rust hook installer manages 28 of the 30 lifecycle events in the `HOOK_EVENTS` table (`rust/crates/claude-skills/src/hooks/claude.rs`), writing them to `~/.claude/settings.json`: `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PostToolBatch`, `PermissionRequest`, `PermissionDenied`, `Notification`, `UserPromptSubmit`, `UserPromptExpansion`, `Stop`, `StopFailure`, `SubagentStart`, `SubagentStop`, `TaskCreated`, `TaskCompleted`, `TeammateIdle`, `WorktreeCreate`, `WorktreeRemove`, `CwdChanged`, `PreCompact`, `PostCompact`, `SessionStart`, `SessionEnd`, `Setup`, `InstructionsLoaded`, `ConfigChange`, `Elicitation`, and `ElicitationResult`. `PreToolUse` owns command compaction before noisy output exists. `SessionStart` delivers the bootstrap skill once per session, `UserPromptSubmit` injects a short research-first iron-law restatement per prompt, and `PostToolBatch` injects the reviewer-on-close reminder before each next turn. The remaining lifecycle hooks are silent checkpoint surfaces reserved for memory and recovery wiring without shell-profile wrappers. Two events are defined in the dispatch table but skipped on install: `FileChanged` (its `matcher` doubles as a per-repo file watch list, so an empty matcher would ship dead config) and `MessageDisplay` (no matcher, fires on every assistant message, and emits `hookSpecificOutput.displayContent` — auto-installing would be a no-op or would silently rewrite on-screen text, so it stays opt-in). Ad-hoc invocations like `claude-skills hook file-changed` and `claude-skills hook message-display` still work.
 
 ## Preserve Existing Flow Evidence
 
@@ -563,8 +618,9 @@ claude-skills memoriesv2 working-brief list
 
 Advanced memory and search surfaces:
 
-- The Rust runtime currently implements `scope`, `system-map`, `working-brief`, and `completion-gate check` for both `memory` and `memoriesv2` command groups.
-- Agent-registry, research-cache, maintenance, loop-guard, agent-packets, retrieval packets, ledger append/show, graph add/list/query, and consolidate are not yet implemented and return non-zero with a "not implemented" message.
+- The Rust runtime implements `scope`, `system-map`, `working-brief`, `completion-gate check`, and `recall` for both `memory` and `memoriesv2` command groups, plus the family commands `research-cache` (record/lookup/stale/reward/list), `maintenance` (append-working-buffer/trim/recalibrate), `agent-registry` (register/list), `agent-packets` (build/show/list), `loop-guard` (record/check), `entity` (upsert/list/query), `graph` (add/list/query), `retrieve` (cross-family lexical search), and `status`. Each family persists flat-JSON records under `<claude-home>/<group>/<family>/`, isolated per command group.
+- The `orchestration` group implements `runtime-preflight`, `resume-status`, `task` (begin/progress/complete/list), and `checkpoint`.
+- Still not implemented (return non-zero with a "not implemented" message): `memory report`, `memory index`, `memory hook`, and `consolidate`.
 - Code-search demo details live at [./docs/code-search-demo-and-gap-map.md](./docs/code-search-demo-and-gap-map.md).
 
 ## Manager and Operator Surfaces
@@ -592,7 +648,7 @@ Routine work stays in the main lane. Specialist profiles are for the moments whe
 
 ## Legacy Command Compatibility
 
-The native CLI is the primary surface. Earlier docs referenced richer subcommand shapes (`memory working-brief record-summary`, `memory completion-gate record-requirement`, `memoriesv2 retrieve|ledger|graph|entity|hook`, `orchestration task begin|progress|complete`, `orchestration checkpoint`, `memory report`, `memory agent-registry|research-cache|maintenance|loop-guard|agent-packets`). Those surfaces are **not yet implemented in the Rust runtime** and now return non-zero with a "not implemented" message instead of silently succeeding. The surface that does work today is listed under [Memory and System Map](#memory-and-system-map) above and in `claude-skills help advanced`.
+The native CLI is the primary surface. Most subcommand shapes earlier docs referenced are now implemented: `orchestration task begin|progress|complete|list`, `orchestration checkpoint`, and `memory|memoriesv2 research-cache|maintenance|agent-registry|agent-packets|loop-guard|entity|graph|retrieve|status` all work today (see [Memory and System Map](#memory-and-system-map) above). A few remain **not yet implemented in the Rust runtime** and return non-zero with a "not implemented" message instead of silently succeeding: `memory working-brief record-summary`, `memory completion-gate record-requirement`, `memory report`, `memory index`, `memory hook`, and `consolidate`. The full working surface is listed above and in `claude-skills help advanced`.
 
 ## Documentation Map
 
@@ -603,6 +659,7 @@ The native CLI is the primary surface. Earlier docs referenced richer subcommand
 | Agent rules | [./AGENTS.md](./AGENTS.md) |
 | Compatibility matrix | [./docs/compatibility-matrix.md](./docs/compatibility-matrix.md) |
 | Why `claude_skills` over native Claude Code, runtime-shell comparator, and workflow-teaching comparator | [./docs/why-claude-skills.md](./docs/why-claude-skills.md) |
+| Competitive gap closure (named comparators + remaining work) | [./docs/competitive-gap-closure.md](./docs/competitive-gap-closure.md) |
 | Release notes | [./docs/release-notes.md](./docs/release-notes.md) |
 | Release proof bundle | [./docs/release-proof-bundle.md](./docs/release-proof-bundle.md) |
 | Audit bundle format | [./docs/audit-bundle-format.md](./docs/audit-bundle-format.md) |

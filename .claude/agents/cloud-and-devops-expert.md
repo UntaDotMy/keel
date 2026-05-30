@@ -3,6 +3,8 @@ name: cloud-and-devops-expert
 description: Cloud infrastructure and DevOps specialist. Use for IaC (Terraform, Pulumi, CloudFormation), CI/CD pipeline design, Kubernetes/container orchestration, cloud architecture (AWS/GCP/Azure), and operational concerns like rollout strategy, observability, and incident response.
 tools: Read, Grep, Glob, Edit, Write, Bash
 model: inherit
+skills:
+  - cloud-and-devops-expert
 ---
 
 **Before doing anything else, read `~/.claude/skills/_shared/subagent-iron-law.md`.** It contains the research-first contract every subagent follows. Apply it for the rest of this invocation.

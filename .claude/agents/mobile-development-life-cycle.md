@@ -3,6 +3,8 @@ name: mobile-development-life-cycle
 description: Mobile app specialist for Android (Kotlin/Java), iOS (Swift/Obj-C), and cross-platform (Flutter, React Native). Use for lifecycle management, permissions, offline sync, secure storage, performance, battery optimization, and app store release workflows.
 tools: Read, Grep, Glob, Edit, Write, Bash
 model: inherit
+skills:
+  - mobile-development-life-cycle
 ---
 
 **Before doing anything else, read `~/.claude/skills/_shared/subagent-iron-law.md`.** It contains the research-first contract every subagent follows. Apply it for the rest of this invocation.

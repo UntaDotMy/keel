@@ -5,8 +5,10 @@
 //! Side Effects: None.
 
 pub mod build;
+pub mod cloud;
 pub mod common;
 pub mod containers;
+pub mod database;
 pub mod files;
 pub mod generic;
 pub mod git;

@@ -5,7 +5,9 @@
 //! Side Effects: Reads optional project filter configuration files from the current workspace.
 
 use crate::adapters::build::BuildAdapter;
+use crate::adapters::cloud::CloudAdapter;
 use crate::adapters::containers::ContainersAdapter;
+use crate::adapters::database::DatabaseAdapter;
 use crate::adapters::files::FilesAdapter;
 use crate::adapters::generic::GenericAdapter;
 use crate::adapters::git::GitAdapter;
@@ -24,6 +26,8 @@ pub fn build_adapter_registry() -> AdapterRegistry {
     registry.register(Box::new(BuildAdapter));
     registry.register(Box::new(LintAdapter));
     registry.register(Box::new(ContainersAdapter));
+    registry.register(Box::new(CloudAdapter));
+    registry.register(Box::new(DatabaseAdapter));
     registry.register(Box::new(LogsAdapter));
     for adapter in crate::proxy::filters::load_project_filter_adapters() {
         registry.register(adapter);
@@ -33,7 +37,7 @@ pub fn build_adapter_registry() -> AdapterRegistry {
 }
 
 pub fn adapter_names() -> &'static str {
-    "tests, git, search, files, build, lint, containers, logs, project-filter, generic"
+    "tests, git, search, files, build, lint, containers, cloud, database, logs, project-filter, generic"
 }
 
 #[cfg(test)]
@@ -68,6 +72,40 @@ mod tests {
             registry.best_match(&ast).expect("adapter").name(),
             "generic"
         );
+    }
+
+    #[test]
+    fn cloud_clis_route_to_cloud_adapter_terraform_stays_logs() {
+        let registry = build_adapter_registry();
+        for program in ["aws", "az", "gcloud"] {
+            let ast = classify_command(&args(&[program, "describe", "x"])).expect("ast");
+            assert_eq!(
+                registry.best_match(&ast).expect("adapter").name(),
+                "cloud",
+                "{program} must route to the cloud adapter"
+            );
+        }
+        // terraform deliberately stays on the logs adapter (plan/apply output is
+        // not service-API JSON), so it must not be captured by cloud.
+        let ast = classify_command(&args(&["terraform", "plan"])).expect("ast");
+        assert_eq!(registry.best_match(&ast).expect("adapter").name(), "logs");
+    }
+
+    #[test]
+    fn database_clients_route_to_database_adapter_dumps_stay_logs() {
+        let registry = build_adapter_registry();
+        for program in ["psql", "mysql", "sqlite3", "redis-cli", "mongosh"] {
+            let ast = classify_command(&args(&[program, "-c", "select 1"])).expect("ast");
+            assert_eq!(
+                registry.best_match(&ast).expect("adapter").name(),
+                "database",
+                "{program} must route to the database adapter"
+            );
+        }
+        // Bulk-export tools stream file content, not query results — they stay
+        // on the logs adapter rather than the result-table reducer.
+        let ast = classify_command(&args(&["pg_dump", "mydb"])).expect("ast");
+        assert_eq!(registry.best_match(&ast).expect("adapter").name(), "logs");
     }
 
     #[test]

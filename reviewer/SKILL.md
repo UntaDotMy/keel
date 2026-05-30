@@ -49,6 +49,18 @@ Beyond the Google rubric, this skill also enforces:
 - **Batch Validation Discipline** — prefer small, reviewable patch batches with re-read and proving validation between batches over one oversized rewrite ([Google — Small CLs](https://google.github.io/eng-practices/review/developer/small-cls.html)).
 - **Fail-Fast Over Hidden Fallbacks** — reject silent `try/catch` swallowing, default-on-failure, and parallel "just-in-case" code paths. Errors must surface; root causes must be fixed.
 
+## Two-Stage Review Gate (run in order, re-review after fixes)
+
+Run the review as two distinct stages with a hard ordering, not one undifferentiated pass. Stage 2 does not start until Stage 1 is clean. This separates "did it build the right thing" from "did it build the thing right" so a polished implementation of the wrong spec cannot pass on code quality alone.
+
+**Stage 1 — Spec compliance (does it do what was asked?).** Reconcile the diff against the working brief, PRD/spec, explicit task list, acceptance criteria, and active plan items. Confirm every requested item is implemented, no unrequested feature was added, and edge cases named in the brief are handled. If any requirement is unmet, partially implemented, or drifted, **stop here and return Stage-1 findings** — do not spend the turn on code-quality nits for code that solves the wrong problem.
+
+**Stage 2 — Code quality (is the implementation sound?).** Only once Stage 1 is clean: apply the code-quality, security, performance, testing, language-gate, and hygiene checks (sequence steps 5-10 below).
+
+**Mandatory re-review after fixes.** When findings from either stage are fixed, re-run the stage that produced them against the *new* diff — do not assume a fix is correct or that it introduced no regression. A fix to a Stage-1 gap re-enters at Stage 1; a fix to a Stage-2 issue re-enters at Stage 2. Keep looping until the active stage is clean, then advance. The verdict is final only when both stages are clean on the current diff.
+
+This is a sequencing discipline layered on the detailed Review Sequence below: Stage 1 ≈ steps 1-4 (diff map, impact, requirements, stateful ownership), Stage 2 ≈ steps 5-10 (quality, security, performance, testing, language gates, hygiene).
+
 ## Review Sequence
 
 1. **Diff-First**: Start from the concrete change set, not a narrative summary. Build a "changed surface map" of files, named entrypoints, and behavior changes. Reject reviews that cannot point to specific files, lines, or symbols for each finding.

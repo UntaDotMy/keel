@@ -34,6 +34,7 @@ A "skill" runs in the main thread (instructions inline, costs ongoing tokens). A
 - `.claude/review.json` — Review policy configuration.
 - `.claude/hooks.json` — Claude Code hook wiring rendered by `claude-skills hook install`.
 - `.claude-plugin/plugin.json` — Plugin manifest for Claude Code's plugin system.
+- `commands/` — Custom slash commands (`/claude-core:<name>`) wrapping the implemented CLI surfaces: `workflow`, `review`, `recall`, `gain`. Registered via the `commands` key in the plugin manifest. Note: these install through the **plugin path**; the native `claude-skills install` does not yet sync them to `~/.claude/commands/` (planned follow-up — the installer has `sync_skills`/`sync_agents` but no `sync_commands` yet).
 
 ## Specialist Layout
 
@@ -51,13 +52,13 @@ Each specialist contains three artifacts:
 
 Other official optional fields not currently used here include `disable-model-invocation`, `user-invocable`, `argument-hint`, `arguments`, `model`, `context`, `agent`, `hooks`, and `shell`. Add them deliberately when a skill needs that capability.
 
-**Subagent frontmatter** (`.claude/agents/<name>.md`) follows the official spec: `name` and `description` are required; `tools` (comma-separated bare tool names), `model` (`opus`, `sonnet`, `haiku`, or `inherit`), and `color` are optional. Note: scoped tool patterns like `Bash(git diff:*)` work in SKILL.md `allowed-tools` but not in subagent `tools` — subagents use bare tool names. Reference: https://code.claude.com/docs/en/sub-agents.
+**Subagent frontmatter** (`.claude/agents/<name>.md`) follows the official spec: `name` and `description` are required; `tools` (comma-separated bare tool names), `model` (`opus`, `sonnet`, `haiku`, or `inherit`), `color`, and `skills` (a YAML list of bare skill names to preload at startup) are optional. Note: scoped tool patterns like `Bash(git diff:*)` work in SKILL.md `allowed-tools` but not in subagent `tools` — subagents use bare tool names. Each managed subagent preloads its same-named skill via `skills:` so the full skill content is in context from startup rather than loaded on demand; `skills` is supported for plugin subagents and a missing/disabled skill is skipped with a debug-log warning. Reference: https://code.claude.com/docs/en/sub-agents.
 
-**Hook events** (`.claude/hooks.json`) are wired through `claude-skills hook <event>` for every Claude Code lifecycle event the manager observes. The current wiring covers all 29 official events listed at https://code.claude.com/docs/en/hooks (see `rust/crates/claude-skills/src/hooks/claude.rs::EVENTS`). Events the runtime does not currently emit are stubbed for forward-compatibility — the dispatcher no-ops until behavior is needed. When Anthropic adds or renames events, update both the Rust constant and `.claude/hooks.json`.
+**Hook events** (`.claude/hooks.json`) are wired through `claude-skills hook <event>` for every Claude Code lifecycle event the manager observes. The `HOOK_EVENTS` table in `rust/crates/claude-skills/src/hooks/claude.rs` defines **30 events**, of which 28 install into `settings.json`. Two rows carry `installs_in_settings: false`: `FileChanged` (its matcher doubles as a per-repo watch list, so an empty matcher would ship dead config) and `MessageDisplay` (no matcher, fires on every assistant message, emits `hookSpecificOutput.displayContent` — auto-installing would either be a no-op or silently rewrite on-screen text, so it stays opt-in). Both still dispatch for ad-hoc invocations (`claude-skills hook file-changed`, `claude-skills hook message-display`). Events the runtime does not actively emit are stubbed for forward-compatibility — the dispatcher no-ops until behavior is needed. When Anthropic adds or renames events, update both `HOOK_EVENTS` and the generated `.claude/hooks.json`. Reference: https://code.claude.com/docs/en/hooks.
 
 **Output styles**: Claude Code ships four built-in output styles — `Default`, `Proactive`, `Explanatory`, and `Learning`. The active style for this project is set in `.claude/settings.local.json`. Reference: https://code.claude.com/docs/en/output-styles.
 
-**Plugin manifest** (`.claude-plugin/plugin.json`) follows the official plugin schema. Only `name` is required; `displayName`, `version`, `description`, `skills`, `agents`, `hooks`, `commands`, `mcpServers`, `outputStyles`, `lspServers`, `experimental.themes`, `experimental.monitors`, `userConfig`, `channels`, and `dependencies` are optional. Reference: https://code.claude.com/docs/en/plugins-reference.
+**Plugin manifest** (`.claude-plugin/plugin.json`) follows the official plugin schema. Only `name` is required; `displayName`, `version`, `description`, `skills`, `agents`, `hooks`, `commands`, `mcpServers`, `outputStyles`, `lspServers`, `experimental.themes`, `experimental.monitors`, `userConfig`, `channels`, and `dependencies` are optional. This project uses `skills`, `agents`, `commands` (set to `["./commands/"]`), `hooks`, and `mcpServers`. Per the official reference, listing `commands` **replaces** the default `commands/` scan, so the explicit `["./commands/"]` keeps the default directory. Command `.md` files live at the plugin root `commands/` (not inside `.claude-plugin/`). Reference: https://code.claude.com/docs/en/plugins-reference.
 
 **Token-saving proxy**: command-output compaction lives in `rust/crates/claude-skills/src/proxy/`. The native `claude-skills run -- <command>`, `claude-skills rewrite`, and `claude-skills gain` surfaces own this work. When Claude Code introduces native compaction primitives, prefer them and keep this layer thin.
 
@@ -122,3 +123,35 @@ cargo test
 cargo fmt --all -- --check
 cargo clippy -- -D warnings
 ```
+
+## Skill Lint
+
+`claude-skills skill-lint --repo-root .` validates that every `<name>/SKILL.md`
+has the structural properties the Claude Code matcher needs to *trigger* the
+skill — non-empty `description`, `name` matching the directory, combined
+`description` + `when_to_use` within the 1536-char matcher budget, scoped
+`allowed-tools` (warn), and no dangling `references/*.md` links. It is the
+superpowers-style "test that skills trigger" gate, expressed as deterministic
+checks. Add `--json` for machine output; exits non-zero when any skill fails.
+
+## Config Audit
+
+`claude-skills config-audit --repo-root .` is an AgentShield-style security audit
+of claude-core's *own* config surface (not user code): `.claude/hooks.json`,
+`.claude/settings.json` permissions, and `.claude-plugin/plugin.json`. It flags
+shell-metacharacter injection and network fetches in hook commands,
+`bypassPermissions` mode, unscoped `Bash` allow rules, and committed secret
+literals in MCP env. Exits 2 on any high-severity finding. Add `--json` for
+machine output. Distinct from the `security-and-compliance-auditor` skill, which
+audits the user's application code.
+
+## Code Checkpoints
+
+`claude-skills checkpoint create|list|show|restore` is a git-backed working-tree
+snapshot surface — the durable, cross-session analog to native `/rewind` for the
+*code* axis. `create` snapshots tracked changes via `git stash create` pinned
+under `refs/claude-checkpoints/<id>` (non-destructive); `restore --id <id>
+--confirm` reapplies one, taking an automatic pre-restore safety snapshot first so
+the restore is itself reversible. It does not capture conversation state (only
+Claude Code's `/rewind` can), so the two are complementary.
+

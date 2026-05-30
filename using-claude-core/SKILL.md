@@ -112,7 +112,7 @@ skill matcher fires. The full text and the tactical rules they imply live in
 | "I'll add a config knob in case we need it" | Step 2 (Simplicity First) violated. Add it when a second caller exists. |
 | "Make it work" is a goal | Step 4 (Goal-Driven Execution) failed. State the verifiable check that proves done. |
 
-## Skill catalog (19 skills installed under ~/.claude/skills/)
+## Skill catalog (20 skills installed under ~/.claude/skills/)
 
 Source: each `<name>/SKILL.md` in this repo. Use the Skill tool with the bare
 name (e.g. `Skill("reviewer")`).
@@ -136,6 +136,7 @@ name (e.g. `Skill("reviewer")`).
 - `stripe-integration` — Stripe Checkout, Payment Intents, Subscriptions, Connect, Webhooks, refunds, disputes, idempotency, and 3DS/SCA.
 - `websocket-realtime-design` — WebSocket, SSE, fan-out, reconnect/resume, backpressure, ordering and dedup, auth lifecycle on long-lived connections.
 - `compression-discipline` — Per-turn output-compression playbook (narrower line ranges, search before reading, summarize logs). Auto-loaded by the UserPromptSubmit hint when a session crosses the per-day tool-call threshold.
+- `output-economy` — Per-response output-token economy: cut reply verbosity (no preamble, no re-narration of tool output, length tracks the task) without dropping technical signal. The output-side counterpart to compression-discipline's input-side rules.
 
 ## Subagent catalog (18 delegation targets in .claude/agents/)
 
@@ -167,6 +168,19 @@ form so subagents do not fall back to memory-based defaults.
 - `00-skill-routing-and-escalation.md` (repo root) — read first for routing.
 - Workspace `SYSTEM_MAP.md` lives at `~/.claude/memories/workspaces/<workspace-key>/reference/SYSTEM_MAP.md` and is auto-refreshed by `claude-skills memory scope resolve --refresh-system-map` at session start, pre-compact, and session end. Read it before making structural claims.
 
+## Slash commands (in `commands/`, namespaced `/claude-core:<name>`)
+
+Thin, discoverable wrappers over the implemented `claude-skills` CLI surfaces.
+Each command file maps only to commands that actually ship in the Rust runtime.
+
+- `/claude-core:workflow [route|start|cockpit|finish] <args>` — drive a proof-first workstream over the JSONL ledger.
+- `/claude-core:review [pre-commit|pre-pr|gates] [base-ref]` — run the native review gates on the current diff.
+- `/claude-core:recall <terms>` — FTS5 search over durable memory (working briefs, system maps, memoriesv2).
+- `/claude-core:gain [since]` — report command-output compaction token savings.
+
+These exist so the surface is reachable from the `/` menu, not only by the skill
+matcher or raw CLI. They never invoke planned-but-unimplemented commands.
+
 ## MCP server (`claude-skills mcp serve`)
 
 `.claude-plugin/plugin.json` registers `mcpServers.claude_core`, so Claude Code auto-discovers the server when the plugin is installed and you do not invoke it by hand. The server exposes four tools and two resources over JSON-RPC 2.0 stdio:
@@ -188,7 +202,7 @@ Your working memory only lives in the current context window. Anything you want 
 | `claude-skills memory working-brief write` | `~/.claude/working-briefs/<id>.json` | starting non-trivial work. Capture the user's request, acceptance criteria, and the files you expect to touch *before* coding so completion can be reconciled against it. Update with `working-brief write` again as scope shifts. |
 | `claude-skills memory completion-gate check` | nothing (probe-only) | before claiming a task complete. Returns the gate's verdict; failures point at the requirement that has no evidence yet. |
 
-The other `claude-skills memory <verb>` arms (`status`, `report`, `agent-registry`, `research-cache`, `maintenance`, `agent-packets`, `loop-guard`, `retrieve`, `index`, `entity`, `hook`) exit 1 with "not implemented" today. Do not pretend a command exists by trying it; check the dispatcher in `rust/crates/claude-skills/src/utility/memory.rs` if you are unsure.
+Beyond the four writers above, these `claude-skills memory <verb>` arms are now implemented (under both `memory` and `memoriesv2`): `research-cache`, `maintenance`, `agent-registry`, `agent-packets`, `loop-guard`, `entity`, `graph`, `retrieve`, and `status`. The `orchestration` group adds `task begin|progress|complete|list` and `checkpoint`. Only `report`, `index`, and `hook` still exit 1 with "not implemented" today. Do not pretend a command exists by trying it; check the dispatcher in `rust/crates/claude-skills/src/utility/memory.rs` (and `memory_families.rs`) if you are unsure.
 
 | Thought | Reality |
 |---|---|

@@ -155,8 +155,8 @@ Use the smallest acceptable step for classification, routing, candidate filterin
 - `claude-skills code-search status|index|search|demo|reset` provides a native local retrieval surface with incremental lineage and an honest shared demo path so agents can search the repo before widening to full-file reads
 - `claude-skills memory scope resolve` resolves scoped search order and write targets for the active workspace
 - `claude-skills memoriesv2 scope resolve` proves where the mirrored second-layer workspace, workstream, lane, graph, and hook artifacts live
-- `claude-skills memory research-cache` provides shared lookup, record, stale, archive, and reward operations for reusable research
-- `claude-skills memory report --format compact` provides the final-answer learning footer
+- `claude-skills memory research-cache record|lookup|stale|reward|list` provides shared record, freshness-aware lookup, stale/reward marking, and listing for reusable research (scoped per command group on disk)
+- `claude-skills memory report --format compact` (final-answer learning footer) is **planned but not yet implemented**; the `memory-status-reporter` skill produces the human-readable status report today, and `claude-skills memory status` gives a compact per-family record-count summary
 - `README.md` documents the setup and operational workflow
 
 ## Sources

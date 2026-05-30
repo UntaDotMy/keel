@@ -3,6 +3,8 @@ name: memory-status-reporter
 description: Memory health reporter. Use when user asks for a memory status report — "what did you learn today", "show memory status", "what mistakes happened and are they resolved", "how is memory growing", "summarize what you understand about my needs". Produces human-style narrative summaries.
 tools: Read, Grep, Glob, Bash
 model: sonnet
+skills:
+  - memory-status-reporter
 ---
 
 **Before doing anything else, read `~/.claude/skills/_shared/subagent-iron-law.md`.** It contains the research-first contract every subagent follows. Apply it for the rest of this invocation.

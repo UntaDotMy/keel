@@ -50,7 +50,7 @@ Treat compaction as a normal lifecycle event, not as a surprise failure:
 - When the runtime tool surface, unified-exec health, or child-agent controls are uncertain, run `claude-skills orchestration runtime-preflight` first and follow its preferred tool routing before opening new long-running work.
 - If the runtime can provide continuity markers such as a runtime session id, conversation id, turn id, or visible-history digest, pass them to `resume-status` and `start-run`. Marker mismatches are the explicit signal that continuity broke.
 - If the runtime cannot provide continuity markers, do not bluff. Exact automatic-versus-manual compaction detection is unavailable, so the workflow must fall back to artifact-first recovery on every long-running turn.
-- Before manual compaction, and whenever automatic compaction risk is rising, run `claude-skills orchestration checkpoint` so the live task is refreshed across:
+- Before manual compaction, and whenever automatic compaction risk is rising, run `claude-skills orchestration checkpoint` to persist a snapshot (open tasks, open workflows, working-brief count, and an optional `--note`) and report the current durable state. It composes the implemented surfaces below rather than owning a separate store, so the snapshot is an honest count of what is actually persisted:
   - `SESSION-STATE.md` for durable corrections, decisions, names, and exact values
   - the scoped working-brief artifact (for example `working-brief.json` or `working-brief-<agent-instance>.json`) for the user story, acceptance criteria, and plan items
   - `working-buffer.md` for the latest in-flight breadcrumbs
@@ -114,7 +114,7 @@ Avoid infinite or low-value retry loops:
 - Do not repeat the same failing tool call or plan shape more than twice without a new hypothesis.
 - If a retry is needed, change something concrete: inputs, scope, tool, search terms, or execution order.
 - If the same failure pattern repeats, write the mistake to rollout memory and pick a different approach.
-- The claude-skills memory loop-guard helper can record failure signatures in scoped workstream memory and tell the next run when the retry budget is exhausted.
+- The `claude-skills memory loop-guard record --signature <text>` helper records a failure signature in scoped workstream memory and increments its count; `loop-guard check --signature <text> --budget <n>` reports whether the retry budget is exhausted and exits non-zero (2) when it is, so a caller can branch on it. Use it to enforce the twice-and-change rule mechanically instead of by hand.
 - While sub-agents are running, the main agent should continue non-conflicting work instead of idling.
 
 ## Live Research Tool Selection
@@ -191,9 +191,9 @@ All repo-managed maintenance tooling should remain portable:
 
 Borrow the structure, not the transport:
 
-- Use the repo's native `claude-skills memory agent-packets` surface to build an Octave-style handoff packet without any MCP dependency.
+- Build Octave-style handoff packets with `claude-skills memory agent-packets build --objective <text> [--constraints a,b] [--files a,b] [--non-goals a,b] [--expected-output <text>]`, then `agent-packets show --id <id>` to reload one. The packets persist under scoped L3 reference memory so reused lanes do not need a full transcript replay, with no MCP dependency.
 - Use concise structured packets for sub-agent work: objective, constraints, current findings, relevant files, validation state, non-goals, and expected output.
 - Keep the main agent as the broker when feedback must pass between agents.
 - Do not depend on MCP-specific runtime features; implement the discipline directly in the skill pack.
-- The claude-skills memory agent-packets helper builds saved handoff, feedback, and readiness-check packets under scoped L3 reference memory so reused lanes do not need a full transcript replay.
+- When the `agent-packets` helper lands it will persist saved handoff, feedback, and readiness-check packets under scoped L3 reference memory so reused lanes do not need a full transcript replay; until then, keep those packets in the working brief or a reference note.
 - Before trusting a reused same-role lane with fresh work, build a readiness-check packet and wait for a new acknowledgment instead of assuming the previous completion payload still applies.

@@ -3,6 +3,8 @@ name: reviewer
 description: Production-readiness reviewer and quality gate. Use proactively after implementation work to validate code quality, security, architecture, testing, and delivery readiness before final handoff. Returns findings with severity, evidence, and remediation steps.
 tools: Read, Grep, Glob, Bash
 model: sonnet
+skills:
+  - reviewer
 ---
 
 **Before doing anything else, read `~/.claude/skills/_shared/subagent-iron-law.md`.** It contains the research-first contract every subagent follows. Apply it for the rest of this invocation.

@@ -3,6 +3,8 @@ name: web-development-life-cycle
 description: Web application specialist. Use for website and web-app development covering frontend framework architecture (React, Vue, Svelte, Next.js), backend APIs, performance budgets, SEO, accessibility (WCAG), browser compatibility, and deployment.
 tools: Read, Grep, Glob, Edit, Write, Bash
 model: inherit
+skills:
+  - web-development-life-cycle
 ---
 
 **Before doing anything else, read `~/.claude/skills/_shared/subagent-iron-law.md`.** It contains the research-first contract every subagent follows. Apply it for the rest of this invocation.

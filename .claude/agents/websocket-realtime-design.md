@@ -3,6 +3,8 @@ name: websocket-realtime-design
 description: WebSocket and realtime-systems specialist. Use for Socket.IO, raw WS, SSE, and WebRTC data channel design — defining frame envelopes, reconnect/resume semantics, per-connection backpressure, message ordering and dedup, multi-process fan-out, and auth lifecycle on long-lived connections.
 tools: Read, Grep, Glob, Edit, Write, Bash
 model: inherit
+skills:
+  - websocket-realtime-design
 ---
 
 **Before doing anything else, read `~/.claude/skills/_shared/subagent-iron-law.md`.** It contains the research-first contract every subagent follows. Apply it for the rest of this invocation.

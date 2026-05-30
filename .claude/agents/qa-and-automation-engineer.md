@@ -3,6 +3,8 @@ name: qa-and-automation-engineer
 description: QA and test-automation specialist. Use proactively when tests need to be added, regressions investigated, test strategy designed, or release reliability validated. Covers TDD, E2E frameworks (Playwright, Cypress), unit/integration/contract tests, and the mandatory release ladder (Smoke → Functional → Integration → UI → Load → Stress → Security).
 tools: Read, Grep, Glob, Edit, Write, Bash
 model: inherit
+skills:
+  - qa-and-automation-engineer
 ---
 
 **Before doing anything else, read `~/.claude/skills/_shared/subagent-iron-law.md`.** It contains the research-first contract every subagent follows. Apply it for the rest of this invocation.

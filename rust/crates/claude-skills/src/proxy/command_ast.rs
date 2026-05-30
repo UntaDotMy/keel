@@ -17,6 +17,8 @@ pub enum CommandKind {
     Lint,
     Logs,
     Container,
+    Cloud,
+    Database,
     PackageManager,
     Unknown,
 }
@@ -188,7 +190,8 @@ impl CommandAst {
             "dd" | "install" | "strip" => CommandKind::Build,
             "eslint" | "ruff" | "mypy" | "biome" => CommandKind::Lint,
             "docker" | "kubectl" | "helm" | "podman" | "nerdctl" => CommandKind::Container,
-            "terraform" | "aws" | "az" | "gcloud" => CommandKind::Logs,
+            "aws" | "az" | "gcloud" => CommandKind::Cloud,
+            "terraform" => CommandKind::Logs,
             "curl" | "wget" | "http" | "xh" | "httpie" => CommandKind::Logs,
             "journalctl" | "systemctl" | "loginctl" => CommandKind::Logs,
             "pip" | "pip3" => {
@@ -252,8 +255,10 @@ impl CommandAst {
             "openssl" | "gpg" | "gpg2" | "age" | "age-keygen" => CommandKind::Logs,
             "date" | "uptime" | "uname" | "hostname" | "whoami" | "who" | "id" | "groups"
             | "locale" => CommandKind::FileRead,
-            "pg_dump" | "pg_dumpall" | "pg_restore" | "psql" | "sqlite3" | "mysql"
-            | "mysqldump" | "redis-cli" | "mongosh" => CommandKind::Logs,
+            "psql" | "sqlite3" | "mysql" | "mariadb" | "redis-cli" | "mongosh" | "mongo" => {
+                CommandKind::Database
+            }
+            "pg_dump" | "pg_dumpall" | "pg_restore" | "mysqldump" => CommandKind::Logs,
             _ => CommandKind::Unknown,
         };
     }

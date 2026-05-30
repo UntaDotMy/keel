@@ -27,6 +27,7 @@
     "./git-expert",
     "./memory-status-reporter",
     "./mobile-development-life-cycle",
+    "./output-economy",
     "./postgres-migration-safety",
     "./preserve-existing-flow",
     "./qa-and-automation-engineer",
@@ -41,6 +42,7 @@
     "./websocket-realtime-design"
   ],
   "agents": "./.claude/agents/",
+  "commands": ["./commands/"],
   "hooks": "./.claude/hooks.json",
   "mcpServers": {
     "claude_core": {

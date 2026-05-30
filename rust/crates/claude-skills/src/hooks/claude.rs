@@ -308,6 +308,23 @@ pub const HOOK_EVENTS: &[HookEvent] = &[
         supports_hook_specific_output: false,
         installs_in_settings: true,
     },
+    // MessageDisplay fires while assistant message text is displayed. Per the
+    // official docs it has no matcher (always fires on every occurrence),
+    // cannot block, and emits `hookSpecificOutput.displayContent` to rewrite
+    // the on-screen text — NOT `additionalContext`, so `supports_hook_specific_output`
+    // stays false (that flag gates the additionalContext payload shape in
+    // `render_lifecycle_payload`). We keep the row so dispatch works for ad-hoc
+    // `claude-skills hook message-display`, but skip it on install: a handler
+    // with no displayContent is a no-op, and one that sets displayContent would
+    // silently rewrite what the user sees on every message — not a safe default.
+    HookEvent {
+        name: "MessageDisplay",
+        slug: "message-display",
+        matcher: "",
+        status: "Recording message-display lifecycle",
+        supports_hook_specific_output: false,
+        installs_in_settings: false,
+    },
 ];
 
 /// Find a row by Claude Code's PascalCase event name (`"PreToolUse"`).
@@ -478,10 +495,15 @@ mod tests {
     }
 
     #[test]
-    fn only_file_changed_opts_out_of_install() {
-        // Pins the install-allowlist invariant: FileChanged is the single known
-        // opt-out (its matcher value IS the watch list per the official docs, so
-        // it cannot be installed via settings.json the same way as other events).
+    fn only_known_events_opt_out_of_install() {
+        // Pins the install-allowlist invariant. Two rows opt out of
+        // settings.json install, each for a distinct documented reason:
+        //   - FileChanged: its matcher value IS the per-repo watch list per the
+        //     official docs, so an empty matcher ships dead config.
+        //   - MessageDisplay: it has no matcher and emits `displayContent` to
+        //     rewrite on-screen text on every assistant message. A no-op handler
+        //     is pointless and a displayContent handler would silently rewrite
+        //     what the user sees, so it is opt-in, not auto-installed.
         // If you intentionally flip another row's `installs_in_settings` to false,
         // update this test deliberately so the regression is reviewed.
         let opt_outs: Vec<&'static str> = HOOK_EVENTS
@@ -491,7 +513,7 @@ mod tests {
             .collect();
         assert_eq!(
             opt_outs,
-            ["FileChanged"],
+            ["FileChanged", "MessageDisplay"],
             "unexpected installs_in_settings=false rows; update this test if intentional"
         );
     }

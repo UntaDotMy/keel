@@ -3,6 +3,8 @@ name: react-performance-audit
 description: React performance specialist. Use for runtime profiling, render-cost reduction, memoization (`React.memo`, `useMemo`, `useCallback`), bundle-size and code-splitting decisions, list virtualization, suspense and concurrent-rendering tuning, and Core Web Vitals investigations on React apps.
 tools: Read, Grep, Glob, Edit, Write, Bash
 model: inherit
+skills:
+  - react-performance-audit
 ---
 
 **Before doing anything else, read `~/.claude/skills/_shared/subagent-iron-law.md`.** It contains the research-first contract every subagent follows. Apply it for the rest of this invocation.

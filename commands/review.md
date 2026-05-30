@@ -1,0 +1,27 @@
+---
+description: Run the claude-core native review gates (pre-commit, pre-pr, gate check) on the current diff before closing work. Use to get a deterministic local quality gate with fail-closed verdicts.
+argument-hint: "[pre-commit|pre-pr|gates] [base-ref]"
+allowed-tools: Read, Bash(claude-skills review:*), Bash(git diff:*), Bash(git status)
+---
+
+# /claude-core:review
+
+Run a claude-core native review surface. Arguments: **$ARGUMENTS**
+
+Use the installed binary path (bare `claude-skills` is not guaranteed on PATH):
+`~/.claude/claude-skills` (macOS/Linux), `%USERPROFILE%\.claude\claude-skills.exe`
+(Windows), or `cargo run --bin claude-skills --` from a source checkout.
+
+Map the surface in `$0` to the matching native subcommand:
+
+- `pre-commit` → `review pre-commit --format compact` — local pre-commit gate.
+- `pre-pr` → `review pre-pr --base-ref <ref> --format compact` — pre-PR gate (defaults base-ref to origin/main when none given).
+- `gates` → `review gates check --surface pre-pr --base-ref <ref> --format compact` — explicit gate verdict.
+- `diff` → `review diff` — review the working diff.
+
+If no surface is given, default to `review pre-pr --base-ref origin/main`.
+
+This is the deterministic CLI gate. For a deeper, evidence-backed code review of
+non-trivial changes, also invoke the `reviewer` skill — the CLI gate and the
+reviewer skill are complementary, not substitutes. Report the verdict honestly:
+if a gate fails or is blocked, say so and name the blocker instead of soft-passing.

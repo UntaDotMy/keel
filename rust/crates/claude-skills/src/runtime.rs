@@ -248,6 +248,10 @@ pub fn agents_directory(claude_home: &Path) -> PathBuf {
     claude_home.join("agents")
 }
 
+pub fn commands_directory(claude_home: &Path) -> PathBuf {
+    claude_home.join("commands")
+}
+
 pub fn agent_profiles_directory(claude_home: &Path) -> PathBuf {
     claude_home.join("agent-profiles")
 }

@@ -1,7 +1,7 @@
 ﻿//! Purpose: Verify and validate install logic for claude-skills manager.
 //! Caller: commands.rs via run_verify_command, run_validate_command, run_all_command, run_menu_command.
 //! Dependencies: std::fs, std::io, std::path, crate::args, crate::runtime.
-//! Main Functions: run_verify_command, verify_install, compare_skill, compare_directory_subset, compare_file_bytes, count_installed_skills, count_managed_skills, install_metadata_path, read_inventory_lines, metadata_value, run_validate_command, run_all_command, run_menu_command.
+//! Main Functions: run_verify_command, verify_install, compare_skill, compare_directory_subset, compare_file_bytes, verify_installed_markdown_dir, count_installed_skills, count_managed_skills, install_metadata_path, read_inventory_lines, metadata_value, run_validate_command, run_all_command, run_menu_command.
 //! Side Effects: Reads installed files and compares against source; runs cargo/git validation commands.
 
 use std::fs;
@@ -10,9 +10,10 @@ use std::path::{Path, PathBuf};
 
 use crate::args::FlagSet;
 use crate::runtime::{
-    agent_profiles_directory, discover_repository_layout, display_path, forward_process_result,
-    installed_executable_path, read_text_if_exists, resolve_claude_home, resolve_repository_root,
-    run_command, skills_directory, state_directory, SkillDefinition, SKILL_SYNC_DIRECTORIES,
+    agent_profiles_directory, agents_directory, commands_directory, discover_repository_layout,
+    display_path, forward_process_result, installed_executable_path, read_text_if_exists,
+    resolve_claude_home, resolve_repository_root, run_command, skills_directory, state_directory,
+    SkillDefinition, SKILL_SYNC_DIRECTORIES,
 };
 
 pub fn run_verify_command(
@@ -115,6 +116,22 @@ fn verify_install(
             ));
         }
     }
+    // Subagent `.md` definitions and custom slash commands are synced by install
+    // (sync_subagent_definitions / sync_commands) but were historically not
+    // re-verified. Confirm each source `.md` is byte-identical in Claude home so
+    // a drifted or partially-synced command/subagent is caught here, not at runtime.
+    verify_installed_markdown_dir(
+        &repository_root.join(".claude").join("agents"),
+        &agents_directory(&claude_home),
+        "subagent definition",
+        standard_output,
+    )?;
+    verify_installed_markdown_dir(
+        &repository_root.join("commands"),
+        &commands_directory(&claude_home),
+        "command",
+        standard_output,
+    )?;
     if !installed_executable_path(&claude_home).is_file() {
         return Err(format!(
             "installed Rust executable is missing {}",
@@ -178,6 +195,48 @@ fn compare_file_bytes(source_path: &Path, target_path: &Path) -> Result<(), Stri
             "content mismatch for {}",
             display_path(source_path)
         ));
+    }
+    Ok(())
+}
+
+/// Verify every `*.md` file in `source_dir` is installed byte-identical in
+/// `target_dir`. Used for subagent definitions (`.claude/agents/`) and custom
+/// slash commands (`commands/`), which install copies `.md` files verbatim. A
+/// missing source directory is not an error (the repo may ship neither);
+/// `label` names the artifact class in messages.
+fn verify_installed_markdown_dir(
+    source_dir: &Path,
+    target_dir: &Path,
+    label: &str,
+    standard_output: &mut dyn Write,
+) -> Result<(), String> {
+    if !source_dir.is_dir() {
+        return Ok(());
+    }
+    for entry_result in fs::read_dir(source_dir)
+        .map_err(|error| format!("read {}: {error}", display_path(source_dir)))?
+    {
+        let entry = entry_result.map_err(|error| format!("read directory entry: {error}"))?;
+        let source_path = entry.path();
+        if source_path.extension().and_then(|value| value.to_str()) != Some("md") {
+            continue;
+        }
+        let Some(file_name) = source_path.file_name() else {
+            continue;
+        };
+        let target_path = target_dir.join(file_name);
+        if !target_path.is_file() {
+            return Err(format!(
+                "{label} is not installed in Claude home: {}",
+                display_path(&target_path)
+            ));
+        }
+        compare_file_bytes(&source_path, &target_path)?;
+        let _ = writeln!(
+            standard_output,
+            "Content verified for {label}: {}",
+            file_name.to_string_lossy()
+        );
     }
     Ok(())
 }

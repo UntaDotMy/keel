@@ -130,6 +130,17 @@ impl Application {
             "code-search" => {
                 utility::run_code_search_command(command_arguments, standard_output, standard_error)
             }
+            "skill-lint" => {
+                utility::run_skill_lint_command(command_arguments, standard_output, standard_error)
+            }
+            "config-audit" => utility::run_config_audit_command(
+                command_arguments,
+                standard_output,
+                standard_error,
+            ),
+            "checkpoint" => {
+                utility::run_checkpoint_command(command_arguments, standard_output, standard_error)
+            }
             "design-intelligence" => utility::run_design_intelligence_command(
                 command_arguments,
                 standard_output,

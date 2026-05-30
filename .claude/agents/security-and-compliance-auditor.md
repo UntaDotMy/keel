@@ -3,6 +3,8 @@ name: security-and-compliance-auditor
 description: Application security and compliance review specialist. Use proactively when changes touch auth, secrets, input validation, data handling, dependencies, IAM, or compliance-sensitive surfaces (SOC2, GDPR). Performs threat modeling, exploitability analysis, and remediation review.
 tools: Read, Grep, Glob, Bash
 model: sonnet
+skills:
+  - security-and-compliance-auditor
 ---
 
 **Before doing anything else, read `~/.claude/skills/_shared/subagent-iron-law.md`.** It contains the research-first contract every subagent follows. Apply it for the rest of this invocation.

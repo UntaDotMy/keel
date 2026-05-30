@@ -3,6 +3,8 @@ name: api-contract-design
 description: API contract design specialist. Use for OpenAPI, GraphQL, gRPC, and JSON Schema work — adding or removing endpoints, evolving fields, classifying breaking changes, defining error taxonomies, idempotency rules, and pagination semantics. Routes generated-client drift and SDK migration windows.
 tools: Read, Grep, Glob, Edit, Write, Bash
 model: inherit
+skills:
+  - api-contract-design
 ---
 
 **Before doing anything else, read `~/.claude/skills/_shared/subagent-iron-law.md`.** It contains the research-first contract every subagent follows. Apply it for the rest of this invocation.

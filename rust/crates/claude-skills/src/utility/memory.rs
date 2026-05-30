@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use crate::args::FlagSet;
 use crate::json::{write_indented, Value};
 use crate::runtime::{display_path, resolve_claude_home, resolve_repository_root, write_text};
+use crate::utility::record_store::{field, record_to_value, Record, RecordStore};
 use crate::utility::system_map::{render_system_map, sanitize_key};
 use crate::utility::workflow_ledger::{
     allocate_unique_entry_id, close_entry, create_entry, current_timestamp_millis, entry_to_value,
@@ -65,12 +66,44 @@ pub fn run_memory_command(
             standard_output,
             standard_error,
         ),
-        "status" | "report" | "agent-registry" | "research-cache" | "maintenance"
-        | "agent-packets" | "loop-guard" | "retrieve" | "index" | "entity" | "hook" => {
+        "research-cache" | "maintenance" | "agent-registry" | "agent-packets" | "loop-guard"
+        | "retrieve" | "entity" | "graph" | "status" | "instincts" => {
+            crate::utility::memory_families::run_memory_family_command(
+                command_group,
+                arguments[0].as_str(),
+                &arguments[1..],
+                standard_output,
+                standard_error,
+            )
+        }
+        // `report` is a compact health summary across the implemented families —
+        // an alias for `status` so older docs that called `memory report` resolve.
+        "report" => crate::utility::memory_families::run_memory_family_command(
+            command_group,
+            "status",
+            &arguments[1..],
+            standard_output,
+            standard_error,
+        ),
+        // `index` rebuilds the FTS5 recall index. It reuses the recall reindex
+        // path so there is one index, not two.
+        "index" => crate::utility::recall::run_recall_command(
+            command_group,
+            &{
+                let mut reindex_args = vec!["reindex".to_string()];
+                reindex_args.extend_from_slice(&arguments[1..]);
+                reindex_args
+            },
+            standard_output,
+            standard_error,
+        ),
+        // `hook` is intentionally not a memory subcommand: Claude Code lifecycle
+        // hooks are owned by the top-level `claude-skills hook` surface. Point
+        // the caller there rather than shipping a parallel memory-hook concept.
+        "hook" => {
             let _ = writeln!(
                 standard_error,
-                "{command_group} {}: not implemented in the Rust runtime; expected scope|system-map|working-brief|completion-gate",
-                arguments[0]
+                "{command_group} hook: not a memory subcommand. Claude Code lifecycle hooks are managed by `claude-skills hook install|list|instructions|diagnose`."
             );
             1
         }
@@ -297,46 +330,409 @@ fn run_orchestration_task(
     if arguments.is_empty() || is_help_argument(&arguments[0]) {
         let _ = writeln!(
             standard_output,
-            "Usage: claude-skills orchestration task [begin|progress|complete] ..."
+            "Usage: claude-skills orchestration task [begin|progress|complete|list] ..."
         );
         return if arguments.is_empty() { 1 } else { 0 };
     }
     match arguments[0].as_str() {
-        "begin" | "progress" | "complete" => {
-            let _ = writeln!(
-                standard_error,
-                "orchestration task {}: not implemented in the Rust runtime (no ledger writer yet)",
-                arguments[0]
-            );
-            1
+        "begin" => run_orchestration_task_begin(&arguments[1..], standard_output, standard_error),
+        "progress" => {
+            run_orchestration_task_progress(&arguments[1..], standard_output, standard_error)
         }
+        "complete" => {
+            run_orchestration_task_complete(&arguments[1..], standard_output, standard_error)
+        }
+        "list" => run_orchestration_task_list(&arguments[1..], standard_output, standard_error),
         other => {
             let _ = writeln!(
                 standard_error,
-                "Unknown orchestration task action: {other} (expected begin|progress|complete)"
+                "Unknown orchestration task action: {other} (expected begin|progress|complete|list)"
             );
             1
         }
     }
 }
 
+/// Tasks live one-JSON-per-record under `<claude_home>/orchestration/tasks/`.
+/// Status moves open -> in-progress -> done. The record is a flat string map so
+/// it round-trips through the shared key=string reader like every other ledger.
+fn task_store(claude_home: &std::path::Path) -> RecordStore {
+    RecordStore::new(claude_home, "orchestration/tasks")
+}
+
+const TASK_STATUS_IN_PROGRESS: &str = "in-progress";
+const TASK_STATUS_DONE: &str = "done";
+
+fn run_orchestration_task_begin(
+    arguments: &[String],
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let mut flag_set = FlagSet::new("orchestration task begin");
+    flag_set.string_flag("task", "");
+    flag_set.string_flag("phase", "");
+    flag_set.string_flag("next-step", "");
+    flag_set.string_flag("skills", "");
+    flag_set.string_flag("claude-home", "");
+    flag_set.bool_flag("json", false);
+    if let Err(parse_error) = flag_set.parse(arguments) {
+        let _ = writeln!(standard_error, "{}", parse_error.message);
+        return 1;
+    }
+    let mut task = flag_set.string_value("task").trim().to_string();
+    if task.is_empty() && !flag_set.positional.is_empty() {
+        task = flag_set.positional.join(" ");
+    }
+    if task.trim().is_empty() {
+        let _ = writeln!(
+            standard_error,
+            "orchestration task begin: --task is required (the active task description)"
+        );
+        return 1;
+    }
+    let claude_home = match resolve_claude_home(flag_set.string_value("claude-home")) {
+        Ok(path) => path,
+        Err(error) => {
+            let _ = writeln!(standard_error, "orchestration task begin: {error}");
+            return 1;
+        }
+    };
+    let now_millis = current_timestamp_millis();
+    let id = format!("task-{now_millis:x}");
+    let started_at = format_timestamp_iso8601(now_millis);
+    let record: Record = vec![
+        ("id".into(), id.clone()),
+        ("task".into(), task.trim().to_string()),
+        (
+            "phase".into(),
+            flag_set.string_value("phase").trim().to_string(),
+        ),
+        ("status".into(), TASK_STATUS_IN_PROGRESS.to_string()),
+        (
+            "nextStep".into(),
+            flag_set.string_value("next-step").trim().to_string(),
+        ),
+        (
+            "skills".into(),
+            flag_set.string_value("skills").trim().to_string(),
+        ),
+        ("startedAt".into(), started_at),
+        ("updatedAt".into(), String::new()),
+        ("completedAt".into(), String::new()),
+        ("note".into(), String::new()),
+    ];
+    let store = task_store(&claude_home);
+    let path = match store.write_record(&id, &record) {
+        Ok(path) => path,
+        Err(error) => {
+            let _ = writeln!(standard_error, "orchestration task begin: {error}");
+            return 1;
+        }
+    };
+    if flag_set.bool_value("json") {
+        let payload = Value::Object(vec![
+            ("created".into(), Value::Bool(true)),
+            ("path".into(), Value::String(display_path(&path))),
+            ("task".into(), record_to_value(&record)),
+        ]);
+        return render_workflow_json(standard_output, standard_error, &payload);
+    }
+    let _ = writeln!(standard_output, "orchestration task begin: id={id}");
+    let _ = writeln!(standard_output, "  task: {}", task.trim());
+    let _ = writeln!(standard_output, "  status: {TASK_STATUS_IN_PROGRESS}");
+    let _ = writeln!(standard_output, "  ledger: {}", display_path(&path));
+    0
+}
+
+fn run_orchestration_task_progress(
+    arguments: &[String],
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    update_existing_task(
+        "orchestration task progress",
+        arguments,
+        standard_output,
+        standard_error,
+        TASK_STATUS_IN_PROGRESS,
+    )
+}
+
+fn run_orchestration_task_complete(
+    arguments: &[String],
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    update_existing_task(
+        "orchestration task complete",
+        arguments,
+        standard_output,
+        standard_error,
+        TASK_STATUS_DONE,
+    )
+}
+
+/// Shared update path for `progress` and `complete`: load the record by id,
+/// apply the new status plus any supplied fields, and stamp `updatedAt`
+/// (and `completedAt` when transitioning to done).
+fn update_existing_task(
+    command_label: &str,
+    arguments: &[String],
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+    new_status: &str,
+) -> u8 {
+    let mut flag_set = FlagSet::new(command_label.to_string());
+    flag_set.string_flag("id", "");
+    flag_set.string_flag("phase", "");
+    flag_set.string_flag("next-step", "");
+    flag_set.string_flag("skills", "");
+    flag_set.string_flag("note", "");
+    flag_set.string_flag("claude-home", "");
+    flag_set.bool_flag("json", false);
+    if let Err(parse_error) = flag_set.parse(arguments) {
+        let _ = writeln!(standard_error, "{}", parse_error.message);
+        return 1;
+    }
+    let id = flag_set.string_value("id").trim().to_string();
+    if id.is_empty() {
+        let _ = writeln!(
+            standard_error,
+            "{command_label}: --id is required (the task id from `orchestration task begin`)"
+        );
+        return 1;
+    }
+    let claude_home = match resolve_claude_home(flag_set.string_value("claude-home")) {
+        Ok(path) => path,
+        Err(error) => {
+            let _ = writeln!(standard_error, "{command_label}: {error}");
+            return 1;
+        }
+    };
+    let store = task_store(&claude_home);
+    let mut record = match store.read_record(&id) {
+        Ok(Some(record)) => record,
+        Ok(None) => {
+            let _ = writeln!(standard_error, "{command_label}: no task with id {id}");
+            return 1;
+        }
+        Err(error) => {
+            let _ = writeln!(standard_error, "{command_label}: {error}");
+            return 1;
+        }
+    };
+    let now_millis = current_timestamp_millis();
+    let timestamp = format_timestamp_iso8601(now_millis);
+    set_field(&mut record, "status", new_status.to_string());
+    set_field(&mut record, "updatedAt", timestamp.clone());
+    if new_status == TASK_STATUS_DONE {
+        set_field(&mut record, "completedAt", timestamp);
+    }
+    for (flag, key) in [
+        ("phase", "phase"),
+        ("next-step", "nextStep"),
+        ("skills", "skills"),
+        ("note", "note"),
+    ] {
+        let value = flag_set.string_value(flag).trim().to_string();
+        if !value.is_empty() {
+            set_field(&mut record, key, value);
+        }
+    }
+    let path = match store.write_record(&id, &record) {
+        Ok(path) => path,
+        Err(error) => {
+            let _ = writeln!(standard_error, "{command_label}: {error}");
+            return 1;
+        }
+    };
+    if flag_set.bool_value("json") {
+        let payload = Value::Object(vec![
+            ("updated".into(), Value::Bool(true)),
+            ("path".into(), Value::String(display_path(&path))),
+            ("task".into(), record_to_value(&record)),
+        ]);
+        return render_workflow_json(standard_output, standard_error, &payload);
+    }
+    let _ = writeln!(standard_output, "{command_label}: id={id}");
+    let _ = writeln!(
+        standard_output,
+        "  status: {}",
+        field(&record, "status").unwrap_or(new_status)
+    );
+    let _ = writeln!(standard_output, "  ledger: {}", display_path(&path));
+    0
+}
+
+fn run_orchestration_task_list(
+    arguments: &[String],
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let mut flag_set = FlagSet::new("orchestration task list");
+    flag_set.string_flag("claude-home", "");
+    flag_set.bool_flag("open-only", false);
+    flag_set.bool_flag("json", false);
+    if let Err(parse_error) = flag_set.parse(arguments) {
+        let _ = writeln!(standard_error, "{}", parse_error.message);
+        return 1;
+    }
+    let claude_home = match resolve_claude_home(flag_set.string_value("claude-home")) {
+        Ok(path) => path,
+        Err(error) => {
+            let _ = writeln!(standard_error, "orchestration task list: {error}");
+            return 1;
+        }
+    };
+    let store = task_store(&claude_home);
+    let records = match store.list_records() {
+        Ok(records) => records,
+        Err(error) => {
+            let _ = writeln!(standard_error, "orchestration task list: {error}");
+            return 1;
+        }
+    };
+    let open_only = flag_set.bool_value("open-only");
+    let selected: Vec<&Record> = records
+        .iter()
+        .map(|(_, record)| record)
+        .filter(|record| {
+            if !open_only {
+                return true;
+            }
+            !matches!(field(record, "status"), Some(TASK_STATUS_DONE))
+        })
+        .collect();
+    if flag_set.bool_value("json") {
+        let payload = Value::Object(vec![
+            ("count".into(), Value::Number(selected.len().to_string())),
+            (
+                "tasks".into(),
+                Value::Array(
+                    selected
+                        .iter()
+                        .map(|record| record_to_value(record))
+                        .collect(),
+                ),
+            ),
+        ]);
+        return render_workflow_json(standard_output, standard_error, &payload);
+    }
+    let _ = writeln!(
+        standard_output,
+        "orchestration task list: {} task(s)",
+        selected.len()
+    );
+    for record in &selected {
+        let _ = writeln!(
+            standard_output,
+            "  {} [{}] {}",
+            field(record, "id").unwrap_or("?"),
+            field(record, "status").unwrap_or("?"),
+            field(record, "task").unwrap_or("")
+        );
+    }
+    0
+}
+
+fn set_field(record: &mut Record, key: &str, value: String) {
+    if let Some(slot) = record.iter_mut().find(|(field_key, _)| field_key == key) {
+        slot.1 = value;
+    } else {
+        record.push((key.to_string(), value));
+    }
+}
+
+/// Checkpoint refreshes the durable artifacts that survive compaction, then
+/// reports their current state. It composes the already-working surfaces
+/// (system-map refresh, open task ledger, open workflow entries, working briefs)
+/// rather than owning a separate store, so "checkpoint" is an honest snapshot of
+/// what is actually persisted.
 fn run_orchestration_checkpoint(
     arguments: &[String],
     standard_output: &mut dyn Write,
     standard_error: &mut dyn Write,
 ) -> u8 {
-    if !arguments.is_empty() && is_help_argument(&arguments[0]) {
-        let _ = writeln!(
-            standard_output,
-            "Usage: claude-skills orchestration checkpoint [--note <text>]"
-        );
-        return 0;
+    let mut flag_set = FlagSet::new("orchestration checkpoint");
+    flag_set.string_flag("note", "");
+    flag_set.string_flag("claude-home", "");
+    flag_set.bool_flag("json", false);
+    if let Err(parse_error) = flag_set.parse(arguments) {
+        let _ = writeln!(standard_error, "{}", parse_error.message);
+        return 1;
     }
+    let claude_home = match resolve_claude_home(flag_set.string_value("claude-home")) {
+        Ok(path) => path,
+        Err(error) => {
+            let _ = writeln!(standard_error, "orchestration checkpoint: {error}");
+            return 1;
+        }
+    };
+
+    let open_tasks = task_store(&claude_home)
+        .list_records()
+        .map(|records| {
+            records
+                .into_iter()
+                .filter(|(_, record)| !matches!(field(record, "status"), Some(TASK_STATUS_DONE)))
+                .count()
+        })
+        .unwrap_or(0);
+    let open_workflows = list_entries(&claude_home)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter(|entry| entry.status == STATUS_OPEN)
+                .count()
+        })
+        .unwrap_or(0);
+    let brief_count = list_briefs(&claude_home)
+        .map(|briefs| briefs.len())
+        .unwrap_or(0);
+    let note = flag_set.string_value("note").trim().to_string();
+
+    // Persist the checkpoint event itself so resume-after-compaction can see the
+    // last snapshot point and its note.
+    let now_millis = current_timestamp_millis();
+    let checkpoint_id = format!("checkpoint-{now_millis:x}");
+    let checkpoint_record: Record = vec![
+        ("id".into(), checkpoint_id.clone()),
+        ("at".into(), format_timestamp_iso8601(now_millis)),
+        ("note".into(), note.clone()),
+        ("openTasks".into(), open_tasks.to_string()),
+        ("openWorkflows".into(), open_workflows.to_string()),
+        ("workingBriefs".into(), brief_count.to_string()),
+    ];
+    let checkpoint_store = RecordStore::new(&claude_home, "orchestration/checkpoints");
+    let checkpoint_path = match checkpoint_store.write_record(&checkpoint_id, &checkpoint_record) {
+        Ok(path) => path,
+        Err(error) => {
+            let _ = writeln!(standard_error, "orchestration checkpoint: {error}");
+            return 1;
+        }
+    };
+
+    if flag_set.bool_value("json") {
+        let payload = Value::Object(vec![
+            ("checkpointed".into(), Value::Bool(true)),
+            ("path".into(), Value::String(display_path(&checkpoint_path))),
+            ("snapshot".into(), record_to_value(&checkpoint_record)),
+        ]);
+        return render_workflow_json(standard_output, standard_error, &payload);
+    }
+    let _ = writeln!(standard_output, "orchestration checkpoint: {checkpoint_id}");
+    if !note.is_empty() {
+        let _ = writeln!(standard_output, "  note: {note}");
+    }
+    let _ = writeln!(standard_output, "  open tasks: {open_tasks}");
+    let _ = writeln!(standard_output, "  open workflows: {open_workflows}");
+    let _ = writeln!(standard_output, "  working briefs: {brief_count}");
     let _ = writeln!(
-        standard_error,
-        "orchestration checkpoint: not implemented in the Rust runtime (no ledger writer yet)"
+        standard_output,
+        "  saved: {}",
+        display_path(&checkpoint_path)
     );
-    1
+    0
 }
 
 pub fn run_workflow_command(
@@ -2867,7 +3263,9 @@ mod tests {
     }
 
     #[test]
-    fn orchestration_task_known_action_reports_not_implemented() {
+    fn orchestration_task_begin_without_task_flag_reports_required() {
+        // `task begin` is implemented now; with no --task it must fail closed
+        // asking for the required description rather than silently no-op.
         let mut stdout: Vec<u8> = Vec::new();
         let mut stderr: Vec<u8> = Vec::new();
         let exit_code = run_orchestration_command(
@@ -2878,23 +3276,36 @@ mod tests {
         assert_eq!(exit_code, 1);
         let stderr_text = String::from_utf8_lossy(&stderr).to_string();
         assert!(
-            stderr_text.contains("orchestration task begin: not implemented"),
+            stderr_text.contains("--task is required"),
             "stderr: {stderr_text}"
         );
     }
 
     #[test]
-    fn orchestration_checkpoint_reports_not_implemented() {
+    fn orchestration_checkpoint_succeeds_and_reports_snapshot() {
+        // `checkpoint` is implemented now; with no open work it must still
+        // succeed and emit a zeroed snapshot rather than the old stub error.
+        let temporary_directory = tempdir_under("claude-skills-orch-checkpoint-empty");
+        let claude_home = temporary_directory.join("claude-home");
+        fs::create_dir_all(&claude_home).expect("create claude home");
         let mut stdout: Vec<u8> = Vec::new();
         let mut stderr: Vec<u8> = Vec::new();
-        let exit_code =
-            run_orchestration_command(&["checkpoint".to_string()], &mut stdout, &mut stderr);
-        assert_eq!(exit_code, 1);
-        let stderr_text = String::from_utf8_lossy(&stderr).to_string();
-        assert!(
-            stderr_text.contains("orchestration checkpoint: not implemented"),
-            "stderr: {stderr_text}"
+        let exit_code = run_orchestration_command(
+            &[
+                "checkpoint".to_string(),
+                "--claude-home".to_string(),
+                claude_home.to_string_lossy().to_string(),
+            ],
+            &mut stdout,
+            &mut stderr,
         );
+        assert_eq!(exit_code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
+        let stdout_text = String::from_utf8_lossy(&stdout).to_string();
+        assert!(
+            stdout_text.contains("open tasks: 0"),
+            "stdout: {stdout_text}"
+        );
+        let _ = fs::remove_dir_all(&temporary_directory);
     }
 
     #[test]
@@ -3466,6 +3877,311 @@ mod tests {
         assert!(
             stderr_text.contains("Unknown memory completion-gate action: bogus"),
             "stderr: {stderr_text}"
+        );
+    }
+
+    fn task_id_from_stdout(stdout: &[u8]) -> String {
+        let text = String::from_utf8_lossy(stdout);
+        text.lines()
+            .find_map(|line| line.trim().strip_prefix("orchestration task begin: id="))
+            .map(|id| id.trim().to_string())
+            .expect("begin output must include an id")
+    }
+
+    #[test]
+    fn orchestration_task_begin_progress_complete_round_trips() {
+        let temporary_directory = tempdir_under("claude-skills-orch-task-lifecycle");
+        let claude_home = temporary_directory.join("claude-home");
+        fs::create_dir_all(&claude_home).expect("create claude home");
+        let home_arg = claude_home.to_string_lossy().to_string();
+
+        // begin
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let exit = run_orchestration_command(
+            &[
+                "task".to_string(),
+                "begin".to_string(),
+                "--task".to_string(),
+                "wire sync_commands".to_string(),
+                "--phase".to_string(),
+                "implement".to_string(),
+                "--claude-home".to_string(),
+                home_arg.clone(),
+            ],
+            &mut stdout,
+            &mut stderr,
+        );
+        assert_eq!(exit, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
+        let id = task_id_from_stdout(&stdout);
+        assert!(claude_home
+            .join("orchestration/tasks")
+            .join(format!("{id}.json"))
+            .is_file());
+
+        // progress
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let exit = run_orchestration_command(
+            &[
+                "task".to_string(),
+                "progress".to_string(),
+                "--id".to_string(),
+                id.clone(),
+                "--note".to_string(),
+                "tests passing".to_string(),
+                "--claude-home".to_string(),
+                home_arg.clone(),
+            ],
+            &mut stdout,
+            &mut stderr,
+        );
+        assert_eq!(exit, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
+
+        // complete (json) — assert status flips to done and completedAt is stamped
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let exit = run_orchestration_command(
+            &[
+                "task".to_string(),
+                "complete".to_string(),
+                "--id".to_string(),
+                id.clone(),
+                "--claude-home".to_string(),
+                home_arg.clone(),
+                "--json".to_string(),
+            ],
+            &mut stdout,
+            &mut stderr,
+        );
+        assert_eq!(exit, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
+        let out = String::from_utf8_lossy(&stdout).to_string();
+        assert!(out.contains("\"status\": \"done\""), "stdout: {out}");
+        assert!(out.contains("\"completedAt\""), "stdout: {out}");
+
+        let _ = fs::remove_dir_all(&temporary_directory);
+    }
+
+    #[test]
+    fn orchestration_task_begin_requires_task_description() {
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let exit = run_orchestration_command(
+            &["task".to_string(), "begin".to_string()],
+            &mut stdout,
+            &mut stderr,
+        );
+        assert_eq!(exit, 1);
+        assert!(String::from_utf8_lossy(&stderr).contains("--task is required"));
+    }
+
+    #[test]
+    fn orchestration_task_progress_unknown_id_errors() {
+        let temporary_directory = tempdir_under("claude-skills-orch-task-missing");
+        let claude_home = temporary_directory.join("claude-home");
+        fs::create_dir_all(&claude_home).expect("create claude home");
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let exit = run_orchestration_command(
+            &[
+                "task".to_string(),
+                "progress".to_string(),
+                "--id".to_string(),
+                "task-nope".to_string(),
+                "--claude-home".to_string(),
+                claude_home.to_string_lossy().to_string(),
+            ],
+            &mut stdout,
+            &mut stderr,
+        );
+        assert_eq!(exit, 1);
+        assert!(String::from_utf8_lossy(&stderr).contains("no task with id task-nope"));
+        let _ = fs::remove_dir_all(&temporary_directory);
+    }
+
+    #[test]
+    fn orchestration_task_list_open_only_excludes_done() {
+        let temporary_directory = tempdir_under("claude-skills-orch-task-list");
+        let claude_home = temporary_directory.join("claude-home");
+        fs::create_dir_all(&claude_home).expect("create claude home");
+        let home_arg = claude_home.to_string_lossy().to_string();
+
+        // Two tasks; complete one.
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        run_orchestration_command(
+            &[
+                "task".to_string(),
+                "begin".to_string(),
+                "--task".to_string(),
+                "open one".to_string(),
+                "--claude-home".to_string(),
+                home_arg.clone(),
+            ],
+            &mut out,
+            &mut err,
+        );
+        let mut out2 = Vec::new();
+        let mut err2 = Vec::new();
+        run_orchestration_command(
+            &[
+                "task".to_string(),
+                "begin".to_string(),
+                "--task".to_string(),
+                "done one".to_string(),
+                "--claude-home".to_string(),
+                home_arg.clone(),
+            ],
+            &mut out2,
+            &mut err2,
+        );
+        let done_id = task_id_from_stdout(&out2);
+        let mut out3 = Vec::new();
+        let mut err3 = Vec::new();
+        run_orchestration_command(
+            &[
+                "task".to_string(),
+                "complete".to_string(),
+                "--id".to_string(),
+                done_id,
+                "--claude-home".to_string(),
+                home_arg.clone(),
+            ],
+            &mut out3,
+            &mut err3,
+        );
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let exit = run_orchestration_command(
+            &[
+                "task".to_string(),
+                "list".to_string(),
+                "--open-only".to_string(),
+                "--claude-home".to_string(),
+                home_arg,
+            ],
+            &mut stdout,
+            &mut stderr,
+        );
+        assert_eq!(exit, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
+        let text = String::from_utf8_lossy(&stdout).to_string();
+        assert!(text.contains("1 task(s)"), "stdout: {text}");
+        assert!(text.contains("open one"), "stdout: {text}");
+        assert!(!text.contains("done one"), "stdout: {text}");
+        let _ = fs::remove_dir_all(&temporary_directory);
+    }
+
+    #[test]
+    fn orchestration_checkpoint_counts_open_tasks_and_persists_snapshot() {
+        let temporary_directory = tempdir_under("claude-skills-orch-checkpoint");
+        let claude_home = temporary_directory.join("claude-home");
+        fs::create_dir_all(&claude_home).expect("create claude home");
+        let home_arg = claude_home.to_string_lossy().to_string();
+
+        // One open task.
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        run_orchestration_command(
+            &[
+                "task".to_string(),
+                "begin".to_string(),
+                "--task".to_string(),
+                "in flight".to_string(),
+                "--claude-home".to_string(),
+                home_arg.clone(),
+            ],
+            &mut out,
+            &mut err,
+        );
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let exit = run_orchestration_command(
+            &[
+                "checkpoint".to_string(),
+                "--note".to_string(),
+                "before compaction".to_string(),
+                "--claude-home".to_string(),
+                home_arg,
+                "--json".to_string(),
+            ],
+            &mut stdout,
+            &mut stderr,
+        );
+        assert_eq!(exit, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
+        let text = String::from_utf8_lossy(&stdout).to_string();
+        assert!(text.contains("\"openTasks\": \"1\""), "stdout: {text}");
+        assert!(text.contains("before compaction"), "stdout: {text}");
+        // A checkpoint record must be persisted for resume-after-compaction.
+        let checkpoint_dir = claude_home.join("orchestration/checkpoints");
+        let count = fs::read_dir(&checkpoint_dir)
+            .expect("checkpoints dir exists")
+            .count();
+        assert_eq!(count, 1, "exactly one checkpoint record expected");
+        let _ = fs::remove_dir_all(&temporary_directory);
+    }
+
+    #[test]
+    fn memory_report_aliases_status_summary() {
+        let temporary_directory = tempdir_under("claude-skills-memory-report");
+        let claude_home = temporary_directory.join("claude-home");
+        fs::create_dir_all(&claude_home).expect("create claude home");
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let exit = run_memory_command(
+            "memory",
+            &[
+                "report".to_string(),
+                "--claude-home".to_string(),
+                claude_home.to_string_lossy().to_string(),
+            ],
+            &mut stdout,
+            &mut stderr,
+        );
+        assert_eq!(exit, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
+        // `report` is an alias for the family status summary.
+        let text = String::from_utf8_lossy(&stdout).to_string();
+        assert!(text.contains("family record counts"), "stdout: {text}");
+        let _ = fs::remove_dir_all(&temporary_directory);
+    }
+
+    #[test]
+    fn memory_index_rebuilds_recall_index() {
+        let temporary_directory = tempdir_under("claude-skills-memory-index");
+        let claude_home = temporary_directory.join("claude-home");
+        fs::create_dir_all(&claude_home).expect("create claude home");
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let exit = run_memory_command(
+            "memory",
+            &[
+                "index".to_string(),
+                "--claude-home".to_string(),
+                claude_home.to_string_lossy().to_string(),
+            ],
+            &mut stdout,
+            &mut stderr,
+        );
+        // reindex on an empty home succeeds and creates the sqlite index.
+        assert_eq!(exit, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
+        assert!(
+            claude_home.join("recall-index.sqlite3").is_file(),
+            "recall index must be created by `memory index`"
+        );
+        let _ = fs::remove_dir_all(&temporary_directory);
+    }
+
+    #[test]
+    fn memory_hook_redirects_to_lifecycle_hook_surface() {
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let exit = run_memory_command("memory", &["hook".to_string()], &mut stdout, &mut stderr);
+        assert_eq!(exit, 1);
+        let stderr_text = String::from_utf8_lossy(&stderr).to_string();
+        assert!(
+            stderr_text.contains("claude-skills hook install"),
+            "stderr must point at the real hook surface: {stderr_text}"
         );
     }
 }
