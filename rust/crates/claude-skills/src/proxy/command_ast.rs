@@ -87,6 +87,14 @@ impl CommandAst {
                 }
             }
             "pytest" | "jest" | "vitest" | "playwright" => CommandKind::Test,
+            // Additional test runners across ecosystems (route to the tests
+            // adapter: pass/fail summary + failure signal + rerun hint).
+            "mocha" | "ava" | "cypress" | "karma" | "tap" | "gotestsum" | "bats" | "ctest" => {
+                CommandKind::Test
+            }
+            // Python meta test runners. `tox`/`nox` orchestrate test envs; their
+            // output is test output.
+            "tox" | "nox" => CommandKind::Test,
             "deno" => {
                 if self.args.iter().any(|arg| arg == "test") {
                     CommandKind::Test
@@ -172,6 +180,9 @@ impl CommandAst {
             }
             "git" if self.args.first().map(String::as_str) == Some("grep") => CommandKind::Search,
             "git" | "gh" | "git-lfs" => CommandKind::Git,
+            // Jujutsu (jj) is a Git-compatible VCS; its status/log/diff output is
+            // the same shape as git, so route it to the git adapter.
+            "jj" => CommandKind::Git,
             "rg" | "grep" => CommandKind::Search,
             "cat" | "head" | "tail" | "sed" | "jq" | "awk" | "sort" | "uniq" | "wc" | "cut"
             | "tr" | "tee" => CommandKind::FileRead,
@@ -184,11 +195,50 @@ impl CommandAst {
                 CommandKind::Build
             }
             "make" | "cmake" | "ninja" | "xcodebuild" | "msbuild" => CommandKind::Build,
+            // Additional build systems across ecosystems (route to the build
+            // adapter: errors first, repeated noise removed).
+            "bazel" | "buck" | "buck2" | "meson" | "scons" | "bear" => CommandKind::Build,
+            // C/C++ compilers and task runners — high-volume, error-first output.
+            "gcc" | "g++" | "clang" | "clang++" | "cc" | "c++" => CommandKind::Build,
+            "just" | "task" | "mise" | "trunk" | "pre-commit" => CommandKind::Build,
+            // Swift / OpenTofu / Ansible / DB-migration / doc build tooling.
+            "swift" | "tofu" | "ansible" | "ansible-playbook" => CommandKind::Build,
+            "liquibase" | "flyway" | "quarto" => CommandKind::Build,
+            // JVM / other-language build+test multiplexers. Test/build split is
+            // by subcommand so a `test` task still routes to the tests adapter.
+            "sbt" | "lein" | "mill" => {
+                if self.args.iter().any(|arg| arg.contains("test")) {
+                    CommandKind::Test
+                } else {
+                    CommandKind::Build
+                }
+            }
+            // Haskell (cabal/stack) and Elixir (mix) build+test multiplexers.
+            "cabal" | "stack" | "mix" => {
+                if self
+                    .args
+                    .iter()
+                    .any(|arg| arg == "test" || arg.ends_with(".test"))
+                {
+                    CommandKind::Test
+                } else {
+                    CommandKind::Build
+                }
+            }
             "chmod" | "chown" | "touch" | "mkdir" | "rm" | "cp" | "mv" | "ln" | "rmdir" => {
                 CommandKind::Build
             }
             "dd" | "install" | "strip" => CommandKind::Build,
             "eslint" | "ruff" | "mypy" | "biome" => CommandKind::Lint,
+            // Additional linters/formatters-as-checkers across ecosystems
+            // (route to the lint adapter: error+warning signal first).
+            "pylint" | "pyright" | "shellcheck" | "hadolint" | "yamllint" | "stylelint"
+            | "tflint" | "clippy-driver" | "oxlint" | "standard" | "luacheck" | "vale" => {
+                CommandKind::Lint
+            }
+            // More checkers across ecosystems: typed-Python (basedpyright/ty),
+            // markdown, and the trunk meta-linter route to the lint adapter.
+            "basedpyright" | "ty" | "markdownlint" | "markdownlint-cli2" => CommandKind::Lint,
             "docker" | "kubectl" | "helm" | "podman" | "nerdctl" => CommandKind::Container,
             "aws" | "az" | "gcloud" => CommandKind::Cloud,
             "terraform" => CommandKind::Logs,
@@ -241,6 +291,20 @@ impl CommandAst {
             }
             "brew" | "apt" | "apt-get" | "apk" | "choco" | "winget" | "scoop" => {
                 CommandKind::PackageManager
+            }
+            // uv is the fast Python package manager; install/sync/lock are
+            // package-manager operations, `uv run`/`uv build` are build-like.
+            "uv" => {
+                if self.args.iter().any(|arg| {
+                    matches!(
+                        arg.as_str(),
+                        "pip" | "add" | "remove" | "sync" | "lock" | "install" | "tree"
+                    )
+                }) {
+                    CommandKind::PackageManager
+                } else {
+                    CommandKind::Build
+                }
             }
             "df" | "du" | "ncdu" => CommandKind::FileList,
             "ps" | "top" | "htop" | "pgrep" | "pidof" | "kill" | "killall" | "pkill" | "pwdx"

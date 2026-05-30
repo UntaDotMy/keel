@@ -346,12 +346,13 @@ fn sync_directory_delta(
     source_directory: &Path,
     target_directory: &Path,
     tracker: &mut FileTracker,
-) -> Result<(), String> {
+) -> Result<usize, String> {
     if !source_directory.is_dir() {
-        return Ok(());
+        return Ok(0);
     }
     fs::create_dir_all(target_directory)
         .map_err(|error| format!("create {}: {error}", display_path(target_directory)))?;
+    let mut changed = 0usize;
     for entry_result in fs::read_dir(source_directory)
         .map_err(|error| format!("read {}: {error}", display_path(source_directory)))?
     {
@@ -362,13 +363,15 @@ fn sync_directory_delta(
             format!("read file type for {}: {error}", display_path(&source_path))
         })?;
         if file_type.is_dir() {
-            sync_directory_delta(&source_path, &target_path, tracker)?;
+            changed += sync_directory_delta(&source_path, &target_path, tracker)?;
         } else if file_type.is_file() {
-            copy_file_if_changed(&source_path, &target_path)?;
+            if copy_file_if_changed(&source_path, &target_path)? {
+                changed += 1;
+            }
             tracker.record(&target_path);
         }
     }
-    Ok(())
+    Ok(changed)
 }
 
 fn remove_path_if_exists_counted(path: &Path) -> Result<usize, String> {
@@ -412,7 +415,7 @@ fn sync_skills(
         for relative_directory in SKILL_SYNC_DIRECTORIES {
             let source_directory = skill.skill_path.join(relative_directory);
             let target_directory = target_skill_directory.join(relative_directory);
-            sync_directory_delta(&source_directory, &target_directory, tracker)?;
+            synced_count += sync_directory_delta(&source_directory, &target_directory, tracker)?;
         }
     }
     Ok(synced_count)
@@ -424,19 +427,20 @@ fn sync_skills(
 /// resolves to a missing file at runtime even though the source lives in the
 /// repo. Files are recorded in the tracker so per-file orphan cleanup picks
 /// up renames and deletions just like skill references do. Returns the count
-/// of shared-resource directories staged this run (zero when the repo has
-/// none).
+/// of files actually written this run (zero on a no-op re-install), so the
+/// install summary reflects real churn rather than a constant.
 fn sync_shared_resources(
     layout: &RepositoryLayout,
     claude_home: &Path,
     tracker: &mut FileTracker,
 ) -> Result<usize, String> {
+    let mut changed = 0usize;
     for shared_directory_name in &layout.shared_resource_directories {
         let source_directory = layout.root_path.join(shared_directory_name);
         let target_directory = skills_directory(claude_home).join(shared_directory_name);
-        sync_directory_delta(&source_directory, &target_directory, tracker)?;
+        changed += sync_directory_delta(&source_directory, &target_directory, tracker)?;
     }
-    Ok(layout.shared_resource_directories.len())
+    Ok(changed)
 }
 
 fn sync_agents(
@@ -1641,6 +1645,53 @@ mod tests {
         assert!(
             installed_shared.join("common-discipline-v2.md").is_file(),
             "new shared file must be installed"
+        );
+        let _ = fs::remove_dir_all(&repo);
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn reinstall_is_zero_churn_when_nothing_changed() {
+        // Delta-patch guarantee: a re-install with an unchanged repo must report
+        // zero synced files across every category, including shared resources.
+        // Regression for the prior bug where sync_shared_resources returned the
+        // directory count (always 1) instead of the real change count, so the
+        // install summary always claimed churn on a no-op re-install.
+        let (repo, home) = unique_paths("zero-churn");
+        seed_repo(&repo);
+        write_skill_with_reference(&repo, "reviewer", "10-r.md");
+        let shared_dir = repo.join("_shared");
+        fs::create_dir_all(&shared_dir).unwrap();
+        fs::write(shared_dir.join("common-discipline.md"), "discipline body\n").unwrap();
+
+        let first = install_from_paths("dev", &repo, &home).unwrap();
+        assert!(
+            first.synced_shared_resources >= 1,
+            "first install must actually write the shared resource"
+        );
+
+        let second = install_from_paths("dev", &repo, &home).unwrap();
+        assert_eq!(second.synced_skills, 0, "no skill churn on no-op reinstall");
+        assert_eq!(second.synced_agents, 0, "no agent churn on no-op reinstall");
+        assert_eq!(
+            second.synced_subagent_definitions, 0,
+            "no subagent churn on no-op reinstall"
+        );
+        assert_eq!(
+            second.synced_commands, 0,
+            "no command churn on no-op reinstall"
+        );
+        assert_eq!(
+            second.synced_root_files, 0,
+            "no root-file churn on no-op reinstall"
+        );
+        assert_eq!(
+            second.synced_shared_resources, 0,
+            "no shared-resource churn on no-op reinstall (the fixed bug)"
+        );
+        assert_eq!(
+            second.removed_stale_files, 0,
+            "nothing stale to remove on no-op reinstall"
         );
         let _ = fs::remove_dir_all(&repo);
         let _ = fs::remove_dir_all(&home);

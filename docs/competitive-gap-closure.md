@@ -17,7 +17,7 @@ to the official Claude Code docs at code.claude.com as of the audit date.
 | Project | Identity | License | Overlap with claude-core |
 | --- | --- | --- | --- |
 | Official Claude Code | The host platform (code.claude.com/docs) | Anthropic | The baseline claude-core extends; ~30 hook events, skills (commands merged in), built-in subagents, checkpointing/rewind, MCP Tool Search, Agent SDK. |
-| RTK ("Rust Token Killer", `rtk-ai/rtk`) | Single-binary Rust command-output compaction proxy | Apache-2.0 | Near-identical to claude-core's compaction proxy; 100+ purpose-built command filters across 42 ecosystem modules, `gain`/`discover`/`session`, tee recovery. |
+| RTK ("Rust Token Killer", `rtk-ai/rtk`) | Single-binary Rust command-output compaction proxy | Apache-2.0 | Near-identical to claude-core's compaction proxy; "100+ supported commands" (mostly subcommand breadth within categories we also cover — 8 git subcmds, 8 aws subcmds, etc.), `gain`/`discover`/`session`, tee recovery. Verified from the upstream README: **no auto-rewrite on native Windows** (falls back to CLAUDE.md injection) and **never intercepts Read/Grep/Glob** (Bash-tool-only hook). |
 | caveman (`JuliusBrussee/caveman`) | Skill that compresses the model's own replies (terse "caveman speak") | MIT | Token economy on the **output** side (claude-core only compacts command **output**); ships slash commands, statusline, MCP middleware. |
 | superpowers (`obra/superpowers`) | Opinionated TDD methodology as auto-triggering skills | MIT | Skills + workflow doctrine; `writing-skills` meta-skill with a subagent eval harness; two-stage review loop; visual brainstorming. |
 | ECC ("Everything Claude Code", `affaan-m/ECC`) | Multi-harness operator framework | MIT | Whole operator posture at larger scale; **Instincts** (confidence-scored learned behaviors that evolve into skills), **AgentShield** (adversarial config security audit), advisor CLI, cross-harness adapters. |
@@ -200,28 +200,81 @@ N = absent.
 | Confidence-scored instincts w/ decay+prune | Y | ~ (usage counters) | Y | N | N | N | N |
 | Provenance guard (never clobber built-in/manual) | Y | Y (`write_origin`) | ~ | n/a | n/a | n/a | n/a |
 | Always-on learned-convention injection | Y (SessionStart digest) | Y (system prompt) | Y (band >=0.7) | N | N | N | N |
-| Command-output compaction proxy | Y (multi-adapter) | N | ~ | N | Y (100+ filters) | N | N |
+| Command-output compaction proxy | Y (multi-adapter, all platforms, every tool) | N | ~ | N | Y (100+ subcmds, no native-Windows auto-rewrite) | N | N |
 | Output-side verbosity economy | Y (output-economy skill) | N | N | N | N | Y | N |
 | Fail-closed review gate + release ladder | Y | N | ~ | ~ (TDD loop) | N | N | N |
 | Brownfield preserve-existing-flow gate | Y (unique) | N | N | N | N | N | N |
 | Auto-refreshed system map + recall index | Y | ~ (memory) | ~ | N | N | N | N |
 | Git-backed code checkpoints | Y | N | ~ | N | N | N | N |
 | Cross-harness adapters (Codex/Cursor/Gemini) | N (by design) | Y | Y | Y | Y | Y | ~ |
-| Zero-manual automation (all hook-driven) | Y | ~ (CLI agent) | ~ (opt-in) | ~ | Y (hook) | ~ | N |
+| Zero-manual automation (all hook-driven) | Y | ~ (CLI agent) | ~ (opt-in) | ~ | Y (hook, POSIX only) | ~ | N |
 
-**Where we still lose (honest):**
+**Where we still lose (honest), updated after the breadth + prose pass:**
 - **Cross-harness reach** — every comparator runs on Codex/Cursor/Gemini; we are
   Claude-Code-native by deliberate product stance (see strategic note). This is
   the one axis where every peer beats us, and it is a choice, not a defect.
-- **RTK filter breadth** — RTK ships 100+ purpose-built command filters across 42
-  ecosystem modules; our adapter set (build/cloud/containers/database/git/lint/
-  logs/search/tests/generic) is narrower. Incremental adapter work, not an
-  architectural gap.
-- **Skill-prose polish** — our generated SKILL.md is a deterministic template;
-  Hermes/ECC use an LLM to author richer prose. By design (the inline hook binary
-  has no LLM), and mitigated because the agent can refine any generated skill
-  (the no-clobber guard protects its edits). A future `learn run --synthesize`
-  that asks the agent to rewrite a freshly generated skill would close this.
+  Explicitly out of scope per product direction.
+- ~~RTK filter breadth~~ **(closed this pass).** Two real defects were found and
+  fixed, not just breadth added:
+  1. The PreToolUse auto-rewrite gate (`is_supported_noisy_command`) had drifted
+     narrower than the classifier, so the `database`/`cloud`/`containers`
+     adapters we already shipped were *unreachable on the automatic path* —
+     `psql`, `az`, `gcloud`, `helm`, `podman`, `cmake`, and others were never
+     auto-wrapped, so their adapters were dead code in practice. The gate now
+     covers every command the classifier routes to a dedicated adapter.
+  2. `adapter_name_for_rewrite` mislabeled `docker`/`kubectl`/`aws` as `logs`
+     when they actually route to `containers`/`cloud`. Fixed to match real
+     routing.
+  Breadth was also widened (~30 new programs: mocha/ava/cypress/karma/tap/
+  gotestsum/bats/ctest/tox/nox test runners; bazel/buck/buck2/meson/scons/bear/
+  sbt/lein/mill/cabal/stack/mix build systems; pylint/pyright/shellcheck/hadolint/
+  yamllint/stylelint/tflint/oxlint/standard/luacheck/vale linters). A new
+  drift-guard test (`every_specifically_classified_program_is_auto_wrappable`)
+  makes the two surfaces unable to diverge silently again. Note RTK's "100+"
+  count is mostly *subcommand* breadth within the same categories we cover, and
+  RTK has no auto-rewrite at all on native Windows (falls back to CLAUDE.md
+  injection) and never touches Read/Grep/Glob — our PostToolUse telemetry +
+  PreToolUse rewrite fire on every tool on every platform.
+- ~~Skill-prose polish~~ **(closed this pass).** `claude-skills learn synthesize`
+  emits a precise, agent-actionable refinement brief for every template-state
+  generated skill (carrying the observed conventions as the source of truth),
+  and SessionStart now surfaces that brief autonomously (no manual slash) so the
+  session model upgrades the prose in the normal course of work. The agent's
+  edit is protected by the content-hash no-clobber guard, and the nudge
+  self-clears once the skill is refined. The binary still never calls an LLM —
+  the session model that Claude Code already runs does the authoring. `learn run
+  --synthesize` also collects briefs inline for a freshly generated skill.
+
+### Bugs found and fixed while verifying the workflows end-to-end
+
+The user asked to confirm every workflow runs "like it should." Three latent
+defects surfaced during end-to-end verification and were fixed with regression
+tests:
+- **Delta-patch over-reported churn.** `sync_shared_resources` returned the
+  shared-*directory* count (always 1), not the file change count, so every
+  re-install claimed "Synced shared resources: 1" even on a pure no-op.
+  `sync_directory_delta` now returns the real changed-file count; a no-op
+  re-install reports 0 across every category. Regression:
+  `reinstall_is_zero_churn_when_nothing_changed`.
+- **Hook uninstall left dead keys.** `remove_managed_hooks` stripped our command
+  entries and empty matcher entries but left 28 empty `"Event": []` keys behind,
+  so an uninstall did not restore settings.json to its pre-install shape. It now
+  prunes event keys whose array became empty, while preserving any event key
+  that still holds a user-authored hook. Regressions:
+  `install_then_uninstall_leaves_no_managed_hook_keys`,
+  `uninstall_preserves_user_authored_hook_on_shared_event`.
+- **Stop hook "JSON validation failed"** (diagnosed, not a claude-core defect).
+  Transcript evidence shows the failing Stop hook is the `/goal`
+  prompt-based session hook (its `command` field is the goal text), exiting 1
+  with `stderr: "JSON validation failed"`. claude-core's own Stop hook
+  ("Closing native session state") succeeds in 38 ms with empty stdout. The
+  `/goal` evaluator routes through the user's model proxy (`ANTHROPIC_BASE_URL=
+  http://localhost:8989`, every model slot mapped to `claude-opus-4-8[1M]`),
+  which is not returning the structured yes/no JSON `/goal` requires. The fix is
+  environmental (point `/goal` at a model that honors the structured-output
+  contract, or set its evaluator model), not a code change in claude-core — our
+  hooks already use exec form (`args` array), which is the documented immunity to
+  the Windows shell-profile JSON-corruption failure mode.
 
 ## Remaining work (deliberately out of scope)
 

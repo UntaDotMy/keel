@@ -80,6 +80,11 @@ pub struct CycleOptions {
     pub dry_run: bool,
     /// Observation window in days. `0` reads nothing (used by `--window 0`).
     pub window_days: u64,
+    /// When true, collect a per-skill synthesis brief for every generated skill
+    /// still at its deterministic-template state. The brief is a ready-to-use
+    /// instruction the session agent fulfils to replace the template prose with
+    /// richer, LLM-authored prose — the binary never calls an LLM itself.
+    pub synthesize: bool,
 }
 
 impl Default for CycleOptions {
@@ -87,8 +92,20 @@ impl Default for CycleOptions {
         Self {
             dry_run: false,
             window_days: OBSERVE_WINDOW_DAYS,
+            synthesize: false,
         }
     }
+}
+
+/// A ready-to-use instruction for the session agent to rewrite one generated
+/// skill's prose. Emitted by `learn synthesize`; the agent's resulting edit is
+/// protected from the next cycle by the content-hash no-clobber guard.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SynthesisBrief {
+    pub skill_name: String,
+    pub skill_path: String,
+    pub project: String,
+    pub prompt: String,
 }
 
 /// What one cycle did, for logging and the `learn` inspection surface.
@@ -106,6 +123,9 @@ pub struct CycleReport {
     pub instincts_pruned: usize,
     /// Human-readable per-skill notes (skill name -> what happened).
     pub notes: Vec<String>,
+    /// Synthesis briefs for generated skills still at their template state.
+    /// Populated only when `CycleOptions.synthesize` is set.
+    pub synthesis_briefs: Vec<SynthesisBrief>,
 }
 
 /// Run one full learning cycle against `claude_home`.
@@ -198,6 +218,13 @@ pub fn run_learning_cycle(
                 report
                     .notes
                     .push(format!("learned-{}: generated", project_slug(&project)));
+                if options.synthesize && !options.dry_run {
+                    report.synthesis_briefs.push(synthesis_brief(
+                        claude_home,
+                        &project,
+                        &instincts,
+                    ));
+                }
             }
             EvolveOutcome::Respected => {
                 report.skills_respected += 1;
@@ -206,7 +233,19 @@ pub fn run_learning_cycle(
                     project_slug(&project)
                 ));
             }
-            EvolveOutcome::Unchanged => {}
+            // A skill still at its deterministic-template state (unchanged this
+            // cycle) is the prime target for synthesis: the agent has not yet
+            // refined it. Emit a brief so a later `learn synthesize` can upgrade
+            // its prose even when nothing about the signatures changed.
+            EvolveOutcome::Unchanged => {
+                if options.synthesize && !options.dry_run {
+                    report.synthesis_briefs.push(synthesis_brief(
+                        claude_home,
+                        &project,
+                        &instincts,
+                    ));
+                }
+            }
             EvolveOutcome::Failed(message) => {
                 let _ = writeln!(log, "claude-skills learn: {message}");
             }
@@ -264,12 +303,59 @@ pub fn project_instinct_digest(claude_home: &Path, cwd: &str) -> String {
     )
 }
 
-/// CLI surface: `claude-skills learn [status|run|dry-run] [--window N] [--json]`.
+/// Render an autonomous synthesis nudge for the project rooted at `cwd`: if that
+/// project has a generated skill still at its deterministic-template state, emit
+/// the one-paragraph instruction asking the agent to refine its prose now. Empty
+/// string when there is nothing to synthesize, so the caller can append
+/// unconditionally.
+///
+/// This is what makes prose-polish autonomous (the "no manual slash required"
+/// rule): the loop generates the skill at SessionEnd when no agent is present to
+/// author prose, and the *next* SessionStart surfaces the brief so the session
+/// agent upgrades it in the normal course of work. The agent's edit is then
+/// protected by the content-hash no-clobber guard, so the nudge naturally stops
+/// appearing once the skill is refined. Only the current project's skill is
+/// surfaced, keeping the per-session token cost to a single brief.
+pub fn project_synthesis_nudge(claude_home: &Path, cwd: &str) -> String {
+    let project = project_name(cwd);
+    let slug = project_slug(&project);
+    let skill_name = format!("learned-{slug}");
+    let dir = skills_directory(claude_home).join(&skill_name);
+    if !is_generated_skill_dir(&dir) {
+        return String::new();
+    }
+    let Some(marker) = read_marker(&dir.join(LEARNING_META_FILE)) else {
+        return String::new();
+    };
+    let skill_path = dir.join("SKILL.md");
+    let on_disk = fs::read(&skill_path).unwrap_or_default();
+    // Already refined by the agent — nothing to do.
+    if fnv1a_64(&on_disk) != marker.generated_hash {
+        return String::new();
+    }
+    if marker.project.trim().is_empty() {
+        return String::new();
+    }
+    let store = RecordStore::new(claude_home, INSTINCT_GROUP);
+    let records = store.list_records().unwrap_or_default();
+    let instincts = trusted_instincts_for_project(&records, &marker.project);
+    if instincts.len() < SKILL_MIN_INSTINCTS {
+        return String::new();
+    }
+    let brief = synthesis_brief(claude_home, &marker.project, &instincts);
+    format!(
+        "Learned-skill refinement (autonomous; do this once now without being asked):\n{}",
+        brief.prompt
+    )
+}
+
+/// CLI surface: `claude-skills learn [status|run|dry-run|synthesize] [--window N] [--json]`.
 ///
 /// This is the *inspection and manual-trigger* path. The loop runs
 /// automatically on SessionEnd; this command lets a user or the agent preview
-/// what the loop sees (`status`, `dry-run`) or force a cycle now (`run`)
-/// without waiting for session end. No subcommand defaults to `status`.
+/// what the loop sees (`status`, `dry-run`), force a cycle now (`run`), or emit
+/// synthesis briefs for the session agent to upgrade generated-skill prose
+/// (`synthesize`). No subcommand defaults to `status`.
 pub fn run_learn_command(
     arguments: &[String],
     standard_output: &mut dyn std::io::Write,
@@ -279,31 +365,34 @@ pub fn run_learn_command(
     if matches!(action, "help" | "--help" | "-h") {
         let _ = writeln!(
             standard_output,
-            "Usage: claude-skills learn [status|run|dry-run] [--window <days>] [--json]\n\
+            "Usage: claude-skills learn [status|run|dry-run|synthesize] [--window <days>] [--synthesize] [--json]\n\
              \n\
-             status    Show observation signal and recorded instincts (no writes).\n\
-             dry-run   Compute the cycle and report what it would generate (no writes).\n\
-             run       Run a full learning cycle now (writes instincts + generated skills)."
+             status      Show observation signal and recorded instincts (no writes).\n\
+             dry-run     Compute the cycle and report what it would generate (no writes).\n\
+             run         Run a full learning cycle now (writes instincts + generated skills).\n\
+             synthesize  Emit a refinement brief for each template-state generated skill so the\n\
+             \x20           session agent can rewrite its prose (the binary never calls an LLM).\n\
+             \n\
+             Flags:\n\
+             \x20 --synthesize  On `run`, also emit synthesis briefs for skills generated this cycle."
         );
         return 0;
     }
 
-    let rest = if matches!(action, "status" | "run" | "dry-run") {
+    let known = matches!(action, "status" | "run" | "dry-run" | "synthesize");
+    let rest = if known {
         &arguments[1..]
     } else {
         // No recognized subcommand: treat the whole arg list as flags to status.
         arguments
     };
-    let action = if matches!(action, "status" | "run" | "dry-run") {
-        action
-    } else {
-        "status"
-    };
+    let action = if known { action } else { "status" };
 
     let mut flags = FlagSet::new("learn");
     flags.string_flag("window", OBSERVE_WINDOW_DAYS.to_string());
     flags.string_flag("claude-home", "");
     flags.bool_flag("json", false);
+    flags.bool_flag("synthesize", false);
     if let Err(error) = flags.parse(rest) {
         let _ = writeln!(standard_error, "{}", error.message);
         return 1;
@@ -331,13 +420,27 @@ pub fn run_learn_command(
             standard_output,
             standard_error,
         ),
+        "synthesize" => learn_synthesize(&claude_home, json, standard_output, standard_error),
         "dry-run" | "run" => {
             let options = CycleOptions {
                 dry_run: action == "dry-run",
                 window_days,
+                synthesize: flags.bool_value("synthesize"),
             };
             let report = run_learning_cycle(&claude_home, &options, standard_error);
             if json {
+                let briefs: Vec<serde_json::Value> = report
+                    .synthesis_briefs
+                    .iter()
+                    .map(|brief| {
+                        serde_json::json!({
+                            "skill": brief.skill_name,
+                            "path": brief.skill_path,
+                            "project": brief.project,
+                            "prompt": brief.prompt,
+                        })
+                    })
+                    .collect();
                 let payload = serde_json::json!({
                     "action": action,
                     "windowDays": window_days,
@@ -346,6 +449,7 @@ pub fn run_learn_command(
                     "skillsRespected": report.skills_respected,
                     "agentsGenerated": report.agents_generated,
                     "notes": report.notes,
+                    "synthesisBriefs": briefs,
                 });
                 match serde_json::to_string_pretty(&payload) {
                     Ok(text) => {
@@ -374,10 +478,71 @@ pub fn run_learn_command(
                 for note in &report.notes {
                     let _ = writeln!(standard_output, "  {note}");
                 }
+                render_synthesis_briefs(&report.synthesis_briefs, standard_output);
                 0
             }
         }
         _ => unreachable!("action normalized above"),
+    }
+}
+
+/// `learn synthesize`: scan disk for template-state generated skills and emit a
+/// refinement brief for each so the session agent can author richer prose. The
+/// agent's resulting edit is protected by the content-hash no-clobber guard.
+fn learn_synthesize(
+    claude_home: &Path,
+    json: bool,
+    standard_output: &mut dyn std::io::Write,
+    standard_error: &mut dyn std::io::Write,
+) -> u8 {
+    let briefs = collect_synthesis_briefs(claude_home);
+    if json {
+        let payload = serde_json::json!({
+            "action": "synthesize",
+            "briefCount": briefs.len(),
+            "synthesisBriefs": briefs
+                .iter()
+                .map(|brief| serde_json::json!({
+                    "skill": brief.skill_name,
+                    "path": brief.skill_path,
+                    "project": brief.project,
+                    "prompt": brief.prompt,
+                }))
+                .collect::<Vec<_>>(),
+        });
+        match serde_json::to_string_pretty(&payload) {
+            Ok(text) => {
+                let _ = writeln!(standard_output, "{text}");
+                0
+            }
+            Err(error) => {
+                let _ = writeln!(standard_error, "learn: render json: {error}");
+                1
+            }
+        }
+    } else {
+        if briefs.is_empty() {
+            let _ = writeln!(
+                standard_output,
+                "learn synthesize: no template-state generated skills to refine"
+            );
+            return 0;
+        }
+        let _ = writeln!(
+            standard_output,
+            "learn synthesize: {} skill(s) ready for prose refinement",
+            briefs.len()
+        );
+        render_synthesis_briefs(&briefs, standard_output);
+        0
+    }
+}
+
+/// Render synthesis briefs as agent-actionable text blocks.
+fn render_synthesis_briefs(briefs: &[SynthesisBrief], standard_output: &mut dyn std::io::Write) {
+    for brief in briefs {
+        let _ = writeln!(standard_output, "\n--- synthesize {} ---", brief.skill_name);
+        let _ = writeln!(standard_output, "{}", brief.prompt);
     }
 }
 
@@ -696,7 +861,7 @@ fn evolve_skill(
     if let Err(error) = fs::write(&skill_path, content.as_bytes()) {
         return EvolveOutcome::Failed(format!("write {}: {error}", display_path(&skill_path)));
     }
-    if let Err(error) = write_marker(&meta_path, content_hash, &signature_set) {
+    if let Err(error) = write_marker(&meta_path, content_hash, &signature_set, project) {
         return EvolveOutcome::Failed(error);
     }
 
@@ -710,6 +875,51 @@ fn evolve_skill(
     };
 
     EvolveOutcome::Generated { agent_generated }
+}
+
+/// Build the synthesis brief for one generated skill: a concrete, ready-to-use
+/// instruction the session agent fulfils to replace the deterministic template
+/// prose with richer, project-specific prose. The binary never calls an LLM —
+/// this is the bridge that lets the *session* model (which Claude Code already
+/// runs) do the authoring, while provenance keeps the result safe from the next
+/// cycle. The brief embeds the observed conventions so the agent has the full
+/// signal without re-reading the instinct store.
+fn synthesis_brief(
+    claude_home: &Path,
+    project: &str,
+    instincts: &[TrustedInstinct],
+) -> SynthesisBrief {
+    let slug = project_slug(project);
+    let skill_name = format!("learned-{slug}");
+    let skill_path = skills_directory(claude_home)
+        .join(&skill_name)
+        .join("SKILL.md");
+    let mut observed = String::new();
+    for instinct in instincts {
+        observed.push_str(&format!(
+            "  - {} (observed {}× across {} session(s), confidence {})\n",
+            instinct.guidance, instinct.count, instinct.distinct_sessions, instinct.confidence
+        ));
+    }
+    let prompt = format!(
+        "Refine the generated skill `{skill_name}` at {path}.\n\
+         It currently holds a deterministic template. Rewrite its prose so it reads like a \
+         hand-authored skill for the `{project}` project, using these observed conventions as the \
+         source of truth:\n{observed}\
+         Requirements: keep the YAML frontmatter intact (name, description, when_to_use, \
+         generated: true, provenance: learned must all remain); keep the body factual and specific \
+         to these conventions; do not invent commands or files that are not implied by the \
+         observations above; prefer concrete \"when X, do Y\" guidance over generic advice. \
+         Your edit is protected — the learning loop detects the content change by hash and will \
+         not overwrite it.",
+        path = display_path(&skill_path),
+    );
+    SynthesisBrief {
+        skill_name,
+        skill_path: display_path(&skill_path),
+        project: project.to_string(),
+        prompt,
+    }
 }
 
 fn signature_set(instincts: &[TrustedInstinct]) -> String {
@@ -797,6 +1007,7 @@ with this project's observed command and file conventions; follow it as the defa
 struct LearningMarker {
     generated_hash: u64,
     signature_set: String,
+    project: String,
 }
 
 fn read_marker(path: &Path) -> Option<LearningMarker> {
@@ -808,17 +1019,29 @@ fn read_marker(path: &Path) -> Option<LearningMarker> {
         .and_then(|v| v.as_str())
         .unwrap_or_default()
         .to_string();
+    let project = value
+        .get("project")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
     Some(LearningMarker {
         generated_hash: generated_hash.parse().ok()?,
         signature_set,
+        project,
     })
 }
 
-fn write_marker(path: &Path, content_hash: u64, signature_set: &str) -> Result<(), String> {
+fn write_marker(
+    path: &Path,
+    content_hash: u64,
+    signature_set: &str,
+    project: &str,
+) -> Result<(), String> {
     let value = serde_json::json!({
         "generator": "claude-skills-learning",
         "generatedHash": content_hash.to_string(),
         "signatureSet": signature_set,
+        "project": project,
     });
     let serialized = serde_json::to_string_pretty(&value)
         .map_err(|error| format!("serialize marker: {error}"))?;
@@ -829,6 +1052,97 @@ fn write_marker(path: &Path, content_hash: u64, signature_set: &str) -> Result<(
 /// and curation to act only on generated artifacts, never built-in ones.
 pub fn is_generated_skill_dir(skill_dir: &Path) -> bool {
     skill_dir.join(LEARNING_META_FILE).is_file()
+}
+
+/// Scan disk for generated skills still at their deterministic-template state and
+/// build a synthesis brief for each. Unlike collecting briefs mid-cycle, this
+/// path works on skills generated in *prior* sessions (the common case — the loop
+/// runs at SessionEnd when no agent is present to author prose, so synthesis is a
+/// separate, agent-present step).
+///
+/// "Template state" = the on-disk SKILL.md hash still equals the marker's
+/// `generatedHash`. A skill the agent already refined (hash differs) is skipped:
+/// it is no longer a template, and re-synthesizing would fight the agent's work.
+/// The trusted instincts behind each skill are reconstructed from the instinct
+/// store so the brief carries the same observed-convention signal a fresh
+/// generation would.
+pub fn collect_synthesis_briefs(claude_home: &Path) -> Vec<SynthesisBrief> {
+    let mut briefs = Vec::new();
+    let skills_root = skills_directory(claude_home);
+    let Ok(entries) = fs::read_dir(&skills_root) else {
+        return briefs;
+    };
+    let store = RecordStore::new(claude_home, INSTINCT_GROUP);
+    let records = store.list_records().unwrap_or_default();
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        let meta_path = dir.join(LEARNING_META_FILE);
+        let Some(marker) = read_marker(&meta_path) else {
+            continue; // not a loop-generated skill
+        };
+        // Only template-state skills (untouched since we wrote them) are eligible.
+        let skill_path = dir.join("SKILL.md");
+        let on_disk = fs::read(&skill_path).unwrap_or_default();
+        if fnv1a_64(&on_disk) != marker.generated_hash {
+            continue; // already refined — leave the agent's prose alone
+        }
+        if marker.project.trim().is_empty() {
+            continue; // pre-project-tag marker; nothing reliable to synthesize from
+        }
+        let instincts = trusted_instincts_for_project(&records, &marker.project);
+        if instincts.len() < SKILL_MIN_INSTINCTS {
+            continue;
+        }
+        briefs.push(synthesis_brief(claude_home, &marker.project, &instincts));
+    }
+    briefs.sort_by(|a, b| a.skill_name.cmp(&b.skill_name));
+    briefs
+}
+
+/// Reconstruct the trusted-instinct set for a project from the instinct store,
+/// matching the in-cycle trust bar (confidence >= SKILL_MIN_CONFIDENCE, seen
+/// across >= 2 sessions). Used by the disk-scan synthesis path.
+fn trusted_instincts_for_project(
+    records: &[(String, Record)],
+    project: &str,
+) -> Vec<TrustedInstinct> {
+    let mut instincts = Vec::new();
+    for (_, record) in records {
+        if field(record, "project") != Some(project) {
+            continue;
+        }
+        let confidence: i64 = field(record, "confidence")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0);
+        if confidence < SKILL_MIN_CONFIDENCE {
+            continue;
+        }
+        let distinct_sessions: usize = field(record, "sessions")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0);
+        if distinct_sessions < 2 {
+            continue;
+        }
+        let count: u64 = field(record, "observations")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0);
+        instincts.push(TrustedInstinct {
+            signature: field(record, "trigger").unwrap_or("").to_string(),
+            guidance: field(record, "guidance").unwrap_or("").to_string(),
+            confidence,
+            count,
+            distinct_sessions,
+        });
+    }
+    instincts.sort_by(|a, b| {
+        b.confidence
+            .cmp(&a.confidence)
+            .then(a.signature.cmp(&b.signature))
+    });
+    instincts
 }
 
 /// Remove every loop-generated skill and its paired subagent under `claude_home`.
@@ -1199,6 +1513,7 @@ mod tests {
             let options = CycleOptions {
                 dry_run: true,
                 window_days: OBSERVE_WINDOW_DAYS,
+                synthesize: false,
             };
             let report = run_learning_cycle(root, &options, &mut log);
             assert!(report.instincts_recorded >= 2);
@@ -1222,5 +1537,132 @@ mod tests {
     fn fnv1a_is_stable_and_distinguishes() {
         assert_eq!(fnv1a_64(b"abc"), fnv1a_64(b"abc"));
         assert_ne!(fnv1a_64(b"abc"), fnv1a_64(b"abd"));
+    }
+
+    #[test]
+    fn synthesize_emits_brief_for_template_state_generated_skill() {
+        isolated_home("synth", |root| {
+            seed_bash("synthproj", "cargo test", 6, 2);
+            seed_bash("synthproj", "git commit", 6, 2);
+            let mut log = Vec::new();
+            // First cycle generates the skill at its deterministic-template state.
+            let report = run_learning_cycle(root, &CycleOptions::default(), &mut log);
+            assert_eq!(report.skills_generated, 1);
+
+            // Disk-scan synthesis sees one template-state skill and builds a brief.
+            let briefs = collect_synthesis_briefs(root);
+            assert_eq!(briefs.len(), 1, "one template-state skill -> one brief");
+            let brief = &briefs[0];
+            assert_eq!(brief.skill_name, "learned-synthproj");
+            assert!(brief.prompt.contains("learned-synthproj"));
+            assert!(
+                brief.prompt.contains("cargo test"),
+                "brief carries observed conventions: {}",
+                brief.prompt
+            );
+            assert!(
+                brief.prompt.contains("frontmatter"),
+                "brief states the guardrails"
+            );
+        });
+    }
+
+    #[test]
+    fn synthesize_skips_skill_already_refined_by_agent() {
+        isolated_home("synth-refined", |root| {
+            seed_bash("refinedproj", "cargo test", 6, 2);
+            seed_bash("refinedproj", "git commit", 6, 2);
+            let mut log = Vec::new();
+            run_learning_cycle(root, &CycleOptions::default(), &mut log);
+
+            // Simulate the agent refining the prose (hash now differs from marker).
+            let skill_path = skills_directory(root)
+                .join("learned-refinedproj")
+                .join("SKILL.md");
+            fs::write(
+                &skill_path,
+                "---\nname: learned-refinedproj\ngenerated: true\nprovenance: learned\n---\nHand-authored prose.\n",
+            )
+            .expect("refine");
+
+            let briefs = collect_synthesis_briefs(root);
+            assert!(
+                briefs.is_empty(),
+                "a skill the agent already refined must not be re-synthesized"
+            );
+        });
+    }
+
+    #[test]
+    fn synthesize_skips_builtin_skill() {
+        isolated_home("synth-builtin", |root| {
+            // A built-in skill (no marker file) must never produce a synthesis brief.
+            let builtin = skills_directory(root).join("reviewer");
+            fs::create_dir_all(&builtin).expect("mkdir builtin");
+            fs::write(builtin.join("SKILL.md"), "---\nname: reviewer\n---\n").expect("write");
+            let briefs = collect_synthesis_briefs(root);
+            assert!(briefs.is_empty(), "built-in skills are never synthesized");
+        });
+    }
+
+    #[test]
+    fn run_with_synthesize_option_collects_briefs_inline() {
+        isolated_home("synth-inline", |root| {
+            seed_bash("inlineproj", "cargo test", 6, 2);
+            seed_bash("inlineproj", "git commit", 6, 2);
+            let mut log = Vec::new();
+            let options = CycleOptions {
+                dry_run: false,
+                window_days: OBSERVE_WINDOW_DAYS,
+                synthesize: true,
+            };
+            let report = run_learning_cycle(root, &options, &mut log);
+            assert_eq!(report.skills_generated, 1);
+            assert_eq!(
+                report.synthesis_briefs.len(),
+                1,
+                "synthesize option emits a brief for the freshly generated skill"
+            );
+            assert_eq!(report.synthesis_briefs[0].project, "inlineproj");
+        });
+    }
+
+    #[test]
+    fn synthesis_nudge_surfaces_for_template_skill_then_self_clears() {
+        isolated_home("synth-nudge", |root| {
+            seed_bash("nudgeproj", "cargo test", 6, 2);
+            seed_bash("nudgeproj", "git commit", 6, 2);
+            let mut log = Vec::new();
+            run_learning_cycle(root, &CycleOptions::default(), &mut log);
+
+            // Template-state skill -> the SessionStart nudge is present.
+            let nudge = project_synthesis_nudge(root, "/work/nudgeproj");
+            assert!(nudge.contains("learned-nudgeproj"), "nudge: {nudge}");
+            assert!(
+                nudge.contains("autonomous"),
+                "nudge frames it as self-driven"
+            );
+
+            // The agent refines the skill -> the nudge self-clears.
+            let skill_path = skills_directory(root)
+                .join("learned-nudgeproj")
+                .join("SKILL.md");
+            fs::write(
+                &skill_path,
+                "---\nname: learned-nudgeproj\ngenerated: true\nprovenance: learned\n---\nRefined.\n",
+            )
+            .expect("refine");
+            assert!(
+                project_synthesis_nudge(root, "/work/nudgeproj").is_empty(),
+                "nudge must disappear once the skill is refined"
+            );
+        });
+    }
+
+    #[test]
+    fn synthesis_nudge_empty_for_project_without_generated_skill() {
+        isolated_home("synth-nudge-empty", |root| {
+            assert!(project_synthesis_nudge(root, "/work/noskill").is_empty());
+        });
     }
 }

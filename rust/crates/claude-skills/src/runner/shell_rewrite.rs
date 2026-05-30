@@ -55,6 +55,10 @@ pub fn adapter_name_for_rewrite(command: &str) -> &'static str {
 
         "pytest" | "jest" | "vitest" | "playwright" => "tests",
 
+        // Additional test runners across ecosystems.
+        "mocha" | "ava" | "cypress" | "karma" | "tap" | "gotestsum" | "bats" | "ctest" | "tox"
+        | "nox" => "tests",
+
         "deno" if analysis.effective_fields.iter().any(|arg| arg == "test") => "tests",
 
         "deno" if analysis.effective_fields.iter().any(|arg| arg == "lint") => "lint",
@@ -86,13 +90,18 @@ pub fn adapter_name_for_rewrite(command: &str) -> &'static str {
             analysis.effective_fields.iter().skip(1).map(String::as_str),
         ),
 
-        "git" | "gh" => "git",
+        "git" | "gh" | "jj" => "git",
 
         "rg" | "grep" => "search",
 
         "find" | "cat" | "sed" | "head" | "tail" | "ls" | "tree" | "jq" => "files",
 
         "ruff" | "eslint" | "mypy" | "biome" | "rubocop" | "flake8" | "golangci-lint" => "lint",
+
+        // Additional linters/checkers across ecosystems.
+        "pylint" | "pyright" | "shellcheck" | "hadolint" | "yamllint" | "stylelint" | "tflint"
+        | "oxlint" | "standard" | "luacheck" | "vale" | "basedpyright" | "ty" | "markdownlint"
+        | "markdownlint-cli2" => "lint",
 
         "tsc" | "prettier" | "webpack" | "vite" | "next" | "black" | "isort" => "build",
 
@@ -119,9 +128,26 @@ pub fn adapter_name_for_rewrite(command: &str) -> &'static str {
 
         "nx" if analysis.effective_fields.iter().any(|arg| arg == "build") => "build",
 
-        "brew" | "apt" | "apt-get" => "build",
+        "brew" | "apt" | "apt-get" | "apk" | "choco" | "winget" | "scoop" => "build",
 
-        "docker" | "kubectl" | "terraform" | "aws" => "logs",
+        // Containers + orchestration route to the containers adapter, NOT logs.
+        // The prior `docker | kubectl | terraform | aws => logs` arm mislabeled
+        // every one of these; only terraform actually stays on logs.
+        "docker" | "kubectl" | "helm" | "podman" | "nerdctl" => "containers",
+
+        // Cloud CLIs route to the dedicated cloud adapter (service-API JSON),
+        // not logs. terraform plan/apply output is not service JSON, so it
+        // deliberately stays on logs (handled below).
+        "aws" | "az" | "gcloud" => "cloud",
+
+        // Database clients route to the dedicated database adapter.
+        "psql" | "mysql" | "mariadb" | "sqlite3" | "redis-cli" | "mongosh" | "mongo" => "database",
+
+        // Bulk database exports stream file-like content -> logs adapter.
+        "pg_dump" | "pg_dumpall" | "pg_restore" | "mysqldump" => "logs",
+
+        // Infra-as-code (terraform) and HTTP probes stay on the logs adapter.
+        "terraform" | "http" | "xh" | "httpie" => "logs",
 
         "dotnet" | "mvn" | "gradle"
             if analysis.effective_fields.iter().any(|arg| arg == "test") =>
@@ -138,11 +164,46 @@ pub fn adapter_name_for_rewrite(command: &str) -> &'static str {
             "build"
         }
 
-        "make" => "build",
+        "make" | "cmake" | "ninja" | "msbuild" | "xcodebuild" => "build",
+
+        "esbuild" | "swc" | "rollup" | "parcel" | "turbo" => "build",
+
+        // Standalone build systems route to the build adapter.
+        "bazel" | "buck" | "buck2" | "meson" | "scons" | "bear" => "build",
+
+        // C/C++ compilers, task runners, and language/infra build tooling.
+        "gcc" | "g++" | "clang" | "clang++" | "cc" | "c++" => "build",
+        "just" | "task" | "mise" | "trunk" | "pre-commit" => "build",
+        "swift" | "tofu" | "ansible" | "ansible-playbook" => "build",
+        "liquibase" | "flyway" | "quarto" => "build",
+
+        // JVM / other-language build+test multiplexers: a `test` task routes to
+        // the tests adapter, everything else to build (mirrors the classifier).
+        "sbt" | "lein" | "mill"
+            if analysis
+                .effective_fields
+                .iter()
+                .any(|arg| arg.contains("test")) =>
+        {
+            "tests"
+        }
+
+        "sbt" | "lein" | "mill" => "build",
+
+        "cabal" | "stack" | "mix"
+            if analysis
+                .effective_fields
+                .iter()
+                .any(|arg| arg == "test" || arg.ends_with(".test")) =>
+        {
+            "tests"
+        }
+
+        "cabal" | "stack" | "mix" => "build",
 
         "curl" | "wget" => "logs",
 
-        "pip" | "pip3" => "build",
+        "pip" | "pip3" | "poetry" | "uv" => "build",
 
         "journalctl" | "systemctl" => "logs",
 
@@ -621,6 +682,7 @@ pub fn is_supported_noisy_command(fields: &[String]) -> bool {
 
     if matches!(
         command.as_str(),
+        // Test runners.
         "cargo"
             | "npm"
             | "pnpm"
@@ -630,24 +692,143 @@ pub fn is_supported_noisy_command(fields: &[String]) -> bool {
             | "pnpx"
             | "dlx"
             | "pytest"
-            | "ruff"
-            | "eslint"
-            | "tsc"
             | "vitest"
             | "jest"
             | "playwright"
+            | "mocha"
+            | "ava"
+            | "cypress"
+            | "karma"
+            | "tap"
+            | "gotestsum"
+            | "bats"
+            | "ctest"
+            | "tox"
+            | "nox"
             | "deno"
+            | "go"
+            | "rspec"
+            | "phpunit"
+            // Build + bundlers (build adapter). cmake/ninja/msbuild/xcodebuild
+            // and the JS bundlers were classified but never auto-wrapped, so the
+            // build adapter went unused on their (often very noisy) output.
             | "gradle"
             | "mvn"
             | "make"
-            | "go"
+            | "cmake"
+            | "ninja"
+            | "msbuild"
+            | "xcodebuild"
+            | "bazel"
+            | "buck"
+            | "buck2"
+            | "meson"
+            | "scons"
+            | "bear"
+            | "gcc"
+            | "g++"
+            | "clang"
+            | "clang++"
+            | "cc"
+            | "c++"
+            | "just"
+            | "task"
+            | "mise"
+            | "trunk"
+            | "pre-commit"
+            | "swift"
+            | "tofu"
+            | "ansible"
+            | "ansible-playbook"
+            | "liquibase"
+            | "flyway"
+            | "quarto"
+            | "sbt"
+            | "lein"
+            | "mill"
+            | "cabal"
+            | "stack"
+            | "mix"
             | "dotnet"
+            | "tsc"
+            | "prettier"
+            | "esbuild"
+            | "swc"
+            | "rollup"
+            | "parcel"
+            | "turbo"
+            | "webpack"
+            | "vite"
+            | "next"
+            | "nx"
+            | "rake"
+            // Linters.
+            | "ruff"
+            | "eslint"
+            | "mypy"
+            | "biome"
+            | "rubocop"
+            | "flake8"
+            | "golangci-lint"
+            | "black"
+            | "isort"
+            | "pylint"
+            | "pyright"
+            | "shellcheck"
+            | "hadolint"
+            | "yamllint"
+            | "stylelint"
+            | "tflint"
+            | "oxlint"
+            | "standard"
+            | "luacheck"
+            | "vale"
+            | "basedpyright"
+            | "ty"
+            | "markdownlint"
+            | "markdownlint-cli2"
+            // Containers + orchestration (containers adapter). helm/podman/nerdctl
+            // had adapter coverage but no auto-wrap.
             | "docker"
             | "kubectl"
-            | "terraform"
+            | "helm"
+            | "podman"
+            | "nerdctl"
+            // Cloud CLIs (cloud adapter). Only `aws` was wrapped; az/gcloud
+            // classified to the cloud adapter but never reached it automatically.
             | "aws"
+            | "az"
+            | "gcloud"
+            // Infra-as-code + HTTP probes (logs adapter).
+            | "terraform"
+            | "curl"
+            | "wget"
+            | "http"
+            | "xh"
+            | "httpie"
+            // Database clients (database adapter). None were auto-wrapped before,
+            // so the database adapter was dead on the automatic path. The Bash
+            // tool is non-interactive, so these always carry a query flag here.
+            | "psql"
+            | "mysql"
+            | "mariadb"
+            | "sqlite3"
+            | "redis-cli"
+            | "mongosh"
+            | "mongo"
+            // Bulk database exports (logs adapter) — large, terminating output.
+            | "pg_dump"
+            | "pg_dumpall"
+            | "pg_restore"
+            | "mysqldump"
+            // System log/service readers (logs adapter).
+            | "journalctl"
+            | "systemctl"
+            // Version control + search + file readers.
             | "gh"
             | "git"
+            | "git-lfs"
+            | "jj"
             | "rg"
             | "grep"
             | "find"
@@ -658,33 +839,21 @@ pub fn is_supported_noisy_command(fields: &[String]) -> bool {
             | "ls"
             | "tree"
             | "jq"
-            | "mypy"
-            | "prettier"
-            | "biome"
-            | "curl"
-            | "wget"
+            // Package managers (build adapter). apk/choco/winget/scoop were
+            // classified but never auto-wrapped.
             | "pip"
             | "pip3"
-            | "journalctl"
-            | "systemctl"
-            | "rake"
-            | "rspec"
-            | "rubocop"
-            | "bundle"
-            | "flake8"
-            | "black"
-            | "isort"
             | "poetry"
-            | "webpack"
-            | "vite"
-            | "nx"
-            | "next"
-            | "golangci-lint"
+            | "uv"
+            | "bundle"
             | "composer"
-            | "phpunit"
             | "brew"
             | "apt"
             | "apt-get"
+            | "apk"
+            | "choco"
+            | "winget"
+            | "scoop"
     ) {
         return true;
     }
@@ -776,6 +945,222 @@ mod tests {
         assert_eq!(adapter_name_for_rewrite("eslint ."), "lint");
 
         assert_eq!(adapter_name_for_rewrite("tsc --noEmit"), "build");
+    }
+
+    #[test]
+    fn auto_wrap_gate_covers_database_cloud_container_and_infra_commands() {
+        // Regression: these all have dedicated adapters in the classifier but
+        // were NOT in the auto-rewrite gate, so the adapter never fired on the
+        // automatic PreToolUse path — the adapter was dead code in practice.
+        for command in [
+            "psql -c 'select 1'",
+            "mysql -e 'show tables'",
+            "sqlite3 db.sqlite '.tables'",
+            "redis-cli ping",
+            "mongosh --eval 'db.stats()'",
+            "az vm list",
+            "gcloud compute instances list",
+            "helm install foo ./chart",
+            "podman ps",
+            "cmake --build .",
+            "ninja -C build",
+            "pg_dump mydb",
+            "poetry install",
+            "choco install foo",
+        ] {
+            let rewrite = rewrite_command_text(command);
+            assert!(
+                rewrite.supported,
+                "auto-wrap gate must cover `{command}` (it has a dedicated adapter)"
+            );
+        }
+    }
+
+    #[test]
+    fn rewrite_adapter_metadata_attributes_to_real_adapter() {
+        // The metadata must name the adapter the classifier actually routes to,
+        // not a catch-all. Prior bug: docker/kubectl/aws all reported "logs".
+        assert_eq!(adapter_name_for_rewrite("docker ps"), "containers");
+        assert_eq!(adapter_name_for_rewrite("kubectl get pods"), "containers");
+        assert_eq!(adapter_name_for_rewrite("helm list"), "containers");
+        assert_eq!(adapter_name_for_rewrite("aws s3 ls"), "cloud");
+        assert_eq!(adapter_name_for_rewrite("az vm list"), "cloud");
+        assert_eq!(adapter_name_for_rewrite("gcloud projects list"), "cloud");
+        assert_eq!(adapter_name_for_rewrite("psql -c 'select 1'"), "database");
+        assert_eq!(adapter_name_for_rewrite("redis-cli ping"), "database");
+        // terraform stays on logs (plan/apply output is not service JSON).
+        assert_eq!(adapter_name_for_rewrite("terraform plan"), "logs");
+        // bulk exports stay on logs (file-like streaming output).
+        assert_eq!(adapter_name_for_rewrite("pg_dump mydb"), "logs");
+        assert_eq!(adapter_name_for_rewrite("cmake --build ."), "build");
+    }
+
+    /// Drift guard: every program the classifier routes to a *specific* adapter
+    /// (anything other than the generic catch-all) MUST also be recognized by
+    /// the auto-rewrite gate. Otherwise that adapter is unreachable on the
+    /// automatic PreToolUse path. This is the structural fix for the
+    /// database/cloud/container drift — the two surfaces can no longer diverge
+    /// silently.
+    #[test]
+    fn every_specifically_classified_program_is_auto_wrappable() {
+        use crate::proxy::classify::classify_command;
+        use crate::proxy::command_ast::CommandKind;
+
+        // One representative invocation per program that the classifier maps to
+        // a non-generic CommandKind. If you add a program to the classifier with
+        // a dedicated adapter, add it here too (and to is_supported_noisy_command).
+        let samples: &[&[&str]] = &[
+            &["cargo", "test"],
+            &["pytest", "tests"],
+            &["jest"],
+            &["vitest"],
+            &["playwright", "test"],
+            &["mocha"],
+            &["ava"],
+            &["cypress", "run"],
+            &["karma", "start"],
+            &["tap"],
+            &["gotestsum"],
+            &["bats", "test"],
+            &["ctest"],
+            &["tox"],
+            &["nox"],
+            &["go", "test"],
+            &["rspec"],
+            &["phpunit"],
+            &["gradle", "test"],
+            &["mvn", "test"],
+            &["dotnet", "test"],
+            &["sbt", "test"],
+            &["lein", "test"],
+            &["mill", "__.test"],
+            &["cabal", "test"],
+            &["stack", "test"],
+            &["mix", "test"],
+            &["git", "status"],
+            &["gh", "pr", "list"],
+            &["jj", "status"],
+            &["rg", "foo"],
+            &["grep", "foo"],
+            &["cat", "file"],
+            &["head", "file"],
+            &["tail", "file"],
+            &["sed", "s/a/b/", "file"],
+            &["jq", "."],
+            &["ls", "-la"],
+            &["find", "."],
+            &["tree"],
+            &["tsc", "--noEmit"],
+            &["prettier", "--check", "."],
+            &["esbuild", "in.js"],
+            &["swc", "src"],
+            &["rollup", "-c"],
+            &["parcel", "build"],
+            &["turbo", "run", "build"],
+            &["make"],
+            &["cmake", "--build", "."],
+            &["ninja"],
+            &["msbuild"],
+            &["xcodebuild"],
+            &["bazel", "build", "//..."],
+            &["buck", "build"],
+            &["buck2", "build"],
+            &["meson", "compile"],
+            &["scons"],
+            &["bear", "--", "make"],
+            &["gcc", "-c", "x.c"],
+            &["g++", "-c", "x.cpp"],
+            &["clang", "-c", "x.c"],
+            &["cc", "-c", "x.c"],
+            &["just", "build"],
+            &["task", "build"],
+            &["mise", "install"],
+            &["trunk", "check"],
+            &["pre-commit", "run"],
+            &["swift", "build"],
+            &["tofu", "plan"],
+            &["ansible-playbook", "site.yml"],
+            &["liquibase", "update"],
+            &["flyway", "migrate"],
+            &["quarto", "render"],
+            &["webpack"],
+            &["vite", "build"],
+            &["next", "build"],
+            &["eslint", "."],
+            &["ruff", "check"],
+            &["mypy", "."],
+            &["biome", "check"],
+            &["rubocop"],
+            &["flake8"],
+            &["golangci-lint", "run"],
+            &["pylint", "pkg"],
+            &["pyright"],
+            &["shellcheck", "x.sh"],
+            &["hadolint", "Dockerfile"],
+            &["yamllint", "."],
+            &["stylelint", "**/*.css"],
+            &["tflint"],
+            &["oxlint"],
+            &["standard"],
+            &["luacheck", "."],
+            &["vale", "docs"],
+            &["basedpyright"],
+            &["ty", "check"],
+            &["markdownlint", "."],
+            &["markdownlint-cli2"],
+            &["docker", "ps"],
+            &["kubectl", "get", "pods"],
+            &["helm", "list"],
+            &["podman", "ps"],
+            &["nerdctl", "ps"],
+            &["aws", "s3", "ls"],
+            &["az", "vm", "list"],
+            &["gcloud", "projects", "list"],
+            &["terraform", "plan"],
+            &["curl", "https://x"],
+            &["wget", "https://x"],
+            &["psql", "-c", "select 1"],
+            &["mysql", "-e", "show tables"],
+            &["mariadb", "-e", "show tables"],
+            &["sqlite3", "db", ".tables"],
+            &["redis-cli", "ping"],
+            &["mongosh", "--eval", "db.stats()"],
+            &["pg_dump", "mydb"],
+            &["mysqldump", "mydb"],
+            &["journalctl", "-u", "x"],
+            &["systemctl", "status", "x"],
+            &["npm", "install"],
+            &["pnpm", "install"],
+            &["yarn", "add", "x"],
+            &["bundle", "install"],
+            &["composer", "install"],
+            &["pip", "install", "x"],
+            &["poetry", "install"],
+            &["uv", "sync"],
+            &["brew", "install", "x"],
+            &["apt", "install", "x"],
+            &["apk", "add", "x"],
+            &["choco", "install", "x"],
+            &["winget", "install", "x"],
+            &["scoop", "install", "x"],
+        ];
+
+        for sample in samples {
+            let fields: Vec<String> = sample.iter().map(|value| value.to_string()).collect();
+            let ast = classify_command(&fields)
+                .unwrap_or_else(|| panic!("classify failed for {sample:?}"));
+            if ast.detected_kind == CommandKind::Unknown {
+                // A bare program the classifier deliberately leaves Unknown
+                // (e.g. `cargo` with no recognized subcommand) is allowed to
+                // fall through; the gate need not wrap it.
+                continue;
+            }
+            assert!(
+                is_supported_noisy_command(&fields),
+                "{sample:?} classifies as {:?} (a dedicated adapter) but the auto-rewrite gate does not wrap it — the adapter is unreachable on the automatic path",
+                ast.detected_kind
+            );
+        }
     }
 
     #[test]

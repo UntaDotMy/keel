@@ -841,15 +841,25 @@ fn session_start_context() -> String {
     //
     // Layout: full bootstrap skill (iron law + Red Flags + skill catalog +
     // workspace pointers), the runtime-resolved memory pointer that CLAUDE.md
-    // cannot know in advance, and the learned-instinct digest for the current
+    // cannot know in advance, the learned-instinct digest for the current
     // project (the always-on tier of the learning loop — what the user
-    // reliably does here, surfaced without waiting for a skill match).
+    // reliably does here, surfaced without waiting for a skill match), and an
+    // autonomous synthesis nudge so a freshly generated skill's deterministic
+    // template gets upgraded to richer prose in the normal course of work
+    // (no manual slash). The nudge self-clears once the agent refines the skill,
+    // because the content-hash no-clobber guard then reports it as non-template.
     let mut context = format!("{BOOTSTRAP_SKILL}\n\n{}", memory_scope_summary());
     if let (Ok(claude_home), Ok(cwd)) = (resolve_claude_home(""), std::env::current_dir()) {
-        let digest = learning::project_instinct_digest(&claude_home, &cwd.to_string_lossy());
+        let cwd = cwd.to_string_lossy();
+        let digest = learning::project_instinct_digest(&claude_home, &cwd);
         if !digest.trim().is_empty() {
             context.push_str("\n\n");
             context.push_str(&digest);
+        }
+        let synthesis = learning::project_synthesis_nudge(&claude_home, &cwd);
+        if !synthesis.trim().is_empty() {
+            context.push_str("\n\n");
+            context.push_str(&synthesis);
         }
     }
     context
@@ -1777,6 +1787,19 @@ pub fn remove_managed_hooks(document: &mut JsonDocument) {
                 .unwrap_or(true)
         });
     }
+
+    // Drop event keys whose array is now empty so a clean uninstall leaves no
+    // trace. An event we managed but the user also added a hook to keeps its
+    // key (the retain above preserves their non-managed matcher entries); only
+    // events that became fully empty after removing our entries are pruned.
+    // An empty `"Stop": []` array carries no behavior, so removing it is safe
+    // and restores settings.json to its pre-install shape.
+    hooks.retain(|_event_name, event_entries| {
+        event_entries
+            .as_array()
+            .map(|entries| !entries.is_empty())
+            .unwrap_or(true)
+    });
 }
 
 fn append_managed_hooks(document: &mut JsonDocument, executable: &Path) -> Result<(), String> {
@@ -2270,6 +2293,106 @@ mod tests {
             "args": ["hook", "not-a-real-slug"],
         });
         assert!(!is_managed_hook_entry(&unknown_slug));
+    }
+
+    #[test]
+    fn install_then_uninstall_leaves_no_managed_hook_keys() {
+        // Round-trip: building the full payload installs a stanza per
+        // installable event; removing it must strip every key it added so the
+        // hooks object returns to empty. Regression for the bug where empty
+        // `"Stop": []` arrays were left behind after uninstall (28 dead keys).
+        let executable = Path::new(if cfg!(windows) {
+            r"C:\Users\Example\.claude\claude-skills.exe"
+        } else {
+            "/home/example/.claude/claude-skills"
+        });
+        let hook_path = temp_hook_path("claude-skills-uninstall-roundtrip");
+        std::fs::create_dir_all(hook_path.parent().unwrap()).unwrap();
+        std::fs::write(&hook_path, r#"{"hooks": {}}"#).unwrap();
+
+        let installed = build_hooks_payload(&hook_path, executable).unwrap();
+        std::fs::write(&hook_path, &installed).unwrap();
+        // Sanity: the install added stanzas.
+        let installed_doc: JsonDocument = serde_json::from_str(&installed).unwrap();
+        assert!(
+            !installed_doc
+                .get("hooks")
+                .and_then(JsonDocument::as_object)
+                .unwrap()
+                .is_empty(),
+            "install must add hook stanzas"
+        );
+
+        let (removed_payload, removed) = remove_managed_hook_payload(&hook_path).unwrap();
+        assert!(removed, "uninstall must report a change");
+        let removed_doc: JsonDocument = serde_json::from_str(&removed_payload).unwrap();
+        let hooks = removed_doc
+            .get("hooks")
+            .and_then(JsonDocument::as_object)
+            .unwrap();
+        assert!(
+            hooks.is_empty(),
+            "uninstall must leave zero hook event keys, found: {:?}",
+            hooks.keys().collect::<Vec<_>>()
+        );
+
+        let _ = std::fs::remove_dir_all(hook_path.parent().unwrap());
+    }
+
+    #[test]
+    fn uninstall_preserves_user_authored_hook_on_shared_event() {
+        // A user's own hook on an event we also manage must survive uninstall —
+        // only our managed entry is removed, and the event key is preserved
+        // because it still holds the user's matcher.
+        let mut document = serde_json::json!({
+            "hooks": {
+                "Stop": [
+                    {
+                        "matcher": "",
+                        "hooks": [
+                            { "type": "command", "command": "claude-skills", "args": ["hook", "stop"] },
+                            { "type": "command", "command": "/usr/local/bin/my-own-stop.sh" }
+                        ]
+                    }
+                ],
+                "PostToolUse": [
+                    {
+                        "matcher": "",
+                        "hooks": [
+                            { "type": "command", "command": "claude-skills", "args": ["hook", "post-tool-use"] }
+                        ]
+                    }
+                ]
+            }
+        });
+
+        remove_managed_hooks(&mut document);
+        let hooks = document
+            .get("hooks")
+            .and_then(JsonDocument::as_object)
+            .unwrap();
+
+        // PostToolUse held only our entry -> key pruned entirely.
+        assert!(
+            !hooks.contains_key("PostToolUse"),
+            "fully-managed event key must be pruned"
+        );
+        // Stop still holds the user's script -> key preserved with that entry.
+        let stop_commands = hooks
+            .get("Stop")
+            .and_then(JsonDocument::as_array)
+            .and_then(|entries| entries.first())
+            .and_then(|entry| entry.get("hooks"))
+            .and_then(JsonDocument::as_array)
+            .expect("Stop event must survive with the user's hook");
+        assert_eq!(stop_commands.len(), 1, "only the user's hook remains");
+        assert_eq!(
+            stop_commands[0]
+                .get("command")
+                .and_then(JsonDocument::as_str),
+            Some("/usr/local/bin/my-own-stop.sh"),
+            "the user's own hook must be preserved verbatim"
+        );
     }
 
     fn base64_encode_for_test(bytes: &[u8]) -> String {
