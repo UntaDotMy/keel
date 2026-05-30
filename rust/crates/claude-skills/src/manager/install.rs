@@ -711,23 +711,118 @@ fn atomic_copy_executable(source: &Path, target: &Path) -> Result<(), String> {
             format!("set permissions for {}: {error}", display_path(&temp_path))
         })?;
     }
-    // On Windows, std::fs::rename calls MoveFileExW with MOVEFILE_REPLACE_EXISTING,
-    // which atomically replaces a running .exe (loader opens it FILE_SHARE_DELETE,
-    // so the directory entry is replaced while the running process keeps its handle).
-    fs::rename(&temp_path, target).map_err(|error| {
-        let _ = fs::remove_file(&temp_path);
-        format!(
-            "rename {} to {}: {error}",
-            display_path(&temp_path),
-            display_path(target)
-        )
-    })?;
-    Ok(())
+    replace_executable_in_place(&temp_path, target)
+}
+
+/// Move the staged `temp_path` into `target`, replacing any running image.
+///
+/// On Unix, `fs::rename` swaps the inode atomically even while the old
+/// executable is still running, so a single rename is correct.
+///
+/// On Windows, `fs::rename` maps to `MoveFileExW(MOVEFILE_REPLACE_EXISTING)`,
+/// which must *delete* the existing `target` as part of the replace. The old
+/// comment here claimed that always succeeds because the loader opens the
+/// image with `FILE_SHARE_DELETE` — but that only covers the loader's own
+/// handle. When the install is launched *by* the running `claude-skills.exe`
+/// (exactly what Claude Code does when it shells out to `claude-skills
+/// install`), or when a lifecycle hook holds a handle to the binary, the
+/// delete is refused with `ERROR_ACCESS_DENIED` (os error 5) and the whole
+/// install aborts with a stale binary left on disk.
+///
+/// The Windows-safe sequence is the standard self-update dance: rename the
+/// running image out of the way first — renaming a directory entry is
+/// permitted while the image is mapped — then move the new binary into the
+/// freed name. The displaced image is parked under the `.stale-<ts>` sibling
+/// name that `find_executable_orphans` already sweeps on the next install, so
+/// even if it is still mapped (and therefore undeletable right now) it is
+/// cleaned up later. A short retry absorbs transient locks from
+/// concurrently-firing hooks.
+fn replace_executable_in_place(temp_path: &Path, target: &Path) -> Result<(), String> {
+    if !target.exists() {
+        return rename_with_retry(temp_path, target).inspect_err(|_| {
+            let _ = fs::remove_file(temp_path);
+        });
+    }
+
+    #[cfg(windows)]
+    {
+        let stale_path = sibling_stale_path(target);
+        // Move the running image aside so the new binary can take its name.
+        // If the file is genuinely unlocked the move-aside still succeeds; if
+        // even the rename is refused we fall back to a direct replace so a
+        // non-running target on a permissive filesystem still updates.
+        if rename_with_retry(target, &stale_path).is_err() {
+            return rename_with_retry(temp_path, target).inspect_err(|_| {
+                let _ = fs::remove_file(temp_path);
+            });
+        }
+        match rename_with_retry(temp_path, target) {
+            Ok(()) => {
+                // Best-effort cleanup; if the displaced image is still mapped
+                // the orphan sweep removes it on the next install.
+                let _ = fs::remove_file(&stale_path);
+                Ok(())
+            }
+            Err(error) => {
+                // Never leave the install without a binary: restore the image
+                // we moved aside, drop the staged copy, and surface the error.
+                let _ = fs::rename(&stale_path, target);
+                let _ = fs::remove_file(temp_path);
+                Err(error)
+            }
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        rename_with_retry(temp_path, target).inspect_err(|_| {
+            let _ = fs::remove_file(temp_path);
+        })
+    }
+}
+
+/// Rename `from` to `to`, retrying a few times to absorb transient locks.
+///
+/// Claude Code lifecycle hooks fire frequently and each one opens the
+/// installed binary; a replace can land in the brief window one of them holds
+/// a handle. Five attempts at 100ms spacing clears those without making a
+/// genuinely stuck replace hang for long. Cleanup of `from` on permanent
+/// failure is the caller's responsibility so the move-aside path can restore
+/// the original image instead of deleting it.
+fn rename_with_retry(from: &Path, to: &Path) -> Result<(), String> {
+    let mut last_error = None;
+    for attempt in 0..5 {
+        match fs::rename(from, to) {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                last_error = Some(error);
+                if attempt < 4 {
+                    thread::sleep(Duration::from_millis(100));
+                }
+            }
+        }
+    }
+    let error = last_error.expect("retry loop records an error before failing");
+    Err(format!(
+        "rename {} to {}: {error}",
+        display_path(from),
+        display_path(to)
+    ))
 }
 
 fn sibling_temp_path(target: &Path) -> PathBuf {
     let mut name = target.file_name().map(|n| n.to_owned()).unwrap_or_default();
     name.push(".new");
+    target.with_file_name(name)
+}
+
+/// Sibling path used to park a running image while the new binary takes its
+/// name. The `.stale-<ts>` shape matches the prefix `find_executable_orphans`
+/// already detects, so a displaced image that is still mapped (and therefore
+/// undeletable in this run) is swept on the next install.
+fn sibling_stale_path(target: &Path) -> PathBuf {
+    let mut name = target.file_name().map(|n| n.to_owned()).unwrap_or_default();
+    name.push(format!(".stale-{}", unix_timestamp()));
     target.with_file_name(name)
 }
 
@@ -1290,6 +1385,54 @@ mod tests {
 
         let _ = fs::remove_dir_all(&repo);
         let _ = fs::remove_dir_all(&claude_home);
+    }
+
+    #[test]
+    fn replace_executable_in_place_overwrites_existing_target() {
+        // The core of the Windows re-install fix: replacing an existing
+        // installed binary must succeed and leave the new bytes in place,
+        // with no `.new` temp and no `.stale-*` sibling stranded behind on
+        // the happy path. Before the fix this went through a bare
+        // `fs::rename` that returned ERROR_ACCESS_DENIED (os error 5) when
+        // the install was launched by the running binary; the move-aside
+        // sequence avoids deleting the in-use image.
+        let (dir, _) = unique_paths("replace-in-place");
+        fs::create_dir_all(&dir).unwrap();
+        let target = dir.join(executable_file_name());
+        fs::write(&target, b"old-installed-bytes").unwrap();
+        let temp = sibling_temp_path(&target);
+        fs::write(&temp, b"freshly-staged-bytes").unwrap();
+
+        replace_executable_in_place(&temp, &target).unwrap();
+
+        assert_eq!(fs::read(&target).unwrap(), b"freshly-staged-bytes");
+        assert!(!temp.exists(), "staged .new temp must be consumed");
+        // No `.stale-*` orphan should survive a successful replace.
+        let orphans = find_executable_orphans(&dir);
+        assert!(
+            orphans.is_empty(),
+            "no orphans expected after a clean replace, found {orphans:?}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn replace_executable_in_place_creates_target_when_absent() {
+        // First-ever install: there is no existing binary to move aside, so
+        // the staged temp is renamed straight into the target name.
+        let (dir, _) = unique_paths("replace-fresh");
+        fs::create_dir_all(&dir).unwrap();
+        let target = dir.join(executable_file_name());
+        let temp = sibling_temp_path(&target);
+        fs::write(&temp, b"first-install-bytes").unwrap();
+
+        replace_executable_in_place(&temp, &target).unwrap();
+
+        assert_eq!(fs::read(&target).unwrap(), b"first-install-bytes");
+        assert!(!temp.exists(), "staged .new temp must be consumed");
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     fn create_minimal_layout(name: &str) -> PathBuf {
