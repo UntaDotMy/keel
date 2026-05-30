@@ -820,6 +820,12 @@ fn sibling_temp_path(target: &Path) -> PathBuf {
 /// name. The `.stale-<ts>` shape matches the prefix `find_executable_orphans`
 /// already detects, so a displaced image that is still mapped (and therefore
 /// undeletable in this run) is swept on the next install.
+///
+/// Windows-only: the move-aside dance exists solely to work around the
+/// Windows refusal to delete a running image. On Unix `fs::rename` swaps the
+/// inode atomically, so the displaced-image path is never compiled there and
+/// this helper would be dead code (`-D warnings` would reject it).
+#[cfg(windows)]
 fn sibling_stale_path(target: &Path) -> PathBuf {
     let mut name = target.file_name().map(|n| n.to_owned()).unwrap_or_default();
     name.push(format!(".stale-{}", unix_timestamp()));
