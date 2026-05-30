@@ -123,6 +123,9 @@ impl Application {
                 runner::run_rewrite_command(command_arguments, standard_output, standard_error)
             }
             "hook" => runner::run_hook_command(command_arguments, standard_output, standard_error),
+            "learn" => {
+                runner::run_learn_command(command_arguments, standard_output, standard_error)
+            }
             "raw" => runner::run_raw_command(command_arguments, standard_output, standard_error),
             "replay" => {
                 runner::run_replay_command(command_arguments, standard_output, standard_error)

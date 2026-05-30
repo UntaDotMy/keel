@@ -1,7 +1,7 @@
 //! Purpose: Single source of truth for Claude Code hook event metadata.
 //! Caller: hooks module, runner managed-hook payload, doctor checks.
 //! Dependencies: Claude Code settings.json hooks schema.
-//! Main Functions: required_feature_flag, pre_tool_matcher,
+//! Main Functions: pre_tool_matcher,
 //! settings_file_name, event_by_name, event_by_slug, HOOK_EVENTS.
 //! Side Effects: None.
 //!
@@ -335,12 +335,6 @@ pub fn event_by_name(name: &str) -> Option<&'static HookEvent> {
 /// Find a row by the kebab-case `claude-skills hook <slug>` subcommand.
 pub fn event_by_slug(slug: &str) -> Option<&'static HookEvent> {
     HOOK_EVENTS.iter().find(|event| event.slug == slug)
-}
-
-/// Claude Code uses no dedicated feature flag; hooks are active whenever settings.json is loaded.
-#[allow(dead_code)]
-pub const fn required_feature_flag() -> &'static str {
-    ""
 }
 
 /// PreToolUse matcher (`Bash`) so rewrites only fire on shell invocations.

@@ -34,7 +34,7 @@ A "skill" runs in the main thread (instructions inline, costs ongoing tokens). A
 - `.claude/review.json` — Review policy configuration.
 - `.claude/hooks.json` — Claude Code hook wiring rendered by `claude-skills hook install`.
 - `.claude-plugin/plugin.json` — Plugin manifest for Claude Code's plugin system.
-- `commands/` — Custom slash commands (`/claude-core:<name>`) wrapping the implemented CLI surfaces: `workflow`, `review`, `recall`, `gain`. Registered via the `commands` key in the plugin manifest. Note: these install through the **plugin path**; the native `claude-skills install` does not yet sync them to `~/.claude/commands/` (planned follow-up — the installer has `sync_skills`/`sync_agents` but no `sync_commands` yet).
+- `commands/` — Custom slash commands (`/claude-core:<name>`) wrapping the implemented CLI surfaces: `workflow`, `review`, `recall`, `gain`. Registered via the `commands` key in the plugin manifest. The native `claude-skills install` also syncs them to `~/.claude/commands/` via `sync_commands`, so they work whether installed through the plugin path or the native installer.
 
 ## Specialist Layout
 

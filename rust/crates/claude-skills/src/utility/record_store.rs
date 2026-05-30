@@ -42,9 +42,11 @@ impl RecordStore {
         Self { directory }
     }
 
-    /// Directory backing this collection. Exposed for callers that need to list
-    /// or stat the raw directory (and exercised by the store's own tests).
-    #[allow(dead_code)]
+    /// Directory backing this collection. Test-only: production code addresses
+    /// records by id via `record_path`/`read_record`/`list_records` rather than
+    /// reaching for the raw directory, so this stays gated out of the shipped
+    /// binary instead of carrying a dead-code allow.
+    #[cfg(test)]
     pub fn directory(&self) -> &Path {
         &self.directory
     }
@@ -116,9 +118,9 @@ impl RecordStore {
         Ok(records)
     }
 
-    /// Remove a record, returning whether it existed. API surface for family
-    /// `forget`/`remove` actions; currently exercised by the store's tests.
-    #[allow(dead_code)]
+    /// Remove a record, returning whether it existed. Used by the learning
+    /// loop's decay/prune step to drop auto-learned instincts whose pattern has
+    /// aged out, and by family `forget`/`remove` actions.
     pub fn delete_record(&self, id: &str) -> Result<bool, String> {
         let path = self.record_path(id);
         match fs::remove_file(&path) {

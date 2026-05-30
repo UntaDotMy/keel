@@ -17,6 +17,7 @@ use crate::json::{write_indented, Value};
 use crate::proxy::raw_store::RawStore;
 use crate::runner::shell_rewrite::{rewrite_command_text_for_shell, RewriteShell};
 use crate::runner::tool_timings;
+use crate::runner::{learning, observation};
 use crate::runtime::{display_path, installed_executable_path, resolve_claude_home, write_text};
 use crate::utility;
 
@@ -29,6 +30,12 @@ const RAW_OUTPUT_DEFAULT_RETENTION_DAYS: u64 = 14;
 /// `CLAUDE_SKILLS_TIMINGS_RETENTION_DAYS`; setting it to `0` disables the
 /// SessionEnd prune.
 const TIMINGS_DEFAULT_RETENTION_DAYS: u64 = 30;
+
+/// Behavioral observation JSONL rows feed the learning loop. They age out of
+/// the loop's 7-day distillation window naturally, but the files are pruned on
+/// a longer horizon so a late `learn --window 14` inspection still has data.
+/// Tunable via `CLAUDE_SKILLS_OBSERVATION_RETENTION_DAYS`; `0` disables.
+const OBSERVATION_DEFAULT_RETENTION_DAYS: u64 = 30;
 
 const MANAGED_PRE_TOOL_USE_EVENT: &str = "PreToolUse";
 
@@ -511,6 +518,18 @@ fn run_hook_post_tool_use(standard_error: &mut dyn Write) -> u8 {
         );
     }
 
+    // Capture a behavioral observation for the autonomous learning loop. This
+    // is the signal `learning::run_learning_cycle` distills into instincts and,
+    // once a pattern is trusted, into a generated skill. Like the timing record
+    // above, any failure is logged and swallowed — learning capture must never
+    // fail the hook.
+    if let Err(error) = observation::record_observation(&input) {
+        let _ = writeln!(
+            standard_error,
+            "claude-skills post-tool-use: observation record failed: {error}"
+        );
+    }
+
     if !is_edit_class_tool(tool_name) {
         return 0;
     }
@@ -693,6 +712,8 @@ fn run_hook_lifecycle(
     if event.name == "SessionEnd" {
         prune_raw_output_store(standard_error);
         prune_tool_timings_store(standard_error);
+        prune_observations_store(standard_error);
+        run_session_end_learning(standard_error);
     }
 
     let context = lifecycle_additional_context(event.slug);
@@ -1095,6 +1116,55 @@ pub(crate) fn prune_tool_timings_store(standard_error: &mut dyn Write) {
         let _ = writeln!(
             standard_error,
             "claude-skills tool-timings prune failed: {error}"
+        );
+    }
+}
+
+/// Drop behavioral observation JSONL rows older than the configured retention.
+/// SessionEnd-only, env-var override, errors swallowed — same housekeeping
+/// contract as the timings and raw-output prunes.
+fn prune_observations_store(standard_error: &mut dyn Write) {
+    let retention_days = std::env::var("CLAUDE_SKILLS_OBSERVATION_RETENTION_DAYS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(OBSERVATION_DEFAULT_RETENTION_DAYS);
+    if retention_days == 0 {
+        return;
+    }
+    if let Err(error) = observation::prune_older_than(retention_days) {
+        let _ = writeln!(
+            standard_error,
+            "claude-skills observation prune failed: {error}"
+        );
+    }
+}
+
+/// Run the autonomous learning cycle at session end: distill the session's
+/// observations into instincts and evolve trusted clusters into generated
+/// skills. Fully automatic — no slash command. Set
+/// `CLAUDE_SKILLS_LEARNING=off` to disable. Errors are swallowed so a learning
+/// failure can never fail the SessionEnd hook.
+fn run_session_end_learning(standard_error: &mut dyn Write) {
+    if std::env::var("CLAUDE_SKILLS_LEARNING")
+        .map(|value| value.trim().eq_ignore_ascii_case("off"))
+        .unwrap_or(false)
+    {
+        return;
+    }
+    let claude_home = match resolve_claude_home("") {
+        Ok(path) => path,
+        Err(_) => return,
+    };
+    let report = learning::run_learning_cycle(
+        &claude_home,
+        &learning::CycleOptions::default(),
+        standard_error,
+    );
+    if report.skills_generated > 0 || report.agents_generated > 0 {
+        let _ = writeln!(
+            standard_error,
+            "claude-skills learn: recorded {} instinct(s), generated {} skill(s) and {} agent(s)",
+            report.instincts_recorded, report.skills_generated, report.agents_generated
         );
     }
 }
@@ -1611,6 +1681,19 @@ pub fn remove_managed_hook_payload(hook_path: &Path) -> Result<(String, bool), S
         .map_err(|error| format!("render hooks config: {error}"))?;
 
     Ok((rendered, before != after))
+}
+
+/// Strip the managed hook stanzas from `<claude_home>/settings.json`, writing
+/// the file back only when something changed. Used by `manager` uninstall so a
+/// full uninstall does not leave Claude Code firing hooks at a deleted binary.
+/// A missing settings file is a no-op (nothing to clean), not an error.
+pub fn remove_managed_hook_payload_for_home(claude_home: &Path) -> Result<bool, String> {
+    let hook_path = claude_home.join(crate::hooks::claude::SETTINGS_FILE_NAME);
+    let (payload, removed) = remove_managed_hook_payload(&hook_path)?;
+    if removed {
+        write_text(&hook_path, &payload)?;
+    }
+    Ok(removed)
 }
 
 pub fn read_hooks_document(hook_path: &Path) -> Result<JsonDocument, String> {

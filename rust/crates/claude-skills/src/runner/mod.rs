@@ -5,6 +5,8 @@
 //! Side Effects: Spawns requested child commands, writes raw-output recovery logs, and may write or remove Claude Code hook configuration.
 
 pub mod hook_lifecycle;
+pub mod learning;
+pub mod observation;
 pub mod shell_rewrite;
 pub mod telemetry;
 pub mod tool_timings;
@@ -18,6 +20,7 @@ use crate::runtime::{display_path, run_command};
 
 // Re-export the public API callers depend on
 pub use hook_lifecycle::run_hook_command;
+pub use learning::run_learn_command;
 pub use shell_rewrite::rewrite_for_doctor;
 pub use telemetry::run_telemetry_command;
 

@@ -761,16 +761,11 @@ pub fn run_workflow_command(
         }
         "finish" => run_workflow_finish(&arguments[1..], standard_output, standard_error),
         "resume" => run_workflow_resume(&arguments[1..], standard_output, standard_error),
-        "await" | "shutdown" | "guide" | "first-run" | "setup" | "guided-setup" | "branch" => {
+        other => {
             let _ = writeln!(
                 standard_error,
-                "workflow {}: not implemented in the Rust runtime; expected start|resume|finish|status|cockpit|dashboard|watch|route",
-                arguments[0]
+                "Unknown workflow command: {other} (expected start|resume|finish|status|cockpit|dashboard|watch|route)"
             );
-            1
-        }
-        other => {
-            let _ = writeln!(standard_error, "Unknown workflow command: {other}");
             1
         }
     }

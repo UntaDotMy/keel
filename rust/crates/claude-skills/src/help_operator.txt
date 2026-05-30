@@ -26,6 +26,7 @@
   raw prune --older-than <Nd>
   replay <raw-id>
   hook install|uninstall|list|show|instructions
+  learn [status|dry-run|run] [--window <days>] [--json]
   code-search search --workspace-root <path> --query <text> [--format json|compact]
   design-intelligence recommend [request...]
   memory scope resolve [--memory-base <path>] [--workspace-root <path>] [--create-missing] [--refresh-system-map] [--format json|compact]
@@ -33,12 +34,13 @@
   memory system-map show [--memory-base <path>] [--workspace-root <path>]
   memory working-brief|completion-gate
   memory recall <query>
+  memory instincts|research-cache|maintenance|agent-registry|agent-packets|loop-guard|entity|graph|retrieve|status
   memoriesv2 scope resolve [same flags as memory scope resolve]
   memoriesv2 system-map refresh [same flags as memory system-map refresh]
   memoriesv2 system-map show [same flags as memory system-map show]
   memoriesv2 working-brief|completion-gate
   memoriesv2 recall <query>
-  orchestration runtime-preflight|resume-status
+  orchestration runtime-preflight|resume-status|task|checkpoint
   workflow route|start|cockpit|status|dashboard|watch|finish|resume
   gain [reset]
   session [--since today|7d|30d|all] [--json]

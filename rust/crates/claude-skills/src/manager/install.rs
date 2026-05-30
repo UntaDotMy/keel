@@ -39,15 +39,6 @@ pub struct InstallSummary {
     pub published_executable: bool,
 }
 
-#[derive(Default)]
-struct SyncStats {
-    created: usize,
-    updated: usize,
-    unchanged: usize,
-    #[allow(dead_code)]
-    removed: usize,
-}
-
 struct FileTracker<'a> {
     claude_home: &'a Path,
     files: BTreeSet<String>,
@@ -354,7 +345,6 @@ fn write_text_if_changed(path: &Path, content: &str) -> Result<bool, String> {
 fn sync_directory_delta(
     source_directory: &Path,
     target_directory: &Path,
-    stats: &mut SyncStats,
     tracker: &mut FileTracker,
 ) -> Result<(), String> {
     if !source_directory.is_dir() {
@@ -372,18 +362,9 @@ fn sync_directory_delta(
             format!("read file type for {}: {error}", display_path(&source_path))
         })?;
         if file_type.is_dir() {
-            sync_directory_delta(&source_path, &target_path, stats, tracker)?;
+            sync_directory_delta(&source_path, &target_path, tracker)?;
         } else if file_type.is_file() {
-            if target_path.is_file() {
-                if copy_file_if_changed(&source_path, &target_path)? {
-                    stats.updated += 1;
-                } else {
-                    stats.unchanged += 1;
-                }
-            } else {
-                copy_file_if_changed(&source_path, &target_path)?;
-                stats.created += 1;
-            }
+            copy_file_if_changed(&source_path, &target_path)?;
             tracker.record(&target_path);
         }
     }
@@ -431,8 +412,7 @@ fn sync_skills(
         for relative_directory in SKILL_SYNC_DIRECTORIES {
             let source_directory = skill.skill_path.join(relative_directory);
             let target_directory = target_skill_directory.join(relative_directory);
-            let mut stats = SyncStats::default();
-            sync_directory_delta(&source_directory, &target_directory, &mut stats, tracker)?;
+            sync_directory_delta(&source_directory, &target_directory, tracker)?;
         }
     }
     Ok(synced_count)
@@ -454,8 +434,7 @@ fn sync_shared_resources(
     for shared_directory_name in &layout.shared_resource_directories {
         let source_directory = layout.root_path.join(shared_directory_name);
         let target_directory = skills_directory(claude_home).join(shared_directory_name);
-        let mut stats = SyncStats::default();
-        sync_directory_delta(&source_directory, &target_directory, &mut stats, tracker)?;
+        sync_directory_delta(&source_directory, &target_directory, tracker)?;
     }
     Ok(layout.shared_resource_directories.len())
 }
@@ -1113,6 +1092,26 @@ pub fn run_uninstall_command(
             let _ = writeln!(standard_error, "remove executable failed: {error}");
             return 1;
         }
+    }
+    // Remove loop-generated skills and their paired subagents. Built-in
+    // (repo-synced) skills are identified by the absence of the learning marker
+    // and are never touched here — they were already removed by inventory above.
+    match crate::runner::learning::remove_generated_artifacts(&claude_home) {
+        Ok(count) => removed_count += count,
+        Err(error) => {
+            let _ = writeln!(standard_error, "remove generated artifacts failed: {error}");
+            return 1;
+        }
+    }
+    // Strip the managed hook stanzas from settings.json. Without this, an
+    // uninstall leaves Claude Code firing hooks at a now-deleted binary every
+    // session. Reuse the same removal the dedicated `hook uninstall` performs so
+    // unrelated user hooks are preserved.
+    if let Err(error) =
+        crate::runner::hook_lifecycle::remove_managed_hook_payload_for_home(&claude_home)
+    {
+        let _ = writeln!(standard_error, "remove managed hooks failed: {error}");
+        return 1;
     }
     if let Err(error) = remove_deprecated_config_keys(&claude_home) {
         let _ = writeln!(
