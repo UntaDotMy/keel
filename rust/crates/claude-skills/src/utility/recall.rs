@@ -1,4 +1,4 @@
-//! Purpose: SQLite FTS5-backed full-text search over the local Markdown memory stores.
+//! Purpose: SQLite FTS5-backed full-text search over the local Markdown and JSON memory stores.
 //! Caller: `utility::memory::run_memory_command` for the `recall` subcommand on both the
 //!   `memory` and `memoriesv2` command groups.
 //! Dependencies: rusqlite (bundled SQLite with FTS5), std::fs, std::path, std::time, the
@@ -6,7 +6,7 @@
 //! Main Functions: `run_recall_command`, `sync_recall_index`, `query_recall_index`,
 //!   `recall_database_path`, `default_search_roots`.
 //! Side Effects: Creates and writes the SQLite index file at `<claude-home>/recall-index.sqlite3`,
-//!   reads markdown files under `<claude-home>/memories`, `<claude-home>/memoriesv2`, and
+//!   reads `.md` and `.json` files under `<claude-home>/memories`, `<claude-home>/memoriesv2`, and
 //!   `<claude-home>/working-briefs`. No network. No global state.
 //!
 //! Invariants:
@@ -108,7 +108,7 @@ fn render_recall_help(command_group: &str, standard_output: &mut dyn Write) {
     let _ = writeln!(standard_output);
     let _ = writeln!(
         standard_output,
-        "Searches Markdown files under <claude-home>/{{memories,memoriesv2,working-briefs}} via SQLite FTS5."
+        "Searches Markdown and JSON files under <claude-home>/{{memories,memoriesv2,working-briefs}} via SQLite FTS5."
     );
     let _ = writeln!(
         standard_output,
@@ -767,7 +767,7 @@ pub fn sync_recall_index(
         if !root_directory.is_dir() {
             continue;
         }
-        collect_markdown_files(&root_directory, &mut on_disk)?;
+        collect_indexable_files(&root_directory, &mut on_disk)?;
     }
 
     let mut on_disk_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -859,7 +859,7 @@ struct DocumentRecord {
     size_bytes: i64,
 }
 
-fn collect_markdown_files(directory: &Path, out: &mut Vec<DocumentRecord>) -> Result<(), String> {
+fn collect_indexable_files(directory: &Path, out: &mut Vec<DocumentRecord>) -> Result<(), String> {
     let read_dir = match fs::read_dir(directory) {
         Ok(read_dir) => read_dir,
         Err(_) => return Ok(()),
@@ -875,7 +875,7 @@ fn collect_markdown_files(directory: &Path, out: &mut Vec<DocumentRecord>) -> Re
             Err(_) => continue,
         };
         if metadata.is_dir() {
-            collect_markdown_files(&entry_path, out)?;
+            collect_indexable_files(&entry_path, out)?;
             continue;
         }
         if !metadata.is_file() {
@@ -885,7 +885,13 @@ fn collect_markdown_files(directory: &Path, out: &mut Vec<DocumentRecord>) -> Re
             .extension()
             .and_then(|os_str| os_str.to_str())
             .map(|extension| extension.to_ascii_lowercase());
-        if extension.as_deref() != Some("md") {
+        // Index both Markdown notes and JSON records. Working briefs,
+        // completion gates, and the memory-family records (research-cache,
+        // entities, graph, ...) are all stored as `.json` under the recall
+        // roots; restricting the index to `.md` silently excluded every one of
+        // them, so `recall` never matched a working brief it had just written.
+        // Both formats are UTF-8 text and FTS5-tokenize cleanly.
+        if !matches!(extension.as_deref(), Some("md") | Some("json")) {
             continue;
         }
         let modified_at_millis = metadata
@@ -1188,6 +1194,36 @@ mod tests {
             assert!(
                 rendered.contains("working-briefs/today.md"),
                 "rendered: {rendered}"
+            );
+        });
+    }
+
+    #[test]
+    fn recall_indexes_json_working_briefs_and_returns_hits() {
+        // Regression: working briefs and memory-family records are stored as
+        // `.json`, not `.md`. The indexer previously accepted only `.md`, so a
+        // brief was never findable by `recall` even though `working-briefs` is an
+        // advertised search root. This proves `.json` is now indexed.
+        run_with_home("claude-skills-recall-json-briefs", |claude_home| {
+            write_memory(
+                claude_home,
+                "working-briefs/wb-1.json",
+                "{\n  \"id\": \"wb-1\",\n  \"request\": \"Add pagination to the users API\",\n  \"acceptanceCriteria\": \"limit=20 default\"\n}\n",
+            );
+
+            let mut stdout: Vec<u8> = Vec::new();
+            let mut stderr: Vec<u8> = Vec::new();
+            let exit_code = run_recall_command(
+                "memory",
+                &["pagination".to_string()],
+                &mut stdout,
+                &mut stderr,
+            );
+            assert_eq!(exit_code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
+            let rendered = String::from_utf8_lossy(&stdout);
+            assert!(
+                rendered.contains("working-briefs/wb-1.json"),
+                "JSON working brief must be recallable; rendered: {rendered}"
             );
         });
     }

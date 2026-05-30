@@ -128,11 +128,24 @@ try {
     if ($null -eq $ClaudeCli) {
         Write-Warning "claude CLI not found on PATH; skipping MCP registration. Run 'claude mcp add claude_core --scope user -- $InstalledBinary mcp serve' after installing Claude Code."
     } else {
-        $McpOutput = & claude mcp add claude_core --scope user -- "$InstalledBinary" mcp serve 2>&1
-        $McpExit = $LASTEXITCODE
+        # `claude mcp add` writes "already exists" to STDERR and exits non-zero on
+        # re-runs. Under the script-wide $ErrorActionPreference = "Stop", a native
+        # command's stderr is promoted to a terminating NativeCommandError in
+        # Windows PowerShell 5.1 — which fired BEFORE the idempotency check below
+        # could run, aborting every re-install. Drop to "Continue" for just this
+        # call so stderr is captured into $McpOutput and the exit code drives the
+        # decision instead.
+        $PreviousErrorActionPreference = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        try {
+            $McpOutput = & claude mcp add claude_core --scope user -- "$InstalledBinary" mcp serve 2>&1
+            $McpExit = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $PreviousErrorActionPreference
+        }
         if ($McpExit -eq 0) {
             Write-Host "Registered claude_core MCP server in Claude Code user config"
-        } elseif ($McpOutput -match "already exists") {
+        } elseif ("$McpOutput" -match "already exists") {
             Write-Host "claude_core MCP server already registered in Claude Code user config"
         } else {
             Write-Warning "claude mcp add failed (exit $McpExit): $McpOutput"
