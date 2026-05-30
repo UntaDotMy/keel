@@ -155,11 +155,73 @@ below was implemented and verified with `cargo build` + `cargo test --workspace`
     pre-restore safety snapshot so the restore itself is reversible. An external
     binary cannot hook Claude's edit tool the way native `/rewind` does, but git
     is the real code-undo; this exposes it as a first-class checkpoint surface.
+14. **Autonomous learning loop (Hermes/ECC headline parity — the biggest gap closed).**
+    The prior `memory instincts` CLI (item 4) was the *data model* for instincts,
+    but every transition was operator-driven — nothing observed behavior or
+    created skills. This pass wired the full closed loop, the one capability only
+    Hermes Agent and ECC had:
+    - `runner/observation.rs` — append-only per-day JSONL behavioral log captured
+      automatically on PostToolUse. Secret-scrubbed, truncated, navigation-noise
+      filtered, daily rotation, fail-open. Command lines collapse to stable
+      low-cardinality signatures (`git commit`, `cargo test`, `edit:rs`).
+    - `runner/learning.rs` — the loop. Clusters observations per project+signature,
+      upserts confidence-scored instincts (>=3 observations), decays and prunes
+      instincts whose pattern ages out, and evolves trusted instinct clusters
+      (>=2 instincts at confidence >=5 across >=2 sessions) into generated
+      `SKILL.md` skills plus a paired subagent — deterministic Rust template, no
+      inline LLM. Runs automatically on SessionEnd (no slash command);
+      `claude-skills learn [status|dry-run|run]` is the inspection/manual-trigger
+      surface.
+    - **Provenance discipline** (the spine): every generated artifact is marked
+      `generated`/`provenance=learned` with a content-hash sidecar. The loop never
+      rewrites a built-in repo-synced skill, and respects manual edits to a
+      generated skill (content-hash no-clobber guard) so the agent can freely
+      refine them. Disable with `CLAUDE_SKILLS_LEARNING=off`.
+    - **Always-on instinct digest** (ECC's lightweight tier): SessionStart injects
+      a compact digest of the current project's trusted instincts so learned
+      conventions are in context without waiting for a skill match.
+    First time claude-core matches Hermes/ECC on automatic
+    skill-creation-from-behavior; superpowers does it as an offline batch, and
+    Claude Code/caveman/RTK/ohmyclaude do not do it at all.
 
 Prior non-Rust work (doc/impl drift fixes, the four slash commands, the
 cross-platform statusline savings badge, and hook-count doc accuracy) shipped
 earlier in the same pass and remains in place; the doctrine docs were then
 reconciled to describe these commands as implemented rather than planned.
+
+## Head-to-head scorecard (post-pass)
+
+Capability-based, after the autonomous-learning pass. Y = present, ~ = partial,
+N = absent.
+
+| Capability | claude-core | Hermes | ECC | superpowers | RTK | caveman | ohmyclaude |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Observe behavior -> auto-create skills | Y (SessionEnd, deterministic) | Y (per-turn fork) | Y (hook+observer) | ~ (offline batch) | N | N | N |
+| Confidence-scored instincts w/ decay+prune | Y | ~ (usage counters) | Y | N | N | N | N |
+| Provenance guard (never clobber built-in/manual) | Y | Y (`write_origin`) | ~ | n/a | n/a | n/a | n/a |
+| Always-on learned-convention injection | Y (SessionStart digest) | Y (system prompt) | Y (band >=0.7) | N | N | N | N |
+| Command-output compaction proxy | Y (multi-adapter) | N | ~ | N | Y (100+ filters) | N | N |
+| Output-side verbosity economy | Y (output-economy skill) | N | N | N | N | Y | N |
+| Fail-closed review gate + release ladder | Y | N | ~ | ~ (TDD loop) | N | N | N |
+| Brownfield preserve-existing-flow gate | Y (unique) | N | N | N | N | N | N |
+| Auto-refreshed system map + recall index | Y | ~ (memory) | ~ | N | N | N | N |
+| Git-backed code checkpoints | Y | N | ~ | N | N | N | N |
+| Cross-harness adapters (Codex/Cursor/Gemini) | N (by design) | Y | Y | Y | Y | Y | ~ |
+| Zero-manual automation (all hook-driven) | Y | ~ (CLI agent) | ~ (opt-in) | ~ | Y (hook) | ~ | N |
+
+**Where we still lose (honest):**
+- **Cross-harness reach** — every comparator runs on Codex/Cursor/Gemini; we are
+  Claude-Code-native by deliberate product stance (see strategic note). This is
+  the one axis where every peer beats us, and it is a choice, not a defect.
+- **RTK filter breadth** — RTK ships 100+ purpose-built command filters across 42
+  ecosystem modules; our adapter set (build/cloud/containers/database/git/lint/
+  logs/search/tests/generic) is narrower. Incremental adapter work, not an
+  architectural gap.
+- **Skill-prose polish** — our generated SKILL.md is a deterministic template;
+  Hermes/ECC use an LLM to author richer prose. By design (the inline hook binary
+  has no LLM), and mitigated because the agent can refine any generated skill
+  (the no-clobber guard protects its edits). A future `learn run --synthesize`
+  that asks the agent to rewrite a freshly generated skill would close this.
 
 ## Remaining work (deliberately out of scope)
 
