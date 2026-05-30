@@ -202,6 +202,9 @@ N = absent.
 | Always-on learned-convention injection | Y (SessionStart digest) | Y (system prompt) | Y (band >=0.7) | N | N | N | N |
 | Command-output compaction proxy | Y (multi-adapter, all platforms, every tool) | N | ~ | N | Y (100+ subcmds, no native-Windows auto-rewrite) | N | N |
 | Output-side verbosity economy | Y (output-economy skill) | N | N | N | N | Y | N |
+| TDD loop as a named skill (RED-GREEN-REFACTOR) | Y (test-driven-development) | N | N | Y | N | N | N |
+| Root-cause debugging as a named skill | Y (systematic-debugging) | N | N | Y | N | N | N |
+| Design-before-code brainstorming as a named skill | Y (brainstorming, brief-captured) | N | N | Y | N | N | N |
 | Fail-closed review gate + release ladder | Y | N | ~ | ~ (TDD loop) | N | N | N |
 | Brownfield preserve-existing-flow gate | Y (unique) | N | N | N | N | N | N |
 | Auto-refreshed system map + recall index | Y | ~ (memory) | ~ | N | N | N | N |
@@ -244,6 +247,39 @@ N = absent.
   self-clears once the skill is refined. The binary still never calls an LLM —
   the session model that Claude Code already runs does the authoring. `learn run
   --synthesize` also collects briefs inline for a freshly generated skill.
+- ~~superpowers methodology-skill discoverability~~ **(closed this pass).** A
+  focused re-audit against `obra/superpowers` v5.1.0 (read the actual SKILL.md
+  tree, the SessionStart hook, and the marketplace manifest) confirmed parity or
+  a win on everything except the by-design cross-harness axis — **with three
+  exceptions**: superpowers ships `test-driven-development`, `systematic-debugging`,
+  and `brainstorming` as *first-class, name-triggerable* skills, while claude-core
+  carried the same doctrine only embedded inside `_shared/common-discipline.md`
+  (Think-Before-Coding / Goal-Driven Execution). Embedded doctrine fires only when
+  a broader skill is already loaded; a named skill activates by its own matcher.
+  Closed by promoting all three to standalone skills that delegate to the shared
+  discipline rather than restating it:
+  - `test-driven-development` — the tight RED→GREEN→REFACTOR loop (watch it fail
+    for the right reason, minimum code to green, refactor under green), plus the
+    bug-fix-as-missing-test branch.
+  - `systematic-debugging` — reproduce → trace-to-root-with-file:line → fix the
+    source of truth → prove with a regression test; explicit "stop after two
+    failed attempts and re-trace" rule.
+  - `brainstorming` — Socratic design exploration that converges on one agreed
+    design and **captures it in the working brief** (so `reviewer` Stage 1 has a
+    spec to check against), the generative front half of Think-Before-Coding.
+  All three pass `skill-lint`, install + byte-compare-verify cleanly (24 skills
+  total), and are registered in the plugin manifest and the `using-claude-core`
+  bootstrap catalog. Note superpowers authors skills by a *manual* TDD-for-prompts
+  method; claude-core's authoring is the autonomous learning loop — different
+  mechanism, both now cover the methodology surface.
+
+### Skill count: 20 → 23 (named-skill parity with superpowers' methodology set)
+
+The repo now ships 23 specialist/methodology skills (manifest-driven; the binary
+discovers the count from `plugin.json`, so no hardcoded total drifts). The
+three additions are the superpowers methodology trio above. `using-claude-core`
+catalog header and entries updated to match.
+
 
 ### Bugs found and fixed while verifying the workflows end-to-end
 

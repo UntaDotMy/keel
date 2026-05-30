@@ -112,7 +112,7 @@ skill matcher fires. The full text and the tactical rules they imply live in
 | "I'll add a config knob in case we need it" | Step 2 (Simplicity First) violated. Add it when a second caller exists. |
 | "Make it work" is a goal | Step 4 (Goal-Driven Execution) failed. State the verifiable check that proves done. |
 
-## Skill catalog (20 skills installed under ~/.claude/skills/)
+## Skill catalog (23 skills installed under ~/.claude/skills/)
 
 Source: each `<name>/SKILL.md` in this repo. Use the Skill tool with the bare
 name (e.g. `Skill("reviewer")`).
@@ -127,6 +127,9 @@ name (e.g. `Skill("reviewer")`).
 - `git-expert` — Safe Git workflow and version control (branching, conflict resolution, history repair, secret cleanup).
 - `preserve-existing-flow` — Pre-edit ownership trace before changing existing behavior in a brownfield codebase.
 - `reviewer` — Production-readiness review and quality gate after implementation. Returns Pass / Conditional Pass / Fail.
+- `brainstorming` — Socratic design exploration before implementation: refine an open-ended idea into a concrete, agreed design with trade-offs, captured in the working brief before any code. The generative front half of Think-Before-Coding.
+- `test-driven-development` — The tight RED-GREEN-REFACTOR loop: write the failing test first, make it pass with the minimum change, refactor under green. The per-change companion to qa-and-automation-engineer's coverage strategy.
+- `systematic-debugging` — Root-cause-first defect work: reproduce the symptom, trace it end-to-end with file:line evidence, fix the source of truth, prove it with a regression test. Use instead of patching the first suspicious line.
 - `ui-design-systems-and-responsive-interfaces` — UI systems, responsive design, accessibility (WCAG 2.1 AA).
 - `ux-research-and-experience-strategy` — UX research and evidence-based experience design (journeys, funnels, usability).
 - `memory-status-reporter` — Human-style memory health and learning reports.
