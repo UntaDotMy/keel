@@ -53,6 +53,12 @@ impl RecordStore {
         self.directory.join(format!("{id}.json"))
     }
 
+    /// Whether a record file already exists for `id`. Used by
+    /// `allocate_unique_record_id` to avoid same-millisecond id collisions.
+    pub fn record_exists(&self, id: &str) -> bool {
+        self.record_path(id).exists()
+    }
+
     pub fn write_record(&self, id: &str, fields: &Record) -> Result<PathBuf, String> {
         fs::create_dir_all(&self.directory)
             .map_err(|error| format!("create {}: {error}", display_path(&self.directory)))?;
@@ -121,6 +127,25 @@ impl RecordStore {
             Err(error) => Err(format!("remove {}: {error}", display_path(&path))),
         }
     }
+}
+
+/// Return an id that does not yet exist in `store`, starting from `base` and
+/// appending `-1`, `-2`, ... on collision. Without this, two records created in
+/// the same millisecond (a common case under fast test/CI execution) derive the
+/// same `<prefix>-<ms>` id and the second write silently overwrites the first.
+/// Mirrors the workflow ledger's `allocate_unique_entry_id`.
+pub fn allocate_unique_record_id(store: &RecordStore, base: &str) -> String {
+    if !store.record_exists(base) {
+        return base.to_string();
+    }
+    for counter in 1..10_000u32 {
+        let candidate = format!("{base}-{counter}");
+        if !store.record_exists(&candidate) {
+            return candidate;
+        }
+    }
+    // Astronomically unlikely; fall back to the base rather than loop forever.
+    base.to_string()
 }
 
 /// Look up a single field value from a record by key.
@@ -260,6 +285,29 @@ mod tests {
             .expect("write");
         assert!(store.delete_record("p-1").expect("delete present"));
         assert!(!store.delete_record("p-1").expect("delete absent"));
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn allocate_unique_record_id_appends_counter_on_collision() {
+        let home = temp_home("alloc-unique");
+        let store = RecordStore::new(&home, "orchestration/tasks");
+        // First allocation of an unused base returns it verbatim.
+        let first = allocate_unique_record_id(&store, "task-abc");
+        assert_eq!(first, "task-abc");
+        store
+            .write_record(&first, &vec![("id".into(), first.clone())])
+            .expect("write first");
+        // Same base now collides -> appends -1.
+        let second = allocate_unique_record_id(&store, "task-abc");
+        assert_eq!(second, "task-abc-1");
+        store
+            .write_record(&second, &vec![("id".into(), second.clone())])
+            .expect("write second");
+        // And again -> -2. This is exactly the same-millisecond case that made
+        // two `task begin` calls collapse into one record on Linux/macOS CI.
+        let third = allocate_unique_record_id(&store, "task-abc");
+        assert_eq!(third, "task-abc-2");
         let _ = fs::remove_dir_all(&home);
     }
 

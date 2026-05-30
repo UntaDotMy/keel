@@ -11,7 +11,9 @@ use std::path::PathBuf;
 use crate::args::FlagSet;
 use crate::json::{write_indented, Value};
 use crate::runtime::{display_path, resolve_claude_home, resolve_repository_root, write_text};
-use crate::utility::record_store::{field, record_to_value, Record, RecordStore};
+use crate::utility::record_store::{
+    allocate_unique_record_id, field, record_to_value, Record, RecordStore,
+};
 use crate::utility::system_map::{render_system_map, sanitize_key};
 use crate::utility::workflow_ledger::{
     allocate_unique_entry_id, close_entry, create_entry, current_timestamp_millis, entry_to_value,
@@ -398,7 +400,12 @@ fn run_orchestration_task_begin(
         }
     };
     let now_millis = current_timestamp_millis();
-    let id = format!("task-{now_millis:x}");
+    let store = task_store(&claude_home);
+    // Allocate a collision-free id: `task begin` calls within the same
+    // millisecond would otherwise produce the same `task-{ms:x}` id and the
+    // second write would silently overwrite the first. Append a counter on
+    // collision, mirroring the workflow ledger's allocate_unique_entry_id.
+    let id = allocate_unique_record_id(&store, &format!("task-{now_millis:x}"));
     let started_at = format_timestamp_iso8601(now_millis);
     let record: Record = vec![
         ("id".into(), id.clone()),
@@ -421,7 +428,6 @@ fn run_orchestration_task_begin(
         ("completedAt".into(), String::new()),
         ("note".into(), String::new()),
     ];
-    let store = task_store(&claude_home);
     let path = match store.write_record(&id, &record) {
         Ok(path) => path,
         Err(error) => {
@@ -694,7 +700,11 @@ fn run_orchestration_checkpoint(
     // Persist the checkpoint event itself so resume-after-compaction can see the
     // last snapshot point and its note.
     let now_millis = current_timestamp_millis();
-    let checkpoint_id = format!("checkpoint-{now_millis:x}");
+    let checkpoint_store = RecordStore::new(&claude_home, "orchestration/checkpoints");
+    // Collision-free id so two checkpoints in the same millisecond do not
+    // overwrite each other (same fix as task begin).
+    let checkpoint_id =
+        allocate_unique_record_id(&checkpoint_store, &format!("checkpoint-{now_millis:x}"));
     let checkpoint_record: Record = vec![
         ("id".into(), checkpoint_id.clone()),
         ("at".into(), format_timestamp_iso8601(now_millis)),
@@ -703,7 +713,6 @@ fn run_orchestration_checkpoint(
         ("openWorkflows".into(), open_workflows.to_string()),
         ("workingBriefs".into(), brief_count.to_string()),
     ];
-    let checkpoint_store = RecordStore::new(&claude_home, "orchestration/checkpoints");
     let checkpoint_path = match checkpoint_store.write_record(&checkpoint_id, &checkpoint_record) {
         Ok(path) => path,
         Err(error) => {
