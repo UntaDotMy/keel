@@ -860,7 +860,7 @@ fn run_review_policy_command(
     standard_output: &mut dyn Write,
     standard_error: &mut dyn Write,
 ) -> u8 {
-    if arguments.len() >= 2 && arguments[0] == "show" {
+    if arguments.first().map(String::as_str) == Some("show") {
         let mut flag_set = FlagSet::new("review policy show");
         flag_set.string_flag("repo-root", "");
         flag_set.string_flag("format", "markdown");
@@ -955,18 +955,31 @@ fn render_generated_message(
     let mut flag_set = FlagSet::new(format!("git-workflow {message_kind}"));
     flag_set.bool_flag("from-diff", false);
     flag_set.string_flag("test-result", "");
+    // Accept the flags the README and help advertise for this command so it does
+    // not error on its own documented usage. `repo-root` scopes the git diff;
+    // `base-ref` and `format` are accepted for documented-surface compatibility.
+    flag_set.string_flag("repo-root", "");
+    flag_set.string_flag("base-ref", "");
+    flag_set.string_flag("format", "");
     if let Err(parse_error) = flag_set.parse(arguments) {
         let _ = writeln!(standard_error, "{}", parse_error.message);
         return 1;
     }
+    let repo_root_value = flag_set.string_value("repo-root");
+    let repo_root: Option<std::path::PathBuf> = if repo_root_value.trim().is_empty() {
+        None
+    } else {
+        Some(std::path::PathBuf::from(repo_root_value))
+    };
     let from_diff = flag_set.bool_value("from-diff");
     let staged = if from_diff {
-        staged_files().unwrap_or_default()
+        staged_files(repo_root.as_deref()).unwrap_or_default()
     } else {
         Vec::new()
     };
     let diff_summary = if from_diff {
-        git_diff_stat().unwrap_or_else(|| "No diff summary available.".to_string())
+        git_diff_stat(repo_root.as_deref())
+            .unwrap_or_else(|| "No diff summary available.".to_string())
     } else {
         "No diff summary requested.".to_string()
     };
@@ -1001,7 +1014,7 @@ fn render_generated_message(
     0
 }
 
-fn staged_files() -> Option<Vec<String>> {
+fn staged_files(repo_root: Option<&std::path::Path>) -> Option<Vec<String>> {
     let result = run_command(
         "git",
         &[
@@ -1009,7 +1022,7 @@ fn staged_files() -> Option<Vec<String>> {
             "--cached".to_string(),
             "--name-only".to_string(),
         ],
-        None,
+        repo_root,
     )
     .ok()?;
     if result.code != 0 {
@@ -1230,8 +1243,13 @@ fn lint_message(
     }
 }
 
-fn git_diff_stat() -> Option<String> {
-    let result = run_command("git", &["diff".to_string(), "--stat".to_string()], None).ok()?;
+fn git_diff_stat(repo_root: Option<&std::path::Path>) -> Option<String> {
+    let result = run_command(
+        "git",
+        &["diff".to_string(), "--stat".to_string()],
+        repo_root,
+    )
+    .ok()?;
     if result.code != 0 {
         return None;
     }
@@ -1278,6 +1296,43 @@ fn is_help_argument(argument: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn review_policy_show_succeeds_with_no_extra_args() {
+        // Regression: the handler previously required arguments.len() >= 2, so
+        // `review policy show` (the documented form, args == ["show"]) fell
+        // through to the exit-1 usage path. It must succeed and print the policy.
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let code = run_review_policy_command(&["show".to_string()], &mut stdout, &mut stderr);
+        assert_eq!(code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
+        assert!(String::from_utf8_lossy(&stdout).contains("Native Review Policy"));
+    }
+
+    #[test]
+    fn review_policy_show_honors_compact_format() {
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let code = run_review_policy_command(
+            &[
+                "show".to_string(),
+                "--format".to_string(),
+                "compact".to_string(),
+            ],
+            &mut stdout,
+            &mut stderr,
+        );
+        assert_eq!(code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
+        assert!(String::from_utf8_lossy(&stdout).contains("native_rules=rust"));
+    }
+
+    #[test]
+    fn review_policy_unknown_subcommand_errors() {
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let code = run_review_policy_command(&["bogus".to_string()], &mut stdout, &mut stderr);
+        assert_eq!(code, 1);
+    }
 
     #[test]
     fn gate_result_status_mapping() {

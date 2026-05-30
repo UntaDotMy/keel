@@ -2169,6 +2169,7 @@ fn run_scope_resolve(
     let mut flag_set = FlagSet::new("scope resolve");
     flag_set.string_flag("workspace-root", "");
     flag_set.string_flag("format", "text");
+    flag_set.string_flag("claude-home", "");
     flag_set.bool_flag("create-missing", false);
     flag_set.bool_flag("refresh-system-map", false);
     if let Err(parse_error) = flag_set.parse(arguments) {
@@ -2198,7 +2199,7 @@ fn run_scope_resolve(
         );
         return 1;
     }
-    let Some(claude_home) = resolve_claude_home("").ok() else {
+    let Some(claude_home) = resolve_claude_home(flag_set.string_value("claude-home")).ok() else {
         let _ = writeln!(
             standard_error,
             "{command_group} scope resolve: unable to resolve Claude home"
@@ -2344,6 +2345,7 @@ fn run_system_map_refresh(
 ) -> u8 {
     let mut flag_set = FlagSet::new("system-map refresh");
     flag_set.string_flag("workspace-root", "");
+    flag_set.string_flag("claude-home", "");
     if let Err(parse_error) = flag_set.parse(arguments) {
         let _ = writeln!(standard_error, "{}", parse_error.message);
         return 1;
@@ -2371,7 +2373,7 @@ fn run_system_map_refresh(
         );
         return 1;
     }
-    let Some(claude_home) = resolve_claude_home("").ok() else {
+    let Some(claude_home) = resolve_claude_home(flag_set.string_value("claude-home")).ok() else {
         let _ = writeln!(
             standard_error,
             "{command_group} system-map refresh: unable to resolve Claude home"
@@ -2426,6 +2428,7 @@ fn run_system_map_show(
 ) -> u8 {
     let mut flag_set = FlagSet::new("system-map show");
     flag_set.string_flag("workspace-root", "");
+    flag_set.string_flag("claude-home", "");
     if let Err(parse_error) = flag_set.parse(arguments) {
         let _ = writeln!(standard_error, "{}", parse_error.message);
         return 1;
@@ -2453,7 +2456,7 @@ fn run_system_map_show(
         );
         return 1;
     }
-    let Some(claude_home) = resolve_claude_home("").ok() else {
+    let Some(claude_home) = resolve_claude_home(flag_set.string_value("claude-home")).ok() else {
         let _ = writeln!(
             standard_error,
             "{command_group} system-map show: unable to resolve Claude home"
