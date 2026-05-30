@@ -1,0 +1,1003 @@
+//! Purpose: Design-intelligence recommendation generator backed by the installed catalog.
+//! Caller: commands.rs via the utility dispatcher (`design-intelligence recommend`).
+//! Dependencies: std::fs, std::path, serde_json, crate::args, crate::runtime.
+//! Main Functions: run_design_intelligence_command.
+//! Side Effects: Reads the design-intelligence catalog JSON; optionally writes a
+//!   persisted design-system markdown artifact when `--persist` is set.
+//!
+//! This replaces the former three-line stub in code_search.rs. The catalog
+//! (`ui-design-systems-and-responsive-interfaces/data/design_intelligence_catalog.json`)
+//! ships with the skill and is installed to `<claude_home>/skills/.../data/`.
+//! The generator scores the free-text request against archetype/style/color/
+//! typography keywords, biases the selection by an optional `--stack`, and emits
+//! the documented packet shape (text or JSON), so the SKILL.md generator workflow
+//! is real rather than aspirational.
+
+use std::collections::HashSet;
+use std::fs;
+use std::io::Write;
+use std::path::PathBuf;
+
+use serde_json::{json, Value};
+
+use crate::runtime::{
+    clean_path, discover_repository_layout, display_path, resolve_claude_home,
+    resolve_repository_root, skills_directory,
+};
+
+const UI_SKILL_NAME: &str = "ui-design-systems-and-responsive-interfaces";
+const CATALOG_RELATIVE_PATH: &str = "data/design_intelligence_catalog.json";
+
+pub fn run_design_intelligence_command(
+    arguments: &[String],
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    if arguments.is_empty() || is_help_argument(&arguments[0]) {
+        let _ = writeln!(
+            standard_output,
+            "Usage: claude-skills design-intelligence recommend [request...] \
+             [--stack <id>] [--component-library <name>] [--format text|json] \
+             [--persist --project-name <name> --page <name>] [--catalog <path>]"
+        );
+        return if arguments.is_empty() { 1 } else { 0 };
+    }
+    if arguments[0] != "recommend" {
+        let _ = writeln!(
+            standard_error,
+            "Unknown design-intelligence command: {}",
+            arguments[0]
+        );
+        return 1;
+    }
+    run_recommend(&arguments[1..], standard_output, standard_error)
+}
+
+fn run_recommend(
+    arguments: &[String],
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let parsed = match RecommendArgs::parse(arguments) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            let _ = writeln!(standard_error, "{error}");
+            return 1;
+        }
+    };
+
+    let request = parsed.request.trim().to_string();
+    if request.is_empty() {
+        let _ = writeln!(
+            standard_error,
+            "design-intelligence recommend: a product or feature request is required \
+             (example: recommend \"fintech banking dashboard with secure transfers\")"
+        );
+        return 1;
+    }
+
+    if parsed.format != "text" && parsed.format != "json" {
+        let _ = writeln!(
+            standard_error,
+            "design-intelligence recommend: --format must be 'text' or 'json'"
+        );
+        return 1;
+    }
+
+    let catalog = match load_catalog(&parsed.catalog) {
+        Ok(catalog) => catalog,
+        Err(error) => {
+            let _ = writeln!(standard_error, "design-intelligence recommend: {error}");
+            return 1;
+        }
+    };
+
+    let packet = build_packet(&request, &catalog, &parsed.stack, &parsed.component_library);
+
+    if parsed.persist {
+        match persist_design_system(
+            &packet,
+            &request,
+            &parsed.project_name,
+            &parsed.page,
+            &parsed.out,
+        ) {
+            Ok(path) => {
+                let _ = writeln!(
+                    standard_output,
+                    "Persisted design system to {}",
+                    display_path(&path)
+                );
+            }
+            Err(error) => {
+                let _ = writeln!(standard_error, "design-intelligence recommend: {error}");
+                return 1;
+            }
+        }
+    }
+
+    if parsed.format == "json" {
+        match serde_json::to_string_pretty(&packet) {
+            Ok(serialized) => {
+                let _ = writeln!(standard_output, "{serialized}");
+            }
+            Err(error) => {
+                let _ = writeln!(standard_error, "design-intelligence recommend: {error}");
+                return 1;
+            }
+        }
+    } else {
+        render_text(&packet, standard_output);
+    }
+    0
+}
+
+/// Parsed `recommend` arguments. Unlike the shared `FlagSet` (which captures
+/// everything after the first positional token as positional), this recognizes
+/// flags anywhere in the argument list so the documented `recommend "<request>"
+/// --stack <id> --format json` ordering works — the request text and the flags
+/// can appear in either order.
+struct RecommendArgs {
+    request: String,
+    stack: String,
+    component_library: String,
+    format: String,
+    persist: bool,
+    project_name: String,
+    page: String,
+    catalog: String,
+    out: String,
+}
+
+impl RecommendArgs {
+    fn parse(arguments: &[String]) -> Result<Self, String> {
+        let mut parsed = RecommendArgs {
+            request: String::new(),
+            stack: String::new(),
+            component_library: String::new(),
+            format: "text".to_string(),
+            persist: false,
+            project_name: String::new(),
+            page: String::new(),
+            catalog: String::new(),
+            out: String::new(),
+        };
+        let mut request_tokens: Vec<String> = Vec::new();
+        let mut index = 0;
+        let mut request_terminated = false;
+        while index < arguments.len() {
+            let token = &arguments[index];
+            if token == "--" {
+                // Everything after a bare `--` is request text.
+                request_tokens.extend(arguments[index + 1..].iter().cloned());
+                break;
+            }
+            if let Some(stripped) = token.strip_prefix("--") {
+                let (flag_name, inline_value) = match stripped.split_once('=') {
+                    Some((name, value)) => (name.to_string(), Some(value.to_string())),
+                    None => (stripped.to_string(), None),
+                };
+                // Once a flag is seen, request text is complete; later bare
+                // tokens are flag values, not request words.
+                request_terminated = true;
+                let take_value = |index: &mut usize| -> Result<String, String> {
+                    if let Some(value) = inline_value.clone() {
+                        return Ok(value);
+                    }
+                    if *index + 1 >= arguments.len() {
+                        return Err(format!(
+                            "design-intelligence recommend: flag --{flag_name} needs a value"
+                        ));
+                    }
+                    *index += 1;
+                    Ok(arguments[*index].clone())
+                };
+                match flag_name.as_str() {
+                    "stack" => parsed.stack = take_value(&mut index)?,
+                    "component-library" => parsed.component_library = take_value(&mut index)?,
+                    "format" => parsed.format = take_value(&mut index)?,
+                    "project-name" => parsed.project_name = take_value(&mut index)?,
+                    "page" => parsed.page = take_value(&mut index)?,
+                    "catalog" => parsed.catalog = take_value(&mut index)?,
+                    "out" => parsed.out = take_value(&mut index)?,
+                    "persist" => {
+                        parsed.persist = match inline_value.as_deref() {
+                            None => true,
+                            Some("true") | Some("1") => true,
+                            Some("false") | Some("0") => false,
+                            Some(other) => {
+                                return Err(format!(
+                                    "design-intelligence recommend: invalid boolean {other:?} for --persist"
+                                ));
+                            }
+                        };
+                    }
+                    other => {
+                        return Err(format!(
+                            "design-intelligence recommend: unknown flag --{other}"
+                        ));
+                    }
+                }
+                index += 1;
+                continue;
+            }
+            // A bare token. It belongs to the request only if no flag has been
+            // seen yet; after a flag, a stray bare token is an error rather than
+            // silently joining the request.
+            if request_terminated {
+                return Err(format!(
+                    "design-intelligence recommend: unexpected argument {token:?} after flags"
+                ));
+            }
+            request_tokens.push(token.clone());
+            index += 1;
+        }
+        parsed.request = request_tokens.join(" ");
+        Ok(parsed)
+    }
+}
+
+/// Resolve and parse the catalog: explicit `--catalog` wins, then the repo
+/// layout (when invoked from a checkout), then the installed skills directory.
+fn load_catalog(catalog_override: &str) -> Result<Value, String> {
+    let path = resolve_catalog_path(catalog_override)?;
+    let text = fs::read_to_string(&path)
+        .map_err(|error| format!("read catalog {}: {error}", display_path(&path)))?;
+    let value: Value = serde_json::from_str(&text)
+        .map_err(|error| format!("parse catalog {}: {error}", display_path(&path)))?;
+    Ok(value)
+}
+
+fn resolve_catalog_path(catalog_override: &str) -> Result<PathBuf, String> {
+    if !catalog_override.trim().is_empty() {
+        let candidate = clean_path(&PathBuf::from(catalog_override.trim()));
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+        return Err(format!(
+            "catalog not found at --catalog path: {}",
+            display_path(&candidate)
+        ));
+    }
+    if let Ok(root) = resolve_repository_root("") {
+        if let Ok(layout) = discover_repository_layout(&root) {
+            if let Some(skill) = layout.skills.iter().find(|s| s.name == UI_SKILL_NAME) {
+                let candidate = skill.skill_path.join(CATALOG_RELATIVE_PATH);
+                if candidate.is_file() {
+                    return Ok(candidate);
+                }
+            }
+        }
+    }
+    if let Ok(claude_home) = resolve_claude_home("") {
+        let candidate = skills_directory(&claude_home)
+            .join(UI_SKILL_NAME)
+            .join(CATALOG_RELATIVE_PATH);
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+    Err(
+        "design-intelligence catalog not found (looked in the repo skill and the installed \
+         skills directory); pass --catalog <path> to point at it explicitly"
+            .to_string(),
+    )
+}
+
+fn build_packet(request: &str, catalog: &Value, stack_id: &str, component_library: &str) -> Value {
+    let request_lower = request.to_lowercase();
+    let tokens = tokenize(&request_lower);
+
+    let archetypes = array_field(catalog, "product_archetypes");
+    let style_families = array_field(catalog, "style_families");
+    let color_moods = array_field(catalog, "color_moods");
+    let typography_moods = array_field(catalog, "typography_moods");
+    let stack_profiles = array_field(catalog, "stack_profiles");
+
+    // Archetype is the spine of the recommendation.
+    let (archetype, archetype_score) = pick_archetype(&archetypes, &request_lower, &tokens);
+    let confidence = match archetype_score {
+        s if s >= 2 => "high",
+        s if s >= 1 => "medium",
+        _ => "low",
+    };
+
+    // Optional stack profile biases the family/color/typography choices.
+    let stack = if stack_id.trim().is_empty() {
+        None
+    } else {
+        find_stack(&stack_profiles, stack_id)
+    };
+
+    let style_pref = biased_preferences(
+        archetype,
+        stack,
+        "recommended_style_families",
+        "preferred_style_families",
+    );
+    let color_pref = biased_preferences(
+        archetype,
+        stack,
+        "recommended_color_moods",
+        "preferred_color_moods",
+    );
+    let typography_pref = biased_preferences(
+        archetype,
+        stack,
+        "recommended_typography_moods",
+        "preferred_typography_moods",
+    );
+
+    let style = choose(&style_pref, &style_families, &request_lower, &tokens);
+    let color = choose(&color_pref, &color_moods, &request_lower, &tokens);
+    let typography = choose(&typography_pref, &typography_moods, &request_lower, &tokens);
+
+    let polish_checks = checks_or_default(
+        archetype,
+        "professional_polish_checks",
+        &[
+            "Establish one clear primary action per screen and keep secondary controls visually quieter.",
+            "Use design tokens for spacing, color, and typography instead of hardcoded values, and keep interactive affordances obvious.",
+        ],
+    );
+    let recovery_checks = checks_or_default(
+        archetype,
+        "recovery_checks",
+        &[
+            "Design empty, loading, error, and success states with the same care as the happy path.",
+            "Preserve user input and progress across navigation, interruption, and reconnection.",
+        ],
+    );
+    let verification_checks = checks_or_default(
+        archetype,
+        "verification_checks",
+        &[
+            "Walk the primary task path end to end before approving the visual direction.",
+            "Verify responsive behavior and WCAG 2.1 AA contrast and keyboard access across desktop and mobile.",
+        ],
+    );
+
+    let mut packet = json!({
+        "request": request,
+        "confidence": confidence,
+        "archetype_match_score": archetype_score,
+        "product_archetype": {
+            "id": str_field(archetype, "id"),
+            "display_name": str_field(archetype, "display_name"),
+            "trust_posture": str_field(archetype, "trust_posture"),
+            "content_priorities": str_array(archetype, "content_priorities"),
+            "cta_guidance": str_field(archetype, "cta_guidance"),
+            "motion_posture": str_field(archetype, "recommended_motion_posture"),
+            "density": str_field(archetype, "recommended_density"),
+        },
+        "style_family": entry_summary(style, "visual_direction"),
+        "color_mood": entry_summary(color, "palette_direction"),
+        "typography_mood": entry_summary(typography, "direction"),
+        "professional_polish_checks": polish_checks,
+        "recovery_checks": recovery_checks,
+        "verification_checks": verification_checks,
+        "anti_patterns": merged_anti_patterns(archetype, style),
+    });
+
+    if let Some(stack_entry) = stack {
+        packet["stack_adaptation"] = json!({
+            "id": str_field(stack_entry, "id"),
+            "display_name": str_field(stack_entry, "display_name"),
+            "guidance": str_array(stack_entry, "guidance"),
+            "component_preview_tools": str_array(stack_entry, "component_preview_tools"),
+            "validation_checks": str_array(stack_entry, "validation_checks"),
+        });
+    } else if !stack_id.trim().is_empty() {
+        packet["stack_adaptation"] = json!({
+            "note": format!(
+                "stack '{stack_id}' not in the catalog; recommendation is stack-agnostic"
+            ),
+        });
+    }
+
+    if !component_library.trim().is_empty() {
+        packet["component_library"] = json!({
+            "name": component_library,
+            "guidance": format!(
+                "Reuse {component_library} primitives and tokens before introducing custom \
+                 components; align spacing, color, and state styling to its theme."
+            ),
+        });
+    }
+
+    packet
+}
+
+fn render_text(packet: &Value, output: &mut dyn Write) {
+    let _ = writeln!(output, "Design Intelligence Recommendation");
+    let _ = writeln!(output, "Request: {}", str_field(packet, "request"));
+    let _ = writeln!(
+        output,
+        "Confidence: {} (archetype keyword match: {})",
+        str_field(packet, "confidence"),
+        packet
+            .get("archetype_match_score")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+    );
+    let _ = writeln!(output);
+
+    let archetype = &packet["product_archetype"];
+    let _ = writeln!(
+        output,
+        "Product archetype: {} — {}",
+        str_field(archetype, "display_name"),
+        str_field(archetype, "trust_posture")
+    );
+    write_inline_list(
+        output,
+        "  Content priorities",
+        &str_array(archetype, "content_priorities"),
+    );
+    let _ = writeln!(
+        output,
+        "  CTA guidance: {}",
+        str_field(archetype, "cta_guidance")
+    );
+    let _ = writeln!(
+        output,
+        "  Motion: {}   Density: {}",
+        str_field(archetype, "motion_posture"),
+        str_field(archetype, "density")
+    );
+    let _ = writeln!(output);
+
+    write_entry(
+        output,
+        "Style family",
+        &packet["style_family"],
+        "visual_direction",
+    );
+    write_entry(
+        output,
+        "Color mood",
+        &packet["color_mood"],
+        "palette_direction",
+    );
+    write_entry(
+        output,
+        "Typography mood",
+        &packet["typography_mood"],
+        "direction",
+    );
+    let _ = writeln!(output);
+
+    if let Some(stack) = packet.get("stack_adaptation") {
+        if let Some(note) = stack.get("note").and_then(Value::as_str) {
+            let _ = writeln!(output, "Stack adaptation: {note}");
+        } else {
+            let _ = writeln!(
+                output,
+                "Stack adaptation ({}):",
+                str_field(stack, "display_name")
+            );
+            for line in str_array(stack, "guidance") {
+                let _ = writeln!(output, "  - {line}");
+            }
+            write_inline_list(
+                output,
+                "  Component preview tools",
+                &str_array(stack, "component_preview_tools"),
+            );
+            for line in str_array(stack, "validation_checks") {
+                let _ = writeln!(output, "  validation: {line}");
+            }
+        }
+        let _ = writeln!(output);
+    }
+
+    if let Some(library) = packet.get("component_library") {
+        let _ = writeln!(
+            output,
+            "Component library ({}): {}",
+            str_field(library, "name"),
+            str_field(library, "guidance")
+        );
+        let _ = writeln!(output);
+    }
+
+    write_block(
+        output,
+        "Professional polish checks",
+        &str_array(packet, "professional_polish_checks"),
+    );
+    write_block(
+        output,
+        "Recovery checks",
+        &str_array(packet, "recovery_checks"),
+    );
+    write_block(
+        output,
+        "Verification checks",
+        &str_array(packet, "verification_checks"),
+    );
+    write_block(
+        output,
+        "Anti-patterns to avoid",
+        &str_array(packet, "anti_patterns"),
+    );
+}
+
+fn persist_design_system(
+    packet: &Value,
+    request: &str,
+    project_name: &str,
+    page: &str,
+    out_override: &str,
+) -> Result<PathBuf, String> {
+    let path = if !out_override.trim().is_empty() {
+        clean_path(&PathBuf::from(out_override.trim()))
+    } else {
+        let cwd = std::env::current_dir()
+            .map_err(|error| format!("resolve current directory: {error}"))?;
+        cwd.join("design-system").join("MASTER.md")
+    };
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("create {}: {error}", display_path(parent)))?;
+    }
+
+    let project = if project_name.trim().is_empty() {
+        "Design System"
+    } else {
+        project_name.trim()
+    };
+    let mut markdown = String::new();
+    markdown.push_str(&format!("# {project}\n\n"));
+    if !page.trim().is_empty() {
+        markdown.push_str(&format!("## {}\n\n", page.trim()));
+    }
+    markdown.push_str(&format!("Request: {request}\n\n"));
+    let archetype = &packet["product_archetype"];
+    markdown.push_str(&format!(
+        "- Archetype: {} ({})\n",
+        str_field(archetype, "display_name"),
+        str_field(archetype, "trust_posture")
+    ));
+    markdown.push_str(&format!(
+        "- Style family: {} — {}\n",
+        str_field(&packet["style_family"], "display_name"),
+        str_field(&packet["style_family"], "visual_direction")
+    ));
+    markdown.push_str(&format!(
+        "- Color mood: {} — {}\n",
+        str_field(&packet["color_mood"], "display_name"),
+        str_field(&packet["color_mood"], "palette_direction")
+    ));
+    markdown.push_str(&format!(
+        "- Typography: {} — {}\n",
+        str_field(&packet["typography_mood"], "display_name"),
+        str_field(&packet["typography_mood"], "direction")
+    ));
+    markdown.push_str(&format!(
+        "- Motion: {}   Density: {}\n\n",
+        str_field(archetype, "motion_posture"),
+        str_field(archetype, "density")
+    ));
+    append_markdown_list(
+        &mut markdown,
+        "Professional polish checks",
+        &str_array(packet, "professional_polish_checks"),
+    );
+    append_markdown_list(
+        &mut markdown,
+        "Recovery checks",
+        &str_array(packet, "recovery_checks"),
+    );
+    append_markdown_list(
+        &mut markdown,
+        "Verification checks",
+        &str_array(packet, "verification_checks"),
+    );
+    append_markdown_list(
+        &mut markdown,
+        "Anti-patterns to avoid",
+        &str_array(packet, "anti_patterns"),
+    );
+
+    fs::write(&path, markdown)
+        .map_err(|error| format!("write {}: {error}", display_path(&path)))?;
+    Ok(path)
+}
+
+// --- selection helpers ---------------------------------------------------
+
+fn pick_archetype<'a>(
+    archetypes: &'a [Value],
+    request_lower: &str,
+    tokens: &HashSet<String>,
+) -> (&'a Value, u32) {
+    let mut best: Option<(&Value, u32)> = None;
+    for entry in archetypes {
+        let score = score_keywords(request_lower, tokens, &str_array(entry, "keywords"));
+        if best.map_or(true, |(_, best_score)| score > best_score) {
+            best = Some((entry, score));
+        }
+    }
+    // archetypes is never empty in a valid catalog; fall back to the first entry.
+    best.unwrap_or((&archetypes[0], 0))
+}
+
+fn choose<'a>(
+    preferred_ids: &[String],
+    all: &'a [Value],
+    request_lower: &str,
+    tokens: &HashSet<String>,
+) -> &'a Value {
+    let mut best: Option<(&Value, u32)> = None;
+    for id in preferred_ids {
+        if let Some(entry) = find_by_id(all, id) {
+            let score = score_keywords(request_lower, tokens, &str_array(entry, "keywords"));
+            if best.map_or(true, |(_, best_score)| score > best_score) {
+                best = Some((entry, score));
+            }
+        }
+    }
+    if let Some((entry, _)) = best {
+        return entry;
+    }
+    // No preferred ids resolved — pick the global best by direct keyword score.
+    let mut global: Option<(&Value, u32)> = None;
+    for entry in all {
+        let score = score_keywords(request_lower, tokens, &str_array(entry, "keywords"));
+        if global.map_or(true, |(_, best_score)| score > best_score) {
+            global = Some((entry, score));
+        }
+    }
+    global.map(|(entry, _)| entry).unwrap_or(&all[0])
+}
+
+/// Intersect the archetype's recommended ids with the stack's preferred ids.
+/// Non-empty intersection wins (stack-aligned); otherwise the archetype list.
+fn biased_preferences(
+    archetype: &Value,
+    stack: Option<&Value>,
+    archetype_key: &str,
+    stack_key: &str,
+) -> Vec<String> {
+    let archetype_pref = str_array(archetype, archetype_key);
+    let Some(stack_entry) = stack else {
+        return archetype_pref;
+    };
+    let stack_pref = str_array(stack_entry, stack_key);
+    let intersection: Vec<String> = archetype_pref
+        .iter()
+        .filter(|id| stack_pref.contains(id))
+        .cloned()
+        .collect();
+    if !intersection.is_empty() {
+        return intersection;
+    }
+    // No overlap — lead with the stack's preference, then the archetype's.
+    let mut combined = stack_pref;
+    for id in archetype_pref {
+        if !combined.contains(&id) {
+            combined.push(id);
+        }
+    }
+    combined
+}
+
+fn find_stack<'a>(stack_profiles: &'a [Value], stack_id: &str) -> Option<&'a Value> {
+    let needle = stack_id.trim().to_lowercase();
+    stack_profiles.iter().find(|entry| {
+        str_field(entry, "id").to_lowercase() == needle
+            || str_array(entry, "aliases")
+                .iter()
+                .any(|alias| alias.to_lowercase() == needle)
+            || str_array(entry, "keywords")
+                .iter()
+                .any(|keyword| keyword.to_lowercase() == needle)
+    })
+}
+
+fn merged_anti_patterns(archetype: &Value, style: &Value) -> Vec<String> {
+    let mut merged = str_array(archetype, "anti_patterns");
+    for item in str_array(style, "anti_patterns") {
+        if !merged.contains(&item) {
+            merged.push(item);
+        }
+    }
+    merged
+}
+
+fn checks_or_default(entry: &Value, key: &str, defaults: &[&str]) -> Vec<String> {
+    let found = str_array(entry, key);
+    if found.is_empty() {
+        defaults.iter().map(|s| s.to_string()).collect()
+    } else {
+        found
+    }
+}
+
+fn entry_summary(entry: &Value, direction_key: &str) -> Value {
+    json!({
+        "id": str_field(entry, "id"),
+        "display_name": str_field(entry, "display_name"),
+        direction_key: str_field(entry, direction_key),
+    })
+}
+
+// --- scoring -------------------------------------------------------------
+
+fn tokenize(text: &str) -> HashSet<String> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(stem)
+        .collect()
+}
+
+/// Crude singular stem so "dashboards" matches "dashboard".
+fn stem(word: &str) -> String {
+    let lower = word.to_lowercase();
+    if lower.len() > 3 {
+        if let Some(base) = lower.strip_suffix('s') {
+            return base.to_string();
+        }
+    }
+    lower
+}
+
+fn score_keywords(request_lower: &str, tokens: &HashSet<String>, keywords: &[String]) -> u32 {
+    let mut score = 0;
+    for keyword in keywords {
+        let keyword_lower = keyword.to_lowercase();
+        let word_count = keyword_lower.split_whitespace().count();
+        let matched = if word_count > 1 {
+            request_lower.contains(&keyword_lower)
+        } else {
+            tokens.contains(&stem(&keyword_lower))
+        };
+        if matched {
+            // Multi-word, more specific keywords weigh more than generic ones.
+            score += word_count as u32;
+        }
+    }
+    score
+}
+
+// --- Value accessors -----------------------------------------------------
+
+fn array_field(value: &Value, key: &str) -> Vec<Value> {
+    value
+        .get(key)
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn str_field(value: &Value, key: &str) -> String {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string()
+}
+
+fn str_array(value: &Value, key: &str) -> Vec<String> {
+    value
+        .get(key)
+        .and_then(Value::as_array)
+        .map(|array| {
+            array
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn find_by_id<'a>(entries: &'a [Value], id: &str) -> Option<&'a Value> {
+    entries.iter().find(|entry| str_field(entry, "id") == id)
+}
+
+// --- output formatting ---------------------------------------------------
+
+fn write_entry(output: &mut dyn Write, label: &str, entry: &Value, direction_key: &str) {
+    let _ = writeln!(output, "{label}: {}", str_field(entry, "display_name"));
+    let direction = str_field(entry, direction_key);
+    if !direction.is_empty() {
+        let _ = writeln!(output, "  {direction}");
+    }
+}
+
+fn write_block(output: &mut dyn Write, label: &str, items: &[String]) {
+    if items.is_empty() {
+        return;
+    }
+    let _ = writeln!(output, "{label}:");
+    for item in items {
+        let _ = writeln!(output, "  - {item}");
+    }
+    let _ = writeln!(output);
+}
+
+fn write_inline_list(output: &mut dyn Write, label: &str, items: &[String]) {
+    if items.is_empty() {
+        return;
+    }
+    let _ = writeln!(output, "{label}: {}", items.join(", "));
+}
+
+fn append_markdown_list(markdown: &mut String, label: &str, items: &[String]) {
+    if items.is_empty() {
+        return;
+    }
+    markdown.push_str(&format!("### {label}\n\n"));
+    for item in items {
+        markdown.push_str(&format!("- {item}\n"));
+    }
+    markdown.push('\n');
+}
+
+fn is_help_argument(argument: &str) -> bool {
+    argument == "--help" || argument == "-h" || argument == "help"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn repo_catalog_path() -> PathBuf {
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        clean_path(
+            &manifest_dir
+                .join("../../../")
+                .join(UI_SKILL_NAME)
+                .join(CATALOG_RELATIVE_PATH),
+        )
+    }
+
+    fn run(args: &[&str]) -> (u8, String, String) {
+        let owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = run_design_intelligence_command(&owned, &mut out, &mut err);
+        (
+            code,
+            String::from_utf8(out).unwrap(),
+            String::from_utf8(err).unwrap(),
+        )
+    }
+
+    #[test]
+    fn fintech_request_routes_to_fintech_archetype_and_trust_palette() {
+        let catalog = repo_catalog_path();
+        let (code, out, err) = run(&[
+            "recommend",
+            "fintech banking dashboard with secure transfers",
+            "--catalog",
+            catalog.to_str().unwrap(),
+        ]);
+        assert_eq!(code, 0, "stderr: {err}");
+        assert!(out.contains("Fintech Product"), "out: {out}");
+        assert!(out.contains("Trust Blue"), "out: {out}");
+        assert!(out.contains("Confidence: high"), "out: {out}");
+    }
+
+    #[test]
+    fn json_format_emits_structured_packet() {
+        let catalog = repo_catalog_path();
+        let (code, out, _) = run(&[
+            "recommend",
+            "ai workspace for research copilots",
+            "--format",
+            "json",
+            "--catalog",
+            catalog.to_str().unwrap(),
+        ]);
+        assert_eq!(code, 0);
+        let value: Value = serde_json::from_str(&out).expect("valid json");
+        assert_eq!(value["product_archetype"]["id"], "ai-workspace");
+        assert!(value["style_family"]["id"].is_string());
+        assert!(value["professional_polish_checks"].is_array());
+        assert!(value["verification_checks"].is_array());
+    }
+
+    #[test]
+    fn stack_flag_biases_selection_and_adds_stack_guidance() {
+        let catalog = repo_catalog_path();
+        let (code, out, _) = run(&[
+            "recommend",
+            "messaging app with unread states and voice notes",
+            "--stack",
+            "flutter",
+            "--format",
+            "json",
+            "--catalog",
+            catalog.to_str().unwrap(),
+        ]);
+        assert_eq!(code, 0);
+        let value: Value = serde_json::from_str(&out).expect("valid json");
+        assert_eq!(value["stack_adaptation"]["id"], "flutter-mobile");
+        let tools = value["stack_adaptation"]["component_preview_tools"]
+            .as_array()
+            .unwrap();
+        assert!(tools.iter().any(|t| t == "Widgetbook"));
+    }
+
+    #[test]
+    fn unknown_stack_is_noted_not_fatal() {
+        let catalog = repo_catalog_path();
+        let (code, out, _) = run(&[
+            "recommend",
+            "saas dashboard",
+            "--stack",
+            "cobol",
+            "--format",
+            "json",
+            "--catalog",
+            catalog.to_str().unwrap(),
+        ]);
+        assert_eq!(code, 0);
+        let value: Value = serde_json::from_str(&out).expect("valid json");
+        assert!(value["stack_adaptation"]["note"]
+            .as_str()
+            .unwrap()
+            .contains("cobol"));
+    }
+
+    #[test]
+    fn unmatched_request_falls_back_with_low_confidence() {
+        let catalog = repo_catalog_path();
+        let (code, out, _) = run(&[
+            "recommend",
+            "zzzz qqqq wwww",
+            "--catalog",
+            catalog.to_str().unwrap(),
+        ]);
+        assert_eq!(code, 0);
+        assert!(out.contains("Confidence: low"), "out: {out}");
+    }
+
+    #[test]
+    fn persist_writes_master_markdown() {
+        let catalog = repo_catalog_path();
+        let temp = std::env::temp_dir().join(format!("di-test-{}.md", std::process::id()));
+        let (code, out, err) = run(&[
+            "recommend",
+            "ecommerce storefront checkout",
+            "--persist",
+            "--project-name",
+            "Storefront Revamp",
+            "--page",
+            "Checkout Flow",
+            "--out",
+            temp.to_str().unwrap(),
+            "--catalog",
+            catalog.to_str().unwrap(),
+        ]);
+        assert_eq!(code, 0, "stderr: {err}");
+        assert!(out.contains("Persisted design system"), "out: {out}");
+        let written = fs::read_to_string(&temp).unwrap();
+        assert!(written.contains("# Storefront Revamp"));
+        assert!(written.contains("## Checkout Flow"));
+        assert!(written.contains("Anti-patterns to avoid"));
+        let _ = fs::remove_file(&temp);
+    }
+
+    #[test]
+    fn missing_request_errors() {
+        let catalog = repo_catalog_path();
+        let (code, _, err) = run(&["recommend", "--catalog", catalog.to_str().unwrap()]);
+        assert_eq!(code, 1);
+        assert!(err.contains("request is required"), "err: {err}");
+    }
+
+    #[test]
+    fn bad_catalog_path_errors_clearly() {
+        let (code, _, err) = run(&[
+            "recommend",
+            "saas dashboard",
+            "--catalog",
+            "/nonexistent/catalog.json",
+        ]);
+        assert_eq!(code, 1);
+        assert!(err.contains("catalog not found"), "err: {err}");
+    }
+}

@@ -21,6 +21,7 @@ to the official Claude Code docs at code.claude.com as of the audit date.
 | caveman (`JuliusBrussee/caveman`) | Skill that compresses the model's own replies (terse "caveman speak") | MIT | Token economy on the **output** side (claude-core only compacts command **output**); ships slash commands, statusline, MCP middleware. |
 | superpowers (`obra/superpowers`) | Opinionated TDD methodology as auto-triggering skills | MIT | Skills + workflow doctrine; `writing-skills` meta-skill with a subagent eval harness; two-stage review loop; visual brainstorming. |
 | ECC ("Everything Claude Code", `affaan-m/ECC`) | Multi-harness operator framework | MIT | Whole operator posture at larger scale; **Instincts** (confidence-scored learned behaviors that evolve into skills), **AgentShield** (adversarial config security audit), advisor CLI, cross-harness adapters. |
+| UI/UX Pro Max (`nextlevelbuilder/ui-ux-pro-max-skill`) | Design-intelligence skill: a knowledge corpus + generator that turns a UI request into a design-system packet (style, palette, typography, anti-patterns, checklist) | MIT | Single-domain overlap with claude-core's **`design-intelligence` generator** + the `ui-design-systems-and-responsive-interfaces` skill. Larger corpus (67 styles / 161 palettes / 57 font pairings vs our 13 / 9 / 7), persists to `design-system/MASTER.md`. Cross-harness (Claude/Cursor/Copilot/Gemini/Codex/Kiro/…). Accessibility is checklist guidance, not automated WCAG validation — same posture as ours. No command-output compaction, no review gate, no learning loop, no brownfield gate. |
 
 Note: published star counts for these repos (caveman/superpowers/ECC/RTK) were
 flagged as implausible/unverifiable during research and are deliberately not used
@@ -279,6 +280,39 @@ The repo now ships 23 specialist/methodology skills (manifest-driven; the binary
 discovers the count from `plugin.json`, so no hardcoded total drifts). The
 three additions are the superpowers methodology trio above. `using-claude-core`
 catalog header and entries updated to match.
+
+- ~~UI/UX Pro Max design-intelligence generator was a stub~~ **(closed this
+  pass).** An audit against `nextlevelbuilder/ui-ux-pro-max-skill` (whose headline
+  is a knowledge-corpus design generator) exposed a real doc/impl drift on **our**
+  side: `claude-skills design-intelligence recommend` was a three-line stub that
+  ignored the request, the 47-entry `design_intelligence_catalog.json`, and every
+  flag the SKILL.md and reference doc documented (`--stack`, `--component-library`,
+  `--format`, `--persist`). The skill *promised* a catalog-driven generator that
+  did not exist. Implemented for real in `utility/design_intelligence.rs`:
+  - Loads the catalog (explicit `--catalog`, else the repo skill, else the
+    installed `<claude_home>/skills/.../data/` copy), keyword-scores the request
+    against product archetypes, and emits a confidence-rated packet: archetype +
+    trust posture + content priorities + CTA guidance, then style family, color
+    mood, typography mood, polish/recovery/verification checks, and merged
+    anti-patterns.
+  - `--stack` biases style/color/typography by intersecting the archetype's
+    recommendations with the stack profile and appends stack-specific guidance,
+    preview tools, and validation checks; an unknown stack is noted, not fatal.
+  - `--component-library` adds reuse guidance; `--persist --project-name --page`
+    writes a `design-system/MASTER.md` artifact (the UI/UX Pro Max persistence
+    analog); `--format json|text`.
+  - A request-first argument parser (flags can follow the free-text request in
+    either order) replaces the shared `FlagSet`, which would have swallowed flags
+    into the request string. 8 unit tests + an end-to-end install/verify run cover
+    routing, JSON shape, stack bias, unknown-stack fallback, low-confidence
+    fallback, persistence, and error paths.
+
+  Honest standing vs UI/UX Pro Max: their **corpus is larger** (67 styles / 161
+  palettes / 57 font pairings vs our 13 / 9 / 7) and they are cross-harness. Our
+  generator is now real, ships inside the single hook-wired binary (no Python
+  runtime, unlike theirs), and feeds a deeper UI skill with brownfield + WCAG +
+  review-gate discipline they do not have. Corpus breadth is the remaining
+  single-axis gap and is incremental data work, not architecture.
 
 
 ### Bugs found and fixed while verifying the workflows end-to-end

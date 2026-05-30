@@ -1,7 +1,7 @@
-//! Purpose: Code search and design intelligence command handlers
+//! Purpose: Code search command handler
 //! Caller: commands.rs via utility dispatcher
 //! Dependencies: std::io, std::fs, std::path, crate::args, crate::runtime
-//! Main Functions: run_code_search_command, run_design_intelligence_command
+//! Main Functions: run_code_search_command
 //! Side Effects: Reads repository files, writes search results to stdout
 
 use std::fs;
@@ -30,42 +30,6 @@ pub fn run_code_search_command(
             1
         }
     }
-}
-
-pub fn run_design_intelligence_command(
-    arguments: &[String],
-    standard_output: &mut dyn Write,
-    standard_error: &mut dyn Write,
-) -> u8 {
-    if arguments.is_empty() || is_help_argument(&arguments[0]) {
-        let _ = writeln!(
-            standard_output,
-            "Usage: claude-skills design-intelligence recommend [flags]"
-        );
-        return if arguments.is_empty() { 1 } else { 0 };
-    }
-    if arguments[0] != "recommend" {
-        let _ = writeln!(
-            standard_error,
-            "Unknown design-intelligence command: {}",
-            arguments[0]
-        );
-        return 1;
-    }
-    let _ = writeln!(standard_output, "Design Intelligence Recommendation");
-    let _ = writeln!(
-        standard_output,
-        "- preserve existing visual language before changing components"
-    );
-    let _ = writeln!(
-        standard_output,
-        "- validate responsive behavior on desktop and mobile"
-    );
-    let _ = writeln!(
-        standard_output,
-        "- avoid generic AI-looking layouts unless matching an existing system"
-    );
-    0
 }
 
 fn run_code_search_search(
