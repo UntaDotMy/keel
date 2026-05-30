@@ -840,9 +840,19 @@ fn session_start_context() -> String {
     // bootstrap skill instead of restating it on every UserPromptSubmit.
     //
     // Layout: full bootstrap skill (iron law + Red Flags + skill catalog +
-    // workspace pointers) followed by the runtime-resolved memory pointer
-    // that CLAUDE.md cannot know in advance.
-    format!("{BOOTSTRAP_SKILL}\n\n{}", memory_scope_summary())
+    // workspace pointers), the runtime-resolved memory pointer that CLAUDE.md
+    // cannot know in advance, and the learned-instinct digest for the current
+    // project (the always-on tier of the learning loop — what the user
+    // reliably does here, surfaced without waiting for a skill match).
+    let mut context = format!("{BOOTSTRAP_SKILL}\n\n{}", memory_scope_summary());
+    if let (Ok(claude_home), Ok(cwd)) = (resolve_claude_home(""), std::env::current_dir()) {
+        let digest = learning::project_instinct_digest(&claude_home, &cwd.to_string_lossy());
+        if !digest.trim().is_empty() {
+            context.push_str("\n\n");
+            context.push_str(&digest);
+        }
+    }
+    context
 }
 
 fn pre_compact_context() -> String {

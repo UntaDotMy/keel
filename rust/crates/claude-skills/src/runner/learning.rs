@@ -216,6 +216,54 @@ pub fn run_learning_cycle(
     report
 }
 
+/// Render a compact, always-on digest of the trusted instincts for the project
+/// rooted at `cwd`, for injection into SessionStart context. Empty string when
+/// there is nothing trusted to surface, so the caller can append unconditionally
+/// without adding a blank section.
+///
+/// This is the lightweight, always-on tier (ECC's key move): generated skills
+/// are loaded on demand by Claude Code's matcher, but a one-line-per-instinct
+/// digest of what the user reliably does in *this* project is cheap enough to
+/// keep in context every session. Only instincts at or above the skill-trust
+/// confidence are surfaced, so a half-formed pattern never leaks into context.
+pub fn project_instinct_digest(claude_home: &Path, cwd: &str) -> String {
+    let project = project_name(cwd);
+    let store = RecordStore::new(claude_home, INSTINCT_GROUP);
+    let records = match store.list_records() {
+        Ok(records) => records,
+        Err(_) => return String::new(),
+    };
+    let mut lines: Vec<(i64, String)> = Vec::new();
+    for (_, record) in &records {
+        if field(record, "project") != Some(project.as_str()) {
+            continue;
+        }
+        let confidence: i64 = field(record, "confidence")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0);
+        if confidence < SKILL_MIN_CONFIDENCE {
+            continue;
+        }
+        let guidance = field(record, "guidance").unwrap_or("").trim();
+        if guidance.is_empty() {
+            continue;
+        }
+        lines.push((
+            confidence,
+            format!("- {guidance} (confidence {confidence})"),
+        ));
+    }
+    if lines.is_empty() {
+        return String::new();
+    }
+    lines.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    let body: Vec<String> = lines.into_iter().take(8).map(|(_, line)| line).collect();
+    format!(
+        "Learned conventions for the {project} project (observed by claude-skills; treat as defaults, not constraints):\n{}",
+        body.join("\n")
+    )
+}
+
 /// CLI surface: `claude-skills learn [status|run|dry-run] [--window N] [--json]`.
 ///
 /// This is the *inspection and manual-trigger* path. The loop runs
@@ -955,6 +1003,70 @@ mod tests {
                 Some("4"),
                 "confidence-5 instinct decays to 4, not deleted"
             );
+        });
+    }
+
+    #[test]
+    fn project_instinct_digest_surfaces_only_trusted_for_matching_project() {
+        isolated_home("digest", |root| {
+            let store = RecordStore::new(root, INSTINCT_GROUP);
+            // Trusted instinct for the target project.
+            let trusted_id = instinct_id("digestproj", "cargo test");
+            store
+                .write_record(
+                    &trusted_id,
+                    &vec![
+                        ("id".into(), trusted_id.clone()),
+                        ("trigger".into(), "cargo test".into()),
+                        ("guidance".into(), "Frequently runs `cargo test`".into()),
+                        ("confidence".into(), "6".into()),
+                        ("project".into(), "digestproj".into()),
+                        ("source".into(), SOURCE_OBSERVED.into()),
+                    ],
+                )
+                .expect("write trusted");
+            // Below-threshold instinct (same project) — must NOT surface.
+            let weak_id = instinct_id("digestproj", "ls");
+            store
+                .write_record(
+                    &weak_id,
+                    &vec![
+                        ("id".into(), weak_id.clone()),
+                        ("trigger".into(), "ls".into()),
+                        ("guidance".into(), "Frequently runs `ls`".into()),
+                        ("confidence".into(), "2".into()),
+                        ("project".into(), "digestproj".into()),
+                        ("source".into(), SOURCE_OBSERVED.into()),
+                    ],
+                )
+                .expect("write weak");
+            // Trusted instinct for a DIFFERENT project — must NOT surface.
+            let other_id = instinct_id("otherproj", "npm test");
+            store
+                .write_record(
+                    &other_id,
+                    &vec![
+                        ("id".into(), other_id.clone()),
+                        ("trigger".into(), "npm test".into()),
+                        ("guidance".into(), "Frequently runs `npm test`".into()),
+                        ("confidence".into(), "9".into()),
+                        ("project".into(), "otherproj".into()),
+                        ("source".into(), SOURCE_OBSERVED.into()),
+                    ],
+                )
+                .expect("write other");
+
+            let digest = project_instinct_digest(root, "/work/digestproj");
+            assert!(digest.contains("digestproj"), "names the project: {digest}");
+            assert!(digest.contains("cargo test"), "includes trusted instinct");
+            assert!(
+                !digest.contains("`ls`"),
+                "excludes below-threshold instinct"
+            );
+            assert!(!digest.contains("npm test"), "excludes other project");
+
+            // A project with no trusted instincts yields empty (no blank section).
+            assert!(project_instinct_digest(root, "/work/emptyproj").is_empty());
         });
     }
 
