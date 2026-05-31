@@ -1,7 +1,7 @@
 ---
 name: brainstorming
-description: Socratic design exploration before implementation. Use when a request is open-ended, the approach is not obvious, multiple designs are plausible, or the user says "how should we", "what are the options", "help me think through", or "design". Refines a vague idea into a concrete, agreed design through questions and trade-off comparison before any code is written — and captures the decision so it survives compaction. The generative counterpart to Think-Before-Coding (which guards against guessing); this skill produces the design to commit to.
-when_to_use: Open-ended or ambiguous work where the design is not yet decided — new features, architecture choices, "how should we approach X". Stop before coding and explore. Hand the agreed design to the implementation skills (TDD, the lifecycle skills).
+description: Socratic design exploration and requirement-understanding before implementation. Use when a request is open-ended OR vague/under-specified, the approach is not obvious, multiple designs are plausible, or the user gives a directive feature ask whose details are not yet pinned down — "how should we", "what are the options", "help me think through", "design", or imperative asks like "add X", "build Y", "make Z work" where the user story is not yet confirmed. Restates the request, confirms the user story, and refines a vague idea into a concrete, agreed design through questions and trade-off comparison before any code is written — and captures the decision so it survives compaction. The generative counterpart to Think-Before-Coding (which guards against guessing); this skill produces the design to commit to.
+when_to_use: Open-ended, ambiguous, OR vague-but-directive work where the request is not yet pinned to a confirmed user story — new features, architecture choices, "how should we approach X", or "build/add/make X" asks whose requirements are not yet sharp. Stop before coding, restate the request, and confirm what is actually wanted. Hand the agreed design to the implementation skills (TDD, the lifecycle skills).
 allowed-tools: Read, Grep, Glob, Bash(claude-skills memory:*)
 effort: medium
 ---
@@ -34,9 +34,15 @@ Invoke brainstorming when any of these hold:
 - The requirements are not yet sharp enough to write a failing test against.
 - The change is large enough that committing to the wrong shape is expensive.
 
-Skip it for mechanical or unambiguous work (a rename, a known one-line fix, a
-clearly specified change). Brainstorming a trivial task wastes the user's time —
-match the ceremony to the stakes.
+Skip it only for genuinely mechanical, fully-specified work — a rename, a known
+one-line fix, a change whose requirement is already unambiguous and confirmed.
+"It feels unambiguous" is not the test; "I have restated the request and the
+user story is confirmed" is. A directive ask ("add X", "build Y") that *seems*
+clear but whose user story you have not actually confirmed is exactly the case
+this skill exists for — do the restate-and-confirm step first, then decide
+whether the design also needs exploring. Match the ceremony to the stakes: a
+confirmed-and-trivial task needs neither; a vague one needs at least the
+understanding step before any code.
 
 ## The Practice
 
