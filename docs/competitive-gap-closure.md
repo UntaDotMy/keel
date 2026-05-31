@@ -19,7 +19,7 @@ to the official Claude Code docs at code.claude.com as of the audit date.
 | Official Claude Code | The host platform (code.claude.com/docs) | Anthropic | The baseline claude-core extends; ~30 hook events, skills (commands merged in), built-in subagents, checkpointing/rewind, MCP Tool Search, Agent SDK. |
 | RTK ("Rust Token Killer", `rtk-ai/rtk`) | Single-binary Rust command-output compaction proxy | Apache-2.0 | Near-identical to claude-core's compaction proxy; "100+ supported commands" (mostly subcommand breadth within categories we also cover — 8 git subcmds, 8 aws subcmds, etc.), `gain`/`discover`/`session`, tee recovery. Verified from the upstream README: **no auto-rewrite on native Windows** (falls back to CLAUDE.md injection) and **never intercepts Read/Grep/Glob** (Bash-tool-only hook). |
 | caveman (`JuliusBrussee/caveman`) | Skill that compresses the model's own replies (terse "caveman speak") | MIT | Token economy on the **output** side (claude-core only compacts command **output**); ships slash commands, statusline, MCP middleware. |
-| superpowers (`obra/superpowers`) | Opinionated TDD methodology as auto-triggering skills | MIT | Skills + workflow doctrine; `writing-skills` meta-skill with a subagent eval harness; two-stage review loop; visual brainstorming. |
+| superpowers (`obra/superpowers`) | Opinionated TDD methodology as auto-triggering skills | MIT | Skills + workflow doctrine; `writing-skills` meta-skill with a subagent eval harness; two-stage review loop (walked back to inline self-review checklists in v5.0.6 for speed); visual brainstorming. v5.1.0 (May 2026) removed its legacy slash commands and named code-reviewer agent. Cross-harness (Claude/Codex/Cursor/Gemini/Copilot) — the one axis it still leads. After the methodology-completion pass, claude-core ships named first-class equivalents for **all 14** of its methodology skills (see scorecard). |
 | ECC ("Everything Claude Code", `affaan-m/ECC`) | Multi-harness operator framework | MIT | Whole operator posture at larger scale; **Instincts** (confidence-scored learned behaviors that evolve into skills), **AgentShield** (adversarial config security audit), advisor CLI, cross-harness adapters. |
 | UI/UX Pro Max (`nextlevelbuilder/ui-ux-pro-max-skill`) | Design-intelligence skill: a knowledge corpus + generator that turns a UI request into a design-system packet (style, palette, typography, anti-patterns, checklist) | MIT | Single-domain overlap with claude-core's **`design-intelligence` generator** + the `ui-design-systems-and-responsive-interfaces` skill. After the corpus-expansion pass, comparable corpus (their 67 styles / 161 palettes / 57 font pairings vs our 23 styles / 48 palettes / 50 pairings, plus our 25 archetypes / 21 color moods / 15 typography moods / 15 stack profiles / 25 chart types / 60 UX guidelines — same artifact types). Both persist to `design-system/MASTER.md`. They are cross-harness (Claude/Cursor/Copilot/Gemini/Codex/Kiro/…); ours ships inside the single hook-wired Rust binary (no Python runtime). Accessibility is checklist guidance, not automated WCAG validation — same posture as ours. No command-output compaction, no review gate, no learning loop, no brownfield gate. |
 
@@ -206,6 +206,13 @@ N = absent.
 | TDD loop as a named skill (RED-GREEN-REFACTOR) | Y (test-driven-development) | N | N | Y | N | N | N |
 | Root-cause debugging as a named skill | Y (systematic-debugging) | N | N | Y | N | N | N |
 | Design-before-code brainstorming as a named skill | Y (brainstorming, brief-captured) | N | N | Y | N | N | N |
+| Plan-authoring + step-verified plan-execution skills | Y (writing-plans + executing-plans) | N | N | Y | N | N | N |
+| Subagent-driven development as a named loop | Y (subagent-driven-development) | ~ | ~ | Y | N | N | N |
+| Parallel-agent dispatch w/ independence test | Y (dispatching-parallel-agents) | N | ~ | Y | N | N | N |
+| Git-worktree isolation as a named workflow | Y (using-git-worktrees) | N | N | Y | N | N | N |
+| Branch-finishing closeout skill | Y (finishing-a-development-branch) | N | N | Y | N | N | N |
+| Author-side receiving-code-review skill | Y (receiving-code-review) | N | N | Y | N | N | N |
+| Adversarial skill-prose eval harness | Y (writing-skills + subagent pressure-test) | N | N | Y (headline) | N | N | N |
 | Fail-closed review gate + release ladder | Y | N | ~ | ~ (TDD loop) | N | N | N |
 | Brownfield preserve-existing-flow gate | Y (unique) | N | N | N | N | N | N |
 | Auto-refreshed system map + recall index | Y | ~ (memory) | ~ | N | N | N | N |
@@ -268,18 +275,65 @@ N = absent.
   - `brainstorming` — Socratic design exploration that converges on one agreed
     design and **captures it in the working brief** (so `reviewer` Stage 1 has a
     spec to check against), the generative front half of Think-Before-Coding.
-  All three pass `skill-lint`, install + byte-compare-verify cleanly (24 skills
-  total), and are registered in the plugin manifest and the `using-claude-core`
-  bootstrap catalog. Note superpowers authors skills by a *manual* TDD-for-prompts
-  method; claude-core's authoring is the autonomous learning loop — different
-  mechanism, both now cover the methodology surface.
+  All three pass `skill-lint`, install + byte-compare-verify cleanly, and are
+  registered in the plugin manifest and the `using-claude-core` bootstrap catalog.
+  Note superpowers authors skills by a *manual* TDD-for-prompts method;
+  claude-core's authoring is the autonomous learning loop — different mechanism,
+  both now cover the methodology surface.
 
-### Skill count: 20 → 23 (named-skill parity with superpowers' methodology set)
+- ~~Remaining superpowers methodology surface (the other 11 skills + the
+  writing-skills eval harness)~~ **(closed this pass).** A full capability re-audit
+  against `obra/superpowers` v5.1.0 (read all 14 SKILL.md frontmatters, the single
+  SessionStart hook, the marketplace manifest, and the `writing-skills` eval method)
+  mapped every one of its skills to claude-core. The prior pass had closed the
+  methodology *trio*; this pass closed the rest, promoting diffuse doctrine and CLI
+  surfaces into discrete name-triggerable skills and closing the one genuine
+  mechanism gap. Eight new skills:
+  - `writing-skills` — **the headline gap.** superpowers' meta-skill applies TDD to
+    skill *prose*: dispatch a fresh subagent the target situation *without* the skill
+    under stacked pressure (time + sunk cost + authority), capture the wrong call and
+    its rationalizations, write the minimum prose that flips it, re-test under
+    pressure until the subagent decides right and cites the skill. claude-core had
+    only `skill-lint` (structural, explicitly "without invoking the live model") and
+    the statistical `learn` loop — nothing tested whether prose changes behavior.
+    Now shipped as a skill plus `references/10-testing-skills-with-subagents.md`,
+    framed as the behavioral gate *above* skill-lint's structural gate.
+  - `writing-plans` / `executing-plans` — the plan-authoring and step-by-step
+    plan-execution loop (each step names files + a verification check; stop on a
+    failed check), promoting what was spread across `software-development-life-cycle`
+    and the workflow/orchestration ledgers into two discrete skills.
+  - `subagent-driven-development` — delegate self-contained tasks to fresh-context
+    subagents and re-verify in the main thread (the discipline behind the 18-agent
+    roster, now a named loop).
+  - `dispatching-parallel-agents` — the four-condition independence test as a
+    name-triggerable skill (was per-prompt doctrine in `hook_lifecycle.rs`, no skill).
+  - `using-git-worktrees` — isolated checkouts, prefer-native-then-worktree, with
+    cleanup (was `git-expert` prose + telemetry-only WorktreeCreate/Remove hooks).
+  - `finishing-a-development-branch` — verify → completion-gate → reviewer → present
+    merge/PR/cleanup options (never unilateral force-push/merge), consolidating
+    closeout that was split across `git-expert`, the workflow `finish --proof`
+    ledger, and the completion gate.
+  - `receiving-code-review` — the author-side counterpart to `reviewer`: judge each
+    comment on merit, fix valid ones at root cause with evidence, push back on wrong
+    ones with evidence, re-verify (superpowers separates requesting vs receiving;
+    `requesting-code-review` maps to our `reviewer` + `/claude-core:review`).
+  All eight pass `claude-skills skill-lint` (32 skills, 0 failed, 0 warned) and are
+  registered in the plugin manifest and the `using-claude-core` catalog. With this
+  pass, claude-core ships a named first-class equivalent for **all 14** superpowers
+  methodology skills; the only remaining superpowers lead is the by-design
+  cross-harness axis.
 
-The repo now ships 23 specialist/methodology skills (manifest-driven; the binary
-discovers the count from `plugin.json`, so no hardcoded total drifts). The
-three additions are the superpowers methodology trio above. `using-claude-core`
-catalog header and entries updated to match.
+### Skill count: 20 → 23 → 31 (full named-skill parity with superpowers' methodology set)
+
+The repo now ships 31 specialist/methodology skills in the manifest (manifest-driven;
+the binary discovers the count from `plugin.json`, so no hardcoded total drifts), plus
+the `using-claude-core` bootstrap and `compression-discipline` (32 SKILL.md files
+total, all passing `skill-lint`). The methodology trio (`test-driven-development`,
+`systematic-debugging`, `brainstorming`) closed the first superpowers gap; the eight
+skills above (`writing-skills`, `writing-plans`, `executing-plans`,
+`subagent-driven-development`, `dispatching-parallel-agents`, `using-git-worktrees`,
+`finishing-a-development-branch`, `receiving-code-review`) close the remainder.
+`using-claude-core` catalog header and entries updated to match.
 
 - ~~UI/UX Pro Max design-intelligence generator was a stub~~ **(closed this
   pass).** An audit against `nextlevelbuilder/ui-ux-pro-max-skill` (whose headline

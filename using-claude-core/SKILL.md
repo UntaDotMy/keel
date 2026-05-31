@@ -112,7 +112,7 @@ skill matcher fires. The full text and the tactical rules they imply live in
 | "I'll add a config knob in case we need it" | Step 2 (Simplicity First) violated. Add it when a second caller exists. |
 | "Make it work" is a goal | Step 4 (Goal-Driven Execution) failed. State the verifiable check that proves done. |
 
-## Skill catalog (23 skills installed under ~/.claude/skills/)
+## Skill catalog (30 skills installed under ~/.claude/skills/)
 
 Source: each `<name>/SKILL.md` in this repo. Use the Skill tool with the bare
 name (e.g. `Skill("reviewer")`).
@@ -130,6 +130,15 @@ name (e.g. `Skill("reviewer")`).
 - `brainstorming` — Socratic design exploration before implementation: refine an open-ended idea into a concrete, agreed design with trade-offs, captured in the working brief before any code. The generative front half of Think-Before-Coding.
 - `test-driven-development` — The tight RED-GREEN-REFACTOR loop: write the failing test first, make it pass with the minimum change, refactor under green. The per-change companion to qa-and-automation-engineer's coverage strategy.
 - `systematic-debugging` — Root-cause-first defect work: reproduce the symptom, trace it end-to-end with file:line evidence, fix the source of truth, prove it with a regression test. Use instead of patching the first suspicious line.
+- `writing-plans` — Turn an agreed design into an ordered, per-step-verifiable implementation plan (each step names its files and its check), captured in the working brief. The front half of execution.
+- `executing-plans` — Drive a captured plan to done one step at a time, running each step's verification check before advancing and stopping on a failed check. The back half of planning.
+- `subagent-driven-development` — Delegate self-contained plan tasks to fresh-context subagents to preserve the controller's window, then integrate and re-verify in the main thread.
+- `dispatching-parallel-agents` — Fan out genuinely independent work concurrently (the four-condition independence test), and sequence work that fails the test instead of colliding.
+- `using-git-worktrees` — Isolate feature or experimental work in its own checkout (prefer native harness isolation, fall back to a git worktree) so parallel work and the main tree never collide; clean up on merge or abandon.
+- `finishing-a-development-branch` — Close out a completed branch: verify the full suite, confirm the completion gate, review non-trivial work, then present merge/PR/cleanup options rather than acting unilaterally.
+- `receiving-code-review` — Act on review feedback as the author: judge each point on merit, fix valid ones at the root cause with evidence, push back on wrong ones with evidence, re-verify before claiming addressed.
+- `requesting-code-review` — see `reviewer`; route a non-trivial diff through the fail-closed review gate.
+- `writing-skills` — Author and revise skills with evidence the prose changes behavior: RED-GREEN-REFACTOR on the instructions themselves, pressure-testing a fresh subagent without the skill, then with it. The behavioral gate above skill-lint's structural gate.
 - `ui-design-systems-and-responsive-interfaces` — UI systems, responsive design, accessibility (WCAG 2.1 AA).
 - `ux-research-and-experience-strategy` — UX research and evidence-based experience design (journeys, funnels, usability).
 - `memory-status-reporter` — Human-style memory health and learning reports.
