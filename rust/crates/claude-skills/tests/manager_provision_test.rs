@@ -219,6 +219,21 @@ fn project_subagents_reference_iron_law_bootstrap() {
         bootstrap_text.contains("Trust the codebase"),
         "bootstrap text should restate the research-first contract; got:\n{bootstrap_text}"
     );
+    // The subagent iron law must carry the understand-before-building rule, not
+    // only the read-first / root-cause rules. Subagents spawn fresh and never
+    // see the SessionStart bootstrap, so if this rule is dropped here a
+    // delegated agent loses the "research the request before building, no
+    // guessing" contract entirely — and nothing else would catch it. Pin both
+    // the rule name and its no-guessing clause so a reword that guts the
+    // meaning still trips the test.
+    assert!(
+        bootstrap_text.contains("Understand before building"),
+        "subagent iron law must name the understand-before-building rule; got:\n{bootstrap_text}"
+    );
+    assert!(
+        bootstrap_text.contains("Do not guess"),
+        "subagent iron law must forbid guessing the request; got:\n{bootstrap_text}"
+    );
 
     let agents_directory = repository_root.join(".claude").join("agents");
     let entries = fs::read_dir(&agents_directory).unwrap_or_else(|error| {

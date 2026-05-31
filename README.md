@@ -13,9 +13,10 @@ Side Effects: Sets contributor and operator expectations for the repo-managed na
 
 ## The Iron Law
 
-Three rules are restated to the agent on every prompt. You cannot skip them.
+Four rules are restated to the agent on every prompt. You cannot skip them.
 
 - **Read first.** Read SYSTEM_MAP, CLAUDE.md, the owning module, and the existing implementation. Do not propose changes against an imagined version of the file.
+- **Understand before building.** Restate what the request actually asks, confirm the user story, and research what is genuinely needed before writing code. No guessing, no assuming, no building against an imagined spec. Correct code that solved the wrong problem still gets thrown away — the research that prevents it is always cheaper than the rebuild.
 - **Invoke relevant skills.** If there is even a 1% chance a skill applies, use the Skill tool *before* writing code or giving a final answer. The cost of skipping a skill that did apply is shipping a regression.
 - **Find the root cause.** Take the symptom as a starting point, not the spec. The real problem is usually one layer below what was asked. Trace the symptom end-to-end against the running code with file:line evidence before changing anything.
 

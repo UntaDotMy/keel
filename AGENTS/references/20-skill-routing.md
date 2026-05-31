@@ -86,7 +86,7 @@ The old generic `default`, `explorer`, `worker`, `architect`, and `awaiter` TOML
 
 ## Routing Principles (Detailed)
 
-These 52 numbered principles previously lived in `00-skill-routing-and-escalation.md`. They were moved here so the root file stays tight while the depth remains searchable.
+These 53 numbered principles previously lived in `00-skill-routing-and-escalation.md`. They were moved here so the root file stays tight while the depth remains searchable.
 
 1. **Start With The Owning Skill**: When the task clearly belongs to one surface, route directly to that domain skill instead of front-loading reviewer by habit
 2. **Use Focused Execution Deliberately**: If a non-trivial task clearly belongs to one specialist surface, route to that skill; reserve generic local execution for straightforward work
@@ -140,6 +140,7 @@ These 52 numbered principles previously lived in `00-skill-routing-and-escalatio
 50. **No Hardcoded Runtime Decisions**: Reject hardcoded thresholds, endpoints, environment-specific paths, rollout choices, secrets, or magic values when configuration, derivation, or existing constants are the correct source of truth
 51. **Keep Commit Bodies Professional**: When a task includes Git commit or PR body writing, keep the language professional, keep the text scoped to the actual diff, do not mention Claude Code or claude-skills unless the change itself is about those surfaces, and keep commit bodies in this order when the sections are needed: Problem, Solution, What Changed, Test Result
 52. **Hold Final Synthesis Until Closure Checks Pass**: Before the answer is presented, explicitly confirm that the named task set is done or honestly blocked, tests passed, coverage is adequate for the touched risk surface, and no partial implementation is being mislabeled as complete
+53. **Understand The Request Before Building**: Before writing any code, restate what the request actually asks, confirm the user story, and research what is genuinely needed instead of building against an imagined spec. Do not guess, do not assume. Correct code that solved the wrong problem is the most expensive failure — it passes review and still gets thrown away — so this gates routing itself: there is no point selecting a skill or refreshing memory for the wrong task. This is distinct from #49 (reproduce failures before fixing, a debugging rule) and #15 (clarify when ambiguity remains after review): this principle requires the restate-and-research step up front, before the question of which skill even applies. For a vague or directive feature ask whose user story is not yet confirmed, route through `brainstorming` to restate and confirm before building.
 
 ## Routing Authority and Overlap Resolution
 
