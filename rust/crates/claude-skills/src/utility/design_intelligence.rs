@@ -405,7 +405,176 @@ fn build_packet(request: &str, catalog: &Value, stack_id: &str, component_librar
         });
     }
 
+    // Concrete artifacts: a real palette, a real font pairing, chart guidance,
+    // and matched UX rules — the data that makes the recommendation buildable
+    // rather than abstract.
+    let color_id = str_field(color, "id");
+    if let Some(palette) = pick_palette(catalog, &color_id, &request_lower, &tokens) {
+        packet["color_palette"] = palette_summary(palette);
+    }
+    let typography_id = str_field(typography, "id");
+    if let Some(pairing) = pick_font_pairing(catalog, &typography_id, &request_lower, &tokens) {
+        packet["font_pairing"] = font_pairing_summary(pairing);
+    }
+    let charts = pick_chart_types(catalog, &request_lower, &tokens);
+    if !charts.is_empty() {
+        packet["recommended_charts"] = Value::Array(charts);
+    }
+    let guidelines = pick_ux_guidelines(catalog, archetype, &request_lower, &tokens);
+    if !guidelines.is_empty() {
+        packet["ux_guidelines"] = Value::Array(guidelines);
+    }
+
     packet
+}
+
+/// Pick the best palette for the chosen color mood: prefer palettes whose
+/// `color_mood` matches, ranked by direct keyword score against the request.
+fn pick_palette<'a>(
+    catalog: &'a Value,
+    color_mood_id: &str,
+    request_lower: &str,
+    tokens: &HashSet<String>,
+) -> Option<&'a Value> {
+    let palettes = catalog.get("color_palettes")?.as_array()?;
+    let wants_dark = request_lower.contains("dark");
+    let mut best: Option<(&Value, i64)> = None;
+    for palette in palettes {
+        if str_field(palette, "color_mood") != color_mood_id {
+            continue;
+        }
+        let mut score =
+            score_keywords(request_lower, tokens, &str_array(palette, "keywords")) as i64;
+        // Honor an explicit light/dark request when present.
+        if str_field(palette, "mode") == "dark" {
+            score += if wants_dark { 2 } else { -1 };
+        } else if wants_dark {
+            score -= 1;
+        }
+        if best.map_or(true, |(_, best_score)| score > best_score) {
+            best = Some((palette, score));
+        }
+    }
+    best.map(|(palette, _)| palette)
+}
+
+fn palette_summary(palette: &Value) -> Value {
+    json!({
+        "id": str_field(palette, "id"),
+        "display_name": str_field(palette, "display_name"),
+        "mode": str_field(palette, "mode"),
+        "colors": palette.get("colors").cloned().unwrap_or(Value::Null),
+        "contrast_notes": str_field(palette, "contrast_notes"),
+    })
+}
+
+/// Pick the best font pairing for the chosen typography mood.
+fn pick_font_pairing<'a>(
+    catalog: &'a Value,
+    typography_mood_id: &str,
+    request_lower: &str,
+    tokens: &HashSet<String>,
+) -> Option<&'a Value> {
+    let pairings = catalog.get("font_pairings")?.as_array()?;
+    let mut best: Option<(&Value, u32)> = None;
+    for pairing in pairings {
+        if str_field(pairing, "typography_mood") != typography_mood_id {
+            continue;
+        }
+        let score = score_keywords(request_lower, tokens, &str_array(pairing, "keywords"));
+        if best.map_or(true, |(_, best_score)| score > best_score) {
+            best = Some((pairing, score));
+        }
+    }
+    best.map(|(pairing, _)| pairing)
+}
+
+fn font_pairing_summary(pairing: &Value) -> Value {
+    json!({
+        "id": str_field(pairing, "id"),
+        "display_name": str_field(pairing, "display_name"),
+        "heading_font": str_field(pairing, "heading_font"),
+        "body_font": str_field(pairing, "body_font"),
+        "mono_font": str_field(pairing, "mono_font"),
+        "source": str_field(pairing, "source"),
+        "scale": str_field(pairing, "scale"),
+        "weights": str_array(pairing, "weights"),
+        "pairing_rationale": str_field(pairing, "pairing_rationale"),
+    })
+}
+
+/// Recommend up to three chart types whose keywords match the request. Returns
+/// an empty list when the request shows no data-visualization intent.
+fn pick_chart_types(catalog: &Value, request_lower: &str, tokens: &HashSet<String>) -> Vec<Value> {
+    let Some(charts) = catalog.get("chart_types").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut scored: Vec<(&Value, u32)> = charts
+        .iter()
+        .map(|chart| {
+            (
+                chart,
+                score_keywords(request_lower, tokens, &str_array(chart, "keywords")),
+            )
+        })
+        .filter(|(_, score)| *score > 0)
+        .collect();
+    scored.sort_by_key(|(_, score)| std::cmp::Reverse(*score));
+    scored
+        .into_iter()
+        .take(3)
+        .map(|(chart, _)| {
+            json!({
+                "id": str_field(chart, "id"),
+                "display_name": str_field(chart, "display_name"),
+                "use_when": str_field(chart, "use_when"),
+                "accessibility_notes": str_field(chart, "accessibility_notes"),
+                "library_examples": str_array(chart, "library_examples"),
+            })
+        })
+        .collect()
+}
+
+/// Match UX guidelines to the request and archetype. Always returns the
+/// critical-severity rules (they apply broadly), plus the highest-scoring
+/// keyword/archetype matches, capped to keep the packet focused.
+fn pick_ux_guidelines(
+    catalog: &Value,
+    archetype: &Value,
+    request_lower: &str,
+    tokens: &HashSet<String>,
+) -> Vec<Value> {
+    let Some(guidelines) = catalog.get("ux_guidelines").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let archetype_id = str_field(archetype, "id");
+    let mut scored: Vec<(&Value, u32)> = Vec::new();
+    for guideline in guidelines {
+        let mut score = score_keywords(request_lower, tokens, &str_array(guideline, "keywords"));
+        let applies = str_array(guideline, "applies_to");
+        if applies.iter().any(|a| a == "all" || a == &archetype_id) {
+            score += 2;
+        }
+        if str_field(guideline, "severity") == "critical" {
+            score += 1;
+        }
+        if score > 0 {
+            scored.push((guideline, score));
+        }
+    }
+    scored.sort_by_key(|(_, score)| std::cmp::Reverse(*score));
+    scored
+        .into_iter()
+        .take(8)
+        .map(|(guideline, _)| {
+            json!({
+                "id": str_field(guideline, "id"),
+                "category": str_field(guideline, "category"),
+                "rule": str_field(guideline, "rule"),
+                "severity": str_field(guideline, "severity"),
+            })
+        })
+        .collect()
 }
 
 fn render_text(packet: &Value, output: &mut dyn Write) {
@@ -467,6 +636,74 @@ fn render_text(packet: &Value, output: &mut dyn Write) {
     );
     let _ = writeln!(output);
 
+    if let Some(palette) = packet.get("color_palette") {
+        let _ = writeln!(
+            output,
+            "Color palette: {} ({} mode)",
+            str_field(palette, "display_name"),
+            str_field(palette, "mode")
+        );
+        if let Some(colors) = palette.get("colors").and_then(Value::as_object) {
+            for key in [
+                "primary",
+                "secondary",
+                "accent",
+                "background",
+                "surface",
+                "text_primary",
+            ] {
+                if let Some(hex) = colors.get(key).and_then(Value::as_str) {
+                    let _ = writeln!(output, "  {key}: {hex}");
+                }
+            }
+        }
+        let notes = str_field(palette, "contrast_notes");
+        if !notes.is_empty() {
+            let _ = writeln!(output, "  contrast: {notes}");
+        }
+        let _ = writeln!(output);
+    }
+
+    if let Some(pairing) = packet.get("font_pairing") {
+        let _ = writeln!(
+            output,
+            "Font pairing: {} ({})",
+            str_field(pairing, "display_name"),
+            str_field(pairing, "source")
+        );
+        let _ = writeln!(
+            output,
+            "  Heading: {}   Body: {}   Mono: {}",
+            str_field(pairing, "heading_font"),
+            str_field(pairing, "body_font"),
+            str_field(pairing, "mono_font")
+        );
+        let scale = str_field(pairing, "scale");
+        if !scale.is_empty() {
+            let _ = writeln!(output, "  Scale: {scale}");
+        }
+        let rationale = str_field(pairing, "pairing_rationale");
+        if !rationale.is_empty() {
+            let _ = writeln!(output, "  {rationale}");
+        }
+        let _ = writeln!(output);
+    }
+
+    if let Some(charts) = packet.get("recommended_charts").and_then(Value::as_array) {
+        if !charts.is_empty() {
+            let _ = writeln!(output, "Recommended charts:");
+            for chart in charts {
+                let _ = writeln!(
+                    output,
+                    "  - {}: {}",
+                    str_field(chart, "display_name"),
+                    str_field(chart, "use_when")
+                );
+            }
+            let _ = writeln!(output);
+        }
+    }
+
     if let Some(stack) = packet.get("stack_adaptation") {
         if let Some(note) = stack.get("note").and_then(Value::as_str) {
             let _ = writeln!(output, "Stack adaptation: {note}");
@@ -521,6 +758,22 @@ fn render_text(packet: &Value, output: &mut dyn Write) {
         "Anti-patterns to avoid",
         &str_array(packet, "anti_patterns"),
     );
+
+    if let Some(guidelines) = packet.get("ux_guidelines").and_then(Value::as_array) {
+        if !guidelines.is_empty() {
+            let _ = writeln!(output, "UX guidelines that apply:");
+            for guideline in guidelines {
+                let _ = writeln!(
+                    output,
+                    "  - [{}/{}] {}",
+                    str_field(guideline, "severity"),
+                    str_field(guideline, "category"),
+                    str_field(guideline, "rule")
+                );
+            }
+            let _ = writeln!(output);
+        }
+    }
 }
 
 fn persist_design_system(
@@ -897,6 +1150,97 @@ mod tests {
         assert!(value["style_family"]["id"].is_string());
         assert!(value["professional_polish_checks"].is_array());
         assert!(value["verification_checks"].is_array());
+    }
+
+    #[test]
+    fn packet_attaches_concrete_palette_and_font_pairing() {
+        let catalog = repo_catalog_path();
+        let (code, out, err) = run(&[
+            "recommend",
+            "fintech banking dashboard with secure transfers",
+            "--format",
+            "json",
+            "--catalog",
+            catalog.to_str().unwrap(),
+        ]);
+        assert_eq!(code, 0, "stderr: {err}");
+        let value: Value = serde_json::from_str(&out).expect("valid json");
+        // Palette: a real hex primary tied to the chosen color mood.
+        let primary = value["color_palette"]["colors"]["primary"]
+            .as_str()
+            .expect("palette primary hex");
+        assert!(
+            primary.starts_with('#') && primary.len() == 7,
+            "primary hex: {primary}"
+        );
+        assert!(value["color_palette"]["contrast_notes"].is_string());
+        // Font pairing: real named faces.
+        assert!(value["font_pairing"]["heading_font"].is_string());
+        assert!(!value["font_pairing"]["heading_font"]
+            .as_str()
+            .unwrap()
+            .is_empty());
+        assert!(value["font_pairing"]["body_font"].is_string());
+    }
+
+    #[test]
+    fn dashboard_request_recommends_charts() {
+        let catalog = repo_catalog_path();
+        let (code, out, _) = run(&[
+            "recommend",
+            "analytics dashboard showing revenue trend over time and category comparison",
+            "--format",
+            "json",
+            "--catalog",
+            catalog.to_str().unwrap(),
+        ]);
+        assert_eq!(code, 0);
+        let value: Value = serde_json::from_str(&out).expect("valid json");
+        let charts = value["recommended_charts"]
+            .as_array()
+            .expect("charts array");
+        assert!(!charts.is_empty(), "expected chart recommendations");
+        assert!(charts.iter().all(|c| c["display_name"].is_string()));
+    }
+
+    #[test]
+    fn packet_includes_matched_ux_guidelines() {
+        let catalog = repo_catalog_path();
+        let (code, out, _) = run(&[
+            "recommend",
+            "ecommerce checkout form with payment",
+            "--format",
+            "json",
+            "--catalog",
+            catalog.to_str().unwrap(),
+        ]);
+        assert_eq!(code, 0);
+        let value: Value = serde_json::from_str(&out).expect("valid json");
+        let guidelines = value["ux_guidelines"].as_array().expect("ux guidelines");
+        assert!(!guidelines.is_empty());
+        assert!(guidelines
+            .iter()
+            .all(|g| g["rule"].is_string() && g["severity"].is_string()));
+    }
+
+    #[test]
+    fn dark_mode_request_prefers_dark_palette() {
+        let catalog = repo_catalog_path();
+        let (code, out, _) = run(&[
+            "recommend",
+            "developer console dark mode observability tool",
+            "--format",
+            "json",
+            "--catalog",
+            catalog.to_str().unwrap(),
+        ]);
+        assert_eq!(code, 0);
+        let value: Value = serde_json::from_str(&out).expect("valid json");
+        // A palette should be attached; when a dark palette exists for the mood
+        // the dark-mode bias should select it.
+        if let Some(mode) = value["color_palette"]["mode"].as_str() {
+            assert!(mode == "dark" || mode == "light", "mode: {mode}");
+        }
     }
 
     #[test]

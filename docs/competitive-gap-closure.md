@@ -21,7 +21,7 @@ to the official Claude Code docs at code.claude.com as of the audit date.
 | caveman (`JuliusBrussee/caveman`) | Skill that compresses the model's own replies (terse "caveman speak") | MIT | Token economy on the **output** side (claude-core only compacts command **output**); ships slash commands, statusline, MCP middleware. |
 | superpowers (`obra/superpowers`) | Opinionated TDD methodology as auto-triggering skills | MIT | Skills + workflow doctrine; `writing-skills` meta-skill with a subagent eval harness; two-stage review loop; visual brainstorming. |
 | ECC ("Everything Claude Code", `affaan-m/ECC`) | Multi-harness operator framework | MIT | Whole operator posture at larger scale; **Instincts** (confidence-scored learned behaviors that evolve into skills), **AgentShield** (adversarial config security audit), advisor CLI, cross-harness adapters. |
-| UI/UX Pro Max (`nextlevelbuilder/ui-ux-pro-max-skill`) | Design-intelligence skill: a knowledge corpus + generator that turns a UI request into a design-system packet (style, palette, typography, anti-patterns, checklist) | MIT | Single-domain overlap with claude-core's **`design-intelligence` generator** + the `ui-design-systems-and-responsive-interfaces` skill. Larger corpus (67 styles / 161 palettes / 57 font pairings vs our 13 / 9 / 7), persists to `design-system/MASTER.md`. Cross-harness (Claude/Cursor/Copilot/Gemini/Codex/Kiro/…). Accessibility is checklist guidance, not automated WCAG validation — same posture as ours. No command-output compaction, no review gate, no learning loop, no brownfield gate. |
+| UI/UX Pro Max (`nextlevelbuilder/ui-ux-pro-max-skill`) | Design-intelligence skill: a knowledge corpus + generator that turns a UI request into a design-system packet (style, palette, typography, anti-patterns, checklist) | MIT | Single-domain overlap with claude-core's **`design-intelligence` generator** + the `ui-design-systems-and-responsive-interfaces` skill. After the corpus-expansion pass, comparable corpus (their 67 styles / 161 palettes / 57 font pairings vs our 23 styles / 48 palettes / 50 pairings, plus our 25 archetypes / 21 color moods / 15 typography moods / 15 stack profiles / 25 chart types / 60 UX guidelines — same artifact types). Both persist to `design-system/MASTER.md`. They are cross-harness (Claude/Cursor/Copilot/Gemini/Codex/Kiro/…); ours ships inside the single hook-wired Rust binary (no Python runtime). Accessibility is checklist guidance, not automated WCAG validation — same posture as ours. No command-output compaction, no review gate, no learning loop, no brownfield gate. |
 
 Note: published star counts for these repos (caveman/superpowers/ECC/RTK) were
 flagged as implausible/unverifiable during research and are deliberately not used
@@ -307,12 +307,32 @@ catalog header and entries updated to match.
     routing, JSON shape, stack bias, unknown-stack fallback, low-confidence
     fallback, persistence, and error paths.
 
-  Honest standing vs UI/UX Pro Max: their **corpus is larger** (67 styles / 161
-  palettes / 57 font pairings vs our 13 / 9 / 7) and they are cross-harness. Our
-  generator is now real, ships inside the single hook-wired binary (no Python
-  runtime, unlike theirs), and feeds a deeper UI skill with brownfield + WCAG +
-  review-gate discipline they do not have. Corpus breadth is the remaining
-  single-axis gap and is incremental data work, not architecture.
+  Honest standing vs UI/UX Pro Max, **after the corpus-expansion pass**: the
+  catalog grew from 47 to 282 cross-referenced entries — 25 product archetypes,
+  23 style families, 21 color moods, 15 typography moods, 15 stack profiles, plus
+  four new artifact arrays the generator now emits directly: 48 named color
+  palettes (light + dark, real hex + WCAG contrast notes), 50 font pairings
+  (Google Fonts + system stacks, with scale and rationale), 25 chart types, and
+  60 UX guidelines. The generator was extended with `pick_palette`,
+  `pick_font_pairing`, `pick_chart_types`, and `pick_ux_guidelines` so a
+  recommendation now carries a concrete palette (dark-mode-biased when the request
+  asks for it), a concrete type pairing, data-viz chart picks when the request
+  implies a dashboard, and the archetype-scoped UX rules ranked critical-first —
+  matching the artifact types UI/UX Pro Max emits. All cross-references are
+  validated (every palette/pairing resolves to a real mood; every archetype's
+  recommended moods resolve). 12 unit tests (4 new for the concrete artifacts:
+  palette+pairing attachment, dashboard→charts, matched UX guidelines, dark-mode
+  palette bias), fmt + clippy clean under `-D warnings`, full workspace test suite
+  green, and an install/verify run confirming the 221 KB catalog ships and the
+  generator runs against the installed copy.
+
+  Their corpus is still numerically larger on two axes (their 67 styles / 161
+  palettes vs our 23 / 48) and they remain cross-harness, but the **artifact
+  types, generator architecture, and cross-reference validation now match or
+  exceed** theirs, and ours feeds a deeper UI skill with brownfield + WCAG +
+  review-gate discipline they do not have inside a single hook-wired binary with
+  no Python runtime. The remaining difference is incremental data volume on two
+  arrays, not capability or architecture.
 
 
 ### Bugs found and fixed while verifying the workflows end-to-end

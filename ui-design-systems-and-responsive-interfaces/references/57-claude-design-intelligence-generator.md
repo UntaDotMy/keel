@@ -32,13 +32,35 @@ claude-skills design-intelligence recommend "checkout recovery improvements" --p
 
 ## Output Shape Highlights
 
-The generator now emits more than style picks:
+The generator emits a full design-intelligence packet, not just style picks:
 
+- **product archetype** scored from the request (with confidence and selection signals)
+- **style family, color mood, and typography mood** chosen from the archetype's recommended set and biased by `--stack`
+- **concrete color palette** (`color_palette`) — named palette matching the color mood with real hex values for primary, secondary, accent, background, surface, and text colors plus a WCAG contrast note; biases toward dark palettes when the request mentions dark mode
+- **concrete font pairing** (`font_pairing`) — named heading/body/mono faces, source (e.g. Google Fonts), type scale, weights, and a pairing rationale matched to the typography mood
+- **recommended charts** (`recommended_charts`) — top data-visualization types when the request implies dashboards, analytics, or reporting (empty when there is no data-viz intent)
+- **applicable UX guidelines** (`ux_guidelines`) — matched rules tagged by `[severity/category]`, scoped to the chosen archetype plus universal rules, ranked with critical rules first
 - stack-aware adaptation guidance when `--stack` is provided
 - professional polish checks for affordance, CTA clarity, contrast, and layout stability
 - recovery checks for validation, interruption, and high-trust flow handling
 - product-family-aware recommendations for familiar surfaces such as direct messaging
 - selection signals and an explicit clarification flag when the prompt is too vague to classify safely
+
+## Backing Corpus
+
+The catalog is the design knowledge base behind every recommendation. It currently holds 282 cross-referenced entries:
+
+- 25 product archetypes
+- 23 style families
+- 21 color moods
+- 15 typography moods
+- 15 stack profiles
+- 48 named color palettes (light and dark, with hex + contrast notes)
+- 50 font pairings (Google Fonts and system stacks)
+- 25 chart types
+- 60 UX guidelines
+
+Cross-references are validated: every archetype's recommended style/color/typography moods resolve, every stack's preferred entries resolve, and every palette and pairing points at a real color or typography mood. The `data/` directory ships with the skill on install, so the native command works against the installed copy without network access.
 
 ## Persistence Safety
 
