@@ -37,6 +37,10 @@ pub struct InstallSummary {
     pub removed_stale_files: usize,
     pub removed_executable_orphans: usize,
     pub published_executable: bool,
+    /// Human-readable outcome of the MCP server registration step, or `None`
+    /// when registration was skipped (non-standard `--claude-home`) or failed
+    /// non-fatally. Registration never blocks an install.
+    pub mcp_registration: Option<String>,
 }
 
 struct FileTracker<'a> {
@@ -138,6 +142,7 @@ pub fn install_from_paths(
     let removed_executable_orphans = remove_executable_orphans(claude_home)?;
     write_install_metadata(build_version, repository_root, claude_home)?;
     write_inventories(&layout, claude_home, &tracker)?;
+    let mcp_registration = maybe_register_mcp_server(claude_home);
     Ok(InstallSummary {
         synced_skills,
         synced_agents,
@@ -148,7 +153,42 @@ pub fn install_from_paths(
         removed_stale_files,
         removed_executable_orphans,
         published_executable,
+        mcp_registration,
     })
+}
+
+/// Register the `claude_core` MCP server in `~/.claude.json` during install,
+/// but only when the target Claude home is a real `.claude` directory under a
+/// user home. The integration test suite installs into throwaway
+/// `--claude-home` directories that are NOT named `.claude`; auto-writing a
+/// `.claude.json` beside each of those would (a) be meaningless and (b) race
+/// parallel tests on a shared temp-dir parent. Guarding on the directory name
+/// keeps real installs fully automatic while leaving tests hermetic. The
+/// `repair` command registers unconditionally for explicit operator recovery.
+///
+/// Registration is best-effort: a failure is reported in the summary but never
+/// fails the install (MCP is additive, not load-bearing for the skill pack).
+fn maybe_register_mcp_server(claude_home: &Path) -> Option<String> {
+    let is_standard_home = claude_home
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name == ".claude")
+        .unwrap_or(false);
+    if !is_standard_home {
+        return None;
+    }
+    match super::mcp_register::register_mcp_server(claude_home) {
+        Ok(super::mcp_register::McpRegistration::Added) => {
+            Some("registered in ~/.claude.json".to_string())
+        }
+        Ok(super::mcp_register::McpRegistration::Updated) => {
+            Some("updated in ~/.claude.json".to_string())
+        }
+        Ok(super::mcp_register::McpRegistration::AlreadyCurrent) => {
+            Some("already current".to_string())
+        }
+        Err(error) => Some(format!("skipped ({error})")),
+    }
 }
 
 fn managed_files_inventory_path(claude_home: &Path) -> PathBuf {
@@ -233,6 +273,9 @@ pub fn write_install_summary(summary: &InstallSummary, output: &mut dyn Write) {
         "  Published executable: {}",
         summary.published_executable
     );
+    if let Some(mcp_status) = &summary.mcp_registration {
+        let _ = writeln!(output, "  MCP server: {mcp_status}");
+    }
 }
 
 fn ensure_claude_home_directories(claude_home: &Path) -> Result<(), String> {

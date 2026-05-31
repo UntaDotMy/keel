@@ -96,6 +96,9 @@ impl Application {
                 standard_output,
                 standard_error,
             ),
+            "repair" => {
+                manager::run_repair_command(command_arguments, standard_output, standard_error)
+            }
             "verify" | "v" => {
                 manager::run_verify_command(command_arguments, standard_output, standard_error)
             }

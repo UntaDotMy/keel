@@ -18,10 +18,17 @@ architecture:
 
 1. **Read first.** Read SYSTEM_MAP, CLAUDE.md, the owning module, and the existing
    implementation. Do not propose changes against an imagined version of the file.
-2. **Invoke relevant skills.** If there is even a 1% chance a skill applies, use the
+2. **Understand before building.** Before you write any code, restate what the
+   request actually asks, confirm the user story, and research what is genuinely
+   needed. Do not guess. Do not assume. Do not blindly start building against an
+   imagined spec. The vast majority of wasted work is not buggy code — it is
+   correct code that solved the wrong problem. An hour of research is always
+   cheaper than shipping the wrong thing and rebuilding it. If the request is
+   ambiguous in a way that changes what you build, ask before building, not after.
+3. **Invoke relevant skills.** If there is even a 1% chance a skill applies, use the
    Skill tool to invoke it BEFORE writing code or giving a final answer. This
    is not negotiable. You cannot rationalize your way out of it.
-3. **Find the root cause.** User stories and prompts are vague. Take the symptom
+4. **Find the root cause.** User stories and prompts are vague. Take the symptom
    as a starting point, not the specification. The real problem is usually one
    layer below what was asked. Suspecting a function is not the same as
    confirming it: trace the symptom end-to-end against the running code with
@@ -41,6 +48,9 @@ checking. The cost of skipping a skill that did apply is shipping a regression.
 |---|---|
 | "I remember this codebase" | Memories drift. Read SYSTEM_MAP and the owning file before claiming behavior. |
 | "The user story is clear" | Stories are summaries, not specs. Find the root cause. |
+| "I get the gist, I'll start building" | The gist is not the spec. Restate the request, confirm the user story, research what's needed. Building on a guess is how you ship the wrong thing. |
+| "I'll assume they meant X and proceed" | Assuming is guessing with confidence. If the assumption changes what you build, confirm it first — do not build then apologize. |
+| "Research is slower than just coding it" | Research is slower than starting; it is far faster than finishing the wrong thing twice. The hour you save guessing, you pay back with interest. |
 | "I'll just code this quickly" | Skills tell you HOW. Check first. |
 | "This is just a simple question" | Questions are tasks. Check for skills before answering. |
 | "I need more context first" | Skill check comes BEFORE clarifying questions. |
@@ -60,11 +70,15 @@ checking. The cost of skipping a skill that did apply is shipping a regression.
 prompt arrives
     │
     ▼
-Does any skill below match the request, even at 1% confidence?
-    ├── yes → invoke that skill via the Skill tool, then act on its output
-    └── no  → Are you about to read or edit existing code?
-                ├── yes → invoke preserve-existing-flow first
-                └── no  → answer normally, but verify claims against the repo
+Do you actually understand what is being asked? Can you restate the request and
+the user story without guessing or assuming?
+    ├── no  → research first: read the request, the codebase, and what's needed.
+    │         If still ambiguous in a way that changes what you build, ask.
+    └── yes → Does any skill below match the request, even at 1% confidence?
+                ├── yes → invoke that skill via the Skill tool, then act on its output
+                └── no  → Are you about to read or edit existing code?
+                            ├── yes → invoke preserve-existing-flow first
+                            └── no  → answer normally, but verify claims against the repo
 ```
 
 After implementation work, before claiming completion:
@@ -228,5 +242,7 @@ Beyond the four writers above, these `claude-skills memory <verb>` arms are now 
 
 ## The one-line summary, if you only remember one thing
 
-**Research first. Invoke relevant skills before responding. Find the root cause.
-The repository — not your training data — is the source of truth.**
+**Understand before you build. Research first. Invoke relevant skills before
+responding. Find the root cause. The repository — not your training data — is
+the source of truth. Researching first is what saves you from building the
+wrong thing.**

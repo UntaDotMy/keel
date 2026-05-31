@@ -46,13 +46,15 @@ The block is split into two layers: four **behavioral pillars** that govern how 
 
 ### Think Before Coding
 
-**Don't assume. Don't hide confusion. Surface tradeoffs. Suspicion is a hypothesis, not a finding.**
+**Understand the request before building. Don't assume. Don't hide confusion. Surface tradeoffs. Suspicion is a hypothesis, not a finding.**
 
+- **Understand before building.** Before writing any code, restate what the request actually asks and confirm the user story. Research what is genuinely needed — the language, framework, existing implementation, and the real requirement — before implementing. Do not guess, do not assume, do not build against an imagined spec. The most expensive mistake is not buggy code; it is correct code that solved the wrong problem, because it passes review and still has to be thrown away. The research that prevents it is always cheaper than the rebuild.
 - State assumptions explicitly before implementing. If uncertain, ask instead of guessing.
 - If multiple interpretations exist, present them. Do not silently pick one.
 - If a simpler approach exists, say so and push back on the requested approach when warranted.
 - If something is unclear, stop. Name what is confusing. Ask.
 - "I'll just code this and see" is the failure mode this pillar exists to prevent.
+- "I get the gist" is not understanding. The gist is a summary; building needs the spec. Research the gap before coding, not after a reviewer or the user finds it.
 
 **Deep dive before declaring a target.** When you suspect a function, module, or branch is the cause:
 

@@ -885,15 +885,46 @@ fn post_compact_context() -> String {
 /// every byte lands per prompt and is paid as input tokens. The full
 /// bootstrap (skill catalog, Red Flags table, decision flow, four
 /// implementation-discipline pillars) is delivered once via SessionStart;
-/// this hook only restates the iron law, names the four pillars, and adds
-/// the one-line parallel-fan-out independence test so they stay top-of-mind
-/// on each turn. Body weight is roughly 230 tokens before
-/// `memory_scope_summary()` — within budget for a per-prompt injection but
-/// expensive enough that adding more text needs a deliberate reason.
+/// this hook only restates the iron law, names the four pillars, adds the
+/// understand-before-building rule (research the request before writing code —
+/// the lever that stops the model building the wrong thing), and the one-line
+/// parallel-fan-out independence test so they stay top-of-mind on each turn.
+/// Body weight is roughly 260 tokens before `memory_scope_summary()` — within
+/// budget for a per-prompt injection but expensive enough that adding more
+/// text needs a deliberate reason.
 fn user_prompt_submit_context() -> String {
     format!(
-        "Research-first: trust the codebase, not your knowledge base. Read SYSTEM_MAP and the owning module before claiming behavior. Invoke any relevant skill via the Skill tool BEFORE responding — even a 1% chance it applies means use it. Find the root cause, not just the surface symptom: suspicion is a hypothesis, not a finding — trace the symptom end-to-end with file:line evidence and confirm the suspect is on that path before changing it. No assumptions. No jumping from \"this may be the case\" to a patch. Implementation discipline applies on every code-touching turn — Think Before Coding (state assumptions, deep-dive any suspected target before changing it), Simplicity First (minimum code, no speculative features or abstractions), Surgical Changes (every changed line traces to the request), Goal-Driven Execution (reproduce or trace the symptom before naming a root cause; turn the task into a verifiable goal before coding). Parallel fan-out: only batch agents in the same message when all four hold — no shared inputs, no shared file or git-index writes, no need to cancel/steer one based on another's interim result, and the work fits the current task scope. If any check fails, dispatch sequentially. {}",
+        "Research-first: trust the codebase, not your knowledge base. Read SYSTEM_MAP and the owning module before claiming behavior. Invoke any relevant skill via the Skill tool BEFORE responding — even a 1% chance it applies means use it. Understand before building: restate what the request actually asks, confirm the user story, and research what is genuinely needed before writing code — no guessing, no assuming, no building against an imagined spec. Researching first is what stops you building the wrong thing; the cost of an hour's research is always less than the cost of shipping the wrong feature. Find the root cause, not just the surface symptom: suspicion is a hypothesis, not a finding — trace the symptom end-to-end with file:line evidence and confirm the suspect is on that path before changing it. No assumptions. No jumping from \"this may be the case\" to a patch. Implementation discipline applies on every code-touching turn — Think Before Coding (state assumptions, deep-dive any suspected target before changing it), Simplicity First (minimum code, no speculative features or abstractions), Surgical Changes (every changed line traces to the request), Goal-Driven Execution (reproduce or trace the symptom before naming a root cause; turn the task into a verifiable goal before coding). Parallel fan-out: only batch agents in the same message when all four hold — no shared inputs, no shared file or git-index writes, no need to cancel/steer one based on another's interim result, and the work fits the current task scope. If any check fails, dispatch sequentially. {}",
         memory_scope_summary()
+    )
+}
+
+/// Concrete per-prompt skill guidance. Emitted only when the prompt
+/// distinctively matches one installed skill (see
+/// `utility::skill_match::match_skill_for_prompt`).
+///
+/// Two parts, deliberately ordered:
+///   1. A one-line header naming the matched skill and the `Skill("<name>")`
+///      call that loads its full body.
+///   2. The skill's *own* bounded brief (`brief`) — its description plus the
+///      opening of its body. This is the model-independence fix: the operative
+///      guidance is injected as input context for this turn, so it lands even
+///      if the gateway model never makes the `Skill()` call. Earlier this hook
+///      only asked the model to call `Skill()`; whether the skill loaded then
+///      depended entirely on the model honoring that instruction.
+fn skill_pointer_text(skill_name: &str, brief: &str) -> String {
+    format!(
+        "Skill match: this prompt strongly matches the `{skill_name}` skill. Its guidance is inlined below and applies now — follow it before writing code or giving a final answer. For the complete skill, call Skill(\"{skill_name}\"). If, after reading, the skill turns out not to apply, say so and proceed.\n\n--- begin {skill_name} skill brief ---\n{brief}\n--- end {skill_name} skill brief ---"
+    )
+}
+
+/// Fallback per-prompt skill pointer used when the matched skill's body cannot
+/// be read for inlining. Names the skill and the exact `Skill("<name>")` call so
+/// the model still gets an actionable instruction, even though the brief itself
+/// is unavailable this turn.
+fn skill_pointer_fallback(skill_name: &str) -> String {
+    format!(
+        "Skill match: this prompt strongly matches the `{skill_name}` skill. Invoke it now with Skill(\"{skill_name}\") BEFORE writing code or giving a final answer. If, after reading it, the skill turns out not to apply, say so and proceed — but do not skip the check."
     )
 }
 
@@ -935,9 +966,43 @@ fn run_hook_user_prompt_submit(
         .and_then(JsonDocument::as_str)
         .unwrap_or_default();
 
+    // The prompt text Claude Code delivers on stdin. This is what lets the
+    // per-prompt nudge name the *specific* matching skill instead of repeating
+    // the generic "invoke any relevant skill" reminder every turn. Absent or
+    // empty prompt → no skill pointer, just the base context (fail-open).
+    let prompt_text = stdin_payload
+        .as_ref()
+        .and_then(|payload| payload.get("prompt"))
+        .and_then(JsonDocument::as_str)
+        .unwrap_or_default();
+
     let claude_home = resolve_claude_home("").ok();
 
-    let base_context = user_prompt_submit_context();
+    let mut base_context = user_prompt_submit_context();
+    // Prepend the matched skill's own guidance when the prompt distinctively
+    // matches one installed skill. Placed first so it is the first thing the
+    // model reads. Conservative by construction: `match_skill_for_prompt` stays
+    // silent for generic or ambiguous prompts (see utility::skill_match), so
+    // this never mis-routes — it only sharpens an already-clear signal.
+    //
+    // Inline the skill's *actual brief* rather than only asking for a
+    // `Skill()` call: injected context is consumed by the model as input
+    // regardless of whether it honors the tool-call instruction, so the
+    // guidance lands even behind a gateway model that ignores `Skill()`. Fall
+    // back to the bare pointer only when the body cannot be read.
+    if let (false, Some(home)) = (prompt_text.trim().is_empty(), claude_home.as_ref()) {
+        if let Some(matched) =
+            crate::utility::skill_match::match_skill_for_prompt(home, prompt_text)
+        {
+            let pointer = match crate::utility::skill_match::skill_inline_brief(home, &matched.name)
+            {
+                Some(brief) => skill_pointer_text(&matched.name, &brief),
+                None => skill_pointer_fallback(&matched.name),
+            };
+            base_context = format!("{pointer}\n\n{base_context}");
+        }
+    }
+
     let final_context = match (session_id.is_empty(), claude_home.as_ref()) {
         (false, Some(home)) => match maybe_compression_hint(home, session_id) {
             Some(hint) => format!("{base_context}\n\n{hint}"),
@@ -2607,6 +2672,22 @@ mod tests {
         assert!(context.contains("Skill tool"));
         assert!(context.contains("root cause"));
         assert!(context.contains("No assumptions"));
+
+        // Understand-before-building — the per-prompt hook must require the
+        // model to understand the request and research what is needed before
+        // writing code, so it does not build the wrong thing. This is distinct
+        // from the root-cause/debugging cue below: it governs the front of the
+        // task (what to build), not the middle (where the bug is). It lands
+        // per prompt because the SessionStart bootstrap drops out of the
+        // working window after a few turns.
+        assert!(
+            context.contains("Understand before building"),
+            "UserPromptSubmit must name the understand-before-building rule"
+        );
+        assert!(
+            context.contains("building the wrong thing"),
+            "UserPromptSubmit must state that research prevents building the wrong thing"
+        );
 
         // Deep-dive cues — the per-prompt pointer must keep the model from
         // jumping from suspicion to fix. These two phrases name the failure
