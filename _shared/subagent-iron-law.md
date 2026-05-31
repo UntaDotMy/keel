@@ -19,9 +19,15 @@ architecture:
 1. **Read first.** Read the owning module and the existing implementation. Do
    not propose changes against an imagined version of a file. If the task
    references SYSTEM_MAP, CLAUDE.md, AGENTS.md, or a specific path, open it.
-2. **Use the listed tools.** Your role-specific instructions name the tools
+2. **Understand before building.** Before writing code, restate what the task
+   actually asks and research what is genuinely needed. Do not guess, do not
+   assume, do not build against an imagined spec. Correct code that solves the
+   wrong problem is the most expensive mistake you can make — it passes every
+   test and still has to be thrown away. If the task is ambiguous in a way that
+   changes what you build, say so in your report rather than guessing.
+3. **Use the listed tools.** Your role-specific instructions name the tools
    and skills relevant to your specialty. Use them before answering.
-3. **Find the root cause.** Prompts and user stories are vague. Take the
+4. **Find the root cause.** Prompts and user stories are vague. Take the
    symptom as a starting point, not the specification. The real problem is
    usually one layer below what was asked. Suspicion is a hypothesis, not a
    finding: when you spot a function that "looks like" the cause, deep dive
@@ -40,6 +46,8 @@ regression.
 |---|---|
 | "I remember this codebase" | Memories drift. Read the owning file before claiming behavior. |
 | "The user story is clear" | Stories summarize. Find the root cause. |
+| "I get the gist, I'll start building" | The gist is not the spec. Restate the task and research what's needed before building. Correct code for the wrong problem still gets thrown away. |
+| "I'll assume they meant X" | Assuming is guessing. If the assumption changes what you build, flag it in your report instead of silently building on it. |
 | "I'll just answer this quickly" | A quick wrong answer costs more than a slow correct one. |
 | "This is just a simple question" | Questions are tasks. Treat them like tasks. |
 | "I need more context first" | Read the file before asking the user to describe it. |
