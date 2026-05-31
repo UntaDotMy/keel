@@ -19,8 +19,9 @@ Token-saving rule: prevent noisy raw command output from entering Claude Code co
 - **Existing-source edits**: validate Preserve Existing Flow evidence with `claude-skills flow start|check|finish` and record the owner path in the global flow-check artifact before patching.
 - **Commit/PR/final-response text**: use `claude-skills git-workflow commit-message|pr-body|lint-message`, then `claude-skills git-workflow preflight` and `claude-skills review pre-pr` before merge.
 
-## Routing Contract (the seven rules)
+## Routing Contract (the eight rules)
 
+0. **Understand before building** — before writing any code, restate what the request actually asks, confirm the user story, and research what is genuinely needed. No guessing, no assuming, no building against an imagined spec. Correct code that solved the wrong problem still gets thrown away, so this gates every rule below: there is no point routing a skill or refreshing memory for the wrong task. If the request is ambiguous in a way that changes what you build, ask before building, not after.
 1. **Skills first** — route domain work through the matching `~/.claude/skills/<name>/SKILL.md`. Run `preserve-existing-flow` before editing existing source. Run `reviewer` before closing **non-trivial** work (logic changes, multi-file edits, public-API touches, security-sensitive surfaces, brownfield behavior changes, release-impacting work). Skip `reviewer` for trivial work: docs-only, formatting-only, generated-only, single-line typo or comment fixes, and explicitly throw-away work.
 2. **Native commands first** — prefer `claude-skills` surfaces over raw shell when they own the job.
 3. **Memory first** — resolve scoped memory and read `SYSTEM_MAP.md` before broad analysis: `claude-skills memory scope resolve --create-missing --refresh-system-map`.

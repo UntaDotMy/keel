@@ -73,7 +73,10 @@ prompt arrives
 Do you actually understand what is being asked? Can you restate the request and
 the user story without guessing or assuming?
     ├── no  → research first: read the request, the codebase, and what's needed.
-    │         If still ambiguous in a way that changes what you build, ask.
+    │         For a vague or directive feature ask ("add X", "build Y", "make Z
+    │         work") whose user story is not confirmed, invoke Skill("brainstorming")
+    │         to restate and confirm before building. If still ambiguous in a way
+    │         that changes what you build, ask.
     └── yes → Does any skill below match the request, even at 1% confidence?
                 ├── yes → invoke that skill via the Skill tool, then act on its output
                 └── no  → Are you about to read or edit existing code?
@@ -126,10 +129,13 @@ skill matcher fires. The full text and the tactical rules they imply live in
 | "I'll add a config knob in case we need it" | Step 2 (Simplicity First) violated. Add it when a second caller exists. |
 | "Make it work" is a goal | Step 4 (Goal-Driven Execution) failed. State the verifiable check that proves done. |
 
-## Skill catalog (33 skills installed under ~/.claude/skills/)
+## Skill catalog (34 skills installed under ~/.claude/skills/)
 
 Source: each `<name>/SKILL.md` in this repo. Use the Skill tool with the bare
-name (e.g. `Skill("reviewer")`).
+name (e.g. `Skill("reviewer")`). The count excludes this bootstrap skill itself
+(`using-claude-core`), which is always loaded at SessionStart rather than
+invoked on demand. `requesting-code-review` below is an alias pointer, not a
+separate skill directory — it routes to `reviewer`.
 
 - `software-development-life-cycle` — Cross-domain planning, architecture framing, multi-phase delivery sequencing.
 - `web-development-life-cycle` — Web architecture, quality, and production delivery (Core Web Vitals, SEO, accessibility).
