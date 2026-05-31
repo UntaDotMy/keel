@@ -80,7 +80,7 @@ Open the matching reference when you need the full ruleset:
 
 | Topic | File |
 |---|---|
-| 52 routing principles, overlap resolution, context-efficiency ladder, planning defaults, honest reporting | [AGENTS/references/20-skill-routing.md](AGENTS/references/20-skill-routing.md) |
+| 53 routing principles, overlap resolution, context-efficiency ladder, planning defaults, honest reporting | [AGENTS/references/20-skill-routing.md](AGENTS/references/20-skill-routing.md) |
 | Native command routing depth, hook transparent rewrite, token compaction | [AGENTS/references/10-native-command-routing.md](AGENTS/references/10-native-command-routing.md) |
 | Execution strategy, iterative loop, memory protocol | [AGENTS/references/30-execution-strategy.md](AGENTS/references/30-execution-strategy.md) |
 | Code quality standards, testing requirements, feature flags | [AGENTS/references/40-code-quality-and-testing.md](AGENTS/references/40-code-quality-and-testing.md) |
