@@ -7,6 +7,7 @@
   update [--repo-root <path>] [--claude-home <path>]
   status [--repo-root <path>] [--claude-home <path>]
   doctor [--repo-root <path>] [--claude-home <path>]
+  repair [--claude-home <path>]
   validate [--repo-root <path>] [--profile full|smoke]
   verify [--repo-root <path>] [--claude-home <path>] [<skill-name>]
   uninstall [--repo-root <path>] [--claude-home <path>]

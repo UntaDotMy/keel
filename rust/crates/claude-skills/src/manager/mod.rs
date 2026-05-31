@@ -7,10 +7,13 @@
 pub mod agent_config;
 pub mod doctor;
 pub mod install;
+pub mod mcp_register;
+pub mod repair;
 pub mod verify;
 
 pub use doctor::run_doctor_command;
 pub use install::{run_self_replace_command, run_uninstall_command, run_update_command};
+pub use repair::run_repair_command;
 pub use verify::{run_all_command, run_menu_command, run_validate_command, run_verify_command};
 
 use std::io::Write;

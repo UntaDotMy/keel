@@ -897,6 +897,18 @@ fn user_prompt_submit_context() -> String {
     )
 }
 
+/// Concrete per-prompt skill pointer. Emitted only when the prompt
+/// distinctively matches one installed skill (see
+/// `utility::skill_match::match_skill_for_prompt`). Naming the skill and the
+/// exact `Skill("<name>")` call turns the generic "invoke any relevant skill"
+/// reminder into an actionable instruction — the single biggest lever for
+/// getting the model to actually load the right skill before responding.
+fn skill_pointer_text(skill_name: &str) -> String {
+    format!(
+        "Skill match: this prompt strongly matches the `{skill_name}` skill. Invoke it now with Skill(\"{skill_name}\") BEFORE writing code or giving a final answer. If, after reading it, the skill turns out not to apply, say so and proceed — but do not skip the check."
+    )
+}
+
 /// UserPromptSubmit dispatcher that reads stdin and composes the per-prompt
 /// `additionalContext`.
 ///
@@ -935,9 +947,32 @@ fn run_hook_user_prompt_submit(
         .and_then(JsonDocument::as_str)
         .unwrap_or_default();
 
+    // The prompt text Claude Code delivers on stdin. This is what lets the
+    // per-prompt nudge name the *specific* matching skill instead of repeating
+    // the generic "invoke any relevant skill" reminder every turn. Absent or
+    // empty prompt → no skill pointer, just the base context (fail-open).
+    let prompt_text = stdin_payload
+        .as_ref()
+        .and_then(|payload| payload.get("prompt"))
+        .and_then(JsonDocument::as_str)
+        .unwrap_or_default();
+
     let claude_home = resolve_claude_home("").ok();
 
-    let base_context = user_prompt_submit_context();
+    let mut base_context = user_prompt_submit_context();
+    // Prepend a concrete skill pointer when the prompt distinctively matches one
+    // installed skill. Placed first so it is the first thing the model reads.
+    // Conservative by construction: `match_skill_for_prompt` stays silent for
+    // generic or ambiguous prompts (see utility::skill_match), so this never
+    // mis-routes — it only sharpens an already-clear signal.
+    if let (false, Some(home)) = (prompt_text.trim().is_empty(), claude_home.as_ref()) {
+        if let Some(matched) =
+            crate::utility::skill_match::match_skill_for_prompt(home, prompt_text)
+        {
+            base_context = format!("{}\n\n{}", skill_pointer_text(&matched.name), base_context);
+        }
+    }
+
     let final_context = match (session_id.is_empty(), claude_home.as_ref()) {
         (false, Some(home)) => match maybe_compression_hint(home, session_id) {
             Some(hint) => format!("{base_context}\n\n{hint}"),

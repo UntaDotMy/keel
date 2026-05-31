@@ -15,6 +15,7 @@ pub mod recall;
 pub mod record_store;
 pub mod session;
 pub mod skill_lint;
+pub mod skill_match;
 pub mod system_map;
 pub mod workflow_ledger;
 pub mod working_brief;
