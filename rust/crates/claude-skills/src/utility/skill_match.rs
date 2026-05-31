@@ -2,13 +2,16 @@
 //!   `~/.claude/skills/<name>/SKILL.md` frontmatter, builds an IDF-weighted
 //!   keyword model per skill, and decides whether a user prompt is a *strong,
 //!   distinctive* match for exactly one skill.
-//! Caller: `runner::hook_lifecycle::run_hook_user_prompt_submit` — turns the
-//!   static "invoke any relevant skill" nudge into a concrete
-//!   `Skill("<name>")` pointer when (and only when) the prompt clearly matches.
+//! Caller: `runner::hook_lifecycle::run_hook_user_prompt_submit` — on a strong,
+//!   distinctive match it injects a bounded slice of the matched skill's *actual
+//!   body* into the per-prompt context (see `skill_inline_brief`), so the
+//!   operative guidance lands whether or not the gateway model chooses to honor
+//!   a `Skill("<name>")` tool call. The match itself is the gate; the inline
+//!   brief is what makes it model-independent.
 //! Dependencies: std::fs, std::path, std::collections; crate::runtime for the
 //!   skills directory resolver.
 //! Main Functions: match_skill_for_prompt, load_skill_terms,
-//!   score_prompt_against_skills.
+//!   score_prompt_against_skills, skill_inline_brief.
 //! Side Effects: Reads SKILL.md files under the installed skills directory.
 //!   Never writes. Any IO failure degrades to "no match" so the hook fails
 //!   open to its generic reminder.
@@ -51,6 +54,17 @@ const DISTINCTIVE_DF_MAX: usize = 3;
 /// uses them is a stronger signal than an incidental description-word hit.
 const NAME_TOKEN_BOOST: f64 = 1.5;
 
+/// Hard cap on the inline brief injected into per-prompt context. Skill bodies
+/// run ~10-15 KB; we inject the description plus the opening body and stop at
+/// this many bytes (rounded out to the next line boundary). The cap keeps the
+/// per-prompt input-token cost bounded — the full skill is still one
+/// `Skill("<name>")` call away for the model that wants the rest — while
+/// guaranteeing the operative guidance lands even if the gateway model never
+/// makes that call. ~2400 bytes is roughly 600 tokens: enough for a skill's
+/// purpose and its first one or two discipline sections, small enough to pay
+/// every prompt that distinctively matches.
+const INLINE_BRIEF_MAX_BYTES: usize = 2400;
+
 /// Tokenized term model for one installed skill.
 #[derive(Debug, Clone)]
 pub struct SkillTerms {
@@ -81,6 +95,110 @@ pub fn match_skill_for_prompt(claude_home: &Path, prompt: &str) -> Option<SkillM
         return None;
     }
     score_prompt_against_skills(prompt, &skills)
+}
+
+/// Read the matched skill's `SKILL.md` and return a bounded, ready-to-inject
+/// brief: the frontmatter `description` followed by the opening of the skill
+/// body, truncated to [`INLINE_BRIEF_MAX_BYTES`] on a line boundary. Returns
+/// `None` when the skill cannot be read or has no usable content.
+///
+/// This is the model-independence lever. The per-prompt hook used to *ask* the
+/// model to call `Skill("<name>")`; whether that happened depended on the
+/// gateway model honoring an injected instruction. Injecting the brief instead
+/// means the skill's operative guidance is in the model's input context for
+/// this turn no matter what — the `Skill()` call becomes an optional upgrade to
+/// the full body, not a prerequisite for any guidance at all.
+pub fn skill_inline_brief(claude_home: &Path, skill_name: &str) -> Option<String> {
+    // `skill_name` comes from a matched installed skill (the matcher only
+    // returns names it read from a real directory), but guard the path join
+    // against separators defensively so a crafted frontmatter `name` can never
+    // escape the skills directory.
+    if skill_name.is_empty()
+        || skill_name.contains(['/', '\\'])
+        || skill_name.contains("..")
+        || Path::new(skill_name).is_absolute()
+    {
+        return None;
+    }
+    let skill_path = skills_directory(claude_home)
+        .join(skill_name)
+        .join("SKILL.md");
+    let text = fs::read_to_string(&skill_path).ok()?;
+    inline_brief_from_source(&text)
+}
+
+/// Pure brief builder (no IO) so truncation behavior is unit-testable. Takes raw
+/// SKILL.md text, pulls the frontmatter `description`, drops the frontmatter
+/// block, and appends the opening body up to the byte cap on a line boundary.
+fn inline_brief_from_source(text: &str) -> Option<String> {
+    let body = strip_frontmatter_block(text);
+    let description = split_frontmatter(text)
+        .and_then(|frontmatter| frontmatter_field(&frontmatter, "description"))
+        .unwrap_or_default();
+
+    let mut brief = String::new();
+    if !description.trim().is_empty() {
+        brief.push_str(description.trim());
+        brief.push_str("\n\n");
+    }
+    brief.push_str(truncate_on_line_boundary(body.trim_start(), INLINE_BRIEF_MAX_BYTES).trim_end());
+
+    let trimmed = brief.trim().to_string();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
+/// Return everything after the leading `---\n...\n---\n` frontmatter block, or
+/// the whole text when there is no frontmatter. Mirrors [`split_frontmatter`]
+/// but yields the body rather than the fenced metadata.
+fn strip_frontmatter_block(text: &str) -> &str {
+    let trimmed_start = text.trim_start_matches(['\u{feff}', ' ', '\t', '\n', '\r']);
+    if !trimmed_start.starts_with("---") {
+        return text;
+    }
+    // Skip the opening fence line, then find the closing fence.
+    let Some(after_open) = trimmed_start.split_once('\n').map(|(_, rest)| rest) else {
+        return text;
+    };
+    let mut offset = 0usize;
+    for line in after_open.split_inclusive('\n') {
+        if line.trim_end_matches(['\r', '\n']).trim() == "---" {
+            return &after_open[offset + line.len()..];
+        }
+        offset += line.len();
+    }
+    // Unterminated frontmatter — no usable body.
+    ""
+}
+
+/// Truncate `text` to at most `max_bytes`, backing up to the last newline so the
+/// brief never ends mid-line. Falls back to a hard byte cut on a char boundary
+/// when the first line already exceeds the cap. Appends an explicit elision
+/// marker when content was dropped so the model knows the skill continues.
+fn truncate_on_line_boundary(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_string();
+    }
+    // Prefer cutting at the last newline within the budget.
+    let window = &text.as_bytes()[..max_bytes];
+    let cut = window
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map(|pos| pos + 1)
+        .unwrap_or_else(|| {
+            // No newline in range — back up to a UTF-8 char boundary.
+            let mut end = max_bytes;
+            while end > 0 && !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            end
+        });
+    let mut truncated = text[..cut].trim_end().to_string();
+    truncated.push_str("\n\n[skill brief truncated — call Skill(\"<name>\") for the full body]");
+    truncated
 }
 
 /// Read `<skills_dir>/<name>/SKILL.md` for every installed skill and build its
@@ -453,5 +571,61 @@ mod tests {
             skill("beta-tool", "shared widget handling", ""),
         ];
         assert_eq!(score_prompt_against_skills("widget", &corpus), None);
+    }
+
+    #[test]
+    fn inline_brief_includes_description_and_body() {
+        let source = "---\nname: stripe-integration\ndescription: Stripe Checkout, webhooks, and PCI scope.\n---\n# Stripe integration\n\nAlways verify webhook signatures before trusting the event.\n";
+        let brief = inline_brief_from_source(source).expect("brief");
+        assert!(brief.contains("Stripe Checkout, webhooks, and PCI scope."));
+        assert!(brief.contains("verify webhook signatures"));
+        // The frontmatter fence itself must not leak into the brief.
+        assert!(!brief.contains("---"));
+        assert!(!brief.contains("name: stripe-integration"));
+    }
+
+    #[test]
+    fn inline_brief_truncates_long_body_on_line_boundary() {
+        let mut source = String::from("---\ndescription: D.\n---\n");
+        // Build a body well over the cap out of distinct numbered lines.
+        for n in 0..400 {
+            source.push_str(&format!("line {n} with enough text to add bytes\n"));
+        }
+        let brief = inline_brief_from_source(&source).expect("brief");
+        assert!(
+            brief.len() <= INLINE_BRIEF_MAX_BYTES + 120,
+            "brief length {} exceeds cap + marker allowance",
+            brief.len()
+        );
+        assert!(brief.contains("[skill brief truncated"));
+        // Truncation lands on a line boundary: the last content line before the
+        // marker is a whole "line N ..." line, never a fragment.
+        let before_marker = brief.split("\n\n[skill brief truncated").next().unwrap();
+        assert!(before_marker.ends_with("add bytes"));
+    }
+
+    #[test]
+    fn inline_brief_none_without_content() {
+        // Frontmatter only, empty body, blank description → nothing to inject.
+        assert_eq!(inline_brief_from_source("---\ndescription:\n---\n"), None);
+        assert_eq!(inline_brief_from_source(""), None);
+    }
+
+    #[test]
+    fn strip_frontmatter_block_returns_body_after_fence() {
+        let body = strip_frontmatter_block("---\nname: x\n---\nhello body\n");
+        assert_eq!(body.trim(), "hello body");
+        // No frontmatter → whole text is the body.
+        assert_eq!(strip_frontmatter_block("plain body").trim(), "plain body");
+        // Unterminated frontmatter → no usable body.
+        assert_eq!(strip_frontmatter_block("---\nname: x\nno close").trim(), "");
+    }
+
+    #[test]
+    fn skill_inline_brief_rejects_path_traversal() {
+        let dir = std::env::temp_dir();
+        assert_eq!(skill_inline_brief(&dir, "../escape"), None);
+        assert_eq!(skill_inline_brief(&dir, "a/b"), None);
+        assert_eq!(skill_inline_brief(&dir, ""), None);
     }
 }

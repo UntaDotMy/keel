@@ -87,7 +87,8 @@ pub fn run_repair_command(
         }
     }
 
-    // 3. The caveat we cannot fix in code.
+    // 3. Status note. The skill brief is now inlined into per-prompt context,
+    //    so a matched skill's guidance lands regardless of model compliance.
     let _ = writeln!(standard_output);
     let _ = writeln!(standard_output, "Next steps:");
     let _ = writeln!(
@@ -101,23 +102,31 @@ pub fn run_repair_command(
     let _ = writeln!(standard_output);
     let _ = writeln!(
         standard_output,
-        "Note: hooks and skills are advisory by design. They inject the iron law"
+        "Note: when a prompt distinctively matches a skill, that skill's guidance"
     );
     let _ = writeln!(
         standard_output,
-        "and name the matching skill, but Claude Code's model must choose to act"
+        "is now inlined directly into the turn's context — it applies whether or"
     );
     let _ = writeln!(
         standard_output,
-        "on them — a hook cannot force a Skill() call. If skills still do not load"
+        "not the model chooses to make a Skill() call, so it no longer depends on"
     );
     let _ = writeln!(
         standard_output,
-        "after a restart, the model behind your ANTHROPIC_BASE_URL may be ignoring"
+        "the gateway model honoring an injected tool-call instruction. The Skill()"
     );
     let _ = writeln!(
         standard_output,
-        "injected instructions; that is a model/gateway setting, not a wiring bug."
+        "call remains available to load the full skill body when the brief is not"
+    );
+    let _ = writeln!(
+        standard_output,
+        "enough. MCP tools are likewise offered to the model by Claude Code; this"
+    );
+    let _ = writeln!(
+        standard_output,
+        "command guarantees the wiring, and the inlined brief guarantees the guidance."
     );
 
     if had_error {

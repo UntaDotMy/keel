@@ -897,13 +897,30 @@ fn user_prompt_submit_context() -> String {
     )
 }
 
-/// Concrete per-prompt skill pointer. Emitted only when the prompt
+/// Concrete per-prompt skill guidance. Emitted only when the prompt
 /// distinctively matches one installed skill (see
-/// `utility::skill_match::match_skill_for_prompt`). Naming the skill and the
-/// exact `Skill("<name>")` call turns the generic "invoke any relevant skill"
-/// reminder into an actionable instruction — the single biggest lever for
-/// getting the model to actually load the right skill before responding.
-fn skill_pointer_text(skill_name: &str) -> String {
+/// `utility::skill_match::match_skill_for_prompt`).
+///
+/// Two parts, deliberately ordered:
+///   1. A one-line header naming the matched skill and the `Skill("<name>")`
+///      call that loads its full body.
+///   2. The skill's *own* bounded brief (`brief`) — its description plus the
+///      opening of its body. This is the model-independence fix: the operative
+///      guidance is injected as input context for this turn, so it lands even
+///      if the gateway model never makes the `Skill()` call. Earlier this hook
+///      only asked the model to call `Skill()`; whether the skill loaded then
+///      depended entirely on the model honoring that instruction.
+fn skill_pointer_text(skill_name: &str, brief: &str) -> String {
+    format!(
+        "Skill match: this prompt strongly matches the `{skill_name}` skill. Its guidance is inlined below and applies now — follow it before writing code or giving a final answer. For the complete skill, call Skill(\"{skill_name}\"). If, after reading, the skill turns out not to apply, say so and proceed.\n\n--- begin {skill_name} skill brief ---\n{brief}\n--- end {skill_name} skill brief ---"
+    )
+}
+
+/// Fallback per-prompt skill pointer used when the matched skill's body cannot
+/// be read for inlining. Names the skill and the exact `Skill("<name>")` call so
+/// the model still gets an actionable instruction, even though the brief itself
+/// is unavailable this turn.
+fn skill_pointer_fallback(skill_name: &str) -> String {
     format!(
         "Skill match: this prompt strongly matches the `{skill_name}` skill. Invoke it now with Skill(\"{skill_name}\") BEFORE writing code or giving a final answer. If, after reading it, the skill turns out not to apply, say so and proceed — but do not skip the check."
     )
@@ -960,16 +977,27 @@ fn run_hook_user_prompt_submit(
     let claude_home = resolve_claude_home("").ok();
 
     let mut base_context = user_prompt_submit_context();
-    // Prepend a concrete skill pointer when the prompt distinctively matches one
-    // installed skill. Placed first so it is the first thing the model reads.
-    // Conservative by construction: `match_skill_for_prompt` stays silent for
-    // generic or ambiguous prompts (see utility::skill_match), so this never
-    // mis-routes — it only sharpens an already-clear signal.
+    // Prepend the matched skill's own guidance when the prompt distinctively
+    // matches one installed skill. Placed first so it is the first thing the
+    // model reads. Conservative by construction: `match_skill_for_prompt` stays
+    // silent for generic or ambiguous prompts (see utility::skill_match), so
+    // this never mis-routes — it only sharpens an already-clear signal.
+    //
+    // Inline the skill's *actual brief* rather than only asking for a
+    // `Skill()` call: injected context is consumed by the model as input
+    // regardless of whether it honors the tool-call instruction, so the
+    // guidance lands even behind a gateway model that ignores `Skill()`. Fall
+    // back to the bare pointer only when the body cannot be read.
     if let (false, Some(home)) = (prompt_text.trim().is_empty(), claude_home.as_ref()) {
         if let Some(matched) =
             crate::utility::skill_match::match_skill_for_prompt(home, prompt_text)
         {
-            base_context = format!("{}\n\n{}", skill_pointer_text(&matched.name), base_context);
+            let pointer = match crate::utility::skill_match::skill_inline_brief(home, &matched.name)
+            {
+                Some(brief) => skill_pointer_text(&matched.name, &brief),
+                None => skill_pointer_fallback(&matched.name),
+            };
+            base_context = format!("{pointer}\n\n{base_context}");
         }
     }
 
