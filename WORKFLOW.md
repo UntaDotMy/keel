@@ -133,6 +133,7 @@ Automation cannot prove semantic single-feature scope perfectly. Human review an
 
 ## Research-First Implementation Rules
 
+- Understand the request before building. Restate what the user actually asked, confirm the user story, and identify what is genuinely needed before writing code. Do not guess, do not assume, do not build against an imagined spec. The fact-research bullets below refresh *how* to build (syntax, releases, conventions); this bullet establishes *what* to build. Correct code that solved the wrong problem still gets thrown away, so confirm the target first. If the request is ambiguous in a way that changes what you build, ask before building.
 - Use `preserve-existing-flow` before changing any existing source file, established function, loop, handler, queue, state machine, transport path, firmware path, protocol flow, or source-of-truth ownership. New behavior should layer through the existing owner unless the user explicitly approves replacing that owner.
 - When the job is covered by a native `claude-skills` command, prefer the native executable or source-checkout command path instead of recreating the behavior through ad hoc generic tool calls.
 - Before writing non-trivial code, run a targeted research pass for the active language, framework, runtime, and harness so syntax, release changes, tooling behavior, and repository conventions are current instead of assumed from memory.
