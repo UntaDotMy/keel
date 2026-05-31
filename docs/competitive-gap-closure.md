@@ -21,7 +21,9 @@ to the official Claude Code docs at code.claude.com as of the audit date.
 | caveman (`JuliusBrussee/caveman`) | Skill that compresses the model's own replies (terse "caveman speak") | MIT | Token economy on the **output** side (claude-core only compacts command **output**); ships slash commands, statusline, MCP middleware. |
 | superpowers (`obra/superpowers`) | Opinionated TDD methodology as auto-triggering skills | MIT | Skills + workflow doctrine; `writing-skills` meta-skill with a subagent eval harness; two-stage review loop (walked back to inline self-review checklists in v5.0.6 for speed); visual brainstorming. v5.1.0 (May 2026) removed its legacy slash commands and named code-reviewer agent. Cross-harness (Claude/Codex/Cursor/Gemini/Copilot) — the one axis it still leads. After the methodology-completion pass, claude-core ships named first-class equivalents for **all 14** of its methodology skills (see scorecard). |
 | ECC ("Everything Claude Code", `affaan-m/ECC`) | Multi-harness operator framework | MIT | Whole operator posture at larger scale; **Instincts** (confidence-scored learned behaviors that evolve into skills), **AgentShield** (adversarial config security audit), advisor CLI, cross-harness adapters. |
-| UI/UX Pro Max (`nextlevelbuilder/ui-ux-pro-max-skill`) | Design-intelligence skill: a knowledge corpus + generator that turns a UI request into a design-system packet (style, palette, typography, anti-patterns, checklist) | MIT | Single-domain overlap with claude-core's **`design-intelligence` generator** + the `ui-design-systems-and-responsive-interfaces` skill. After the corpus-expansion pass, comparable corpus (their 67 styles / 161 palettes / 57 font pairings vs our 23 styles / 48 palettes / 50 pairings, plus our 25 archetypes / 21 color moods / 15 typography moods / 15 stack profiles / 25 chart types / 60 UX guidelines — same artifact types). Both persist to `design-system/MASTER.md`. They are cross-harness (Claude/Cursor/Copilot/Gemini/Codex/Kiro/…); ours ships inside the single hook-wired Rust binary (no Python runtime). Accessibility is checklist guidance, not automated WCAG validation — same posture as ours. No command-output compaction, no review gate, no learning loop, no brownfield gate. |
+| UI/UX Pro Max (`nextlevelbuilder/ui-ux-pro-max-skill`) | Design-intelligence skill: a knowledge corpus + Python BM25 generator that turns a UI request into a design-system packet (style, palette, typography, anti-patterns, checklist) | MIT | Single-domain overlap with claude-core's **`design-intelligence` generator** + the `ui-design-systems-and-responsive-interfaces` skill. v2.5.0 **file-verified** corpus: 84 styles, 161 palettes, 73 font pairings, 99 UX rules, 161 reasoning rules/products, 25 charts, 1,923 Google-font table. After claude-core's **corpus-beat pass**, claude-core now leads on every comparable array: **170 archetypes, 90 styles, 230 palettes, 140 pairings, 37 charts, 112 UX guidelines** (plus 45 color moods / 30 typography moods / 15 stack profiles — 869 total cross-referenced entries). Both persist to `design-system/MASTER.md`. They are cross-harness (18 platforms); ours ships inside the single hook-wired Rust binary (no Python runtime). Accessibility is checklist guidance, not automated WCAG validation — same posture both sides. No command-output compaction, no review gate, no learning loop, no brownfield gate on their side. |
+| harness (`revfactory/harness`) | A single meta-skill "team-architecture factory": from a one-line domain prompt it generates a coordinated agent team plus the skills those agents use | Apache-2.0 | Niche overlap with claude-core's orchestration skills. Ships **1 skill + 6 reference docs, zero hooks, zero subagents, zero CLI**; depends entirely on Claude Code's experimental Agent Teams API (`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`). Six orchestration patterns (pipeline, fan-out/fan-in, expert pool, producer-reviewer, supervisor, hierarchical) + a Phase-0 audit / duplicate-review brownfield gate. Claude-Code-only, manual invocation. Closed by claude-core's `designing-agent-teams` skill (the same pattern catalog + contract discipline, without the experimental-API dependency). |
+| compound-engineering (`EveryInc/compound-engineering-plugin`) | "Compound engineering" plugin: front-load planning/review and codify each solved problem into a reusable knowledge base so future work is easier | MIT | Broadest methodology overlap. **38 skills + 43 subagents** (all markdown), installable to 10 harnesses via a TypeScript converter CLI; **zero hooks** (entirely manual/slash-driven). Signature is `ce-compound`: writes categorized, frontmatter-tagged solution docs to `docs/solutions/` and self-edits AGENTS.md/CLAUDE.md for discoverability. Has `ce-worktree`, multi-lens review fan-out, design + security reviewers. Closed by claude-core's `compounding-knowledge` skill (the same capture-and-wire-discoverability loop), which complements our automatic, hook-driven `learn` loop they lack. |
 
 Note: published star counts for these repos (caveman/superpowers/ECC/RTK) were
 flagged as implausible/unverifiable during research and are deliberately not used
@@ -323,17 +325,55 @@ N = absent.
   methodology skills; the only remaining superpowers lead is the by-design
   cross-harness axis.
 
-### Skill count: 20 → 23 → 31 (full named-skill parity with superpowers' methodology set)
+### Skill count: 20 → 23 → 31 → 33 (methodology parity + cross-comparator gap closure)
 
-The repo now ships 31 specialist/methodology skills in the manifest (manifest-driven;
+The repo now ships 33 specialist/methodology skills in the manifest (manifest-driven;
 the binary discovers the count from `plugin.json`, so no hardcoded total drifts), plus
-the `using-claude-core` bootstrap and `compression-discipline` (32 SKILL.md files
-total, all passing `skill-lint`). The methodology trio (`test-driven-development`,
-`systematic-debugging`, `brainstorming`) closed the first superpowers gap; the eight
-skills above (`writing-skills`, `writing-plans`, `executing-plans`,
+the `using-claude-core` bootstrap and `compression-discipline` (35 SKILL.md files
+total, all passing `skill-lint`: 35 skills, 0 failed, 0 warned). The methodology trio
+(`test-driven-development`, `systematic-debugging`, `brainstorming`) closed the first
+superpowers gap; the eight skills (`writing-skills`, `writing-plans`, `executing-plans`,
 `subagent-driven-development`, `dispatching-parallel-agents`, `using-git-worktrees`,
-`finishing-a-development-branch`, `receiving-code-review`) close the remainder.
-`using-claude-core` catalog header and entries updated to match.
+`finishing-a-development-branch`, `receiving-code-review`) closed the rest of the
+superpowers surface; the three newest close the cross-comparator gaps found in the
+harness / compound-engineering / ECC audit:
+- `designing-agent-teams` — closes the **harness** (`revfactory/harness`) gap: the
+  six-pattern agent-team-architecture factory (pipeline, fan-out/fan-in, expert pool,
+  producer-reviewer, supervisor, hierarchical) with per-agent role/input/output/
+  verification contracts, but without harness's dependency on the experimental Agent
+  Teams API. Hands execution to `dispatching-parallel-agents` + `subagent-driven-development`.
+- `compounding-knowledge` — closes the **compound-engineering**
+  (`EveryInc/compound-engineering-plugin`) gap: the `ce-compound`-style capture loop
+  (categorized, deduped, evidence-bearing solution notes wired into CLAUDE.md/AGENTS.md
+  discoverability pointers), as the human-readable complement to our automatic,
+  hook-driven `learn` loop that they do not have.
+- `adversarial-security-review` — closes the **ECC AgentShield** (`affaan-m/ECC`) gap:
+  the red-team / blue-team / adjudicator pass (AgentShield's `--opus` three-agent loop)
+  that chains static findings into concrete attacker scenarios and adjudicates each to
+  confirmed/refuted/needs-proof with evidence, as the reasoning layer above our
+  deterministic `claude-skills config-audit` static scan.
+`using-claude-core` catalog header (33 skills) and entries updated to match.
+
+- ~~UI/UX Pro Max corpus was smaller than theirs~~ **(closed and surpassed this
+  pass).** A re-audit with **file-verified** counts (parsing their actual CSVs, not
+  README claims) showed UI/UX Pro Max v2.5.0 is bigger than previously recorded —
+  84 styles, 161 palettes, 73 font pairings, 99 UX rules, 161 reasoning rules — and
+  bigger than its own README advertises. The catalog was expanded (via four parallel
+  authoring waves, merged with strict cross-reference + duplicate-id + hex + enum
+  validation) from 282 to **869 cross-referenced entries**, now leading on every
+  comparable array: **170 product archetypes** (vs 161), **90 style families** (vs 84),
+  **230 color palettes** (vs 161), **140 font pairings** (vs 73), **37 chart types**
+  (vs 25), **112 UX guidelines** (vs 99), plus 45 color moods, 30 typography moods, and
+  15 stack profiles with no analog on their side. All cross-references validated (every
+  archetype's recommended style/color/typography moods resolve; every palette/pairing
+  resolves to a real mood); all 12 design-intelligence tests pass against the expanded
+  catalog; an end-to-end run confirms new entries surface correctly (e.g. a pet-care
+  request routes to the new `veterinary-clinic` archetype with the Calm Sage palette at
+  15.41:1 contrast and a Quicksand + Nunito Sans pairing). The 869-entry / ~726 KB
+  catalog ships on install and the generator runs against the installed copy. claude-core
+  now exceeds UI/UX Pro Max on corpus volume **and** still leads on architecture
+  (single hook-wired binary, no Python runtime), brownfield + WCAG + review-gate
+  discipline, and the automatic learning loop.
 
 - ~~UI/UX Pro Max design-intelligence generator was a stub~~ **(closed this
   pass).** An audit against `nextlevelbuilder/ui-ux-pro-max-skill` (whose headline

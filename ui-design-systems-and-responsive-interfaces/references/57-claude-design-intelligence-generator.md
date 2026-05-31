@@ -48,17 +48,17 @@ The generator emits a full design-intelligence packet, not just style picks:
 
 ## Backing Corpus
 
-The catalog is the design knowledge base behind every recommendation. It currently holds 282 cross-referenced entries:
+The catalog is the design knowledge base behind every recommendation. It currently holds 869 cross-referenced entries — larger than every comparable array of the largest external design-intelligence corpus (UI/UX Pro Max v2.5.0, file-verified: 84 styles / 161 palettes / 73 pairings / 99 UX rules / 161 reasoning rules / 25 charts):
 
-- 25 product archetypes
-- 23 style families
-- 21 color moods
-- 15 typography moods
+- 170 product archetypes
+- 90 style families
+- 45 color moods
+- 30 typography moods
 - 15 stack profiles
-- 48 named color palettes (light and dark, with hex + contrast notes)
-- 50 font pairings (Google Fonts and system stacks)
-- 25 chart types
-- 60 UX guidelines
+- 230 named color palettes (light and dark, with hex + WCAG contrast notes)
+- 140 font pairings (Google Fonts and system stacks)
+- 37 chart types
+- 112 UX guidelines
 
 Cross-references are validated: every archetype's recommended style/color/typography moods resolve, every stack's preferred entries resolve, and every palette and pairing points at a real color or typography mood. The `data/` directory ships with the skill on install, so the native command works against the installed copy without network access.
 

@@ -21,10 +21,13 @@
     "automation"
   ],
   "skills": [
+    "./adversarial-security-review",
     "./api-contract-design",
     "./backend-and-data-architecture",
     "./brainstorming",
     "./cloud-and-devops-expert",
+    "./compounding-knowledge",
+    "./designing-agent-teams",
     "./dispatching-parallel-agents",
     "./executing-plans",
     "./finishing-a-development-branch",

@@ -112,7 +112,7 @@ skill matcher fires. The full text and the tactical rules they imply live in
 | "I'll add a config knob in case we need it" | Step 2 (Simplicity First) violated. Add it when a second caller exists. |
 | "Make it work" is a goal | Step 4 (Goal-Driven Execution) failed. State the verifiable check that proves done. |
 
-## Skill catalog (30 skills installed under ~/.claude/skills/)
+## Skill catalog (33 skills installed under ~/.claude/skills/)
 
 Source: each `<name>/SKILL.md` in this repo. Use the Skill tool with the bare
 name (e.g. `Skill("reviewer")`).
@@ -139,6 +139,9 @@ name (e.g. `Skill("reviewer")`).
 - `receiving-code-review` — Act on review feedback as the author: judge each point on merit, fix valid ones at the root cause with evidence, push back on wrong ones with evidence, re-verify before claiming addressed.
 - `requesting-code-review` — see `reviewer`; route a non-trivial diff through the fail-closed review gate.
 - `writing-skills` — Author and revise skills with evidence the prose changes behavior: RED-GREEN-REFACTOR on the instructions themselves, pressure-testing a fresh subagent without the skill, then with it. The behavioral gate above skill-lint's structural gate.
+- `designing-agent-teams` — Decompose a domain or oversized task into a coordinated multi-agent team: pick an architecture pattern (pipeline, fan-out/fan-in, expert pool, producer-reviewer, supervisor, hierarchical), define each agent's role/inputs/output/verification, and wire orchestration. Hands execution to dispatching-parallel-agents and subagent-driven-development.
+- `compounding-knowledge` — Capture each solved problem as a durable, deduped, discoverable solution note (problem/root-cause/solution/evidence) wired into the project's CLAUDE.md/AGENTS.md pointers so future work starts ahead. The deliberate, human-readable counterpart to the automatic learn loop.
+- `adversarial-security-review` — Red-team / blue-team / adjudicator pass that chains static findings into concrete attacker scenarios and adjudicates each to confirmed/refuted/needs-proof with evidence. The reasoning layer above claude-skills config-audit's deterministic scan.
 - `ui-design-systems-and-responsive-interfaces` — UI systems, responsive design, accessibility (WCAG 2.1 AA).
 - `ux-research-and-experience-strategy` — UX research and evidence-based experience design (journeys, funnels, usability).
 - `memory-status-reporter` — Human-style memory health and learning reports.
