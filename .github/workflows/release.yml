@@ -163,6 +163,25 @@ jobs:
               cp -R "$shared_dir" "$target_dir/"
             fi
           done
+          # Stage custom slash commands so the native installer's
+          # sync_commands step (manager/install.rs) finds a source directory.
+          # Without this the release archive carries no commands/ dir, so a
+          # fresh `claude-skills install` registers zero /claude-core:*
+          # commands — they would otherwise ship only via the plugin path.
+          if [ -d commands ]; then
+            cp -R commands "$target_dir/commands"
+          fi
+          # Stage Claude Code subagent definitions and the plugin manifest.
+          # sync_subagent_definitions reads .claude/agents/*.md; without it a
+          # fresh install registers none of the 18 delegation subagents.
+          # .claude-plugin/ carries the plugin + MCP registration manifest so
+          # the archive is self-describing for the plugin install path too.
+          if [ -d .claude ]; then
+            cp -R .claude "$target_dir/.claude"
+          fi
+          if [ -d .claude-plugin ]; then
+            cp -R .claude-plugin "$target_dir/.claude-plugin"
+          fi
           cat > "$target_dir/claude-skills-release-manifest.json" <<EOF
           {
             "package_kind": "packaged_release_bundle",
