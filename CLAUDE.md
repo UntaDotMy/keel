@@ -5,6 +5,7 @@
 This is the claude-core project — native delivery rails for Claude Code. It provides:
 - 1 bootstrap **skill** (`using-claude-core/SKILL.md`) injected verbatim at every `SessionStart` to establish the research-first iron law and list every other skill
 - 18 specialist Claude Code **skills** for software delivery (`<name>/SKILL.md`)
+- 16 technique/process **skills** (`brainstorming`, `test-driven-development`, `systematic-debugging`, `writing-plans`, `executing-plans`, `subagent-driven-development`, `dispatching-parallel-agents`, `using-git-worktrees`, `finishing-a-development-branch`, `receiving-code-review`, `writing-skills`, `designing-agent-teams`, `compounding-knowledge`, `adversarial-security-review`, plus the token-discipline pair `compression-discipline` and `output-economy`) — main-thread skills with no subagent or managed profile. This makes 35 `SKILL.md` directories total (18 specialists + 16 technique + 1 bootstrap); 34 are matcher-invokable (all but the bootstrap, which loads automatically at SessionStart). `requesting-code-review` is an alias pointer to `reviewer`, not a directory.
 - 18 matching Claude Code **subagents** for token-efficient delegation (`.claude/agents/<name>.md`)
 - 18 internal **managed profiles** consumed by the CLI (`<name>/agents/claude.yaml`)
 - Workflow routing and escalation rules
@@ -38,11 +39,11 @@ A "skill" runs in the main thread (instructions inline, costs ongoing tokens). A
 
 ## Specialist Layout
 
-Each specialist contains three artifacts:
+Each specialist contains three artifacts, plus an optional reference library:
 - `<name>/SKILL.md` — Skill definition (loaded by Claude Code when relevant)
 - `.claude/agents/<name>.md` — Subagent definition (delegation target with isolated context)
 - `<name>/agents/claude.yaml` — Managed profile (CLI runtime configuration)
-- `<name>/references/` — Deep knowledge files referenced by SKILL.md
+- `<name>/references/` — Deep knowledge files referenced by SKILL.md (most specialists; the narrow specialists `api-contract-design`, `postgres-migration-safety`, `react-performance-audit`, `stripe-integration`, and `websocket-realtime-design` ship a self-contained SKILL.md with no reference library)
 
 18 specialists: `software-development-life-cycle`, `web-development-life-cycle`, `mobile-development-life-cycle`, `backend-and-data-architecture`, `cloud-and-devops-expert`, `qa-and-automation-engineer`, `security-and-compliance-auditor`, `git-expert`, `preserve-existing-flow`, `reviewer`, `ui-design-systems-and-responsive-interfaces`, `ux-research-and-experience-strategy`, `memory-status-reporter`, `api-contract-design`, `react-performance-audit`, `postgres-migration-safety`, `stripe-integration`, `websocket-realtime-design`.
 
@@ -52,7 +53,7 @@ Each specialist contains three artifacts:
 
 Other official optional fields not currently used here include `disable-model-invocation`, `user-invocable`, `argument-hint`, `arguments`, `model`, `context`, `agent`, `hooks`, and `shell`. Add them deliberately when a skill needs that capability.
 
-**Subagent frontmatter** (`.claude/agents/<name>.md`) follows the official spec: `name` and `description` are required; `tools` (comma-separated bare tool names), `model` (`opus`, `sonnet`, `haiku`, or `inherit`), `color`, and `skills` (a YAML list of bare skill names to preload at startup) are optional. Note: scoped tool patterns like `Bash(git diff:*)` work in SKILL.md `allowed-tools` but not in subagent `tools` — subagents use bare tool names. Each managed subagent preloads its same-named skill via `skills:` so the full skill content is in context from startup rather than loaded on demand; `skills` is supported for plugin subagents and a missing/disabled skill is skipped with a debug-log warning. Reference: https://code.claude.com/docs/en/sub-agents.
+**Subagent frontmatter** (`.claude/agents/<name>.md`) follows the official spec: `name` and `description` are required; `tools` (comma-separated bare tool names), `model` (`opus`, `sonnet`, `haiku`, or `inherit`), `color`, and `skills` (a YAML list of bare skill names to preload at startup) are optional. Note: scoped tool patterns like `Bash(git diff:*)` work in SKILL.md `allowed-tools` but not in subagent `tools` — subagents use bare tool names. A consequence: the six read-only review subagents (`reviewer`, `security-and-compliance-auditor`, `git-expert`, `preserve-existing-flow`, `ux-research-and-experience-strategy`, `memory-status-reporter`) correctly omit `Edit`/`Write` but still carry an unscoped `Bash` grant, so their read-only contract is enforced by instruction (the `_shared/subagent-iron-law.md` "respect their intent" rule), not by the tool grant — a determined shell command could still mutate the tree. Each managed subagent preloads its same-named skill via `skills:` so the full skill content is in context from startup rather than loaded on demand; `skills` is supported for plugin subagents and a missing/disabled skill is skipped with a debug-log warning. Reference: https://code.claude.com/docs/en/sub-agents.
 
 **Hook events** (`.claude/hooks.json`) are wired through `claude-skills hook <event>` for every Claude Code lifecycle event the manager observes. The `HOOK_EVENTS` table in `rust/crates/claude-skills/src/hooks/claude.rs` defines **30 events**, of which 28 install into `settings.json`. Two rows carry `installs_in_settings: false`: `FileChanged` (its matcher doubles as a per-repo watch list, so an empty matcher would ship dead config) and `MessageDisplay` (no matcher, fires on every assistant message, emits `hookSpecificOutput.displayContent` — auto-installing would either be a no-op or silently rewrite on-screen text, so it stays opt-in). Both still dispatch for ad-hoc invocations (`claude-skills hook file-changed`, `claude-skills hook message-display`). Events the runtime does not actively emit are stubbed for forward-compatibility — the dispatcher no-ops until behavior is needed. When Anthropic adds or renames events, update both `HOOK_EVENTS` and the generated `.claude/hooks.json`. Reference: https://code.claude.com/docs/en/hooks.
 

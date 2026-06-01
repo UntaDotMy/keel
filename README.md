@@ -53,9 +53,9 @@ The cast file ships in this repo. Render to GIF with `agg docs/demos/quickstart.
 
 | Surface | What it gives you |
 | --- | --- |
-| Iron-law hooks | SessionStart loads the bootstrap skill, UserPromptSubmit restates the three rules, PostToolBatch nudges a reviewer pass, PreCompact refreshes SYSTEM_MAP. |
+| Iron-law hooks | SessionStart loads the bootstrap skill, UserPromptSubmit restates the four rules, PostToolBatch nudges a reviewer pass, PreCompact refreshes SYSTEM_MAP. |
 | Workflow CLI | `workflow start`, `workflow route`, `workflow cockpit`, `workflow finish` — proof-first delivery rails. |
-| Review gates | Native `.claude-review.json`, `review pre-pr`, and CI-ready artifacts so non-trivial code never self-reviews. |
+| Review gates | Native `.claude/review.json`, `review pre-pr`, and CI-ready artifacts so non-trivial code never self-reviews. |
 | Memory | Working briefs, completion ledgers, scoped `SYSTEM_MAP.md`, and durable recovery state under `~/.claude/memories/`. |
 | Command compaction | `claude-skills run -- <cmd>` produces compact output for noisy test/build/lint/log/search commands without dropping diagnostic signal. |
 | MCP server | `claude-skills mcp serve` is registered through the plugin manifest so Claude Code auto-discovers `recall`, `system_map`, `run_command`, and `recall_status` tools plus the system-map and recall-status resources. |
@@ -208,9 +208,10 @@ discoverable `/`-menu wrapper over an **implemented** `claude-skills` CLI surfac
 | `/claude-core:gain [since]` | `gain` | Report command-output compaction savings. |
 
 Command files live at the plugin root `commands/`. They ship through the plugin
-install path; the native `claude-skills install` does not yet sync them into
-`~/.claude/commands/` (tracked follow-up — the installer has `sync_skills` and
-`sync_agents` but no `sync_commands` arm yet).
+install path, and the native `claude-skills install` also syncs them into
+`~/.claude/commands/` via its `sync_commands` arm (alongside `sync_skills` and
+`sync_agents`), so they work whether installed through the plugin path or the
+native installer.
 
 ## Statusline (opt-in)
 
@@ -434,7 +435,7 @@ The pack is strict on purpose:
 
 ## Native Review and CI
 
-`.claude-review.json` is the tracked repo-level rule file.
+`.claude/review.json` is the tracked repo-level rule file.
 
 - claude-skills review pre-commit is the local pre-commit surface.
 - claude-skills review pre-pr is the local pre-PR surface.
@@ -691,7 +692,7 @@ claude_skills/
 |- rust/crates/claude-skills     Native install, update, hook, review, flow, and compaction surfaces
 |- rust/crates/claude-skills-*   Rust support crates for flow, platform, release assets, and text linting
 |- .github/workflows/           native Rust CI and release pipelines
-|- .claude-review.json           native review rules
+|- .claude/review.json          native review rules
 |- AGENTS.md                    agent operating doctrine
 |- WORKFLOW.md                  branch and completion rules
 ```

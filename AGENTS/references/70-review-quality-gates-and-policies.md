@@ -1,7 +1,7 @@
 <!--
 Purpose: Capture code review requirements, automated quality checks, quality gates, final output, reasoning effort, skill model policy, and git identity policy previously inline in AGENTS.md.
 Caller: AGENTS.md before closeout, before final answer, when triggering review, or when wiring agent-profile reasoning effort.
-Dependencies: reviewer skill, .claude-review.json, claude-skills review, agent-profile TOMLs.
+Dependencies: reviewer skill, .claude/review.json, claude-skills review, agent-profile TOMLs.
 Main Functions: Define when review is mandatory, the automated quality bar, closeout output, reasoning policy, model pinning policy, and commit identity rules.
 Side Effects: None — this file is informational.
 -->

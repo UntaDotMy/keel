@@ -67,7 +67,7 @@
           {
             "type": "command",
             "command": "claude-skills hook task-created",
-            "statusMessage": "Recording task creation in workflow ledger"
+            "statusMessage": "Task lifecycle hook (reserved; dispatch is currently a no-op)"
           }
         ]
       }
@@ -79,7 +79,7 @@
           {
             "type": "command",
             "command": "claude-skills hook task-completed",
-            "statusMessage": "Recording task completion in workflow ledger"
+            "statusMessage": "Task lifecycle hook (reserved; dispatch is currently a no-op)"
           }
         ]
       }
@@ -91,7 +91,7 @@
           {
             "type": "command",
             "command": "claude-skills hook teammate-idle",
-            "statusMessage": "Recording teammate idle lifecycle"
+            "statusMessage": "Teammate-idle hook (reserved; dispatch is currently a no-op)"
           }
         ]
       }
@@ -103,7 +103,7 @@
           {
             "type": "command",
             "command": "claude-skills hook worktree-create",
-            "statusMessage": "Recording worktree creation lifecycle"
+            "statusMessage": "Worktree lifecycle hook (reserved; dispatch is currently a no-op)"
           }
         ]
       }
@@ -115,7 +115,7 @@
           {
             "type": "command",
             "command": "claude-skills hook worktree-remove",
-            "statusMessage": "Recording worktree removal lifecycle"
+            "statusMessage": "Worktree lifecycle hook (reserved; dispatch is currently a no-op)"
           }
         ]
       }
@@ -127,7 +127,7 @@
           {
             "type": "command",
             "command": "claude-skills hook cwd-changed",
-            "statusMessage": "Recording working directory change"
+            "statusMessage": "Working-directory-change hook (reserved; dispatch is currently a no-op)"
           }
         ]
       }
@@ -139,7 +139,7 @@
           {
             "type": "command",
             "command": "claude-skills hook permission-request",
-            "statusMessage": "Recording permission lifecycle"
+            "statusMessage": "Permission lifecycle hook (reserved; dispatch is currently a no-op)"
           }
         ]
       }
@@ -151,7 +151,7 @@
           {
             "type": "command",
             "command": "claude-skills hook notification",
-            "statusMessage": "Recording notification lifecycle"
+            "statusMessage": "Emitting terminal bell on notification"
           }
         ]
       }
@@ -235,7 +235,7 @@
           {
             "type": "command",
             "command": "claude-skills hook stop-failure",
-            "statusMessage": "Recording stop failure for recovery"
+            "statusMessage": "Stop-failure hook (reserved; dispatch is currently a no-op)"
           }
         ]
       }
@@ -247,7 +247,7 @@
           {
             "type": "command",
             "command": "claude-skills hook setup",
-            "statusMessage": "Preparing project setup state"
+            "statusMessage": "Setup hook (reserved; dispatch is currently a no-op)"
           }
         ]
       }
@@ -259,7 +259,7 @@
           {
             "type": "command",
             "command": "claude-skills hook user-prompt-expansion",
-            "statusMessage": "Recording prompt expansion lifecycle"
+            "statusMessage": "Prompt-expansion hook (reserved; dispatch is currently a no-op)"
           }
         ]
       }
@@ -271,7 +271,7 @@
           {
             "type": "command",
             "command": "claude-skills hook permission-denied",
-            "statusMessage": "Recording denied permission for routing"
+            "statusMessage": "Permission-denied hook (reserved; dispatch is currently a no-op)"
           }
         ]
       }
@@ -283,7 +283,7 @@
           {
             "type": "command",
             "command": "claude-skills hook subagent-start",
-            "statusMessage": "Opening subagent lifecycle"
+            "statusMessage": "Subagent-start hook (reserved; dispatch is currently a no-op)"
           }
         ]
       }
@@ -295,7 +295,7 @@
           {
             "type": "command",
             "command": "claude-skills hook instructions-loaded",
-            "statusMessage": "Recording loaded instruction context"
+            "statusMessage": "Instructions-loaded hook (reserved; dispatch is currently a no-op)"
           }
         ]
       }
@@ -307,7 +307,7 @@
           {
             "type": "command",
             "command": "claude-skills hook config-change",
-            "statusMessage": "Recording configuration change"
+            "statusMessage": "Config-change hook (reserved; dispatch is currently a no-op)"
           }
         ]
       }
@@ -319,7 +319,7 @@
           {
             "type": "command",
             "command": "claude-skills hook elicitation",
-            "statusMessage": "Recording elicitation prompt"
+            "statusMessage": "Elicitation-prompt hook (reserved; dispatch is currently a no-op)"
           }
         ]
       }
@@ -331,7 +331,7 @@
           {
             "type": "command",
             "command": "claude-skills hook elicitation-result",
-            "statusMessage": "Recording elicitation result"
+            "statusMessage": "Elicitation-result hook (reserved; dispatch is currently a no-op)"
           }
         ]
       }
