@@ -622,7 +622,7 @@ Advanced memory and search surfaces:
 
 - The Rust runtime implements `scope`, `system-map`, `working-brief`, `completion-gate check`, and `recall` for both `memory` and `memoriesv2` command groups, plus the family commands `research-cache` (record/lookup/stale/reward/list), `maintenance` (append-working-buffer/trim/recalibrate), `agent-registry` (register/list), `agent-packets` (build/show/list), `loop-guard` (record/check), `entity` (upsert/list/query), `graph` (add/list/query), `retrieve` (cross-family lexical search), and `status`. Each family persists flat-JSON records under `<claude-home>/<group>/<family>/`, isolated per command group.
 - The `orchestration` group implements `runtime-preflight`, `resume-status`, `task` (begin/progress/complete/list), and `checkpoint`.
-- Still not implemented (return non-zero with a "not implemented" message): `memory report`, `memory index`, `memory hook`, and `consolidate`.
+- `memory report` (alias for `status`), `memory index` (rebuilds the recall index), and `instincts` are also implemented. `memory hook` is intentionally not a memory subcommand — it points to `claude-skills hook ...`, which owns Claude Code lifecycle hooks. Still not implemented (return non-zero): `memory working-brief record-summary`, `memory completion-gate record-requirement`, and `consolidate`.
 - Code-search demo details live at [./docs/code-search-demo-and-gap-map.md](./docs/code-search-demo-and-gap-map.md).
 
 ## Manager and Operator Surfaces

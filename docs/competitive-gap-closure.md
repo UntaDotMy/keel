@@ -325,12 +325,12 @@ N = absent.
   methodology skills; the only remaining superpowers lead is the by-design
   cross-harness axis.
 
-### Skill count: 20 → 23 → 31 → 33 (methodology parity + cross-comparator gap closure)
+### Skill count: 20 → 23 → 31 → 33 → 37 (methodology parity + cross-comparator + domain-coverage gap closure)
 
-The repo now ships 33 specialist/methodology skills in the manifest (manifest-driven;
+The repo now ships 37 specialist/methodology skills in the manifest (manifest-driven;
 the binary discovers the count from `plugin.json`, so no hardcoded total drifts), plus
-the `using-claude-core` bootstrap and `compression-discipline` (35 SKILL.md files
-total, all passing `skill-lint`: 35 skills, 0 failed, 0 warned). The methodology trio
+the `using-claude-core` bootstrap (38 SKILL.md files
+total, all passing `skill-lint`: 38 skills, 0 failed, 0 warned). The methodology trio
 (`test-driven-development`, `systematic-debugging`, `brainstorming`) closed the first
 superpowers gap; the eight skills (`writing-skills`, `writing-plans`, `executing-plans`,
 `subagent-driven-development`, `dispatching-parallel-agents`, `using-git-worktrees`,
@@ -352,7 +352,21 @@ harness / compound-engineering / ECC audit:
   that chains static findings into concrete attacker scenarios and adjudicates each to
   confirmed/refuted/needs-proof with evidence, as the reasoning layer above our
   deterministic `claude-skills config-audit` static scan.
-`using-claude-core` catalog header (33 skills) and entries updated to match.
+
+The three newest specialists close the operational-domain-coverage gaps the
+roster audit found (observability, supply-chain action, analytical/ML data flow):
+- `observability-and-incident-response` — promotes what was only a
+  `cloud-and-devops-expert` reference into a first-class skill: metrics/logs/traces
+  via OpenTelemetry, golden signals, SLO/SLI and error-budget math, burn-rate
+  paging linked to runbooks, and blameless postmortems.
+- `dependency-and-supply-chain` — the action counterpart to
+  `security-and-compliance-auditor`'s scanning: dependency upgrades, lockfile
+  hygiene, semver risk tiering, major-version migration, SBOM, and provenance/signing.
+- `data-and-ml-engineering` — the analytical/ML-flow counterpart to
+  `backend-and-data-architecture`'s OLTP focus: ETL/ELT pipelines, dbt warehouse
+  modeling, orchestration, data quality, and the ML lifecycle through drift.
+
+`using-claude-core` catalog header (37 skills) and entries updated to match.
 
 - ~~UI/UX Pro Max corpus was smaller than theirs~~ **(closed and surpassed this
   pass).** A re-audit with **file-verified** counts (parsing their actual CSVs, not

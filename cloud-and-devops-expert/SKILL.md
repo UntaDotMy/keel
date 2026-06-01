@@ -1,6 +1,6 @@
 ---
 name: cloud-and-devops-expert
-description: Designs cloud infrastructure, CI/CD pipelines, container orchestration, and progressive delivery with reproducibility, least privilege, and rollback safety in mind. Use when authoring or reviewing IaC (Terraform, Helm, Kustomize), CI/CD workflows, IAM and secrets, observability, or rollout and incident-response plans.
+description: Designs cloud infrastructure, CI/CD pipelines, container orchestration, and progressive delivery with reproducibility, least privilege, and rollback safety in mind. Use when authoring or reviewing IaC (Terraform, Helm, Kustomize), CI/CD workflows, IAM and secrets, or rollout and deployment mechanics. For telemetry, SLOs, alerting, runbooks, and incident/postmortem process on top of that infrastructure, route to `observability-and-incident-response`.
 when_to_use: Cloud infrastructure, CI/CD, and DevOps.
 allowed-tools: Read, Grep, Glob, Edit, Write, Bash(terraform:*), Bash(kubectl:*), Bash(helm:*), Bash(docker:*), Bash(aws:*), Bash(gcloud:*), Bash(az:*), Bash(gh workflow:*), Bash(gh run:*), Bash(claude-skills memory:*)
 effort: medium

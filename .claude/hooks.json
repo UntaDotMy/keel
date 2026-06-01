@@ -55,7 +55,7 @@
           {
             "type": "command",
             "command": "claude-skills hook post-tool-batch",
-            "statusMessage": "Recording post-tool batch lifecycle"
+            "statusMessage": "Injecting reviewer-on-close reminder"
           }
         ]
       }

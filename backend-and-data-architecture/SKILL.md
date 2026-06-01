@@ -17,14 +17,6 @@ paths:
   - "**/*.ex"
   - "**/*.exs"
   - "**/*.prisma"
-  - "**/Cargo.toml"
-  - "**/go.mod"
-  - "**/requirements.txt"
-  - "**/pyproject.toml"
-  - "**/Gemfile"
-  - "**/pom.xml"
-  - "**/build.gradle"
-  - "**/build.gradle.kts"
 ---
 
 # Backend and Data Architecture
