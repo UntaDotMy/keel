@@ -1,0 +1,9 @@
+# Reasoning: Use the repo-managed high reasoning baseline so this skill
+# can push deeper on ICU plural/gender correctness, locale fallback chains, and bidi/Unicode safety without a model pin.
+reasoning_effort: "high"
+interface:
+  display_name: "Internationalization and Localization"
+  short_description: "Message catalogs, ICU MessageFormat, locale-aware formatting, RTL/bidi, and translation workflows"
+  default_prompt: "Use $internationalization-and-localization when the main risk is in the message, locale, or translation layer — designing or extracting message catalogs, writing ICU MessageFormat with plurals and gender, wiring locale-aware number/date/currency formatting, defining fallback chains and locale negotiation, handling RTL/bidi and Unicode correctness, or running pseudo-localization and TMS workflows. Never concatenate translated fragments, drive plurals from CLDR categories, format through Intl/ICU with an explicit locale, and verify with pseudo-localization before translation. Shared execution policy is appended from the central managed catalog during install."
+policy:
+  allow_implicit_invocation: true

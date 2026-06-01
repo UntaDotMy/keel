@@ -173,7 +173,7 @@ jobs:
           fi
           # Stage Claude Code subagent definitions and the plugin manifest.
           # sync_subagent_definitions reads .claude/agents/*.md; without it a
-          # fresh install registers none of the 21 delegation subagents.
+          # fresh install registers none of the 24 delegation subagents.
           # .claude-plugin/ carries the plugin + MCP registration manifest so
           # the archive is self-describing for the plugin install path too.
           if [ -d .claude ]; then

@@ -129,7 +129,7 @@ skill matcher fires. The full text and the tactical rules they imply live in
 | "I'll add a config knob in case we need it" | Step 2 (Simplicity First) violated. Add it when a second caller exists. |
 | "Make it work" is a goal | Step 4 (Goal-Driven Execution) failed. State the verifiable check that proves done. |
 
-## Skill catalog (37 skills installed under ~/.claude/skills/)
+## Skill catalog (40 skills installed under ~/.claude/skills/)
 
 Source: each `<name>/SKILL.md` in this repo. Use the Skill tool with the bare
 name (e.g. `Skill("reviewer")`). The count excludes this bootstrap skill itself
@@ -173,10 +173,13 @@ separate skill directory — it routes to `reviewer`.
 - `observability-and-incident-response` — Metrics/logs/traces via OpenTelemetry, golden signals, SLO/SLI and error-budget math, alerting and burn-rate paging linked to runbooks, on-call ergonomics, and blameless postmortems.
 - `dependency-and-supply-chain` — Dependency upgrades, lockfile hygiene and dedup, semver risk tiering, major-version migration planning, transitive triage, Renovate/Dependabot, SBOM, and provenance/signing across npm/cargo/pip/go. The action counterpart to security-and-compliance-auditor's scanning.
 - `data-and-ml-engineering` — Data pipelines (ETL/ELT), batch/streaming ingestion, warehouse/lakehouse modeling (dbt), data quality and contracts, orchestration (Airflow/Dagster), and the ML lifecycle (feature engineering, training, serving, evaluation, drift). The analytical/ML-flow counterpart to backend-and-data-architecture's OLTP focus.
+- `authentication-and-identity` — Builds login, session, token, and SSO flows: OAuth2/OIDC (authorization-code + PKCE), JWT/opaque token issuance and validation, refresh-token rotation with reuse detection, SAML/SSO, MFA/passkeys/WebAuthn, and argon2/bcrypt password storage. The build counterpart to security-and-compliance-auditor's read-only auditing.
+- `cloud-cost-and-finops` — Cloud cost engineering and FinOps: cost estimation before deploy, rightsizing, commitment planning (reserved/savings/CUD), autoscaling and spot strategy, cost allocation and tagging, budget guardrails and anomaly alerts, and unit economics. Owns the spend dimension that cloud-and-devops-expert (mechanics) and observability-and-incident-response (SLOs) do not.
+- `internationalization-and-localization` — i18n/l10n: message-catalog design and extraction, ICU MessageFormat, pluralization, locale-aware number/date/currency formatting, RTL/bidi, translation workflows and fallback chains, pseudo-localization, and Unicode correctness. The message/locale layer beneath ui-design-systems-and-responsive-interfaces.
 - `compression-discipline` — Per-turn output-compression playbook (narrower line ranges, search before reading, summarize logs). Auto-loaded by the UserPromptSubmit hint when a session crosses the per-day tool-call threshold.
 - `output-economy` — Per-response output-token economy: cut reply verbosity (no preamble, no re-narration of tool output, length tracks the task) without dropping technical signal. The output-side counterpart to compression-discipline's input-side rules.
 
-## Subagent catalog (21 delegation targets in .claude/agents/)
+## Subagent catalog (24 delegation targets in .claude/agents/)
 
 Use these via the Agent tool when the work benefits from an isolated context
 window. Same names as the skills — pick the subagent when token-saving delegation
@@ -197,7 +200,9 @@ form so subagents do not fall back to memory-based defaults.
   `api-contract-design`, `react-performance-audit`,
   `postgres-migration-safety`, `stripe-integration`,
   `websocket-realtime-design`, `observability-and-incident-response`,
-  `dependency-and-supply-chain`, `data-and-ml-engineering`.
+  `dependency-and-supply-chain`, `data-and-ml-engineering`,
+  `authentication-and-identity`, `cloud-cost-and-finops`,
+  `internationalization-and-localization`.
 
 ## Workspace pointers
 
@@ -242,6 +247,8 @@ Your working memory only lives in the current context window. Anything you want 
 | `claude-skills memory completion-gate check` | nothing (probe-only) | before claiming a task complete. Returns the gate's verdict; failures point at the requirement that has no evidence yet. |
 
 Beyond the four writers above, these `claude-skills memory <verb>` arms are implemented (under both `memory` and `memoriesv2`): `research-cache`, `maintenance`, `agent-registry`, `agent-packets`, `loop-guard`, `entity`, `graph`, `retrieve`, `instincts`, and `status`. `report` is an alias for `status`, and `index` rebuilds the FTS5 recall index — both work. The `orchestration` group adds `task begin|progress|complete|list` and `checkpoint`. The only `memory` verb that does not run is `hook`: it exits with a pointer to `claude-skills hook install|list|instructions|diagnose`, which owns Claude Code lifecycle hooks. Do not pretend a command exists by trying it; check the dispatcher in `rust/crates/claude-skills/src/utility/memory.rs` (and `memory_families.rs`) if you are unsure.
+
+**Relationship to Claude Code's native Auto memory.** Recent Claude Code ships its own *Auto memory* — notes the model writes itself to `~/.claude/projects/<project>/memory/MEMORY.md` based on your corrections, loaded automatically each session. The two are complementary, not competing: native Auto memory is *passive* (the model decides what to jot, machine-local, per-repo), while claude-core's surfaces above are *explicit and structured* — a deterministic SYSTEM_MAP, reconcilable working briefs, a completion gate, an FTS5-searchable recall index, and the durable `memoriesv2` families. Use native Auto memory for incidental learnings; use these commands when you need a structured artifact that survives compaction and can be reconciled against the request. Do not duplicate the same fact into both.
 
 | Thought | Reality |
 |---|---|

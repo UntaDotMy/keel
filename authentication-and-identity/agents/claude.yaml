@@ -1,0 +1,9 @@
+# Reasoning: Use the repo-managed high reasoning baseline so this skill
+# can push deeper on flow selection, token-lifecycle safety, and credential storage without a model pin.
+reasoning_effort: "high"
+interface:
+  display_name: "Authentication and Identity"
+  short_description: "Build OAuth2/OIDC, SSO, session, token, MFA, and password-storage flows"
+  default_prompt: "Use $authentication-and-identity when the task is building login, session, token, OAuth2/OIDC, SSO/SAML, MFA/passkey, or password-storage flows — not auditing them. Default to authorization-code with PKCE, never roll your own crypto or token format, validate iss/aud/exp and the signature on every token, rotate refresh tokens with reuse detection, store passwords with argon2id, and set httpOnly/Secure/SameSite cookies with CSRF defense. Finding vulnerabilities is the security-and-compliance-auditor's job; this skill builds the flow. Shared execution policy is appended from the central managed catalog during install."
+policy:
+  allow_implicit_invocation: true

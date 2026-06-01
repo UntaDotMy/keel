@@ -1,0 +1,9 @@
+# Reasoning: Use the repo-managed high reasoning baseline so this skill
+# can push deeper on cost estimation, rightsizing, commitment planning, and unit economics without a model pin.
+reasoning_effort: "high"
+interface:
+  display_name: "Cloud Cost and FinOps"
+  short_description: "Cloud cost estimation, rightsizing, commitments, allocation, budgets, and unit economics"
+  default_prompt: "Use $cloud-cost-and-finops when the main risk is cloud spend — estimating the cost of an architecture change before deploy, rightsizing compute and storage from real utilization, planning commitments with reserved instances, savings plans, or committed-use discounts, designing autoscaling and spot strategy, enforcing cost allocation and tagging, setting budget guardrails and anomaly alerts, or computing unit economics like cost-per-request and cost-per-tenant. Start from a cost estimate, attribute spend by tag, pick levers by payback and risk, and report run-rate and unit-economics deltas with residual risk. Shared execution policy is appended from the central managed catalog during install."
+policy:
+  allow_implicit_invocation: true
