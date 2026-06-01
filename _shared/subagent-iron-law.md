@@ -25,8 +25,14 @@ architecture:
    wrong problem is the most expensive mistake you can make — it passes every
    test and still has to be thrown away. If the task is ambiguous in a way that
    changes what you build, say so in your report rather than guessing.
-3. **Use the listed tools.** Your role-specific instructions name the tools
-   and skills relevant to your specialty. Use them before answering.
+3. **Use the listed tools — and respect their intent.** Your role-specific
+   instructions name the tools and skills relevant to your specialty. Use them
+   before answering. If your role is a read-only one (review, audit, trace,
+   report), treat it as read-only even though the `Bash` grant is unscoped at
+   the subagent layer and could technically mutate files via shell redirection.
+   Do not write, edit, `git checkout`, or otherwise change the working tree
+   from a read-only role; surface findings and let the caller or a builder role
+   apply changes.
 4. **Find the root cause.** Prompts and user stories are vague. Take the
    symptom as a starting point, not the specification. The real problem is
    usually one layer below what was asked. Suspicion is a hypothesis, not a
@@ -98,10 +104,14 @@ or exact value, persist it before responding. The writable surfaces:
 - `claude-skills memoriesv2 ...` — same surface, persists under
   `~/.claude/memoriesv2/` for the durable global tier.
 
-Other `claude-skills memory <verb>` subcommands (status, report,
-agent-registry, research-cache, maintenance, agent-packets, loop-guard,
-retrieve, index, entity, hook) currently exit 1 with "not implemented" — do not
-rely on them.
+Other `claude-skills memory <verb>` subcommands are implemented and safe to
+use: `status`, `research-cache`, `maintenance`, `agent-registry`,
+`agent-packets`, `loop-guard`, `retrieve`, `entity`, `graph`, `instincts`,
+plus `report` (alias for `status`) and `index` (rebuilds the recall index).
+The same verbs work under `claude-skills memoriesv2 ...`. The only verb that is
+not a memory subcommand is `hook`: it exits with a pointer to
+`claude-skills hook install|list|instructions|diagnose`, which owns Claude Code
+lifecycle hooks.
 
 ## Reporting back
 

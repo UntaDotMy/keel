@@ -29,6 +29,10 @@
   hook install|uninstall|list|show|instructions
   learn [status|dry-run|run] [--window <days>] [--json]
   code-search search --workspace-root <path> --query <text> [--format json|compact]
+  skill-lint --repo-root <path> [--json]
+  config-audit --repo-root <path> [--json]
+  checkpoint create|list|show|restore [--id <id>] [--confirm]
+  telemetry summary [--days <N>] [--session <id>] [--top <N>] [--json]
   design-intelligence recommend [request...]
   memory scope resolve [--memory-base <path>] [--workspace-root <path>] [--create-missing] [--refresh-system-map] [--format json|compact]
   memory system-map refresh [--memory-base <path>] [--workspace-root <path>] [--format json|compact]

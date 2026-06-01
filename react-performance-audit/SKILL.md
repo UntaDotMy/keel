@@ -7,9 +7,6 @@ effort: medium
 paths:
   - "**/*.tsx"
   - "**/*.jsx"
-  - "**/*.ts"
-  - "**/*.js"
-  - "**/package.json"
   - "**/next.config.js"
   - "**/next.config.mjs"
   - "**/next.config.ts"
@@ -19,7 +16,6 @@ paths:
   - "**/rollup.config.js"
   - "**/.babelrc"
   - "**/babel.config.js"
-  - "**/tsconfig.json"
 ---
 
 # React Performance Audit

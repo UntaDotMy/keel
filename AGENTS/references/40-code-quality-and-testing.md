@@ -1,7 +1,7 @@
 <!--
 Purpose: Capture code quality standards, testing requirements, and feature flags previously inline in AGENTS.md.
 Caller: AGENTS.md when implementation, naming, structure, DRY, simplicity, comments, or test discipline is in scope.
-Dependencies: claude-skills review, .claude-review.json, native review surfaces.
+Dependencies: claude-skills review, .claude/review.json, native review surfaces.
 Main Functions: Define readability rules, scope discipline, structure/modularity, DRY, simplicity, professional comments, and the testing ladder.
 Side Effects: None — this file is informational.
 -->
@@ -79,7 +79,7 @@ Side Effects: None — this file is informational.
 - Reviewer lanes must read the working brief, scoped memory, `SYSTEM_MAP.md`, the changed-surface map, and proving validation evidence before findings or approval.
 - During final code review on this Rust-backed repo, run `cargo test --workspace` and wait for it to finish before passing the gate.
 - After implementation and repo-wide proof on non-trivial work, run a second reviewer-quality pass before the final answer.
-- Use `.claude-review.json` as the tracked rule engine for PR-native automation, use `claude-skills review learn summarize` to inspect repeated accepted feedback, and require `claude-skills review learn apply-promotion` with an explicit approval note before a learned suggestion becomes policy.
+- Use `.claude/review.json` as the tracked rule engine for PR-native automation, use `claude-skills review learn summarize` to inspect repeated accepted feedback, and require `claude-skills review learn apply-promotion` with an explicit approval note before a learned suggestion becomes policy.
 
 **New Features:**
 - Unit tests for business logic

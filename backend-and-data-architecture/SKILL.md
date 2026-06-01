@@ -16,14 +16,7 @@ paths:
   - "**/*.scala"
   - "**/*.ex"
   - "**/*.exs"
-  - "**/*.sql"
   - "**/*.prisma"
-  - "**/*.proto"
-  - "**/*.graphql"
-  - "**/*.gql"
-  - "**/migrations/**"
-  - "**/schema.rb"
-  - "**/schema.sql"
   - "**/Cargo.toml"
   - "**/go.mod"
   - "**/requirements.txt"
@@ -32,10 +25,6 @@ paths:
   - "**/pom.xml"
   - "**/build.gradle"
   - "**/build.gradle.kts"
-  - "**/openapi.yaml"
-  - "**/openapi.yml"
-  - "**/swagger.yaml"
-  - "**/swagger.yml"
 ---
 
 # Backend and Data Architecture
