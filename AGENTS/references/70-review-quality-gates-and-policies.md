@@ -105,7 +105,7 @@ Do not pin a model to achieve these settings. Preserve reasoning effort in repo-
 
 - Do not pin a specific model inside root Claude Code `agents/claude.yaml` files or generated agent-profile TOML. Let the workspace default model handle that choice.
 - Keep root Claude Code skill `reasoning_effort` at the repo-managed specialist baseline (`high`) for deeper review and verification passes.
-- Sync the 21 skill-owned agent profiles into `~/.claude/agent-profiles/*.toml` with their skill instructions attached, `model_reasoning_effort = "high"`, and no `model = ...` entry.
+- Sync the 24 skill-owned agent profiles into `~/.claude/agent-profiles/*.toml` with their skill instructions attached, `model_reasoning_effort = "high"`, and no `model = ...` entry.
 - A local `memory-status-reporter` override from `~/.claude/.claude-skill-manager/local-home-agent-overrides.json` may narrow only that profile to `low` reasoning unless the user explicitly changes local policy.
 - When any Claude Code skill executes tools in this runtime, let Claude Code choose the best supported tool
   surface for the task.

@@ -305,7 +305,7 @@ N = absent.
     failed check), promoting what was spread across `software-development-life-cycle`
     and the workflow/orchestration ledgers into two discrete skills.
   - `subagent-driven-development` — delegate self-contained tasks to fresh-context
-    subagents and re-verify in the main thread (the discipline behind the 21-agent
+    subagents and re-verify in the main thread (the discipline behind the 24-agent
     roster, now a named loop).
   - `dispatching-parallel-agents` — the four-condition independence test as a
     name-triggerable skill (was per-prompt doctrine in `hook_lifecycle.rs`, no skill).
@@ -325,12 +325,12 @@ N = absent.
   methodology skills; the only remaining superpowers lead is the by-design
   cross-harness axis.
 
-### Skill count: 20 → 23 → 31 → 33 → 37 (methodology parity + cross-comparator + domain-coverage gap closure)
+### Skill count: 20 → 23 → 31 → 33 → 37 → 40 (methodology parity + cross-comparator + domain-coverage gap closure)
 
-The repo now ships 37 specialist/methodology skills in the manifest (manifest-driven;
+The repo now ships 40 specialist/methodology skills in the manifest (manifest-driven;
 the binary discovers the count from `plugin.json`, so no hardcoded total drifts), plus
-the `using-claude-core` bootstrap (38 SKILL.md files
-total, all passing `skill-lint`: 38 skills, 0 failed, 0 warned). The methodology trio
+the `using-claude-core` bootstrap (41 SKILL.md files
+total, all passing `skill-lint`: 41 skills, 0 failed, 0 warned). The methodology trio
 (`test-driven-development`, `systematic-debugging`, `brainstorming`) closed the first
 superpowers gap; the eight skills (`writing-skills`, `writing-plans`, `executing-plans`,
 `subagent-driven-development`, `dispatching-parallel-agents`, `using-git-worktrees`,
@@ -366,7 +366,23 @@ roster audit found (observability, supply-chain action, analytical/ML data flow)
   `backend-and-data-architecture`'s OLTP focus: ETL/ELT pipelines, dbt warehouse
   modeling, orchestration, data quality, and the ML lifecycle through drift.
 
-`using-claude-core` catalog header (37 skills) and entries updated to match.
+A further three specialists close the last roster-audit domain gaps
+(build-side identity, cost/FinOps, and i18n/localization):
+- `authentication-and-identity` — the build counterpart to
+  `security-and-compliance-auditor`'s read-only auditing: OAuth2/OIDC
+  (authorization-code + PKCE), SSO/SAML, session and token lifecycles,
+  refresh-token rotation with reuse detection, MFA/passkeys/WebAuthn, and
+  argon2/bcrypt password storage.
+- `cloud-cost-and-finops` — the spend dimension neither `cloud-and-devops-expert`
+  (mechanics) nor `observability-and-incident-response` (SLOs) owned: cost
+  estimation before deploy, rightsizing, commitment planning, autoscaling/spot
+  strategy, cost allocation and tagging, budget guardrails, and unit economics.
+- `internationalization-and-localization` — the message/locale layer beneath
+  `ui-design-systems-and-responsive-interfaces`: message-catalog design and
+  extraction, ICU MessageFormat and plurals, locale-aware formatting, RTL/bidi,
+  translation workflows and fallback chains, and Unicode correctness.
+
+`using-claude-core` catalog header (40 skills) and entries updated to match.
 
 - ~~UI/UX Pro Max corpus was smaller than theirs~~ **(closed and surpassed this
   pass).** A re-audit with **file-verified** counts (parsing their actual CSVs, not
@@ -508,3 +524,32 @@ ladder), the preserve-existing-flow brownfield gate (no comparator has this), an
 breadth-of-integration (compaction + methodology + review gates + memory in one
 hook-wired binary) remain genuine differentiators even where individual pieces
 are shallower than a single-purpose peer.
+
+## Decided non-goals (chosen, not drifted)
+
+The audit flagged several capabilities competitors have that claude-core does
+not. After review these are **deliberate scope boundaries**, not defects — they
+conflict with the "single Rust binary, Claude-Code-native, discipline-over-volume"
+positioning. Recorded here so each is a chosen tradeoff:
+
+- **Multi-agent swarm runtime** (topologies/consensus, à la claude-flow). claude-core
+  ships orchestration *patterns* (`designing-agent-teams`, `dispatching-parallel-agents`,
+  `subagent-driven-development`) over Claude Code's native subagents/agent-teams/
+  background-agents, not a separate swarm engine with consensus. A swarm runtime is
+  outside Claude Code's native execution model and would contradict the single-binary
+  stance. **Not pursued.**
+- **Exhaustive per-language / niche-vertical library breadth** (191-agent megalibraries
+  like wshobson). claude-core is curated-not-exhaustive by design: ~40 skills covering
+  delivery domains and methodology, not one-agent-per-language. The matcher quality and
+  discipline contract degrade with volume. **Not pursued; curation is the product.**
+- **Passive automatic learning from corrections.** Native Claude Code now ships Auto
+  memory for this; claude-core's `compounding-knowledge` + `instincts` path is the
+  deliberate, human-readable complement (see the native-Auto-memory note in CLAUDE.md and
+  the bootstrap skill). We lean on native Auto memory rather than reinvent passive learning.
+  **Complemented, not duplicated.**
+- **Cross-harness portability** (Codex/Cursor/Gemini/Copilot adapters). The standing
+  product decision above: deliberately Claude-native. **Open product question, not a defect.**
+
+Domain coverage, by contrast, was a *real* gap and is now closed: observability/incident
+response, dependency/supply-chain, data/ML, build-side identity, cloud cost/FinOps, and
+i18n/localization all ship as first-class skill triads.

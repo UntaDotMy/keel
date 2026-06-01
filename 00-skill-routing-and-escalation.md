@@ -1,7 +1,7 @@
 <!--
 Purpose: Compact entry point for skill routing rules and the specialist roster. Detailed doctrine lives under AGENTS/references/.
 Caller: Synced Claude Code guidance files and contributors needing the routing summary.
-Dependencies: AGENTS.md, AGENTS/references/20-skill-routing.md, the 21 specialist SKILL.md files.
+Dependencies: AGENTS.md, AGENTS/references/20-skill-routing.md, the 24 specialist SKILL.md files.
 Main Functions: Provide the short routing contract, ownership map, and pointers to depth references.
 Side Effects: Changes to this file affect every Claude Code session; keep it tight.
 -->
@@ -53,7 +53,7 @@ Token-saving rule: prevent noisy raw command output from entering Claude Code co
             └────────────────────────────────────┘
 ```
 
-## Specialist Roster (21)
+## Specialist Roster (24)
 
 1. **software-development-life-cycle** — full SDLC, architecture, cross-domain coordination
 2. **preserve-existing-flow** — brownfield ownership tracing before existing-source edits
@@ -76,6 +76,9 @@ Token-saving rule: prevent noisy raw command output from entering Claude Code co
 19. **observability-and-incident-response** — metrics/logs/traces, SLO/error budgets, alerting, runbooks, postmortems
 20. **dependency-and-supply-chain** — dependency upgrades, lockfile hygiene, major-version migration, SBOM, provenance
 21. **data-and-ml-engineering** — data pipelines, dbt/warehouse modeling, orchestration, ML lifecycle and drift
+22. **authentication-and-identity** — OAuth2/OIDC, SSO/SAML, sessions, tokens, refresh rotation, MFA/passkeys, password storage
+23. **cloud-cost-and-finops** — cost estimation, rightsizing, commitments, autoscaling/spot, budgets, unit economics
+24. **internationalization-and-localization** — message catalogs, ICU MessageFormat, locale formatting, RTL/bidi, translation workflows
 
 ## Pointers to Depth
 

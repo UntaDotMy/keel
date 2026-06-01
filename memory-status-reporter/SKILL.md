@@ -78,7 +78,7 @@ Always produce these sections unless the user narrows the scope:
    ```bash
    claude-skills memory system-map refresh --workspace-root "$PWD"
    ```
-4. Read the scoped artifacts directly with `Read`, `Grep`, and `Glob`, walking the Source Priority list below. The report itself is composed from those files; there is no native `memory report` command, so do not invent one.
+4. Read the scoped artifacts directly with `Read`, `Grep`, and `Glob`, walking the Source Priority list below. The human-readable narrative report is composed from those files. A `claude-skills memory report` command does exist — it is an alias for `memory status`, a compact health summary across the implemented memory families — so use it for the structured family snapshot, but compose the narrative status report from the scoped files rather than expecting `memory report` to write the prose for you.
 5. Inspect the latest scoped working brief and any open completion-gate entries to anchor "what is in progress" and "what is unresolved":
    ```bash
    claude-skills memory working-brief list --json

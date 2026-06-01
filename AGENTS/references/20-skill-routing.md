@@ -1,7 +1,7 @@
 <!--
 Purpose: Capture skill routing rules, the specialist roster, skill-focused execution, and agent profiles previously inline in AGENTS.md.
 Caller: AGENTS.md when picking a primary skill, deciding whether to compose, or wiring agent-profile TOMLs.
-Dependencies: The 21 specialist SKILL.md files and the matching .claude/agents/<name>.md subagent files.
+Dependencies: The 24 specialist SKILL.md files and the matching .claude/agents/<name>.md subagent files.
 Main Functions: Define routing defaults, the specialist matrix, composition discipline, and agent-profile expectations.
 Side Effects: None — this file is informational.
 -->
@@ -61,7 +61,7 @@ Load specialist skills when the task clearly requires domain expertise:
 
 ### Agent Profiles
 
-Your managed Claude Code home should expose these 21 skill-owned agent profiles under `~/.claude/agent-profiles/*.toml`:
+Your managed Claude Code home should expose these 24 skill-owned agent profiles under `~/.claude/agent-profiles/*.toml`:
 
 - **backend-and-data-architecture**: Backend systems, APIs, data models, caching, and messaging
 - **cloud-and-devops-expert**: Infrastructure, CI/CD, containers, and IaC
@@ -84,8 +84,11 @@ Your managed Claude Code home should expose these 21 skill-owned agent profiles 
 - **observability-and-incident-response**: Metrics, logs, traces, SLO/error budgets, alerting and burn-rate paging, runbooks, and blameless postmortems
 - **dependency-and-supply-chain**: Dependency upgrades, lockfile hygiene, major-version migration, transitive triage, SBOM, and provenance/signing
 - **data-and-ml-engineering**: Data pipelines, warehouse/lakehouse modeling, orchestration, data quality, and the ML lifecycle from features to serving and drift
+- **authentication-and-identity**: OAuth2/OIDC (authorization-code + PKCE), SSO/SAML, session and token lifecycles, refresh-token rotation with reuse detection, MFA/passkeys/WebAuthn, and argon2/bcrypt password storage
+- **cloud-cost-and-finops**: Cost estimation before deploy, rightsizing, commitment planning, autoscaling and spot strategy, cost allocation and tagging, budget guardrails, and unit economics
+- **internationalization-and-localization**: Message-catalog design and extraction, ICU MessageFormat and plurals, locale-aware number/date/currency formatting, RTL/bidi, translation workflows and fallback chains, and Unicode correctness
 
-The old generic `default`, `explorer`, `worker`, `architect`, and `awaiter` TOMLs are not the repo-managed profile surface anymore. Runtime helper roles may still exist inside Claude Code, but the managed install should mirror these 21 specialist skill profiles instead.
+The old generic `default`, `explorer`, `worker`, `architect`, and `awaiter` TOMLs are not the repo-managed profile surface anymore. Runtime helper roles may still exist inside Claude Code, but the managed install should mirror these 24 specialist skill profiles instead.
 
 ## Routing Principles (Detailed)
 
