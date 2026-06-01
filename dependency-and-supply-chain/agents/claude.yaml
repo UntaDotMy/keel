@@ -1,0 +1,9 @@
+# Reasoning: Use the repo-managed high reasoning baseline so this skill
+# can push deeper on semver risk tiering, transitive triage, and supply-chain provenance without a model pin.
+reasoning_effort: "high"
+interface:
+  display_name: "Dependency and Supply Chain"
+  short_description: "Dependency upgrades, lockfile hygiene, major-version migrations, SBOM, and supply-chain provenance"
+  default_prompt: "Use $dependency-and-supply-chain when the work is performing dependency and supply-chain actions — upgrading dependencies, cleaning up and deduping lockfiles, planning a breaking major-version migration, triaging a vulnerable transitive package, configuring Renovate or Dependabot, generating an SBOM, or adding provenance and signing. Sequence upgrades by semver risk tier, keep the lockfile deterministic, prefer root fixes over forced overrides, vet new packages for typosquatting, and verify every change with a clean frozen install plus build and tests. It complements the security auditor: the auditor finds, this skill fixes and upgrades. Shared execution policy is appended from the central managed catalog during install."
+policy:
+  allow_implicit_invocation: true

@@ -305,7 +305,7 @@ N = absent.
     failed check), promoting what was spread across `software-development-life-cycle`
     and the workflow/orchestration ledgers into two discrete skills.
   - `subagent-driven-development` — delegate self-contained tasks to fresh-context
-    subagents and re-verify in the main thread (the discipline behind the 18-agent
+    subagents and re-verify in the main thread (the discipline behind the 21-agent
     roster, now a named loop).
   - `dispatching-parallel-agents` — the four-condition independence test as a
     name-triggerable skill (was per-prompt doctrine in `hook_lifecycle.rs`, no skill).

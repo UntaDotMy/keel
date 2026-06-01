@@ -4,10 +4,10 @@
 
 This is the claude-core project — native delivery rails for Claude Code. It provides:
 - 1 bootstrap **skill** (`using-claude-core/SKILL.md`) injected verbatim at every `SessionStart` to establish the research-first iron law and list every other skill
-- 18 specialist Claude Code **skills** for software delivery (`<name>/SKILL.md`)
-- 16 technique/process **skills** (`brainstorming`, `test-driven-development`, `systematic-debugging`, `writing-plans`, `executing-plans`, `subagent-driven-development`, `dispatching-parallel-agents`, `using-git-worktrees`, `finishing-a-development-branch`, `receiving-code-review`, `writing-skills`, `designing-agent-teams`, `compounding-knowledge`, `adversarial-security-review`, plus the token-discipline pair `compression-discipline` and `output-economy`) — main-thread skills with no subagent or managed profile. This makes 35 `SKILL.md` directories total (18 specialists + 16 technique + 1 bootstrap); 34 are matcher-invokable (all but the bootstrap, which loads automatically at SessionStart). `requesting-code-review` is an alias pointer to `reviewer`, not a directory.
-- 18 matching Claude Code **subagents** for token-efficient delegation (`.claude/agents/<name>.md`)
-- 18 internal **managed profiles** consumed by the CLI (`<name>/agents/claude.yaml`)
+- 21 specialist Claude Code **skills** for software delivery (`<name>/SKILL.md`)
+- 16 technique/process **skills** (`brainstorming`, `test-driven-development`, `systematic-debugging`, `writing-plans`, `executing-plans`, `subagent-driven-development`, `dispatching-parallel-agents`, `using-git-worktrees`, `finishing-a-development-branch`, `receiving-code-review`, `writing-skills`, `designing-agent-teams`, `compounding-knowledge`, `adversarial-security-review`, plus the token-discipline pair `compression-discipline` and `output-economy`) — main-thread skills with no subagent or managed profile. This makes 38 `SKILL.md` directories total (21 specialists + 16 technique + 1 bootstrap); 37 are matcher-invokable (all but the bootstrap, which loads automatically at SessionStart). `requesting-code-review` is an alias pointer to `reviewer`, not a directory.
+- 21 matching Claude Code **subagents** for token-efficient delegation (`.claude/agents/<name>.md`)
+- 21 internal **managed profiles** consumed by the CLI (`<name>/agents/claude.yaml`)
 - Workflow routing and escalation rules
 - Review gates (pre-commit, pre-PR)
 - Professional text templates
@@ -43,9 +43,9 @@ Each specialist contains three artifacts, plus an optional reference library:
 - `<name>/SKILL.md` — Skill definition (loaded by Claude Code when relevant)
 - `.claude/agents/<name>.md` — Subagent definition (delegation target with isolated context)
 - `<name>/agents/claude.yaml` — Managed profile (CLI runtime configuration)
-- `<name>/references/` — Deep knowledge files referenced by SKILL.md (most specialists; the narrow specialists `api-contract-design`, `postgres-migration-safety`, `react-performance-audit`, `stripe-integration`, and `websocket-realtime-design` ship a self-contained SKILL.md with no reference library)
+- `<name>/references/` — Deep knowledge files referenced by SKILL.md (most specialists; the narrow specialists `api-contract-design`, `postgres-migration-safety`, `react-performance-audit`, `stripe-integration`, `websocket-realtime-design`, `observability-and-incident-response`, `dependency-and-supply-chain`, and `data-and-ml-engineering` ship a self-contained SKILL.md with no reference library)
 
-18 specialists: `software-development-life-cycle`, `web-development-life-cycle`, `mobile-development-life-cycle`, `backend-and-data-architecture`, `cloud-and-devops-expert`, `qa-and-automation-engineer`, `security-and-compliance-auditor`, `git-expert`, `preserve-existing-flow`, `reviewer`, `ui-design-systems-and-responsive-interfaces`, `ux-research-and-experience-strategy`, `memory-status-reporter`, `api-contract-design`, `react-performance-audit`, `postgres-migration-safety`, `stripe-integration`, `websocket-realtime-design`.
+21 specialists: `software-development-life-cycle`, `web-development-life-cycle`, `mobile-development-life-cycle`, `backend-and-data-architecture`, `cloud-and-devops-expert`, `qa-and-automation-engineer`, `security-and-compliance-auditor`, `git-expert`, `preserve-existing-flow`, `reviewer`, `ui-design-systems-and-responsive-interfaces`, `ux-research-and-experience-strategy`, `memory-status-reporter`, `api-contract-design`, `react-performance-audit`, `postgres-migration-safety`, `stripe-integration`, `websocket-realtime-design`, `observability-and-incident-response`, `dependency-and-supply-chain`, `data-and-ml-engineering`.
 
 ## Schema Compliance Notes
 

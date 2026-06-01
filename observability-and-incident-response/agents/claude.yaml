@@ -1,0 +1,9 @@
+# Reasoning: Use the repo-managed high reasoning baseline so this skill
+# can push deeper on SLO/error-budget math, burn-rate alert design, and incident-response sequencing without a model pin.
+reasoning_effort: "high"
+interface:
+  display_name: "Observability and Incident Response"
+  short_description: "Telemetry, SLOs and error budgets, alerting and paging, runbooks, and incident response"
+  default_prompt: "Use $observability-and-incident-response when the main work is making a system observable or an incident survivable — designing metrics, logs, and traces through OpenTelemetry, defining SLIs/SLOs and error budgets, writing symptom-based alerts with burn-rate paging, building dashboards that correlate deploys with impact, linking alerts to runbook actions, and running blameless postmortems. Start from the user-visible outcome and golden signals, page only on symptoms that threaten users or the error budget, and make every alert point to an action. Shared execution policy is appended from the central managed catalog during install."
+policy:
+  allow_implicit_invocation: true

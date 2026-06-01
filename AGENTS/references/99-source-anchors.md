@@ -1,7 +1,7 @@
 <!--
 Purpose: Authoritative sources for the rules in AGENTS.md so contributors can verify a rule against its origin.
 Caller: AGENTS.md and contributors reconciling drift between AGENTS.md and references.
-Dependencies: AGENTS.md, the 18 specialist SKILL.md files, claude-skills CLI surface.
+Dependencies: AGENTS.md, the 21 specialist SKILL.md files, claude-skills CLI surface.
 Main Functions: Map AGENTS.md sections to reference files, list related skills, list owning commands.
 Side Effects: None — this file is informational.
 -->
