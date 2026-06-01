@@ -97,7 +97,7 @@ pub const HOOK_EVENTS: &[HookEvent] = &[
         name: "PostToolBatch",
         slug: "post-tool-batch",
         matcher: "",
-        status: "Recording post-tool batch lifecycle",
+        status: "Injecting reviewer-on-close reminder",
         supports_hook_specific_output: true,
         installs_in_settings: true,
     },
