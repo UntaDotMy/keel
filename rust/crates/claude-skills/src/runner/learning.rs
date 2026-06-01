@@ -1197,6 +1197,30 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    /// Assert a path is gone, tolerating Windows' delete-pending state.
+    ///
+    /// `fs::remove_dir_all` returns `Ok` once the delete is *posted*, but on
+    /// Windows the directory entry can linger briefly while another handle
+    /// (an antivirus scan, the indexer, or a sibling test thread) closes. An
+    /// instantaneous `!exists()` check therefore races under parallel `cargo
+    /// test` load — the source of an intermittent failure in
+    /// `remove_generated_artifacts_leaves_builtin_skills`. Poll for a short,
+    /// bounded window so the assertion verifies the real contract ("the path
+    /// is removed") without depending on the OS reclaiming the entry within a
+    /// single instruction. On Unix the first check passes immediately.
+    fn assert_removed_eventually(path: &Path) {
+        for _ in 0..50 {
+            if !path.exists() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!(
+            "path was not removed within the delete-pending window: {}",
+            path.display()
+        );
+    }
+
     fn isolated_home<F: FnOnce(&PathBuf)>(suffix: &str, run: F) {
         let _guard = ENV_LOCK
             .lock()
@@ -1498,9 +1522,9 @@ mod tests {
 
             let removed = remove_generated_artifacts(root).expect("remove");
             assert_eq!(removed, 1);
-            assert!(!skills_directory(root).join("learned-theta").exists());
+            assert_removed_eventually(&skills_directory(root).join("learned-theta"));
             assert!(builtin.exists(), "built-in skill must survive");
-            assert!(!agents_directory(root).join("learned-theta.md").exists());
+            assert_removed_eventually(&agents_directory(root).join("learned-theta.md"));
         });
     }
 

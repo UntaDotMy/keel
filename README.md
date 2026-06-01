@@ -60,7 +60,7 @@ The cast file ships in this repo. Render to GIF with `agg docs/demos/quickstart.
 | Command compaction | `claude-skills run -- <cmd>` produces compact output for noisy test/build/lint/log/search commands without dropping diagnostic signal. |
 | MCP server | `claude-skills mcp serve` is registered through the plugin manifest so Claude Code auto-discovers `recall`, `system_map`, `run_command`, and `recall_status` tools plus the system-map and recall-status resources. |
 | Slash commands | `/claude-core:workflow`, `/claude-core:review`, `/claude-core:recall`, `/claude-core:gain` — discoverable `/`-menu wrappers over the implemented CLI surfaces. Shipped via the plugin manifest `commands` key. |
-| Specialist skills | 18 managed specialist profiles synced into `~/.claude/agent-profiles/*.toml`, invokable via the Skill tool. |
+| Specialist skills | 21 managed specialist profiles synced into `~/.claude/agent-profiles/*.toml`, invokable via the Skill tool. |
 
 ## Use as a Claude Code Plugin
 
@@ -642,15 +642,15 @@ Release download overrides are available for controlled environments:
 
 ## Managed Agent Profiles
 
-The managed install mirrors these 18 specialist lanes into `~/.claude/agent-profiles/*.toml`:
+The managed install mirrors these 21 specialist lanes into `~/.claude/agent-profiles/*.toml`:
 
-`api-contract-design`, `backend-and-data-architecture`, `cloud-and-devops-expert`, `git-expert`, `memory-status-reporter`, `mobile-development-life-cycle`, `postgres-migration-safety`, `preserve-existing-flow`, `qa-and-automation-engineer`, `react-performance-audit`, `reviewer`, `security-and-compliance-auditor`, `software-development-life-cycle`, `stripe-integration`, `ui-design-systems-and-responsive-interfaces`, `ux-research-and-experience-strategy`, `web-development-life-cycle`, and `websocket-realtime-design`.
+`api-contract-design`, `backend-and-data-architecture`, `cloud-and-devops-expert`, `data-and-ml-engineering`, `dependency-and-supply-chain`, `git-expert`, `memory-status-reporter`, `mobile-development-life-cycle`, `observability-and-incident-response`, `postgres-migration-safety`, `preserve-existing-flow`, `qa-and-automation-engineer`, `react-performance-audit`, `reviewer`, `security-and-compliance-auditor`, `software-development-life-cycle`, `stripe-integration`, `ui-design-systems-and-responsive-interfaces`, `ux-research-and-experience-strategy`, `web-development-life-cycle`, and `websocket-realtime-design`.
 
 Routine work stays in the main lane. Specialist profiles are for the moments where domain ownership or independent verification is worth the extra context.
 
 ## Legacy Command Compatibility
 
-The native CLI is the primary surface. Most subcommand shapes earlier docs referenced are now implemented: `orchestration task begin|progress|complete|list`, `orchestration checkpoint`, and `memory|memoriesv2 research-cache|maintenance|agent-registry|agent-packets|loop-guard|entity|graph|retrieve|status` all work today (see [Memory and System Map](#memory-and-system-map) above). A few remain **not yet implemented in the Rust runtime** and return non-zero with a "not implemented" message instead of silently succeeding: `memory working-brief record-summary`, `memory completion-gate record-requirement`, `memory report`, `memory index`, `memory hook`, and `consolidate`. The full working surface is listed above and in `claude-skills help advanced`.
+The native CLI is the primary surface. Most subcommand shapes earlier docs referenced are now implemented: `orchestration task begin|progress|complete|list`, `orchestration checkpoint`, and `memory|memoriesv2 research-cache|maintenance|agent-registry|agent-packets|loop-guard|entity|graph|retrieve|status|instincts` all work today, as do `memory report` (an alias for `status`) and `memory index` (rebuilds the recall index) — see [Memory and System Map](#memory-and-system-map) above. A few remain **not yet implemented in the Rust runtime** and return non-zero with a "not implemented" message instead of silently succeeding: `memory working-brief record-summary`, `memory completion-gate record-requirement`, and `consolidate`. `memory hook` is intentionally not a memory subcommand — it points you to `claude-skills hook ...`, which owns Claude Code lifecycle hooks. The full working surface is listed above and in `claude-skills help advanced`.
 
 ## Documentation Map
 

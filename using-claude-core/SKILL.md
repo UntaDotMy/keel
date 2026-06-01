@@ -129,7 +129,7 @@ skill matcher fires. The full text and the tactical rules they imply live in
 | "I'll add a config knob in case we need it" | Step 2 (Simplicity First) violated. Add it when a second caller exists. |
 | "Make it work" is a goal | Step 4 (Goal-Driven Execution) failed. State the verifiable check that proves done. |
 
-## Skill catalog (34 skills installed under ~/.claude/skills/)
+## Skill catalog (37 skills installed under ~/.claude/skills/)
 
 Source: each `<name>/SKILL.md` in this repo. Use the Skill tool with the bare
 name (e.g. `Skill("reviewer")`). The count excludes this bootstrap skill itself
@@ -170,10 +170,13 @@ separate skill directory — it routes to `reviewer`.
 - `postgres-migration-safety` — Live-traffic Postgres schema changes, lock-level analysis, expand-and-contract sequencing, bounded backfills, rollback paths.
 - `stripe-integration` — Stripe Checkout, Payment Intents, Subscriptions, Connect, Webhooks, refunds, disputes, idempotency, and 3DS/SCA.
 - `websocket-realtime-design` — WebSocket, SSE, fan-out, reconnect/resume, backpressure, ordering and dedup, auth lifecycle on long-lived connections.
+- `observability-and-incident-response` — Metrics/logs/traces via OpenTelemetry, golden signals, SLO/SLI and error-budget math, alerting and burn-rate paging linked to runbooks, on-call ergonomics, and blameless postmortems.
+- `dependency-and-supply-chain` — Dependency upgrades, lockfile hygiene and dedup, semver risk tiering, major-version migration planning, transitive triage, Renovate/Dependabot, SBOM, and provenance/signing across npm/cargo/pip/go. The action counterpart to security-and-compliance-auditor's scanning.
+- `data-and-ml-engineering` — Data pipelines (ETL/ELT), batch/streaming ingestion, warehouse/lakehouse modeling (dbt), data quality and contracts, orchestration (Airflow/Dagster), and the ML lifecycle (feature engineering, training, serving, evaluation, drift). The analytical/ML-flow counterpart to backend-and-data-architecture's OLTP focus.
 - `compression-discipline` — Per-turn output-compression playbook (narrower line ranges, search before reading, summarize logs). Auto-loaded by the UserPromptSubmit hint when a session crosses the per-day tool-call threshold.
 - `output-economy` — Per-response output-token economy: cut reply verbosity (no preamble, no re-narration of tool output, length tracks the task) without dropping technical signal. The output-side counterpart to compression-discipline's input-side rules.
 
-## Subagent catalog (18 delegation targets in .claude/agents/)
+## Subagent catalog (21 delegation targets in .claude/agents/)
 
 Use these via the Agent tool when the work benefits from an isolated context
 window. Same names as the skills — pick the subagent when token-saving delegation
@@ -193,7 +196,8 @@ form so subagents do not fall back to memory-based defaults.
   `ux-research-and-experience-strategy`, `memory-status-reporter`,
   `api-contract-design`, `react-performance-audit`,
   `postgres-migration-safety`, `stripe-integration`,
-  `websocket-realtime-design`.
+  `websocket-realtime-design`, `observability-and-incident-response`,
+  `dependency-and-supply-chain`, `data-and-ml-engineering`.
 
 ## Workspace pointers
 

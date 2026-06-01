@@ -1,0 +1,9 @@
+# Reasoning: Use the repo-managed high reasoning baseline so this skill
+# can push deeper on idempotent pipeline design, data contracts, train/serve parity, and reproducibility without a model pin.
+reasoning_effort: "high"
+interface:
+  display_name: "Data and ML Engineering"
+  short_description: "Data pipelines, ETL/ELT, dbt, orchestration, warehouse/lakehouse modeling, and the ML lifecycle"
+  default_prompt: "Use $data-and-ml-engineering when the main work is analytical or machine-learning data flow — ETL/ELT pipelines, batch or streaming ingestion, warehouse or lakehouse modeling with dbt and partitioning, data quality and contracts, orchestration in Airflow, Dagster, or Prefect, or the ML lifecycle from feature engineering and training to evaluation, model serving, and drift monitoring. Make pipelines idempotent and backfillable, gate ingestion with data contracts and quality checks, choose incremental vs full-refresh deliberately, keep training and serving features in parity, clear an evaluation bar before serving, and pin data and code for reproducibility. It complements backend-and-data-architecture, which owns OLTP schemas and live-traffic migrations. Shared execution policy is appended from the central managed catalog during install."
+policy:
+  allow_implicit_invocation: true
