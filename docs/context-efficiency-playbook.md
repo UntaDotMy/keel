@@ -156,7 +156,7 @@ Use the smallest acceptable step for classification, routing, candidate filterin
 - `claude-skills memory scope resolve` resolves scoped search order and write targets for the active workspace
 - `claude-skills memoriesv2 scope resolve` proves where the mirrored second-layer workspace, workstream, lane, graph, and hook artifacts live
 - `claude-skills memory research-cache record|lookup|stale|reward|list` provides shared record, freshness-aware lookup, stale/reward marking, and listing for reusable research (scoped per command group on disk)
-- `claude-skills memory report --format compact` (final-answer learning footer) is **planned but not yet implemented**; the `memory-status-reporter` skill produces the human-readable status report today, and `claude-skills memory status` gives a compact per-family record-count summary
+- `claude-skills memory report` is implemented as an alias for `claude-skills memory status` — a compact per-family record-count summary. The `memory-status-reporter` skill produces the richer human-readable narrative status report on top of the scoped files; use `memory report`/`status` for the structured family snapshot.
 - `README.md` documents the setup and operational workflow
 
 ## Sources
