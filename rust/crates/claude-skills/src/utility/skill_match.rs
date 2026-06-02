@@ -121,16 +121,18 @@ pub fn match_skill_for_prompt(claude_home: &Path, prompt: &str) -> Option<SkillM
 /// matcher is silent.
 ///
 /// These skills apply to a whole *class* of work but use high-frequency verbs
-/// (review, test, debug, edit) that the IDF matcher correctly treats as
-/// non-distinctive across the 40+ skill corpus — so they would never fire on
-/// their own, leaving the most-used everyday skills with no inline brief. Each
-/// entry lists narrow, verb-anchored trigger phrases; the first skill whose
-/// phrase appears in the (lowercased) prompt wins. Phrases are intentionally
-/// specific so ordinary prose ("I reviewed the docs") does not trip them.
+/// (review, test, debug, edit) — or, for the UI/UX pair, share nearly all their
+/// vocabulary with each other — so the IDF matcher correctly treats them as
+/// non-distinctive and stays silent, leaving the most-used everyday skills with
+/// no inline brief. Each entry lists narrow, verb- or noun-anchored trigger
+/// phrases; the first skill whose phrase appears in the (lowercased) prompt
+/// wins. Phrases are intentionally specific so ordinary prose ("I reviewed the
+/// docs") does not trip them.
 ///
 /// Order matters: earlier entries win ties. `systematic-debugging` precedes
 /// `test-driven-development` because "the test is failing" is a debugging ask,
-/// not a request to author a new test.
+/// not a request to author a new test. The UI and UX phrase sets are kept
+/// disjoint (visual-craft vs. research/flow) so the two never collide.
 const CURATED_SKILL_TRIGGERS: &[(&str, &[&str])] = &[
     (
         "reviewer",
@@ -202,6 +204,65 @@ const CURATED_SKILL_TRIGGERS: &[(&str, &[&str])] = &[
             "before i edit",
             "without breaking existing",
             "don't break existing",
+        ],
+    ),
+    // UI visual-craft asks. The two UI/UX skills share almost all their
+    // vocabulary (design, ui, ux, interface, experience), so the IDF matcher
+    // ties on them and correctly stays silent — leaving obvious UI prompts with
+    // no inline guidance (the real-world failure that produced "I don't have a
+    // UI/UX skill registered"). These phrases are visual-craft-specific so they
+    // route to `ui-design-systems-…` without colliding with the research-shaped
+    // UX phrases below.
+    (
+        "ui-design-systems-and-responsive-interfaces",
+        &[
+            "typography",
+            "responsive layout",
+            "responsive design",
+            "design system",
+            "looks ai-generated",
+            "look less ai-generated",
+            "less ai-generated",
+            "ai-generated look",
+            "visual hierarchy",
+            "visual polish",
+            "visual craft",
+            "color palette",
+            "color discipline",
+            "spacing and",
+            "make this look",
+            "make it look",
+            "style the",
+            "css layout",
+            "tailwind",
+            "component library",
+            "wcag",
+            "accessible ui",
+            "ui polish",
+            "ui design",
+        ],
+    ),
+    // UX research / experience-strategy asks. Research- and flow-shaped phrasing,
+    // kept disjoint from the visual-craft phrases above so the two never tie.
+    (
+        "ux-research-and-experience-strategy",
+        &[
+            "user research",
+            "usability",
+            "user journey",
+            "user journeys",
+            "user flow",
+            "user flows",
+            "conversion funnel",
+            "drop-off",
+            "personas",
+            "wireframe",
+            "wireframes",
+            "information architecture",
+            "ux research",
+            "experience strategy",
+            "user testing",
+            "journey map",
         ],
     ),
 ];
@@ -746,6 +807,63 @@ mod tests {
         );
         assert_eq!(curated_skill_for_prompt("add a logout button"), None);
         assert_eq!(curated_skill_for_prompt(""), None);
+    }
+
+    #[test]
+    fn curated_tier_routes_ui_visual_craft_prompts() {
+        // Regression for the real-world failure: the two UI/UX skills share
+        // almost all their vocabulary, so the IDF matcher ties and stays silent,
+        // and an obvious UI prompt got NO inline guidance — the agent then said
+        // "I don't have a UI/UX skill registered." Visual-craft phrasing must now
+        // route to ui-design-systems via the curated tier.
+        for prompt in [
+            "make this dashboard look less ai-generated, improve the typography and spacing",
+            "tighten the color discipline and visual hierarchy",
+            "add a responsive layout for mobile",
+            "build out the design system tokens",
+            "make this look more polished",
+        ] {
+            assert_eq!(
+                curated_skill_for_prompt(prompt),
+                Some("ui-design-systems-and-responsive-interfaces"),
+                "UI visual-craft prompt must route to ui-design-systems: {prompt:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn curated_tier_routes_ux_research_prompts() {
+        // Research/flow-shaped phrasing routes to ux-research, disjoint from the
+        // visual-craft phrases so the two never collide.
+        for prompt in [
+            "run some user research on the onboarding",
+            "map the user journey through checkout",
+            "where is the drop-off in the conversion funnel",
+            "let's do usability testing on this",
+            "sketch a wireframe for the settings page",
+        ] {
+            assert_eq!(
+                curated_skill_for_prompt(prompt),
+                Some("ux-research-and-experience-strategy"),
+                "UX research prompt must route to ux-research: {prompt:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn curated_tier_ui_and_ux_phrase_sets_are_disjoint() {
+        // The whole point of splitting them is that no single prompt should
+        // satisfy both sets — that disjointness is what stops the original tie
+        // from reappearing inside the curated tier. Spot-check the representative
+        // phrases do not cross-match.
+        assert_eq!(
+            curated_skill_for_prompt("improve the typography"),
+            Some("ui-design-systems-and-responsive-interfaces")
+        );
+        assert_eq!(
+            curated_skill_for_prompt("map the user journey"),
+            Some("ux-research-and-experience-strategy")
+        );
     }
 
     #[test]
