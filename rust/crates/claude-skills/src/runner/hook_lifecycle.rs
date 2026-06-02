@@ -130,6 +130,16 @@ pub fn run_hook_command(
             run_hook_user_prompt_submit(&mut stdin, standard_output, standard_error)
         }
 
+        // PostToolBatch reads stdin for `session_id` so the optional review gate
+        // (CLAUDE_SKILLS_REVIEW_GATE) can scope its per-session block counter and
+        // edit-vs-review telemetry. With the gate disabled (the default) this is
+        // behaviorally identical to the advisory reminder the lifecycle path
+        // emits. Stdin is injected so tests can pass `&mut std::io::empty()`.
+        "post-tool-batch" => {
+            let mut stdin = std::io::stdin().lock();
+            run_hook_post_tool_batch(&mut stdin, standard_output, standard_error)
+        }
+
         // Every other slug is dispatched if and only if it appears in the canonical
         // event table. Using the same table that drives `settings.json` installation
         // means a stale binary cannot reject an event the install path advertises:
@@ -1254,6 +1264,337 @@ fn post_tool_batch_context() -> String {
     "Closeout check: if this batch changed code with logic edits, multi-file changes, public-API touches, or security-sensitive surfaces, route the diff through a reviewer pass before final closeout. Trivial work (docs-only, formatting-only, single-line typo or comment fixes, generated-only) is exempt. The standard is: non-trivial code does not self-review. If a project-level CLAUDE.md or AGENTS.md defines stricter routing rules, those take precedence. If this reminder feels like wrapper noise, that is the rationalization the rule names — re-read the diff and decide deliberately before skipping.".to_string()
 }
 
+// ----- Optional PostToolBatch review gate (step 7) -----
+//
+// By default the PostToolBatch hook only *advises* a reviewer pass (the text
+// above). When an operator opts in with `CLAUDE_SKILLS_REVIEW_GATE=on`, the hook
+// instead emits a `decision: "block"` when this session changed code but no
+// reviewer pass was recorded since the last edit — the only model-INDEPENDENT
+// way to keep non-trivial work from closing unreviewed, since Claude Code hooks
+// cannot force a Skill()/MCP/tool call.
+//
+// SAFETY — this is the part that makes a hard gate shippable:
+//   * OFF by default. With the env var unset (or `off`/`0`), behavior is byte
+//     -for-byte identical to the advisory-only reminder. Merging changes nothing
+//     for anyone who does not opt in.
+//   * Hard per-session block cap. Even when enabled, the gate blocks at most
+//     `CLAUDE_SKILLS_REVIEW_GATE_MAX_BLOCKS` times (default 1) per session, then
+//     permanently falls through to advisory. Because the issued-block counter
+//     strictly increases on every block and the gate stops blocking once it
+//     reaches the cap, an infinite Stop/PostToolBatch loop is mathematically
+//     impossible regardless of whether the model ever satisfies the gate. This
+//     directly forecloses the documented stop-cascade hazard.
+//   * Fail-open everywhere. No session id, no claude_home, unreadable telemetry,
+//     or a serialization error all degrade to the advisory reminder, never to a
+//     block. A telemetry hiccup can never wedge a turn.
+//   * Clearable by actually reviewing. Running `claude-skills review
+//     pre-pr|pre-commit|gates` writes a workspace-keyed marker; if that marker
+//     is newer than the last edit, the gate does not block.
+
+const REVIEW_GATE_ENV_VAR: &str = "CLAUDE_SKILLS_REVIEW_GATE";
+const REVIEW_GATE_MAX_BLOCKS_ENV_VAR: &str = "CLAUDE_SKILLS_REVIEW_GATE_MAX_BLOCKS";
+
+/// Default block cap when the gate is enabled but the operator did not set a
+/// custom `CLAUDE_SKILLS_REVIEW_GATE_MAX_BLOCKS`. One hard stop per session: the
+/// model gets a single un-skippable "review before closing" block, after which
+/// the turn proceeds no matter what. A cap of 0 disables blocking entirely (a
+/// second escape hatch alongside the on/off switch).
+const REVIEW_GATE_DEFAULT_MAX_BLOCKS: u64 = 1;
+
+/// True only when the operator explicitly opts in. Unset / `off` / `0` / `false`
+/// all leave the gate disabled (advisory-only), which is the default.
+fn review_gate_enabled() -> bool {
+    std::env::var(REVIEW_GATE_ENV_VAR)
+        .ok()
+        .as_deref()
+        .map(str::trim)
+        .map(|value| matches!(value, "on" | "block" | "1" | "true"))
+        .unwrap_or(false)
+}
+
+fn review_gate_max_blocks() -> u64 {
+    std::env::var(REVIEW_GATE_MAX_BLOCKS_ENV_VAR)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(REVIEW_GATE_DEFAULT_MAX_BLOCKS)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ReviewGateDecision {
+    /// Emit the normal advisory reminder.
+    Advisory,
+    /// Emit `decision: "block"` and increment the per-session block counter.
+    Block,
+}
+
+/// Pure decision core (no IO, no env) so the termination guarantee is
+/// unit-testable in isolation.
+///
+/// The cap check (`blocks_issued >= max_blocks`) is the termination proof: the
+/// caller increments `blocks_issued` on every `Block`, so the value is strictly
+/// monotonic across a session and the function returns `Advisory` forever once
+/// the cap is reached. No infinite loop is possible.
+fn decide_review_gate(
+    enabled: bool,
+    max_blocks: u64,
+    blocks_issued: u64,
+    edit_count: usize,
+    reviewed_after_last_edit: bool,
+) -> ReviewGateDecision {
+    if !enabled || max_blocks == 0 {
+        return ReviewGateDecision::Advisory;
+    }
+    // No code changed this session — nothing to gate. Pure-research and
+    // question-answering turns never get blocked.
+    if edit_count == 0 {
+        return ReviewGateDecision::Advisory;
+    }
+    // A review already ran after the last edit — requirement satisfied.
+    if reviewed_after_last_edit {
+        return ReviewGateDecision::Advisory;
+    }
+    // Hard cap: stop blocking once we have issued the allowed number of blocks.
+    // This is what guarantees the gate cannot loop.
+    if blocks_issued >= max_blocks {
+        return ReviewGateDecision::Advisory;
+    }
+    ReviewGateDecision::Block
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|delta| delta.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn read_counter_value(path: &Path) -> u64 {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|text| text.trim().parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
+fn review_gate_blocks_path(claude_home: &Path, session_id: &str) -> PathBuf {
+    let key = if session_id.trim().is_empty() {
+        "no-session".to_string()
+    } else {
+        sanitize_memory_key(session_id)
+    };
+    claude_home
+        .join("state")
+        .join("review-gate-blocks")
+        .join(key)
+}
+
+/// Number of edit-class tool calls recorded for `session_id` today, plus the
+/// timestamp of the most recent one and the cwd it ran in. `count == 0` means
+/// no code changed this session. Fail-open: any read/parse problem yields a
+/// zero-count result so the gate degrades to advisory.
+struct SessionEditStats {
+    count: usize,
+    last_edit_ms: u64,
+    last_cwd: String,
+}
+
+fn session_edit_stats(claude_home: &Path, session_id: &str) -> SessionEditStats {
+    let mut stats = SessionEditStats {
+        count: 0,
+        last_edit_ms: 0,
+        last_cwd: String::new(),
+    };
+    let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let path = claude_home
+        .join("state")
+        .join("tool-timings")
+        .join(format!("{date}.jsonl"));
+    let Ok(body) = fs::read_to_string(&path) else {
+        return stats;
+    };
+    for line in body.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(row) = serde_json::from_str::<JsonDocument>(line) else {
+            continue;
+        };
+        if row.get("session_id").and_then(JsonDocument::as_str) != Some(session_id) {
+            continue;
+        }
+        let tool = row
+            .get("tool_name")
+            .and_then(JsonDocument::as_str)
+            .unwrap_or_default();
+        if !is_edit_class_tool(tool) {
+            continue;
+        }
+        stats.count += 1;
+        let ms = row
+            .get("recorded_at_ms")
+            .and_then(JsonDocument::as_u64)
+            .unwrap_or(0);
+        if ms >= stats.last_edit_ms {
+            stats.last_edit_ms = ms;
+            stats.last_cwd = row
+                .get("cwd")
+                .and_then(JsonDocument::as_str)
+                .unwrap_or_default()
+                .to_string();
+        }
+    }
+    stats
+}
+
+/// Timestamp (ms) of the last recorded review for `workspace_cwd`, or `None`
+/// when no review marker exists. Written by `record_review_gate_clear` from the
+/// `claude-skills review` surface.
+fn review_marker_ms(claude_home: &Path, workspace_cwd: &str) -> Option<u64> {
+    let key = sanitize_memory_key(workspace_cwd);
+    let path = claude_home
+        .join("state")
+        .join("review-gate")
+        .join(format!("{key}.reviewed"));
+    fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| text.trim().parse::<u64>().ok())
+}
+
+/// Record that a reviewer pass ran for the current workspace, clearing the
+/// review gate for edits made up to now. Called from the `claude-skills review`
+/// surface (pre-pr / pre-commit / gates). Best-effort: any failure is silently
+/// ignored — a missing marker only means the gate may block once more, which
+/// the per-session cap still bounds.
+pub fn record_review_gate_clear() {
+    let Ok(claude_home) = resolve_claude_home("") else {
+        return;
+    };
+    let Ok(cwd) = std::env::current_dir() else {
+        return;
+    };
+    let key = sanitize_memory_key(&display_path(&cwd));
+    let dir = claude_home.join("state").join("review-gate");
+    if fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let _ = fs::write(dir.join(format!("{key}.reviewed")), now_ms().to_string());
+}
+
+fn review_gate_block_reason() -> String {
+    "Review gate (CLAUDE_SKILLS_REVIEW_GATE is on): this session changed code but no reviewer pass has been recorded since the last edit. Before closing, run a reviewer pass — invoke the `reviewer` skill on the diff, or run `claude-skills review pre-pr` (which also clears this gate). This gate blocks at most CLAUDE_SKILLS_REVIEW_GATE_MAX_BLOCKS time(s) per session (default 1) and then lets the turn through, so it cannot loop. Set CLAUDE_SKILLS_REVIEW_GATE=off to disable entirely.".to_string()
+}
+
+/// Emit the advisory PostToolBatch reminder (the default, gate-disabled path and
+/// every fail-open branch). Mirrors the lifecycle render so the output is
+/// identical to what `run_hook_lifecycle("post-tool-batch")` produces.
+fn emit_post_tool_batch_advisory(
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let Some(event) = event_by_name("PostToolBatch") else {
+        return 0;
+    };
+    let payload = render_lifecycle_payload(event, &post_tool_batch_context());
+    match serde_json::to_string_pretty(&payload) {
+        Ok(rendered) => {
+            let _ = writeln!(standard_output, "{rendered}");
+            0
+        }
+        Err(error) => {
+            let _ = writeln!(
+                standard_error,
+                "Unable to render PostToolBatch advisory output: {error}"
+            );
+            1
+        }
+    }
+}
+
+/// PostToolBatch dispatcher with the optional review gate.
+///
+/// Reads stdin for `session_id` (Claude Code delivers the hook payload there,
+/// same as UserPromptSubmit). When the gate is disabled — the default — this is
+/// behaviorally identical to the advisory reminder. When enabled, it may emit a
+/// single `decision: "block"` per session (bounded by the cap) to force a
+/// reviewer pass on unreviewed code changes.
+fn run_hook_post_tool_batch(
+    standard_input: &mut dyn Read,
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    // Gate off (default): skip stdin entirely and emit the advisory reminder.
+    // This keeps the disabled path cheap and side-effect-free.
+    if !review_gate_enabled() {
+        return emit_post_tool_batch_advisory(standard_output, standard_error);
+    }
+
+    let max_blocks = review_gate_max_blocks();
+    if max_blocks == 0 {
+        return emit_post_tool_batch_advisory(standard_output, standard_error);
+    }
+
+    let stdin_payload: Option<JsonDocument> = {
+        let mut text = String::new();
+        match standard_input.read_to_string(&mut text) {
+            Ok(_) if !text.trim().is_empty() => serde_json::from_str(&text).ok(),
+            _ => None,
+        }
+    };
+    let session_id = stdin_payload
+        .as_ref()
+        .and_then(|payload| payload.get("session_id"))
+        .and_then(JsonDocument::as_str)
+        .unwrap_or_default();
+
+    // Fail-open: without a claude_home we cannot read telemetry or the block
+    // counter, so degrade to advisory rather than risk a wedged turn.
+    let Ok(claude_home) = resolve_claude_home("") else {
+        return emit_post_tool_batch_advisory(standard_output, standard_error);
+    };
+
+    let stats = session_edit_stats(&claude_home, session_id);
+    let reviewed = if stats.count == 0 {
+        false
+    } else {
+        review_marker_ms(&claude_home, &stats.last_cwd)
+            .map(|marker_ms| marker_ms >= stats.last_edit_ms)
+            .unwrap_or(false)
+    };
+    let blocks_path = review_gate_blocks_path(&claude_home, session_id);
+    let blocks_issued = read_counter_value(&blocks_path);
+
+    match decide_review_gate(true, max_blocks, blocks_issued, stats.count, reviewed) {
+        ReviewGateDecision::Advisory => {
+            emit_post_tool_batch_advisory(standard_output, standard_error)
+        }
+        ReviewGateDecision::Block => {
+            // Increment FIRST so the cap counts down even if rendering fails or
+            // the model ignores the block — the monotonic counter is the
+            // termination guarantee and must advance before anything else.
+            let _ = increment_counter_file(&blocks_path);
+            let payload = serde_json::json!({
+                "decision": "block",
+                "reason": review_gate_block_reason(),
+                "suppressOutput": true,
+            });
+            match serde_json::to_string_pretty(&payload) {
+                Ok(rendered) => {
+                    let _ = writeln!(standard_output, "{rendered}");
+                    0
+                }
+                // Even a render failure must not wedge the turn: fall back to
+                // advisory (the counter already advanced, so the cap holds).
+                Err(error) => {
+                    let _ = writeln!(
+                        standard_error,
+                        "Unable to render PostToolBatch block output: {error}"
+                    );
+                    emit_post_tool_batch_advisory(standard_output, standard_error)
+                }
+            }
+        }
+    }
+}
+
 fn prune_raw_output_store(standard_error: &mut dyn Write) {
     let retention_days = std::env::var("CLAUDE_SKILLS_RAW_RETENTION_DAYS")
         .ok()
@@ -1838,7 +2179,7 @@ fn ensure_skill_listing_budget_fraction(document: &mut JsonDocument) -> Result<(
     if !object.contains_key("skillListingBudgetFraction") {
         object.insert(
             "skillListingBudgetFraction".to_string(),
-            serde_json::json!(0.02),
+            serde_json::json!(0.06),
         );
     }
     Ok(())
@@ -3114,6 +3455,137 @@ mod tests {
         assert_eq!(event_name, Some("PostToolBatch"));
     }
 
+    // ----- Review gate (step 7) tests -----
+
+    #[test]
+    fn review_gate_disabled_decision_is_always_advisory() {
+        // The default. With the gate disabled, no combination of inputs blocks.
+        for edit_count in [0usize, 1, 50] {
+            for reviewed in [true, false] {
+                assert_eq!(
+                    decide_review_gate(false, 1, 0, edit_count, reviewed),
+                    ReviewGateDecision::Advisory,
+                    "disabled gate must never block (edits={edit_count}, reviewed={reviewed})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn review_gate_max_blocks_zero_is_advisory() {
+        // Cap of 0 is a second kill switch: enabled but never blocks.
+        assert_eq!(
+            decide_review_gate(true, 0, 0, 5, false),
+            ReviewGateDecision::Advisory
+        );
+    }
+
+    #[test]
+    fn review_gate_no_edits_is_advisory() {
+        // Pure-research / question turns changed no code — never gate them.
+        assert_eq!(
+            decide_review_gate(true, 1, 0, 0, false),
+            ReviewGateDecision::Advisory
+        );
+    }
+
+    #[test]
+    fn review_gate_reviewed_after_edit_is_advisory() {
+        // A review already ran after the last edit — requirement satisfied.
+        assert_eq!(
+            decide_review_gate(true, 1, 0, 5, true),
+            ReviewGateDecision::Advisory
+        );
+    }
+
+    #[test]
+    fn review_gate_blocks_unreviewed_edits_once() {
+        // Enabled, code changed, no review, under the cap → block exactly once.
+        assert_eq!(
+            decide_review_gate(true, 1, 0, 5, false),
+            ReviewGateDecision::Block
+        );
+    }
+
+    #[test]
+    fn review_gate_cannot_loop_terminates_at_cap() {
+        // THE TERMINATION PROOF. Simulate the worst case: the gate stays enabled,
+        // code stays changed, and the model NEVER reviews (reviewed=false
+        // forever). Drive the loop exactly as the dispatcher does — increment the
+        // issued-block counter on every Block — and assert it stops blocking once
+        // the cap is reached, no matter how many turns elapse. If this ever
+        // looped in production it would wedge every project; this test is the
+        // guarantee that it cannot.
+        for max_blocks in [1u64, 2, 3] {
+            let mut blocks_issued = 0u64;
+            let mut total_blocks = 0u64;
+            for _turn in 0..1000 {
+                match decide_review_gate(true, max_blocks, blocks_issued, 5, false) {
+                    ReviewGateDecision::Block => {
+                        blocks_issued += 1;
+                        total_blocks += 1;
+                    }
+                    ReviewGateDecision::Advisory => {}
+                }
+            }
+            assert_eq!(
+                total_blocks, max_blocks,
+                "gate must block exactly max_blocks ({max_blocks}) times across a long session, then fall through forever"
+            );
+        }
+    }
+
+    #[test]
+    fn run_hook_post_tool_batch_disabled_matches_advisory_path() {
+        // End-to-end: with the env var unset, the stdin-reading dispatcher emits
+        // byte-identical output to the lifecycle advisory path. This is the
+        // "merging changes nothing unless you opt in" guarantee.
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous = std::env::var(REVIEW_GATE_ENV_VAR).ok();
+        std::env::remove_var(REVIEW_GATE_ENV_VAR);
+
+        let mut gate_stdin = std::io::empty();
+        let mut gate_out = Vec::new();
+        let mut gate_err = Vec::new();
+        let gate_code = run_hook_post_tool_batch(&mut gate_stdin, &mut gate_out, &mut gate_err);
+
+        let mut adv_out = Vec::new();
+        let mut adv_err = Vec::new();
+        let adv_code = run_hook_lifecycle("post-tool-batch", &mut adv_out, &mut adv_err);
+
+        match previous {
+            Some(value) => std::env::set_var(REVIEW_GATE_ENV_VAR, value),
+            None => std::env::remove_var(REVIEW_GATE_ENV_VAR),
+        }
+
+        assert_eq!(gate_code, 0);
+        assert_eq!(adv_code, 0);
+        assert_eq!(
+            String::from_utf8_lossy(&gate_out),
+            String::from_utf8_lossy(&adv_out),
+            "gate-disabled dispatcher output must match the advisory lifecycle path exactly"
+        );
+        // And it must NOT be a block.
+        assert!(
+            !String::from_utf8_lossy(&gate_out).contains("\"decision\""),
+            "disabled gate must never emit a decision field"
+        );
+    }
+
+    #[test]
+    fn review_gate_block_reason_names_the_kill_switch() {
+        // Operators must always be told how to turn it off, right in the block.
+        let reason = review_gate_block_reason();
+        assert!(reason.contains("CLAUDE_SKILLS_REVIEW_GATE=off"));
+        assert!(reason.contains("review pre-pr"));
+        assert!(
+            reason.contains("cannot loop") || reason.contains("at most"),
+            "block reason must reassure that the gate is bounded"
+        );
+    }
+
     #[test]
     fn edit_counter_increments_and_resets_at_threshold() {
         // The counter file is the bridge between PostToolUse fires (one per
@@ -3626,7 +4098,7 @@ mod tests {
             document
                 .get("skillListingBudgetFraction")
                 .and_then(JsonDocument::as_f64),
-            Some(0.02),
+            Some(0.06),
         );
 
         let _ = std::fs::remove_dir_all(hook_path.parent().unwrap());

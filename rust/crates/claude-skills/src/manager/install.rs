@@ -41,6 +41,14 @@ pub struct InstallSummary {
     /// when registration was skipped (non-standard `--claude-home`) or failed
     /// non-fatally. Registration never blocks an install.
     pub mcp_registration: Option<String>,
+    /// Human-readable outcome of the Claude Code lifecycle hook installation
+    /// step, or `None` when it was skipped (non-standard `--claude-home`) or
+    /// failed non-fatally. Like MCP registration, hook install never blocks an
+    /// install — but without it, a manual or plugin-only user gets skills+MCP
+    /// and no hooks, so the SessionStart bootstrap and per-prompt routing never
+    /// fire. Folding it in here makes hooks load-bearing on every install path,
+    /// not only the one-line bootstrap scripts.
+    pub hooks_installation: Option<String>,
 }
 
 struct FileTracker<'a> {
@@ -143,6 +151,7 @@ pub fn install_from_paths(
     write_install_metadata(build_version, repository_root, claude_home)?;
     write_inventories(&layout, claude_home, &tracker)?;
     let mcp_registration = maybe_register_mcp_server(claude_home);
+    let hooks_installation = maybe_install_hooks(claude_home);
     Ok(InstallSummary {
         synced_skills,
         synced_agents,
@@ -154,6 +163,7 @@ pub fn install_from_paths(
         removed_executable_orphans,
         published_executable,
         mcp_registration,
+        hooks_installation,
     })
 }
 
@@ -187,6 +197,46 @@ fn maybe_register_mcp_server(claude_home: &Path) -> Option<String> {
         Ok(super::mcp_register::McpRegistration::AlreadyCurrent) => {
             Some("already current".to_string())
         }
+        Err(error) => Some(format!("skipped ({error})")),
+    }
+}
+
+/// Install the Claude Code lifecycle hooks into `<claude_home>/settings.json`
+/// during install, pointing them at the just-published binary.
+///
+/// Guarded on the standard `.claude` home name for the same reason as
+/// `maybe_register_mcp_server`: the integration suite installs into throwaway
+/// `--claude-home` directories, and writing a real settings.json into each
+/// would race parallel tests sharing a temp-dir parent. Real installs into
+/// `~/.claude` always get hooks.
+///
+/// Best-effort: a failure is reported in the summary but never fails the
+/// install. The previous behavior left hook installation to the one-line
+/// bootstrap scripts only, so a manual `claude-skills install`, an `update`,
+/// or a plugin-only setup produced skills+MCP with no hooks — meaning the
+/// SessionStart bootstrap and per-prompt routing never fired. Folding it in
+/// here makes the engagement rails load-bearing on every install path.
+fn maybe_install_hooks(claude_home: &Path) -> Option<String> {
+    let is_standard_home = claude_home
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name == ".claude")
+        .unwrap_or(false);
+    if !is_standard_home {
+        return None;
+    }
+    let hook_path = claude_home.join(crate::hooks::claude::SETTINGS_FILE_NAME);
+    // Point the hooks at the binary we just published into claude_home, not at
+    // the currently-running executable (which during `update` is the freshly
+    // built release artifact in the repo target dir, and during a release-bundle
+    // install is the extracted temp binary). The published path is the stable
+    // location Claude Code will invoke for the lifetime of the install.
+    let executable = installed_executable_path(claude_home);
+    match crate::runner::hook_lifecycle::build_hooks_payload(&hook_path, &executable) {
+        Ok(payload) => match write_text(&hook_path, &payload) {
+            Ok(()) => Some(format!("installed at {}", display_path(&hook_path))),
+            Err(error) => Some(format!("skipped ({error})")),
+        },
         Err(error) => Some(format!("skipped ({error})")),
     }
 }
@@ -275,6 +325,9 @@ pub fn write_install_summary(summary: &InstallSummary, output: &mut dyn Write) {
     );
     if let Some(mcp_status) = &summary.mcp_registration {
         let _ = writeln!(output, "  MCP server: {mcp_status}");
+    }
+    if let Some(hooks_status) = &summary.hooks_installation {
+        let _ = writeln!(output, "  Lifecycle hooks: {hooks_status}");
     }
 }
 
@@ -1638,6 +1691,87 @@ mod tests {
         );
         let _ = fs::remove_dir_all(&repo);
         let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn install_into_standard_home_writes_lifecycle_hooks() {
+        // Every other install test uses a home NOT named `.claude`, so
+        // `maybe_install_hooks` returns None and its write branch is never
+        // exercised. This test builds a home literally named `.claude` under a
+        // unique parent so the standard-home guard passes and the hook write
+        // path actually runs — covering the previously-untested branch where
+        // settings.json is created with the managed lifecycle stanzas.
+        let suffix = format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+        );
+        let parent = std::env::temp_dir().join(format!("hookhome-{suffix}"));
+        let repo = std::env::temp_dir().join(format!("hookrepo-{suffix}"));
+        let home = parent.join(".claude");
+        let _ = fs::remove_dir_all(&parent);
+        let _ = fs::remove_dir_all(&repo);
+        seed_repo(&repo);
+        write_skill_with_reference(&repo, "reviewer", "10-r.md");
+
+        let summary = install_from_paths("dev", &repo, &home).unwrap();
+
+        // Summary reports the install, not a skip.
+        let status = summary
+            .hooks_installation
+            .expect("standard .claude home must attempt hook install");
+        assert!(
+            status.starts_with("installed at"),
+            "expected an install, got: {status}"
+        );
+
+        // settings.json exists and carries managed lifecycle stanzas pointing at
+        // the published binary.
+        let settings_path = home.join(crate::hooks::claude::SETTINGS_FILE_NAME);
+        assert!(settings_path.is_file(), "settings.json must be written");
+        let text = fs::read_to_string(&settings_path).unwrap();
+        let document: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert!(
+            document["hooks"]["SessionStart"].is_array(),
+            "SessionStart hook stanza must be present"
+        );
+        assert!(
+            document["hooks"]["UserPromptSubmit"].is_array(),
+            "UserPromptSubmit hook stanza must be present"
+        );
+        // The budget knob folded in by build_hooks_payload lands at the new default.
+        assert_eq!(
+            document
+                .get("skillListingBudgetFraction")
+                .and_then(serde_json::Value::as_f64),
+            Some(0.06),
+        );
+
+        // Re-install is idempotent and preserves an unrelated user key.
+        let mut reparsed: serde_json::Value = serde_json::from_str(&text).unwrap();
+        reparsed["userCustomKey"] = serde_json::json!("keep-me");
+        fs::write(
+            &settings_path,
+            serde_json::to_string_pretty(&reparsed).unwrap(),
+        )
+        .unwrap();
+        install_from_paths("dev", &repo, &home).unwrap();
+        let after: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&settings_path).unwrap()).unwrap();
+        assert_eq!(
+            after["userCustomKey"], "keep-me",
+            "unrelated user keys must survive a re-install"
+        );
+        assert!(
+            after["hooks"]["SessionStart"].is_array(),
+            "managed hooks must still be present after re-install"
+        );
+
+        let _ = fs::remove_dir_all(&parent);
+        let _ = fs::remove_dir_all(&repo);
     }
 
     #[test]
