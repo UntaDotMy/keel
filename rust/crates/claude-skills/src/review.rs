@@ -22,14 +22,29 @@ pub fn run_review_command(
         return if arguments.is_empty() { 1 } else { 0 };
     }
     match arguments[0].as_str() {
-        "gates" => run_review_gates_command(&arguments[1..], standard_output, standard_error),
+        "gates" => {
+            let code = run_review_gates_command(&arguments[1..], standard_output, standard_error);
+            // Running a gates check is a reviewer pass — clear the optional
+            // PostToolBatch review gate for this workspace so it does not block
+            // closeout. Best-effort and a no-op unless the gate is enabled.
+            crate::runner::hook_lifecycle::record_review_gate_clear();
+            code
+        }
         "hosted" => run_review_hosted_command(&arguments[1..], standard_output, standard_error),
-        "pre-pr" | "pre-commit" | "diff" | "init" => run_review_surface_command(
-            arguments[0].as_str(),
-            &arguments[1..],
-            standard_output,
-            standard_error,
-        ),
+        "pre-pr" | "pre-commit" | "diff" | "init" => {
+            let code = run_review_surface_command(
+                arguments[0].as_str(),
+                &arguments[1..],
+                standard_output,
+                standard_error,
+            );
+            // pre-pr / pre-commit / diff constitute a reviewer pass over the
+            // working diff; clear the review gate for this workspace. `init` is
+            // harmless to clear on (no edits yet). Best-effort; no-op when the
+            // gate is disabled.
+            crate::runner::hook_lifecycle::record_review_gate_clear();
+            code
+        }
         "policy" => run_review_policy_command(&arguments[1..], standard_output, standard_error),
         other => {
             let _ = writeln!(standard_error, "Unknown review command: {other}");

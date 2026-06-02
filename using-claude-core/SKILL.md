@@ -95,6 +95,17 @@ After implementation work, before claiming completion:
   project-level CLAUDE.md or AGENTS.md defines stricter routing rules, those
   take precedence; otherwise the inline rule in this paragraph is the standard.
 
+> **Optional hard review gate.** By default the closeout reviewer rule is an
+> advisory reminder the model is trusted to honor. Operators who want it
+> *enforced* can set `CLAUDE_SKILLS_REVIEW_GATE=on`: the PostToolBatch hook then
+> emits a `decision: "block"` when a session changed code but recorded no
+> reviewer pass since the last edit, refusing closeout until a review runs
+> (invoke the `reviewer` skill, or run `claude-skills review pre-pr`, which
+> clears the gate). It is **off by default**, blocks at most
+> `CLAUDE_SKILLS_REVIEW_GATE_MAX_BLOCKS` time(s) per session (default 1) and then
+> lets the turn through, so it cannot loop. Disable with
+> `CLAUDE_SKILLS_REVIEW_GATE=off` or `…_MAX_BLOCKS=0`.
+
 ## Code Implementation Discipline (every code-touching turn)
 
 Four pillars govern every change. They apply on every turn, not only when a
