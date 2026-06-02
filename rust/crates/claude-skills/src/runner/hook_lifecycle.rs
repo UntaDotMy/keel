@@ -885,16 +885,18 @@ fn post_compact_context() -> String {
 /// every byte lands per prompt and is paid as input tokens. The full
 /// bootstrap (skill catalog, Red Flags table, decision flow, four
 /// implementation-discipline pillars) is delivered once via SessionStart;
-/// this hook only restates the iron law, names the four pillars, adds the
-/// understand-before-building rule (research the request before writing code —
-/// the lever that stops the model building the wrong thing), and the one-line
-/// parallel-fan-out independence test so they stay top-of-mind on each turn.
-/// Body weight is roughly 260 tokens before `memory_scope_summary()` — within
-/// budget for a per-prompt injection but expensive enough that adding more
-/// text needs a deliberate reason.
+/// this hook only restates the iron law, names the four pillars, advertises the
+/// always-available claude_core MCP tools (so the model reaches for
+/// `system_map`/`recall` instead of guessing about the repo or its memory),
+/// adds the understand-before-building rule (research the request before writing
+/// code — the lever that stops the model building the wrong thing), and the
+/// one-line parallel-fan-out independence test so they stay top-of-mind on each
+/// turn. Body weight is roughly 320 tokens before `memory_scope_summary()` —
+/// within budget for a per-prompt injection but expensive enough that adding
+/// more text needs a deliberate reason.
 fn user_prompt_submit_context() -> String {
     format!(
-        "Research-first: trust the codebase, not your knowledge base. Read SYSTEM_MAP and the owning module before claiming behavior. Invoke any relevant skill via the Skill tool BEFORE responding — even a 1% chance it applies means use it. Understand before building: restate what the request actually asks, confirm the user story, and research what is genuinely needed before writing code — no guessing, no assuming, no building against an imagined spec. Researching first is what stops you building the wrong thing; the cost of an hour's research is always less than the cost of shipping the wrong feature. Find the root cause, not just the surface symptom: suspicion is a hypothesis, not a finding — trace the symptom end-to-end with file:line evidence and confirm the suspect is on that path before changing it. No assumptions. No jumping from \"this may be the case\" to a patch. Implementation discipline applies on every code-touching turn — Think Before Coding (state assumptions, deep-dive any suspected target before changing it), Simplicity First (minimum code, no speculative features or abstractions), Surgical Changes (every changed line traces to the request), Goal-Driven Execution (reproduce or trace the symptom before naming a root cause; turn the task into a verifiable goal before coding). Parallel fan-out: only batch agents in the same message when all four hold — no shared inputs, no shared file or git-index writes, no need to cancel/steer one based on another's interim result, and the work fits the current task scope. If any check fails, dispatch sequentially. {}",
+        "Research-first: trust the codebase, not your knowledge base. Read SYSTEM_MAP and the owning module before claiming behavior. Invoke any relevant skill via the Skill tool BEFORE responding — even a 1% chance it applies means use it. Native claude_core MCP tools are always available — prefer them over guessing: `system_map` returns the workspace structural map (call it before any repo-structure or \"what is this project\" claim), `recall` runs full-text search over your saved memories and working briefs (call it before claiming what you remember or learned), and `run_command` routes noisy shell output through the compaction proxy. Understand before building: restate what the request actually asks, confirm the user story, and research what is genuinely needed before writing code — no guessing, no assuming, no building against an imagined spec. Researching first is what stops you building the wrong thing; the cost of an hour's research is always less than the cost of shipping the wrong feature. Find the root cause, not just the surface symptom: suspicion is a hypothesis, not a finding — trace the symptom end-to-end with file:line evidence and confirm the suspect is on that path before changing it. No assumptions. No jumping from \"this may be the case\" to a patch. Implementation discipline applies on every code-touching turn — Think Before Coding (state assumptions, deep-dive any suspected target before changing it), Simplicity First (minimum code, no speculative features or abstractions), Surgical Changes (every changed line traces to the request), Goal-Driven Execution (reproduce or trace the symptom before naming a root cause; turn the task into a verifiable goal before coding). Parallel fan-out: only batch agents in the same message when all four hold — no shared inputs, no shared file or git-index writes, no need to cancel/steer one based on another's interim result, and the work fits the current task scope. If any check fails, dispatch sequentially. {}",
         memory_scope_summary()
     )
 }
@@ -926,6 +928,85 @@ fn skill_pointer_fallback(skill_name: &str) -> String {
     format!(
         "Skill match: this prompt strongly matches the `{skill_name}` skill. Invoke it now with Skill(\"{skill_name}\") BEFORE writing code or giving a final answer. If, after reading it, the skill turns out not to apply, say so and proceed — but do not skip the check."
     )
+}
+
+/// Per-prompt pointer at the claude_core MCP tools for prompts that ask about
+/// the repository layout or the agent's own memory.
+///
+/// The deterministic skill matcher (`utility::skill_match`) stays silent on
+/// these prompts by design: "what is this project about", "how is the repo
+/// structured", "what do you remember" carry no *distinctive domain token*, so
+/// they clear no skill's score floor. That silence is correct for skill
+/// routing, but it left a real gap — exactly these prompts are the ones the
+/// model should answer by calling `system_map` (structure) or `recall`
+/// (memory) instead of guessing or reading files conversationally. This pointer
+/// fills that gap with a targeted reminder, fired only when the prompt matches
+/// one of the two question shapes below. Returns `None` (no injection) for
+/// everything else so the generic per-prompt context is unchanged.
+fn mcp_tool_pointer_for_prompt(prompt: &str) -> Option<&'static str> {
+    let lowered = prompt.to_ascii_lowercase();
+
+    // Memory questions: the model should search its durable memory rather than
+    // claim from conversation alone. Checked first because "what did you learn
+    // about this project" mentions "project" too, and the recall answer is the
+    // better one for a memory-shaped ask.
+    const MEMORY_CUES: &[&str] = &[
+        "what do you remember",
+        "what did you learn",
+        "what have you learned",
+        "do you remember",
+        "from memory",
+        "your memory",
+        "recall what",
+        "what's in memory",
+        "what is in memory",
+    ];
+    if MEMORY_CUES.iter().any(|cue| lowered.contains(cue)) {
+        return Some(
+            "This prompt asks about your durable memory. Call the claude_core MCP `recall` tool (full-text search over your saved memories and working briefs) before answering — do not claim what you remember from conversation alone. Use `recall_status` if you need index health.",
+        );
+    }
+
+    // Repo/structure questions: the model should consult the workspace map
+    // rather than guess. The cues are phrased to catch the common shapes
+    // ("what is this project", "how is this repo structured", "what does this
+    // codebase do", "project overview", "explain the architecture") while
+    // staying narrow enough not to fire on ordinary feature work that merely
+    // mentions the word "project".
+    const REPO_CUES: &[&str] = &[
+        "what is this project",
+        "what's this project",
+        "what is this repo",
+        "what's this repo",
+        "what is this codebase",
+        "what does this project",
+        "what does this repo",
+        "what does this codebase",
+        "about this project",
+        "about this repo",
+        "about this codebase",
+        "project overview",
+        "repo structure",
+        "repository structure",
+        "project structure",
+        "codebase structure",
+        "how is this repo",
+        "how is the repo",
+        "how is this project",
+        "how is the project",
+        "how is this codebase",
+        "explain the architecture",
+        "explain this project",
+        "explain the project",
+        "explain the codebase",
+    ];
+    if REPO_CUES.iter().any(|cue| lowered.contains(cue)) {
+        return Some(
+            "This prompt asks about the repository's structure or purpose. Call the claude_core MCP `system_map` tool to get the authoritative workspace structural map before answering — do not describe the repo layout from memory or guesswork. Read the owning files only after the map points you at them.",
+        );
+    }
+
+    None
 }
 
 /// UserPromptSubmit dispatcher that reads stdin and composes the per-prompt
@@ -999,6 +1080,19 @@ fn run_hook_user_prompt_submit(
                 Some(brief) => skill_pointer_text(&matched.name, &brief),
                 None => skill_pointer_fallback(&matched.name),
             };
+            base_context = format!("{pointer}\n\n{base_context}");
+        }
+    }
+
+    // Point repo/structure and memory questions at the claude_core MCP tools.
+    // The skill matcher above stays silent for these prompts (they carry no
+    // distinctive domain token), so without this the model gets no nudge to
+    // call `system_map`/`recall` and tends to answer from guesswork or ad-hoc
+    // file reads. Independent of the skill match — both can fire — and prepended
+    // last so the tool reminder is the first thing the model reads on exactly
+    // the prompts where reaching for the tool is the correct first move.
+    if !prompt_text.trim().is_empty() {
+        if let Some(pointer) = mcp_tool_pointer_for_prompt(prompt_text) {
             base_context = format!("{pointer}\n\n{base_context}");
         }
     }
@@ -2673,6 +2767,24 @@ mod tests {
         assert!(context.contains("root cause"));
         assert!(context.contains("No assumptions"));
 
+        // MCP-tool advertisement — every per-prompt injection must name the
+        // always-available claude_core MCP tools so the model reaches for
+        // `system_map`/`recall` instead of guessing about the repo or its
+        // memory. This is the base-context half of the fix; the targeted
+        // repo/memory-question pointer (tested separately) is the other half.
+        assert!(
+            context.contains("system_map"),
+            "UserPromptSubmit must advertise the system_map MCP tool"
+        );
+        assert!(
+            context.contains("recall"),
+            "UserPromptSubmit must advertise the recall MCP tool"
+        );
+        assert!(
+            context.contains("run_command"),
+            "UserPromptSubmit must advertise the run_command MCP tool"
+        );
+
         // Understand-before-building — the per-prompt hook must require the
         // model to understand the request and research what is needed before
         // writing code, so it does not build the wrong thing. This is distinct
@@ -2737,6 +2849,135 @@ mod tests {
             .and_then(JsonDocument::as_str);
 
         assert_eq!(event_name, Some("UserPromptSubmit"));
+    }
+
+    #[test]
+    fn mcp_pointer_fires_for_repo_structure_questions() {
+        // The skill matcher stays silent on these prompts (no distinctive
+        // domain token), so this targeted pointer is the only thing that nudges
+        // the model to call `system_map` instead of guessing the layout. Cover
+        // the common phrasings.
+        for prompt in [
+            "what is this project about?",
+            "so what's this repo for",
+            "give me a project overview",
+            "explain the architecture here",
+            "how is this codebase structured",
+            "what does this project do",
+        ] {
+            let pointer = mcp_tool_pointer_for_prompt(prompt).unwrap_or_else(|| {
+                panic!("repo-question prompt should point at system_map: {prompt:?}")
+            });
+            assert!(
+                pointer.contains("system_map"),
+                "repo-question pointer must name system_map: {prompt:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn mcp_pointer_fires_for_memory_questions() {
+        for prompt in [
+            "what do you remember about this work",
+            "what did you learn last session",
+            "do you remember the auth refactor",
+            "recall what we decided about pagination",
+        ] {
+            let pointer = mcp_tool_pointer_for_prompt(prompt).unwrap_or_else(|| {
+                panic!("memory-question prompt should point at recall: {prompt:?}")
+            });
+            assert!(
+                pointer.contains("recall"),
+                "memory-question pointer must name recall: {prompt:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn mcp_pointer_silent_for_ordinary_work() {
+        // Must not fire on ordinary feature/bugfix prompts — even ones that
+        // mention "project" incidentally — or the reminder becomes noise on
+        // every turn. Silence here is the correct, conservative default.
+        for prompt in [
+            "add a logout button to the navbar",
+            "fix the failing pagination test",
+            "refactor the project's auth module to use PKCE",
+            "why is this function returning null",
+            "",
+            "   ",
+        ] {
+            assert_eq!(
+                mcp_tool_pointer_for_prompt(prompt),
+                None,
+                "pointer must stay silent for ordinary work: {prompt:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn mcp_pointer_prefers_recall_for_memory_shaped_repo_question() {
+        // "what did you learn about this project" mentions "project" but is a
+        // memory ask — the recall answer is the right one, so the memory branch
+        // must win over the repo branch.
+        let pointer = mcp_tool_pointer_for_prompt("what did you learn about this project")
+            .expect("memory-shaped prompt should match");
+        assert!(
+            pointer.contains("recall"),
+            "memory-shaped prompt must prefer recall over system_map"
+        );
+        assert!(
+            !pointer.contains("structural map"),
+            "memory-shaped prompt must not fire the repo-structure pointer"
+        );
+    }
+
+    #[test]
+    fn user_prompt_submit_injects_mcp_pointer_for_repo_question() {
+        // End-to-end through the dispatcher: a repo-structure prompt on stdin
+        // must surface the system_map pointer in the emitted additionalContext,
+        // ahead of the base research-first context. This is the integration
+        // half of the fix — the unit tests above prove the detector, this
+        // proves it is actually wired into the per-prompt payload.
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous_mode = std::env::var("CLAUDE_SKILLS_COMPRESSION_HINT").ok();
+        std::env::remove_var("CLAUDE_SKILLS_COMPRESSION_HINT");
+
+        let payload = serde_json::json!({
+            "session_id": "",
+            "prompt": "what is this project about?"
+        })
+        .to_string();
+        let payload_bytes = payload.into_bytes();
+        let mut stdin: &[u8] = &payload_bytes;
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let code = run_hook_user_prompt_submit(&mut stdin, &mut stdout, &mut stderr);
+
+        match previous_mode {
+            Some(value) => std::env::set_var("CLAUDE_SKILLS_COMPRESSION_HINT", value),
+            None => std::env::remove_var("CLAUDE_SKILLS_COMPRESSION_HINT"),
+        }
+
+        assert_eq!(code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
+
+        let output: JsonDocument = serde_json::from_slice(&stdout).expect("valid JSON");
+        let context = output
+            .get("hookSpecificOutput")
+            .and_then(|node| node.get("additionalContext"))
+            .and_then(JsonDocument::as_str)
+            .expect("additionalContext present");
+
+        assert!(
+            context.contains("system_map"),
+            "repo question must inject the system_map pointer; got: {context}"
+        );
+        assert!(
+            context.contains("Research-first"),
+            "base research-first context must still be present"
+        );
     }
 
     #[test]
