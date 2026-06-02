@@ -49,6 +49,13 @@ pub struct InstallSummary {
     /// fire. Folding it in here makes hooks load-bearing on every install path,
     /// not only the one-line bootstrap scripts.
     pub hooks_installation: Option<String>,
+    /// Human-readable outcome of writing the always-on operating contract into
+    /// the user-global `~/.claude/CLAUDE.md`, or `None` when skipped
+    /// (non-standard `--claude-home`). This file is loaded natively into every
+    /// session as user memory — the one channel that does not depend on hook
+    /// `additionalContext` reaching the model — so the iron law and tool/skill
+    /// contract land even when the hook channel is dropped by a gateway/proxy.
+    pub user_claude_md: Option<String>,
 }
 
 struct FileTracker<'a> {
@@ -152,6 +159,7 @@ pub fn install_from_paths(
     write_inventories(&layout, claude_home, &tracker)?;
     let mcp_registration = maybe_register_mcp_server(claude_home);
     let hooks_installation = maybe_install_hooks(claude_home);
+    let user_claude_md = maybe_sync_user_claude_md(claude_home);
     Ok(InstallSummary {
         synced_skills,
         synced_agents,
@@ -164,6 +172,7 @@ pub fn install_from_paths(
         published_executable,
         mcp_registration,
         hooks_installation,
+        user_claude_md,
     })
 }
 
@@ -238,6 +247,145 @@ fn maybe_install_hooks(claude_home: &Path) -> Option<String> {
             Err(error) => Some(format!("skipped ({error})")),
         },
         Err(error) => Some(format!("skipped ({error})")),
+    }
+}
+
+/// Sentinels delimiting the claude-core-managed region inside the user-global
+/// `~/.claude/CLAUDE.md`. Everything between them is owned by the installer and
+/// rewritten on every install; everything outside is the user's own content and
+/// is preserved verbatim.
+const MANAGED_CLAUDE_MD_BEGIN: &str =
+    "<!-- claude-core:begin (managed by claude-skills install — edits inside this block are overwritten; edit outside it freely) -->";
+const MANAGED_CLAUDE_MD_END: &str = "<!-- claude-core:end -->";
+
+/// The always-on operating contract written into `~/.claude/CLAUDE.md`.
+///
+/// Why this exists: every other claude-core surface (the SessionStart bootstrap,
+/// the per-prompt iron law, skill pointers, MCP-tool nudges) is delivered through
+/// Claude Code's hook `additionalContext` channel. When that channel does not
+/// reach the model — e.g. a gateway/proxy that drops injected context — the agent
+/// sees none of claude-core. `~/.claude/CLAUDE.md` is loaded natively into every
+/// session as user memory, the same hook-independent channel that carries the
+/// base system prompt, so this block lands even when hooks do not. Kept compact
+/// because it is paid on every session of every project.
+const MANAGED_CLAUDE_MD_BODY: &str = r#"# claude-core operating contract (always-on)
+
+Installed by claude-core into `~/.claude/CLAUDE.md` and loaded into **every** Claude Code session as user memory — independent of hooks. Applies to every project you work in, not just claude-core.
+
+## Iron Law — for any request that could touch code, config, or architecture
+1. **Read first.** Read the workspace SYSTEM_MAP and the owning file before claiming behavior; never propose changes against an imagined version.
+2. **Understand before building.** Restate what the request asks and research what is genuinely needed before writing code. No guessing, no building against an imagined spec.
+3. **Invoke relevant skills.** If there is even a 1% chance a claude-core skill applies, use the Skill tool BEFORE writing code or giving a final answer.
+4. **Find the root cause.** Trace the symptom end-to-end with file:line evidence and confirm the suspect is on that path before changing anything.
+
+## claude_core MCP tools — always available, prefer over guessing
+- `system_map` — call before any claim about a repository's structure or layout ("what is this project", "where does X live") instead of reading files blind.
+- `recall` — call before claiming what you remember or previously learned; full-text search over your durable memory and working briefs.
+- `run_command` — run noisy shell commands (test, build, lint, logs, search) through it so compacted output enters context instead of the raw stream.
+
+## Skills
+claude-core installs specialist skills under `~/.claude/skills/` (lifecycle, backend, cloud, security, reviewer, UI/UX, debugging, TDD, migrations, and more). Invoke by bare name with the Skill tool, e.g. `Skill("reviewer")`. The `using-claude-core` skill carries the full catalog and routing rules."#;
+
+fn managed_claude_md_block() -> String {
+    format!("{MANAGED_CLAUDE_MD_BEGIN}\n{MANAGED_CLAUDE_MD_BODY}\n{MANAGED_CLAUDE_MD_END}")
+}
+
+/// Splice `block` into `existing` CLAUDE.md content, preserving user content.
+///
+/// If a managed region already exists (both sentinels present, in order), its
+/// contents are replaced in place. Otherwise the block is prepended (so the
+/// contract is the first thing the model reads) and any pre-existing user
+/// content is kept below it. Pure (no IO) so the splice logic is unit-testable.
+fn merge_managed_claude_md(existing: &str, block: &str) -> String {
+    if let (Some(start), Some(end_idx)) = (
+        existing.find(MANAGED_CLAUDE_MD_BEGIN),
+        existing.find(MANAGED_CLAUDE_MD_END),
+    ) {
+        if end_idx > start {
+            let end_full = end_idx + MANAGED_CLAUDE_MD_END.len();
+            let before = &existing[..start];
+            let after = &existing[end_full..];
+            return format!("{before}{block}{after}");
+        }
+    }
+    if existing.trim().is_empty() {
+        format!("{block}\n")
+    } else {
+        format!("{block}\n\n{existing}")
+    }
+}
+
+/// Remove the managed region from `existing`, preserving user content. Pure
+/// (no IO). Returns the content with the block (and the blank lines it
+/// introduced) stripped; an all-managed file collapses to empty so the caller
+/// can delete it.
+fn strip_managed_claude_md(existing: &str) -> String {
+    if let (Some(start), Some(end_idx)) = (
+        existing.find(MANAGED_CLAUDE_MD_BEGIN),
+        existing.find(MANAGED_CLAUDE_MD_END),
+    ) {
+        if end_idx > start {
+            let end_full = end_idx + MANAGED_CLAUDE_MD_END.len();
+            let before = existing[..start].trim_end();
+            let after = existing[end_full..].trim_start();
+            return match (before.is_empty(), after.is_empty()) {
+                (true, true) => String::new(),
+                (true, false) => format!("{after}\n"),
+                (false, true) => format!("{before}\n"),
+                (false, false) => format!("{before}\n\n{after}\n"),
+            };
+        }
+    }
+    existing.to_string()
+}
+
+/// Write/refresh the claude-core managed block in `~/.claude/CLAUDE.md`.
+///
+/// Guarded on the standard `.claude` home name for the same reason as
+/// `maybe_register_mcp_server` / `maybe_install_hooks`: the integration suite
+/// installs into throwaway `--claude-home` dirs and must stay hermetic. Real
+/// installs into `~/.claude` always get the file. Best-effort: a failure is
+/// reported in the summary but never fails the install.
+fn maybe_sync_user_claude_md(claude_home: &Path) -> Option<String> {
+    let is_standard_home = claude_home
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name == ".claude")
+        .unwrap_or(false);
+    if !is_standard_home {
+        return None;
+    }
+    let path = claude_home.join("CLAUDE.md");
+    let existing = read_text_if_exists(&path).unwrap_or_default();
+    let merged = merge_managed_claude_md(&existing, &managed_claude_md_block());
+    if merged == existing {
+        return Some("already current".to_string());
+    }
+    match write_text(&path, &merged) {
+        Ok(()) => Some(format!("written to {}", display_path(&path))),
+        Err(error) => Some(format!("skipped ({error})")),
+    }
+}
+
+/// Strip the claude-core managed block from `~/.claude/CLAUDE.md` on uninstall,
+/// preserving any user content outside it. Deletes the file only if it becomes
+/// empty. Returns the number of paths changed/removed (0 or 1). A missing file
+/// or a file with no managed block is a no-op.
+fn remove_managed_user_claude_md(claude_home: &Path) -> Result<usize, String> {
+    let path = claude_home.join("CLAUDE.md");
+    let existing = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(_) => return Ok(0),
+    };
+    if !existing.contains(MANAGED_CLAUDE_MD_BEGIN) {
+        return Ok(0);
+    }
+    let stripped = strip_managed_claude_md(&existing);
+    if stripped.trim().is_empty() {
+        remove_path_if_exists_counted(&path)
+    } else {
+        write_text(&path, &stripped)?;
+        Ok(1)
     }
 }
 
@@ -328,6 +476,9 @@ pub fn write_install_summary(summary: &InstallSummary, output: &mut dyn Write) {
     }
     if let Some(hooks_status) = &summary.hooks_installation {
         let _ = writeln!(output, "  Lifecycle hooks: {hooks_status}");
+    }
+    if let Some(claude_md_status) = &summary.user_claude_md {
+        let _ = writeln!(output, "  User CLAUDE.md: {claude_md_status}");
     }
 }
 
@@ -1185,6 +1336,21 @@ pub fn run_uninstall_command(
             }
         }
     }
+    // Strip the claude-core managed block from ~/.claude/CLAUDE.md, preserving
+    // any user-authored content outside the sentinels. Unlike AGENTS.md (which
+    // claude-core owns wholesale at this path), CLAUDE.md may hold the user's own
+    // global memory, so we only remove our block and delete the file solely when
+    // nothing else remains.
+    match remove_managed_user_claude_md(&claude_home) {
+        Ok(count) => removed_count += count,
+        Err(error) => {
+            let _ = writeln!(
+                standard_error,
+                "remove managed CLAUDE.md block failed: {error}"
+            );
+            return 1;
+        }
+    }
     let executable_path = installed_executable_path(&claude_home);
     match remove_path_if_exists_counted(&executable_path) {
         Ok(count) => removed_count += count,
@@ -1768,6 +1934,171 @@ mod tests {
         assert!(
             after["hooks"]["SessionStart"].is_array(),
             "managed hooks must still be present after re-install"
+        );
+
+        let _ = fs::remove_dir_all(&parent);
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn merge_managed_claude_md_into_empty_prepends_block() {
+        let block = managed_claude_md_block();
+        let merged = merge_managed_claude_md("", &block);
+        assert!(merged.contains(MANAGED_CLAUDE_MD_BEGIN));
+        assert!(merged.contains(MANAGED_CLAUDE_MD_END));
+        assert!(merged.contains("Iron Law"));
+    }
+
+    #[test]
+    fn merge_managed_claude_md_preserves_user_content() {
+        // A user with their own global CLAUDE.md must keep it; the managed block
+        // is prepended, the user's prose survives below.
+        let user = "# My personal notes\n\nAlways use tabs, never spaces.\n";
+        let block = managed_claude_md_block();
+        let merged = merge_managed_claude_md(user, &block);
+        assert!(merged.contains("My personal notes"));
+        assert!(merged.contains("Always use tabs, never spaces."));
+        assert!(merged.contains(MANAGED_CLAUDE_MD_BEGIN));
+        // Managed block comes first so the contract is read before user prose.
+        assert!(
+            merged.find(MANAGED_CLAUDE_MD_BEGIN).unwrap()
+                < merged.find("My personal notes").unwrap()
+        );
+    }
+
+    #[test]
+    fn merge_managed_claude_md_replaces_existing_block_in_place() {
+        // A re-install must refresh the managed region without duplicating it or
+        // disturbing user content above and below.
+        let user_above = "# Top notes\n\n";
+        let stale_block =
+            format!("{MANAGED_CLAUDE_MD_BEGIN}\nOLD STALE CONTRACT\n{MANAGED_CLAUDE_MD_END}");
+        let user_below = "\n\n# Bottom notes\n";
+        let existing = format!("{user_above}{stale_block}{user_below}");
+        let merged = merge_managed_claude_md(&existing, &managed_claude_md_block());
+
+        assert!(merged.contains("Top notes"));
+        assert!(merged.contains("Bottom notes"));
+        assert!(
+            !merged.contains("OLD STALE CONTRACT"),
+            "stale managed content must be replaced"
+        );
+        assert!(merged.contains("Iron Law"));
+        // Exactly one managed region remains.
+        assert_eq!(merged.matches(MANAGED_CLAUDE_MD_BEGIN).count(), 1);
+        assert_eq!(merged.matches(MANAGED_CLAUDE_MD_END).count(), 1);
+    }
+
+    #[test]
+    fn merge_managed_claude_md_is_idempotent() {
+        let block = managed_claude_md_block();
+        let once = merge_managed_claude_md("", &block);
+        let twice = merge_managed_claude_md(&once, &block);
+        assert_eq!(once, twice, "re-merging an already-current file is a no-op");
+    }
+
+    #[test]
+    fn strip_managed_claude_md_removes_block_keeps_user_content() {
+        let user_above = "# Top notes\n";
+        let block = managed_claude_md_block();
+        let user_below = "# Bottom notes\n";
+        let existing = format!("{user_above}\n\n{block}\n\n{user_below}");
+        let stripped = strip_managed_claude_md(&existing);
+        assert!(stripped.contains("Top notes"));
+        assert!(stripped.contains("Bottom notes"));
+        assert!(!stripped.contains(MANAGED_CLAUDE_MD_BEGIN));
+        assert!(!stripped.contains("Iron Law"));
+    }
+
+    #[test]
+    fn strip_managed_claude_md_all_managed_collapses_to_empty() {
+        // A file that is ONLY our block must strip to empty so the caller deletes it.
+        let only_block = format!("{}\n", managed_claude_md_block());
+        let stripped = strip_managed_claude_md(&only_block);
+        assert!(stripped.trim().is_empty());
+    }
+
+    #[test]
+    fn install_into_standard_home_writes_user_claude_md() {
+        // End-to-end: a real `.claude`-named home must get ~/.claude/CLAUDE.md
+        // with the managed contract, and uninstall must strip it while keeping
+        // any user content. This is the hook-independent channel that lands even
+        // when a gateway drops the hook additionalContext.
+        let suffix = format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+        );
+        let parent = std::env::temp_dir().join(format!("cmdhome-{suffix}"));
+        let repo = std::env::temp_dir().join(format!("cmdrepo-{suffix}"));
+        let home = parent.join(".claude");
+        let _ = fs::remove_dir_all(&parent);
+        let _ = fs::remove_dir_all(&repo);
+        seed_repo(&repo);
+        write_skill_with_reference(&repo, "reviewer", "10-r.md");
+
+        // Pre-seed a user-authored CLAUDE.md to prove preservation.
+        fs::create_dir_all(&home).unwrap();
+        fs::write(
+            home.join("CLAUDE.md"),
+            "# My global prefs\n\nUse 2-space indent.\n",
+        )
+        .unwrap();
+
+        let summary = install_from_paths("dev", &repo, &home).unwrap();
+        let status = summary
+            .user_claude_md
+            .expect("standard home must write user CLAUDE.md");
+        assert!(status.starts_with("written to"), "got: {status}");
+
+        let claude_md = home.join("CLAUDE.md");
+        let text = fs::read_to_string(&claude_md).unwrap();
+        assert!(
+            text.contains("Iron Law"),
+            "managed contract must be present"
+        );
+        assert!(
+            text.contains("claude_core MCP tools"),
+            "MCP imperative must be present"
+        );
+        assert!(
+            text.contains("Use 2-space indent."),
+            "user content must be preserved"
+        );
+
+        // Re-install is idempotent.
+        let resummary = install_from_paths("dev", &repo, &home).unwrap();
+        assert_eq!(
+            resummary.user_claude_md.as_deref(),
+            Some("already current"),
+            "second install must detect the block is already current"
+        );
+
+        // Uninstall strips the managed block but keeps user content.
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = run_uninstall_command(
+            &["--claude-home".to_string(), display_path(&home)],
+            &mut out,
+            &mut err,
+        );
+        assert_eq!(
+            code,
+            0,
+            "uninstall stderr: {}",
+            String::from_utf8_lossy(&err)
+        );
+        let after = fs::read_to_string(&claude_md).expect("user CLAUDE.md must survive uninstall");
+        assert!(
+            !after.contains("Iron Law"),
+            "managed block must be stripped"
+        );
+        assert!(
+            after.contains("Use 2-space indent."),
+            "user content must survive uninstall"
         );
 
         let _ = fs::remove_dir_all(&parent);
