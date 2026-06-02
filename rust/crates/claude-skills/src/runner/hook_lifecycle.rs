@@ -1838,7 +1838,7 @@ fn ensure_skill_listing_budget_fraction(document: &mut JsonDocument) -> Result<(
     if !object.contains_key("skillListingBudgetFraction") {
         object.insert(
             "skillListingBudgetFraction".to_string(),
-            serde_json::json!(0.02),
+            serde_json::json!(0.06),
         );
     }
     Ok(())
@@ -3626,7 +3626,7 @@ mod tests {
             document
                 .get("skillListingBudgetFraction")
                 .and_then(JsonDocument::as_f64),
-            Some(0.02),
+            Some(0.06),
         );
 
         let _ = std::fs::remove_dir_all(hook_path.parent().unwrap());

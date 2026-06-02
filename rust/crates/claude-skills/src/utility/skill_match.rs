@@ -94,7 +94,130 @@ pub fn match_skill_for_prompt(claude_home: &Path, prompt: &str) -> Option<SkillM
     if skills.is_empty() {
         return None;
     }
-    score_prompt_against_skills(prompt, &skills)
+    if let Some(found) = score_prompt_against_skills(prompt, &skills) {
+        return Some(found);
+    }
+    // The IDF matcher stayed silent (no corpus-rare token). Before giving up,
+    // try the curated cross-cutting tier: a small set of always-applies skills
+    // (reviewer, TDD, debugging, preserve-existing-flow) whose vocabulary is
+    // high-frequency across the corpus and therefore never distinctive, even
+    // though the prompt clearly calls for them. Only route to a curated skill
+    // that is actually installed, so a trimmed install never points at a
+    // missing skill.
+    let curated = curated_skill_for_prompt(prompt)?;
+    if skills.iter().any(|skill| skill.name == curated) {
+        return Some(SkillMatch {
+            name: curated.to_string(),
+            // Sentinel score: curated matches are keyword-routed, not IDF-scored.
+            // The caller only uses the name, so the exact value is immaterial;
+            // 0.0 documents "did not clear the statistical bar."
+            score: 0.0,
+        });
+    }
+    None
+}
+
+/// Curated cross-cutting skill triggers, evaluated only when the statistical
+/// matcher is silent.
+///
+/// These skills apply to a whole *class* of work but use high-frequency verbs
+/// (review, test, debug, edit) that the IDF matcher correctly treats as
+/// non-distinctive across the 40+ skill corpus — so they would never fire on
+/// their own, leaving the most-used everyday skills with no inline brief. Each
+/// entry lists narrow, verb-anchored trigger phrases; the first skill whose
+/// phrase appears in the (lowercased) prompt wins. Phrases are intentionally
+/// specific so ordinary prose ("I reviewed the docs") does not trip them.
+///
+/// Order matters: earlier entries win ties. `systematic-debugging` precedes
+/// `test-driven-development` because "the test is failing" is a debugging ask,
+/// not a request to author a new test.
+const CURATED_SKILL_TRIGGERS: &[(&str, &[&str])] = &[
+    (
+        "reviewer",
+        &[
+            "review this diff",
+            "review the diff",
+            "review this pr",
+            "review the pr",
+            "review this code",
+            "review the code",
+            "review my code",
+            "review my changes",
+            "review the changes",
+            "code review",
+            "ready to merge",
+            "ready for merge",
+            "before we merge",
+            "production ready",
+            "production readiness",
+            "release readiness",
+            "is this ready to ship",
+        ],
+    ),
+    (
+        "systematic-debugging",
+        &[
+            "test is failing",
+            "tests are failing",
+            "this test is failing",
+            "it keeps failing",
+            "keeps crashing",
+            "flaky test",
+            "flaky tests",
+            "intermittent failure",
+            "debug this",
+            "debug the",
+            "why is this failing",
+            "why does this fail",
+            "track down the bug",
+            "find the root cause",
+            "reproduce the bug",
+        ],
+    ),
+    (
+        "test-driven-development",
+        &[
+            "write a test",
+            "write tests",
+            "add a test",
+            "add tests",
+            "add unit tests",
+            "test first",
+            "test-driven",
+            "tdd",
+            "red green refactor",
+            "cover this with tests",
+            "write a failing test",
+        ],
+    ),
+    (
+        "preserve-existing-flow",
+        &[
+            "edit the existing",
+            "change the existing",
+            "modify the existing",
+            "refactor the existing",
+            "change existing behavior",
+            "before editing",
+            "before i edit",
+            "without breaking existing",
+            "don't break existing",
+        ],
+    ),
+];
+
+/// Pure curated-tier lookup (no IO) so the trigger phrases are unit-testable.
+/// Returns the first curated skill whose trigger phrase appears in the
+/// lowercased prompt, or `None`. Conservative by construction: it errs toward
+/// silence, and the caller still gates on the skill being installed.
+pub fn curated_skill_for_prompt(prompt: &str) -> Option<&'static str> {
+    let lowered = prompt.to_ascii_lowercase();
+    for (skill, phrases) in CURATED_SKILL_TRIGGERS {
+        if phrases.iter().any(|phrase| lowered.contains(phrase)) {
+            return Some(skill);
+        }
+    }
+    None
 }
 
 /// Read the matched skill's `SKILL.md` and return a bounded, ready-to-inject
@@ -297,13 +420,26 @@ pub fn score_prompt_against_skills(prompt: &str, skills: &[SkillTerms]) -> Optio
             if !skill.all_tokens.contains(token) {
                 continue;
             }
-            let mut weight = idf(token);
-            if skill.name_tokens.contains(token) {
-                weight *= NAME_TOKEN_BOOST;
-            }
+            let is_own_name_token = skill.name_tokens.contains(token);
+            // A skill's own name token is its distinctive handle. Sibling
+            // skills that mention it by name inflate its corpus document
+            // frequency, which would otherwise crush its IDF (ln(N/df)) toward
+            // zero and drop the match below the score floor — the RC7 bug where
+            // a skill became unreachable by its own name. For the owning skill
+            // we therefore score the token as if it were unique (df=1, i.e.
+            // ln(N)) and apply the name boost, so naming a skill always reaches
+            // it regardless of how many siblings reference it. Non-name tokens
+            // use the real corpus IDF.
+            let weight = if is_own_name_token {
+                corpus_size.ln() * NAME_TOKEN_BOOST
+            } else {
+                idf(token)
+            };
             score += weight;
+            // Distinctive if corpus-rare OR this skill's own name token (same
+            // principle as the score: naming a skill is distinctive to it).
             let df = document_frequency.get(token.as_str()).copied().unwrap_or(0);
-            if df > 0 && df <= DISTINCTIVE_DF_MAX {
+            if is_own_name_token || (df > 0 && df <= DISTINCTIVE_DF_MAX) {
                 has_distinctive = true;
             }
         }
@@ -534,6 +670,85 @@ mod tests {
     }
 
     #[test]
+    fn own_name_token_stays_distinctive_despite_cross_references() {
+        // RC7 regression: when many other skills mention a skill by name in
+        // their descriptions, that name token's document frequency climbs past
+        // DISTINCTIVE_DF_MAX, so the rarity gate alone would stop the skill from
+        // matching its own handle. The own-name exemption must keep it
+        // reachable. Build a corpus where "reviewer" appears in 4 skills (df=4
+        // > 3) but only the reviewer skill has it as a *name* token.
+        let corpus = vec![
+            skill(
+                "reviewer",
+                "Production-readiness review and quality gate.",
+                "Review a diff before merge.",
+            ),
+            skill(
+                "test-driven-development",
+                "RED-GREEN-REFACTOR; complements the reviewer and qa work.",
+                "Write a failing test first.",
+            ),
+            skill(
+                "finishing-a-development-branch",
+                "Close out a branch: verify, then route non-trivial work through the reviewer.",
+                "Branch closeout.",
+            ),
+            skill(
+                "receiving-code-review",
+                "Act on reviewer feedback as the author.",
+                "Address review comments.",
+            ),
+        ];
+        // df("reviewer") == 4 here, above the rarity gate, yet naming it must
+        // still reach the reviewer skill via the own-name exemption.
+        let result = score_prompt_against_skills("have the reviewer look at this", &corpus);
+        assert_eq!(result.map(|m| m.name), Some("reviewer".to_string()));
+    }
+
+    #[test]
+    fn curated_tier_routes_cross_cutting_prompts() {
+        // RC2: these verb-anchored prompts carry no corpus-rare token, so the
+        // IDF matcher stays silent — the curated tier is what routes them.
+        assert_eq!(
+            curated_skill_for_prompt("please review this diff"),
+            Some("reviewer")
+        );
+        assert_eq!(
+            curated_skill_for_prompt("this test is failing intermittently"),
+            Some("systematic-debugging")
+        );
+        assert_eq!(
+            curated_skill_for_prompt("write a test for the parser"),
+            Some("test-driven-development")
+        );
+        assert_eq!(
+            curated_skill_for_prompt("I need to modify the existing auth handler"),
+            Some("preserve-existing-flow")
+        );
+    }
+
+    #[test]
+    fn curated_tier_prefers_debugging_over_tdd_for_failing_tests() {
+        // "the test is failing" is a debugging ask, not a request to author a
+        // new test — debugging must win the tie via trigger order.
+        assert_eq!(
+            curated_skill_for_prompt("the test is failing, help me fix it"),
+            Some("systematic-debugging")
+        );
+    }
+
+    #[test]
+    fn curated_tier_silent_on_ordinary_prose() {
+        // Must not trip on incidental mentions — only verb-anchored asks.
+        assert_eq!(
+            curated_skill_for_prompt("I reviewed the docs yesterday"),
+            None
+        );
+        assert_eq!(curated_skill_for_prompt("add a logout button"), None);
+        assert_eq!(curated_skill_for_prompt(""), None);
+    }
+
+    #[test]
     fn tokenize_drops_stopwords_and_short_tokens() {
         let tokens = tokenize("Add the Stripe webhook to a PCI flow");
         assert!(tokens.contains("stripe"));
@@ -627,5 +842,39 @@ mod tests {
         assert_eq!(skill_inline_brief(&dir, "../escape"), None);
         assert_eq!(skill_inline_brief(&dir, "a/b"), None);
         assert_eq!(skill_inline_brief(&dir, ""), None);
+    }
+
+    #[test]
+    fn curated_match_requires_the_skill_to_be_installed() {
+        // match_skill_for_prompt gates a curated route on the skill actually
+        // existing under <home>/skills/. Build a home whose only installed skill
+        // is unrelated, then fire a curated-trigger prompt for a skill that is
+        // NOT installed: the IDF matcher is silent and the curated branch must
+        // return None rather than point at a missing skill.
+        let suffix = format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+        );
+        let home = std::env::temp_dir().join(format!("curated-gate-{suffix}"));
+        let only_skill = skills_directory(&home).join("unrelated-skill");
+        fs::create_dir_all(&only_skill).unwrap();
+        fs::write(
+            only_skill.join("SKILL.md"),
+            "---\nname: unrelated-skill\ndescription: Something entirely unrelated to reviewing.\nwhen_to_use: Never for reviews.\n---\nbody\n",
+        )
+        .unwrap();
+
+        // "review this diff" is a curated trigger for `reviewer`, which is not
+        // installed here. Must be None, not a dangling pointer.
+        assert_eq!(
+            match_skill_for_prompt(&home, "please review this diff"),
+            None
+        );
+
+        let _ = fs::remove_dir_all(&home);
     }
 }

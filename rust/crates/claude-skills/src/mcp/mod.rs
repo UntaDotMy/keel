@@ -272,7 +272,7 @@ fn handle_tools_list() -> Value {
         "tools": [
             {
                 "name": "recall",
-                "description": "Full-text search over Markdown under <claude-home>/{memories,memoriesv2,working-briefs} via the recall FTS5 index. Auto-syncs the index before querying.",
+                "description": "Call this BEFORE claiming what you remember or previously learned — search your durable memory instead of relying on conversation alone. Full-text search over Markdown under <claude-home>/{memories,memoriesv2,working-briefs}. Auto-syncs the index before querying.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -284,7 +284,7 @@ fn handle_tools_list() -> Value {
             },
             {
                 "name": "system_map",
-                "description": "Returns the workspace SYSTEM_MAP.md (preferring the auto-refreshed copy under ~/.claude/memories/workspaces/<slug>/reference/SYSTEM_MAP.md, falling back to a freshly rendered map for the supplied workspace_root).",
+                "description": "Call this BEFORE any claim about the current repository's structure or layout (\"what is this project\", \"how is this organized\", \"where does X live\") instead of guessing or reading files blind. Returns the workspace SYSTEM_MAP.md (the auto-refreshed copy under ~/.claude/memories/workspaces/<slug>/reference/SYSTEM_MAP.md, falling back to a freshly rendered map).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -294,7 +294,7 @@ fn handle_tools_list() -> Value {
             },
             {
                 "name": "run_command",
-                "description": "Run a shell command through the claude-skills proxy with capture mode forced on, returning the compacted output that would otherwise enter context untouched.",
+                "description": "Prefer this over a raw shell call for noisy commands (test, build, lint, logs, search): it runs the command through the compaction proxy so compacted high-signal output enters context instead of the raw stream.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -305,7 +305,7 @@ fn handle_tools_list() -> Value {
             },
             {
                 "name": "recall_status",
-                "description": "Reports recall index health: document count, schema version, last-sync timestamp, and on-disk index path.",
+                "description": "Check recall index health before trusting or after rebuilding the memory index: document count, schema version, last-sync timestamp, and on-disk index path.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {}
@@ -572,14 +572,46 @@ fn tool_run_command(arguments: &Value) -> Result<String, String> {
         .map_err(|error| format!("run_command: spawn: {error}"))?;
     let stdout_text = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr_text = String::from_utf8_lossy(&output.stderr).to_string();
-    let payload = json!({
-        "command": command,
-        "exitCode": output.status.code().unwrap_or(-1),
-        "stdout": stdout_text,
-        "stderr": stderr_text,
-    });
-    serde_json::to_string_pretty(&payload)
-        .map_err(|error| format!("run_command: serialize: {error}"))
+    // Return a plain-text report rather than a JSON object. Embedding multi-line
+    // stdout/stderr as JSON string values escapes every newline as a literal
+    // `\n`, which turns a build/test log into an unreadable single line in the
+    // MCP tool-result view. A text report keeps real newlines so the output is
+    // legible to both the human reading the transcript and the model consuming
+    // the result; the exit code stays on its own labeled line for easy parsing.
+    Ok(render_run_command_report(
+        &command,
+        output.status.code().unwrap_or(-1),
+        &stdout_text,
+        &stderr_text,
+    ))
+}
+
+/// Build the human-readable `run_command` report. Pure (no IO) so the framing
+/// is unit-testable. Sections with no content are omitted; a command that
+/// produced nothing on either stream still reports its exit code plus an
+/// explicit `(no output)` marker so the result is never ambiguously empty.
+fn render_run_command_report(command: &str, exit_code: i32, stdout: &str, stderr: &str) -> String {
+    let mut report = String::new();
+    report.push_str(&format!("$ {command}\n"));
+    report.push_str(&format!("exit code: {exit_code}\n"));
+
+    let stdout_body = stdout.trim_end_matches(['\n', '\r']);
+    let stderr_body = stderr.trim_end_matches(['\n', '\r']);
+
+    if !stdout_body.trim().is_empty() {
+        report.push_str("\n--- stdout ---\n");
+        report.push_str(stdout_body);
+        report.push('\n');
+    }
+    if !stderr_body.trim().is_empty() {
+        report.push_str("\n--- stderr ---\n");
+        report.push_str(stderr_body);
+        report.push('\n');
+    }
+    if stdout_body.trim().is_empty() && stderr_body.trim().is_empty() {
+        report.push_str("\n(no output)\n");
+    }
+    report
 }
 
 fn tool_recall_status(_arguments: &Value) -> Result<String, String> {
@@ -780,5 +812,46 @@ mod tests {
         assert!(rendered.contains("\"id\":1"), "rendered: {rendered}");
         assert!(rendered.contains("\"result\":{}"), "rendered: {rendered}");
         assert!(rendered.ends_with('\n'), "rendered: {rendered}");
+    }
+
+    #[test]
+    fn run_command_report_keeps_real_newlines() {
+        // Regression: stdout/stderr used to be embedded as JSON string values,
+        // which escaped every newline as a literal `\n` and produced an
+        // unreadable single-line wall. The text report must carry real
+        // newlines and label each stream.
+        let report = render_run_command_report(
+            "cargo test",
+            0,
+            "running 2 tests\ntest a ... ok\ntest b ... ok",
+            "",
+        );
+        assert!(report.contains("$ cargo test\n"));
+        assert!(report.contains("exit code: 0\n"));
+        assert!(report.contains("--- stdout ---\n"));
+        // Real newline present, no literal backslash-n escape.
+        assert!(report.contains("test a ... ok\ntest b ... ok"));
+        assert!(
+            !report.contains("\\n"),
+            "report must not contain escaped newlines"
+        );
+        // No stderr section when stderr is empty.
+        assert!(!report.contains("--- stderr ---"));
+    }
+
+    #[test]
+    fn run_command_report_includes_stderr_and_nonzero_exit() {
+        let report = render_run_command_report("false", 1, "", "boom: it failed\n");
+        assert!(report.contains("exit code: 1\n"));
+        assert!(report.contains("--- stderr ---\n"));
+        assert!(report.contains("boom: it failed"));
+        assert!(!report.contains("--- stdout ---"));
+    }
+
+    #[test]
+    fn run_command_report_marks_empty_output() {
+        let report = render_run_command_report("true", 0, "", "");
+        assert!(report.contains("exit code: 0\n"));
+        assert!(report.contains("(no output)"));
     }
 }

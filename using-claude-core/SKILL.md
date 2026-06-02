@@ -10,8 +10,10 @@ effort: low
 
 <EXTREMELY_IMPORTANT>
 
-You are working in claude-core. **Trust the codebase, not your knowledge base.**
-Knowledge-base recall is stale. Memories drift. The repository is the source of truth.
+This contract governs **every project you work in**, not just claude-core itself.
+**Trust the codebase, not your knowledge base.**
+Knowledge-base recall is stale. Memories drift. The repository in front of you is
+the source of truth.
 
 Before you respond to anything that could touch code, configuration, or
 architecture:
@@ -206,11 +208,16 @@ form so subagents do not fall back to memory-based defaults.
 
 ## Workspace pointers
 
-- `CLAUDE.md` (repo root) — project guide, terminology, schema notes, routing rules.
-- `AGENTS.md` (repo root) — operating doctrine, section-to-reference map.
-- `WORKFLOW.md` (repo root) — branch naming, commit format, completion rules.
-- `00-skill-routing-and-escalation.md` (repo root) — read first for routing.
-- Workspace `SYSTEM_MAP.md` lives at `~/.claude/memories/workspaces/<workspace-key>/reference/SYSTEM_MAP.md` and is auto-refreshed by `claude-skills memory scope resolve --refresh-system-map` at session start, pre-compact, and session end. Read it before making structural claims.
+The one pointer that exists on **every** project is the workspace map:
+
+- Workspace `SYSTEM_MAP.md` lives at `~/.claude/memories/workspaces/<workspace-key>/reference/SYSTEM_MAP.md` and is auto-refreshed by `claude-skills memory scope resolve --refresh-system-map` at session start, pre-compact, and session end. Read it before making structural claims about the current repo. This is keyed to whatever project you are in, so it is always present.
+
+The files below ship **only inside the claude-core repository** and are synced to disk only when you are working in that repo. On any other project they do not exist — read the current project's own `CLAUDE.md`/`AGENTS.md`/`README` instead, and fall back to the SYSTEM_MAP above:
+
+- `CLAUDE.md` (claude-core repo root) — project guide, terminology, schema notes, routing rules.
+- `AGENTS.md` (claude-core repo root) — operating doctrine, section-to-reference map.
+- `WORKFLOW.md` (claude-core repo root) — branch naming, commit format, completion rules.
+- `00-skill-routing-and-escalation.md` (claude-core repo root) — read first for routing when in this repo.
 
 ## Slash commands (in `commands/`, namespaced `/claude-core:<name>`)
 
@@ -227,13 +234,15 @@ matcher or raw CLI. They never invoke planned-but-unimplemented commands.
 
 ## MCP server (`claude-skills mcp serve`)
 
-`.claude-plugin/plugin.json` registers `mcpServers.claude_core`, so Claude Code auto-discovers the server when the plugin is installed and you do not invoke it by hand. The server exposes four tools and two resources over JSON-RPC 2.0 stdio:
+`.claude-plugin/plugin.json` registers `mcpServers.claude_core` at user scope, so Claude Code auto-discovers the server on **every** project — you do not need to start it. These tools are always available; **prefer them over guessing or ad-hoc file reading**:
 
-- Tool `recall` — full-text search over `~/.claude/memories`, `memoriesv2`, `working-briefs` via the FTS5 index. Same code path as `claude-skills memory recall`.
-- Tool `system_map` — returns the workspace SYSTEM_MAP.md (auto-refreshed copy preferred, freshly rendered fallback).
-- Tool `run_command` — runs a shell command through the proxy capture+compaction pipeline; the compacted output lands in context instead of the raw stream.
+- Tool `system_map` — **call this before any claim about the current repo's structure or layout** ("what is this project", "how is this organized", "where does X live") instead of guessing or spelunking files blind. Returns the workspace SYSTEM_MAP.md (auto-refreshed copy preferred, freshly rendered fallback).
+- Tool `recall` — **call this before claiming what you remember or previously learned.** Full-text search over `~/.claude/memories`, `memoriesv2`, `working-briefs` via the FTS5 index. Same code path as `claude-skills memory recall`.
+- Tool `run_command` — run a noisy shell command through the proxy capture+compaction pipeline so the compacted output lands in context instead of the raw stream. Prefer it for test/build/lint/log/search commands.
 - Tool `recall_status` — recall index health snapshot (document count, schema version, last-sync timestamp).
 - Resource `claude_core://system-map` (`text/markdown`) and `claude_core://recall/status` (`application/json`).
+
+The same 1% rule that governs skills applies here: if a tool could answer the question more authoritatively than your own recall, use it before responding.
 
 ## Memory writes (when you learn something durable)
 
