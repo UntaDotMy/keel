@@ -829,28 +829,91 @@ fn lifecycle_additional_context(subcommand: &str) -> String {
     }
 }
 
-/// Bootstrap skill text embedded at compile time.
+/// Compact SessionStart bootstrap contract.
 ///
-/// The file lives at the repository root so `discover_repository_layout` picks
-/// it up alongside the other skills and `sync_skills` installs it under
-/// `~/.claude/skills/using-claude-core/SKILL.md`. We *also* embed it here so
-/// SessionStart can inject the full text directly into
-/// `hookSpecificOutput.additionalContext` per the official Claude Code hooks
-/// schema. CLAUDE.md and the individual SKILL.md files are read by the skill
-/// matcher on demand; this single block is what the model sees up front, so
-/// it doubles as the research-first iron law and the catalog of every other
-/// invokable skill.
-const BOOTSTRAP_SKILL: &str = include_str!("../../../../../using-claude-core/SKILL.md");
+/// This must land in the model's context *in full*. Claude Code truncates hook
+/// `hookSpecificOutput.additionalContext` once it crosses ~10KB: the full text
+/// is persisted to `<project>/tool-results/hook-…-additionalContext.txt` and the
+/// model receives only a ~2KB preview plus a file pointer it never reads back.
+/// The previous implementation injected the entire 27KB `using-claude-core/
+/// SKILL.md` here, so in every project the bootstrap was silently truncated to
+/// its first ~2KB — the model never saw the iron law's later rules, the MCP tool
+/// list, the discipline pillars, or the skill catalog. Verified against live
+/// session transcripts: the 27.6KB SessionStart additionalContext was replaced
+/// by a 2KB preview while a 5.9KB UserPromptSubmit context landed intact.
+///
+/// The fix is to keep this block small enough to survive the cap. We drop the
+/// ~8.5KB skill catalog enumeration (Claude Code already injects its own native
+/// skill listing every session, so it was pure duplication) and the verbose
+/// prose, keeping the operative contract: the iron law, the rationalization Red
+/// Flags, the four discipline pillars, the always-on MCP tools, and the memory
+/// writers. The full body still ships to disk as
+/// `~/.claude/skills/using-claude-core/SKILL.md` (synced by `sync_skills`) and is
+/// loadable on demand via `Skill("using-claude-core")` when the model wants the
+/// complete catalog and routing rules. `~/.claude/CLAUDE.md` carries the same
+/// compact contract through the hook-independent user-memory channel.
+const COMPACT_BOOTSTRAP: &str = r#"# claude-core operating contract (loaded at SessionStart)
+
+<EXTREMELY_IMPORTANT>
+This contract governs **every project you work in**, not just claude-core itself.
+**Trust the codebase, not your knowledge base.** Knowledge-base recall is stale. Memories drift. The repository in front of you is the source of truth.
+
+Before you respond to anything that could touch code, configuration, or architecture:
+1. **Read first.** Read SYSTEM_MAP, CLAUDE.md, the owning module, and the existing implementation before claiming behavior. Never propose changes against an imagined version of the file.
+2. **Understand before building.** Restate what the request actually asks, confirm the user story, and research what is genuinely needed before writing code. Do not guess, do not assume, do not build against an imagined spec. The most expensive waste is not buggy code — it is correct code that solved the wrong problem. If the request is ambiguous in a way that changes what you build, ask before building, not after.
+3. **Invoke relevant skills.** If there is even a 1% chance a skill applies, use the Skill tool to invoke it BEFORE writing code or giving a final answer. This is not negotiable. You cannot rationalize your way out of it.
+4. **Find the root cause.** Suspicion is a hypothesis, not a finding. Take the symptom as a starting point, trace it end-to-end against the running code with file:line evidence, and confirm the suspected target sits on that path before changing anything.
+</EXTREMELY_IMPORTANT>
+
+## Red Flags (rationalizations to ignore)
+- "I remember this codebase" → Memories drift. Read SYSTEM_MAP and the owning file before claiming behavior.
+- "The user story is clear" → Stories are summaries, not specs. Find the root cause.
+- "I get the gist, I'll start building" → The gist is not the spec. Restate the request and research what's needed; building on a guess ships the wrong thing.
+- "I'll just code this quickly" → Skills tell you HOW. Check first.
+- "Oh this may be the case" → Suspicion is a hypothesis, not a finding. Confirm the suspect sits on the symptom's traced path with file:line evidence before changing it.
+- "Tests already passed earlier" → Re-run before claiming. No completion claims without fresh evidence.
+- "That hook reminder is wrapper noise" → It states the rule inline so it is self-contained in any repo. Re-read the diff against the rule before skipping.
+
+## Code Implementation Discipline (every code-touching turn)
+1. **Think Before Coding** — state assumptions, surface tradeoffs, and deep-dive any suspected target (read it, trace callers/callees against the failing trigger) before changing it.
+2. **Simplicity First** — the minimum code that solves the problem. No speculative features, no abstractions for single-use code, no error handling for impossible scenarios.
+3. **Surgical Changes** — touch only what the task requires. Match existing style. Every changed line traces directly to the request. Do not refactor unrelated code.
+4. **Goal-Driven Execution** — turn vague tasks into verifiable goals before coding. Reproduce or trace the symptom from the user story end-to-end before naming a root cause.
+
+## claude_core MCP tools — always available, prefer over guessing
+- `system_map` — call before any claim about a repository's structure or layout ("what is this project", "where does X live") instead of reading files blind.
+- `recall` — call before claiming what you remember or previously learned; full-text search over your durable memory and working briefs.
+- `run_command` — run noisy shell commands (test, build, lint, logs, search) through it so compacted output enters context instead of the raw stream.
+
+## Skills & subagents
+40 specialist skills are installed under `~/.claude/skills/` (lifecycle, backend, cloud, security, `reviewer`, UI/UX, `preserve-existing-flow`, systematic-debugging, TDD, migrations, and more) — Claude Code lists them natively each session. Invoke by bare name, e.g. `Skill("reviewer")`. For the full catalog and routing rules, call `Skill("using-claude-core")`. 24 matching subagents in `.claude/agents/` handle delegated isolated-context work via the Agent tool. About to read or edit existing code? Invoke `preserve-existing-flow` first.
+
+## Memory writes (when you learn something durable)
+Working memory dies at compaction. To persist across sessions:
+- `claude-skills memory working-brief write` — when starting non-trivial work: capture the request, acceptance criteria, and files you expect to touch BEFORE coding so completion can be reconciled against it.
+- `claude-skills memory completion-gate check` — before claiming a task complete: returns the gate's verdict and points at any requirement with no evidence yet.
+- SYSTEM_MAP auto-refreshes at session start, pre-compact, and session end — read it before repo-structure claims.
+
+## The one thing to remember
+**Understand before you build. Research first. Invoke relevant skills before responding. Find the root cause. The repository — not your training data — is the source of truth.**"#;
 
 fn session_start_context() -> String {
     // SessionStart fires once per session and is the documented entry point
     // for delivering durable model context via
     // `hookSpecificOutput.additionalContext`. Per-prompt token cost is paid
     // at most once per session, so this is the right place to deliver the
-    // bootstrap skill instead of restating it on every UserPromptSubmit.
+    // bootstrap contract instead of restating it on every UserPromptSubmit.
     //
-    // Layout: full bootstrap skill (iron law + Red Flags + skill catalog +
-    // workspace pointers), the runtime-resolved memory pointer that CLAUDE.md
+    // The bootstrap MUST be the compact contract, not the full 27KB
+    // using-claude-core/SKILL.md. Claude Code truncates additionalContext above
+    // ~10KB to a 2KB preview + a file pointer (verified against live
+    // transcripts), so dumping the full skill here meant the model only ever saw
+    // its first ~2KB. COMPACT_BOOTSTRAP keeps the operative contract under the
+    // cap so it lands in full; the complete catalog ships to disk and is loadable
+    // on demand via Skill("using-claude-core").
+    //
+    // Layout: compact bootstrap (iron law + Red Flags + discipline pillars + MCP
+    // tools + memory writers), the runtime-resolved memory pointer that CLAUDE.md
     // cannot know in advance, the learned-instinct digest for the current
     // project (the always-on tier of the learning loop — what the user
     // reliably does here, surfaced without waiting for a skill match), and an
@@ -858,7 +921,7 @@ fn session_start_context() -> String {
     // template gets upgraded to richer prose in the normal course of work
     // (no manual slash). The nudge self-clears once the agent refines the skill,
     // because the content-hash no-clobber guard then reports it as non-template.
-    let mut context = format!("{BOOTSTRAP_SKILL}\n\n{}", memory_scope_summary());
+    let mut context = format!("{COMPACT_BOOTSTRAP}\n\n{}", memory_scope_summary());
     if let (Ok(claude_home), Ok(cwd)) = (resolve_claude_home(""), std::env::current_dir()) {
         let cwd = cwd.to_string_lossy();
         let digest = learning::project_instinct_digest(&claude_home, &cwd);
@@ -3727,6 +3790,34 @@ mod tests {
         assert!(
             context.contains("Oh this may be the case"),
             "SessionStart Red Flags must name the \"Oh this may be the case\" jump"
+        );
+    }
+
+    #[test]
+    fn session_start_context_stays_under_truncation_cap() {
+        // The bug this guards: Claude Code truncates hook
+        // `hookSpecificOutput.additionalContext` once it crosses ~10KB,
+        // persisting the full text to a tool-results file and injecting only a
+        // ~2KB preview + a file pointer the model never reads back. Verified
+        // against live session transcripts — a 27.6KB SessionStart context was
+        // replaced by a 2KB preview while a 5.9KB UserPromptSubmit context landed
+        // intact. The previous implementation embedded the full 27KB
+        // using-claude-core/SKILL.md here, so the operating contract was silently
+        // truncated to its first ~2KB in every project: the model never saw the
+        // later iron-law rules, the discipline pillars, the MCP tools, or the
+        // memory writers.
+        //
+        // The contract MUST fit in full. We assert a conservative 9KB ceiling on
+        // the UTF-8 byte length — below the observed ~10KB cap with headroom for
+        // the appended runtime memory pointer. If a future edit grows the
+        // bootstrap past this, it re-introduces the truncation bug, so the bound
+        // fails loudly instead of shipping a contract the model cannot see.
+        const TRUNCATION_CEILING_BYTES: usize = 9 * 1024;
+        let context = session_start_context();
+        let byte_len = context.len();
+        assert!(
+            byte_len < TRUNCATION_CEILING_BYTES,
+            "SessionStart context is {byte_len} bytes, at/over the {TRUNCATION_CEILING_BYTES}-byte ceiling — Claude Code truncates additionalContext above ~10KB, so the operating contract would be cut off mid-way and the model would never see the full iron law. Trim the compact bootstrap or move detail into the on-demand Skill(\"using-claude-core\") body."
         );
     }
 
