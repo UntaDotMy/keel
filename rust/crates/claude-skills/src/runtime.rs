@@ -302,9 +302,108 @@ pub fn read_text_if_exists(path: &Path) -> Result<String, String> {
     }
 }
 
+/// Atomically write `text` to `path`.
+///
+/// Writes to a sibling temp file, flushes it, then renames it over the target.
+/// A reader either sees the complete old file or the complete new file — never a
+/// half-written one. This matters because `write_text` backs every managed config
+/// write: `~/.claude.json` (MCP registration, which also holds the user's auth and
+/// project history), `~/.claude/settings.json` (hooks), `~/.claude/CLAUDE.md`,
+/// `config.toml`, agent-profile TOML, and the install inventories. A bare
+/// `fs::write` truncates first and writes second, so a crash, power loss, or a
+/// concurrent reader landing mid-write would leave a torn or empty file — and an
+/// empty `~/.claude.json` is a destructive loss of unrelated state.
+///
+/// The rename retries a few times to absorb the transient locks that frequently
+/// firing Claude Code lifecycle hooks can hold on these files (mirrors the
+/// executable-replace path's `rename_with_retry`). If staging into the same
+/// directory fails (e.g. a permission quirk), it falls back to a direct write so
+/// a non-atomic success still beats a hard failure.
 pub fn write_text(path: &Path, text: &str) -> Result<(), String> {
     ensure_parent_directory(path)?;
-    fs::write(path, text).map_err(|error| format!("write {}: {error}", display_path(path)))
+
+    let temp_path = atomic_temp_path(path);
+    // Best-effort cleanup of any leftover temp from a previous interrupted write.
+    let _ = fs::remove_file(&temp_path);
+
+    let staged = (|| -> std::io::Result<()> {
+        let mut file = fs::File::create(&temp_path)?;
+        file.write_all(text.as_bytes())?;
+        file.flush()?;
+        // fsync so the bytes are durable before the rename publishes the file.
+        file.sync_all()?;
+        Ok(())
+    })();
+
+    if let Err(error) = staged {
+        let _ = fs::remove_file(&temp_path);
+        // Fall back to a direct write rather than failing outright: a non-atomic
+        // write still leaves the file in the intended final state on success.
+        return fs::write(path, text).map_err(|fallback| {
+            format!(
+                "write {}: {error} (fallback: {fallback})",
+                display_path(path)
+            )
+        });
+    }
+
+    match rename_text_with_retry(&temp_path, path) {
+        Ok(()) => Ok(()),
+        Err(rename_error) => {
+            // Rename failed (e.g. a stubborn lock on the target). Drop the temp
+            // and fall back to a direct write so the install still completes.
+            let direct = fs::write(path, text);
+            let _ = fs::remove_file(&temp_path);
+            direct.map_err(|error| {
+                format!(
+                    "write {}: rename failed ({rename_error}); direct write also failed: {error}",
+                    display_path(path)
+                )
+            })
+        }
+    }
+}
+
+/// Sibling temp path for an atomic write. Kept in the same directory as the
+/// target so the final step is a same-filesystem rename (atomic), never a
+/// cross-device copy. A pid + nanosecond suffix avoids collisions between
+/// concurrent writers staging the same target.
+fn atomic_temp_path(target: &Path) -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let mut name = target.file_name().map(|n| n.to_owned()).unwrap_or_default();
+    name.push(format!(".tmp-{}-{nanos}", std::process::id()));
+    target.with_file_name(name)
+}
+
+/// Rename `from` over `to`, retrying a few times to absorb transient locks from
+/// concurrently-firing Claude Code hooks. `fs::rename` replaces an existing
+/// target on both Unix (atomic inode swap) and Windows
+/// (`MoveFileExW(MOVEFILE_REPLACE_EXISTING)`).
+fn rename_text_with_retry(from: &Path, to: &Path) -> Result<(), String> {
+    let mut last_error = None;
+    for attempt in 0..5 {
+        match fs::rename(from, to) {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                last_error = Some(error);
+                if attempt < 4 {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+            }
+        }
+    }
+    Err(last_error
+        .map(|error| {
+            format!(
+                "rename {} -> {}: {error}",
+                display_path(from),
+                display_path(to)
+            )
+        })
+        .unwrap_or_else(|| "rename failed".to_string()))
 }
 
 pub fn write_lines(path: &Path, lines: &[String]) -> Result<(), String> {
@@ -406,5 +505,80 @@ pub fn git_short_head(repository_root: &Path) -> String {
             String::from_utf8_lossy(&result.stdout).trim().to_string()
         }
         _ => "unknown".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod write_text_tests {
+    use super::*;
+
+    fn unique_dir(label: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        let dir = std::env::temp_dir().join(format!(
+            "claude-skills-writetext-{label}-{}-{nanos}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("create test dir");
+        dir
+    }
+
+    fn temp_siblings(dir: &Path, stem: &str) -> Vec<String> {
+        fs::read_dir(dir)
+            .expect("read dir")
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|name| name.starts_with(stem) && name.contains(".tmp-"))
+            .collect()
+    }
+
+    #[test]
+    fn writes_content_and_creates_parent() {
+        let dir = unique_dir("create");
+        // Nested path: write_text must create the missing parent directory.
+        let target = dir.join("nested").join("config.toml");
+        write_text(&target, "hello = 1\n").expect("write");
+        assert_eq!(fs::read_to_string(&target).unwrap(), "hello = 1\n");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn overwrite_replaces_content_atomically() {
+        let dir = unique_dir("overwrite");
+        let target = dir.join("claude.json");
+        write_text(&target, "{\"a\":1}").expect("first write");
+        write_text(&target, "{\"b\":2}").expect("second write");
+        // New content fully replaces old — no torn merge.
+        assert_eq!(fs::read_to_string(&target).unwrap(), "{\"b\":2}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn leaves_no_temp_file_behind() {
+        let dir = unique_dir("notmp");
+        let target = dir.join("settings.json");
+        write_text(&target, "x").expect("write");
+        // The staged temp must be renamed away, not left as litter beside the target.
+        assert!(
+            temp_siblings(&dir, "settings.json").is_empty(),
+            "atomic temp file leaked: {:?}",
+            temp_siblings(&dir, "settings.json")
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn repeated_writes_are_stable() {
+        // Simulate the install path rewriting the same managed file many times.
+        let dir = unique_dir("repeat");
+        let target = dir.join("CLAUDE.md");
+        for i in 0..20 {
+            write_text(&target, &format!("iteration {i}\n")).expect("write");
+        }
+        assert_eq!(fs::read_to_string(&target).unwrap(), "iteration 19\n");
+        assert!(temp_siblings(&dir, "CLAUDE.md").is_empty());
+        let _ = fs::remove_dir_all(&dir);
     }
 }

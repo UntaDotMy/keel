@@ -69,7 +69,8 @@
     "claude_core": {
       "command": "claude-skills",
       "args": ["mcp", "serve"],
-      "env": {}
+      "env": {},
+      "alwaysLoad": true
     }
   }
 }

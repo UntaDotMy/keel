@@ -111,6 +111,7 @@ pub fn run_doctor_command(
         hook_accepts_wrapped_command() && installed_executable_path(&claude_home).exists(),
         "rerun wrapper command is accepted",
     );
+    report_mcp_registration(standard_output, &claude_home);
     let _ = writeln!(
         standard_output,
         "[warn] unified_exec interception incomplete in current Claude Code"
@@ -185,6 +186,62 @@ fn write_doctor_check(standard_output: &mut dyn Write, ok: bool, message: &str) 
     let _ = writeln!(standard_output, "{status} {message}");
 }
 
+/// Report the health of the `claude_core` MCP registration in `~/.claude.json`.
+///
+/// Two failure modes matter and look identical from inside a session — the four
+/// tools (`recall`, `system_map`, `run_command`, `recall_status`) appear absent:
+///
+/// 1. **No entry at all** — the server was never registered, so the tools do not
+///    exist for Claude Code.
+/// 2. **Entry present but `alwaysLoad` missing/false** — the tools ARE registered
+///    but Claude Code *defers* them behind `ToolSearch` (forced on whenever tool
+///    search is enabled or `ANTHROPIC_BASE_URL` points at a non-first-party
+///    gateway). A model that searches for them by bare name (`select:recall`)
+///    finds nothing and wrongly concludes "MCP not registered". `alwaysLoad: true`
+///    pins them into context so they are always available. See
+///    `mcp_register::mcp_server_entry` for the authoritative rationale.
+///
+/// Both are repaired by `claude-skills repair` (re-runs `register_mcp_server`,
+/// which writes the entry *with* `alwaysLoad: true`). Doctor only reports — it
+/// never mutates `~/.claude.json` here, since a doctor run should be read-only.
+fn report_mcp_registration(standard_output: &mut dyn Write, claude_home: &std::path::Path) {
+    let config_path = super::mcp_register::mcp_config_path(claude_home);
+    let text = fs::read_to_string(&config_path).unwrap_or_default();
+    let parsed: Option<serde_json::Value> = serde_json::from_str(&text).ok();
+    let entry = parsed
+        .as_ref()
+        .and_then(|doc| doc.get("mcpServers"))
+        .and_then(|servers| servers.get(super::mcp_register::MCP_SERVER_KEY));
+
+    match entry {
+        None => {
+            write_doctor_check(
+                standard_output,
+                false,
+                "claude_core MCP server registered in ~/.claude.json \
+                 (run `claude-skills repair` to register it)",
+            );
+        }
+        Some(entry) => {
+            write_doctor_check(standard_output, true, "claude_core MCP server registered");
+            let always_load = entry
+                .get("alwaysLoad")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            write_doctor_check(
+                standard_output,
+                always_load,
+                if always_load {
+                    "claude_core MCP tools pinned into context (alwaysLoad)"
+                } else {
+                    "claude_core MCP tools pinned into context (alwaysLoad missing — \
+                     tools are deferred behind ToolSearch; run `claude-skills repair`)"
+                },
+            );
+        }
+    }
+}
+
 fn find_on_path(executable: &str) -> Option<PathBuf> {
     let path_value = std::env::var_os("PATH")?;
     for directory in std::env::split_paths(&path_value) {
@@ -200,4 +257,106 @@ fn find_on_path(executable: &str) -> Option<PathBuf> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn unique_home(label: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        // claude_home is <root>/.claude so the parent is the synthetic user home
+        // where .claude.json lives (matches mcp_register::mcp_config_path).
+        let claude_home = std::env::temp_dir()
+            .join(format!(
+                "claude-skills-doctor-{label}-{}-{nanos}",
+                std::process::id()
+            ))
+            .join(".claude");
+        fs::create_dir_all(&claude_home).expect("create claude home");
+        claude_home
+    }
+
+    fn run_report(claude_home: &std::path::Path) -> String {
+        let mut out = Vec::new();
+        report_mcp_registration(&mut out, claude_home);
+        String::from_utf8(out).expect("utf8")
+    }
+
+    #[test]
+    fn reports_ok_when_entry_has_always_load() {
+        let claude_home = unique_home("ok");
+        let config = super::super::mcp_register::mcp_config_path(&claude_home);
+        // The exact shape register_mcp_server writes.
+        fs::write(
+            &config,
+            r#"{"mcpServers":{"claude_core":{"type":"stdio","command":"x","args":["mcp","serve"],"env":{},"alwaysLoad":true}}}"#,
+        )
+        .unwrap();
+        let report = run_report(&claude_home);
+        assert!(
+            report.contains("[ok] claude_core MCP server registered"),
+            "{report}"
+        );
+        assert!(
+            report.contains("[ok] claude_core MCP tools pinned into context"),
+            "{report}"
+        );
+        let _ = fs::remove_dir_all(claude_home.parent().unwrap());
+    }
+
+    #[test]
+    fn warns_when_always_load_missing() {
+        // The exact bug a stale install / `claude mcp add` leaves behind:
+        // entry present, alwaysLoad absent -> tools deferred behind ToolSearch.
+        let claude_home = unique_home("noalwaysload");
+        let config = super::super::mcp_register::mcp_config_path(&claude_home);
+        fs::write(
+            &config,
+            r#"{"mcpServers":{"claude_core":{"type":"stdio","command":"x","args":["mcp","serve"],"env":{}}}}"#,
+        )
+        .unwrap();
+        let report = run_report(&claude_home);
+        // Server is registered...
+        assert!(
+            report.contains("[ok] claude_core MCP server registered"),
+            "{report}"
+        );
+        // ...but the alwaysLoad line must WARN and point at repair.
+        assert!(
+            report.contains("[warn] claude_core MCP tools pinned into context"),
+            "{report}"
+        );
+        assert!(report.contains("claude-skills repair"), "{report}");
+        let _ = fs::remove_dir_all(claude_home.parent().unwrap());
+    }
+
+    #[test]
+    fn warns_when_no_entry() {
+        let claude_home = unique_home("noentry");
+        let config = super::super::mcp_register::mcp_config_path(&claude_home);
+        fs::write(&config, r#"{"mcpServers":{}}"#).unwrap();
+        let report = run_report(&claude_home);
+        assert!(
+            report.contains("[warn] claude_core MCP server registered"),
+            "{report}"
+        );
+        assert!(report.contains("claude-skills repair"), "{report}");
+        let _ = fs::remove_dir_all(claude_home.parent().unwrap());
+    }
+
+    #[test]
+    fn warns_when_config_absent() {
+        // No ~/.claude.json at all -> treated as "no entry", warns.
+        let claude_home = unique_home("noconfig");
+        let report = run_report(&claude_home);
+        assert!(
+            report.contains("[warn] claude_core MCP server registered"),
+            "{report}"
+        );
+        let _ = fs::remove_dir_all(claude_home.parent().unwrap());
+    }
 }

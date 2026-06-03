@@ -247,13 +247,19 @@ matcher or raw CLI. They never invoke planned-but-unimplemented commands.
 
 `.claude-plugin/plugin.json` registers `mcpServers.claude_core` at user scope, so Claude Code auto-discovers the server on **every** project — you do not need to start it. These tools are always available; **prefer them over guessing or ad-hoc file reading**:
 
-- Tool `system_map` — **call this before any claim about the current repo's structure or layout** ("what is this project", "how is this organized", "where does X live") instead of guessing or spelunking files blind. Returns the workspace SYSTEM_MAP.md (auto-refreshed copy preferred, freshly rendered fallback).
-- Tool `recall` — **call this before claiming what you remember or previously learned.** Full-text search over `~/.claude/memories`, `memoriesv2`, `working-briefs` via the FTS5 index. Same code path as `claude-skills memory recall`.
-- Tool `run_command` — run a noisy shell command through the proxy capture+compaction pipeline so the compacted output lands in context instead of the raw stream. Prefer it for test/build/lint/log/search commands.
-- Tool `recall_status` — recall index health snapshot (document count, schema version, last-sync timestamp).
+- Tool `system_map` (full name `mcp__claude_core__system_map`) — **call this before any claim about the current repo's structure or layout** ("what is this project", "how is this organized", "where does X live") instead of guessing or spelunking files blind. Returns the workspace SYSTEM_MAP.md (auto-refreshed copy preferred, freshly rendered fallback).
+- Tool `recall` (full name `mcp__claude_core__recall`) — **call this before claiming what you remember or previously learned.** Full-text search over `~/.claude/memories`, `memoriesv2`, `working-briefs` via the FTS5 index. Same code path as `claude-skills memory recall`.
+- Tool `run_command` (full name `mcp__claude_core__run_command`) — run a noisy shell command through the proxy capture+compaction pipeline so the compacted output lands in context instead of the raw stream. Prefer it for test/build/lint/log/search commands.
+- Tool `recall_status` (full name `mcp__claude_core__recall_status`) — recall index health snapshot (document count, schema version, last-sync timestamp).
 - Resource `claude_core://system-map` (`text/markdown`) and `claude_core://recall/status` (`application/json`).
 
 The same 1% rule that governs skills applies here: if a tool could answer the question more authoritatively than your own recall, use it before responding.
+
+**If these tools seem absent — they are almost never actually missing.** MCP tools are namespaced `mcp__claude_core__<tool>` and may be *deferred* behind `ToolSearch` (Claude Code forces deferral whenever tool search is on or `ANTHROPIC_BASE_URL` points at a non-first-party gateway). Two traps:
+
+1. **Searching by bare name fails.** `ToolSearch("select:recall")` does an *exact* match on the full name and returns nothing, because the real name is `mcp__claude_core__recall`. Do **not** conclude "MCP isn't registered" from an empty `select:` result. Search by keyword (`ToolSearch("recall system map run command")`) or select the full namespaced name (`select:mcp__claude_core__recall`).
+2. **Deferral is the bug, not absence.** The fix is `alwaysLoad: true` on the `~/.claude.json` entry, which pins the four tools into context so they are never deferred. Verify with `claude-skills doctor` (it now reports the entry and `alwaysLoad`); repair with `claude-skills repair`, then restart Claude Code.
+
 
 ## Memory writes (when you learn something durable)
 
