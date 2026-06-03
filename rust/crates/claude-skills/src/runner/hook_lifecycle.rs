@@ -858,11 +858,13 @@ const COMPACT_BOOTSTRAP: &str = r#"# claude-core operating contract (loaded at S
 This contract governs **every project you work in**, not just claude-core itself.
 **Trust the codebase, not your knowledge base.** Knowledge-base recall is stale. Memories drift. The repository in front of you is the source of truth.
 
-Before you respond to anything that could touch code, configuration, or architecture:
+## The Iron Law — before you respond to anything that could touch code, configuration, or architecture
 1. **Read first.** Read SYSTEM_MAP, CLAUDE.md, the owning module, and the existing implementation before claiming behavior. Never propose changes against an imagined version of the file.
 2. **Understand before building.** Restate what the request actually asks, confirm the user story, and research what is genuinely needed before writing code. Do not guess, do not assume, do not build against an imagined spec. The most expensive waste is not buggy code — it is correct code that solved the wrong problem. If the request is ambiguous in a way that changes what you build, ask before building, not after.
 3. **Invoke relevant skills.** If there is even a 1% chance a skill applies, use the Skill tool to invoke it BEFORE writing code or giving a final answer. This is not negotiable. You cannot rationalize your way out of it.
 4. **Find the root cause.** Suspicion is a hypothesis, not a finding. Take the symptom as a starting point, trace it end-to-end against the running code with file:line evidence, and confirm the suspected target sits on that path before changing anything.
+
+This is the **Iron Law** of claude-core. It is loaded into your context at SessionStart and applies to every prompt thereafter — if asked whether the Iron Law is in your context, the answer is yes: it is the four rules above.
 </EXTREMELY_IMPORTANT>
 
 ## Red Flags (rationalizations to ignore)
@@ -3713,6 +3715,17 @@ mod tests {
         assert!(
             context.contains("Trust the codebase, not your knowledge base"),
             "SessionStart must restate the trust-the-codebase rule"
+        );
+        // The four rules must be labeled with the literal phrase "Iron Law" in
+        // the always-loaded SessionStart channel. Regression guard for the bug
+        // where the contract WAS in context but never named: an agent scanning
+        // its context for "iron law" found nothing because the bootstrap only
+        // said "operating contract"/"EXTREMELY_IMPORTANT", so it answered "no
+        // iron law in my context" even though the rules were right there. The
+        // name is the lookup key the user (and the model) search for.
+        assert!(
+            context.contains("Iron Law"),
+            "SessionStart must label the four rules with the literal phrase \"Iron Law\" so an agent asked whether the Iron Law is in context can find it by name"
         );
         assert!(
             context.contains("Red Flags"),
