@@ -27,6 +27,8 @@ coverage.out
 
 # Rust build artifacts
 /target/
+# Scratch build/test dir used for isolated verification runs (cargo output + logs).
+/target-test/
 # Cargo.lock is committed for reproducible binary builds per Cargo convention.
 
 # Local assistant settings
