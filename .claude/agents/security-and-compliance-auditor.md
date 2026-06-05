@@ -2,6 +2,7 @@
 name: security-and-compliance-auditor
 description: Application security and compliance review specialist. Use proactively when changes touch auth, secrets, input validation, data handling, dependencies, IAM, or compliance-sensitive surfaces (SOC2, GDPR). Performs threat modeling, exploitability analysis, and remediation review.
 tools: Read, Grep, Glob, Bash
+disallowedTools: Edit, Write
 model: sonnet
 skills:
   - security-and-compliance-auditor

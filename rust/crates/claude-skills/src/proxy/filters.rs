@@ -63,7 +63,22 @@ pub struct ProjectFilterAdapter {
 impl ProjectFilterAdapter {
     fn new(filter: DeclarativeFilter) -> Self {
         let regex = if matches!(filter.match_mode, MatchMode::Regex) {
-            regex::Regex::new(&filter.command).ok()
+            match regex::Regex::new(&filter.command) {
+                Ok(compiled) => Some(compiled),
+                Err(error) => {
+                    // A regex filter whose pattern does not compile would
+                    // otherwise silently match nothing — the filter looks
+                    // configured but never fires. Surface the compile error so
+                    // the author can fix the pattern instead of debugging a
+                    // no-op filter.
+                    eprintln!(
+                        "[claude-skills] Warning: filter '{}' has an invalid regex command '{}': {} \
+                         (this filter is disabled)",
+                        filter.name, filter.command, error
+                    );
+                    None
+                }
+            }
         } else {
             None
         };

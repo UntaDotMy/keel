@@ -6,9 +6,7 @@
   },
   "metadata": {
     "description": "Discipline as code for Claude Code — iron-law hooks, workflow rails, review gates, memory, command compaction, and 24 managed specialist skills. Single Rust binary, no Node or Python.",
-    "version": "0.1.0",
-    "homepage": "https://github.com/UntaDotMy/claude_core",
-    "license": "MIT"
+    "version": "0.1.0"
   },
   "plugins": [
     {

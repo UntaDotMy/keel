@@ -112,6 +112,11 @@ if [ ! -x "$installed_binary" ]; then
 fi
 
 "$installed_binary" status --repo-root "$bundle_root"
+# Native `claude-skills install` (above) already wires the lifecycle hooks into
+# settings.json, but does so best-effort (a failure is reported, not fatal). This
+# explicit re-run is the bootstrap's verification gate: it is idempotent, and it
+# turns a hook-wiring failure into a hard install error (set -e) so a broken
+# engagement surface never ships silently.
 "$installed_binary" hook install
 
 # MCP registration is handled natively by `claude-skills install` above, which

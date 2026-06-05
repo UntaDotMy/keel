@@ -2,6 +2,7 @@
 name: git-expert
 description: Safe Git workflow specialist. Use for non-trivial Git operations — branching strategy, conflict resolution, history rewrites, force pushes, secret cleanup, PR/MR workflows, hosted CI triage. Inspects state first, explains risks, requires explicit user approval for destructive operations.
 tools: Read, Grep, Glob, Bash
+disallowedTools: Edit, Write
 model: sonnet
 skills:
   - git-expert

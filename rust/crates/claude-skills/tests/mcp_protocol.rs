@@ -250,3 +250,84 @@ fn mcp_serve_ping_returns_empty_object() {
     server.close();
     let _ = std::fs::remove_dir_all(&claude_home);
 }
+
+#[test]
+fn mcp_serve_request_with_null_id_receives_response() {
+    // Per JSON-RPC 2.0 section 4.1, a request with id:null is a valid request,
+    // not a notification. It must receive a response.
+    let claude_home = unique_temp_directory("id-null");
+    let mut server = McpServerProcess::spawn(&claude_home);
+
+    server.send(&json!({
+        "jsonrpc": "2.0",
+        "id": Value::Null,
+        "method": "ping"
+    }));
+    let response = server.recv();
+    assert_eq!(response["jsonrpc"], "2.0");
+    assert_eq!(
+        response["id"],
+        json!(Value::Null),
+        "id must be null as sent"
+    );
+    assert_eq!(
+        response["result"],
+        json!({}),
+        "ping must return empty object"
+    );
+
+    server.close();
+    let _ = std::fs::remove_dir_all(&claude_home);
+}
+
+#[test]
+fn mcp_serve_tools_call_with_array_params_returns_invalid_params() {
+    // The MCP `tools/call` method requires a structured params object carrying
+    // `name` and `arguments`. JSON-RPC permits array-form params in general, but
+    // tools/call has no positional contract — an array cannot name a tool — so
+    // rejecting it with -32602 (Invalid params) is correct, not a gap. This test
+    // pins that contract so a future "accept arrays" change is a conscious one.
+    let claude_home = unique_temp_directory("array-params");
+    let mut server = McpServerProcess::spawn(&claude_home);
+
+    server.send(&json!({
+        "jsonrpc": "2.0",
+        "id": 21,
+        "method": "tools/call",
+        "params": ["recall_status", {}]
+    }));
+    let response = server.recv();
+    assert_eq!(response["id"], json!(21));
+    assert_eq!(
+        response["error"]["code"],
+        json!(-32602),
+        "array params for tools/call must be Invalid params: {response}"
+    );
+
+    server.close();
+    let _ = std::fs::remove_dir_all(&claude_home);
+}
+
+#[test]
+fn mcp_serve_tools_call_with_omitted_params_returns_invalid_params() {
+    // Omitted params default to null; tools/call still needs a name, so this is
+    // Invalid params rather than a panic or a silent default tool.
+    let claude_home = unique_temp_directory("omitted-params");
+    let mut server = McpServerProcess::spawn(&claude_home);
+
+    server.send(&json!({
+        "jsonrpc": "2.0",
+        "id": 22,
+        "method": "tools/call"
+    }));
+    let response = server.recv();
+    assert_eq!(response["id"], json!(22));
+    assert_eq!(
+        response["error"]["code"],
+        json!(-32602),
+        "missing params for tools/call must be Invalid params: {response}"
+    );
+
+    server.close();
+    let _ = std::fs::remove_dir_all(&claude_home);
+}

@@ -71,18 +71,257 @@ pub fn run_git_workflow_command(
             render_generated_message("pr", &arguments[1..], standard_output, standard_error)
         }
         "lint-message" => lint_message(&arguments[1..], standard_output, standard_error),
-        "preflight" => {
-            let _ = writeln!(
-                standard_output,
-                "git-workflow preflight: rust runtime ready"
-            );
-            0
-        }
+        "preflight" => run_git_workflow_preflight(&arguments[1..], standard_output, standard_error),
         other => {
             let _ = writeln!(standard_error, "Unknown git-workflow command: {other}");
             render_git_workflow_help(standard_output);
             1
         }
+    }
+}
+
+/// Branch-name prefixes WORKFLOW.md sanctions for feature-delivery branches.
+const SANCTIONED_BRANCH_PREFIXES: &[&str] = &["feat/", "fix/", "improve/", "add/"];
+/// Conventional commit-subject prefixes the preflight expects; a subject that
+/// matches none of these earns a (non-blocking) drift warning.
+const SANCTIONED_COMMIT_PREFIXES: &[&str] = &[
+    "feat", "fix", "docs", "chore", "refactor", "test", "perf", "build", "ci", "style", "revert",
+    "improve", "add",
+];
+
+/// Run the native Git workflow preflight described in WORKFLOW.md: block on
+/// branch naming, dirty worktrees, empty diffs, and missing committed history
+/// against the target base ref; warn on commit-subject prefix drift. Returns 0
+/// when no blocking check fails, 1 otherwise. Warnings never change the exit
+/// code. A non-git directory or unreadable git state is a blocking failure —
+/// preflight cannot vouch for what it cannot inspect.
+fn run_git_workflow_preflight(
+    arguments: &[String],
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let mut flag_set = FlagSet::new("git-workflow preflight");
+    flag_set.string_flag("repo-root", "");
+    flag_set.string_flag("base-ref", "");
+    flag_set.string_flag("format", "compact");
+    if let Err(parse_error) = flag_set.parse(arguments) {
+        let _ = writeln!(standard_error, "{}", parse_error.message);
+        return 1;
+    }
+    let repository_root = match resolve_repository_root(flag_set.string_value("repo-root")) {
+        Ok(path) => path,
+        Err(error) => {
+            let _ = writeln!(standard_error, "git-workflow preflight: {error}");
+            return 1;
+        }
+    };
+    let repo = Some(repository_root.as_path());
+    let base_ref_raw = flag_set.string_value("base-ref").trim().to_string();
+    let base_ref = if base_ref_raw.is_empty() {
+        "origin/main".to_string()
+    } else {
+        base_ref_raw
+    };
+
+    let mut blocking: Vec<String> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
+
+    // 0. Confirm we are inside a work tree at all — otherwise every check below
+    //    is meaningless and a green result would be a lie.
+    match git_text(repo, &["rev-parse", "--is-inside-work-tree"]) {
+        Some(value) if value.trim() == "true" => {}
+        _ => {
+            let _ = writeln!(
+                standard_error,
+                "git-workflow preflight: {} is not a git work tree",
+                repository_root.display()
+            );
+            return 1;
+        }
+    }
+
+    // 1. Branch naming. The current branch must use a sanctioned feature prefix
+    //    and must not be the base/protected branch.
+    let branch = git_text(repo, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_default();
+    let branch = branch.trim().to_string();
+    if branch.is_empty() || branch == "HEAD" {
+        blocking.push("detached HEAD — check out a feature branch before preflight".to_string());
+    } else if matches!(branch.as_str(), "main" | "master" | "develop") {
+        blocking.push(format!(
+            "on protected branch '{branch}' — create a feat/ fix/ improve/ add/ branch"
+        ));
+    } else if !SANCTIONED_BRANCH_PREFIXES
+        .iter()
+        .any(|prefix| branch.starts_with(prefix))
+    {
+        blocking.push(format!(
+            "branch '{branch}' does not use a sanctioned prefix ({})",
+            SANCTIONED_BRANCH_PREFIXES.join(", ")
+        ));
+    }
+
+    // 2. Dirty worktree. Uncommitted changes must not leak into a push/MR.
+    match git_text(repo, &["status", "--porcelain"]) {
+        Some(status) if !status.trim().is_empty() => {
+            let dirty = status
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .count();
+            blocking.push(format!(
+                "{dirty} uncommitted change(s) in the worktree — commit or stash before preflight"
+            ));
+        }
+        Some(_) => {}
+        None => blocking.push("could not read `git status`".to_string()),
+    }
+
+    // 3 & 4. Committed history against the base ref, and a non-empty diff. Both
+    //    require the base ref to exist locally; if it does not, that itself is a
+    //    blocking condition (cannot prove the branch diverges from the base).
+    if git_text(repo, &["rev-parse", "--verify", "--quiet", &base_ref]).is_none() {
+        blocking.push(format!(
+            "base ref '{base_ref}' not found — fetch it (e.g. `git fetch origin`) or pass --base-ref"
+        ));
+    } else {
+        let range = format!("{base_ref}..HEAD");
+        let commit_count = git_text(repo, &["rev-list", "--count", &range])
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .unwrap_or(0);
+        if commit_count == 0 {
+            blocking.push(format!(
+                "no commits on HEAD ahead of {base_ref} — nothing to push or review"
+            ));
+        }
+        // `git diff --quiet <range>` exits 0 when the trees are identical and 1
+        // when they differ. Commits that produce no net diff (merge-only or
+        // fully reverted) are worth a warning, not a block.
+        if commit_count > 0 && git_exit_code(repo, &["diff", "--quiet", &range]) == Some(0) {
+            warnings.push(format!(
+                "commits exist but `git diff {range}` is empty (merge-only or reverted changes)"
+            ));
+        }
+
+        // Warn on commit-subject prefix drift across the range.
+        if let Some(subjects) = git_lines(repo, &["log", "--format=%s", &range]) {
+            for subject in subjects {
+                if !commit_subject_has_sanctioned_prefix(&subject) {
+                    warnings.push(format!(
+                        "commit subject does not start with a conventional prefix: \"{}\"",
+                        truncate_subject(&subject)
+                    ));
+                }
+            }
+        }
+    }
+
+    render_preflight_result(
+        &branch,
+        &base_ref,
+        &blocking,
+        &warnings,
+        flag_set.string_value("format"),
+        standard_output,
+    )
+}
+
+/// Run a git command in `repo`, returning raw stdout (callers trim as needed)
+/// on exit code 0, or `None` on non-zero exit or spawn failure.
+fn git_text(repo: Option<&Path>, args: &[&str]) -> Option<String> {
+    let owned: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
+    let result = run_command("git", &owned, repo).ok()?;
+    if result.code != 0 {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&result.stdout).to_string())
+}
+
+/// Run a git command and return its exit code (or None on spawn failure).
+fn git_exit_code(repo: Option<&Path>, args: &[&str]) -> Option<i32> {
+    let owned: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
+    run_command("git", &owned, repo)
+        .ok()
+        .map(|result| result.code)
+}
+
+/// Run a git command and split stdout into non-empty trimmed lines.
+fn git_lines(repo: Option<&Path>, args: &[&str]) -> Option<Vec<String>> {
+    git_text(repo, args).map(|text| {
+        text.lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect()
+    })
+}
+
+fn commit_subject_has_sanctioned_prefix(subject: &str) -> bool {
+    let lowered = subject.trim_start().to_ascii_lowercase();
+    SANCTIONED_COMMIT_PREFIXES.iter().any(|prefix| {
+        // Match "feat:", "feat(scope):", "feat!:" — the conventional shapes.
+        lowered.starts_with(&format!("{prefix}:"))
+            || lowered.starts_with(&format!("{prefix}("))
+            || lowered.starts_with(&format!("{prefix}!"))
+    })
+}
+
+fn truncate_subject(subject: &str) -> String {
+    const MAX: usize = 60;
+    if subject.chars().count() <= MAX {
+        subject.to_string()
+    } else {
+        let truncated: String = subject.chars().take(MAX).collect();
+        format!("{truncated}…")
+    }
+}
+
+fn render_preflight_result(
+    branch: &str,
+    base_ref: &str,
+    blocking: &[String],
+    warnings: &[String],
+    output_format: &str,
+    standard_output: &mut dyn Write,
+) -> u8 {
+    let passed = blocking.is_empty();
+    if output_format == "json" {
+        let payload = Value::Object(vec![
+            (
+                "command".into(),
+                Value::String("git-workflow preflight".into()),
+            ),
+            ("passed".into(), Value::Bool(passed)),
+            ("branch".into(), Value::String(branch.into())),
+            ("baseRef".into(), Value::String(base_ref.into())),
+            (
+                "blocking".into(),
+                Value::Array(blocking.iter().map(|m| Value::String(m.clone())).collect()),
+            ),
+            (
+                "warnings".into(),
+                Value::Array(warnings.iter().map(|m| Value::String(m.clone())).collect()),
+            ),
+        ]);
+        let _ = write_indented(standard_output, &payload);
+        return if passed { 0 } else { 1 };
+    }
+    let _ = writeln!(
+        standard_output,
+        "git-workflow preflight: {} (branch={branch} base={base_ref})",
+        if passed { "PASS" } else { "BLOCKED" }
+    );
+    for message in blocking {
+        let _ = writeln!(standard_output, "  [block] {message}");
+    }
+    for message in warnings {
+        let _ = writeln!(standard_output, "  [warn]  {message}");
+    }
+    if passed && warnings.is_empty() {
+        let _ = writeln!(standard_output, "  all checks passed");
+    }
+    if passed {
+        0
+    } else {
+        1
     }
 }
 
@@ -1604,5 +1843,201 @@ mod tests {
             gates = gates.iter().map(|g| &g.name).collect::<Vec<_>>()
         );
         std::fs::remove_dir_all(&temp).unwrap();
+    }
+
+    // ---- git-workflow preflight ----
+
+    /// Run a git command in `dir`, asserting success, for test setup.
+    fn git_in(dir: &std::path::Path, args: &[&str]) {
+        let owned: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        let result = crate::runtime::run_command("git", &owned, Some(dir))
+            .unwrap_or_else(|error| panic!("git {args:?} spawn failed: {error}"));
+        assert_eq!(
+            result.code,
+            0,
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+
+    /// Create an initialized temp git repo with one commit on `main` and a
+    /// deterministic identity/branch so preflight checks are reproducible.
+    fn init_temp_repo(label: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        let dir = std::env::temp_dir().join(format!(
+            "claude-skills-preflight-{label}-{}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp repo dir");
+        git_in(&dir, &["init", "-q"]);
+        git_in(&dir, &["config", "user.email", "test@example.com"]);
+        git_in(&dir, &["config", "user.name", "Test"]);
+        git_in(&dir, &["checkout", "-q", "-B", "main"]);
+        std::fs::write(dir.join("README.md"), "base\n").unwrap();
+        git_in(&dir, &["add", "."]);
+        git_in(&dir, &["commit", "-q", "-m", "chore: base commit"]);
+        dir
+    }
+
+    fn run_preflight(repo: &std::path::Path, base_ref: &str) -> (u8, String) {
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let code = run_git_workflow_preflight(
+            &[
+                "--repo-root".to_string(),
+                repo.to_string_lossy().to_string(),
+                "--base-ref".to_string(),
+                base_ref.to_string(),
+            ],
+            &mut stdout,
+            &mut stderr,
+        );
+        (code, String::from_utf8_lossy(&stdout).to_string())
+    }
+
+    #[test]
+    fn preflight_passes_on_clean_feature_branch_ahead_of_base() {
+        let repo = init_temp_repo("pass");
+        // Branch off main, add a committed change so HEAD is ahead of main.
+        git_in(&repo, &["checkout", "-q", "-b", "feat/widget"]);
+        std::fs::write(repo.join("widget.txt"), "feature\n").unwrap();
+        git_in(&repo, &["add", "."]);
+        git_in(&repo, &["commit", "-q", "-m", "feat: add widget"]);
+
+        let (code, stdout) = run_preflight(&repo, "main");
+        assert_eq!(code, 0, "stdout: {stdout}");
+        assert!(stdout.contains("PASS"), "stdout: {stdout}");
+
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn preflight_blocks_on_protected_branch() {
+        let repo = init_temp_repo("protected");
+        // Still on main (a protected branch).
+        let (code, stdout) = run_preflight(&repo, "main");
+        assert_eq!(code, 1, "stdout: {stdout}");
+        assert!(stdout.contains("protected branch"), "stdout: {stdout}");
+
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn preflight_blocks_on_unsanctioned_branch_name() {
+        let repo = init_temp_repo("badname");
+        git_in(&repo, &["checkout", "-q", "-b", "random-branch"]);
+        std::fs::write(repo.join("x.txt"), "x\n").unwrap();
+        git_in(&repo, &["add", "."]);
+        git_in(&repo, &["commit", "-q", "-m", "feat: x"]);
+
+        let (code, stdout) = run_preflight(&repo, "main");
+        assert_eq!(code, 1, "stdout: {stdout}");
+        assert!(stdout.contains("sanctioned prefix"), "stdout: {stdout}");
+
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn preflight_blocks_on_dirty_worktree() {
+        let repo = init_temp_repo("dirty");
+        git_in(&repo, &["checkout", "-q", "-b", "fix/thing"]);
+        std::fs::write(repo.join("thing.txt"), "committed\n").unwrap();
+        git_in(&repo, &["add", "."]);
+        git_in(&repo, &["commit", "-q", "-m", "fix: thing"]);
+        // Now leave an uncommitted change in the worktree.
+        std::fs::write(repo.join("thing.txt"), "dirty edit\n").unwrap();
+
+        let (code, stdout) = run_preflight(&repo, "main");
+        assert_eq!(code, 1, "stdout: {stdout}");
+        assert!(stdout.contains("uncommitted change"), "stdout: {stdout}");
+
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn preflight_blocks_when_no_commits_ahead_of_base() {
+        let repo = init_temp_repo("nocommits");
+        // A sanctioned, clean branch with NO commits beyond main.
+        git_in(&repo, &["checkout", "-q", "-b", "feat/empty"]);
+        let (code, stdout) = run_preflight(&repo, "main");
+        assert_eq!(code, 1, "stdout: {stdout}");
+        assert!(
+            stdout.contains("no commits on HEAD ahead"),
+            "stdout: {stdout}"
+        );
+
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn preflight_blocks_when_base_ref_missing() {
+        let repo = init_temp_repo("nobase");
+        git_in(&repo, &["checkout", "-q", "-b", "feat/thing"]);
+        std::fs::write(repo.join("a.txt"), "a\n").unwrap();
+        git_in(&repo, &["add", "."]);
+        git_in(&repo, &["commit", "-q", "-m", "feat: a"]);
+
+        let (code, stdout) = run_preflight(&repo, "origin/does-not-exist");
+        assert_eq!(code, 1, "stdout: {stdout}");
+        assert!(stdout.contains("not found"), "stdout: {stdout}");
+
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn preflight_blocks_on_non_git_directory() {
+        let dir = std::env::temp_dir().join(format!(
+            "claude-skills-preflight-nongit-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (code, _stdout) = run_preflight(&dir, "main");
+        assert_eq!(code, 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn preflight_warns_on_commit_subject_prefix_drift() {
+        let repo = init_temp_repo("drift");
+        git_in(&repo, &["checkout", "-q", "-b", "feat/msg"]);
+        std::fs::write(repo.join("m.txt"), "m\n").unwrap();
+        git_in(&repo, &["add", "."]);
+        // Non-conventional subject → should produce a [warn], not a block.
+        git_in(&repo, &["commit", "-q", "-m", "random message no prefix"]);
+
+        let (code, stdout) = run_preflight(&repo, "main");
+        assert_eq!(code, 0, "drift is a warning, not a block: {stdout}");
+        assert!(stdout.contains("conventional prefix"), "stdout: {stdout}");
+
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn preflight_json_format_emits_structured_payload() {
+        let repo = init_temp_repo("json");
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let code = run_git_workflow_preflight(
+            &[
+                "--repo-root".to_string(),
+                repo.to_string_lossy().to_string(),
+                "--base-ref".to_string(),
+                "main".to_string(),
+                "--format".to_string(),
+                "json".to_string(),
+            ],
+            &mut stdout,
+            &mut stderr,
+        );
+        // On main with no commits ahead → blocked.
+        assert_eq!(code, 1);
+        let text = String::from_utf8_lossy(&stdout);
+        assert!(text.contains("\"passed\""), "stdout: {text}");
+        assert!(text.contains("\"blocking\""), "stdout: {text}");
+        assert!(text.contains("\"branch\""), "stdout: {text}");
+        let _ = std::fs::remove_dir_all(&repo);
     }
 }

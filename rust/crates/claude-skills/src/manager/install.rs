@@ -1307,6 +1307,11 @@ pub fn run_uninstall_command(
 ) -> u8 {
     let mut flag_set = FlagSet::new("uninstall");
     flag_set.string_flag("claude-home", "");
+    // Accept-and-ignore --repo-root for parity with the documented help
+    // (`uninstall [--repo-root <path>] [--claude-home <path>]`). Uninstall does
+    // not need the repository — it removes managed files from the claude home —
+    // but rejecting a flag the help advertises breaks documented invocations.
+    flag_set.string_flag("repo-root", "");
     if let Err(parse_error) = flag_set.parse(arguments) {
         let _ = writeln!(standard_error, "{}", parse_error.message);
         return 1;
@@ -1378,6 +1383,18 @@ pub fn run_uninstall_command(
     {
         let _ = writeln!(standard_error, "remove managed hooks failed: {error}");
         return 1;
+    }
+    // Reverse the MCP registration install wrote to ~/.claude.json. Without this,
+    // an uninstall leaves a dangling `mcpServers.claude_core` entry pointing at
+    // the now-deleted binary, which Claude Code tries to spawn every session.
+    // Preserves sibling servers and unrelated keys.
+    match super::mcp_register::unregister_mcp_server(&claude_home) {
+        Ok(super::mcp_register::McpUnregistration::Removed) => removed_count += 1,
+        Ok(super::mcp_register::McpUnregistration::NotPresent) => {}
+        Err(error) => {
+            let _ = writeln!(standard_error, "remove MCP registration failed: {error}");
+            return 1;
+        }
     }
     if let Err(error) = remove_deprecated_config_keys(&claude_home) {
         let _ = writeln!(

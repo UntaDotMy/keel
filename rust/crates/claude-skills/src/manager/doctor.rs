@@ -112,6 +112,7 @@ pub fn run_doctor_command(
         "rerun wrapper command is accepted",
     );
     report_mcp_registration(standard_output, &claude_home);
+    probe_mcp_launch(standard_output, &claude_home);
     let _ = writeln!(
         standard_output,
         "[warn] unified_exec interception incomplete in current Claude Code"
@@ -184,6 +185,139 @@ fn run_hook_probe(command: &str) -> Option<String> {
 fn write_doctor_check(standard_output: &mut dyn Write, ok: bool, message: &str) {
     let status = if ok { "[ok]" } else { "[warn]" };
     let _ = writeln!(standard_output, "{status} {message}");
+}
+
+/// Spawn the MCP command exactly as registered in `~/.claude.json` and confirm it
+/// answers an `initialize` request. This catches the silent failure mode where the
+/// registered `command` (e.g. the plugin manifest's bare `claude-skills`) does not
+/// resolve on the host's PATH — Claude Code would then fail to start the server and
+/// all four always-on tools would be missing with no in-session signal. Reading the
+/// entry from disk (rather than assuming the installed path) means we probe what
+/// Claude Code will actually launch.
+///
+/// Read-only: spawns a short-lived `mcp serve` child, pipes one JSON-RPC line, and
+/// reads the response. No files are mutated.
+fn probe_mcp_launch(standard_output: &mut dyn Write, claude_home: &std::path::Path) {
+    let config_path = super::mcp_register::mcp_config_path(claude_home);
+    let text = fs::read_to_string(&config_path).unwrap_or_default();
+    let parsed: Option<serde_json::Value> = serde_json::from_str(&text).ok();
+    let entry = parsed
+        .as_ref()
+        .and_then(|doc| doc.get("mcpServers"))
+        .and_then(|servers| servers.get(super::mcp_register::MCP_SERVER_KEY));
+    let Some(entry) = entry else {
+        // No registration — report_mcp_registration already warned; nothing to probe.
+        return;
+    };
+    let command = entry
+        .get("command")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    if command.is_empty() {
+        write_doctor_check(
+            standard_output,
+            false,
+            "claude_core MCP launch (registered entry has no command; run `claude-skills repair`)",
+        );
+        return;
+    }
+    // Probe with EXACTLY the registered args so the result reflects what Claude
+    // Code will actually launch, not an assumed shape. Three cases:
+    //   - `args` is a valid array  → use it verbatim.
+    //   - `args` is absent          → Claude Code launches the bare command with
+    //                                 no args, so probe that (an MCP server needs
+    //                                 `mcp serve`, so a bare command correctly
+    //                                 fails the probe and flags the broken entry).
+    //   - `args` is present but not an array → malformed entry; warn and skip
+    //                                 rather than guess.
+    let args: Vec<String> = match entry.get("args") {
+        None => Vec::new(),
+        Some(serde_json::Value::Array(values)) => values
+            .iter()
+            .filter_map(|value| value.as_str().map(str::to_string))
+            .collect(),
+        Some(_) => {
+            write_doctor_check(
+                standard_output,
+                false,
+                "claude_core MCP launch (registered entry has non-array args; \
+                 run `claude-skills repair`)",
+            );
+            return;
+        }
+    };
+    let launched = probe_mcp_initialize(&command, &args);
+    write_doctor_check(
+        standard_output,
+        launched,
+        if launched {
+            "claude_core MCP launch (registered command starts and responds to initialize)"
+        } else {
+            "claude_core MCP launch (registered command did not start — check that it \
+             resolves on PATH; run `claude-skills repair` to pin an absolute path)"
+        },
+    );
+}
+
+/// Spawn `command args...`, send a single `initialize` JSON-RPC line, and return
+/// true if the child emits a JSON-RPC response containing `protocolVersion`.
+///
+/// Bounded by a wall-clock timeout: a registered command that starts but never
+/// answers (a wrong binary, or one that blocks waiting for more input) must not
+/// hang `doctor`. A reader thread captures stdout while the main thread waits on
+/// a channel with a deadline; on timeout the child is killed and reaped.
+fn probe_mcp_initialize(command: &str, args: &[String]) -> bool {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let mut child = match Command::new(command)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        // Command not found / not executable — the failure this probe exists for.
+        Err(_) => return false,
+    };
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": { "name": "doctor", "version": "1.0" }
+        }
+    });
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = writeln!(stdin, "{request}");
+        // stdin drops here so the server sees EOF and exits after answering.
+    }
+
+    // Read the child's stdout on a worker thread so the wait is bounded.
+    let (sender, receiver) = mpsc::channel::<String>();
+    if let Some(mut stdout) = child.stdout.take() {
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut buffer = String::new();
+            let _ = stdout.read_to_string(&mut buffer);
+            let _ = sender.send(buffer);
+        });
+    }
+
+    let responded = match receiver.recv_timeout(Duration::from_secs(5)) {
+        Ok(response) => response.contains("protocolVersion") && response.contains("\"result\""),
+        // Timed out (or the reader thread vanished) — treat as no response.
+        Err(_) => false,
+    };
+
+    // Always reap the child so the probe leaves no lingering process.
+    let _ = child.kill();
+    let _ = child.wait();
+    responded
 }
 
 /// Report the health of the `claude_core` MCP registration in `~/.claude.json`.
