@@ -250,3 +250,25 @@ fn mcp_serve_ping_returns_empty_object() {
     server.close();
     let _ = std::fs::remove_dir_all(&claude_home);
 }
+
+
+#[test]
+fn mcp_serve_request_with_null_id_receives_response() {
+    // Per JSON-RPC 2.0 section 4.1, a request with id:null is a valid request,
+    // not a notification. It must receive a response.
+    let claude_home = unique_temp_directory("id-null");
+    let mut server = McpServerProcess::spawn(&claude_home);
+
+    server.send(&json!({
+        "jsonrpc": "2.0",
+        "id": Value::Null,
+        "method": "ping"
+    }));
+    let response = server.recv();
+    assert_eq!(response["jsonrpc"], "2.0");
+    assert_eq!(response["id"], json!(Value::Null), "id must be null as sent");
+    assert_eq!(response["result"], json!({}), "ping must return empty object");
+
+    server.close();
+    let _ = std::fs::remove_dir_all(&claude_home);
+}

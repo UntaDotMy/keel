@@ -215,9 +215,8 @@ pub fn dispatch(request: &Value) -> Option<Value> {
     let params = object.get("params").cloned().unwrap_or(Value::Null);
 
     // JSON-RPC 2.0 §4.1: a request without `id` is a notification — no
-    // response is sent. We still execute side-effect-free notifications
-    // (`notifications/initialized`) for protocol completeness.
-    let is_notification = id.is_none() || matches!(id.as_ref(), Some(Value::Null));
+    // An id:null is a valid request and must receive a response.
+    let is_notification = id.is_none();
 
     if is_notification {
         // Currently the only meaningful incoming notification is
@@ -854,4 +853,17 @@ mod tests {
         assert!(report.contains("exit code: 0\n"));
         assert!(report.contains("(no output)"));
     }
+    #[test]
+    fn request_with_id_null_receives_response() {
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": Value::Null,
+            "method": "ping"
+        });
+        let response = dispatch(&request).expect("response present");
+        assert_eq!(response["jsonrpc"], "2.0");
+        assert_eq!(response["id"], json!(Value::Null), "id must be null as per request");
+        assert_eq!(response["result"], json!({}), "ping must return empty object");
+    }
+
 }
