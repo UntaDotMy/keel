@@ -335,6 +335,10 @@ fn run_recall_reindex(
                 Value::Number(report.removed.to_string()),
             ),
             (
+                "documentsSkipped".into(),
+                Value::Number(report.skipped.to_string()),
+            ),
+            (
                 "lastIndexedAtMillis".into(),
                 Value::Number(report.last_indexed_at_millis.to_string()),
             ),
@@ -347,13 +351,21 @@ fn run_recall_reindex(
     }
     let _ = writeln!(
         standard_output,
-        "{command_group} recall reindex: indexed={} added={} updated={} removed={} index={}",
+        "{command_group} recall reindex: indexed={} added={} updated={} removed={} skipped={} index={}",
         report.indexed_total,
         report.added,
         report.updated,
         report.removed,
+        report.skipped,
         display_path(&database_path)
     );
+    if report.skipped > 0 {
+        let _ = writeln!(
+            standard_error,
+            "{command_group} recall reindex: warning: {} file(s) skipped (not valid UTF-8 text) and excluded from the index",
+            report.skipped
+        );
+    }
     0
 }
 
@@ -648,16 +660,50 @@ fn open_recall_connection(database_path: &Path) -> Result<Connection, String> {
         fs::create_dir_all(parent_directory)
             .map_err(|io_error| format!("create {}: {io_error}", display_path(parent_directory)))?;
     }
-    let connection = Connection::open(database_path)
-        .map_err(|database_error| format!("open sqlite: {database_error}"))?;
+    let connection = Connection::open(database_path).map_err(|database_error| {
+        recall_open_error_hint(database_path, &format!("open sqlite: {database_error}"))
+    })?;
     connection
         .pragma_update(None, "journal_mode", "WAL")
-        .map_err(|database_error| format!("set journal_mode: {database_error}"))?;
+        .map_err(|database_error| {
+            recall_open_error_hint(
+                database_path,
+                &format!("set journal_mode: {database_error}"),
+            )
+        })?;
     connection
         .pragma_update(None, "synchronous", "NORMAL")
-        .map_err(|database_error| format!("set synchronous: {database_error}"))?;
-    ensure_recall_schema(&connection)?;
+        .map_err(|database_error| {
+            recall_open_error_hint(database_path, &format!("set synchronous: {database_error}"))
+        })?;
+    ensure_recall_schema(&connection)
+        .map_err(|schema_error| recall_open_error_hint(database_path, &schema_error))?;
     Ok(connection)
+}
+
+/// Wrap a SQLite open/setup failure with an actionable recovery hint when it
+/// looks like a locked WAL sidecar or a corrupt index. On Windows the `-wal`/
+/// `-shm` sidecars can be left locked by a crashed process or truncated by an
+/// interrupted write, surfacing as BUSY/LOCKED/CORRUPT/"not a database". Rather
+/// than bubbling a bare driver error, point the user at the deterministic fix:
+/// rebuild the index from the Markdown source of truth.
+fn recall_open_error_hint(database_path: &Path, raw_error: &str) -> String {
+    let lowered = raw_error.to_ascii_lowercase();
+    let looks_recoverable = lowered.contains("locked")
+        || lowered.contains("busy")
+        || lowered.contains("malformed")
+        || lowered.contains("corrupt")
+        || lowered.contains("not a database");
+    if looks_recoverable {
+        format!(
+            "{raw_error}\n  The recall index at {} appears locked or corrupt (often a stale \
+             -wal/-shm sidecar on Windows). Close any other claude-skills process, then run \
+             `claude-skills memory recall reindex` to rebuild it from your Markdown memory.",
+            display_path(database_path)
+        )
+    } else {
+        raw_error.to_string()
+    }
 }
 
 fn ensure_recall_schema(connection: &Connection) -> Result<(), String> {
@@ -726,6 +772,10 @@ pub struct SyncReport {
     pub added: u64,
     pub updated: u64,
     pub removed: u64,
+    /// Files found on disk that could not be read as UTF-8 and were excluded
+    /// from the index. Surfaced so a silently-missing document leaves a signal
+    /// rather than vanishing from search with no explanation.
+    pub skipped: u64,
     pub last_indexed_at_millis: u128,
 }
 
@@ -792,7 +842,10 @@ pub fn sync_recall_index(
             Err(_) => {
                 // Skip files we can't read as UTF-8; they don't belong in a
                 // Markdown text index. We deliberately do not fail the entire
-                // sync over a single unreadable document.
+                // sync over a single unreadable document — but we count it so a
+                // silently-excluded file is visible in the sync report instead
+                // of vanishing from search with no signal.
+                report.skipped += 1;
                 continue;
             }
         };

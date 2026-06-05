@@ -862,8 +862,15 @@ mod tests {
         });
         let response = dispatch(&request).expect("response present");
         assert_eq!(response["jsonrpc"], "2.0");
-        assert_eq!(response["id"], json!(Value::Null), "id must be null as per request");
-        assert_eq!(response["result"], json!({}), "ping must return empty object");
+        assert_eq!(
+            response["id"],
+            json!(Value::Null),
+            "id must be null as per request"
+        );
+        assert_eq!(
+            response["result"],
+            json!({}),
+            "ping must return empty object"
+        );
     }
-
 }

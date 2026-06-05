@@ -108,6 +108,11 @@ try {
         throw "claude-skills status failed with exit code $LASTEXITCODE"
     }
 
+    # Native `claude-skills install` (above) already wires the lifecycle hooks
+    # into settings.json, but does so best-effort (a failure is reported, not
+    # fatal). This explicit re-run is the bootstrap's verification gate: it is
+    # idempotent, and it turns a hook-wiring failure into a hard install error so
+    # a broken engagement surface never ships silently.
     & $InstalledBinary hook install
     if ($LASTEXITCODE -ne 0) {
         throw "claude-skills hook install failed with exit code $LASTEXITCODE"

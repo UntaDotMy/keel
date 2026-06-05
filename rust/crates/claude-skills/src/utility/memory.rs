@@ -1725,13 +1725,40 @@ const ROUTING_RULES: &[RoutingRule] = &[
             "gdpr",
             "owasp",
             "secret",
-            "auth",
-            "authentication",
             "authorization",
             "rbac",
         ],
         specialist: "security-and-compliance-auditor",
         reason: "security, threat modeling, or compliance review",
+    },
+    // Build-side identity work. Placed AFTER the security rule (which reviews
+    // auth) so a distinctive security verb like "threat model" still wins, while
+    // a build ask with no security verb ("implement oauth2/oidc/login") routes
+    // here instead of falling to the default lane. The auditor finds; this builds.
+    RoutingRule {
+        keywords: &[
+            "oauth2",
+            "oauth",
+            "oidc",
+            "openid",
+            "openid connect",
+            "login flow",
+            "login",
+            "sso",
+            "single sign-on",
+            "saml",
+            "passkey",
+            "webauthn",
+            "mfa",
+            "jwt",
+            "refresh token",
+            "session token",
+            "identity provider",
+            "auth",
+            "authentication",
+        ],
+        specialist: "authentication-and-identity",
+        reason: "login, session, token, or SSO/identity build",
     },
     RoutingRule {
         keywords: &[
@@ -1748,6 +1775,114 @@ const ROUTING_RULES: &[RoutingRule] = &[
         ],
         specialist: "qa-and-automation-engineer",
         reason: "test strategy, automation, or release ladder validation",
+    },
+    // Narrow infra-adjacent specialists, placed before cloud-and-devops-expert
+    // so their distinctive tokens win over its broad "cloud"/"pipeline" tokens
+    // (first-match-wins). cloud-cost-and-finops must beat "cloud"; the data/ML
+    // ETL tokens must beat "pipeline".
+    RoutingRule {
+        keywords: &[
+            "finops",
+            "cloud cost",
+            "cost optimization",
+            "rightsizing",
+            "reserved instance",
+            "savings plan",
+            "committed use",
+            "spot instance",
+            "cost allocation",
+            "budget guardrail",
+            "unit economics",
+            "infracost",
+        ],
+        specialist: "cloud-cost-and-finops",
+        reason: "cloud cost estimation, rightsizing, or commitment planning",
+    },
+    RoutingRule {
+        keywords: &[
+            "observability",
+            "slo",
+            "sli",
+            "error budget",
+            "incident",
+            "incident response",
+            "postmortem",
+            "post-mortem",
+            "on-call",
+            "oncall",
+            "paging",
+            "alerting",
+            "runbook",
+            "opentelemetry",
+            "otel",
+            "telemetry",
+            "burn rate",
+        ],
+        specialist: "observability-and-incident-response",
+        reason: "telemetry, SLO/SLI, alerting, or incident response",
+    },
+    RoutingRule {
+        keywords: &[
+            "etl",
+            "elt",
+            "data pipeline",
+            "etl pipeline",
+            "ml pipeline",
+            "data warehouse",
+            "lakehouse",
+            "dbt",
+            "airflow",
+            "dagster",
+            "prefect",
+            "feature engineering",
+            "feature store",
+            "model training",
+            "model serving",
+            "drift monitoring",
+            "train/serve",
+            "mlops",
+            "machine learning",
+        ],
+        specialist: "data-and-ml-engineering",
+        reason: "data engineering pipelines or the ML/MLOps lifecycle",
+    },
+    RoutingRule {
+        keywords: &[
+            "i18n",
+            "l10n",
+            "internationalization",
+            "localization",
+            "localisation",
+            "translation",
+            "message catalog",
+            "icu messageformat",
+            "pluralization",
+            "rtl",
+            "bidi",
+            "locale",
+            "pseudo-localization",
+        ],
+        specialist: "internationalization-and-localization",
+        reason: "message catalogs, locale formatting, or RTL/bidi correctness",
+    },
+    RoutingRule {
+        keywords: &[
+            "dependency upgrade",
+            "dependency update",
+            "dependencies",
+            "sbom",
+            "supply chain",
+            "supply-chain",
+            "lockfile",
+            "dependabot",
+            "renovate",
+            "transitive dependency",
+            "typosquat",
+            "provenance",
+            "pinning strategy",
+        ],
+        specialist: "dependency-and-supply-chain",
+        reason: "dependency upgrades, lockfile hygiene, or supply-chain provenance",
     },
     RoutingRule {
         keywords: &[
@@ -2844,6 +2979,98 @@ mod tests {
         assert_eq!(exit_code, 0);
         assert!(
             stdout.contains("specialist: api-contract-design"),
+            "stdout: {stdout}"
+        );
+    }
+
+    #[test]
+    fn route_observability_targets_observability_skill() {
+        let (exit_code, stdout, _) = route("define SLOs and burn-rate alerting with opentelemetry");
+        assert_eq!(exit_code, 0);
+        assert!(
+            stdout.contains("specialist: observability-and-incident-response"),
+            "stdout: {stdout}"
+        );
+    }
+
+    #[test]
+    fn route_identity_build_targets_auth_skill() {
+        let (exit_code, stdout, _) =
+            route("implement the oauth2 oidc login flow with refresh tokens");
+        assert_eq!(exit_code, 0);
+        assert!(
+            stdout.contains("specialist: authentication-and-identity"),
+            "stdout: {stdout}"
+        );
+    }
+
+    #[test]
+    fn route_threat_model_still_beats_auth_build() {
+        // A distinctive security verb must win over the generic "authentication"
+        // token even though both rules would match — security is ordered first.
+        let (exit_code, stdout, _) = route("threat model the new authentication endpoint");
+        assert_eq!(exit_code, 0);
+        assert!(
+            stdout.contains("specialist: security-and-compliance-auditor"),
+            "stdout: {stdout}"
+        );
+    }
+
+    #[test]
+    fn route_etl_pipeline_targets_data_ml_skill() {
+        // The data/ML rule is ordered before cloud-and-devops so "etl" wins over
+        // the broad "pipeline" token.
+        let (exit_code, stdout, _) = route("build an ETL pipeline feeding a dbt data warehouse");
+        assert_eq!(exit_code, 0);
+        assert!(
+            stdout.contains("specialist: data-and-ml-engineering"),
+            "stdout: {stdout}"
+        );
+    }
+
+    #[test]
+    fn route_finops_targets_cost_skill() {
+        // cloud-cost must beat cloud-and-devops on the shared "cloud" token.
+        let (exit_code, stdout, _) =
+            route("cloud cost rightsizing and savings plan with infracost");
+        assert_eq!(exit_code, 0);
+        assert!(
+            stdout.contains("specialist: cloud-cost-and-finops"),
+            "stdout: {stdout}"
+        );
+    }
+
+    #[test]
+    fn route_i18n_targets_localization_skill() {
+        let (exit_code, stdout, _) =
+            route("add i18n message catalogs with ICU MessageFormat pluralization");
+        assert_eq!(exit_code, 0);
+        assert!(
+            stdout.contains("specialist: internationalization-and-localization"),
+            "stdout: {stdout}"
+        );
+    }
+
+    #[test]
+    fn route_dependency_upgrade_targets_supply_chain_skill() {
+        let (exit_code, stdout, _) =
+            route("upgrade transitive dependencies and generate an sbom with provenance");
+        assert_eq!(exit_code, 0);
+        assert!(
+            stdout.contains("specialist: dependency-and-supply-chain"),
+            "stdout: {stdout}"
+        );
+    }
+
+    #[test]
+    fn route_plain_deploy_still_targets_devops() {
+        // Regression: a plain infra ask with no narrow token must still land on
+        // cloud-and-devops-expert despite the new rules ordered before it.
+        let (exit_code, stdout, _) =
+            route("deploy the service to kubernetes with a terraform rollout");
+        assert_eq!(exit_code, 0);
+        assert!(
+            stdout.contains("specialist: cloud-and-devops-expert"),
             "stdout: {stdout}"
         );
     }

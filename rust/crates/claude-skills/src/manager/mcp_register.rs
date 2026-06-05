@@ -134,6 +134,72 @@ pub fn register_mcp_server(claude_home: &Path) -> Result<McpRegistration, String
     Ok(outcome)
 }
 
+/// Outcome of an unregistration attempt, for caller-facing reporting.
+#[derive(Debug, PartialEq, Eq)]
+pub enum McpUnregistration {
+    /// The `claude_core` entry was present and has been removed.
+    Removed,
+    /// No `claude_core` entry existed — nothing to do.
+    NotPresent,
+}
+
+/// Remove the top-level `mcpServers.claude_core` entry from `~/.claude.json`,
+/// the exact reverse of [`register_mcp_server`]. Preserves every unrelated key
+/// and every sibling MCP server; deletes the now-empty `mcpServers` object so an
+/// uninstall leaves no empty scaffolding behind. Returns the outcome, or an error
+/// string on IO/parse failure.
+///
+/// Why this exists: `register_mcp_server` writes `claude_core` into `~/.claude.json`
+/// on every install/update/repair. Without the matching removal, an uninstall
+/// leaves a dangling MCP entry pointing at a deleted binary, which Claude Code
+/// tries to spawn as an MCP server every session. Uninstall must reverse install.
+///
+/// Idempotent: a missing file, a file with no `mcpServers`, or a file with no
+/// `claude_core` entry are all `NotPresent` no-ops that do not rewrite the file.
+/// A corrupt/non-object config is a hard error rather than a silent overwrite —
+/// clobbering a user's `~/.claude.json` would be destructive.
+pub fn unregister_mcp_server(claude_home: &Path) -> Result<McpUnregistration, String> {
+    let config_path = mcp_config_path(claude_home);
+    let existing_text = read_text_if_exists(&config_path)?;
+    if existing_text.trim().is_empty() {
+        return Ok(McpUnregistration::NotPresent);
+    }
+
+    let mut document: Value = serde_json::from_str(&existing_text)
+        .map_err(|error| format!("parse {}: {error}", display_path(&config_path)))?;
+    let root = document.as_object_mut().ok_or_else(|| {
+        format!(
+            "{} is not a JSON object; refusing to overwrite",
+            display_path(&config_path)
+        )
+    })?;
+
+    // No mcpServers object at all → nothing to remove.
+    let Some(servers_value) = root.get_mut("mcpServers") else {
+        return Ok(McpUnregistration::NotPresent);
+    };
+    let servers = servers_value.as_object_mut().ok_or_else(|| {
+        format!(
+            "{}: mcpServers is not a JSON object; refusing to overwrite",
+            display_path(&config_path)
+        )
+    })?;
+
+    if servers.remove(MCP_SERVER_KEY).is_none() {
+        return Ok(McpUnregistration::NotPresent);
+    }
+
+    // Drop the now-empty mcpServers scaffolding so uninstall leaves a clean file.
+    if servers.is_empty() {
+        root.remove("mcpServers");
+    }
+
+    let rendered = serde_json::to_string_pretty(&document)
+        .map_err(|error| format!("render {}: {error}", display_path(&config_path)))?;
+    write_text(&config_path, &format!("{rendered}\n"))?;
+    Ok(McpUnregistration::Removed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -248,6 +314,97 @@ mod tests {
         fs::write(&config_path, serde_json::to_string_pretty(&seed).unwrap()).unwrap();
         let outcome = register_mcp_server(&claude_home).expect("register");
         assert_eq!(outcome, McpRegistration::Updated);
+        let _ = fs::remove_dir_all(claude_home.parent().unwrap());
+    }
+
+    #[test]
+    fn unregister_reverses_register() {
+        let claude_home = unique_home("unreg-roundtrip");
+        assert_eq!(
+            register_mcp_server(&claude_home).unwrap(),
+            McpRegistration::Added
+        );
+        // Round-trip: the entry register wrote is the entry unregister removes.
+        assert_eq!(
+            unregister_mcp_server(&claude_home).unwrap(),
+            McpUnregistration::Removed
+        );
+        let config_path = mcp_config_path(&claude_home);
+        let text = fs::read_to_string(&config_path).expect("read config");
+        let parsed: Value = serde_json::from_str(&text).expect("valid json");
+        // The claude_core entry is gone and the now-empty mcpServers scaffolding
+        // is dropped so uninstall leaves a clean file.
+        assert!(parsed.get("mcpServers").is_none());
+        let _ = fs::remove_dir_all(claude_home.parent().unwrap());
+    }
+
+    #[test]
+    fn unregister_preserves_sibling_servers_and_keys() {
+        let claude_home = unique_home("unreg-preserve");
+        let config_path = mcp_config_path(&claude_home);
+        let seed = json!({
+            "userID": "abc123",
+            "projects": { "/some/path": { "allowedTools": [] } },
+            "mcpServers": {
+                "claude_core": { "type": "stdio", "command": "x", "args": ["mcp", "serve"], "env": {}, "alwaysLoad": true },
+                "other-server": { "type": "stdio", "command": "y", "args": [], "env": {} }
+            }
+        });
+        fs::write(&config_path, serde_json::to_string_pretty(&seed).unwrap()).unwrap();
+
+        assert_eq!(
+            unregister_mcp_server(&claude_home).unwrap(),
+            McpUnregistration::Removed
+        );
+
+        let text = fs::read_to_string(&config_path).unwrap();
+        let parsed: Value = serde_json::from_str(&text).unwrap();
+        // Unrelated keys survive.
+        assert_eq!(parsed["userID"], "abc123");
+        assert_eq!(parsed["projects"]["/some/path"]["allowedTools"], json!([]));
+        // Sibling MCP server survives; mcpServers object is kept because it is
+        // not empty.
+        assert_eq!(parsed["mcpServers"]["other-server"]["command"], "y");
+        // Our entry is gone.
+        assert!(parsed["mcpServers"].get(MCP_SERVER_KEY).is_none());
+        let _ = fs::remove_dir_all(claude_home.parent().unwrap());
+    }
+
+    #[test]
+    fn unregister_is_noop_when_absent() {
+        let claude_home = unique_home("unreg-absent");
+        // No file at all.
+        assert_eq!(
+            unregister_mcp_server(&claude_home).unwrap(),
+            McpUnregistration::NotPresent
+        );
+        // File exists but has no claude_core entry.
+        let config_path = mcp_config_path(&claude_home);
+        fs::write(
+            &config_path,
+            r#"{"mcpServers":{"other":{"type":"stdio","command":"z","args":[],"env":{}}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            unregister_mcp_server(&claude_home).unwrap(),
+            McpUnregistration::NotPresent
+        );
+        // The unrelated server is untouched.
+        let text = fs::read_to_string(&config_path).unwrap();
+        let parsed: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(parsed["mcpServers"]["other"]["command"], "z");
+        let _ = fs::remove_dir_all(claude_home.parent().unwrap());
+    }
+
+    #[test]
+    fn unregister_refuses_to_clobber_non_object_config() {
+        let claude_home = unique_home("unreg-corrupt");
+        let config_path = mcp_config_path(&claude_home);
+        fs::write(&config_path, "[\"not an object\"]").unwrap();
+        assert!(
+            unregister_mcp_server(&claude_home).is_err(),
+            "must not overwrite a non-object config"
+        );
         let _ = fs::remove_dir_all(claude_home.parent().unwrap());
     }
 }
