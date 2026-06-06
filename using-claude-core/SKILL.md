@@ -95,16 +95,28 @@ After implementation work, before claiming completion:
   project-level CLAUDE.md or AGENTS.md defines stricter routing rules, those
   take precedence; otherwise the inline rule in this paragraph is the standard.
 
-> **Optional hard review gate.** By default the closeout reviewer rule is an
-> advisory reminder the model is trusted to honor. Operators who want it
-> *enforced* can set `CLAUDE_SKILLS_REVIEW_GATE=on`: the PostToolBatch hook then
-> emits a `decision: "block"` when a session changed code but recorded no
-> reviewer pass since the last edit, refusing closeout until a review runs
-> (invoke the `reviewer` skill, or run `claude-skills review pre-pr`, which
-> clears the gate). It is **off by default**, blocks at most
-> `CLAUDE_SKILLS_REVIEW_GATE_MAX_BLOCKS` time(s) per session (default 1) and then
-> lets the turn through, so it cannot loop. Disable with
-> `CLAUDE_SKILLS_REVIEW_GATE=off` or `…_MAX_BLOCKS=0`.
+> **Default-on enforcement gates.** Two PostToolBatch gates are **on by
+> default** — they are the only model-independent backstop for the Iron Law,
+> since hooks cannot force a tool/Skill call but can refuse to let a turn close
+> until a required artifact exists:
+> - **Working-brief gate** (front of the law) — if a session changes code but no
+>   working brief was written this session, the hook emits `decision: "block"`
+>   once, refusing closeout until you write one
+>   (`claude-skills memory working-brief write --request "..." --acceptance-criteria "..."`,
+>   which clears the gate). Disable with `CLAUDE_SKILLS_BRIEF_GATE=off`.
+> - **Review gate** (back of the law) — if a session changed code but recorded no
+>   reviewer pass since the last edit, the hook blocks once until a review runs
+>   (invoke the `reviewer` skill, or run `claude-skills review pre-pr`, which
+>   clears the gate). Disable with `CLAUDE_SKILLS_REVIEW_GATE=off`.
+>
+> Each gate blocks **at most `…_MAX_BLOCKS` time(s) per session (default 1)** via
+> a strictly-increasing counter and then permanently falls through to advisory,
+> so the pair cannot loop. Both fail open (no session id, unreadable telemetry,
+> or a render error degrade to the advisory reminder, never a block) and both are
+> instantly disablable with their env var or `…_MAX_BLOCKS=0`. A determined model
+> can still write a token brief to clear the front gate — that is the
+> acknowledged ceiling of artifact-existence enforcement, which is why the
+> per-prompt reminders and this contract still matter.
 
 ## Code Implementation Discipline (every code-touching turn)
 

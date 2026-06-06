@@ -25,6 +25,14 @@ pub struct Brief {
     pub constraints: Vec<String>,
     pub acceptance_criteria: Vec<String>,
     pub assumptions: Vec<String>,
+    /// Workspace this brief was written for, as a display path (e.g.
+    /// `D:/Nasri/Project/claude_core`). Empty for legacy briefs written before
+    /// the field existed and for writes where the cwd could not be resolved;
+    /// consumers must treat empty as "unknown / applies anywhere" so older
+    /// briefs never change behavior. Used by the working-brief gate to scope
+    /// "did this workspace get a brief this session" instead of counting a brief
+    /// written for an unrelated project.
+    pub workspace: String,
     pub created_at: String,
 }
 
@@ -36,12 +44,14 @@ pub fn brief_path(claude_home: &Path, id: &str) -> PathBuf {
     brief_directory(claude_home).join(format!("{id}.json"))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn create_brief(
     id: String,
     request: String,
     constraints: Vec<String>,
     acceptance_criteria: Vec<String>,
     assumptions: Vec<String>,
+    workspace: String,
     created_at: String,
 ) -> Brief {
     Brief {
@@ -50,6 +60,7 @@ pub fn create_brief(
         constraints,
         acceptance_criteria,
         assumptions,
+        workspace,
         created_at,
     }
 }
@@ -88,6 +99,7 @@ pub fn brief_to_value(brief: &Brief) -> Value {
                     .collect(),
             ),
         ),
+        ("workspace".into(), Value::String(brief.workspace.clone())),
         ("createdAt".into(), Value::String(brief.created_at.clone())),
     ])
 }
@@ -108,6 +120,7 @@ fn brief_to_storage_value(brief: &Brief) -> Value {
             "assumptions".into(),
             Value::String(brief.assumptions.join("\n")),
         ),
+        ("workspace".into(), Value::String(brief.workspace.clone())),
         ("createdAt".into(), Value::String(brief.created_at.clone())),
     ])
 }
@@ -174,6 +187,7 @@ pub fn parse_brief_text(text: &str) -> Result<Brief, String> {
         constraints: Vec::new(),
         acceptance_criteria: Vec::new(),
         assumptions: Vec::new(),
+        workspace: String::new(),
         created_at: String::new(),
     };
     for (key, value) in fields {
@@ -183,6 +197,7 @@ pub fn parse_brief_text(text: &str) -> Result<Brief, String> {
             "constraints" => brief.constraints = split_lines(&value),
             "acceptanceCriteria" => brief.acceptance_criteria = split_lines(&value),
             "assumptions" => brief.assumptions = split_lines(&value),
+            "workspace" => brief.workspace = value,
             "createdAt" => brief.created_at = value,
             _ => {}
         }
@@ -229,6 +244,7 @@ mod tests {
             vec!["must not break /users".into(), "no n+1 queries".into()],
             vec!["limit=20 default".into(), "expose nextCursor".into()],
             vec!["cursor encoding stays opaque".into()],
+            "D:/Nasri/Project/example".into(),
             "2026-05-16T08:00:00Z".into(),
         );
         write_brief(&claude_home, &brief).expect("write brief");
@@ -236,6 +252,10 @@ mod tests {
             .expect("read brief")
             .expect("brief exists");
         assert_eq!(round, brief);
+        assert_eq!(
+            round.workspace, "D:/Nasri/Project/example",
+            "workspace field must round-trip through storage"
+        );
         let _ = fs::remove_dir_all(&claude_home);
     }
 
@@ -258,6 +278,7 @@ mod tests {
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
+                String::new(),
                 "2026-05-16T08:01:00Z".into(),
             ),
         )
@@ -270,6 +291,7 @@ mod tests {
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
+                String::new(),
                 "2026-05-16T08:00:00Z".into(),
             ),
         )
@@ -290,6 +312,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
             Vec::new(),
+            String::new(),
             "2026-05-16T08:00:00Z".into(),
         );
         write_brief(&claude_home, &brief).expect("write");

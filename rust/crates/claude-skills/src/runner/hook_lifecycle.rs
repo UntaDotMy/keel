@@ -1084,6 +1084,105 @@ fn mcp_tool_pointer_for_prompt(prompt: &str) -> Option<&'static str> {
     None
 }
 
+/// Per-prompt reminder for code-CHANGE prompts: read the map, recall prior work,
+/// and write a working brief BEFORE editing existing code.
+///
+/// This closes the gap that let the front of the Iron Law go unenforced in
+/// practice. `mcp_tool_pointer_for_prompt` above fires only on *question*-shaped
+/// prompts ("what is this project", "what do you remember"). A *work* prompt
+/// ("rework the X", "fix the Y", "add Z") carries a domain token, so the skill
+/// matcher may fire — but nothing reminded the model to read SYSTEM_MAP, run
+/// `recall`, or write a working brief first. Those are exactly the steps most
+/// easily rationalized away under time pressure, and skipping them is what ships
+/// the wrong thing.
+///
+/// Returns `Some(text)` when the prompt looks like a request to change the
+/// codebase (edit/build/refactor/fix intent) and `None` otherwise, so it never
+/// fires on pure questions, chit-chat, or read-only asks. Deliberately
+/// conservative: a missed work prompt just loses a reminder (the default-on
+/// brief gate is the hard backstop), while a false positive would add noise to
+/// an ordinary question.
+fn work_intent_pointer_for_prompt(prompt: &str) -> Option<&'static str> {
+    let lowered = prompt.to_ascii_lowercase();
+
+    // Unambiguous change-intent cues — safe to match as substrings because they
+    // are imperative verbs or verb+object phrases that do not double as common
+    // nouns in question phrasing. Each is a frequent opener for a code-change
+    // request.
+    const STRONG_CUES: &[&str] = &[
+        "implement",
+        "refactor",
+        "rework",
+        "rewrite",
+        "add a ",
+        "add an ",
+        "add support",
+        "change the",
+        "update the",
+        "modify",
+        "migrate",
+        "wire up",
+        "integrate",
+        "create a",
+        "create an",
+        "delete the",
+        "remove the",
+        "rename",
+        "optimize",
+        "extend the",
+    ];
+    if STRONG_CUES.iter().any(|cue| lowered.contains(cue)) {
+        return Some(WORK_INTENT_REMINDER);
+    }
+
+    // Verbs that ALSO read as nouns ("the build", "a fix", "the patch"). Treat
+    // them as change-intent only when used as a verb — i.e. NOT immediately
+    // preceded by an article. "fix the bug" fires; "is the build passing" and
+    // "when is the fix landing" do not.
+    const VERB_OR_NOUN_CUES: &[&str] = &["build ", "fix ", "fixes ", "patch "];
+    if VERB_OR_NOUN_CUES
+        .iter()
+        .any(|cue| cue_used_as_verb(&lowered, cue))
+    {
+        return Some(WORK_INTENT_REMINDER);
+    }
+
+    None
+}
+
+/// The read-map / recall / write-brief / preserve-flow reminder injected for
+/// code-change prompts. A `const` so both match arms above return the exact same
+/// text and the test asserting its content has a single source of truth.
+const WORK_INTENT_REMINDER: &str = "This prompt asks you to change the codebase. Before editing: (1) read the workspace SYSTEM_MAP (call the claude_core MCP `system_map` tool) and the owning file — never edit against an imagined version; (2) call `recall` to surface any prior work, decisions, or conventions on this topic; (3) write a working brief with `claude-skills memory working-brief write --request \"...\" --acceptance-criteria \"...\"` capturing what the task actually asks and how completion is judged BEFORE you start (this also clears the default-on working-brief gate); (4) if you are about to edit existing code, invoke the `preserve-existing-flow` skill first. Understand before building — correct code that solved the wrong problem is the most expensive failure.";
+
+/// True when `cue` (e.g. `"fix "`) appears in `lowered` used as a verb rather
+/// than a noun — that is, at least one occurrence is NOT immediately preceded by
+/// a determiner ("the", "a", "an", "this", "that"). This is what separates the
+/// change request "fix the bug" from the question "is the fix ready". Whole-word
+/// determiner matching avoids treating "breathe " (ends in "the") as an article.
+fn cue_used_as_verb(lowered: &str, cue: &str) -> bool {
+    const ARTICLES: &[&str] = &["the", "a", "an", "this", "that"];
+    let mut search_start = 0;
+    while let Some(relative) = lowered[search_start..].find(cue) {
+        let index = search_start + relative;
+        let preceding = lowered[..index].trim_end();
+        let after_article = ARTICLES.iter().any(|article| {
+            if !preceding.ends_with(article) {
+                return false;
+            }
+            // Whole-word check: the char before the article must be a boundary,
+            // so "breathe" (ends with "the") is not mistaken for the article.
+            let article_start = preceding.len() - article.len();
+            article_start == 0 || preceding.as_bytes()[article_start - 1] == b' '
+        });
+        if !after_article {
+            return true;
+        }
+        search_start = index + cue.len();
+    }
+    false
+}
+
 /// UserPromptSubmit dispatcher that reads stdin and composes the per-prompt
 /// `additionalContext`.
 ///
@@ -1168,6 +1267,20 @@ fn run_hook_user_prompt_submit(
     // the prompts where reaching for the tool is the correct first move.
     if !prompt_text.trim().is_empty() {
         if let Some(pointer) = mcp_tool_pointer_for_prompt(prompt_text) {
+            base_context = format!("{pointer}\n\n{base_context}");
+        }
+    }
+
+    // Point code-CHANGE prompts at the read-map / recall / write-brief /
+    // preserve-flow front of the Iron Law. The question pointer above fires only
+    // on question-shaped asks; a work prompt ("rework X", "fix Y") would
+    // otherwise get no reminder to do the upfront research before editing — the
+    // exact gap that let the law go unenforced. Fires independently of the other
+    // two pointers (a prompt can be both a work ask and match a skill), and is
+    // prepended last so it sits at the very top of the per-prompt context on the
+    // turns where the upfront discipline matters most.
+    if !prompt_text.trim().is_empty() {
+        if let Some(pointer) = work_intent_pointer_for_prompt(prompt_text) {
             base_context = format!("{pointer}\n\n{base_context}");
         }
     }
@@ -1326,104 +1439,298 @@ fn count_session_tool_timing_rows(claude_home: &Path, session_id: &str) -> usize
 /// because models that pattern-match generic reminders as noise have
 /// rationalized past prior versions of this text.
 fn post_tool_batch_context() -> String {
-    "Closeout check: if this batch changed code with logic edits, multi-file changes, public-API touches, or security-sensitive surfaces, route the diff through a reviewer pass before final closeout. Trivial work (docs-only, formatting-only, single-line typo or comment fixes, generated-only) is exempt. The standard is: non-trivial code does not self-review. If a project-level CLAUDE.md or AGENTS.md defines stricter routing rules, those take precedence. If this reminder feels like wrapper noise, that is the rationalization the rule names — re-read the diff and decide deliberately before skipping.".to_string()
+    "Closeout check: if this batch changed code with logic edits, multi-file changes, public-API touches, or security-sensitive surfaces, route the diff through a reviewer pass before final closeout. Trivial work (docs-only, formatting-only, single-line typo or comment fixes, generated-only) does not need a full reviewer pass — but that is a judgment about the review, not a promise the gates stay silent. The standard is: non-trivial code does not self-review. Note: the default-on working-brief and review gates are intentionally blunt and do not detect triviality, so any code-changing session may receive one bounded, clearable block — follow the gate's own message to satisfy or disable it. If a project-level CLAUDE.md or AGENTS.md defines stricter routing rules, those take precedence. If this reminder feels like wrapper noise, that is the rationalization the rule names — re-read the diff and decide deliberately before skipping.".to_string()
 }
 
-// ----- Optional PostToolBatch review gate (step 7) -----
+// ----- PostToolBatch enforcement gates (review gate + working-brief gate) -----
 //
-// By default the PostToolBatch hook only *advises* a reviewer pass (the text
-// above). When an operator opts in with `CLAUDE_SKILLS_REVIEW_GATE=on`, the hook
-// instead emits a `decision: "block"` when this session changed code but no
-// reviewer pass was recorded since the last edit — the only model-INDEPENDENT
-// way to keep non-trivial work from closing unreviewed, since Claude Code hooks
-// cannot force a Skill()/MCP/tool call.
+// The PostToolBatch hook fires after a batch of tool calls resolves, just
+// before the next model turn. Two gates ride here, both DEFAULT-ON, because
+// they are the only model-INDEPENDENT way to enforce the Iron Law — Claude Code
+// hooks cannot force a Skill()/MCP/tool call, but they CAN refuse to let a turn
+// close until a required artifact exists:
+//   * Review gate — blocks when this session changed code but no reviewer pass
+//     was recorded since the last edit (the BACK of the law: review before close).
+//   * Working-brief gate — blocks when this session changed code but no working
+//     brief was written this session (the FRONT of the law: understand/plan before
+//     building). This is the gate that would have caught the failure that motivated
+//     it: editing files with no brief, no recall, no map read.
 //
-// SAFETY — this is the part that makes a hard gate shippable:
-//   * OFF by default. With the env var unset (or `off`/`0`), behavior is byte
-//     -for-byte identical to the advisory-only reminder. Merging changes nothing
-//     for anyone who does not opt in.
-//   * Hard per-session block cap. Even when enabled, the gate blocks at most
-//     `CLAUDE_SKILLS_REVIEW_GATE_MAX_BLOCKS` times (default 1) per session, then
-//     permanently falls through to advisory. Because the issued-block counter
-//     strictly increases on every block and the gate stops blocking once it
-//     reaches the cap, an infinite Stop/PostToolBatch loop is mathematically
-//     impossible regardless of whether the model ever satisfies the gate. This
-//     directly forecloses the documented stop-cascade hazard.
+// SAFETY — this is what makes a hard, default-on gate shippable without wedging
+// anyone's session:
+//   * Bounded. Each gate blocks at most `…_MAX_BLOCKS` times (default 1) per
+//     session, then permanently falls through to advisory. The issued-block
+//     counter strictly increases on every block and `decide_gate` stops blocking
+//     once it reaches the cap, so an infinite Stop/PostToolBatch loop is
+//     mathematically impossible regardless of whether the model ever satisfies
+//     the gate. This forecloses the documented stop-cascade hazard.
 //   * Fail-open everywhere. No session id, no claude_home, unreadable telemetry,
 //     or a serialization error all degrade to the advisory reminder, never to a
 //     block. A telemetry hiccup can never wedge a turn.
-//   * Clearable by actually reviewing. Running `claude-skills review
-//     pre-pr|pre-commit|gates` writes a workspace-keyed marker; if that marker
-//     is newer than the last edit, the gate does not block.
+//   * Off-switch preserved. `CLAUDE_SKILLS_REVIEW_GATE=off` and
+//     `CLAUDE_SKILLS_BRIEF_GATE=off` (or `…_MAX_BLOCKS=0`) each fully disable
+//     their gate, restoring byte-identical advisory output.
+//   * Clearable by actually doing the work. Running `claude-skills review
+//     pre-pr|pre-commit|gates` clears the review gate; writing a working brief
+//     this session (`claude-skills memory working-brief write`) clears the brief
+//     gate. The gates reward the real action, not a token one — though a
+//     determined model can still write a junk brief to clear the front gate, which
+//     is the acknowledged ceiling of artifact-existence enforcement.
+//
+// Default-on rationale: these were opt-in and almost nobody flipped them on, so
+// the law went unenforced in practice. Making them default-on with a bounded
+// single block per session is the lightest enforcement that actually changes
+// behavior for every user while staying loop-proof and instantly disablable.
 
 const REVIEW_GATE_ENV_VAR: &str = "CLAUDE_SKILLS_REVIEW_GATE";
 const REVIEW_GATE_MAX_BLOCKS_ENV_VAR: &str = "CLAUDE_SKILLS_REVIEW_GATE_MAX_BLOCKS";
 
-/// Default block cap when the gate is enabled but the operator did not set a
-/// custom `CLAUDE_SKILLS_REVIEW_GATE_MAX_BLOCKS`. One hard stop per session: the
-/// model gets a single un-skippable "review before closing" block, after which
-/// the turn proceeds no matter what. A cap of 0 disables blocking entirely (a
-/// second escape hatch alongside the on/off switch).
-const REVIEW_GATE_DEFAULT_MAX_BLOCKS: u64 = 1;
+/// Default block cap when a gate is enabled but the operator did not set a
+/// custom `…_MAX_BLOCKS`. One hard stop per session: the model gets a single
+/// un-skippable block, after which the turn proceeds no matter what. A cap of 0
+/// disables blocking entirely (a second escape hatch alongside the off-switch).
+const GATE_DEFAULT_MAX_BLOCKS: u64 = 1;
 
-/// True only when the operator explicitly opts in. Unset / `off` / `0` / `false`
-/// all leave the gate disabled (advisory-only), which is the default.
+/// Shared default-on env reader for the PostToolBatch gates.
+///
+/// Returns `true` (enabled) unless the env var is explicitly set to a disable
+/// token (`off` / `0` / `false` / `no`, case-insensitive). Unset → enabled,
+/// which is the new default for both gates. Any unrecognized value also enables,
+/// so a typo fails safe toward enforcement rather than silently disabling.
+fn gate_enabled_by_default(env_var: &str) -> bool {
+    match std::env::var(env_var).ok().as_deref().map(str::trim) {
+        Some(value) => !matches!(
+            value.to_ascii_lowercase().as_str(),
+            "off" | "0" | "false" | "no"
+        ),
+        None => true,
+    }
+}
+
+/// True unless the operator explicitly disables the review gate. Default-on:
+/// unset enables it; `CLAUDE_SKILLS_REVIEW_GATE=off` (or `0`/`false`/`no`)
+/// restores advisory-only behavior.
 fn review_gate_enabled() -> bool {
-    std::env::var(REVIEW_GATE_ENV_VAR)
-        .ok()
-        .as_deref()
-        .map(str::trim)
-        .map(|value| matches!(value, "on" | "block" | "1" | "true"))
-        .unwrap_or(false)
+    gate_enabled_by_default(REVIEW_GATE_ENV_VAR)
 }
 
 fn review_gate_max_blocks() -> u64 {
     std::env::var(REVIEW_GATE_MAX_BLOCKS_ENV_VAR)
         .ok()
         .and_then(|value| value.trim().parse::<u64>().ok())
-        .unwrap_or(REVIEW_GATE_DEFAULT_MAX_BLOCKS)
+        .unwrap_or(GATE_DEFAULT_MAX_BLOCKS)
+}
+
+const BRIEF_GATE_ENV_VAR: &str = "CLAUDE_SKILLS_BRIEF_GATE";
+const BRIEF_GATE_MAX_BLOCKS_ENV_VAR: &str = "CLAUDE_SKILLS_BRIEF_GATE_MAX_BLOCKS";
+
+/// Grace window (ms) applied when deciding whether a working brief "belongs to"
+/// the current session. A brief written as the session's very first action has a
+/// file mtime a few ms BEFORE the session-start timestamp (which is taken from
+/// the PostToolUse timing row recorded *after* that write tool completes), so a
+/// zero-grace `mtime >= session_start` comparison would falsely reject correct
+/// brief-first behavior. 60s comfortably covers tool-execution skew while still
+/// rejecting prior-session briefs, which are minutes-to-hours older. Erring on
+/// the generous side is deliberate: the gate fails open toward NOT blocking.
+const BRIEF_GATE_SESSION_GRACE_MS: u64 = 60_000;
+
+/// True unless the operator explicitly disables the working-brief gate.
+/// Default-on: unset enables it; `CLAUDE_SKILLS_BRIEF_GATE=off` (or
+/// `0`/`false`/`no`) restores advisory-only behavior.
+fn brief_gate_enabled() -> bool {
+    gate_enabled_by_default(BRIEF_GATE_ENV_VAR)
+}
+
+fn brief_gate_max_blocks() -> u64 {
+    std::env::var(BRIEF_GATE_MAX_BLOCKS_ENV_VAR)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(GATE_DEFAULT_MAX_BLOCKS)
+}
+
+fn brief_gate_blocks_path(claude_home: &Path, session_id: &str) -> PathBuf {
+    let key = if session_id.trim().is_empty() {
+        "no-session".to_string()
+    } else {
+        sanitize_memory_key(session_id)
+    };
+    claude_home
+        .join("state")
+        .join("brief-gate-blocks")
+        .join(key)
+}
+
+fn brief_gate_block_reason() -> String {
+    "Working-brief gate (CLAUDE_SKILLS_BRIEF_GATE, on by default): this session changed code but no working brief was written this session. The Iron Law requires understanding before building — before continuing, write one with `claude-skills memory working-brief write --request \"...\" --acceptance-criteria \"...\"` capturing what the task actually asks and how completion is judged (this clears the gate). This gate blocks at most CLAUDE_SKILLS_BRIEF_GATE_MAX_BLOCKS time(s) per session (default 1) and then lets the turn through, so it cannot loop. Set CLAUDE_SKILLS_BRIEF_GATE=off to disable entirely.".to_string()
+}
+
+/// Unix-ms modification time of `path`, or `None` on any error. Fail-open: an
+/// unreadable mtime is treated by callers as "no usable timestamp" rather than
+/// surfacing an error into the hook.
+fn file_mtime_ms(path: &Path) -> Option<u64> {
+    fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|delta| delta.as_millis() as u64)
+}
+
+/// Most recent working-brief file mtime (ms) for a brief that applies to
+/// `workspace_cwd`, or `None` when no such brief exists. Scans
+/// `<claude_home>/working-briefs/*.json` — the same directory the
+/// `claude-skills memory working-brief write` surface writes to.
+///
+/// A brief applies when its stored `workspace` matches `workspace_cwd` (compared
+/// through [`sanitize_memory_key`] so path-separator and case differences
+/// normalize out) OR its workspace is empty. Empty means a legacy brief written
+/// before the field existed, or a write where the cwd could not be resolved —
+/// either way it is treated as "applies anywhere" so the workspace scoping never
+/// makes an older brief suddenly stop counting. Fail-open: a missing or
+/// unreadable directory, or a brief that fails to parse, yields no match for
+/// that entry rather than an error.
+fn newest_brief_mtime_ms(claude_home: &Path, workspace_cwd: &str) -> Option<u64> {
+    let directory = crate::utility::working_brief::brief_directory(claude_home);
+    let entries = fs::read_dir(&directory).ok()?;
+    let current_key = sanitize_memory_key(workspace_cwd);
+    let mut newest: Option<u64> = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(brief) = crate::utility::working_brief::parse_brief_text(&text) else {
+            continue;
+        };
+        let applies = brief.workspace.trim().is_empty()
+            || sanitize_memory_key(&brief.workspace) == current_key;
+        if !applies {
+            continue;
+        }
+        if let Some(ms) = file_mtime_ms(&path) {
+            newest = Some(newest.map_or(ms, |current| current.max(ms)));
+        }
+    }
+    newest
+}
+
+/// Earliest recorded tool-timing (ms) for `session_id`, i.e. an approximation
+/// of when this session started doing work. Scans today's AND yesterday's
+/// per-day JSONL so a session that began before midnight and continued past it
+/// still resolves its true start, rather than taking today's first
+/// post-midnight row (which would post-date a brief written late yesterday and
+/// trigger one spurious block). Returns `None` when the session has no recorded
+/// rows in that window (empty session id, older CC, or unreadable telemetry) so
+/// the caller can fail open.
+fn session_start_ms(claude_home: &Path, session_id: &str) -> Option<u64> {
+    if session_id.trim().is_empty() {
+        return None;
+    }
+    let today = chrono::Local::now().date_naive();
+    let mut earliest: Option<u64> = None;
+    // offset 0 = today, 1 = yesterday. Two days is enough to span one midnight
+    // boundary; sessions longer than that are vanishingly rare and at worst pay
+    // one bounded, clearable block.
+    for offset in 0..2u64 {
+        let Some(date) = today.checked_sub_days(chrono::Days::new(offset)) else {
+            break;
+        };
+        let path = claude_home
+            .join("state")
+            .join("tool-timings")
+            .join(format!("{}.jsonl", date.format("%Y-%m-%d")));
+        let Ok(body) = fs::read_to_string(&path) else {
+            continue;
+        };
+        for line in body.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let Ok(row) = serde_json::from_str::<JsonDocument>(line) else {
+                continue;
+            };
+            if row.get("session_id").and_then(JsonDocument::as_str) != Some(session_id) {
+                continue;
+            }
+            if let Some(ms) = row.get("recorded_at_ms").and_then(JsonDocument::as_u64) {
+                earliest = Some(earliest.map_or(ms, |current| current.min(ms)));
+            }
+        }
+    }
+    earliest
+}
+
+/// Whether a working brief exists that plausibly covers this session's work in
+/// `workspace_cwd`.
+///
+/// True when the newest brief applying to `workspace_cwd` (see
+/// [`newest_brief_mtime_ms`] for the workspace-match rule) has an mtime at or
+/// after `session_start_ms` minus [`BRIEF_GATE_SESSION_GRACE_MS`]. Fail-open in
+/// two ways: when the session start is unknown (`None`, e.g. empty session id)
+/// we report satisfied so the gate never blocks a session it cannot time; the
+/// only way to be unsatisfied is a known session start with no applicable brief
+/// recent enough to match it.
+fn brief_written_this_session(
+    claude_home: &Path,
+    workspace_cwd: &str,
+    session_start_ms: Option<u64>,
+) -> bool {
+    let Some(start) = session_start_ms else {
+        return true;
+    };
+    match newest_brief_mtime_ms(claude_home, workspace_cwd) {
+        Some(brief_ms) => brief_ms.saturating_add(BRIEF_GATE_SESSION_GRACE_MS) >= start,
+        None => false,
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum ReviewGateDecision {
+enum GateDecision {
     /// Emit the normal advisory reminder.
     Advisory,
     /// Emit `decision: "block"` and increment the per-session block counter.
     Block,
 }
 
-/// Pure decision core (no IO, no env) so the termination guarantee is
-/// unit-testable in isolation.
+/// Pure decision core (no IO, no env) shared by the review gate and the
+/// working-brief gate, so the termination guarantee is unit-testable in
+/// isolation and identical for both.
+///
+/// `satisfied` is the gate-specific "requirement already met" signal: for the
+/// review gate it means a reviewer pass ran after the last edit; for the brief
+/// gate it means a working brief covers this session's work.
 ///
 /// The cap check (`blocks_issued >= max_blocks`) is the termination proof: the
 /// caller increments `blocks_issued` on every `Block`, so the value is strictly
 /// monotonic across a session and the function returns `Advisory` forever once
 /// the cap is reached. No infinite loop is possible.
-fn decide_review_gate(
+fn decide_gate(
     enabled: bool,
     max_blocks: u64,
     blocks_issued: u64,
     edit_count: usize,
-    reviewed_after_last_edit: bool,
-) -> ReviewGateDecision {
+    satisfied: bool,
+) -> GateDecision {
     if !enabled || max_blocks == 0 {
-        return ReviewGateDecision::Advisory;
+        return GateDecision::Advisory;
     }
     // No code changed this session — nothing to gate. Pure-research and
     // question-answering turns never get blocked.
     if edit_count == 0 {
-        return ReviewGateDecision::Advisory;
+        return GateDecision::Advisory;
     }
-    // A review already ran after the last edit — requirement satisfied.
-    if reviewed_after_last_edit {
-        return ReviewGateDecision::Advisory;
+    // The gate-specific requirement is already met — nothing to block on.
+    if satisfied {
+        return GateDecision::Advisory;
     }
     // Hard cap: stop blocking once we have issued the allowed number of blocks.
     // This is what guarantees the gate cannot loop.
     if blocks_issued >= max_blocks {
-        return ReviewGateDecision::Advisory;
+        return GateDecision::Advisory;
     }
-    ReviewGateDecision::Block
+    GateDecision::Block
 }
 
 fn now_ms() -> u64 {
@@ -1545,7 +1852,7 @@ pub fn record_review_gate_clear() {
 }
 
 fn review_gate_block_reason() -> String {
-    "Review gate (CLAUDE_SKILLS_REVIEW_GATE is on): this session changed code but no reviewer pass has been recorded since the last edit. Before closing, run a reviewer pass — invoke the `reviewer` skill on the diff, or run `claude-skills review pre-pr` (which also clears this gate). This gate blocks at most CLAUDE_SKILLS_REVIEW_GATE_MAX_BLOCKS time(s) per session (default 1) and then lets the turn through, so it cannot loop. Set CLAUDE_SKILLS_REVIEW_GATE=off to disable entirely.".to_string()
+    "Review gate (CLAUDE_SKILLS_REVIEW_GATE, on by default): this session changed code but no reviewer pass has been recorded since the last edit. Before closing, run a reviewer pass — invoke the `reviewer` skill on the diff, or run `claude-skills review pre-pr` (which also clears this gate). This gate blocks at most CLAUDE_SKILLS_REVIEW_GATE_MAX_BLOCKS time(s) per session (default 1) and then lets the turn through, so it cannot loop. Set CLAUDE_SKILLS_REVIEW_GATE=off to disable entirely.".to_string()
 }
 
 /// Emit the advisory PostToolBatch reminder (the default, gate-disabled path and
@@ -1574,26 +1881,57 @@ fn emit_post_tool_batch_advisory(
     }
 }
 
-/// PostToolBatch dispatcher with the optional review gate.
+/// Emit a `decision: "block"` PostToolBatch payload with `reason`. Falls back
+/// to the advisory reminder if rendering fails so a serialization hiccup can
+/// never wedge the turn. The caller is responsible for incrementing the gate's
+/// block counter BEFORE calling this (the monotonic counter is the termination
+/// guarantee and must advance even if rendering fails).
+fn emit_post_tool_batch_block(
+    reason: String,
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let payload = serde_json::json!({
+        "decision": "block",
+        "reason": reason,
+        "suppressOutput": true,
+    });
+    match serde_json::to_string_pretty(&payload) {
+        Ok(rendered) => {
+            let _ = writeln!(standard_output, "{rendered}");
+            0
+        }
+        Err(error) => {
+            let _ = writeln!(
+                standard_error,
+                "Unable to render PostToolBatch block output: {error}"
+            );
+            emit_post_tool_batch_advisory(standard_output, standard_error)
+        }
+    }
+}
+
+/// PostToolBatch dispatcher running the two default-on enforcement gates.
 ///
 /// Reads stdin for `session_id` (Claude Code delivers the hook payload there,
-/// same as UserPromptSubmit). When the gate is disabled — the default — this is
-/// behaviorally identical to the advisory reminder. When enabled, it may emit a
-/// single `decision: "block"` per session (bounded by the cap) to force a
-/// reviewer pass on unreviewed code changes.
+/// same as UserPromptSubmit). Evaluates the working-brief gate FIRST (the front
+/// of the Iron Law — understand before building), then the review gate (the
+/// back — review before close). At most one `decision: "block"` is emitted per
+/// turn; each gate is independently bounded by its own per-session counter, so
+/// the worst case across a whole session is one brief block plus one review
+/// block, after which both fall through to advisory forever. When both gates are
+/// disabled this is byte-identical to the advisory reminder.
 fn run_hook_post_tool_batch(
     standard_input: &mut dyn Read,
     standard_output: &mut dyn Write,
     standard_error: &mut dyn Write,
 ) -> u8 {
-    // Gate off (default): skip stdin entirely and emit the advisory reminder.
-    // This keeps the disabled path cheap and side-effect-free.
-    if !review_gate_enabled() {
-        return emit_post_tool_batch_advisory(standard_output, standard_error);
-    }
+    let review_on = review_gate_enabled() && review_gate_max_blocks() > 0;
+    let brief_on = brief_gate_enabled() && brief_gate_max_blocks() > 0;
 
-    let max_blocks = review_gate_max_blocks();
-    if max_blocks == 0 {
+    // Both gates off: skip stdin entirely and emit the advisory reminder. This
+    // keeps the fully-disabled path cheap and side-effect-free.
+    if !review_on && !brief_on {
         return emit_post_tool_batch_advisory(standard_output, standard_error);
     }
 
@@ -1611,53 +1949,73 @@ fn run_hook_post_tool_batch(
         .unwrap_or_default();
 
     // Fail-open: without a claude_home we cannot read telemetry or the block
-    // counter, so degrade to advisory rather than risk a wedged turn.
+    // counters, so degrade to advisory rather than risk a wedged turn.
     let Ok(claude_home) = resolve_claude_home("") else {
         return emit_post_tool_batch_advisory(standard_output, standard_error);
     };
 
     let stats = session_edit_stats(&claude_home, session_id);
-    let reviewed = if stats.count == 0 {
-        false
-    } else {
-        review_marker_ms(&claude_home, &stats.last_cwd)
-            .map(|marker_ms| marker_ms >= stats.last_edit_ms)
-            .unwrap_or(false)
-    };
-    let blocks_path = review_gate_blocks_path(&claude_home, session_id);
-    let blocks_issued = read_counter_value(&blocks_path);
 
-    match decide_review_gate(true, max_blocks, blocks_issued, stats.count, reviewed) {
-        ReviewGateDecision::Advisory => {
-            emit_post_tool_batch_advisory(standard_output, standard_error)
-        }
-        ReviewGateDecision::Block => {
+    // Both gates only fire when code changed this session. Short-circuit the
+    // no-edit case so pure-research and question turns pay no gate IO and never
+    // block — this is the same `edit_count == 0 → Advisory` rule decide_gate
+    // enforces, hoisted to skip the brief/review lookups entirely.
+    if stats.count == 0 {
+        return emit_post_tool_batch_advisory(standard_output, standard_error);
+    }
+
+    // Brief gate FIRST (front of the law: understand/plan before building).
+    if brief_on {
+        let start = session_start_ms(&claude_home, session_id);
+        let satisfied = brief_written_this_session(&claude_home, &stats.last_cwd, start);
+        let blocks_path = brief_gate_blocks_path(&claude_home, session_id);
+        let blocks_issued = read_counter_value(&blocks_path);
+        if decide_gate(
+            true,
+            brief_gate_max_blocks(),
+            blocks_issued,
+            stats.count,
+            satisfied,
+        ) == GateDecision::Block
+        {
             // Increment FIRST so the cap counts down even if rendering fails or
             // the model ignores the block — the monotonic counter is the
             // termination guarantee and must advance before anything else.
             let _ = increment_counter_file(&blocks_path);
-            let payload = serde_json::json!({
-                "decision": "block",
-                "reason": review_gate_block_reason(),
-                "suppressOutput": true,
-            });
-            match serde_json::to_string_pretty(&payload) {
-                Ok(rendered) => {
-                    let _ = writeln!(standard_output, "{rendered}");
-                    0
-                }
-                // Even a render failure must not wedge the turn: fall back to
-                // advisory (the counter already advanced, so the cap holds).
-                Err(error) => {
-                    let _ = writeln!(
-                        standard_error,
-                        "Unable to render PostToolBatch block output: {error}"
-                    );
-                    emit_post_tool_batch_advisory(standard_output, standard_error)
-                }
-            }
+            return emit_post_tool_batch_block(
+                brief_gate_block_reason(),
+                standard_output,
+                standard_error,
+            );
         }
     }
+
+    // Review gate SECOND (back of the law: review before close).
+    if review_on {
+        let reviewed = review_marker_ms(&claude_home, &stats.last_cwd)
+            .map(|marker_ms| marker_ms >= stats.last_edit_ms)
+            .unwrap_or(false);
+        let blocks_path = review_gate_blocks_path(&claude_home, session_id);
+        let blocks_issued = read_counter_value(&blocks_path);
+        if decide_gate(
+            true,
+            review_gate_max_blocks(),
+            blocks_issued,
+            stats.count,
+            reviewed,
+        ) == GateDecision::Block
+        {
+            let _ = increment_counter_file(&blocks_path);
+            return emit_post_tool_batch_block(
+                review_gate_block_reason(),
+                standard_output,
+                standard_error,
+            );
+        }
+    }
+
+    // Neither gate blocked → advisory reminder.
+    emit_post_tool_batch_advisory(standard_output, standard_error)
 }
 
 fn prune_raw_output_store(standard_error: &mut dyn Write) {
@@ -3338,6 +3696,55 @@ mod tests {
     }
 
     #[test]
+    fn work_intent_pointer_fires_on_code_change_prompts() {
+        // The targeting fix: code-change prompts must get the read-map / recall /
+        // write-brief / preserve-flow reminder. These are exactly the prompts the
+        // question pointer stays silent on.
+        for prompt in [
+            "rework the github skills in this repo",
+            "fix the failing pagination test",
+            "refactor the auth module to use PKCE",
+            "implement a logout endpoint",
+            "add a retry to the upload client",
+            "update the config loader to read TOML",
+            "migrate the store to sqlite",
+            "rename getUserName to getUsername",
+        ] {
+            let pointer = work_intent_pointer_for_prompt(prompt)
+                .unwrap_or_else(|| panic!("work pointer must fire for: {prompt:?}"));
+            assert!(
+                pointer.contains("SYSTEM_MAP") && pointer.contains("working brief"),
+                "work pointer must name the map and the brief: {prompt:?}"
+            );
+            assert!(
+                pointer.contains("preserve-existing-flow"),
+                "work pointer must route existing-code edits through preserve-existing-flow: {prompt:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn work_intent_pointer_silent_for_questions_and_chitchat() {
+        // Must not fire on questions, read-only asks, or empty prompts — that
+        // would turn the reminder into per-turn noise. Conservative by design.
+        for prompt in [
+            "why is this function returning null",
+            "what does this module do",
+            "explain how the gate works",
+            "is the build passing",
+            "thanks, that looks good",
+            "",
+            "   ",
+        ] {
+            assert_eq!(
+                work_intent_pointer_for_prompt(prompt),
+                None,
+                "work pointer must stay silent for non-change prompts: {prompt:?}"
+            );
+        }
+    }
+
+    #[test]
     fn user_prompt_submit_injects_mcp_pointer_for_repo_question() {
         // End-to-end through the dispatcher: a repo-structure prompt on stdin
         // must surface the system_map pointer in the emitted additionalContext,
@@ -3520,77 +3927,67 @@ mod tests {
         assert_eq!(event_name, Some("PostToolBatch"));
     }
 
-    // ----- Review gate (step 7) tests -----
+    // ----- Shared gate decision-core tests (review gate + brief gate) -----
 
     #[test]
-    fn review_gate_disabled_decision_is_always_advisory() {
-        // The default. With the gate disabled, no combination of inputs blocks.
+    fn gate_disabled_decision_is_always_advisory() {
+        // With a gate disabled, no combination of inputs blocks.
         for edit_count in [0usize, 1, 50] {
-            for reviewed in [true, false] {
+            for satisfied in [true, false] {
                 assert_eq!(
-                    decide_review_gate(false, 1, 0, edit_count, reviewed),
-                    ReviewGateDecision::Advisory,
-                    "disabled gate must never block (edits={edit_count}, reviewed={reviewed})"
+                    decide_gate(false, 1, 0, edit_count, satisfied),
+                    GateDecision::Advisory,
+                    "disabled gate must never block (edits={edit_count}, satisfied={satisfied})"
                 );
             }
         }
     }
 
     #[test]
-    fn review_gate_max_blocks_zero_is_advisory() {
+    fn gate_max_blocks_zero_is_advisory() {
         // Cap of 0 is a second kill switch: enabled but never blocks.
-        assert_eq!(
-            decide_review_gate(true, 0, 0, 5, false),
-            ReviewGateDecision::Advisory
-        );
+        assert_eq!(decide_gate(true, 0, 0, 5, false), GateDecision::Advisory);
     }
 
     #[test]
-    fn review_gate_no_edits_is_advisory() {
+    fn gate_no_edits_is_advisory() {
         // Pure-research / question turns changed no code — never gate them.
-        assert_eq!(
-            decide_review_gate(true, 1, 0, 0, false),
-            ReviewGateDecision::Advisory
-        );
+        assert_eq!(decide_gate(true, 1, 0, 0, false), GateDecision::Advisory);
     }
 
     #[test]
-    fn review_gate_reviewed_after_edit_is_advisory() {
-        // A review already ran after the last edit — requirement satisfied.
-        assert_eq!(
-            decide_review_gate(true, 1, 0, 5, true),
-            ReviewGateDecision::Advisory
-        );
+    fn gate_satisfied_is_advisory() {
+        // The gate-specific requirement is already met (review ran / brief
+        // written) — nothing to block on.
+        assert_eq!(decide_gate(true, 1, 0, 5, true), GateDecision::Advisory);
     }
 
     #[test]
-    fn review_gate_blocks_unreviewed_edits_once() {
-        // Enabled, code changed, no review, under the cap → block exactly once.
-        assert_eq!(
-            decide_review_gate(true, 1, 0, 5, false),
-            ReviewGateDecision::Block
-        );
+    fn gate_blocks_unsatisfied_edits_once() {
+        // Enabled, code changed, requirement unmet, under the cap → block.
+        assert_eq!(decide_gate(true, 1, 0, 5, false), GateDecision::Block);
     }
 
     #[test]
-    fn review_gate_cannot_loop_terminates_at_cap() {
+    fn gate_cannot_loop_terminates_at_cap() {
         // THE TERMINATION PROOF. Simulate the worst case: the gate stays enabled,
-        // code stays changed, and the model NEVER reviews (reviewed=false
-        // forever). Drive the loop exactly as the dispatcher does — increment the
-        // issued-block counter on every Block — and assert it stops blocking once
-        // the cap is reached, no matter how many turns elapse. If this ever
-        // looped in production it would wedge every project; this test is the
-        // guarantee that it cannot.
+        // code stays changed, and the requirement is NEVER satisfied
+        // (satisfied=false forever). Drive the loop exactly as the dispatcher
+        // does — increment the issued-block counter on every Block — and assert it
+        // stops blocking once the cap is reached, no matter how many turns elapse.
+        // If this ever looped in production it would wedge every project; this
+        // test is the guarantee that it cannot. Covers both gates because they
+        // share this exact decision core.
         for max_blocks in [1u64, 2, 3] {
             let mut blocks_issued = 0u64;
             let mut total_blocks = 0u64;
             for _turn in 0..1000 {
-                match decide_review_gate(true, max_blocks, blocks_issued, 5, false) {
-                    ReviewGateDecision::Block => {
+                match decide_gate(true, max_blocks, blocks_issued, 5, false) {
+                    GateDecision::Block => {
                         blocks_issued += 1;
                         total_blocks += 1;
                     }
-                    ReviewGateDecision::Advisory => {}
+                    GateDecision::Advisory => {}
                 }
             }
             assert_eq!(
@@ -3601,15 +3998,19 @@ mod tests {
     }
 
     #[test]
-    fn run_hook_post_tool_batch_disabled_matches_advisory_path() {
-        // End-to-end: with the env var unset, the stdin-reading dispatcher emits
-        // byte-identical output to the lifecycle advisory path. This is the
-        // "merging changes nothing unless you opt in" guarantee.
+    fn run_hook_post_tool_batch_both_gates_off_matches_advisory_path() {
+        // End-to-end: with BOTH gates explicitly disabled, the stdin-reading
+        // dispatcher emits byte-identical output to the lifecycle advisory path.
+        // This is the "off-switch fully restores advisory" guarantee. The gates
+        // are default-on now, so the test must set both to off rather than rely
+        // on an unset env var.
         let _guard = crate::test_support::ENV_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let previous = std::env::var(REVIEW_GATE_ENV_VAR).ok();
-        std::env::remove_var(REVIEW_GATE_ENV_VAR);
+        let previous_review = std::env::var(REVIEW_GATE_ENV_VAR).ok();
+        let previous_brief = std::env::var(BRIEF_GATE_ENV_VAR).ok();
+        std::env::set_var(REVIEW_GATE_ENV_VAR, "off");
+        std::env::set_var(BRIEF_GATE_ENV_VAR, "off");
 
         let mut gate_stdin = std::io::empty();
         let mut gate_out = Vec::new();
@@ -3620,9 +4021,13 @@ mod tests {
         let mut adv_err = Vec::new();
         let adv_code = run_hook_lifecycle("post-tool-batch", &mut adv_out, &mut adv_err);
 
-        match previous {
+        match previous_review {
             Some(value) => std::env::set_var(REVIEW_GATE_ENV_VAR, value),
             None => std::env::remove_var(REVIEW_GATE_ENV_VAR),
+        }
+        match previous_brief {
+            Some(value) => std::env::set_var(BRIEF_GATE_ENV_VAR, value),
+            None => std::env::remove_var(BRIEF_GATE_ENV_VAR),
         }
 
         assert_eq!(gate_code, 0);
@@ -3630,13 +4035,48 @@ mod tests {
         assert_eq!(
             String::from_utf8_lossy(&gate_out),
             String::from_utf8_lossy(&adv_out),
-            "gate-disabled dispatcher output must match the advisory lifecycle path exactly"
+            "both-gates-off dispatcher output must match the advisory lifecycle path exactly"
         );
         // And it must NOT be a block.
         assert!(
             !String::from_utf8_lossy(&gate_out).contains("\"decision\""),
-            "disabled gate must never emit a decision field"
+            "disabled gates must never emit a decision field"
         );
+    }
+
+    #[test]
+    fn gate_enabled_by_default_honors_off_switch() {
+        // The default-on contract: unset → enabled; explicit disable tokens →
+        // disabled; anything else (including a typo) → enabled (fail toward
+        // enforcement).
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        const PROBE: &str = "CLAUDE_SKILLS_GATE_DEFAULT_PROBE";
+        let previous = std::env::var(PROBE).ok();
+
+        std::env::remove_var(PROBE);
+        assert!(gate_enabled_by_default(PROBE), "unset must be enabled");
+
+        for disable in ["off", "0", "false", "no", "OFF", "  off  ", "False"] {
+            std::env::set_var(PROBE, disable);
+            assert!(
+                !gate_enabled_by_default(PROBE),
+                "disable token {disable:?} must disable the gate"
+            );
+        }
+        for enable in ["on", "1", "true", "yes", "wibble", ""] {
+            std::env::set_var(PROBE, enable);
+            assert!(
+                gate_enabled_by_default(PROBE),
+                "non-disable value {enable:?} must keep the gate enabled"
+            );
+        }
+
+        match previous {
+            Some(value) => std::env::set_var(PROBE, value),
+            None => std::env::remove_var(PROBE),
+        }
     }
 
     #[test]
@@ -3649,6 +4089,213 @@ mod tests {
             reason.contains("cannot loop") || reason.contains("at most"),
             "block reason must reassure that the gate is bounded"
         );
+    }
+
+    #[test]
+    fn brief_gate_block_reason_names_the_kill_switch_and_action() {
+        // The brief-gate block must tell the model how to clear it (write a
+        // brief) and how to disable it, and reassure that it is bounded.
+        let reason = brief_gate_block_reason();
+        assert!(reason.contains("CLAUDE_SKILLS_BRIEF_GATE=off"));
+        assert!(
+            reason.contains("working-brief write"),
+            "block reason must name the brief-write surface that clears the gate"
+        );
+        assert!(
+            reason.contains("cannot loop") || reason.contains("at most"),
+            "block reason must reassure that the gate is bounded"
+        );
+    }
+
+    #[test]
+    fn brief_written_this_session_logic() {
+        const WS_A: &str = "D:/Nasri/Project/alpha";
+        const WS_B: &str = "D:/Nasri/Project/beta";
+
+        // Unknown session start → satisfied (fail-open: never block a session we
+        // cannot time).
+        let claude_home = temp_brief_gate_home("unknown-start");
+        assert!(
+            brief_written_this_session(&claude_home, WS_A, None),
+            "unknown session start must report satisfied"
+        );
+
+        // Known start, no brief on disk → not satisfied.
+        assert!(
+            !brief_written_this_session(&claude_home, WS_A, Some(now_ms())),
+            "known start with no brief must be unsatisfied"
+        );
+
+        // A brief written ~now for WS_A covers a WS_A session starting ~now.
+        let brief_a = crate::utility::working_brief::create_brief(
+            "wb-gate-a".into(),
+            "cover this session".into(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            WS_A.into(),
+            "2026-06-06T00:00:00Z".into(),
+        );
+        crate::utility::working_brief::write_brief(&claude_home, &brief_a).expect("write brief a");
+        assert!(
+            brief_written_this_session(&claude_home, WS_A, Some(now_ms())),
+            "a freshly written brief for this workspace must satisfy a session starting now"
+        );
+
+        // WORKSPACE SCOPING (the point of the fix): the WS_A brief must NOT
+        // satisfy a session editing WS_B — a brief for one project does not
+        // count for another.
+        assert!(
+            !brief_written_this_session(&claude_home, WS_B, Some(now_ms())),
+            "a brief written for another workspace must not satisfy this one"
+        );
+
+        // BACKWARD COMPAT: a legacy brief with an empty workspace applies
+        // anywhere, so it satisfies WS_B too (older briefs never start blocking).
+        let brief_legacy = crate::utility::working_brief::create_brief(
+            "wb-gate-legacy".into(),
+            "legacy brief".into(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            String::new(),
+            "2026-06-06T00:00:00Z".into(),
+        );
+        crate::utility::working_brief::write_brief(&claude_home, &brief_legacy)
+            .expect("write legacy brief");
+        assert!(
+            brief_written_this_session(&claude_home, WS_B, Some(now_ms())),
+            "an empty-workspace (legacy) brief must apply to any workspace"
+        );
+
+        // A brief far older than a session that starts well beyond the grace
+        // window → not satisfied (prior-session brief does not count). Use a
+        // fresh home so the briefs written above do not satisfy it.
+        let stale_home = temp_brief_gate_home("stale");
+        let stale_brief = crate::utility::working_brief::create_brief(
+            "wb-gate-stale".into(),
+            "old".into(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            WS_A.into(),
+            "2026-06-06T00:00:00Z".into(),
+        );
+        crate::utility::working_brief::write_brief(&stale_home, &stale_brief)
+            .expect("write stale brief");
+        let far_future_start = now_ms().saturating_add(BRIEF_GATE_SESSION_GRACE_MS * 10);
+        assert!(
+            !brief_written_this_session(&stale_home, WS_A, Some(far_future_start)),
+            "a brief older than (session_start - grace) must not satisfy the gate"
+        );
+
+        let _ = std::fs::remove_dir_all(&claude_home);
+        let _ = std::fs::remove_dir_all(&stale_home);
+    }
+
+    fn temp_brief_gate_home(label: &str) -> std::path::PathBuf {
+        let unique: u128 = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        let directory = std::env::temp_dir().join(format!(
+            "claude-skills-brief-gate-{label}-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).expect("create tempdir");
+        directory
+    }
+
+    #[test]
+    fn run_hook_post_tool_batch_brief_gate_blocks_once_then_falls_through() {
+        // END-TO-END through the real dispatcher: a session that edited code with
+        // no working brief must get exactly one brief-gate block, the block
+        // counter must advance, and the next call must fall through to advisory.
+        // The review gate is disabled so this isolates the brief gate. Exercises
+        // the wiring (stdin parse, timings read, workspace match, counter
+        // increment, gate ordering) that the pure decide_gate test cannot.
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let claude_home = temp_brief_gate_home("e2e-block");
+        let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
+        let previous_review = std::env::var(REVIEW_GATE_ENV_VAR).ok();
+        let previous_brief = std::env::var(BRIEF_GATE_ENV_VAR).ok();
+        std::env::set_var("CLAUDE_TARGET_OVERRIDE", &claude_home);
+        std::env::set_var(REVIEW_GATE_ENV_VAR, "off"); // isolate the brief gate
+        std::env::remove_var(BRIEF_GATE_ENV_VAR); // default-on
+
+        // Seed one edit-class timing row for this session so stats.count > 0 and
+        // session_start_ms resolves. No brief is written → gate must block.
+        let session_id = "sess-e2e-block";
+        let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let timings_dir = claude_home.join("state").join("tool-timings");
+        std::fs::create_dir_all(&timings_dir).expect("create timings dir");
+        let row = serde_json::json!({
+            "recorded_at_ms": now_ms(),
+            "event": "PostToolUse",
+            "tool_name": "Edit",
+            "duration_ms": 5u64,
+            "session_id": session_id,
+            "cwd": "D:/Nasri/Project/gate-e2e",
+            "effort_level": "",
+        });
+        std::fs::write(
+            timings_dir.join(format!("{date}.jsonl")),
+            format!("{row}\n"),
+        )
+        .expect("write timings row");
+
+        let stdin_json = format!("{{\"session_id\":\"{session_id}\"}}");
+
+        // First call: must block and name the brief gate.
+        let mut out1 = Vec::new();
+        let mut err1 = Vec::new();
+        let code1 = run_hook_post_tool_batch(&mut stdin_json.as_bytes(), &mut out1, &mut err1);
+        let out1_text = String::from_utf8_lossy(&out1);
+        assert_eq!(code1, 0, "stderr: {}", String::from_utf8_lossy(&err1));
+        assert!(
+            out1_text.contains("\"decision\"") && out1_text.contains("CLAUDE_SKILLS_BRIEF_GATE"),
+            "first call must emit a brief-gate block: {out1_text}"
+        );
+
+        // The block counter must have advanced to 1.
+        let blocks_path = brief_gate_blocks_path(&claude_home, session_id);
+        assert_eq!(
+            read_counter_value(&blocks_path),
+            1,
+            "brief-gate block counter must advance to 1 after the block"
+        );
+
+        // Second call (same unsatisfied state): cap reached → advisory, no block.
+        let mut out2 = Vec::new();
+        let mut err2 = Vec::new();
+        let code2 = run_hook_post_tool_batch(&mut stdin_json.as_bytes(), &mut out2, &mut err2);
+        let out2_text = String::from_utf8_lossy(&out2);
+        assert_eq!(code2, 0, "stderr: {}", String::from_utf8_lossy(&err2));
+        assert!(
+            !out2_text.contains("\"decision\""),
+            "second call must fall through to advisory (cap reached): {out2_text}"
+        );
+        assert!(
+            out2_text.contains("Closeout check"),
+            "second call must emit the advisory reminder: {out2_text}"
+        );
+
+        match previous_home {
+            Some(value) => std::env::set_var("CLAUDE_TARGET_OVERRIDE", value),
+            None => std::env::remove_var("CLAUDE_TARGET_OVERRIDE"),
+        }
+        match previous_review {
+            Some(value) => std::env::set_var(REVIEW_GATE_ENV_VAR, value),
+            None => std::env::remove_var(REVIEW_GATE_ENV_VAR),
+        }
+        match previous_brief {
+            Some(value) => std::env::set_var(BRIEF_GATE_ENV_VAR, value),
+            None => std::env::remove_var(BRIEF_GATE_ENV_VAR),
+        }
+        let _ = std::fs::remove_dir_all(&claude_home);
     }
 
     #[test]
