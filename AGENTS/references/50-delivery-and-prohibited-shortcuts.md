@@ -9,12 +9,21 @@ Side Effects: None — this file is informational.
 
 ## Feature Delivery Rules
 
-- One feature = one branch = one merge request.
+### Branch model
+
+Three permanent branch tiers, promoted one direction only:
+- **`main`** — final stable, verified. Only receives merges from `dev`. Never commit directly.
+- **`dev`** — active development integration branch for daily commits; features are verified here (staging) before promotion to `main`.
+- **`feat/<topic>`** — all new work: features, fixes, and any subtask. Branch off `dev`, merge back into `dev`.
+
+- One feature = one `feat/<topic>` branch = one merge request into `dev`.
 - Never mix multiple features or unrelated fixes in the same branch or merge request.
+- **Never delete a branch after pushing or merging it** — no `git branch -d/-D`, no `git push origin --delete`. Branches are permanent in this model.
 - Use `git add -p` when selective staging is required.
 - Review `git diff --cached` before each commit.
+- Commit subjects strictly follow `<category>: <FEATURE>: <short information>`. Categories (lowercase): `add`, `config`, `refactor`, `wip`, `fix`, `docs`. `<FEATURE>` is the component/area in uppercase (e.g. RGB, LED, ARGB, SENSOR). Example: `wip: RGB: Build light effect mode (multi color)`.
 - When a commit body is needed, keep it professional and non-chatty, make the title and body match the committed diff exactly, and include only the sections the change genuinely needs. Use this order when present: `Problem`, `Solution`, `Summary`, `Notes`, `What Changed`, `Test Result`. Omit `Problem` and `Solution` when the commit is additive, preventive, or housekeeping rather than fixing a concrete issue, keep `Test Result` limited to validation that directly proves the committed change, and do not mention Claude Code, claude-skills, or tool-brand validation in commit or PR text unless the change itself is about those surfaces.
-- Run `claude-skills git-workflow preflight --repo-root . --base-ref origin/main` before push or merge-request creation.
+- Run `claude-skills git-workflow preflight --repo-root . --base-ref origin/dev` before push or merge-request creation (use `origin/main` only when promoting `dev` to `main`).
 - When opening a PR or MR from the CLI, never publish bodies with escaped newline sequences such as `\\n`; use a real multiline body or a `--body-file` flow instead.
 - Reject or request a split when the diff cannot be described as one cohesive feature.
 

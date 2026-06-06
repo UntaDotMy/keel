@@ -47,25 +47,36 @@ Use one narrow lane per issue or feature so review, validation, and rollback sta
 
 See `references/20-issue-branch-pr-flow.md` for the full worktree, branch, and PR walkthrough.
 
-## Feature Branch and Merge Request Discipline
+## Branch Model and Feature Branch Discipline
 
-- One feature = one branch = one merge request.
+This repository uses three permanent branch tiers, promoted one direction only:
+- **`main`** — final stable, verified. Only receives merges from `dev`. Never commit directly.
+- **`dev`** — active development integration branch for daily commits; features are verified here (staging) before promotion to `main`.
+- **`feat/<topic>`** — all new work: features, fixes, and any subtask. Branch off `dev`, merge back into `dev`.
+
+Discipline:
+- One feature = one `feat/<topic>` branch = one merge request into `dev`.
 - Never mix unrelated features or fixes in the same branch.
+- **Never delete a branch after pushing or merging it** — no `git branch -d/-D`, no `git push origin --delete`. Branches are permanent in this model.
 - Use patch staging (`git add -p`) when selective staging is required.
 - Review `git diff --cached` before committing.
 - When a commit body is needed, keep it professional, make the subject and body match the committed diff exactly, include only the sections the change genuinely needs, and keep this order when a section is present: `Problem`, `Solution`, `Summary`, `Notes`, `What Changed`, `Test Result`. Omit `Problem` and `Solution` when the commit is additive, preventive, or housekeeping rather than fixing a concrete issue, and keep `Test Result` limited to validation that directly proves the committed change.
-- Run `claude-skills git-workflow preflight --repo-root . --base-ref origin/main` before push or merge-request creation.
+- Run `claude-skills git-workflow preflight --repo-root . --base-ref origin/dev` before push or merge-request creation (`origin/main` only when promoting `dev` to `main`).
 - Request a split when the diff cannot be described as one cohesive feature.
 
 ## Branch Naming and Commit Format
 
-**Branch prefixes** (one feature, one branch, one PR):
-- `feat/*` new feature · `fix/*` bug fix · `improve/*` improvement · `add/*` additive work
-- `hotfix/*` urgent production fix · `release/*` release prep
+**Branch tiers** (one feature, one branch, one PR):
+- `main` final stable, verified · `dev` daily integration / staging verification · `feat/<topic>` all new features, fixes, and subtasks (branch off `dev`)
+- Branches are never deleted after push or merge.
 
-**Commit format**:
-- Atomic: one logical change per commit
-- Subject ≤ 50 chars, body wrapped at 72 chars, scoped form `feat(scope): ...` when helpful
+**Commit format** (strictly enforced):
+- Subject must follow `<category>: <FEATURE>: <short information>`.
+- `<category>` is one of (lowercase): `add`, `config`, `refactor`, `wip`, `fix`, `docs`.
+- `<FEATURE>` is the component or area, uppercase, e.g. `RGB`, `LED`, `ARGB`, `SENSOR`.
+- `<short information>` is a concise description.
+- Example: `wip: RGB: Build light effect mode (multi color)`.
+- Atomic: one logical change per commit. Body wrapped at 72 chars when present.
 - Use the configured Git `user.name` and `user.email`; never substitute assistant or tool branding for the author name. When a repo already has a local or global identity configured, preserve it.
 
 ## High-Risk Operations (Explicit User Approval Only)
@@ -122,7 +133,7 @@ See `_shared/common-discipline.md` § Windows Execution Guidance and `references
 - Auto-commit, auto-push, or auto-merge changes
 - Force push to shared branches
 - Rewrite public history
-- Delete branches without confirmation
+- Delete any branch — this repository never deletes branches after push or merge, even when the user asks casually; confirm it is a genuine, explicit exception before running `git branch -d/-D` or `git push origin --delete`
 
 ### Always Do
 - Explain what command will do

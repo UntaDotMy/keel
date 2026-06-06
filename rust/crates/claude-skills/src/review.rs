@@ -1292,26 +1292,58 @@ fn staged_files(repo_root: Option<&std::path::Path>) -> Option<Vec<String>> {
     Some(files)
 }
 
-fn detect_change_type(paths: &[String]) -> &'static str {
+/// Commit categories required by the project commit convention
+/// `<category>: <FEATURE>: <short information>` — all lowercase.
+const COMMIT_CATEGORIES: [&str; 6] = ["add", "config", "refactor", "wip", "fix", "docs"];
+
+/// Validate a commit subject against `<category>: <FEATURE>: <short information>`.
+///
+/// - `<category>` must be one of [`COMMIT_CATEGORIES`] (lowercase).
+/// - `<FEATURE>` must be a non-empty uppercase component label (e.g. RGB, LED, ARGB, SENSOR).
+/// - `<short information>` must be a non-empty description.
+fn validate_commit_subject(subject: &str) -> Result<(), String> {
+    let trimmed = subject.trim();
+    let parts: Vec<&str> = trimmed.splitn(3, ':').collect();
+    if parts.len() < 3 {
+        return Err(
+            "expected three colon-separated parts: <category>: <FEATURE>: <short information>"
+                .to_string(),
+        );
+    }
+    let category = parts[0].trim();
+    let feature = parts[1].trim();
+    let information = parts[2].trim();
+    if !COMMIT_CATEGORIES.contains(&category) {
+        return Err(format!(
+            "category '{category}' must be one of: {}",
+            COMMIT_CATEGORIES.join(", ")
+        ));
+    }
+    if feature.is_empty() {
+        return Err("feature_category is required (e.g. RGB, LED, ARGB, SENSOR)".to_string());
+    }
+    if feature != feature.to_uppercase() {
+        return Err(format!("feature_category '{feature}' must be uppercase"));
+    }
+    if information.is_empty() {
+        return Err("short information is required after the feature category".to_string());
+    }
+    Ok(())
+}
+
+fn detect_category(paths: &[String]) -> &'static str {
     if paths.is_empty() {
-        return "chore";
+        return "wip";
     }
     let all_match = |predicate: fn(&str) -> bool| paths.iter().all(|path| predicate(path));
-    let any_match = |predicate: fn(&str) -> bool| paths.iter().any(|path| predicate(path));
 
     if all_match(is_docs_path) {
         return "docs";
     }
-    if all_match(is_ci_path) {
-        return "ci";
+    if all_match(is_config_path) {
+        return "config";
     }
-    if all_match(is_test_path) {
-        return "test";
-    }
-    if any_match(is_test_path) && !any_match(is_source_path) {
-        return "test";
-    }
-    "chore"
+    "wip"
 }
 
 fn is_docs_path(path: &str) -> bool {
@@ -1322,6 +1354,19 @@ fn is_ci_path(path: &str) -> bool {
     path.starts_with(".github/workflows/")
         || path.starts_with(".github/actions/")
         || path == ".gitlab-ci.yml"
+}
+
+fn is_config_path(path: &str) -> bool {
+    is_ci_path(path)
+        || path.ends_with(".toml")
+        || path.ends_with(".yml")
+        || path.ends_with(".yaml")
+        || path.ends_with(".ini")
+        || path.ends_with(".cfg")
+        || path.ends_with(".conf")
+        || path.ends_with(".json")
+        || path.ends_with(".gitignore")
+        || path.ends_with(".gitattributes")
 }
 
 fn is_test_path(path: &str) -> bool {
@@ -1382,17 +1427,17 @@ fn derive_scope(paths: &[String]) -> Option<String> {
 
 fn generate_commit_subject(from_diff: bool, paths: &[String]) -> String {
     if !from_diff {
-        return "chore: update".to_string();
+        return "wip: GENERAL: update".to_string();
     }
     if paths.is_empty() {
-        return "chore: no staged changes".to_string();
+        return "wip: GENERAL: no staged changes".to_string();
     }
-    let change_type = detect_change_type(paths);
+    let category = detect_category(paths);
     let summary = subject_summary(paths);
-    match derive_scope(paths) {
-        Some(scope) => format!("{change_type}({scope}): {summary}"),
-        None => format!("{change_type}: {summary}"),
-    }
+    let feature = derive_scope(paths)
+        .map(|scope| scope.to_uppercase())
+        .unwrap_or_else(|| "GENERAL".to_string());
+    format!("{category}: {feature}: {summary}")
 }
 
 fn subject_summary(paths: &[String]) -> String {
@@ -1485,6 +1530,22 @@ fn lint_message(
             let first_line = text.lines().next().unwrap_or("");
             if first_line.len() > 72 {
                 let _ = writeln!(standard_error, "message subject exceeds 72 characters");
+                return 1;
+            }
+            if let Err(reason) = validate_commit_subject(first_line) {
+                let _ = writeln!(
+                    standard_error,
+                    "subject does not match <category>: <FEATURE>: <short information>: {reason}"
+                );
+                let _ = writeln!(
+                    standard_error,
+                    "  categories (lowercase): {}",
+                    COMMIT_CATEGORIES.join(", ")
+                );
+                let _ = writeln!(
+                    standard_error,
+                    "  example: wip: RGB: Build light effect mode (multi color)"
+                );
                 return 1;
             }
             let _ = writeln!(standard_output, "message lint passed");
@@ -1691,32 +1752,32 @@ mod tests {
     }
 
     #[test]
-    fn detect_change_type_classifies_docs_only() {
+    fn detect_category_classifies_docs_only() {
         let staged = paths(&["README.md", "docs/architecture.md"]);
-        assert_eq!(detect_change_type(&staged), "docs");
+        assert_eq!(detect_category(&staged), "docs");
     }
 
     #[test]
-    fn detect_change_type_classifies_ci_only() {
+    fn detect_category_classifies_ci_as_config() {
         let staged = paths(&[".github/workflows/release.yml"]);
-        assert_eq!(detect_change_type(&staged), "ci");
+        assert_eq!(detect_category(&staged), "config");
     }
 
     #[test]
-    fn detect_change_type_classifies_test_only() {
-        let staged = paths(&["tests/integration.rs", "src/foo_test.rs"]);
-        assert_eq!(detect_change_type(&staged), "test");
+    fn detect_category_classifies_config_files() {
+        let staged = paths(&["Cargo.toml", "rustfmt.toml"]);
+        assert_eq!(detect_category(&staged), "config");
     }
 
     #[test]
-    fn detect_change_type_falls_back_to_chore_for_mixed_source() {
+    fn detect_category_falls_back_to_wip_for_source() {
         let staged = paths(&["src/lib.rs", "src/main.rs"]);
-        assert_eq!(detect_change_type(&staged), "chore");
+        assert_eq!(detect_category(&staged), "wip");
     }
 
     #[test]
-    fn detect_change_type_empty_is_chore() {
-        assert_eq!(detect_change_type(&[]), "chore");
+    fn detect_category_empty_is_wip() {
+        assert_eq!(detect_category(&[]), "wip");
     }
 
     #[test]
@@ -1750,26 +1811,26 @@ mod tests {
 
     #[test]
     fn generate_commit_subject_without_diff_uses_placeholder() {
-        assert_eq!(generate_commit_subject(false, &[]), "chore: update");
+        assert_eq!(generate_commit_subject(false, &[]), "wip: GENERAL: update");
     }
 
     #[test]
     fn generate_commit_subject_with_diff_but_no_staged_signals_empty() {
         assert_eq!(
             generate_commit_subject(true, &[]),
-            "chore: no staged changes"
+            "wip: GENERAL: no staged changes"
         );
     }
 
     #[test]
-    fn generate_commit_subject_combines_type_scope_and_summary() {
+    fn generate_commit_subject_combines_category_feature_and_summary() {
         let staged = paths(&[
             "rust/crates/claude-skills/src/review.rs",
             "rust/crates/claude-skills/src/lib.rs",
         ]);
         assert_eq!(
             generate_commit_subject(true, &staged),
-            "chore(claude-skills): update 2 files"
+            "wip: CLAUDE-SKILLS: update 2 files"
         );
     }
 
@@ -1778,13 +1839,64 @@ mod tests {
         let staged = paths(&["docs/architecture.md"]);
         let subject = generate_commit_subject(true, &staged);
         assert!(
-            subject.starts_with("docs"),
-            "expected docs type, got {subject}"
+            subject.starts_with("docs: "),
+            "expected docs category, got {subject}"
         );
         assert!(
             subject.ends_with("update architecture.md"),
             "expected leaf summary, got {subject}"
         );
+        assert!(
+            validate_commit_subject(&subject).is_ok(),
+            "generated subject must satisfy the strict validator, got {subject}"
+        );
+    }
+
+    #[test]
+    fn generated_subjects_always_pass_strict_validation() {
+        let cases: Vec<Vec<String>> = vec![
+            paths(&["docs/readme.md"]),
+            paths(&["Cargo.toml"]),
+            paths(&["rust/crates/claude-skills/src/review.rs"]),
+            paths(&["a.rs", "b.rs"]),
+        ];
+        for staged in cases {
+            let subject = generate_commit_subject(true, &staged);
+            assert!(
+                validate_commit_subject(&subject).is_ok(),
+                "generated subject {subject:?} failed strict validation"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_commit_subject_accepts_canonical_form() {
+        assert!(validate_commit_subject("wip: RGB: Build light effect mode (multi color)").is_ok());
+        assert!(validate_commit_subject("fix: SENSOR: Correct I2C read timeout").is_ok());
+        assert!(validate_commit_subject("add: ARGB: Add rainbow cycle preset").is_ok());
+        assert!(validate_commit_subject("config: LED: Set default brightness").is_ok());
+        assert!(validate_commit_subject("refactor: RGB: Extract blend helper").is_ok());
+        assert!(validate_commit_subject("docs: SENSOR: Document calibration").is_ok());
+    }
+
+    #[test]
+    fn validate_commit_subject_rejects_unknown_category() {
+        let error = validate_commit_subject("feat: RGB: do a thing").unwrap_err();
+        assert!(error.contains("category"), "got {error}");
+    }
+
+    #[test]
+    fn validate_commit_subject_rejects_lowercase_feature() {
+        let error = validate_commit_subject("wip: rgb: do a thing").unwrap_err();
+        assert!(error.contains("uppercase"), "got {error}");
+    }
+
+    #[test]
+    fn validate_commit_subject_rejects_missing_parts() {
+        assert!(validate_commit_subject("wip: RGB").is_err());
+        assert!(validate_commit_subject("just a message").is_err());
+        assert!(validate_commit_subject("wip: RGB: ").is_err());
+        assert!(validate_commit_subject("wip: : info").is_err());
     }
 
     #[test]

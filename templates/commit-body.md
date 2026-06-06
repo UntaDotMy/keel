@@ -7,6 +7,11 @@ Side Effects: None.
 -->
 # Commit Body Template
 
+Subject line (strictly enforced): `<category>: <FEATURE>: <short information>`
+- `<category>` (lowercase): add | config | refactor | wip | fix | docs
+- `<FEATURE>` (uppercase component): e.g. RGB, LED, ARGB, SENSOR
+- Example: `wip: RGB: Build light effect mode (multi color)`
+
 Problem
 <Only include when the diff fixes a concrete problem.>
 

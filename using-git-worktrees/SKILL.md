@@ -36,13 +36,14 @@ shared checkout and need a second isolated tree the host does not give you.
 ### 1. Create the worktree on a feature branch
 
 ```bash
-git worktree add ../<repo>-<feature> -b <feature-branch>
+git worktree add ../<repo>-<feature> -b feat/<topic> dev
 ```
 
 - This creates a new directory `../<repo>-<feature>` checked out on a new
-  `<feature-branch>`, sharing the same `.git`. The main tree is untouched.
+  `feat/<topic>` branch off `dev`, sharing the same `.git`. The main tree is untouched.
 - Name the directory and branch for the work so parallel worktrees are
-  distinguishable at a glance.
+  distinguishable at a glance. New work — features, fixes, subtasks — all uses
+  `feat/<topic>` branches off `dev`.
 
 ### 2. Work in it normally
 
@@ -73,8 +74,11 @@ git worktree prune                        # clears administrative records of del
 - `git worktree remove` refuses by default if the tree has uncommitted changes —
   that guard is intentional; do not force past it without confirming the changes are
   truly disposable.
+- Removing a worktree removes the extra **checkout**, not the branch. This repository
+  never deletes branches — the branch stays after the worktree is gone.
 - A worktree left behind after its branch merges is exactly the "clean up your own
-  mess" violation — remove it as part of `finishing-a-development-branch`.
+  mess" violation — remove the worktree (not the branch) as part of
+  `finishing-a-development-branch`.
 
 ## Parallelism
 
