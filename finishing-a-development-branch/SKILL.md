@@ -1,7 +1,7 @@
 ---
 name: finishing-a-development-branch
-description: Close out a completed branch the right way — verify, review, then present merge/PR/cleanup options rather than acting unilaterally. Use when implementation is done and tests pass and you are ready to integrate — run the full suite, confirm the completion gate, route non-trivial work through reviewer, then offer the merge/PR path and clean up the branch and any worktree. Use when the user says "finish this", "wrap up the branch", "open the PR", or "merge it". Never force-push, never merge to main unilaterally, never delete a branch without confirmation. Pairs with reviewer, git-expert, and using-git-worktrees.
-when_to_use: Implementation complete and tests green, ready to integrate a branch. Verify the full suite, confirm the completion gate, review non-trivial work, then present merge/PR/cleanup options. Pairs with reviewer, git-expert, and using-git-worktrees.
+description: Close out a completed branch the right way — verify, review, then present merge/PR options rather than acting unilaterally. Use when implementation is done and tests pass and you are ready to integrate — run the full suite, confirm the completion gate, route non-trivial work through reviewer, then offer the merge/PR path into dev. Use when the user says "finish this", "wrap up the branch", "open the PR", or "merge it". Never force-push, never merge to main unilaterally, never delete a branch — this repo keeps every branch permanently after merge. Pairs with reviewer, git-expert, and using-git-worktrees.
+when_to_use: Implementation complete and tests green, ready to integrate a branch. Verify the full suite, confirm the completion gate, review non-trivial work, then present merge/PR options into dev. Branches are never deleted. Pairs with reviewer, git-expert, and using-git-worktrees.
 allowed-tools: Read, Grep, Glob, Bash(git status:*), Bash(git log:*), Bash(git diff:*), Bash(claude-skills memory:*)
 effort: medium
 ---
@@ -21,9 +21,11 @@ without asking. Finishing is a gate plus a hand-off, not an automatic merge.
 See `_shared/common-discipline.md` § Code Implementation Discipline and the repo's
 `<git_safety>` rules. This skill is the closeout expression of **Goal-Driven
 Execution**: "loop until verified" ends here, with the full suite green and the
-completion gate reconciled. Destructive git verbs (force-push, hard reset, branch
-delete, merge to main) require explicit user confirmation — that is not optional
-politeness, it is the safety contract.
+completion gate reconciled. Destructive git verbs (force-push, hard reset, merge to
+main) require explicit user confirmation — that is not optional politeness, it is the
+safety contract. This repository **never deletes branches** after merge: a finished
+branch stays in place permanently, so closeout means integrate-and-keep, not
+integrate-and-delete.
 
 ## The Closeout Sequence
 
@@ -58,21 +60,24 @@ git log --oneline <base>..HEAD   # the commits that will integrate
 
 Offer the paths and let the user choose; hand the mechanics to `git-expert`:
 
-- **Open a PR/MR** against the base branch (the default for shared repos) — concise
+- **Open a PR/MR** against `dev` (the default integration target for feature branches) — concise
   title under ~70 chars, description covering what changed, what was tested, and
-  anything deferred.
-- **Merge** — only when the user asks, and never directly to main/master without
-  explicit confirmation.
+  anything deferred. Promotion to `main` happens separately, after `dev` verifies the
+  feature on staging.
+- **Merge** — only when the user asks, and never directly to `main` without
+  explicit confirmation. Feature branches merge into `dev`; `dev` promotes to `main`.
 - **Keep the branch** for more work.
 
-Push to a feature branch with upstream tracking (`git push -u`), never directly to
-main unless explicitly told.
+Push to the `feat/<topic>` branch with upstream tracking (`git push -u`), never directly to
+`main`. After merge, the branch stays — this repo never deletes branches.
 
-### 5. Clean up
+### 5. Confirm worktree state — do not delete the branch
 
-- After the branch integrates, remove any git worktree it used
-  (`using-git-worktrees` cleanup) and prune. Delete the local branch only with
-  confirmation.
+- This repository **never deletes branches** after merge, so closeout does not include
+  `git branch -d/-D` or `git push origin --delete`. The branch is permanent history.
+- If the work used a git worktree, you may remove the worktree directory
+  (`using-git-worktrees` cleanup) and prune — that removes the extra checkout, not the
+  branch. The branch itself remains.
 
 ## Anti-Patterns
 
@@ -80,10 +85,11 @@ main unless explicitly told.
   verified.
 - Force-pushing, hard-resetting, or merging to main without explicit confirmation.
 - Finishing over an open `reviewer` finding.
-- Deleting branches or worktrees without asking.
+- Deleting a branch after merge — this repo keeps every branch permanently.
 - A PR description that says "various fixes" instead of what changed, what was
   tested, and what was deferred.
-- Leaving the feature's worktree behind after merge.
+- Leaving the feature's worktree behind after merge (remove the worktree, but keep
+  the branch).
 
 ## Validation
 

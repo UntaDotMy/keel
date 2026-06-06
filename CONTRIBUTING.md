@@ -16,11 +16,14 @@ This repository is a managed Claude Code skill pack, not a loose prompt collecti
 
 ## Feature Delivery Rules
 
-- One feature = one branch = one merge request.
+- Branch model: `main` (stable) ← `dev` (daily integration / staging verification) ← `feat/<topic>` (all new features, fixes, subtasks; branch off `dev`).
+- One feature = one `feat/<topic>` branch = one merge request into `dev`.
 - Do not mix unrelated features or fixes in the same branch.
+- **Never delete a branch** after pushing or merging it (`git branch -d/-D`, `git push origin --delete` are not part of the normal flow).
 - Use `git add -p` when selective staging is required.
 - Review `git diff --cached` before each commit.
-- Run `claude-skills git-workflow preflight --repo-root . --base-ref origin/main` before push or merge-request creation.
+- Commit subjects strictly follow `<category>: <FEATURE>: <short information>` (categories lowercase: add, config, refactor, wip, fix, docs; FEATURE uppercase, e.g. `wip: RGB: Build light effect mode (multi color)`).
+- Run `claude-skills git-workflow preflight --repo-root . --base-ref origin/dev` before push or merge-request creation (use `origin/main` only when promoting `dev` to `main`).
 - When opening a PR or MR from the CLI, use a real multiline body or `--body-file` instead of embedding escaped newline sequences such as `\\n` in the published text.
 - Follow [WORKFLOW.md](WORKFLOW.md) when the change touches branching, merge-request shape, or reviewer expectations.
 

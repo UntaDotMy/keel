@@ -26,7 +26,7 @@ The goal is to prevent noisy raw command output from entering Claude Code contex
 
 - It does not cover `apply_patch` or other file-edit tool surfaces. Existing-source edits stay governed by Preserve Existing Flow and review gates (`~/.claude/memories/workspaces/<workspace-slug>/flow/flow-check.json`, `claude-skills review pre-pr`, `claude-skills review gates check`).
 - It cannot force Claude Code to execute a tool; it injects authoritative `additionalContext` reminders and refreshes lightweight memory artifacts, while Claude Code still owns reasoning and tool selection.
-- It does not run expensive review gates automatically on every stop event; closeout hooks remind Claude Code to run the gates before claiming completion.
+- It does not run expensive review gates automatically on every stop event; closeout hooks remind Claude Code to run the gates before claiming completion. Two PostToolBatch gates are on by default and may each emit a single bounded `decision: "block"` per session — the working-brief gate (`CLAUDE_SKILLS_BRIEF_GATE`, blocks once when a session edits code with no working brief written this session) and the review gate (`CLAUDE_SKILLS_REVIEW_GATE`, blocks once when a session edits code with no reviewer pass since the last edit). Each is bounded to at most `…_MAX_BLOCKS` blocks per session (default 1) by a monotonic counter so it cannot loop, fails open on any telemetry error, and is disablable with its env var set to `off` (or `…_MAX_BLOCKS=0`). They do not run the heavy gate commands themselves; they refuse closeout until the required artifact (a brief, a review marker) exists.
 
 ## Transparent Rewrite Handling
 

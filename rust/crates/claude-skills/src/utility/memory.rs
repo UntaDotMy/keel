@@ -1256,12 +1256,21 @@ fn run_working_brief_write(
     } else {
         entry_id
     };
+    // Capture the workspace this brief belongs to so the default-on working-brief
+    // gate can scope "did this workspace get a brief this session" instead of
+    // counting a brief written for an unrelated project. Empty when the cwd
+    // cannot be resolved — consumers treat empty as "applies anywhere", so a
+    // resolution failure fails open rather than misattributing the brief.
+    let workspace = std::env::current_dir()
+        .map(|cwd| display_path(&cwd))
+        .unwrap_or_default();
     let brief = create_brief(
         entry_id,
         request,
         split_csv_lines(flag_set.string_value("constraints")),
         split_csv_lines(flag_set.string_value("acceptance-criteria")),
         split_csv_lines(flag_set.string_value("assumptions")),
+        workspace,
         format_timestamp_iso8601(now_millis),
     );
     let path = match write_brief(&claude_home, &brief) {
@@ -3840,6 +3849,7 @@ mod tests {
                 vec!["no n+1".into()],
                 vec!["limit=20".into()],
                 Vec::new(),
+                String::new(),
                 format_timestamp_iso8601(0),
             ),
         )

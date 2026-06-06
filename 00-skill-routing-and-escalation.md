@@ -26,7 +26,7 @@ Token-saving rule: prevent noisy raw command output from entering Claude Code co
 2. **Native commands first** — prefer `claude-skills` surfaces over raw shell when they own the job.
 3. **Memory first** — resolve scoped memory and read `SYSTEM_MAP.md` before broad analysis: `claude-skills memory scope resolve --create-missing --refresh-system-map`.
 4. **Iterative loop** — ALIGN → RESEARCH → PLAN → IMPLEMENT → TEST → FIX → VERIFY → REVIEW → RECONCILE.
-5. **One feature per branch** — `feat/<name>` / `fix/<name>` / `improve/<name>` / `add/<name>`. Professional commit and PR text.
+5. **Branch model + commit format** — `main` (stable) ← `dev` (daily integration / staging verification) ← `feat/<topic>` (all new features, fixes, subtasks; branch off `dev`). Never delete a branch after push or merge. Commit subjects strictly follow `<category>: <FEATURE>: <short information>` (categories lowercase: add, config, refactor, wip, fix, docs; FEATURE uppercase, e.g. `wip: RGB: Build light effect mode (multi color)`).
 6. **Release ladder is fail-closed** — Smoke → Functional → Integration → UI → Load → Stress → Security. Mark not-applicable only with explicit, evidence-backed reasoning.
 7. **Completion reconciliation** — re-read the working brief and impacted surface before final answer. Every explicit user requirement maps to evidence or a verified blocker. No partial-as-complete.
 

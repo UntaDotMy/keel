@@ -15,8 +15,10 @@ Require explicit user confirmation before:
 - `git reset`
 - `git revert`
 - `git cherry-pick`
-- branch/tag deletion
+- tag deletion
 - force push operations
+
+This repository **never deletes branches** after push or merge. Treat any branch deletion (`git branch -d/-D`, `git push origin --delete`) as a non-default exception that needs explicit, deliberate confirmation that it is intended despite the never-delete rule.
 
 ## Safe-First Command Strategy
 

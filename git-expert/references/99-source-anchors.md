@@ -40,6 +40,7 @@ Use these sources for current, evidence-backed Git workflow guidance.
 
 ## Commit and History Hygiene
 
-- Conventional Commits specification: https://www.conventionalcommits.org/en/v1.0.0/
+- This project's commit convention: `<category>: <FEATURE>: <short information>` — categories (lowercase) `add`, `config`, `refactor`, `wip`, `fix`, `docs`; `<FEATURE>` uppercase (e.g. RGB, LED, ARGB, SENSOR). Example: `wip: RGB: Build light effect mode (multi color)`. This is the enforced format and supersedes the generic Conventional Commits style for this repository.
+- Conventional Commits specification (background reference only): https://www.conventionalcommits.org/en/v1.0.0/
 - Git ignore pattern format: https://git-scm.com/docs/gitignore
 - Force with lease guidance (git push): https://git-scm.com/docs/git-push#Documentation/git-push.txt---force-with-lease
