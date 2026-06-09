@@ -213,6 +213,37 @@ pub fn resolve_claude_home(requested_claude_home: &str) -> Result<PathBuf, Strin
     Ok(clean_path(&PathBuf::from(home).join(".claude")))
 }
 
+/// Validate that `candidate` is a single, safe path segment usable as one
+/// directory or file-stem component — never a path that could escape its parent.
+///
+/// Returns the trimmed segment on success. The rule is platform-uniform so a
+/// `~/.claude` tree that syncs across machines (OneDrive, Dropbox) cannot smuggle
+/// a name that is benign on the writing OS but a traversal on the reading one:
+///
+/// 1. Reject any candidate containing `/`, `\\`, or `:` outright. On Windows
+///    `Path::components` would flag `C:foo` / `\\server\share` as a `Prefix`,
+///    but on Unix those are ordinary `Normal` characters — checking the raw
+///    bytes makes the verdict identical everywhere.
+/// 2. Then require exactly one `Normal` component, which additionally rejects
+///    empty input, `.`, and `..`.
+///
+/// Callers join the result under a fixed base (skills dir, working-briefs dir)
+/// to build a sandboxed path from caller-supplied names.
+pub fn safe_path_segment(candidate: &str) -> Option<String> {
+    let trimmed = candidate.trim();
+    if trimmed.is_empty() || trimmed.contains(['/', '\\', ':']) {
+        return None;
+    }
+    let mut components = Path::new(trimmed).components();
+    let first = components.next()?;
+    match (first, components.next()) {
+        (Component::Normal(name), None) if name == std::ffi::OsStr::new(trimmed) => {
+            Some(trimmed.to_string())
+        }
+        _ => None,
+    }
+}
+
 pub fn clean_path(raw_path: &Path) -> PathBuf {
     let mut cleaned_path = PathBuf::new();
     for component in raw_path.components() {
@@ -505,6 +536,51 @@ pub fn git_short_head(repository_root: &Path) -> String {
             String::from_utf8_lossy(&result.stdout).trim().to_string()
         }
         _ => "unknown".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod safe_path_segment_tests {
+    use super::safe_path_segment;
+
+    #[test]
+    fn accepts_ordinary_names_and_trims() {
+        assert_eq!(safe_path_segment("reviewer").as_deref(), Some("reviewer"));
+        assert_eq!(
+            safe_path_segment("  systematic-debugging  ").as_deref(),
+            Some("systematic-debugging")
+        );
+        assert_eq!(safe_path_segment("wb-1a2b3c").as_deref(), Some("wb-1a2b3c"));
+        assert_eq!(safe_path_segment("file.json").as_deref(), Some("file.json"));
+    }
+
+    #[test]
+    fn rejects_empty_and_whitespace() {
+        assert_eq!(safe_path_segment(""), None);
+        assert_eq!(safe_path_segment("   "), None);
+    }
+
+    #[test]
+    fn rejects_separators_and_traversal() {
+        assert_eq!(safe_path_segment("a/b"), None);
+        assert_eq!(safe_path_segment("a\\b"), None);
+        assert_eq!(safe_path_segment(".."), None);
+        assert_eq!(safe_path_segment("../evil"), None);
+        assert_eq!(safe_path_segment("../../etc/passwd"), None);
+        assert_eq!(safe_path_segment("."), None);
+        assert_eq!(safe_path_segment("/abs"), None);
+    }
+
+    #[test]
+    fn rejects_windows_drive_relative_and_unc_prefixes() {
+        // The regression the substring guard missed: `C:foo` is not absolute
+        // per Path::is_absolute on Windows, yet PathBuf::join would discard the
+        // base and resolve against the drive's cwd. The Components-based check
+        // rejects any Prefix component on every platform.
+        assert_eq!(safe_path_segment("C:foo"), None);
+        assert_eq!(safe_path_segment("C:"), None);
+        assert_eq!(safe_path_segment("C:\\Windows\\System32"), None);
+        assert_eq!(safe_path_segment("\\\\server\\share"), None);
     }
 }
 

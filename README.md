@@ -58,7 +58,7 @@ The cast file ships in this repo. Render to GIF with `agg docs/demos/quickstart.
 | Review gates | Native `.claude/review.json`, `review pre-pr`, and CI-ready artifacts so non-trivial code never self-reviews. |
 | Memory | Working briefs, completion ledgers, scoped `SYSTEM_MAP.md`, and durable recovery state under `~/.claude/memories/`. |
 | Command compaction | `claude-skills run -- <cmd>` produces compact output for noisy test/build/lint/log/search commands without dropping diagnostic signal. |
-| MCP server | `claude-skills mcp serve` is registered through the plugin manifest so Claude Code auto-discovers `recall`, `system_map`, `run_command`, and `recall_status` tools plus the system-map and recall-status resources. |
+| MCP server | `claude-skills mcp serve` is registered through the plugin manifest so Claude Code auto-discovers 12 tools — `recall`, `system_map`, `run_command`, `recall_status`, `skill_route`, `skill_get`, `skill_list`, `memory_status`, `brief_list`, `brief_get`, `brief_create`, `system_map_refresh` — plus the system-map and recall-status resources. The skill, memory, and brief tools mirror what the lifecycle hooks deliver, so the capabilities stay reachable even where hooks are unreliable. |
 | Slash commands | `/claude-core:workflow`, `/claude-core:review`, `/claude-core:recall`, `/claude-core:gain` — discoverable `/`-menu wrappers over the implemented CLI surfaces. Shipped via the plugin manifest `commands` key. |
 | Specialist skills | 24 managed specialist profiles synced into `~/.claude/agent-profiles/*.toml`, invokable via the Skill tool. |
 

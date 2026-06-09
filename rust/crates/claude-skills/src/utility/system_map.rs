@@ -287,7 +287,16 @@ fn collect_matching_relative_paths_inner(
         if should_skip_workspace_entry(&child_name, &child_path) {
             continue;
         }
-        if child_path.is_dir() {
+        // file_type() does NOT follow symlinks; skip any symlink so a link
+        // pointing outside the workspace cannot be descended (which would leak
+        // external absolute paths into the map via the strip_prefix fallback).
+        let Ok(file_type) = entry_result.file_type() else {
+            continue;
+        };
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
             collect_matching_relative_paths_inner(
                 workspace_root,
                 &child_path,
@@ -297,7 +306,7 @@ fn collect_matching_relative_paths_inner(
                 max_results,
                 matches,
             );
-        } else if child_path.is_file() && child_name == file_name {
+        } else if file_type.is_file() && child_name == file_name {
             let relative_path = child_path
                 .strip_prefix(workspace_root)
                 .unwrap_or(&child_path);

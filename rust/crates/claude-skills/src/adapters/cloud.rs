@@ -78,7 +78,12 @@ impl CommandAdapter for CloudAdapter {
         // JSON payloads: reduce to structure-only (keys + array shape), which
         // also drops secret values along with everything else.
         let rendered = if trimmed.starts_with('{') || trimmed.starts_with('[') {
-            let structure = compact_json_structure(trimmed);
+            // compact_json_structure returns the input VERBATIM when the payload
+            // is JSON-shaped but unparseable (truncated/trailing-log/BOM), so
+            // redact the result to stop that fallback leaking access keys/tokens.
+            // On a successful parse strip_cloud_secrets is a no-op (values already
+            // elided to type placeholders).
+            let structure = strip_cloud_secrets(&compact_json_structure(trimmed));
             format!(
                 "{provider} {service}: JSON reduced to structure (values elided; raw saved)\n{structure}"
             )

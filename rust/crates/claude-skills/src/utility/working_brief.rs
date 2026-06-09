@@ -15,7 +15,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::json::{write_indented, Value};
-use crate::runtime::display_path;
+use crate::runtime::{display_path, safe_path_segment, write_text};
 use crate::utility::workflow_ledger::parse_object_of_strings;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -42,6 +42,20 @@ pub fn brief_directory(claude_home: &Path) -> PathBuf {
 
 pub fn brief_path(claude_home: &Path, id: &str) -> PathBuf {
     brief_directory(claude_home).join(format!("{id}.json"))
+}
+
+/// Validate `id` as a single safe path segment before joining it into a brief
+/// path. Brief ids arrive from CLI `--id` flags and MCP tool arguments; without
+/// this guard `../../foo` or an absolute id would steer the `{id}.json` join
+/// outside the working-briefs directory (arbitrary `.json` read/write). Guarding
+/// inside write_brief/read_brief covers every caller by construction.
+fn validated_brief_path(claude_home: &Path, id: &str) -> Result<PathBuf, String> {
+    match safe_path_segment(id) {
+        Some(segment) => Ok(brief_path(claude_home, &segment)),
+        None => Err(format!(
+            "invalid brief id {id:?}: must be a single safe path segment"
+        )),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -126,20 +140,23 @@ fn brief_to_storage_value(brief: &Brief) -> Value {
 }
 
 pub fn write_brief(claude_home: &Path, brief: &Brief) -> Result<PathBuf, String> {
+    let path = validated_brief_path(claude_home, &brief.id)?;
     let directory = brief_directory(claude_home);
     fs::create_dir_all(&directory)
         .map_err(|error| format!("create {}: {error}", display_path(&directory)))?;
-    let path = brief_path(claude_home, &brief.id);
     let mut serialized = Vec::<u8>::new();
     write_indented(&mut serialized, &brief_to_storage_value(brief))
         .map_err(|error| format!("serialize brief {}: {error}", brief.id))?;
-    fs::write(&path, &serialized)
-        .map_err(|error| format!("write {}: {error}", display_path(&path)))?;
+    let text = String::from_utf8(serialized)
+        .map_err(|error| format!("serialize brief {}: non-utf8 output: {error}", brief.id))?;
+    // Atomic temp+fsync+rename so a crash never leaves a truncated brief that
+    // would then poison list_briefs / the completion gate.
+    write_text(&path, &text)?;
     Ok(path)
 }
 
 pub fn read_brief(claude_home: &Path, id: &str) -> Result<Option<Brief>, String> {
-    let path = brief_path(claude_home, id);
+    let path = validated_brief_path(claude_home, id)?;
     let text = match fs::read_to_string(&path) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -165,11 +182,22 @@ pub fn list_briefs(claude_home: &Path) -> Result<Vec<Brief>, String> {
         if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
             continue;
         }
-        let text = fs::read_to_string(&path)
-            .map_err(|error| format!("read {}: {error}", display_path(&path)))?;
-        let brief = parse_brief_text(&text)
-            .map_err(|error| format!("parse {}: {error}", display_path(&path)))?;
-        briefs.push(brief);
+        // Skip an unreadable/unparseable brief (e.g. a crash-truncated or
+        // hand-edited file) rather than aborting the whole listing.
+        let text = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) => {
+                eprintln!("skip {}: {error}", display_path(&path));
+                continue;
+            }
+        };
+        match parse_brief_text(&text) {
+            Ok(brief) => briefs.push(brief),
+            Err(error) => {
+                eprintln!("skip {}: {error}", display_path(&path));
+                continue;
+            }
+        }
     }
     briefs.sort_by(|left, right| {
         left.created_at

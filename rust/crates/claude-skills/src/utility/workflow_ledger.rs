@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::json::{write_indented, Value};
-use crate::runtime::display_path;
+use crate::runtime::{display_path, safe_path_segment, write_text};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Entry {
@@ -37,6 +37,19 @@ pub fn ledger_directory(claude_home: &Path) -> PathBuf {
 
 pub fn entry_path(claude_home: &Path, id: &str) -> PathBuf {
     ledger_directory(claude_home).join(format!("{id}.json"))
+}
+
+/// Validate `id` as a single safe path segment before joining it into a ledger
+/// entry path, so a CLI `--id` like `../../foo` or an absolute path cannot steer
+/// the `{id}.json` join outside the workflow directory. Guarding inside
+/// write_entry/read_entry covers every caller by construction.
+fn validated_entry_path(claude_home: &Path, id: &str) -> Result<PathBuf, String> {
+    match safe_path_segment(id) {
+        Some(segment) => Ok(entry_path(claude_home, &segment)),
+        None => Err(format!(
+            "invalid workflow id {id:?}: must be a single safe path segment"
+        )),
+    }
 }
 
 pub fn current_timestamp_millis() -> u128 {
@@ -101,20 +114,23 @@ pub fn entry_to_value(entry: &Entry) -> Value {
 }
 
 pub fn write_entry(claude_home: &Path, entry: &Entry) -> Result<PathBuf, String> {
+    let path = validated_entry_path(claude_home, &entry.id)?;
     let directory = ledger_directory(claude_home);
     fs::create_dir_all(&directory)
         .map_err(|error| format!("create {}: {error}", display_path(&directory)))?;
-    let path = entry_path(claude_home, &entry.id);
     let mut serialized = Vec::<u8>::new();
     write_indented(&mut serialized, &entry_to_value(entry))
         .map_err(|error| format!("serialize entry {}: {error}", entry.id))?;
-    fs::write(&path, &serialized)
-        .map_err(|error| format!("write {}: {error}", display_path(&path)))?;
+    let text = String::from_utf8(serialized)
+        .map_err(|error| format!("serialize entry {}: non-utf8 output: {error}", entry.id))?;
+    // Atomic temp+fsync+rename so a crash never leaves a truncated entry that
+    // would then poison list_entries / cockpit.
+    write_text(&path, &text)?;
     Ok(path)
 }
 
 pub fn read_entry(claude_home: &Path, id: &str) -> Result<Option<Entry>, String> {
-    let path = entry_path(claude_home, id);
+    let path = validated_entry_path(claude_home, id)?;
     let text = match fs::read_to_string(&path) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -140,11 +156,21 @@ pub fn list_entries(claude_home: &Path) -> Result<Vec<Entry>, String> {
         if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
             continue;
         }
-        let text = fs::read_to_string(&path)
-            .map_err(|error| format!("read {}: {error}", display_path(&path)))?;
-        let entry = parse_entry_text(&text)
-            .map_err(|error| format!("parse {}: {error}", display_path(&path)))?;
-        entries.push(entry);
+        // Skip an unreadable/unparseable entry rather than aborting the listing.
+        let text = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) => {
+                eprintln!("skip {}: {error}", display_path(&path));
+                continue;
+            }
+        };
+        match parse_entry_text(&text) {
+            Ok(entry) => entries.push(entry),
+            Err(error) => {
+                eprintln!("skip {}: {error}", display_path(&path));
+                continue;
+            }
+        }
     }
     entries.sort_by(|left, right| {
         left.started_at
