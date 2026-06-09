@@ -227,16 +227,22 @@ pub fn run_proxy(
             meta.compacted = use_compact_output;
             meta.compact_path = meta.raw_path.join("compact.txt");
 
-            let (agent_output, raw_findings) = if use_compact_output {
-                (rendered.clone(), Vec::new())
+            // On the non-compact path we still neutralize prompt-injection in the
+            // command output before the agent sees it — the raw bytes are the
+            // exact attack surface the guard exists for. Each stream is cleaned
+            // separately so the stdout/stderr split is preserved when written
+            // below; `agent_output` (the merged form) backs the on-disk compact
+            // copy and the token measurement.
+            let (agent_output, clean_stdout, clean_stderr, raw_findings) = if use_compact_output {
+                (rendered.clone(), String::new(), String::new(), Vec::new())
             } else {
-                let merged = format!(
-                    "{}{}",
-                    String::from_utf8_lossy(&result.stdout),
-                    String::from_utf8_lossy(&result.stderr)
-                );
-                let (cleaned, findings) = neutralize_injection(&merged, &meta.raw_id);
-                (cleaned, findings)
+                let (cleaned_stdout, mut findings) =
+                    neutralize_injection(&String::from_utf8_lossy(&result.stdout), &meta.raw_id);
+                let (cleaned_stderr, stderr_findings) =
+                    neutralize_injection(&String::from_utf8_lossy(&result.stderr), &meta.raw_id);
+                findings.extend(stderr_findings);
+                let merged = format!("{cleaned_stdout}{cleaned_stderr}");
+                (merged, cleaned_stdout, cleaned_stderr, findings)
             };
             let mut all_findings = raw_findings;
             all_findings.extend(compact_findings);
@@ -283,8 +289,10 @@ pub fn run_proxy(
                 );
             } else {
                 if !use_compact_output {
-                    let _ = standard_output.write_all(&result.stdout);
-                    let _ = standard_error.write_all(&result.stderr);
+                    // Write the NEUTRALIZED streams, never the raw bytes: this is
+                    // the agent-visible output path the injection guard protects.
+                    let _ = standard_output.write_all(clean_stdout.as_bytes());
+                    let _ = standard_error.write_all(clean_stderr.as_bytes());
                 } else {
                     let _ = writeln!(standard_output, "{}", rendered);
                 }
@@ -418,6 +426,15 @@ fn cap_lines(text: &str, max_lines: usize) -> String {
     rendered
 }
 
+/// Maximum ordinary (non-high-signal) lines shown live per stream before the
+/// "output capped" notice; the full stream is still captured for compaction.
+const STREAM_LIVE_CAP: usize = 24;
+
+/// Maximum high-signal lines allowed to bypass the live cap per stream. Bounds
+/// the bypass so output that tags every line with an error/warning keyword
+/// cannot defeat the live cap by flooding high-signal lines.
+const STREAM_HIGH_SIGNAL_CAP: usize = 50;
+
 struct StreamChunk {
     label: &'static str,
     bytes: Vec<u8>,
@@ -454,19 +471,40 @@ fn run_command_streaming_proxy(
     let mut stderr_bytes = Vec::new();
     let mut stdout_live = 0usize;
     let mut stderr_live = 0usize;
+    let mut stdout_high_signal = 0usize;
+    let mut stderr_high_signal = 0usize;
     let mut stdout_capped = false;
     let mut stderr_capped = false;
     for chunk in receiver {
-        let live_count = if chunk.label == "stdout" {
-            &mut stdout_live
+        // Always capture the raw bytes for post-run compaction (which neutralizes
+        // the captured copy). The captured stream is the source of truth.
+        if chunk.label == "stdout" {
+            stdout_bytes.extend_from_slice(&chunk.bytes);
         } else {
-            &mut stderr_live
+            stderr_bytes.extend_from_slice(&chunk.bytes);
+        }
+
+        let (live_count, high_signal_count) = if chunk.label == "stdout" {
+            (&mut stdout_live, &mut stdout_high_signal)
+        } else {
+            (&mut stderr_live, &mut stderr_high_signal)
         };
-        let should_show = chunk.high_signal || *live_count < 24;
+        // A high-signal line may show past the normal cap, but only up to a
+        // bounded high-signal budget — otherwise output that tags every line with
+        // an "error"/"warning" keyword defeats the live cap entirely.
+        let show_high_signal = chunk.high_signal && *high_signal_count < STREAM_HIGH_SIGNAL_CAP;
+        let should_show = show_high_signal || *live_count < STREAM_LIVE_CAP;
         if should_show {
+            if show_high_signal {
+                *high_signal_count += 1;
+            }
+            // Neutralize prompt-injection before the chunk reaches the live
+            // display — the live path is agent-visible just like the captured one.
+            let (clean, _) =
+                neutralize_injection(&String::from_utf8_lossy(&chunk.bytes), "live-stream");
             let _ = write!(live_output, "[claude-skills stream:{}] ", chunk.label);
-            let _ = live_output.write_all(&chunk.bytes);
-            if !chunk.bytes.ends_with(b"\n") {
+            let _ = live_output.write_all(clean.as_bytes());
+            if !clean.ends_with('\n') {
                 let _ = writeln!(live_output);
             }
         } else if chunk.label == "stdout" && !stdout_capped {
@@ -483,11 +521,6 @@ fn run_command_streaming_proxy(
             stderr_capped = true;
         }
         *live_count += 1;
-        if chunk.label == "stdout" {
-            stdout_bytes.extend_from_slice(&chunk.bytes);
-        } else {
-            stderr_bytes.extend_from_slice(&chunk.bytes);
-        }
     }
     let status = child.wait().map_err(|error| format!("wait: {error}"))?;
     let _ = stdout_handle.join();
@@ -659,5 +692,61 @@ mod tests {
             assert_eq!(args[0], "-lc");
         }
         assert_eq!(args[1], "cargo test --workspace");
+    }
+
+    #[test]
+    fn no_compact_path_neutralizes_injection_before_writing_to_agent() {
+        // Regression: the non-compact branch wrote the RAW result.stdout to the
+        // agent instead of the neutralized output, so a command emitting a
+        // "--- SYSTEM PROMPT ---" block reached the model verbatim. Run a real
+        // command under the proxy with --no-compact and assert the marker block
+        // is neutralized in the agent-visible output.
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let snapshot = snapshot_signals();
+        clear_signals();
+        // Satisfy the capture gate so the proxy actually runs.
+        std::env::set_var("CLAUDE_SKILLS_HOOK", "test");
+
+        // A portable command that prints an injection-shaped block. echo is not
+        // a standalone executable on Windows (it is a cmd.exe builtin), so route
+        // through the platform shell exactly as the proxy runs shell commands.
+        let payload = "--- SYSTEM PROMPT ---";
+        let recovery_dir = std::env::temp_dir().join(format!(
+            "claude-skills-inject-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        ));
+        let (program, shell_args) =
+            crate::runtime::platform_shell_command_parts(&format!("echo {payload}"));
+        let mut arguments = vec![
+            "--no-compact".to_string(),
+            "--recovery-dir".to_string(),
+            recovery_dir.to_string_lossy().to_string(),
+            "--".to_string(),
+            program,
+        ];
+        arguments.extend(shell_args);
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let _ = run_proxy(&arguments, &mut stdout, &mut stderr);
+        let rendered = String::from_utf8_lossy(&stdout);
+
+        assert!(
+            rendered.contains("neutralized prompt-injection"),
+            "expected neutralized marker in agent output, got: {rendered} (stderr: {})",
+            String::from_utf8_lossy(&stderr)
+        );
+        assert!(
+            !rendered.contains("--- SYSTEM PROMPT ---"),
+            "raw injection marker must NOT reach the agent, got: {rendered}"
+        );
+
+        let _ = std::fs::remove_dir_all(&recovery_dir);
+        restore_signals(&snapshot);
     }
 }

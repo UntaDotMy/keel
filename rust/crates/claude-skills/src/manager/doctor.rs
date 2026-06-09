@@ -191,7 +191,7 @@ fn write_doctor_check(standard_output: &mut dyn Write, ok: bool, message: &str) 
 /// answers an `initialize` request. This catches the silent failure mode where the
 /// registered `command` (e.g. the plugin manifest's bare `claude-skills`) does not
 /// resolve on the host's PATH — Claude Code would then fail to start the server and
-/// all four always-on tools would be missing with no in-session signal. Reading the
+/// all of its always-on tools would be missing with no in-session signal. Reading the
 /// entry from disk (rather than assuming the installed path) means we probe what
 /// Claude Code will actually launch.
 ///
@@ -322,8 +322,9 @@ fn probe_mcp_initialize(command: &str, args: &[String]) -> bool {
 
 /// Report the health of the `claude_core` MCP registration in `~/.claude.json`.
 ///
-/// Two failure modes matter and look identical from inside a session — the four
-/// tools (`recall`, `system_map`, `run_command`, `recall_status`) appear absent:
+/// Two failure modes matter and look identical from inside a session — the
+/// server's tools (`recall`, `system_map`, `run_command`, `recall_status`, the
+/// `skill_*`/`brief_*` pair, `memory_status`, `system_map_refresh`) appear absent:
 ///
 /// 1. **No entry at all** — the server was never registered, so the tools do not
 ///    exist for Claude Code.

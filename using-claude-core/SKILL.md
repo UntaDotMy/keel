@@ -263,6 +263,12 @@ matcher or raw CLI. They never invoke planned-but-unimplemented commands.
 - Tool `recall` (full name `mcp__claude_core__recall`) — **call this before claiming what you remember or previously learned.** Full-text search over `~/.claude/memories`, `memoriesv2`, `working-briefs` via the FTS5 index. Same code path as `claude-skills memory recall`.
 - Tool `run_command` (full name `mcp__claude_core__run_command`) — run a noisy shell command through the proxy capture+compaction pipeline so the compacted output lands in context instead of the raw stream. Prefer it for test/build/lint/log/search commands.
 - Tool `recall_status` (full name `mcp__claude_core__recall_status`) — recall index health snapshot (document count, schema version, last-sync timestamp).
+- Tool `skill_route` (full name `mcp__claude_core__skill_route`) — **the on-demand equivalent of the per-prompt skill router.** Pass a prompt; get the single distinctive skill match plus a bounded inline brief of its guidance. Use this when the lifecycle hook that normally injects the brief did not fire (it is unreliable on some platforms) or whenever you are unsure which skill applies.
+- Tool `skill_get` (full name `mcp__claude_core__skill_get`) — load the full SKILL.md body for an installed skill by name. The full-body upgrade after `skill_route`.
+- Tool `skill_list` (full name `mcp__claude_core__skill_list`) — list every installed skill with its name, description, and when_to_use. Discover what skills exist before routing.
+- Tool `memory_status` (full name `mcp__claude_core__memory_status`) — durable-memory health: the recall index snapshot plus per-family record counts. Read-only.
+- Tool `brief_list` / `brief_get` / `brief_create` (full names `mcp__claude_core__brief_*`) — read and write working briefs under `~/.claude/working-briefs`. `brief_create` records the restated request, constraints, acceptance criteria, and assumptions so they survive compaction; the read pair retrieves them.
+- Tool `system_map_refresh` (full name `mcp__claude_core__system_map_refresh`) — regenerate the cached SYSTEM_MAP.md (`system_map` only reads it). Call after creating, deleting, moving, or renaming files.
 - Resource `claude_core://system-map` (`text/markdown`) and `claude_core://recall/status` (`application/json`).
 
 The same 1% rule that governs skills applies here: if a tool could answer the question more authoritatively than your own recall, use it before responding.
@@ -270,7 +276,7 @@ The same 1% rule that governs skills applies here: if a tool could answer the qu
 **If these tools seem absent — they are almost never actually missing.** MCP tools are namespaced `mcp__claude_core__<tool>` and may be *deferred* behind `ToolSearch` (Claude Code forces deferral whenever tool search is on or `ANTHROPIC_BASE_URL` points at a non-first-party gateway). Two traps:
 
 1. **Searching by bare name fails.** `ToolSearch("select:recall")` does an *exact* match on the full name and returns nothing, because the real name is `mcp__claude_core__recall`. Do **not** conclude "MCP isn't registered" from an empty `select:` result. Search by keyword (`ToolSearch("recall system map run command")`) or select the full namespaced name (`select:mcp__claude_core__recall`).
-2. **Deferral is the bug, not absence.** The fix is `alwaysLoad: true` on the `~/.claude.json` entry, which pins the four tools into context so they are never deferred. Verify with `claude-skills doctor` (it now reports the entry and `alwaysLoad`); repair with `claude-skills repair`, then restart Claude Code.
+2. **Deferral is the bug, not absence.** The fix is `alwaysLoad: true` on the `~/.claude.json` entry, which pins the server's tools into context so they are never deferred. `alwaysLoad` is per-server, so every tool the server publishes is pinned together. Verify with `claude-skills doctor` (it now reports the entry and `alwaysLoad`); repair with `claude-skills repair`, then restart Claude Code.
 
 
 ## Memory writes (when you learn something durable)

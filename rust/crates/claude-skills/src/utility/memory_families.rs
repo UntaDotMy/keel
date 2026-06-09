@@ -1187,6 +1187,38 @@ fn run_retrieve(
     0
 }
 
+/// The family names `status` summarizes, in display order. Shared between the
+/// CLI `status` handler and the programmatic `family_counts` surface so the two
+/// can never drift on which families are counted.
+const STATUS_FAMILIES: &[&str] = &[
+    "research-cache",
+    "agent-registry",
+    "agent-packets",
+    "loop-guard",
+    "entities",
+    "graph",
+    "instincts",
+];
+
+/// Record counts per memory family for `command_group` (`memories` or
+/// `memoriesv2`). A family whose store cannot be read counts as 0 so a partial
+/// store never fails the whole summary. Backs both the CLI `status` subcommand
+/// and the MCP `memory_status` tool, so the two share one definition of "what
+/// families exist and how many records each holds".
+pub fn family_counts(claude_home: &Path, command_group: &str) -> Vec<(String, usize)> {
+    STATUS_FAMILIES
+        .iter()
+        .map(|family| {
+            let store = family_store(claude_home, command_group, family);
+            let count = store
+                .list_records()
+                .map(|records| records.len())
+                .unwrap_or(0);
+            ((*family).to_string(), count)
+        })
+        .collect()
+}
+
 /// status: a compact health summary of every implemented family for this group.
 fn run_status(
     command_group: &str,
@@ -1205,24 +1237,7 @@ fn run_status(
     let Some(home) = resolve_home(flags.string_value("claude-home"), &label, standard_error) else {
         return 1;
     };
-    let families = [
-        "research-cache",
-        "agent-registry",
-        "agent-packets",
-        "loop-guard",
-        "entities",
-        "graph",
-        "instincts",
-    ];
-    let mut counts: Vec<(String, usize)> = Vec::new();
-    for family in families {
-        let store = family_store(&home, command_group, family);
-        let count = store
-            .list_records()
-            .map(|records| records.len())
-            .unwrap_or(0);
-        counts.push((family.to_string(), count));
-    }
+    let counts = family_counts(&home, command_group);
     if flags.bool_value("json") {
         let payload = Value::Object(
             counts

@@ -28,7 +28,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 
-use crate::runtime::skills_directory;
+use crate::runtime::{safe_path_segment, skills_directory};
 
 /// Score floor as a fraction of `ln(corpus_size)`. The floor must scale with
 /// corpus size because IDF does: a token present in exactly one skill scores
@@ -293,22 +293,94 @@ pub fn curated_skill_for_prompt(prompt: &str) -> Option<&'static str> {
 /// this turn no matter what — the `Skill()` call becomes an optional upgrade to
 /// the full body, not a prerequisite for any guidance at all.
 pub fn skill_inline_brief(claude_home: &Path, skill_name: &str) -> Option<String> {
-    // `skill_name` comes from a matched installed skill (the matcher only
-    // returns names it read from a real directory), but guard the path join
-    // against separators defensively so a crafted frontmatter `name` can never
-    // escape the skills directory.
-    if skill_name.is_empty()
-        || skill_name.contains(['/', '\\'])
-        || skill_name.contains("..")
-        || Path::new(skill_name).is_absolute()
-    {
-        return None;
-    }
-    let skill_path = skills_directory(claude_home)
-        .join(skill_name)
-        .join("SKILL.md");
+    let skill_path = resolve_skill_path(claude_home, skill_name)?;
     let text = fs::read_to_string(&skill_path).ok()?;
     inline_brief_from_source(&text)
+}
+
+/// Resolve `<skills_dir>/<name>/SKILL.md` for an installed skill, rejecting any
+/// `name` that could traverse outside the skills directory or reach a reserved
+/// directory. `skill_name` usually comes from a matched installed skill (the
+/// matcher only returns names it read from a real directory), but the guard is
+/// defensive so a crafted frontmatter `name` — or a caller-supplied name from
+/// the MCP surface — can never escape. Delegates the segment-safety check to
+/// `runtime::safe_path_segment`, which rejects separators, `.`/`..`, absolute
+/// paths, and Windows drive-relative prefixes (`C:foo`) via the OS path parser.
+/// Also rejects the `_`/`.`-prefixed reserved directories (`_shared`, hidden)
+/// that the discovery traversal hides, so the get/route surface admits exactly
+/// the set the catalog enumerates.
+fn resolve_skill_path(claude_home: &Path, skill_name: &str) -> Option<std::path::PathBuf> {
+    let segment = safe_path_segment(skill_name)?;
+    if segment.starts_with('_') || segment.starts_with('.') {
+        return None;
+    }
+    Some(skills_directory(claude_home).join(segment).join("SKILL.md"))
+}
+
+/// Read the full SKILL.md body for an installed skill. Returns the resolved
+/// path and the complete file text (frontmatter included) so MCP callers can
+/// pull the entire skill on demand — the `skill_get` tool's backing — without
+/// the brief truncation `skill_inline_brief` applies. `None` when the name is
+/// unsafe or the file is missing/unreadable.
+pub fn skill_full_body(
+    claude_home: &Path,
+    skill_name: &str,
+) -> Option<(std::path::PathBuf, String)> {
+    let skill_path = resolve_skill_path(claude_home, skill_name)?;
+    let text = fs::read_to_string(&skill_path).ok()?;
+    Some((skill_path, text))
+}
+
+/// One installed skill's catalog row: its directory name (the resolve key for
+/// `skill_get`/`skill_route`) plus the two frontmatter fields the Claude Code
+/// matcher reads. Backs the MCP `skill_list` tool.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SkillCatalogEntry {
+    pub name: String,
+    pub description: String,
+    pub when_to_use: String,
+}
+
+/// Enumerate every installed skill under `<claude_home>/skills`, returning the
+/// name + `description` + `when_to_use` frontmatter for each. Skips `_shared`,
+/// hidden directories, and any directory without a parseable SKILL.md — the
+/// same traversal `load_skill_terms` uses. Sorted by name for stable output.
+pub fn skill_catalog(claude_home: &Path) -> Vec<SkillCatalogEntry> {
+    let skills_dir = skills_directory(claude_home);
+    let entries = match fs::read_dir(&skills_dir) {
+        Ok(entries) => entries,
+        Err(_) => return Vec::new(),
+    };
+    let mut catalog = Vec::new();
+    for entry in entries.flatten() {
+        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let dir_name = entry.file_name().to_string_lossy().to_string();
+        if dir_name.starts_with('.') || dir_name.starts_with('_') {
+            continue;
+        }
+        let skill_path = entry.path().join("SKILL.md");
+        let text = match fs::read_to_string(&skill_path) {
+            Ok(text) => text,
+            Err(_) => continue,
+        };
+        let Some(frontmatter) = split_frontmatter(&text) else {
+            continue;
+        };
+        let description = frontmatter_field(&frontmatter, "description").unwrap_or_default();
+        let when_to_use = frontmatter_field(&frontmatter, "when_to_use").unwrap_or_default();
+        // `name` is the directory name — the key `skill_get`/`skill_route`
+        // resolve against — so a `skill_list` entry always round-trips back
+        // through `skill_get`. The frontmatter `name` is display metadata only.
+        catalog.push(SkillCatalogEntry {
+            name: dir_name,
+            description,
+            when_to_use,
+        });
+    }
+    catalog.sort_by(|left, right| left.name.cmp(&right.name));
+    catalog
 }
 
 /// Pure brief builder (no IO) so truncation behavior is unit-testable. Takes raw
@@ -417,19 +489,29 @@ pub fn load_skill_terms(skills_dir: &Path) -> Vec<SkillTerms> {
 }
 
 /// Build a [`SkillTerms`] from a directory name and raw SKILL.md text.
-/// Uses the frontmatter `description` + `when_to_use` plus the directory name
-/// as the matchable surface — exactly the fields the Claude Code matcher reads.
+/// Uses the frontmatter `description` + `when_to_use` plus the name as the
+/// matchable surface — exactly the fields the Claude Code matcher reads.
+///
+/// The returned `name` is the **directory name**, not the frontmatter `name`.
+/// `name` is the stable resolve key: `match_skill_for_prompt` hands it to
+/// `skill_inline_brief`/`skill_get`, which resolve `<skills>/<name>/SKILL.md` —
+/// a directory join. Keying on the frontmatter name would break that join for
+/// any skill whose frontmatter name differs from its directory. Tokens from
+/// both the directory name and the frontmatter name feed the matchable surface
+/// so divergence never costs match signal.
 fn skill_terms_from_source(dir_name: &str, text: &str) -> Option<SkillTerms> {
     let frontmatter = split_frontmatter(text)?;
     let description = frontmatter_field(&frontmatter, "description").unwrap_or_default();
     let when_to_use = frontmatter_field(&frontmatter, "when_to_use").unwrap_or_default();
-    // Prefer the frontmatter `name`, fall back to the directory name.
-    let name = frontmatter_field(&frontmatter, "name")
+    let frontmatter_name = frontmatter_field(&frontmatter, "name")
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| dir_name.to_string());
 
-    let name_tokens = tokenize(&name.replace('-', " "));
+    // Tokenize both the directory name and the frontmatter name so the name
+    // signal is preserved when they diverge; the resolve key stays the dir name.
+    let mut name_tokens = tokenize(&dir_name.replace('-', " "));
+    name_tokens.extend(tokenize(&frontmatter_name.replace('-', " ")));
     let mut all_tokens = name_tokens.clone();
     all_tokens.extend(tokenize(&description));
     all_tokens.extend(tokenize(&when_to_use));
@@ -438,7 +520,7 @@ fn skill_terms_from_source(dir_name: &str, text: &str) -> Option<SkillTerms> {
         return None;
     }
     Some(SkillTerms {
-        name,
+        name: dir_name.to_string(),
         all_tokens,
         name_tokens,
     })
@@ -613,6 +695,35 @@ fn frontmatter_field(frontmatter: &str, key: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolve_skill_path_rejects_traversal_and_reserved_names() {
+        let home = Path::new("/fake/home");
+        // Traversal / separator / absolute / drive-relative names must yield None.
+        for evil in [
+            "",
+            "   ",
+            "..",
+            "../evil",
+            "../../etc",
+            "a/b",
+            "a\\b",
+            "/abs",
+            "C:foo",
+            "C:",
+        ] {
+            assert!(
+                resolve_skill_path(home, evil).is_none(),
+                "name {evil:?} must be rejected"
+            );
+        }
+        // Reserved/hidden directories the catalog hides are not gettable either.
+        assert!(resolve_skill_path(home, "_shared").is_none());
+        assert!(resolve_skill_path(home, ".hidden").is_none());
+        // An ordinary skill name resolves to <skills>/<name>/SKILL.md.
+        let ok = resolve_skill_path(home, "reviewer").expect("ordinary name resolves");
+        assert!(ok.ends_with("reviewer/SKILL.md") || ok.ends_with("reviewer\\SKILL.md"));
+    }
 
     fn skill(name: &str, description: &str, when_to_use: &str) -> SkillTerms {
         let name_tokens = tokenize(&name.replace('-', " "));

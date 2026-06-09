@@ -139,9 +139,19 @@ fn collect_search_candidates(root: &Path, candidates: &mut Vec<PathBuf>) {
             if should_skip_search_entry(&name, &path) {
                 continue;
             }
-            if path.is_dir() {
+            // Use the dir entry's file type, which does NOT follow symlinks, and
+            // skip any symlink. is_dir()/is_file() follow links, so a symlink
+            // pointing outside the workspace would otherwise let the search
+            // recurse into and read the contents of external directories.
+            let Ok(file_type) = entry_result.file_type() else {
+                continue;
+            };
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() {
                 stack.push(path);
-            } else if path.is_file() && !is_probably_binary(&path) {
+            } else if file_type.is_file() && !is_probably_binary(&path) {
                 candidates.push(path);
             }
         }

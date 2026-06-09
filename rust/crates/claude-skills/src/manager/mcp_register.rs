@@ -59,13 +59,15 @@ pub fn mcp_config_path(claude_home: &Path) -> PathBuf {
 /// a non-first-party gateway (a common claude-core setup). Deferred tools are
 /// not in the model's context at session start: the model must search for them
 /// before it can call them. That directly defeats the design premise that
-/// `system_map`/`recall`/`run_command`/`recall_status` are *always available* and
-/// should be reached for instead of guessing. `alwaysLoad: true` pins this one
-/// server's four tools into context upfront regardless of the tool-search mode,
-/// so the per-prompt "prefer the MCP tools" guidance points at tools that are
-/// actually loaded rather than ones the model has to discover first. Supported
-/// by Claude Code v2.1.121+ (per code.claude.com/docs/en/mcp); the four tools
-/// are tiny, so the upfront context cost is negligible.
+/// `system_map`/`recall`/`run_command`/`recall_status` (and the `skill_*`,
+/// `brief_*`, `memory_status`, `system_map_refresh` tools) are *always available*
+/// and should be reached for instead of guessing. `alwaysLoad: true` is
+/// per-server, so it pins every tool this server publishes into context upfront
+/// regardless of the tool-search mode — the per-prompt "prefer the MCP tools"
+/// guidance then points at tools that are actually loaded rather than ones the
+/// model has to discover first. Supported by Claude Code v2.1.121+ (per
+/// code.claude.com/docs/en/mcp); the tools are tiny, so the upfront context cost
+/// is negligible.
 pub fn mcp_server_entry(claude_home: &Path) -> Value {
     let executable = installed_executable_path(claude_home);
     json!({
@@ -234,7 +236,7 @@ mod tests {
         assert_eq!(entry["type"], "stdio");
         assert_eq!(entry["args"], json!(["mcp", "serve"]));
         assert!(entry["command"].as_str().unwrap().contains("claude-skills"));
-        // alwaysLoad pins the four tools into context upfront so they are not
+        // alwaysLoad pins the server's tools into context upfront so they are not
         // deferred behind ToolSearch (the deferral that makes them "just hanging
         // around" rather than always-available). Lock it so a future edit can't
         // silently drop it and re-defer the contract tools.

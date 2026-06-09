@@ -72,7 +72,13 @@ impl CommandAdapter for DatabaseAdapter {
 
         // mongosh and `--json` style output: reduce JSON to structure-only.
         if trimmed.starts_with('{') || trimmed.starts_with('[') {
-            let structure = compact_json_structure(trimmed);
+            // compact_json_structure elides all values on a successful parse, but
+            // returns the input VERBATIM when the payload is JSON-shaped yet
+            // unparseable (truncated by a broken pipe, trailing log line, BOM).
+            // Redact the result so that fallback path cannot leak connection
+            // strings / tokens; on the success path redact_lines is a no-op
+            // because the structure has no secret values left.
+            let structure = redact_lines(&compact_json_structure(trimmed));
             let rendered = format!(
                 "{engine}: JSON result reduced to structure (values elided; raw saved)\n{structure}"
             );
@@ -306,6 +312,33 @@ mod tests {
         );
         assert!(result.stdout.contains("structure"));
         assert!(!result.stdout.contains("doc39"));
+    }
+
+    #[test]
+    fn malformed_json_payload_still_redacts_secrets() {
+        // Regression: compact_json_structure returns the input VERBATIM when the
+        // JSON-shaped payload fails to parse (truncated by a broken pipe, trailing
+        // log line). Without redaction on that fallback, connection-string
+        // credentials leaked straight to the agent. The payload starts with `{`
+        // (so it takes the JSON branch) but is truncated/unparseable, and is long
+        // enough to clear the small-output passthrough.
+        let mut payload =
+            String::from("{\"conn\":\"postgres://admin:s3cr3tpass@db.internal:5432/app\",\n");
+        for i in 0..40 {
+            payload.push_str(&format!("\"row{i}\":\"value-{i}\",\n"));
+        }
+        // No closing brace -> serde_json::from_str fails -> verbatim fallback.
+        let result = DatabaseAdapter.compact(
+            payload.as_bytes(),
+            b"",
+            0,
+            &meta("psql", &["--json", "select * from secrets"], payload.len()),
+        );
+        assert!(
+            !result.stdout.contains("s3cr3tpass"),
+            "credential leaked on malformed-JSON fallback: {}",
+            result.stdout
+        );
     }
 
     #[test]

@@ -17,14 +17,22 @@
 
 use std::env;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::path::Path;
 
 use serde_json::{json, Value};
 
 use crate::runtime::{display_path, resolve_claude_home};
-use crate::utility::recall::{recall_status_snapshot, search_recall_index, RecallSearchResult};
+use crate::utility::recall::recall_status_snapshot;
 use crate::utility::system_map::{render_system_map, sanitize_key};
+
+mod tools;
+
+/// Maximum bytes accepted for a single newline-delimited JSON-RPC frame. A peer
+/// that streams data without a terminating newline would otherwise grow the
+/// read buffer without bound and exhaust memory; capping the per-frame read
+/// bounds that to a generous-but-finite size (8 MiB — far above any real tool
+/// call, well below a DoS). An over-cap frame is refused, not truncated.
+const MAX_FRAME_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Wire-protocol version this server advertises during `initialize`. Matches
 /// the version Claude Code probes for (see code.claude.com/docs/en/mcp).
@@ -36,18 +44,13 @@ const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 const MCP_SERVER_NAME: &str = "claude_core";
 const MCP_SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Default cap for `recall` matches when the caller does not supply one. The
-/// CLI uses the same default (see `utility::recall::DEFAULT_RECALL_LIMIT`).
-const DEFAULT_RECALL_LIMIT: usize = 20;
-const MAX_RECALL_LIMIT: usize = 100;
-
 /// JSON-RPC error codes the dispatcher returns. The numeric values are
 /// stable per JSON-RPC 2.0 §5.1; using named constants here keeps the
 /// `tools/call` and `resources/read` arms readable.
 const JSON_RPC_PARSE_ERROR: i64 = -32700;
 const JSON_RPC_INVALID_REQUEST: i64 = -32600;
 const JSON_RPC_METHOD_NOT_FOUND: i64 = -32601;
-const JSON_RPC_INVALID_PARAMS: i64 = -32602;
+pub(super) const JSON_RPC_INVALID_PARAMS: i64 = -32602;
 const JSON_RPC_INTERNAL_ERROR: i64 = -32603;
 
 /// Resource URIs this server publishes. Keep these as constants so the list
@@ -94,7 +97,7 @@ fn render_mcp_help(standard_output: &mut dyn Write) {
     );
     let _ = writeln!(
         standard_output,
-        "Tools: recall, system_map, run_command, recall_status."
+        "Tools: recall, system_map, run_command, recall_status, skill_route, skill_get, skill_list, memory_status, brief_list, brief_get, brief_create, system_map_refresh."
     );
     let _ = writeln!(
         standard_output,
@@ -112,10 +115,18 @@ pub fn serve_stdio(
     standard_error: &mut dyn Write,
 ) -> u8 {
     let mut reader = BufReader::new(input);
-    let mut line = String::new();
+    let mut raw_line: Vec<u8> = Vec::new();
     loop {
-        line.clear();
-        let read_result = reader.read_line(&mut line);
+        raw_line.clear();
+        // Cap a single frame so a peer that never sends a newline cannot grow
+        // the buffer without bound and OOM the subprocess. `take` limits this
+        // read to MAX_FRAME_BYTES; if the cap is hit with no terminating
+        // newline the frame is oversized — refuse it and drop the connection
+        // rather than parse a truncated payload.
+        let read_result = reader
+            .by_ref()
+            .take(MAX_FRAME_BYTES)
+            .read_until(b'\n', &mut raw_line);
         match read_result {
             Ok(0) => return 0,
             Ok(_) => {}
@@ -124,6 +135,16 @@ pub fn serve_stdio(
                 return 1;
             }
         }
+        if raw_line.len() as u64 >= MAX_FRAME_BYTES && raw_line.last() != Some(&b'\n') {
+            let oversized = error_response(
+                Value::Null,
+                JSON_RPC_INVALID_REQUEST,
+                "Invalid Request: frame exceeds maximum size",
+            );
+            let _ = write_framed_response(standard_output, standard_error, &oversized);
+            return 1;
+        }
+        let line = String::from_utf8_lossy(&raw_line);
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
@@ -241,8 +262,8 @@ fn handle_method(method: &str, params: &Value) -> Result<Value, MethodError> {
         "initialize" => Ok(handle_initialize()),
         "notifications/initialized" => Ok(Value::Null),
         "ping" => Ok(json!({})),
-        "tools/list" => Ok(handle_tools_list()),
-        "tools/call" => handle_tools_call(params),
+        "tools/list" => Ok(tools::handle_tools_list()),
+        "tools/call" => tools::handle_tools_call(params),
         "resources/list" => Ok(handle_resources_list()),
         "resources/read" => handle_resources_read(params),
         other => Err(MethodError {
@@ -264,97 +285,6 @@ fn handle_initialize() -> Value {
             "resources": {},
         },
     })
-}
-
-fn handle_tools_list() -> Value {
-    json!({
-        "tools": [
-            {
-                "name": "recall",
-                "description": "Call this BEFORE claiming what you remember or previously learned — search your durable memory instead of relying on conversation alone. Full-text search over Markdown under <claude-home>/{memories,memoriesv2,working-briefs}. Auto-syncs the index before querying.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "query": { "type": "string", "description": "Search terms; punctuation is stripped and tokens are AND-ed with prefix match." },
-                        "limit": { "type": "integer", "minimum": 1, "maximum": MAX_RECALL_LIMIT, "description": "Maximum hits (default 20)." }
-                    },
-                    "required": ["query"]
-                }
-            },
-            {
-                "name": "system_map",
-                "description": "Call this BEFORE any claim about the current repository's structure or layout (\"what is this project\", \"how is this organized\", \"where does X live\") instead of guessing or reading files blind. Returns the workspace SYSTEM_MAP.md (the auto-refreshed copy under ~/.claude/memories/workspaces/<slug>/reference/SYSTEM_MAP.md, falling back to a freshly rendered map).",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "workspace_root": { "type": "string", "description": "Absolute workspace root. Defaults to the server process working directory." }
-                    }
-                }
-            },
-            {
-                "name": "run_command",
-                "description": "Prefer this over a raw shell call for noisy commands (test, build, lint, logs, search): it runs the command through the compaction proxy so compacted high-signal output enters context instead of the raw stream.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "command": { "type": "string", "description": "Shell command line to execute (joined with the platform shell when shell metacharacters are present)." }
-                    },
-                    "required": ["command"]
-                }
-            },
-            {
-                "name": "recall_status",
-                "description": "Check recall index health before trusting or after rebuilding the memory index: document count, schema version, last-sync timestamp, and on-disk index path.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {}
-                }
-            }
-        ]
-    })
-}
-
-fn handle_tools_call(params: &Value) -> Result<Value, MethodError> {
-    let object = params.as_object().ok_or_else(|| MethodError {
-        code: JSON_RPC_INVALID_PARAMS,
-        message: "tools/call params must be an object".to_string(),
-    })?;
-    let tool_name = object
-        .get("name")
-        .and_then(Value::as_str)
-        .ok_or_else(|| MethodError {
-            code: JSON_RPC_INVALID_PARAMS,
-            message: "tools/call params.name is required".to_string(),
-        })?;
-    let arguments = object.get("arguments").cloned().unwrap_or(Value::Null);
-
-    let outcome = match tool_name {
-        "recall" => tool_recall(&arguments),
-        "system_map" => tool_system_map(&arguments),
-        "run_command" => tool_run_command(&arguments),
-        "recall_status" => tool_recall_status(&arguments),
-        other => {
-            return Err(MethodError {
-                code: JSON_RPC_INVALID_PARAMS,
-                message: format!("Unknown tool: {other}"),
-            });
-        }
-    };
-
-    match outcome {
-        Ok(text) => Ok(json!({
-            "content": [
-                { "type": "text", "text": text }
-            ],
-            "isError": false,
-        })),
-        Err(message) => Ok(json!({
-            "content": [
-                { "type": "text", "text": message }
-            ],
-            "isError": true,
-        })),
-    }
 }
 
 fn handle_resources_list() -> Value {
@@ -430,91 +360,11 @@ fn handle_resources_read(params: &Value) -> Result<Value, MethodError> {
     }
 }
 
-fn tool_recall(arguments: &Value) -> Result<String, String> {
-    let query = arguments
-        .get("query")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .trim()
-        .to_string();
-    if query.is_empty() {
-        return Err("recall: missing query".to_string());
-    }
-    let limit_value = arguments.get("limit");
-    let limit = match limit_value {
-        Some(Value::Number(number)) => match number.as_u64() {
-            Some(parsed) if parsed > 0 => (parsed as usize).min(MAX_RECALL_LIMIT),
-            _ => {
-                return Err(format!(
-                    "recall: limit must be a positive integer, got {number}"
-                ))
-            }
-        },
-        Some(Value::Null) | None => DEFAULT_RECALL_LIMIT,
-        Some(other) => {
-            return Err(format!(
-                "recall: limit must be a positive integer, got {other}"
-            ));
-        }
-    };
-    let claude_home = resolve_claude_home("").map_err(|error| format!("recall: {error}"))?;
-    let result = search_recall_index(&claude_home, &query, limit)
-        .map_err(|error| format!("recall: {error}"))?;
-    let payload = render_recall_payload(&claude_home, &query, limit, result);
-    serde_json::to_string_pretty(&payload).map_err(|error| format!("recall: serialize: {error}"))
-}
-
-fn render_recall_payload(
-    claude_home: &Path,
-    query: &str,
-    limit: usize,
-    result: Option<RecallSearchResult>,
-) -> Value {
-    let (fts_query, hits) = match result {
-        Some(search_result) => (search_result.fts_query, search_result.hits),
-        None => (String::new(), Vec::new()),
-    };
-    let matches: Vec<Value> = hits
-        .iter()
-        .map(|hit| {
-            let relative = relative_to_home(claude_home, Path::new(&hit.absolute_path));
-            json!({
-                "path": relative,
-                "absolutePath": hit.absolute_path,
-                "score": format!("{:.4}", hit.score),
-                "line": hit.line,
-                "snippet": hit.snippet,
-            })
-        })
-        .collect();
-    json!({
-        "query": query,
-        "ftsQuery": fts_query,
-        "limit": limit,
-        "claudeHome": display_path(claude_home),
-        "count": matches.len(),
-        "matches": matches,
-    })
-}
-
-fn relative_to_home(claude_home: &Path, absolute_path: &Path) -> String {
-    match absolute_path.strip_prefix(claude_home) {
-        Ok(relative) => relative.to_string_lossy().replace('\\', "/"),
-        Err(_) => display_path(absolute_path),
-    }
-}
-
-fn tool_system_map(arguments: &Value) -> Result<String, String> {
-    let workspace_override = arguments
-        .get("workspace_root")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from);
-    system_map_text(workspace_override.as_deref())
-}
-
-fn system_map_text(workspace_override: Option<&Path>) -> Result<String, String> {
+/// Resolve the workspace SYSTEM_MAP.md text — the cached copy under the
+/// workspace reference lane when present and non-empty, else a freshly rendered
+/// map. Shared by the `system_map` tool and the `claude_core://system-map`
+/// resource so both surfaces return the same content.
+pub(super) fn system_map_text(workspace_override: Option<&Path>) -> Result<String, String> {
     let workspace_root = match workspace_override {
         Some(path) => path.to_path_buf(),
         None => env::current_dir().map_err(|error| format!("resolve cwd: {error}"))?,
@@ -538,88 +388,10 @@ fn system_map_text(workspace_override: Option<&Path>) -> Result<String, String> 
     Ok(render_system_map(&workspace_root))
 }
 
-fn tool_run_command(arguments: &Value) -> Result<String, String> {
-    let command = arguments
-        .get("command")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .trim()
-        .to_string();
-    if command.is_empty() {
-        return Err("run_command: missing command".to_string());
-    }
-    // Shell out to a fresh `claude-skills run -- <command>` so the proxy
-    // pipeline (capture, compaction, raw-store, gain analytics) runs in its
-    // intended configuration. Setting `CLAUDE_SKILLS_HOOK` flips the proxy's
-    // capture gate on for this child even when the parent MCP server was
-    // launched from a plain shell.
-    let executable = env::current_exe().map_err(|error| format!("locate self: {error}"))?;
-    let mut child = Command::new(&executable);
-    child.arg("run");
-    child.arg("--");
-    let (program, args) = crate::runtime::platform_shell_command_parts(&command);
-    child.arg(program);
-    for argument in args {
-        child.arg(argument);
-    }
-    child.env("CLAUDE_SKILLS_HOOK", "mcp");
-    child.stdin(Stdio::null());
-    child.stdout(Stdio::piped());
-    child.stderr(Stdio::piped());
-    let output = child
-        .output()
-        .map_err(|error| format!("run_command: spawn: {error}"))?;
-    let stdout_text = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr_text = String::from_utf8_lossy(&output.stderr).to_string();
-    // Return a plain-text report rather than a JSON object. Embedding multi-line
-    // stdout/stderr as JSON string values escapes every newline as a literal
-    // `\n`, which turns a build/test log into an unreadable single line in the
-    // MCP tool-result view. A text report keeps real newlines so the output is
-    // legible to both the human reading the transcript and the model consuming
-    // the result; the exit code stays on its own labeled line for easy parsing.
-    Ok(render_run_command_report(
-        &command,
-        output.status.code().unwrap_or(-1),
-        &stdout_text,
-        &stderr_text,
-    ))
-}
-
-/// Build the human-readable `run_command` report. Pure (no IO) so the framing
-/// is unit-testable. Sections with no content are omitted; a command that
-/// produced nothing on either stream still reports its exit code plus an
-/// explicit `(no output)` marker so the result is never ambiguously empty.
-fn render_run_command_report(command: &str, exit_code: i32, stdout: &str, stderr: &str) -> String {
-    let mut report = String::new();
-    report.push_str(&format!("$ {command}\n"));
-    report.push_str(&format!("exit code: {exit_code}\n"));
-
-    let stdout_body = stdout.trim_end_matches(['\n', '\r']);
-    let stderr_body = stderr.trim_end_matches(['\n', '\r']);
-
-    if !stdout_body.trim().is_empty() {
-        report.push_str("\n--- stdout ---\n");
-        report.push_str(stdout_body);
-        report.push('\n');
-    }
-    if !stderr_body.trim().is_empty() {
-        report.push_str("\n--- stderr ---\n");
-        report.push_str(stderr_body);
-        report.push('\n');
-    }
-    if stdout_body.trim().is_empty() && stderr_body.trim().is_empty() {
-        report.push_str("\n(no output)\n");
-    }
-    report
-}
-
-fn tool_recall_status(_arguments: &Value) -> Result<String, String> {
-    let payload = recall_status_payload().map_err(|message| format!("recall_status: {message}"))?;
-    serde_json::to_string_pretty(&payload)
-        .map_err(|error| format!("recall_status: serialize: {error}"))
-}
-
-fn recall_status_payload() -> Result<Value, String> {
+/// Build the recall index health snapshot payload. Shared by the
+/// `recall_status` / `memory_status` tools and the `claude_core://recall/status`
+/// resource so all surfaces report the same shape.
+pub(super) fn recall_status_payload() -> Result<Value, String> {
     let claude_home = resolve_claude_home("")?;
     let snapshot = recall_status_snapshot(&claude_home)?;
     Ok(json!({
@@ -654,9 +426,9 @@ fn error_response(id: Value, code: i64, message: &str) -> Value {
 }
 
 #[derive(Debug, Clone)]
-struct MethodError {
-    code: i64,
-    message: String,
+pub(super) struct MethodError {
+    pub(super) code: i64,
+    pub(super) message: String,
 }
 
 #[cfg(test)]
@@ -705,7 +477,7 @@ mod tests {
     }
 
     #[test]
-    fn tools_list_advertises_four_tools() {
+    fn tools_list_advertises_all_tools() {
         let request = json!({
             "jsonrpc": "2.0",
             "id": 7,
@@ -717,11 +489,23 @@ mod tests {
             .iter()
             .filter_map(|entry| entry.get("name").and_then(Value::as_str))
             .collect();
-        assert!(names.contains(&"recall"), "names: {names:?}");
-        assert!(names.contains(&"system_map"), "names: {names:?}");
-        assert!(names.contains(&"run_command"), "names: {names:?}");
-        assert!(names.contains(&"recall_status"), "names: {names:?}");
-        assert_eq!(names.len(), 4);
+        for expected in [
+            "recall",
+            "system_map",
+            "run_command",
+            "recall_status",
+            "skill_route",
+            "skill_get",
+            "skill_list",
+            "memory_status",
+            "brief_list",
+            "brief_get",
+            "brief_create",
+            "system_map_refresh",
+        ] {
+            assert!(names.contains(&expected), "missing {expected}: {names:?}");
+        }
+        assert_eq!(names.len(), 12, "names: {names:?}");
     }
 
     #[test]
@@ -813,46 +597,6 @@ mod tests {
         assert!(rendered.ends_with('\n'), "rendered: {rendered}");
     }
 
-    #[test]
-    fn run_command_report_keeps_real_newlines() {
-        // Regression: stdout/stderr used to be embedded as JSON string values,
-        // which escaped every newline as a literal `\n` and produced an
-        // unreadable single-line wall. The text report must carry real
-        // newlines and label each stream.
-        let report = render_run_command_report(
-            "cargo test",
-            0,
-            "running 2 tests\ntest a ... ok\ntest b ... ok",
-            "",
-        );
-        assert!(report.contains("$ cargo test\n"));
-        assert!(report.contains("exit code: 0\n"));
-        assert!(report.contains("--- stdout ---\n"));
-        // Real newline present, no literal backslash-n escape.
-        assert!(report.contains("test a ... ok\ntest b ... ok"));
-        assert!(
-            !report.contains("\\n"),
-            "report must not contain escaped newlines"
-        );
-        // No stderr section when stderr is empty.
-        assert!(!report.contains("--- stderr ---"));
-    }
-
-    #[test]
-    fn run_command_report_includes_stderr_and_nonzero_exit() {
-        let report = render_run_command_report("false", 1, "", "boom: it failed\n");
-        assert!(report.contains("exit code: 1\n"));
-        assert!(report.contains("--- stderr ---\n"));
-        assert!(report.contains("boom: it failed"));
-        assert!(!report.contains("--- stdout ---"));
-    }
-
-    #[test]
-    fn run_command_report_marks_empty_output() {
-        let report = render_run_command_report("true", 0, "", "");
-        assert!(report.contains("exit code: 0\n"));
-        assert!(report.contains("(no output)"));
-    }
     #[test]
     fn request_with_id_null_receives_response() {
         let request = json!({

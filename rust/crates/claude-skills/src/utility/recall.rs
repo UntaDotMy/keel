@@ -39,7 +39,17 @@ const SCHEMA_VERSION: &str = "1";
 /// Top-level subdirectories under `<claude-home>` that recall indexes by default.
 /// Listed explicitly so the indexer never wanders into binaries, hooks, or release
 /// staging directories that happen to share the home root.
-const DEFAULT_RECALL_ROOTS: &[&str] = &["memories", "memoriesv2", "working-briefs"];
+///
+/// Both `memory` (singular) and `memories` (plural) are indexed deliberately: the
+/// CLI dispatches the primary lane as the literal command group `"memory"`, so
+/// `family_store` writes family records and the working buffer under
+/// `<home>/memory/<family>/` (singular), while the scoped `SYSTEM_MAP.md`
+/// reference lane and the recall test fixtures live under `memories/` (plural,
+/// via `system_map_reference_directory`'s normalization). Indexing only the
+/// plural root would silently skip everything `memory <family> record` writes —
+/// the primary recall surface returning zero hits with no error. Listing both
+/// keeps recall complete regardless of which tree a write landed in.
+const DEFAULT_RECALL_ROOTS: &[&str] = &["memory", "memories", "memoriesv2", "working-briefs"];
 
 /// Maximum number of FTS5 hits returned when `--limit` is not supplied.
 const DEFAULT_RECALL_LIMIT: usize = 20;
@@ -1062,7 +1072,14 @@ fn locate_first_match_line(content: &str, snippet_text: &str) -> usize {
         Some(offset) => offset,
         None => return 0,
     };
-    1 + content[..byte_offset].matches('\n').count()
+    // Count newlines in the SAME string space the offset came from
+    // (`lower_content`). `str::to_lowercase` is not length-preserving for some
+    // codepoints (e.g. U+0130 'İ'), so `content[..byte_offset]` could slice the
+    // original content mid-char and panic. Lowercasing never adds or removes
+    // newlines, so the line number is identical computed against `lower_content`,
+    // and `lower_content[..byte_offset]` is always a valid char boundary because
+    // `byte_offset` came from `lower_content.find`.
+    1 + lower_content[..byte_offset].matches('\n').count()
 }
 
 /// Replace the internal control-character markers with the visible `[`/`]`
@@ -1490,6 +1507,23 @@ mod tests {
         );
         let line = locate_first_match_line(content, &snippet);
         assert_eq!(line, 3, "expected line 3 for `webhook`, got {line}");
+    }
+
+    #[test]
+    fn locate_first_match_line_survives_length_changing_lowercase() {
+        // Regression: locate_first_match_line derived a byte offset from the
+        // LOWERCASED content then sliced the ORIGINAL content. U+0130 ('İ')
+        // lowercases to two bytes, so an 'İ' before the match shifted the offset
+        // and the original-content slice panicked mid-char. The line count must
+        // be computed in the same (lowercased) string space, and must not panic.
+        let content = "İstanbul title line\nThe match is webhook here.\n";
+        let snippet = format!(
+            "The match is {open}webhook{close} here.",
+            open = SNIPPET_OPEN_MARKER,
+            close = SNIPPET_CLOSE_MARKER,
+        );
+        let line = locate_first_match_line(content, &snippet);
+        assert_eq!(line, 2, "expected line 2 for `webhook`, got {line}");
     }
 
     #[test]

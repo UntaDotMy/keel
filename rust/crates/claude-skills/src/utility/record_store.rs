@@ -18,7 +18,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::json::{write_indented, Value};
-use crate::runtime::display_path;
+use crate::runtime::{display_path, safe_path_segment, write_text};
 use crate::utility::workflow_ledger::parse_object_of_strings;
 
 /// An ordered collection of string fields backing one stored record.
@@ -55,27 +55,50 @@ impl RecordStore {
         self.directory.join(format!("{id}.json"))
     }
 
+    /// Validate that `id` is a single safe path segment before it is joined into
+    /// a record path. Record ids reach this store from CLI `--id` flags, MCP tool
+    /// arguments, and workflow callers; without this guard a value like
+    /// `../../foo` or an absolute path would steer the `{id}.json` join outside
+    /// the store directory (arbitrary `.json` read/write/delete). Centralizing
+    /// the check here means every id-addressed method is guarded by construction,
+    /// rather than relying on each caller to sanitize first.
+    fn validated_record_path(&self, id: &str) -> Result<PathBuf, String> {
+        match safe_path_segment(id) {
+            Some(segment) => Ok(self.record_path(&segment)),
+            None => Err(format!(
+                "invalid record id {id:?}: must be a single safe path segment"
+            )),
+        }
+    }
+
     /// Whether a record file already exists for `id`. Used by
-    /// `allocate_unique_record_id` to avoid same-millisecond id collisions.
+    /// `allocate_unique_record_id` to avoid same-millisecond id collisions. An
+    /// unsafe id can never exist as a stored record, so it reports `false`.
     pub fn record_exists(&self, id: &str) -> bool {
-        self.record_path(id).exists()
+        match self.validated_record_path(id) {
+            Ok(path) => path.exists(),
+            Err(_) => false,
+        }
     }
 
     pub fn write_record(&self, id: &str, fields: &Record) -> Result<PathBuf, String> {
+        let path = self.validated_record_path(id)?;
         fs::create_dir_all(&self.directory)
             .map_err(|error| format!("create {}: {error}", display_path(&self.directory)))?;
-        let path = self.record_path(id);
         let value = record_to_storage_value(fields);
         let mut serialized = Vec::<u8>::new();
         write_indented(&mut serialized, &value)
             .map_err(|error| format!("serialize record {id}: {error}"))?;
-        fs::write(&path, &serialized)
-            .map_err(|error| format!("write {}: {error}", display_path(&path)))?;
+        let text = String::from_utf8(serialized)
+            .map_err(|error| format!("serialize record {id}: non-utf8 output: {error}"))?;
+        // Atomic temp+fsync+rename so a crash or concurrent reader never observes
+        // a truncated record file (which would then poison `list_records`).
+        write_text(&path, &text)?;
         Ok(path)
     }
 
     pub fn read_record(&self, id: &str) -> Result<Option<Record>, String> {
-        let path = self.record_path(id);
+        let path = self.validated_record_path(id)?;
         let text = match fs::read_to_string(&path) {
             Ok(text) => text,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -90,6 +113,11 @@ impl RecordStore {
     /// their id (file stem) alongside the fields so callers can sort or filter
     /// without re-deriving the id. Returns an empty vec when the directory is
     /// absent so first-use is not an error.
+    ///
+    /// A single unreadable or unparseable file is skipped (with a stderr warning)
+    /// rather than aborting the whole listing: a crash mid-write or a hand-edited
+    /// bad file must not make `list`/cockpit/completion-gate fail wholesale until
+    /// the user manually deletes it.
     pub fn list_records(&self) -> Result<Vec<(String, Record)>, String> {
         if !self.directory.is_dir() {
             return Ok(Vec::new());
@@ -108,11 +136,20 @@ impl RecordStore {
                 Some(stem) => stem.to_string(),
                 None => continue,
             };
-            let text = fs::read_to_string(&path)
-                .map_err(|error| format!("read {}: {error}", display_path(&path)))?;
-            let fields = parse_object_of_strings(&text)
-                .map_err(|error| format!("parse {}: {error}", display_path(&path)))?;
-            records.push((id, fields));
+            let text = match fs::read_to_string(&path) {
+                Ok(text) => text,
+                Err(error) => {
+                    eprintln!("skip {}: {error}", display_path(&path));
+                    continue;
+                }
+            };
+            match parse_object_of_strings(&text) {
+                Ok(fields) => records.push((id, fields)),
+                Err(error) => {
+                    eprintln!("skip {}: {error}", display_path(&path));
+                    continue;
+                }
+            }
         }
         records.sort_by(|left, right| left.0.cmp(&right.0));
         Ok(records)
@@ -122,7 +159,7 @@ impl RecordStore {
     /// loop's decay/prune step to drop auto-learned instincts whose pattern has
     /// aged out, and by family `forget`/`remove` actions.
     pub fn delete_record(&self, id: &str) -> Result<bool, String> {
-        let path = self.record_path(id);
+        let path = self.validated_record_path(id)?;
         match fs::remove_file(&path) {
             Ok(()) => Ok(true),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
@@ -237,6 +274,43 @@ mod tests {
             .expect("record exists");
         assert_eq!(field(&loaded, "phase"), Some("implement"));
         assert_eq!(field(&loaded, "steps[]"), Some("a\nb"));
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn rejects_traversal_and_absolute_ids() {
+        let home = temp_home("traversal");
+        let store = RecordStore::new(&home, "research-cache");
+        for evil in [
+            "../escape",
+            "../../etc/passwd",
+            "a/b",
+            "a\\b",
+            "/abs",
+            "C:foo",
+            "..",
+        ] {
+            assert!(
+                store
+                    .write_record(evil, &vec![("id".into(), "x".into())])
+                    .is_err(),
+                "write must reject id {evil:?}"
+            );
+            assert!(
+                store.read_record(evil).is_err(),
+                "read must reject id {evil:?}"
+            );
+            assert!(
+                store.delete_record(evil).is_err(),
+                "delete must reject id {evil:?}"
+            );
+            assert!(
+                !store.record_exists(evil),
+                "record_exists must be false for unsafe id {evil:?}"
+            );
+        }
+        // No file was created outside the store directory.
+        assert!(!home.join("escape.json").exists());
         let _ = fs::remove_dir_all(&home);
     }
 
