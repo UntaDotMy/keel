@@ -172,6 +172,18 @@ The four pillars above govern *what* you choose to build. The rules below govern
 - Keep changes small enough that a reviewer can hold the full diff in mind. ~100 lines is comfortable; ~1000 is too many.
 - The system must continue to function after the change is submitted. No half-landed states.
 
+### Writing Discipline
+
+Applies to every word written for a human or the record: docs, code comments, commit and PR text, review notes, chat replies, and any generated prose. Same standard as the code rules above — say what is needed, nothing more.
+
+- **Write less.** Cut every word that does not change the reader's understanding. If a sentence survives deletion without loss, delete it.
+- **Be accurate, not impressive.** State what is true and verified. No hype, no superlatives ("seamless", "robust", "powerful", "comprehensive", "best-in-class"), no marketing tone.
+- **Lead with the point.** First sentence carries the answer or the change. No throat-clearing preamble, no "In this section we will...".
+- **No filler or AI tells.** Drop "it's worth noting", "as we can see", "in order to", "leverage", "delve", "a wide range of", restating the question, and summary paragraphs that add nothing.
+- **Stay on the asked scope.** Document or describe what the change actually does. Do not speculate, do not pad with tangents, do not invent context that was not requested.
+- **Match register to surface.** Commit/PR text: factual, diff-matching, professional (see the commit-body section rules). Code comments: explain *why*, never *what*. Docs: direct statements a reader can act on.
+- **No drift.** If you cannot state it accurately and briefly, state less — never fill space with plausible-sounding text.
+
 ### Source Anchors
 
 - [Google Engineering Practices — What to look for in a code review](https://google.github.io/eng-practices/review/reviewer/looking-for.html)

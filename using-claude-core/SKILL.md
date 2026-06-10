@@ -97,22 +97,27 @@ After implementation work, before claiming completion:
 
 > **Default-on enforcement gates.** Two PostToolBatch gates are **on by
 > default** — they are the only model-independent backstop for the Iron Law,
-> since hooks cannot force a tool/Skill call but can refuse to let a turn close
-> until a required artifact exists:
+> since hooks cannot force a tool/Skill call but can inject a reminder (and,
+> opt-in, refuse to let a turn close) when a required artifact is missing. By
+> default each fires as a **non-blocking nudge**: the reminder is injected via
+> `hookSpecificOutput.additionalContext`, so you are told to act but the turn is
+> **not** halted.
 > - **Working-brief gate** (front of the law) — if a session changes code but no
->   working brief was written this session, the hook emits `decision: "block"`
->   once, refusing closeout until you write one
+>   working brief was written this session, the hook nudges once to write one
 >   (`claude-skills memory working-brief write --request "..." --acceptance-criteria "..."`,
->   which clears the gate). Disable with `CLAUDE_SKILLS_BRIEF_GATE=off`.
+>   which clears the gate). Set `CLAUDE_SKILLS_BRIEF_GATE=block` for the opt-in
+>   hard stop, or `=off` to disable.
 > - **Review gate** (back of the law) — if a session changed code but recorded no
->   reviewer pass since the last edit, the hook blocks once until a review runs
+>   reviewer pass since the last edit, the hook nudges once to run a review
 >   (invoke the `reviewer` skill, or run `claude-skills review pre-pr`, which
->   clears the gate). Disable with `CLAUDE_SKILLS_REVIEW_GATE=off`.
+>   clears the gate). Set `CLAUDE_SKILLS_REVIEW_GATE=block` for the opt-in hard
+>   stop, or `=off` to disable.
 >
-> Each gate blocks **at most `…_MAX_BLOCKS` time(s) per session (default 1)** via
-> a strictly-increasing counter and then permanently falls through to advisory,
-> so the pair cannot loop. Both fail open (no session id, unreadable telemetry,
-> or a render error degrade to the advisory reminder, never a block) and both are
+> Each gate fires **at most `…_MAX_BLOCKS` time(s) per session (default 1)** via
+> a strictly-increasing counter — whether nudging or blocking — and then
+> permanently falls through to the generic advisory, so the pair can neither loop
+> nor spam. Both fail open (no session id, unreadable telemetry, or a render
+> error degrade to the advisory reminder, never a block) and both are
 > instantly disablable with their env var or `…_MAX_BLOCKS=0`. A determined model
 > can still write a token brief to clear the front gate — that is the
 > acknowledged ceiling of artifact-existence enforcement, which is why the
@@ -153,6 +158,8 @@ skill matcher fires. The full text and the tactical rules they imply live in
 | "While I'm here, I'll clean up the file" | Step 3 (Surgical Changes) violated. Revert the unrelated cleanup. |
 | "I'll add a config knob in case we need it" | Step 2 (Simplicity First) violated. Add it when a second caller exists. |
 | "Make it work" is a goal | Step 4 (Goal-Driven Execution) failed. State the verifiable check that proves done. |
+
+**Writing Discipline** governs every word you write — docs, code comments, commit/PR text, review notes, and chat replies. Write less, be accurate not impressive, lead with the point, no filler or AI tells, stay on the asked scope. Full rule in `_shared/common-discipline.md` § Writing Discipline.
 
 ## Skill catalog (40 skills installed under ~/.claude/skills/)
 
@@ -259,6 +266,7 @@ matcher or raw CLI. They never invoke planned-but-unimplemented commands.
 
 `.claude-plugin/plugin.json` registers `mcpServers.claude_core` at user scope, so Claude Code auto-discovers the server on **every** project — you do not need to start it. These tools are always available; **prefer them over guessing or ad-hoc file reading**:
 
+- Tool `context_brief` (full name `mcp__claude_core__context_brief`) — **call this first when you start a session or task.** One call returns the iron law, the full installed skill catalog (name + when_to_use), durable-memory health, and the newest working brief. This is how you become aware of what the toolkit offers when no skill loaded automatically. After reading it, route with `skill_route`, load with `skill_get`, and reach anything else through `cli`.
 - Tool `system_map` (full name `mcp__claude_core__system_map`) — **call this before any claim about the current repo's structure or layout** ("what is this project", "how is this organized", "where does X live") instead of guessing or spelunking files blind. Returns the workspace SYSTEM_MAP.md (auto-refreshed copy preferred, freshly rendered fallback).
 - Tool `recall` (full name `mcp__claude_core__recall`) — **call this before claiming what you remember or previously learned.** Full-text search over `~/.claude/memories`, `memoriesv2`, `working-briefs` via the FTS5 index. Same code path as `claude-skills memory recall`.
 - Tool `run_command` (full name `mcp__claude_core__run_command`) — run a noisy shell command through the proxy capture+compaction pipeline so the compacted output lands in context instead of the raw stream. Prefer it for test/build/lint/log/search commands.
@@ -269,6 +277,7 @@ matcher or raw CLI. They never invoke planned-but-unimplemented commands.
 - Tool `memory_status` (full name `mcp__claude_core__memory_status`) — durable-memory health: the recall index snapshot plus per-family record counts. Read-only.
 - Tool `brief_list` / `brief_get` / `brief_create` (full names `mcp__claude_core__brief_*`) — read and write working briefs under `~/.claude/working-briefs`. `brief_create` records the restated request, constraints, acceptance criteria, and assumptions so they survive compaction; the read pair retrieves them.
 - Tool `system_map_refresh` (full name `mcp__claude_core__system_map_refresh`) — regenerate the cached SYSTEM_MAP.md (`system_map` only reads it). Call after creating, deleting, moving, or renaming files.
+- Tool `cli` (full name `mcp__claude_core__cli`) — run any other claude-skills subcommand (`review`, `git-workflow`, `workflow`, `memory`, `orchestration`, `flow`, `code-search`, `config-audit`, `skill-lint`, `checkpoint`, `gain`, `telemetry`, `status`, `doctor`, ...) and get its compacted output. Pass `args` as a string array. Destructive/management subcommands (`install`, `update`, `repair`, `uninstall`, `validate`, `all`, `__self-replace`, `checkpoint restore`) require `confirm: true`; `mcp` is refused. Prefer a dedicated tool when one fits; use `cli` for the rest.
 - Resource `claude_core://system-map` (`text/markdown`) and `claude_core://recall/status` (`application/json`).
 
 The same 1% rule that governs skills applies here: if a tool could answer the question more authoritatively than your own recall, use it before responding.
