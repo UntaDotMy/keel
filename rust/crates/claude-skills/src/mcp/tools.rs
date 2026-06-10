@@ -13,9 +13,11 @@
 //!   `memory`, `workflow_ledger`) for the capabilities each tool wraps.
 //! Side Effects: `recall`/`recall_status`/`memory_status` open the recall SQLite
 //!   index; `run_command` executes a user-supplied shell command via the proxy;
-//!   `brief_create` writes a JSON brief under `<claude-home>/working-briefs/`;
-//!   `system_map_refresh` writes SYSTEM_MAP.md under the workspace reference
-//!   lane. The skill and read-only brief tools only read installed files.
+//!   `cli` shells out to any non-refused claude-skills subcommand (destructive
+//!   ones gated behind `confirm`); `brief_create` writes a JSON brief under
+//!   `<claude-home>/working-briefs/`; `system_map_refresh` writes SYSTEM_MAP.md
+//!   under the workspace reference lane. `context_brief` and the skill/read-only
+//!   brief tools only read installed files.
 //!
 //! Design: each tool is a thin wrapper over a function that already backs a CLI
 //! surface, so the MCP channel and the CLI never drift. The skill, memory, and
@@ -184,6 +186,26 @@ pub(super) fn handle_tools_list() -> Value {
                         "workspace_root": { "type": "string", "description": "Absolute workspace root. Defaults to the server process working directory." }
                     }
                 }
+            },
+            {
+                "name": "context_brief",
+                "description": "Call this FIRST when starting a session or task — one call that makes you aware of what this toolkit offers, even when no skill loaded automatically. Returns the iron law, the full installed skill catalog (name + when_to_use), durable-memory health, and the newest working brief. After reading it, use skill_route to pick a skill, skill_get to load one, recall for memory, and cli for any other claude-skills surface. Read-only.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {}
+                }
+            },
+            {
+                "name": "cli",
+                "description": "Run any claude-skills CLI subcommand and get its compacted output — the full toolkit surface (review, git-workflow, workflow, memory, memoriesv2, orchestration, flow, code-search, config-audit, skill-lint, checkpoint, gain, session, telemetry, status, doctor, ...). Pass the subcommand and flags as `args`. Read/inspection subcommands run directly; destructive or management subcommands (install, update, repair, uninstall, validate, all, self-replace, `checkpoint restore`, and `hook install`/`hook uninstall`) require `confirm: true`. The `mcp` subcommand is refused. Prefer the dedicated tools (recall, skill_route, brief_create, ...) when one fits; use cli for everything else.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "args": { "type": "array", "items": { "type": "string" }, "description": "claude-skills arguments, e.g. [\"review\",\"pre-pr\",\"--base-ref\",\"origin/feat\"] or [\"workflow\",\"status\"]." },
+                        "confirm": { "type": "boolean", "description": "Required true to run a destructive/management subcommand. Default false." }
+                    },
+                    "required": ["args"]
+                }
             }
         ]
     })
@@ -216,6 +238,8 @@ pub(super) fn handle_tools_call(params: &Value) -> Result<Value, MethodError> {
         "brief_get" => tool_brief_get(&arguments),
         "brief_create" => tool_brief_create(&arguments),
         "system_map_refresh" => tool_system_map_refresh(&arguments),
+        "context_brief" => tool_context_brief(&arguments),
+        "cli" => tool_cli(&arguments),
         other => {
             return Err(MethodError {
                 code: JSON_RPC_INVALID_PARAMS,
@@ -608,6 +632,155 @@ fn tool_system_map_refresh(arguments: &Value) -> Result<String, String> {
         .map_err(|error| format!("system_map_refresh: serialize: {error}"))
 }
 
+/// One-call awareness payload: the iron law, the installed skill catalog,
+/// durable-memory health, and the newest working brief. The point is that an
+/// agent reaching the MCP surface with no skill auto-loaded can call this once
+/// and know what exists. Read-only; every section fails open to an empty/marker
+/// value rather than erroring the whole call, so partial state still informs.
+fn tool_context_brief(_arguments: &Value) -> Result<String, String> {
+    let claude_home = tool_claude_home("context_brief")?;
+
+    let catalog = skill_catalog(&claude_home);
+    let skills: Vec<Value> = catalog
+        .iter()
+        .map(|entry| {
+            json!({
+                "name": entry.name,
+                "whenToUse": entry.when_to_use,
+            })
+        })
+        .collect();
+
+    // Memory health: reuse the recall-status snapshot, tolerate failure.
+    let memory = match recall_status_payload() {
+        Ok(index) => json!({
+            "index": index,
+            "families": family_counts(&claude_home, DEFAULT_MEMORY_GROUP)
+                .iter()
+                .map(|(family, count)| json!({ "family": family, "records": count }))
+                .collect::<Vec<Value>>(),
+        }),
+        Err(message) => json!({ "unavailable": message }),
+    };
+
+    // Newest working brief, if any. list_briefs is oldest-first → take the last.
+    let newest_brief = match list_briefs(&claude_home) {
+        Ok(briefs) => briefs.last().map(brief_to_json).unwrap_or(Value::Null),
+        Err(_) => Value::Null,
+    };
+
+    let payload = json!({
+        "ironLaw": IRON_LAW_SUMMARY,
+        "skillCount": skills.len(),
+        "skills": skills,
+        "memory": memory,
+        "newestBrief": newest_brief,
+        "next": "Use skill_route to pick a skill, skill_get to load its full body, recall for memory, and cli for any other claude-skills surface.",
+    });
+    serde_json::to_string_pretty(&payload)
+        .map_err(|error| format!("context_brief: serialize: {error}"))
+}
+
+/// Compact restatement of the four-rule Iron Law for the awareness payload. The
+/// authoritative long form is injected at SessionStart by the hook layer; this
+/// is the pull-channel equivalent for sessions where that injection did not
+/// reach the model.
+const IRON_LAW_SUMMARY: &str = "Before anything that could touch code, config, or architecture: (1) Read first — read the SYSTEM_MAP and the owning file before claiming behavior. (2) Understand before building — restate the request and research what is needed; never build against an imagined spec. (3) Invoke relevant skills — if a claude-core skill might apply, route to it before answering. (4) Find the root cause — trace the symptom with file:line evidence before changing anything.";
+
+/// claude-skills subcommands the `cli` passthrough refuses outright. `mcp` would
+/// recurse into another server; the destructive/management set is gated behind
+/// `confirm: true` rather than refused (see [`CLI_CONFIRM_SUBCOMMANDS`]).
+const CLI_REFUSED_SUBCOMMANDS: &[&str] = &["mcp"];
+
+/// claude-skills subcommands that mutate the install, the binary, or the working
+/// tree destructively. The `cli` tool runs these only when the caller passes
+/// `confirm: true`, so a model cannot silently reinstall, repair, uninstall, or
+/// restore over a working tree. Read/inspection subcommands are not listed and
+/// run directly. Two further actions are gated by second-arg checks in
+/// [`tool_cli`] rather than whole-group entries here, because their group also
+/// has read-only members: `checkpoint restore` and `hook install`/`hook uninstall`.
+/// `verify` is intentionally absent — it is a read-only diff/audit pass.
+const CLI_CONFIRM_SUBCOMMANDS: &[&str] = &[
+    "install",
+    "update",
+    "repair",
+    "uninstall",
+    "remove",
+    "validate",
+    "all",
+    "__self-replace",
+];
+
+/// Generic passthrough to the full claude-skills CLI. Covers every subcommand
+/// the dedicated tools do not, so the MCP surface matches the CLI surface
+/// without one wrapper per subcommand. Output is the same compacted report shape
+/// as `run_command`. Destructive/management subcommands require `confirm: true`;
+/// `checkpoint restore` (overwrites the working tree) and `hook install`/`hook
+/// uninstall` (mutate global settings.json) are gated the same way.
+fn tool_cli(arguments: &Value) -> Result<String, String> {
+    let args: Vec<String> = match arguments.get("args") {
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect(),
+        _ => return Err("cli: missing args (a JSON array of strings)".to_string()),
+    };
+    let subcommand = match args.first() {
+        Some(first) if !first.trim().is_empty() => first.trim().to_string(),
+        _ => return Err("cli: args must start with a subcommand".to_string()),
+    };
+
+    if CLI_REFUSED_SUBCOMMANDS.contains(&subcommand.as_str()) {
+        return Err(format!(
+            "cli: subcommand {subcommand:?} is not available through MCP"
+        ));
+    }
+
+    let confirm = arguments
+        .get("confirm")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    // Two subcommand GROUPS gate on a second-arg action rather than the whole
+    // group, because the group also has read-only members:
+    //   * `checkpoint restore` overwrites the working tree (list/show/create are safe).
+    //   * `hook install`/`hook uninstall` mutate the global ~/.claude/settings.json
+    //     (list/show/diagnose/instructions are read-only).
+    let second_arg = args.get(1).map(String::as_str).unwrap_or("");
+    let is_checkpoint_restore = subcommand == "checkpoint" && second_arg == "restore";
+    let is_hook_mutating = subcommand == "hook" && matches!(second_arg, "install" | "uninstall");
+    let needs_confirm = CLI_CONFIRM_SUBCOMMANDS.contains(&subcommand.as_str())
+        || is_checkpoint_restore
+        || is_hook_mutating;
+    if needs_confirm && !confirm {
+        return Err(format!(
+            "cli: subcommand {subcommand:?} is destructive/management — re-call with confirm:true to run it"
+        ));
+    }
+
+    let executable = env::current_exe().map_err(|error| format!("cli: locate self: {error}"))?;
+    let mut child = Command::new(&executable);
+    for argument in &args {
+        child.arg(argument);
+    }
+    child.env("CLAUDE_SKILLS_HOOK", "mcp");
+    child.stdin(Stdio::null());
+    child.stdout(Stdio::piped());
+    child.stderr(Stdio::piped());
+    let output = child
+        .output()
+        .map_err(|error| format!("cli: spawn: {error}"))?;
+    let stdout_text = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr_text = String::from_utf8_lossy(&output.stderr).to_string();
+    Ok(render_run_command_report(
+        &format!("claude-skills {}", args.join(" ")),
+        output.status.code().unwrap_or(-1),
+        &stdout_text,
+        &stderr_text,
+    ))
+}
+
 /// Resolve the default Claude home, prefixing any failure with the calling
 /// tool's name so a resolution error reads `"<tool>: <reason>"` in the
 /// tool-result envelope. Every handler resolves the same way; this keeps the
@@ -689,10 +862,12 @@ mod tests {
             "brief_get",
             "brief_create",
             "system_map_refresh",
+            "context_brief",
+            "cli",
         ] {
             assert!(names.contains(&expected), "missing {expected}: {names:?}");
         }
-        assert_eq!(names.len(), 12, "names: {names:?}");
+        assert_eq!(names.len(), 14, "names: {names:?}");
     }
 
     #[test]
@@ -719,6 +894,78 @@ mod tests {
         assert_eq!(result["isError"], json!(true));
         let text = result["content"][0]["text"].as_str().unwrap_or("");
         assert!(text.contains("missing request"), "text: {text}");
+    }
+
+    #[test]
+    fn cli_missing_args_is_tool_error() {
+        let params = json!({ "name": "cli", "arguments": {} });
+        let result = handle_tools_call(&params).expect("envelope present");
+        assert_eq!(result["isError"], json!(true));
+        let text = result["content"][0]["text"].as_str().unwrap_or("");
+        assert!(text.contains("missing args"), "text: {text}");
+    }
+
+    #[test]
+    fn cli_refuses_mcp_subcommand() {
+        // The mcp subcommand would recurse into another server; refuse outright.
+        let params = json!({ "name": "cli", "arguments": { "args": ["mcp", "serve"] } });
+        let result = handle_tools_call(&params).expect("envelope present");
+        assert_eq!(result["isError"], json!(true));
+        let text = result["content"][0]["text"].as_str().unwrap_or("");
+        assert!(text.contains("not available through MCP"), "text: {text}");
+    }
+
+    #[test]
+    fn cli_gates_destructive_subcommand_without_confirm() {
+        // A management subcommand must refuse unless confirm:true is passed. This
+        // asserts the gate WITHOUT running the subcommand (no confirm → early
+        // return before any spawn).
+        for sub in [
+            "install",
+            "uninstall",
+            "repair",
+            "update",
+            "validate",
+            "all",
+        ] {
+            let params = json!({ "name": "cli", "arguments": { "args": [sub] } });
+            let result = handle_tools_call(&params).expect("envelope present");
+            assert_eq!(result["isError"], json!(true), "sub {sub} must gate");
+            let text = result["content"][0]["text"].as_str().unwrap_or("");
+            assert!(
+                text.contains("confirm:true"),
+                "sub {sub} must name the confirm gate: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn cli_gates_checkpoint_restore_but_not_checkpoint_list() {
+        // `checkpoint restore` overwrites the working tree → gated. Other
+        // checkpoint actions are not gated by the confirm rule (they still run;
+        // here we only assert the gate decision, so use a no-confirm restore).
+        let restore = json!({ "name": "cli", "arguments": { "args": ["checkpoint", "restore", "--id", "x"] } });
+        let result = handle_tools_call(&restore).expect("envelope present");
+        assert_eq!(result["isError"], json!(true));
+        let text = result["content"][0]["text"].as_str().unwrap_or("");
+        assert!(text.contains("confirm:true"), "restore must gate: {text}");
+    }
+
+    #[test]
+    fn cli_gates_hook_install_and_uninstall() {
+        // `hook install`/`hook uninstall` mutate the global settings.json, so they
+        // are gated by a second-arg check even though the `hook` group has
+        // read-only members. No confirm → refuse before any spawn.
+        for action in ["install", "uninstall"] {
+            let params = json!({ "name": "cli", "arguments": { "args": ["hook", action] } });
+            let result = handle_tools_call(&params).expect("envelope present");
+            assert_eq!(result["isError"], json!(true), "hook {action} must gate");
+            let text = result["content"][0]["text"].as_str().unwrap_or("");
+            assert!(
+                text.contains("confirm:true"),
+                "hook {action} must name the confirm gate: {text}"
+            );
+        }
     }
 
     #[test]

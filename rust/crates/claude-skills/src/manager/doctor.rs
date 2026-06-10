@@ -287,7 +287,7 @@ fn probe_mcp_initialize(command: &str, args: &[String]) -> bool {
         "id": 1,
         "method": "initialize",
         "params": {
-            "protocolVersion": "2024-11-05",
+            "protocolVersion": "2025-11-25",
             "capabilities": {},
             "clientInfo": { "name": "doctor", "version": "1.0" }
         }
