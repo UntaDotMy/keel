@@ -26,9 +26,10 @@ Token-saving rule: prevent noisy raw command output from entering Claude Code co
 2. **Native commands first** — prefer `claude-skills` surfaces over raw shell when they own the job.
 3. **Memory first** — resolve scoped memory and read `SYSTEM_MAP.md` before broad analysis: `claude-skills memory scope resolve --create-missing --refresh-system-map`.
 4. **Iterative loop** — ALIGN → RESEARCH → PLAN → IMPLEMENT → TEST → FIX → VERIFY → REVIEW → RECONCILE.
-5. **Branch model + commit format** — `main` (stable) ← `dev` (daily integration / staging verification) ← `feat/<topic>` (all new features, fixes, subtasks; branch off `dev`). Never delete a branch after push or merge. Commit subjects strictly follow `<category>: <FEATURE>: <short information>` (categories lowercase: add, config, refactor, wip, fix, docs; FEATURE uppercase, e.g. `wip: RGB: Build light effect mode (multi color)`).
+5. **Branch model + commit format** — `main` (stable) ← `dev` (staging verification) ← `feat` (feature integration) ← `<category>/<FEATURE>` work branch (all hands-on commits; branch off `feat`). Fixes for in-flight work stay on the same work branch — never a new branch. Never delete a branch after push or merge. Commit subjects strictly follow `<category>: <FEATURE>: <short information>` — colon-separated (categories lowercase: add, config, refactor, wip, fix, docs; FEATURE uppercase, e.g. `wip: RGB: Build light effect mode (multi color)`). The commit uses colons; the branch name uses a slash (`add/RGB`) — never conflate them.
 6. **Release ladder is fail-closed** — Smoke → Functional → Integration → UI → Load → Stress → Security. Mark not-applicable only with explicit, evidence-backed reasoning.
 7. **Completion reconciliation** — re-read the working brief and impacted surface before final answer. Every explicit user requirement maps to evidence or a verified blocker. No partial-as-complete.
+8. **Writing Discipline** — all written output (docs, code comments, commit/PR text, review notes, chat): write less, be accurate not impressive, lead with the point, no filler or AI tells, stay on the asked scope. Full rule in `_shared/common-discipline.md` § Writing Discipline.
 
 ## Skill Ownership Map (Claude Code CLI)
 

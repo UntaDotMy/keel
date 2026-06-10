@@ -1439,37 +1439,52 @@ fn count_session_tool_timing_rows(claude_home: &Path, session_id: &str) -> usize
 /// because models that pattern-match generic reminders as noise have
 /// rationalized past prior versions of this text.
 fn post_tool_batch_context() -> String {
-    "Closeout check: if this batch changed code with logic edits, multi-file changes, public-API touches, or security-sensitive surfaces, route the diff through a reviewer pass before final closeout. Trivial work (docs-only, formatting-only, single-line typo or comment fixes, generated-only) does not need a full reviewer pass — but that is a judgment about the review, not a promise the gates stay silent. The standard is: non-trivial code does not self-review. Note: the default-on working-brief and review gates are intentionally blunt and do not detect triviality, so any code-changing session may receive one bounded, clearable block — follow the gate's own message to satisfy or disable it. If a project-level CLAUDE.md or AGENTS.md defines stricter routing rules, those take precedence. If this reminder feels like wrapper noise, that is the rationalization the rule names — re-read the diff and decide deliberately before skipping.".to_string()
+    "Closeout check: if this batch changed code with logic edits, multi-file changes, public-API touches, or security-sensitive surfaces, route the diff through a reviewer pass before final closeout. Trivial work (docs-only, formatting-only, single-line typo or comment fixes, generated-only) does not need a full reviewer pass. The standard is: non-trivial code does not self-review. Note: the default-on working-brief and review gates are intentionally blunt and do not detect triviality, so any code-changing session may receive one bounded, clearable reminder — by default a non-blocking nudge that does not stop the turn; follow its message to satisfy or disable it (`…=off`), or set `…=block` if you want it to hard-stop instead. If a project-level CLAUDE.md or AGENTS.md defines stricter routing rules, those take precedence. If this reminder feels like wrapper noise, that is the rationalization the rule names — re-read the diff and decide deliberately before skipping.".to_string()
 }
 
 // ----- PostToolBatch enforcement gates (review gate + working-brief gate) -----
 //
 // The PostToolBatch hook fires after a batch of tool calls resolves, just
 // before the next model turn. Two gates ride here, both DEFAULT-ON, because
-// they are the only model-INDEPENDENT way to enforce the Iron Law — Claude Code
-// hooks cannot force a Skill()/MCP/tool call, but they CAN refuse to let a turn
-// close until a required artifact exists:
-//   * Review gate — blocks when this session changed code but no reviewer pass
+// they are the only model-INDEPENDENT way to surface the Iron Law — Claude Code
+// hooks cannot force a Skill()/MCP/tool call, but they CAN inject a reminder
+// (and, opt-in, refuse to let a turn close) when a required artifact is missing:
+//   * Review gate — fires when this session changed code but no reviewer pass
 //     was recorded since the last edit (the BACK of the law: review before close).
-//   * Working-brief gate — blocks when this session changed code but no working
+//   * Working-brief gate — fires when this session changed code but no working
 //     brief was written this session (the FRONT of the law: understand/plan before
 //     building). This is the gate that would have caught the failure that motivated
 //     it: editing files with no brief, no recall, no map read.
 //
-// SAFETY — this is what makes a hard, default-on gate shippable without wedging
-// anyone's session:
-//   * Bounded. Each gate blocks at most `…_MAX_BLOCKS` times (default 1) per
-//     session, then permanently falls through to advisory. The issued-block
-//     counter strictly increases on every block and `decide_gate` stops blocking
-//     once it reaches the cap, so an infinite Stop/PostToolBatch loop is
-//     mathematically impossible regardless of whether the model ever satisfies
-//     the gate. This forecloses the documented stop-cascade hazard.
+// FIRING BEHAVIOR — three modes per gate, selected by its env var (see
+// `GateMode` / `gate_mode`):
+//   * Nudge (DEFAULT) — inject the gate message via
+//     `hookSpecificOutput.additionalContext`. The agent is TOLD to run the
+//     review / write the brief, but the turn is NOT halted. This is the default
+//     because a hard stop mid-task is disruptive; the reminder is enough to
+//     change behavior without breaking flow.
+//   * Block (`…=block`, opt-in) — emit `decision: "block"` so Claude Code halts
+//     the turn until the requirement is met. The pre-existing hard-stop behavior,
+//     now opt-in for teams that want enforcement, not just a reminder.
+//   * Off (`…=off`/`0`/`false`/`no`, or `…_MAX_BLOCKS=0`) — disabled; only the
+//     generic advisory reminder is emitted.
+//
+// SAFETY — this is what makes a default-on gate shippable without wedging or
+// spamming anyone's session:
+//   * Bounded. Each gate fires at most `…_MAX_BLOCKS` times (default 1) per
+//     session — whether nudging or blocking — then permanently falls through to
+//     the generic advisory. The issued counter strictly increases on every fire
+//     and `decide_gate` stops firing once it reaches the cap, so neither a
+//     nudge-spam loop nor an infinite Stop/PostToolBatch block loop is possible,
+//     regardless of whether the model ever satisfies the gate. This forecloses
+//     the documented stop-cascade hazard.
 //   * Fail-open everywhere. No session id, no claude_home, unreadable telemetry,
 //     or a serialization error all degrade to the advisory reminder, never to a
 //     block. A telemetry hiccup can never wedge a turn.
-//   * Off-switch preserved. `CLAUDE_SKILLS_REVIEW_GATE=off` and
-//     `CLAUDE_SKILLS_BRIEF_GATE=off` (or `…_MAX_BLOCKS=0`) each fully disable
-//     their gate, restoring byte-identical advisory output.
+//   * Switches preserved. `CLAUDE_SKILLS_REVIEW_GATE` and
+//     `CLAUDE_SKILLS_BRIEF_GATE` each take `off` (disable), `block` (hard stop),
+//     or unset/anything else (the non-blocking nudge default); `…_MAX_BLOCKS=0`
+//     is a second kill switch.
 //   * Clearable by actually doing the work. Running `claude-skills review
 //     pre-pr|pre-commit|gates` clears the review gate; writing a working brief
 //     this session (`claude-skills memory working-brief write`) clears the brief
@@ -1477,41 +1492,72 @@ fn post_tool_batch_context() -> String {
 //     determined model can still write a junk brief to clear the front gate, which
 //     is the acknowledged ceiling of artifact-existence enforcement.
 //
-// Default-on rationale: these were opt-in and almost nobody flipped them on, so
-// the law went unenforced in practice. Making them default-on with a bounded
-// single block per session is the lightest enforcement that actually changes
-// behavior for every user while staying loop-proof and instantly disablable.
+// Default-on-as-nudge rationale: these were opt-in and almost nobody flipped
+// them on, so the law went unenforced in practice. An earlier revision made them
+// default-on as a HARD BLOCK, which enforced the law but stopped work mid-task —
+// disruptive enough that users asked for it to stop. The resolution: default-on
+// as a non-blocking NUDGE (tell the agent, don't halt it), with the hard stop
+// preserved as opt-in `=block`. This changes behavior for every user while
+// staying loop-proof, non-disruptive, and instantly disablable.
 
 const REVIEW_GATE_ENV_VAR: &str = "CLAUDE_SKILLS_REVIEW_GATE";
 const REVIEW_GATE_MAX_BLOCKS_ENV_VAR: &str = "CLAUDE_SKILLS_REVIEW_GATE_MAX_BLOCKS";
 
-/// Default block cap when a gate is enabled but the operator did not set a
-/// custom `…_MAX_BLOCKS`. One hard stop per session: the model gets a single
-/// un-skippable block, after which the turn proceeds no matter what. A cap of 0
-/// disables blocking entirely (a second escape hatch alongside the off-switch).
+/// Default fire cap when a gate is enabled but the operator did not set a
+/// custom `…_MAX_BLOCKS`. One fire per session: the model gets a single
+/// reminder (a non-blocking nudge by default, or one hard block under `=block`),
+/// after which the turn proceeds no matter what. A cap of 0 disables firing
+/// entirely (a second escape hatch alongside the off-switch). The env var keeps
+/// its historical `_MAX_BLOCKS` name for backward compatibility even though the
+/// default behavior is now a nudge rather than a block.
 const GATE_DEFAULT_MAX_BLOCKS: u64 = 1;
 
-/// Shared default-on env reader for the PostToolBatch gates.
+/// How a PostToolBatch gate behaves when it fires (code changed, requirement
+/// unmet, under the per-session cap). Three modes, parsed from the gate's env
+/// var by [`gate_mode`]:
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GateMode {
+    /// Fully disabled. The gate never fires; only the generic advisory reminder
+    /// is emitted. Selected by `off` / `0` / `false` / `no`.
+    Off,
+    /// DEFAULT. Inject the gate's message via `hookSpecificOutput.additionalContext`
+    /// — the agent is *told* to run the review / write the brief, but the turn is
+    /// never halted (no `decision` field). Still bounded by the per-session
+    /// counter so the reminder shows at most `…_MAX_BLOCKS` time(s) and never
+    /// spams every batch. Selected by an unset var or any unrecognized value, so
+    /// a typo fails safe toward the gentle default, never toward a surprise stop.
+    Nudge,
+    /// Opt-in hard stop. Emit `decision: "block"` so Claude Code halts the turn
+    /// until the requirement is met. The pre-existing behavior, now opt-in.
+    /// Selected by `block` (case-insensitive).
+    Block,
+}
+
+/// Parse a gate's behavior from its env var. Default-on as a NON-BLOCKING NUDGE.
 ///
-/// Returns `true` (enabled) unless the env var is explicitly set to a disable
-/// token (`off` / `0` / `false` / `no`, case-insensitive). Unset → enabled,
-/// which is the new default for both gates. Any unrecognized value also enables,
-/// so a typo fails safe toward enforcement rather than silently disabling.
-fn gate_enabled_by_default(env_var: &str) -> bool {
+/// Mapping (value trimmed, compared case-insensitively):
+///   * `off` / `0` / `false` / `no` → [`GateMode::Off`]
+///   * `block` → [`GateMode::Block`] (the opt-in hard stop)
+///   * unset, or anything else → [`GateMode::Nudge`] (the default)
+///
+/// A typo therefore lands on `Nudge` (tell the agent, never halt), not on a
+/// hard stop and not on silent disablement — the safest failure direction for a
+/// reminder whose whole point is to be informative without being disruptive.
+fn gate_mode(env_var: &str) -> GateMode {
     match std::env::var(env_var).ok().as_deref().map(str::trim) {
-        Some(value) => !matches!(
-            value.to_ascii_lowercase().as_str(),
-            "off" | "0" | "false" | "no"
-        ),
-        None => true,
+        Some(value) => match value.to_ascii_lowercase().as_str() {
+            "off" | "0" | "false" | "no" => GateMode::Off,
+            "block" => GateMode::Block,
+            _ => GateMode::Nudge,
+        },
+        None => GateMode::Nudge,
     }
 }
 
-/// True unless the operator explicitly disables the review gate. Default-on:
-/// unset enables it; `CLAUDE_SKILLS_REVIEW_GATE=off` (or `0`/`false`/`no`)
-/// restores advisory-only behavior.
-fn review_gate_enabled() -> bool {
-    gate_enabled_by_default(REVIEW_GATE_ENV_VAR)
+/// Review-gate behavior. Default `Nudge`; `CLAUDE_SKILLS_REVIEW_GATE=block`
+/// restores the hard stop; `=off` (or `0`/`false`/`no`) disables it entirely.
+fn review_gate_mode() -> GateMode {
+    gate_mode(REVIEW_GATE_ENV_VAR)
 }
 
 fn review_gate_max_blocks() -> u64 {
@@ -1534,11 +1580,10 @@ const BRIEF_GATE_MAX_BLOCKS_ENV_VAR: &str = "CLAUDE_SKILLS_BRIEF_GATE_MAX_BLOCKS
 /// the generous side is deliberate: the gate fails open toward NOT blocking.
 const BRIEF_GATE_SESSION_GRACE_MS: u64 = 60_000;
 
-/// True unless the operator explicitly disables the working-brief gate.
-/// Default-on: unset enables it; `CLAUDE_SKILLS_BRIEF_GATE=off` (or
-/// `0`/`false`/`no`) restores advisory-only behavior.
-fn brief_gate_enabled() -> bool {
-    gate_enabled_by_default(BRIEF_GATE_ENV_VAR)
+/// Working-brief gate behavior. Default `Nudge`; `CLAUDE_SKILLS_BRIEF_GATE=block`
+/// restores the hard stop; `=off` (or `0`/`false`/`no`) disables it entirely.
+fn brief_gate_mode() -> GateMode {
+    gate_mode(BRIEF_GATE_ENV_VAR)
 }
 
 fn brief_gate_max_blocks() -> u64 {
@@ -1560,8 +1605,15 @@ fn brief_gate_blocks_path(claude_home: &Path, session_id: &str) -> PathBuf {
         .join(key)
 }
 
-fn brief_gate_block_reason() -> String {
-    "Working-brief gate (CLAUDE_SKILLS_BRIEF_GATE, on by default): this session changed code but no working brief was written this session. The Iron Law requires understanding before building — before continuing, write one with `claude-skills memory working-brief write --request \"...\" --acceptance-criteria \"...\"` capturing what the task actually asks and how completion is judged (this clears the gate). This gate blocks at most CLAUDE_SKILLS_BRIEF_GATE_MAX_BLOCKS time(s) per session (default 1) and then lets the turn through, so it cannot loop. Set CLAUDE_SKILLS_BRIEF_GATE=off to disable entirely.".to_string()
+/// Working-brief gate message. `Nudge` (default) is framed as a non-blocking
+/// reminder; `Block` (opt-in) is framed as a hard stop. Both name the clearing
+/// action and the off-switch, and both reassure the reminder is bounded.
+fn brief_gate_message(mode: GateMode) -> String {
+    match mode {
+        GateMode::Block => "Working-brief gate (CLAUDE_SKILLS_BRIEF_GATE=block): this session changed code but no working brief was written this session. The Iron Law requires understanding before building — before continuing, write one with `claude-skills memory working-brief write --request \"...\" --acceptance-criteria \"...\"` capturing what the task actually asks and how completion is judged (this clears the gate). This gate blocks at most CLAUDE_SKILLS_BRIEF_GATE_MAX_BLOCKS time(s) per session (default 1) and then lets the turn through, so it cannot loop. Set CLAUDE_SKILLS_BRIEF_GATE=off to disable entirely.".to_string(),
+        // Nudge / Off both render the non-blocking phrasing; Off never reaches here.
+        _ => "Working-brief reminder (CLAUDE_SKILLS_BRIEF_GATE, on by default as a non-blocking nudge): this session changed code but no working brief was written this session. The Iron Law asks you to understand before building — when you reach a natural pause, write one with `claude-skills memory working-brief write --request \"...\" --acceptance-criteria \"...\"` capturing what the task actually asks and how completion is judged (this clears the gate). This is advisory and does not stop the turn; it appears at most CLAUDE_SKILLS_BRIEF_GATE_MAX_BLOCKS time(s) per session (default 1). Set CLAUDE_SKILLS_BRIEF_GATE=block to make it a hard stop, or =off to disable entirely.".to_string(),
+    }
 }
 
 /// Unix-ms modification time of `path`, or `None` on any error. Fail-open: an
@@ -1688,9 +1740,15 @@ fn brief_written_this_session(
 
 #[derive(Debug, PartialEq, Eq)]
 enum GateDecision {
-    /// Emit the normal advisory reminder.
+    /// Emit the normal generic advisory reminder (the gate did not fire).
     Advisory,
-    /// Emit `decision: "block"` and increment the per-session block counter.
+    /// Emit the gate-specific message via `hookSpecificOutput.additionalContext`
+    /// — tell the agent to do the work, but do NOT halt the turn. Increments the
+    /// per-session counter so it shows at most `max_blocks` time(s). This is the
+    /// default firing behavior.
+    Nudge,
+    /// Emit `decision: "block"` and increment the per-session counter. The opt-in
+    /// hard stop (`…=block`).
     Block,
 }
 
@@ -1702,35 +1760,47 @@ enum GateDecision {
 /// review gate it means a reviewer pass ran after the last edit; for the brief
 /// gate it means a working brief covers this session's work.
 ///
+/// `mode` selects what a fired gate emits: [`GateMode::Nudge`] (default,
+/// non-blocking message) maps to [`GateDecision::Nudge`]; [`GateMode::Block`]
+/// (opt-in hard stop) maps to [`GateDecision::Block`]; [`GateMode::Off`] never
+/// fires.
+///
 /// The cap check (`blocks_issued >= max_blocks`) is the termination proof: the
-/// caller increments `blocks_issued` on every `Block`, so the value is strictly
-/// monotonic across a session and the function returns `Advisory` forever once
-/// the cap is reached. No infinite loop is possible.
+/// caller increments `blocks_issued` on every Nudge OR Block, so the value is
+/// strictly monotonic across a session and the function returns `Advisory`
+/// forever once the cap is reached. No infinite loop is possible, and the nudge
+/// is just as bounded as the block — it never spams every batch.
 fn decide_gate(
-    enabled: bool,
+    mode: GateMode,
     max_blocks: u64,
     blocks_issued: u64,
     edit_count: usize,
     satisfied: bool,
 ) -> GateDecision {
-    if !enabled || max_blocks == 0 {
+    if mode == GateMode::Off || max_blocks == 0 {
         return GateDecision::Advisory;
     }
     // No code changed this session — nothing to gate. Pure-research and
-    // question-answering turns never get blocked.
+    // question-answering turns never fire a gate.
     if edit_count == 0 {
         return GateDecision::Advisory;
     }
-    // The gate-specific requirement is already met — nothing to block on.
+    // The gate-specific requirement is already met — nothing to fire on.
     if satisfied {
         return GateDecision::Advisory;
     }
-    // Hard cap: stop blocking once we have issued the allowed number of blocks.
-    // This is what guarantees the gate cannot loop.
+    // Hard cap: stop firing once we have issued the allowed number of
+    // nudges/blocks. This is what guarantees the gate cannot loop or spam.
     if blocks_issued >= max_blocks {
         return GateDecision::Advisory;
     }
-    GateDecision::Block
+    match mode {
+        GateMode::Nudge => GateDecision::Nudge,
+        GateMode::Block => GateDecision::Block,
+        // Unreachable: handled by the early return above. Mapped to Advisory so a
+        // future refactor that removes the early return fails safe, not loud.
+        GateMode::Off => GateDecision::Advisory,
+    }
 }
 
 fn now_ms() -> u64 {
@@ -1851,8 +1921,15 @@ pub fn record_review_gate_clear() {
     let _ = fs::write(dir.join(format!("{key}.reviewed")), now_ms().to_string());
 }
 
-fn review_gate_block_reason() -> String {
-    "Review gate (CLAUDE_SKILLS_REVIEW_GATE, on by default): this session changed code but no reviewer pass has been recorded since the last edit. Before closing, run a reviewer pass — invoke the `reviewer` skill on the diff, or run `claude-skills review pre-pr` (which also clears this gate). This gate blocks at most CLAUDE_SKILLS_REVIEW_GATE_MAX_BLOCKS time(s) per session (default 1) and then lets the turn through, so it cannot loop. Set CLAUDE_SKILLS_REVIEW_GATE=off to disable entirely.".to_string()
+/// Review gate message. `Nudge` (default) is framed as a non-blocking reminder;
+/// `Block` (opt-in) is framed as a hard stop. Both name the clearing action and
+/// the off-switch, and both reassure the reminder is bounded.
+fn review_gate_message(mode: GateMode) -> String {
+    match mode {
+        GateMode::Block => "Review gate (CLAUDE_SKILLS_REVIEW_GATE=block): this session changed code but no reviewer pass has been recorded since the last edit. Before closing, run a reviewer pass — invoke the `reviewer` skill on the diff, or run `claude-skills review pre-pr` (which also clears this gate). This gate blocks at most CLAUDE_SKILLS_REVIEW_GATE_MAX_BLOCKS time(s) per session (default 1) and then lets the turn through, so it cannot loop. Set CLAUDE_SKILLS_REVIEW_GATE=off to disable entirely.".to_string(),
+        // Nudge / Off both render the non-blocking phrasing; Off never reaches here.
+        _ => "Review reminder (CLAUDE_SKILLS_REVIEW_GATE, on by default as a non-blocking nudge): this session changed code but no reviewer pass has been recorded since the last edit. Before you close out, run a reviewer pass — invoke the `reviewer` skill on the diff, or run `claude-skills review pre-pr` (which also clears this gate). This is advisory and does not stop the turn; it appears at most CLAUDE_SKILLS_REVIEW_GATE_MAX_BLOCKS time(s) per session (default 1). Set CLAUDE_SKILLS_REVIEW_GATE=block to make it a hard stop, or =off to disable entirely.".to_string(),
+    }
 }
 
 /// Emit the advisory PostToolBatch reminder (the default, gate-disabled path and
@@ -1911,23 +1988,68 @@ fn emit_post_tool_batch_block(
     }
 }
 
+/// Emit a NON-BLOCKING PostToolBatch nudge: the gate's `message` is injected via
+/// `hookSpecificOutput.additionalContext` so the agent is told to do the work,
+/// but the turn is never halted (no `decision` field). This is the default
+/// firing path — the fix for "stop mid-task": the agent gets the reminder and
+/// keeps going. Falls back to the generic advisory reminder if rendering fails.
+/// The caller increments the gate's counter BEFORE calling this so the
+/// per-session cap advances even on a render error (the monotonic counter is the
+/// termination guarantee).
+fn emit_post_tool_batch_nudge(
+    message: String,
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let payload = serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": "PostToolBatch",
+            "additionalContext": message,
+        },
+        "suppressOutput": true,
+    });
+    match serde_json::to_string_pretty(&payload) {
+        Ok(rendered) => {
+            let _ = writeln!(standard_output, "{rendered}");
+            0
+        }
+        Err(error) => {
+            let _ = writeln!(
+                standard_error,
+                "Unable to render PostToolBatch nudge output: {error}"
+            );
+            emit_post_tool_batch_advisory(standard_output, standard_error)
+        }
+    }
+}
+
 /// PostToolBatch dispatcher running the two default-on enforcement gates.
 ///
 /// Reads stdin for `session_id` (Claude Code delivers the hook payload there,
 /// same as UserPromptSubmit). Evaluates the working-brief gate FIRST (the front
 /// of the Iron Law — understand before building), then the review gate (the
-/// back — review before close). At most one `decision: "block"` is emitted per
-/// turn; each gate is independently bounded by its own per-session counter, so
-/// the worst case across a whole session is one brief block plus one review
-/// block, after which both fall through to advisory forever. When both gates are
-/// disabled this is byte-identical to the advisory reminder.
+/// back — review before close).
+///
+/// Each gate fires at most once per turn and is independently bounded by its own
+/// per-session counter. The DEFAULT firing behavior is a NON-BLOCKING NUDGE: the
+/// gate's message is injected via `hookSpecificOutput.additionalContext` so the
+/// agent is told to do the work but the turn is never halted — this is the fix
+/// for the gate stopping work mid-task. Setting a gate's env var to `block`
+/// restores the opt-in `decision: "block"` hard stop; `off` disables it.
+///
+/// The worst case across a whole session is one brief firing plus one review
+/// firing (default nudges, or blocks under `=block`), after which both fall
+/// through to the generic advisory forever. When both gates are off this is
+/// byte-identical to the advisory reminder.
 fn run_hook_post_tool_batch(
     standard_input: &mut dyn Read,
     standard_output: &mut dyn Write,
     standard_error: &mut dyn Write,
 ) -> u8 {
-    let review_on = review_gate_enabled() && review_gate_max_blocks() > 0;
-    let brief_on = brief_gate_enabled() && brief_gate_max_blocks() > 0;
+    let review_mode = review_gate_mode();
+    let brief_mode = brief_gate_mode();
+    let review_on = review_mode != GateMode::Off && review_gate_max_blocks() > 0;
+    let brief_on = brief_mode != GateMode::Off && brief_gate_max_blocks() > 0;
 
     // Both gates off: skip stdin entirely and emit the advisory reminder. This
     // keeps the fully-disabled path cheap and side-effect-free.
@@ -1948,7 +2070,7 @@ fn run_hook_post_tool_batch(
         .and_then(JsonDocument::as_str)
         .unwrap_or_default();
 
-    // Fail-open: without a claude_home we cannot read telemetry or the block
+    // Fail-open: without a claude_home we cannot read telemetry or the gate
     // counters, so degrade to advisory rather than risk a wedged turn.
     let Ok(claude_home) = resolve_claude_home("") else {
         return emit_post_tool_batch_advisory(standard_output, standard_error);
@@ -1958,7 +2080,7 @@ fn run_hook_post_tool_batch(
 
     // Both gates only fire when code changed this session. Short-circuit the
     // no-edit case so pure-research and question turns pay no gate IO and never
-    // block — this is the same `edit_count == 0 → Advisory` rule decide_gate
+    // fire — this is the same `edit_count == 0 → Advisory` rule decide_gate
     // enforces, hoisted to skip the brief/review lookups entirely.
     if stats.count == 0 {
         return emit_post_tool_batch_advisory(standard_output, standard_error);
@@ -1970,20 +2092,21 @@ fn run_hook_post_tool_batch(
         let satisfied = brief_written_this_session(&claude_home, &stats.last_cwd, start);
         let blocks_path = brief_gate_blocks_path(&claude_home, session_id);
         let blocks_issued = read_counter_value(&blocks_path);
-        if decide_gate(
-            true,
+        let decision = decide_gate(
+            brief_mode,
             brief_gate_max_blocks(),
             blocks_issued,
             stats.count,
             satisfied,
-        ) == GateDecision::Block
-        {
+        );
+        if decision != GateDecision::Advisory {
             // Increment FIRST so the cap counts down even if rendering fails or
-            // the model ignores the block — the monotonic counter is the
+            // the model ignores the message — the monotonic counter is the
             // termination guarantee and must advance before anything else.
             let _ = increment_counter_file(&blocks_path);
-            return emit_post_tool_batch_block(
-                brief_gate_block_reason(),
+            return emit_gate_decision(
+                decision,
+                brief_gate_message(brief_mode),
                 standard_output,
                 standard_error,
             );
@@ -1997,25 +2120,43 @@ fn run_hook_post_tool_batch(
             .unwrap_or(false);
         let blocks_path = review_gate_blocks_path(&claude_home, session_id);
         let blocks_issued = read_counter_value(&blocks_path);
-        if decide_gate(
-            true,
+        let decision = decide_gate(
+            review_mode,
             review_gate_max_blocks(),
             blocks_issued,
             stats.count,
             reviewed,
-        ) == GateDecision::Block
-        {
+        );
+        if decision != GateDecision::Advisory {
             let _ = increment_counter_file(&blocks_path);
-            return emit_post_tool_batch_block(
-                review_gate_block_reason(),
+            return emit_gate_decision(
+                decision,
+                review_gate_message(review_mode),
                 standard_output,
                 standard_error,
             );
         }
     }
 
-    // Neither gate blocked → advisory reminder.
+    // Neither gate fired → advisory reminder.
     emit_post_tool_batch_advisory(standard_output, standard_error)
+}
+
+/// Route a fired gate's [`GateDecision`] to the matching emitter: `Nudge` →
+/// non-blocking `additionalContext`, `Block` → `decision: "block"`. `Advisory`
+/// should never reach here (the caller only emits on a fired gate) but maps to
+/// the generic advisory so the function is total and fails safe.
+fn emit_gate_decision(
+    decision: GateDecision,
+    message: String,
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    match decision {
+        GateDecision::Nudge => emit_post_tool_batch_nudge(message, standard_output, standard_error),
+        GateDecision::Block => emit_post_tool_batch_block(message, standard_output, standard_error),
+        GateDecision::Advisory => emit_post_tool_batch_advisory(standard_output, standard_error),
+    }
 }
 
 fn prune_raw_output_store(standard_error: &mut dyn Write) {
@@ -3931,13 +4072,13 @@ mod tests {
 
     #[test]
     fn gate_disabled_decision_is_always_advisory() {
-        // With a gate disabled, no combination of inputs blocks.
+        // With a gate Off, no combination of inputs fires.
         for edit_count in [0usize, 1, 50] {
             for satisfied in [true, false] {
                 assert_eq!(
-                    decide_gate(false, 1, 0, edit_count, satisfied),
+                    decide_gate(GateMode::Off, 1, 0, edit_count, satisfied),
                     GateDecision::Advisory,
-                    "disabled gate must never block (edits={edit_count}, satisfied={satisfied})"
+                    "Off gate must never fire (edits={edit_count}, satisfied={satisfied})"
                 );
             }
         }
@@ -3945,27 +4086,58 @@ mod tests {
 
     #[test]
     fn gate_max_blocks_zero_is_advisory() {
-        // Cap of 0 is a second kill switch: enabled but never blocks.
-        assert_eq!(decide_gate(true, 0, 0, 5, false), GateDecision::Advisory);
+        // Cap of 0 is a second kill switch: enabled but never fires, in either mode.
+        assert_eq!(
+            decide_gate(GateMode::Nudge, 0, 0, 5, false),
+            GateDecision::Advisory
+        );
+        assert_eq!(
+            decide_gate(GateMode::Block, 0, 0, 5, false),
+            GateDecision::Advisory
+        );
     }
 
     #[test]
     fn gate_no_edits_is_advisory() {
-        // Pure-research / question turns changed no code — never gate them.
-        assert_eq!(decide_gate(true, 1, 0, 0, false), GateDecision::Advisory);
+        // Pure-research / question turns changed no code — never fire them.
+        assert_eq!(
+            decide_gate(GateMode::Nudge, 1, 0, 0, false),
+            GateDecision::Advisory
+        );
+        assert_eq!(
+            decide_gate(GateMode::Block, 1, 0, 0, false),
+            GateDecision::Advisory
+        );
     }
 
     #[test]
     fn gate_satisfied_is_advisory() {
         // The gate-specific requirement is already met (review ran / brief
-        // written) — nothing to block on.
-        assert_eq!(decide_gate(true, 1, 0, 5, true), GateDecision::Advisory);
+        // written) — nothing to fire on, in either mode.
+        assert_eq!(
+            decide_gate(GateMode::Nudge, 1, 0, 5, true),
+            GateDecision::Advisory
+        );
+        assert_eq!(
+            decide_gate(GateMode::Block, 1, 0, 5, true),
+            GateDecision::Advisory
+        );
     }
 
     #[test]
-    fn gate_blocks_unsatisfied_edits_once() {
-        // Enabled, code changed, requirement unmet, under the cap → block.
-        assert_eq!(decide_gate(true, 1, 0, 5, false), GateDecision::Block);
+    fn gate_fires_unsatisfied_edits_once() {
+        // Enabled, code changed, requirement unmet, under the cap → fire.
+        // Default Nudge mode yields a non-blocking nudge; Block mode yields a stop.
+        assert_eq!(
+            decide_gate(GateMode::Nudge, 1, 0, 5, false),
+            GateDecision::Nudge,
+            "default mode must NUDGE, never block — this is the no-stop fix"
+        );
+        assert_eq!(
+            decide_gate(GateMode::Block, 1, 0, 5, false),
+            GateDecision::Block,
+            "block mode must restore the opt-in hard stop"
+        );
     }
 
     #[test]
@@ -3973,27 +4145,29 @@ mod tests {
         // THE TERMINATION PROOF. Simulate the worst case: the gate stays enabled,
         // code stays changed, and the requirement is NEVER satisfied
         // (satisfied=false forever). Drive the loop exactly as the dispatcher
-        // does — increment the issued-block counter on every Block — and assert it
-        // stops blocking once the cap is reached, no matter how many turns elapse.
-        // If this ever looped in production it would wedge every project; this
-        // test is the guarantee that it cannot. Covers both gates because they
-        // share this exact decision core.
-        for max_blocks in [1u64, 2, 3] {
-            let mut blocks_issued = 0u64;
-            let mut total_blocks = 0u64;
-            for _turn in 0..1000 {
-                match decide_gate(true, max_blocks, blocks_issued, 5, false) {
-                    GateDecision::Block => {
-                        blocks_issued += 1;
-                        total_blocks += 1;
+        // does — increment the issued counter on every fire — and assert it
+        // stops firing once the cap is reached, no matter how many turns elapse.
+        // If this ever looped in production it would spam (nudge) or wedge (block)
+        // every project; this test is the guarantee that it cannot. Covers both
+        // gates AND both modes because they share this exact decision core.
+        for mode in [GateMode::Nudge, GateMode::Block] {
+            for max_blocks in [1u64, 2, 3] {
+                let mut blocks_issued = 0u64;
+                let mut total_fires = 0u64;
+                for _turn in 0..1000 {
+                    match decide_gate(mode, max_blocks, blocks_issued, 5, false) {
+                        GateDecision::Nudge | GateDecision::Block => {
+                            blocks_issued += 1;
+                            total_fires += 1;
+                        }
+                        GateDecision::Advisory => {}
                     }
-                    GateDecision::Advisory => {}
                 }
+                assert_eq!(
+                    total_fires, max_blocks,
+                    "gate ({mode:?}) must fire exactly max_blocks ({max_blocks}) times across a long session, then fall through forever"
+                );
             }
-            assert_eq!(
-                total_blocks, max_blocks,
-                "gate must block exactly max_blocks ({max_blocks}) times across a long session, then fall through forever"
-            );
         }
     }
 
@@ -4045,10 +4219,10 @@ mod tests {
     }
 
     #[test]
-    fn gate_enabled_by_default_honors_off_switch() {
-        // The default-on contract: unset → enabled; explicit disable tokens →
-        // disabled; anything else (including a typo) → enabled (fail toward
-        // enforcement).
+    fn gate_mode_parses_off_block_and_nudge_default() {
+        // The default-on-as-nudge contract: unset → Nudge; explicit disable
+        // tokens → Off; `block` → Block; anything else (including a typo) →
+        // Nudge (fail toward the gentle, non-blocking default).
         let _guard = crate::test_support::ENV_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -4056,20 +4230,34 @@ mod tests {
         let previous = std::env::var(PROBE).ok();
 
         std::env::remove_var(PROBE);
-        assert!(gate_enabled_by_default(PROBE), "unset must be enabled");
+        assert_eq!(
+            gate_mode(PROBE),
+            GateMode::Nudge,
+            "unset must default to the non-blocking nudge"
+        );
 
         for disable in ["off", "0", "false", "no", "OFF", "  off  ", "False"] {
             std::env::set_var(PROBE, disable);
-            assert!(
-                !gate_enabled_by_default(PROBE),
-                "disable token {disable:?} must disable the gate"
+            assert_eq!(
+                gate_mode(PROBE),
+                GateMode::Off,
+                "disable token {disable:?} must turn the gate Off"
             );
         }
-        for enable in ["on", "1", "true", "yes", "wibble", ""] {
-            std::env::set_var(PROBE, enable);
-            assert!(
-                gate_enabled_by_default(PROBE),
-                "non-disable value {enable:?} must keep the gate enabled"
+        for block in ["block", "BLOCK", "  Block  "] {
+            std::env::set_var(PROBE, block);
+            assert_eq!(
+                gate_mode(PROBE),
+                GateMode::Block,
+                "value {block:?} must select the opt-in hard stop"
+            );
+        }
+        for nudge in ["on", "1", "true", "yes", "wibble", "", "nudge"] {
+            std::env::set_var(PROBE, nudge);
+            assert_eq!(
+                gate_mode(PROBE),
+                GateMode::Nudge,
+                "non-off, non-block value {nudge:?} must default to the nudge"
             );
         }
 
@@ -4080,30 +4268,52 @@ mod tests {
     }
 
     #[test]
-    fn review_gate_block_reason_names_the_kill_switch() {
-        // Operators must always be told how to turn it off, right in the block.
-        let reason = review_gate_block_reason();
-        assert!(reason.contains("CLAUDE_SKILLS_REVIEW_GATE=off"));
-        assert!(reason.contains("review pre-pr"));
+    fn review_gate_messages_name_the_switches() {
+        // Operators must always be told how to change/disable the gate, right in
+        // the message — in both modes.
+        let nudge = review_gate_message(GateMode::Nudge);
+        assert!(nudge.contains("CLAUDE_SKILLS_REVIEW_GATE=block"));
+        assert!(nudge.contains("=off"));
+        assert!(nudge.contains("review pre-pr"));
         assert!(
-            reason.contains("cannot loop") || reason.contains("at most"),
-            "block reason must reassure that the gate is bounded"
+            nudge.contains("does not stop the turn"),
+            "nudge message must make clear it is non-blocking"
+        );
+
+        let block = review_gate_message(GateMode::Block);
+        assert!(block.contains("CLAUDE_SKILLS_REVIEW_GATE=off"));
+        assert!(block.contains("review pre-pr"));
+        assert!(
+            block.contains("cannot loop") || block.contains("at most"),
+            "block message must reassure that the gate is bounded"
         );
     }
 
     #[test]
-    fn brief_gate_block_reason_names_the_kill_switch_and_action() {
-        // The brief-gate block must tell the model how to clear it (write a
-        // brief) and how to disable it, and reassure that it is bounded.
-        let reason = brief_gate_block_reason();
-        assert!(reason.contains("CLAUDE_SKILLS_BRIEF_GATE=off"));
+    fn brief_gate_messages_name_the_switches_and_action() {
+        // The brief-gate message must tell the model how to clear it (write a
+        // brief) and how to change/disable it, in both modes.
+        let nudge = brief_gate_message(GateMode::Nudge);
+        assert!(nudge.contains("CLAUDE_SKILLS_BRIEF_GATE=block"));
+        assert!(nudge.contains("=off"));
         assert!(
-            reason.contains("working-brief write"),
-            "block reason must name the brief-write surface that clears the gate"
+            nudge.contains("working-brief write"),
+            "nudge message must name the brief-write surface that clears the gate"
         );
         assert!(
-            reason.contains("cannot loop") || reason.contains("at most"),
-            "block reason must reassure that the gate is bounded"
+            nudge.contains("does not stop the turn"),
+            "nudge message must make clear it is non-blocking"
+        );
+
+        let block = brief_gate_message(GateMode::Block);
+        assert!(block.contains("CLAUDE_SKILLS_BRIEF_GATE=off"));
+        assert!(
+            block.contains("working-brief write"),
+            "block message must name the brief-write surface that clears the gate"
+        );
+        assert!(
+            block.contains("cannot loop") || block.contains("at most"),
+            "block message must reassure that the gate is bounded"
         );
     }
 
@@ -4207,28 +4417,31 @@ mod tests {
     }
 
     #[test]
-    fn run_hook_post_tool_batch_brief_gate_blocks_once_then_falls_through() {
-        // END-TO-END through the real dispatcher: a session that edited code with
-        // no working brief must get exactly one brief-gate block, the block
-        // counter must advance, and the next call must fall through to advisory.
-        // The review gate is disabled so this isolates the brief gate. Exercises
-        // the wiring (stdin parse, timings read, workspace match, counter
-        // increment, gate ordering) that the pure decide_gate test cannot.
+    fn run_hook_post_tool_batch_brief_gate_nudges_by_default_then_falls_through() {
+        // END-TO-END through the real dispatcher. Two things proven here:
+        //   1. DEFAULT (unset BRIEF_GATE): a session that edited code with no
+        //      working brief gets exactly one NON-BLOCKING nudge — additionalContext
+        //      carrying the brief reminder, and crucially NO `decision` field, so
+        //      the turn is never halted. This is the no-stop fix.
+        //   2. The per-session counter still advances and the next call falls
+        //      through to the generic advisory, so the nudge is bounded (no spam).
+        //   3. Opt-in: with BRIEF_GATE=block a fresh session emits `decision:block`.
+        // The review gate is disabled throughout so this isolates the brief gate.
         let _guard = crate::test_support::ENV_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-        let claude_home = temp_brief_gate_home("e2e-block");
+        let claude_home = temp_brief_gate_home("e2e-nudge");
         let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
         let previous_review = std::env::var(REVIEW_GATE_ENV_VAR).ok();
         let previous_brief = std::env::var(BRIEF_GATE_ENV_VAR).ok();
         std::env::set_var("CLAUDE_TARGET_OVERRIDE", &claude_home);
         std::env::set_var(REVIEW_GATE_ENV_VAR, "off"); // isolate the brief gate
-        std::env::remove_var(BRIEF_GATE_ENV_VAR); // default-on
+        std::env::remove_var(BRIEF_GATE_ENV_VAR); // default → nudge
 
         // Seed one edit-class timing row for this session so stats.count > 0 and
-        // session_start_ms resolves. No brief is written → gate must block.
-        let session_id = "sess-e2e-block";
+        // session_start_ms resolves. No brief is written → gate must fire.
+        let session_id = "sess-e2e-nudge";
         let date = chrono::Local::now().format("%Y-%m-%d").to_string();
         let timings_dir = claude_home.join("state").join("tool-timings");
         std::fs::create_dir_all(&timings_dir).expect("create timings dir");
@@ -4249,26 +4462,32 @@ mod tests {
 
         let stdin_json = format!("{{\"session_id\":\"{session_id}\"}}");
 
-        // First call: must block and name the brief gate.
+        // First call (default mode): must NUDGE — additionalContext with the brief
+        // reminder and NO decision field (the turn is not halted).
         let mut out1 = Vec::new();
         let mut err1 = Vec::new();
         let code1 = run_hook_post_tool_batch(&mut stdin_json.as_bytes(), &mut out1, &mut err1);
         let out1_text = String::from_utf8_lossy(&out1);
         assert_eq!(code1, 0, "stderr: {}", String::from_utf8_lossy(&err1));
         assert!(
-            out1_text.contains("\"decision\"") && out1_text.contains("CLAUDE_SKILLS_BRIEF_GATE"),
-            "first call must emit a brief-gate block: {out1_text}"
+            !out1_text.contains("\"decision\""),
+            "default brief gate must NOT block (no decision field): {out1_text}"
+        );
+        assert!(
+            out1_text.contains("additionalContext")
+                && out1_text.contains("CLAUDE_SKILLS_BRIEF_GATE"),
+            "default brief gate must emit a non-blocking nudge naming the gate: {out1_text}"
         );
 
-        // The block counter must have advanced to 1.
+        // The counter must have advanced to 1 (the nudge is bounded like a block).
         let blocks_path = brief_gate_blocks_path(&claude_home, session_id);
         assert_eq!(
             read_counter_value(&blocks_path),
             1,
-            "brief-gate block counter must advance to 1 after the block"
+            "brief-gate counter must advance to 1 after the nudge"
         );
 
-        // Second call (same unsatisfied state): cap reached → advisory, no block.
+        // Second call (same unsatisfied state): cap reached → generic advisory.
         let mut out2 = Vec::new();
         let mut err2 = Vec::new();
         let code2 = run_hook_post_tool_batch(&mut stdin_json.as_bytes(), &mut out2, &mut err2);
@@ -4276,11 +4495,179 @@ mod tests {
         assert_eq!(code2, 0, "stderr: {}", String::from_utf8_lossy(&err2));
         assert!(
             !out2_text.contains("\"decision\""),
-            "second call must fall through to advisory (cap reached): {out2_text}"
+            "second call must not block: {out2_text}"
         );
         assert!(
             out2_text.contains("Closeout check"),
-            "second call must emit the advisory reminder: {out2_text}"
+            "second call must fall through to the generic advisory (cap reached): {out2_text}"
+        );
+
+        // Opt-in hard stop: a FRESH session with BRIEF_GATE=block must emit a real
+        // decision:block. New session id so its counter starts at zero.
+        std::env::set_var(BRIEF_GATE_ENV_VAR, "block");
+        let block_session = "sess-e2e-block-optin";
+        let block_row = serde_json::json!({
+            "recorded_at_ms": now_ms(),
+            "event": "PostToolUse",
+            "tool_name": "Edit",
+            "duration_ms": 5u64,
+            "session_id": block_session,
+            "cwd": "D:/Nasri/Project/gate-e2e",
+            "effort_level": "",
+        });
+        // Append the new session's row alongside the first.
+        std::fs::write(
+            timings_dir.join(format!("{date}.jsonl")),
+            format!("{row}\n{block_row}\n"),
+        )
+        .expect("rewrite timings rows");
+        let block_stdin = format!("{{\"session_id\":\"{block_session}\"}}");
+        let mut out3 = Vec::new();
+        let mut err3 = Vec::new();
+        let code3 = run_hook_post_tool_batch(&mut block_stdin.as_bytes(), &mut out3, &mut err3);
+        let out3_text = String::from_utf8_lossy(&out3);
+        assert_eq!(code3, 0, "stderr: {}", String::from_utf8_lossy(&err3));
+        assert!(
+            out3_text.contains("\"decision\"")
+                && out3_text.contains("block")
+                && out3_text.contains("CLAUDE_SKILLS_BRIEF_GATE"),
+            "BRIEF_GATE=block must restore the opt-in hard stop: {out3_text}"
+        );
+
+        match previous_home {
+            Some(value) => std::env::set_var("CLAUDE_TARGET_OVERRIDE", value),
+            None => std::env::remove_var("CLAUDE_TARGET_OVERRIDE"),
+        }
+        match previous_review {
+            Some(value) => std::env::set_var(REVIEW_GATE_ENV_VAR, value),
+            None => std::env::remove_var(REVIEW_GATE_ENV_VAR),
+        }
+        match previous_brief {
+            Some(value) => std::env::set_var(BRIEF_GATE_ENV_VAR, value),
+            None => std::env::remove_var(BRIEF_GATE_ENV_VAR),
+        }
+        let _ = std::fs::remove_dir_all(&claude_home);
+    }
+
+    #[test]
+    fn run_hook_post_tool_batch_review_gate_nudges_by_default_then_falls_through() {
+        // END-TO-END for the REVIEW gate, symmetric to the brief-gate test above.
+        // The review gate has distinct plumbing from the brief gate
+        // (review_marker_ms, review_gate_blocks_path, review_gate_message), so a
+        // regression there could silently re-introduce a default `decision:block`
+        // even while the brief gate stays correct. This isolates the review gate
+        // (brief gate off) and proves:
+        //   1. DEFAULT (unset REVIEW_GATE): a session that edited code with no
+        //      reviewer marker gets a NON-BLOCKING nudge — additionalContext with
+        //      the review reminder and NO `decision` field.
+        //   2. The per-session counter advances and the next call falls through to
+        //      the generic advisory (bounded, no spam).
+        //   3. Opt-in: with REVIEW_GATE=block a fresh session emits decision:block.
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let claude_home = temp_brief_gate_home("e2e-review-nudge");
+        let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
+        let previous_review = std::env::var(REVIEW_GATE_ENV_VAR).ok();
+        let previous_brief = std::env::var(BRIEF_GATE_ENV_VAR).ok();
+        std::env::set_var("CLAUDE_TARGET_OVERRIDE", &claude_home);
+        std::env::set_var(BRIEF_GATE_ENV_VAR, "off"); // isolate the review gate
+        std::env::remove_var(REVIEW_GATE_ENV_VAR); // default → nudge
+
+        // Seed one edit-class timing row. No `.reviewed` marker is written → the
+        // review gate sees an unreviewed edit and must fire.
+        let session_id = "sess-e2e-review-nudge";
+        let cwd = "D:/Nasri/Project/gate-review-e2e";
+        let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let timings_dir = claude_home.join("state").join("tool-timings");
+        std::fs::create_dir_all(&timings_dir).expect("create timings dir");
+        let row = serde_json::json!({
+            "recorded_at_ms": now_ms(),
+            "event": "PostToolUse",
+            "tool_name": "Edit",
+            "duration_ms": 5u64,
+            "session_id": session_id,
+            "cwd": cwd,
+            "effort_level": "",
+        });
+        std::fs::write(
+            timings_dir.join(format!("{date}.jsonl")),
+            format!("{row}\n"),
+        )
+        .expect("write timings row");
+
+        let stdin_json = format!("{{\"session_id\":\"{session_id}\"}}");
+
+        // First call (default mode): must NUDGE — additionalContext naming the
+        // review gate, and NO decision field (turn not halted).
+        let mut out1 = Vec::new();
+        let mut err1 = Vec::new();
+        let code1 = run_hook_post_tool_batch(&mut stdin_json.as_bytes(), &mut out1, &mut err1);
+        let out1_text = String::from_utf8_lossy(&out1);
+        assert_eq!(code1, 0, "stderr: {}", String::from_utf8_lossy(&err1));
+        assert!(
+            !out1_text.contains("\"decision\""),
+            "default review gate must NOT block (no decision field): {out1_text}"
+        );
+        assert!(
+            out1_text.contains("additionalContext")
+                && out1_text.contains("CLAUDE_SKILLS_REVIEW_GATE"),
+            "default review gate must emit a non-blocking nudge naming the gate: {out1_text}"
+        );
+
+        // Counter advances to 1 (the nudge is bounded like a block).
+        let blocks_path = review_gate_blocks_path(&claude_home, session_id);
+        assert_eq!(
+            read_counter_value(&blocks_path),
+            1,
+            "review-gate counter must advance to 1 after the nudge"
+        );
+
+        // Second call (same unsatisfied state): cap reached → generic advisory.
+        let mut out2 = Vec::new();
+        let mut err2 = Vec::new();
+        let code2 = run_hook_post_tool_batch(&mut stdin_json.as_bytes(), &mut out2, &mut err2);
+        let out2_text = String::from_utf8_lossy(&out2);
+        assert_eq!(code2, 0, "stderr: {}", String::from_utf8_lossy(&err2));
+        assert!(
+            !out2_text.contains("\"decision\""),
+            "second call must not block: {out2_text}"
+        );
+        assert!(
+            out2_text.contains("Closeout check"),
+            "second call must fall through to the generic advisory (cap reached): {out2_text}"
+        );
+
+        // Opt-in hard stop: a FRESH session with REVIEW_GATE=block must emit a
+        // real decision:block. New session id so its counter starts at zero.
+        std::env::set_var(REVIEW_GATE_ENV_VAR, "block");
+        let block_session = "sess-e2e-review-block-optin";
+        let block_row = serde_json::json!({
+            "recorded_at_ms": now_ms(),
+            "event": "PostToolUse",
+            "tool_name": "Edit",
+            "duration_ms": 5u64,
+            "session_id": block_session,
+            "cwd": cwd,
+            "effort_level": "",
+        });
+        std::fs::write(
+            timings_dir.join(format!("{date}.jsonl")),
+            format!("{row}\n{block_row}\n"),
+        )
+        .expect("rewrite timings rows");
+        let block_stdin = format!("{{\"session_id\":\"{block_session}\"}}");
+        let mut out3 = Vec::new();
+        let mut err3 = Vec::new();
+        let code3 = run_hook_post_tool_batch(&mut block_stdin.as_bytes(), &mut out3, &mut err3);
+        let out3_text = String::from_utf8_lossy(&out3);
+        assert_eq!(code3, 0, "stderr: {}", String::from_utf8_lossy(&err3));
+        assert!(
+            out3_text.contains("\"decision\"")
+                && out3_text.contains("block")
+                && out3_text.contains("CLAUDE_SKILLS_REVIEW_GATE"),
+            "REVIEW_GATE=block must restore the opt-in hard stop: {out3_text}"
         );
 
         match previous_home {

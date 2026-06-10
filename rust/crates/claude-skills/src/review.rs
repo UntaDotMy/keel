@@ -80,8 +80,15 @@ pub fn run_git_workflow_command(
     }
 }
 
-/// Branch-name prefixes WORKFLOW.md sanctions for feature-delivery branches.
-const SANCTIONED_BRANCH_PREFIXES: &[&str] = &["feat/", "fix/", "improve/", "add/"];
+/// Branch-name prefixes WORKFLOW.md sanctions for work branches — the six
+/// commit categories, each usable as a `<category>/<FEATURE>` work-branch prefix
+/// (e.g. `add/RGB`, `fix/SENSOR`). `feat/` is intentionally absent: `feat` is a
+/// permanent integration tier in the four-tier model, not a work-branch prefix.
+/// `improve/` (a legacy prefix that never mapped to a commit category) was also
+/// removed in the four-tier migration — a branch named `improve/...` now blocks,
+/// which is intended: rename it to a real `<category>/<FEATURE>` work branch.
+const SANCTIONED_BRANCH_PREFIXES: &[&str] =
+    &["add/", "config/", "refactor/", "wip/", "fix/", "docs/"];
 /// Conventional commit-subject prefixes the preflight expects; a subject that
 /// matches none of these earns a (non-blocking) drift warning.
 const SANCTIONED_COMMIT_PREFIXES: &[&str] = &[
@@ -140,22 +147,31 @@ fn run_git_workflow_preflight(
         }
     }
 
-    // 1. Branch naming. The current branch must use a sanctioned feature prefix
-    //    and must not be the base/protected branch.
+    // 1. Branch naming. In the four-tier model (main ← dev ← feat ← work
+    //    branch) the current branch must be either a permitted integration tier
+    //    being promoted (`dev`/`feat`) or a `<category>/<FEATURE>` work branch.
+    //    `main`/`master` are final-stable and never pushed from directly.
     let branch = git_text(repo, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_default();
     let branch = branch.trim().to_string();
     if branch.is_empty() || branch == "HEAD" {
-        blocking.push("detached HEAD — check out a feature branch before preflight".to_string());
-    } else if matches!(branch.as_str(), "main" | "master" | "develop") {
+        blocking.push("detached HEAD — check out a work branch before preflight".to_string());
+    } else if matches!(branch.as_str(), "main" | "master") {
         blocking.push(format!(
-            "on protected branch '{branch}' — create a feat/ fix/ improve/ add/ branch"
+            "on final-stable branch '{branch}' — never push from it directly; create a <category>/<FEATURE> work branch (e.g. add/RGB)"
+        ));
+    } else if matches!(branch.as_str(), "dev" | "feat") {
+        // Integration tiers: valid to stand on only when promoting upward
+        // (feat→dev, dev→main). Allowed through, but flagged so an accidental
+        // direct commit to a tier is visible rather than silent.
+        warnings.push(format!(
+            "on integration tier '{branch}' — only valid when promoting upward (feat→dev→main), not for hands-on work"
         ));
     } else if !SANCTIONED_BRANCH_PREFIXES
         .iter()
         .any(|prefix| branch.starts_with(prefix))
     {
         blocking.push(format!(
-            "branch '{branch}' does not use a sanctioned prefix ({})",
+            "branch '{branch}' does not use a sanctioned <category>/ prefix ({})",
             SANCTIONED_BRANCH_PREFIXES.join(", ")
         ));
     }
@@ -1298,6 +1314,10 @@ const COMMIT_CATEGORIES: [&str; 6] = ["add", "config", "refactor", "wip", "fix",
 
 /// Validate a commit subject against `<category>: <FEATURE>: <short information>`.
 ///
+/// The commit subject is COLON-separated (three parts). This is distinct from a
+/// branch name, which is SLASH-separated (`<category>/<FEATURE>`); same category
+/// vocabulary, different separator. Do not conflate them.
+///
 /// - `<category>` must be one of [`COMMIT_CATEGORIES`] (lowercase).
 /// - `<FEATURE>` must be a non-empty uppercase component label (e.g. RGB, LED, ARGB, SENSOR).
 /// - `<short information>` must be a non-empty description.
@@ -2013,11 +2033,12 @@ mod tests {
     #[test]
     fn preflight_passes_on_clean_feature_branch_ahead_of_base() {
         let repo = init_temp_repo("pass");
-        // Branch off main, add a committed change so HEAD is ahead of main.
-        git_in(&repo, &["checkout", "-q", "-b", "feat/widget"]);
+        // Branch off main onto a <category>/<FEATURE> work branch, add a
+        // committed change so HEAD is ahead of main.
+        git_in(&repo, &["checkout", "-q", "-b", "add/WIDGET"]);
         std::fs::write(repo.join("widget.txt"), "feature\n").unwrap();
         git_in(&repo, &["add", "."]);
-        git_in(&repo, &["commit", "-q", "-m", "feat: add widget"]);
+        git_in(&repo, &["commit", "-q", "-m", "add: WIDGET: add widget"]);
 
         let (code, stdout) = run_preflight(&repo, "main");
         assert_eq!(code, 0, "stdout: {stdout}");
@@ -2029,10 +2050,10 @@ mod tests {
     #[test]
     fn preflight_blocks_on_protected_branch() {
         let repo = init_temp_repo("protected");
-        // Still on main (a protected branch).
+        // Still on main (final-stable; never pushed from directly).
         let (code, stdout) = run_preflight(&repo, "main");
         assert_eq!(code, 1, "stdout: {stdout}");
-        assert!(stdout.contains("protected branch"), "stdout: {stdout}");
+        assert!(stdout.contains("final-stable branch"), "stdout: {stdout}");
 
         let _ = std::fs::remove_dir_all(&repo);
     }
@@ -2043,11 +2064,32 @@ mod tests {
         git_in(&repo, &["checkout", "-q", "-b", "random-branch"]);
         std::fs::write(repo.join("x.txt"), "x\n").unwrap();
         git_in(&repo, &["add", "."]);
-        git_in(&repo, &["commit", "-q", "-m", "feat: x"]);
+        git_in(&repo, &["commit", "-q", "-m", "add: X: x"]);
 
         let (code, stdout) = run_preflight(&repo, "main");
         assert_eq!(code, 1, "stdout: {stdout}");
-        assert!(stdout.contains("sanctioned prefix"), "stdout: {stdout}");
+        assert!(stdout.contains("sanctioned"), "stdout: {stdout}");
+
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn preflight_warns_on_integration_tier_branch() {
+        // Standing on `feat` is valid only for promotion; preflight allows it
+        // through (no block) but flags it so an accidental direct commit to the
+        // tier is visible.
+        let repo = init_temp_repo("tier");
+        git_in(&repo, &["checkout", "-q", "-b", "feat"]);
+        std::fs::write(repo.join("f.txt"), "f\n").unwrap();
+        git_in(&repo, &["add", "."]);
+        git_in(&repo, &["commit", "-q", "-m", "add: FEAT: integration"]);
+
+        let (code, stdout) = run_preflight(&repo, "main");
+        assert_eq!(
+            code, 0,
+            "integration tier is a warning, not a block: {stdout}"
+        );
+        assert!(stdout.contains("integration tier"), "stdout: {stdout}");
 
         let _ = std::fs::remove_dir_all(&repo);
     }
@@ -2055,10 +2097,10 @@ mod tests {
     #[test]
     fn preflight_blocks_on_dirty_worktree() {
         let repo = init_temp_repo("dirty");
-        git_in(&repo, &["checkout", "-q", "-b", "fix/thing"]);
+        git_in(&repo, &["checkout", "-q", "-b", "fix/THING"]);
         std::fs::write(repo.join("thing.txt"), "committed\n").unwrap();
         git_in(&repo, &["add", "."]);
-        git_in(&repo, &["commit", "-q", "-m", "fix: thing"]);
+        git_in(&repo, &["commit", "-q", "-m", "fix: THING: thing"]);
         // Now leave an uncommitted change in the worktree.
         std::fs::write(repo.join("thing.txt"), "dirty edit\n").unwrap();
 
@@ -2072,8 +2114,8 @@ mod tests {
     #[test]
     fn preflight_blocks_when_no_commits_ahead_of_base() {
         let repo = init_temp_repo("nocommits");
-        // A sanctioned, clean branch with NO commits beyond main.
-        git_in(&repo, &["checkout", "-q", "-b", "feat/empty"]);
+        // A sanctioned, clean work branch with NO commits beyond main.
+        git_in(&repo, &["checkout", "-q", "-b", "add/EMPTY"]);
         let (code, stdout) = run_preflight(&repo, "main");
         assert_eq!(code, 1, "stdout: {stdout}");
         assert!(
@@ -2087,10 +2129,10 @@ mod tests {
     #[test]
     fn preflight_blocks_when_base_ref_missing() {
         let repo = init_temp_repo("nobase");
-        git_in(&repo, &["checkout", "-q", "-b", "feat/thing"]);
+        git_in(&repo, &["checkout", "-q", "-b", "fix/THING"]);
         std::fs::write(repo.join("a.txt"), "a\n").unwrap();
         git_in(&repo, &["add", "."]);
-        git_in(&repo, &["commit", "-q", "-m", "feat: a"]);
+        git_in(&repo, &["commit", "-q", "-m", "fix: THING: a"]);
 
         let (code, stdout) = run_preflight(&repo, "origin/does-not-exist");
         assert_eq!(code, 1, "stdout: {stdout}");
@@ -2114,7 +2156,7 @@ mod tests {
     #[test]
     fn preflight_warns_on_commit_subject_prefix_drift() {
         let repo = init_temp_repo("drift");
-        git_in(&repo, &["checkout", "-q", "-b", "feat/msg"]);
+        git_in(&repo, &["checkout", "-q", "-b", "add/MSG"]);
         std::fs::write(repo.join("m.txt"), "m\n").unwrap();
         git_in(&repo, &["add", "."]);
         // Non-conventional subject → should produce a [warn], not a block.

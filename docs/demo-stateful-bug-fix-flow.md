@@ -2,6 +2,8 @@
 
 This demo captures a real stateful bug fix where the durable workflow source of truth had to be corrected instead of patched around.
 
+> Historical transcript — the `feat/<topic>` branch names shown here predate the current four-tier model (work branch → `feat` → `dev` → `main`). See `WORKFLOW.md` for the current branch model; the workflow mechanics demonstrated here still apply.
+
 ## Scenario
 
 - PR: [#27](https://github.com/UntaDotMy/claude_skills/pull/27)

@@ -2,6 +2,8 @@
 
 This demo captures a real scoped feature branch carried from synced `main` to hosted-green merge closeout.
 
+> Historical transcript — branch names and the `feat/<topic>` → PR-into-`main` flow shown here predate the current four-tier model (work branch → `feat` → `dev` → `main`). See `WORKFLOW.md` for the current branch model; the workflow mechanics demonstrated here still apply.
+
 ## Scenario
 
 - PR: [#33](https://github.com/UntaDotMy/claude_skills/pull/33)

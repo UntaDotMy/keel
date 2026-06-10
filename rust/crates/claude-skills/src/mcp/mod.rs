@@ -34,9 +34,15 @@ mod tools;
 /// call, well below a DoS). An over-cap frame is refused, not truncated.
 const MAX_FRAME_BYTES: u64 = 8 * 1024 * 1024;
 
-/// Wire-protocol version this server advertises during `initialize`. Matches
-/// the version Claude Code probes for (see code.claude.com/docs/en/mcp).
-const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
+/// Default wire-protocol version advertised during `initialize` when the client
+/// does not request one. Per the MCP lifecycle spec the server SHOULD respond
+/// with the client's requested `protocolVersion` when it can support it, and
+/// only fall back to its own latest supported version otherwise. We echo the
+/// client's value in [`handle_initialize`] and use this constant as the
+/// fallback, so the server stays compatible as the spec revises without needing
+/// a constant bump each time. Current spec revision: 2025-11-25
+/// (see code.claude.com/docs/en/mcp and modelcontextprotocol.io/specification).
+const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 
 /// Server identity returned in the `initialize` response. The version mirrors
 /// the workspace package version so plugin manifests and the server agree on
@@ -259,7 +265,7 @@ pub fn dispatch(request: &Value) -> Option<Value> {
 /// stays small.
 fn handle_method(method: &str, params: &Value) -> Result<Value, MethodError> {
     match method {
-        "initialize" => Ok(handle_initialize()),
+        "initialize" => Ok(handle_initialize(params)),
         "notifications/initialized" => Ok(Value::Null),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(tools::handle_tools_list()),
@@ -273,9 +279,17 @@ fn handle_method(method: &str, params: &Value) -> Result<Value, MethodError> {
     }
 }
 
-fn handle_initialize() -> Value {
+fn handle_initialize(params: &Value) -> Value {
+    // Per the MCP lifecycle spec, echo the client's requested protocolVersion
+    // when present so the negotiated session version matches what the client
+    // asked for; fall back to our latest supported version when the client
+    // omits it. A non-string value is ignored in favor of the fallback.
+    let negotiated = params
+        .get("protocolVersion")
+        .and_then(Value::as_str)
+        .unwrap_or(MCP_PROTOCOL_VERSION);
     json!({
-        "protocolVersion": MCP_PROTOCOL_VERSION,
+        "protocolVersion": negotiated,
         "serverInfo": {
             "name": MCP_SERVER_NAME,
             "version": MCP_SERVER_VERSION,
@@ -456,6 +470,55 @@ mod tests {
     }
 
     #[test]
+    fn initialize_echoes_client_requested_protocol_version() {
+        // Per the MCP lifecycle spec the server responds with the client's
+        // requested protocolVersion when it can support it, rather than forcing
+        // its own. This keeps the server compatible as the spec revises without a
+        // constant bump. A client asking for an older revision gets that revision
+        // back; omitting it falls back to MCP_PROTOCOL_VERSION (covered above).
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "initialize",
+            "params": { "protocolVersion": "2024-11-05" }
+        });
+        let response = dispatch(&request).expect("response present");
+        assert_eq!(
+            response["result"]["protocolVersion"],
+            json!("2024-11-05"),
+            "server must echo the client's requested protocol version"
+        );
+
+        // A non-string protocolVersion is ignored in favor of the fallback.
+        let bad = json!({
+            "jsonrpc": "2.0",
+            "id": 8,
+            "method": "initialize",
+            "params": { "protocolVersion": 1234 }
+        });
+        let bad_response = dispatch(&bad).expect("response present");
+        assert_eq!(
+            bad_response["result"]["protocolVersion"],
+            json!(MCP_PROTOCOL_VERSION),
+            "a non-string protocolVersion must fall back to the server default"
+        );
+
+        // An explicit null protocolVersion also falls back (as_str on Null → None).
+        let null_version = json!({
+            "jsonrpc": "2.0",
+            "id": 9,
+            "method": "initialize",
+            "params": { "protocolVersion": null }
+        });
+        let null_response = dispatch(&null_version).expect("response present");
+        assert_eq!(
+            null_response["result"]["protocolVersion"],
+            json!(MCP_PROTOCOL_VERSION),
+            "a null protocolVersion must fall back to the server default"
+        );
+    }
+
+    #[test]
     fn notifications_initialized_produces_no_response() {
         let request = json!({
             "jsonrpc": "2.0",
@@ -502,10 +565,12 @@ mod tests {
             "brief_get",
             "brief_create",
             "system_map_refresh",
+            "context_brief",
+            "cli",
         ] {
             assert!(names.contains(&expected), "missing {expected}: {names:?}");
         }
-        assert_eq!(names.len(), 12, "names: {names:?}");
+        assert_eq!(names.len(), 14, "names: {names:?}");
     }
 
     #[test]

@@ -1,8 +1,9 @@
 ## Scope
 
 - [ ] This MR contains exactly one feature or one tightly related fix
-- [ ] A new `feat/<topic>` branch (off `dev`) was used for this feature
-- [ ] This MR targets `dev` (promotion to `main` happens after staging verification)
+- [ ] A `<category>/<FEATURE>` work branch (off `feat`) was used for this feature
+- [ ] This MR targets `feat` (promotion `feat` → `dev` → `main` happens after verification)
+- [ ] Fixes for in-flight work stayed on the same work branch (no new branch for a fix to work already underway)
 - [ ] No unrelated changes are mixed into this MR
 - [ ] Patch staging (`git add -p`) was used where needed
 - [ ] `git diff --cached` and final MR diff were reviewed for scope leaks
@@ -30,4 +31,4 @@ Describe the single feature in one sentence.
 
 - [ ] Safe to merge independently
 - [ ] Needs another MR merged first
-- [ ] Needs rebase onto `dev` if sibling feature branch merges first
+- [ ] Needs rebase onto `feat` if sibling work branch merges first

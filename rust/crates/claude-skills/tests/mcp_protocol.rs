@@ -109,9 +109,12 @@ fn mcp_serve_initialize_then_tools_list_round_trip() {
     let initialize_response = server.recv();
     assert_eq!(initialize_response["jsonrpc"], "2.0");
     assert_eq!(initialize_response["id"], json!(1));
+    // Empty params → server falls back to its latest supported revision. (When
+    // the client requests a protocolVersion the server echoes it instead; that
+    // negotiation path is unit-tested in mcp/mod.rs.)
     assert_eq!(
         initialize_response["result"]["protocolVersion"],
-        json!("2024-11-05")
+        json!("2025-11-25")
     );
     assert_eq!(
         initialize_response["result"]["serverInfo"]["name"],
