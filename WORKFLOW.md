@@ -18,28 +18,32 @@ The managed `PreToolUse` hook may return a Claude Code denial whose reason begin
 
 ## Branch Model
 
-Three permanent branch tiers, promoted in one direction only:
+Four tiers, promoted in one direction only. The three upper tiers are permanent; work branches are where day-to-day commits land.
 
-- **`main`** — final stable, verified. Only receives merges from `dev` after staging verification. Never commit directly to `main`.
-- **`dev`** — active development integration branch for daily commits. New features are verified here (staging) before promotion to `main`.
-- **`feat/<topic>`** — all new work lives here: new features, fixes, and any subtask. Branch off `dev`, keep one coherent scope per branch, then merge back into `dev`.
+- **`main`** — final stable, verified. Only receives merges from `dev`. Never commit directly to `main`.
+- **`dev`** — staging integration. Receives merges from `feat` and is where a feature is verified on staging before promotion to `main`. Never commit directly to `dev`.
+- **`feat`** — feature integration. Receives merges from work branches once each piece of work is verified. Never commit directly to `feat`.
+- **work branch** `<category>/<FEATURE>` (e.g. `add/RGB`, `fix/SENSOR`) — all hands-on commits live here. Branch off `feat`, keep one coherent feature per branch.
 
-Promotion flow: `feat/<topic>` → `dev` (verify on staging) → `main` (stable).
+Promotion flow: `work branch` → `feat` (feature integration) → `dev` (staging verify) → `main` (stable).
 
-**Never delete a branch.** After pushing new work or merging it, leave the branch in place — do not run `git branch -d/-D` or `git push origin --delete` on it. Branches are permanent history in this model; merge does not imply cleanup.
+**Fixes for in-flight work stay on the same work branch.** If you commit `add: RGB: synchronize all` and later find a problem during verification, commit the `fix: RGB: ...` on that **same** work branch — do **not** open a new branch for the fix. A work branch accumulates every commit for its feature (any category: `add`, `fix`, `wip`, `refactor`, ...) until the whole feature is verified, then merges up to `feat`. A new branch is only for a genuinely new, separate feature.
+
+**Never delete a branch.** After pushing new work or merging it — at any tier — leave the branch in place. Do not run `git branch -d/-D` or `git push origin --delete`. Branches are permanent history in this model; merge does not imply cleanup.
 
 ## Feature Branch and Merge Request Rules
 
-- One feature = one `feat/<topic>` branch = one merge request into `dev`.
+- One feature = one `<category>/<FEATURE>` work branch = one merge request into `feat`.
 - Do not mix multiple features in the same branch or merge request.
-- Always create a new `feat/<topic>` branch off `dev` for a new feature, fix, or subtask.
+- Create a new work branch off `feat` only for a genuinely new, separate feature — never to hold a fix for work already in flight on another branch.
+- Fixes, retries, and subtasks for an in-flight feature commit to that feature's existing work branch, regardless of their commit category.
 - If unrelated work is already in the working tree, split it before committing.
 - Use patch staging (`git add -p`) to stage only the required feature.
 - Review `git diff --cached` before every commit.
-- If a change belongs to another feature, move it to another `feat/<topic>` branch.
+- If a change belongs to another feature, move it to that feature's work branch.
 - Do not open a merge request with mixed feature scopes.
-- Avoid duplicate behavior or overlapping implementation across feature branches.
-- Rebase remaining open feature branches onto `dev` after another feature branch merges.
+- Avoid duplicate behavior or overlapping implementation across work branches.
+- Rebase remaining open work branches onto `feat` after another work branch merges.
 - Never delete a branch after pushing or merging it.
 
 ## Scope Definition
@@ -57,21 +61,22 @@ A feature branch must not contain:
 
 ## Required Naming
 
-- Feature-delivery branches use `feat/<topic>`. Branch off `dev`; fixes and subtasks also live under `feat/<topic>`. The permanent tiers are `main`, `dev`, and `feat/*`.
+- The permanent tiers are `main`, `dev`, and `feat`. Hands-on work uses a `<category>/<FEATURE>` work branch off `feat` (e.g. `add/RGB`, `fix/SENSOR`, `wip/ARGB`); fixes and subtasks for that feature stay on the same work branch.
 - **Commit subjects must follow `<category>: <FEATURE>: <short information>`** and this format is strictly enforced.
   - `<category>` is one of (lowercase): `add`, `config`, `refactor`, `wip`, `fix`, `docs`.
   - `<FEATURE>` is the component or area being worked on, written in uppercase, e.g. `RGB`, `LED`, `ARGB`, `SENSOR`.
   - `<short information>` is a concise description of the change.
   - Example: `wip: RGB: Build light effect mode (multi color)`.
+  - **Colon vs slash:** the commit subject uses colons (`add: RGB: sync all`); the branch name uses a slash (`add/RGB`). Same category vocabulary, different separator — never write a commit with a slash or a branch with a colon.
 - When a commit body is needed, keep it professional, non-chatty, and matched to the committed diff. Use a precise title, include only the sections the change genuinely needs, and keep this order when a section is present: `Problem`, `Solution`, `Summary`, `Notes`, `What Changed`, `Test Result`. Omit `Problem` and `Solution` when the commit is additive, preventive, or housekeeping rather than fixing a concrete issue, and keep `Test Result` limited to validation that directly proves the committed change.
 - do not mention Claude Code, claude-skills, or tool-brand validation in commit or PR text unless the change itself is about those surfaces.
 
 ## Required Preflight
 
-Run the native Git workflow preflight before push or merge-request creation. Use the integration target as the base ref — `origin/dev` for feature branches, `origin/main` only when promoting `dev` to `main`:
+Run the native Git workflow preflight before push or merge-request creation. Use the integration target as the base ref — `origin/feat` for work branches, `origin/dev` when promoting `feat` to `dev`, and `origin/main` only when promoting `dev` to `main`:
 
 ```bash
-claude-skills git-workflow preflight --repo-root . --base-ref origin/dev
+claude-skills git-workflow preflight --repo-root . --base-ref origin/feat
 ```
 
 The preflight blocks on branch naming, dirty worktrees, empty diffs, and missing committed history against the target base ref. It warns when commit subjects drift from the `<category>: <FEATURE>: <short information>` format or suggest mixed scope.
@@ -95,10 +100,10 @@ Reject or request a split when:
 
 ## Practical Branch Flow
 
-1. Start from `dev` (the integration branch). Pull it current.
+1. Start from `feat` (the feature-integration branch). Pull it current.
 2. If the request is still broad, run `claude-skills workflow route --request "..."` first so the lane choice is explicit. See [docs/first-success-path.md](docs/first-success-path.md) when an operator wants the named end-to-end path before widening into custom flows.
-3. Create one new feature branch off `dev` with normal Git tooling (e.g. `git switch -c feat/<topic>`).
-4. Implement only that feature.
+3. Create one new work branch off `feat` with normal Git tooling (e.g. `git switch -c add/RGB`). Use a `<category>/<FEATURE>` name.
+4. Implement only that feature. Fixes and retries for it stay on this same branch — do not branch again for a fix to in-flight work.
 5. Keep `claude-skills workflow cockpit`, `claude-skills workflow status`, or `claude-skills workflow watch` visible while the branch is active so stage, active lane, proof state, blockers, and the next command stay easy to scan.
 6. Use `git add -p` when selective staging is required.
 7. Review `git diff --cached`.
@@ -106,14 +111,14 @@ Reject or request a split when:
    If a commit body is included, keep it professional, make the title and body match the committed diff exactly, include only the sections the change genuinely needs, and keep this order when a section is present: `Problem`, `Solution`, `Summary`, `Notes`, `What Changed`, `Test Result`. Omit `Problem` and `Solution` when the commit is additive, preventive, or housekeeping rather than fixing a concrete issue, and keep `Test Result` limited to validation that directly proves the committed change.
    do not mention Claude Code, claude-skills, or tool-brand validation in commit or PR text unless the change itself is about those surfaces.
 9. Run `claude-skills workflow status` or `claude-skills workflow cockpit` when the team needs the current ledger state in one place.
-10. Run `claude-skills git-workflow preflight`.
-11. Push the `feat/<topic>` branch and open one merge request into `dev`. Never delete the branch after pushing or merging.
-12. After `dev` verifies the feature on staging, promote `dev` into `main`. Repeat on a new `feat/<topic>` branch for the next feature.
+10. Run `claude-skills git-workflow preflight --base-ref origin/feat`.
+11. Push the work branch and open one merge request into `feat`. Never delete the branch after pushing or merging.
+12. Once the feature is verified, promote `feat` into `dev` and verify on staging; after staging passes, promote `dev` into `main`. Repeat on a new work branch for the next feature.
 
-If another feature appears during implementation:
+If another, separate feature appears during implementation:
 - do not keep it in the same branch
 - stash it or leave it unstaged
-- create another `feat/<topic>` branch for it later
+- create another `<category>/<FEATURE>` work branch for it later
 
 ## Automation Boundaries
 

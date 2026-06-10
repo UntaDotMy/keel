@@ -49,35 +49,59 @@ See `references/20-issue-branch-pr-flow.md` for the full worktree, branch, and P
 
 ## Branch Model and Feature Branch Discipline
 
-This repository uses three permanent branch tiers, promoted one direction only:
+This repository uses four tiers, promoted one direction only. The three upper tiers are permanent; work branches carry the day-to-day commits:
 - **`main`** — final stable, verified. Only receives merges from `dev`. Never commit directly.
-- **`dev`** — active development integration branch for daily commits; features are verified here (staging) before promotion to `main`.
-- **`feat/<topic>`** — all new work: features, fixes, and any subtask. Branch off `dev`, merge back into `dev`.
+- **`dev`** — staging integration. Receives merges from `feat`; features are verified here before promotion to `main`. Never commit directly.
+- **`feat`** — feature integration. Receives merges from work branches once each piece is verified. Never commit directly.
+- **work branch** `<category>/<FEATURE>` (e.g. `add/RGB`, `fix/SENSOR`) — all hands-on commits. Branch off `feat`, one coherent feature per branch.
+
+Promotion flow: `work branch` → `feat` → `dev` → `main`.
 
 Discipline:
-- One feature = one `feat/<topic>` branch = one merge request into `dev`.
-- Never mix unrelated features or fixes in the same branch.
+- One feature = one `<category>/<FEATURE>` work branch = one merge request into `feat`.
+- **Fixes for in-flight work stay on the same work branch.** If `add: RGB: synchronize all` is committed and testing then surfaces a problem, commit the `fix: RGB: ...` on that **same** branch — do not open a new branch for it. A work branch accumulates every commit for its feature (any category) until verified, then merges up to `feat`. A new branch is only for a genuinely new, separate feature.
+- Never mix unrelated features in the same branch.
 - **Never delete a branch after pushing or merging it** — no `git branch -d/-D`, no `git push origin --delete`. Branches are permanent in this model.
 - Use patch staging (`git add -p`) when selective staging is required.
 - Review `git diff --cached` before committing.
 - When a commit body is needed, keep it professional, make the subject and body match the committed diff exactly, include only the sections the change genuinely needs, and keep this order when a section is present: `Problem`, `Solution`, `Summary`, `Notes`, `What Changed`, `Test Result`. Omit `Problem` and `Solution` when the commit is additive, preventive, or housekeeping rather than fixing a concrete issue, and keep `Test Result` limited to validation that directly proves the committed change.
-- Run `claude-skills git-workflow preflight --repo-root . --base-ref origin/dev` before push or merge-request creation (`origin/main` only when promoting `dev` to `main`).
+- Run `claude-skills git-workflow preflight --repo-root . --base-ref origin/feat` before push or merge-request creation (`origin/dev` when promoting `feat` to `dev`; `origin/main` only when promoting `dev` to `main`).
 - Request a split when the diff cannot be described as one cohesive feature.
 
 ## Branch Naming and Commit Format
 
-**Branch tiers** (one feature, one branch, one PR):
-- `main` final stable, verified · `dev` daily integration / staging verification · `feat/<topic>` all new features, fixes, and subtasks (branch off `dev`)
+**Branch tiers** (one feature, one work branch, one PR):
+- `main` final stable, verified · `dev` staging verification · `feat` feature integration · `<category>/<FEATURE>` work branch for all hands-on commits (branch off `feat`).
 - Branches are never deleted after push or merge.
 
 **Commit format** (strictly enforced):
-- Subject must follow `<category>: <FEATURE>: <short information>`.
+- Subject must follow `<category>: <FEATURE>: <short information>` — colon-separated, three parts.
 - `<category>` is one of (lowercase): `add`, `config`, `refactor`, `wip`, `fix`, `docs`.
 - `<FEATURE>` is the component or area, uppercase, e.g. `RGB`, `LED`, `ARGB`, `SENSOR`.
 - `<short information>` is a concise description.
 - Example: `wip: RGB: Build light effect mode (multi color)`.
+- **Colon vs slash:** the commit subject uses colons (`add: RGB: sync all`); the branch name uses a slash (`add/RGB`). Same category words, different separator. Never write a commit with a slash or a branch with a colon.
 - Atomic: one logical change per commit. Body wrapped at 72 chars when present.
 - Use the configured Git `user.name` and `user.email`; never substitute assistant or tool branding for the author name. When a repo already has a local or global identity configured, preserve it.
+
+## Target Repository Conventions
+
+These apply to any repository created or operated through this toolkit, not to claude_core itself. They are a generic methodology; firmware/SDK is one example, not the only case.
+
+**Repository naming** — `[Scope]_[Topic]`: a stable scope leads, the topic states what it does. The scope is whatever the most stable axis of the project is — silicon for firmware (`STM32F4_MotorControl`), service for backend (`Auth_TokenRotation`), platform for an app (`iOS_OfflineSync`). Repos then sort by scope.
+
+**Directory layout** — separate the three concerns at the top level, with names matching the domain:
+- requirements/reference inputs (e.g. `/datasheet`, `/spec`, `/requirements`) — the authoritative sources the work must satisfy.
+- documentation (e.g. `/docs`) — design notes, references, and explanation.
+- source (e.g. `/sdk`, `/src`, `/app`) — the implementation itself.
+
+A firmware repo uses `/datasheet`, `/docs`, `/sdk`; a web service might use `/spec`, `/docs`, `/src`. The principle is the separation, not the exact names.
+
+**Always commit a `.gitignore`** from the first commit. Exclude build output, toolchain/IDE artifacts, and any generated or secret material so they never enter history. The specific patterns follow the stack (e.g. `*.o`/`*.elf`/`*.hex` for embedded, `node_modules/`/`dist/` for JS, `target/` for Rust).
+
+**Commit format uses colons; branch names use slashes — never conflate them.** A commit subject is `<category>: <FEATURE>: <short information>` (colon-separated). A branch is `<category>/<FEATURE>` (slash). Same category vocabulary, different separator: `add: RGB: sync all channels` is the commit; `add/RGB` is the branch.
+
+The branch model, commit format, "fixes stay on the same work branch," and "never delete a branch" rules above apply to these repos unchanged.
 
 ## High-Risk Operations (Explicit User Approval Only)
 

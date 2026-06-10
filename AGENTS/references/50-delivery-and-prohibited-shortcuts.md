@@ -11,19 +11,23 @@ Side Effects: None — this file is informational.
 
 ### Branch model
 
-Three permanent branch tiers, promoted one direction only:
+Four tiers, promoted one direction only. The three upper tiers are permanent; work branches carry hands-on commits:
 - **`main`** — final stable, verified. Only receives merges from `dev`. Never commit directly.
-- **`dev`** — active development integration branch for daily commits; features are verified here (staging) before promotion to `main`.
-- **`feat/<topic>`** — all new work: features, fixes, and any subtask. Branch off `dev`, merge back into `dev`.
+- **`dev`** — staging integration. Receives merges from `feat`; features are verified here before promotion to `main`. Never commit directly.
+- **`feat`** — feature integration. Receives merges from work branches once verified. Never commit directly.
+- **work branch** `<category>/<FEATURE>` (e.g. `add/RGB`, `fix/SENSOR`) — all hands-on commits. Branch off `feat`, one coherent feature per branch.
 
-- One feature = one `feat/<topic>` branch = one merge request into `dev`.
-- Never mix multiple features or unrelated fixes in the same branch or merge request.
+Promotion flow: `work branch` → `feat` → `dev` → `main`.
+
+- One feature = one `<category>/<FEATURE>` work branch = one merge request into `feat`.
+- **Fixes for in-flight work stay on the same work branch** — if `add: RGB: synchronize all` is committed and testing surfaces a problem, commit the `fix: RGB: ...` on that same branch, never a new one. A work branch accumulates every commit for its feature until verified, then merges up to `feat`. A new branch is only for a genuinely new, separate feature.
+- Never mix multiple features in the same branch or merge request.
 - **Never delete a branch after pushing or merging it** — no `git branch -d/-D`, no `git push origin --delete`. Branches are permanent in this model.
 - Use `git add -p` when selective staging is required.
 - Review `git diff --cached` before each commit.
-- Commit subjects strictly follow `<category>: <FEATURE>: <short information>`. Categories (lowercase): `add`, `config`, `refactor`, `wip`, `fix`, `docs`. `<FEATURE>` is the component/area in uppercase (e.g. RGB, LED, ARGB, SENSOR). Example: `wip: RGB: Build light effect mode (multi color)`.
+- Commit subjects strictly follow `<category>: <FEATURE>: <short information>` (colon-separated). Categories (lowercase): `add`, `config`, `refactor`, `wip`, `fix`, `docs`. `<FEATURE>` is the component/area in uppercase (e.g. RGB, LED, ARGB, SENSOR). Example: `wip: RGB: Build light effect mode (multi color)`. The commit uses colons; the branch name uses a slash (`add/RGB`) — never conflate them.
 - When a commit body is needed, keep it professional and non-chatty, make the title and body match the committed diff exactly, and include only the sections the change genuinely needs. Use this order when present: `Problem`, `Solution`, `Summary`, `Notes`, `What Changed`, `Test Result`. Omit `Problem` and `Solution` when the commit is additive, preventive, or housekeeping rather than fixing a concrete issue, keep `Test Result` limited to validation that directly proves the committed change, and do not mention Claude Code, claude-skills, or tool-brand validation in commit or PR text unless the change itself is about those surfaces.
-- Run `claude-skills git-workflow preflight --repo-root . --base-ref origin/dev` before push or merge-request creation (use `origin/main` only when promoting `dev` to `main`).
+- Run `claude-skills git-workflow preflight --repo-root . --base-ref origin/feat` before push or merge-request creation (`origin/dev` when promoting `feat` to `dev`; `origin/main` only when promoting `dev` to `main`).
 - When opening a PR or MR from the CLI, never publish bodies with escaped newline sequences such as `\\n`; use a real multiline body or a `--body-file` flow instead.
 - Reject or request a split when the diff cannot be described as one cohesive feature.
 

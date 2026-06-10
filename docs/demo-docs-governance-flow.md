@@ -2,6 +2,8 @@
 
 This demo captures a real docs-only workflow-governance change that still had to clear executable proof.
 
+> Historical transcript — the `feat/<topic>` branch names shown here predate the current four-tier model (work branch → `feat` → `dev` → `main`). See `WORKFLOW.md` for the current branch model; the workflow mechanics demonstrated here still apply.
+
 ## Scenario
 
 - PR: [#43](https://github.com/UntaDotMy/claude_skills/pull/43)

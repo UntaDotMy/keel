@@ -15,11 +15,11 @@ Use the installed binary path (bare `claude-skills` is not guaranteed on PATH):
 Map the surface in `$0` to the matching native subcommand:
 
 - `pre-commit` → `review pre-commit --format compact` — local pre-commit gate.
-- `pre-pr` → `review pre-pr --base-ref <ref> --format compact` — pre-PR gate (defaults base-ref to origin/dev when none given; use origin/main only when promoting dev to main).
+- `pre-pr` → `review pre-pr --base-ref <ref> --format compact` — pre-PR gate (defaults base-ref to origin/feat when none given, since work branches branch off `feat`; use origin/dev when promoting `feat` to `dev`, and origin/main only when promoting `dev` to `main`).
 - `gates` → `review gates check --surface pre-pr --base-ref <ref> --format compact` — explicit gate verdict.
 - `diff` → `review diff` — review the working diff.
 
-If no surface is given, default to `review pre-pr --base-ref origin/dev`.
+If no surface is given, default to `review pre-pr --base-ref origin/feat`.
 
 This is the deterministic CLI gate. For a deeper, evidence-backed code review of
 non-trivial changes, also invoke the `reviewer` skill — the CLI gate and the

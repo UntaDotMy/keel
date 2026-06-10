@@ -6,26 +6,30 @@ Support optional structured collaboration flow when the user explicitly requests
 
 ## Branch Model
 
-Three permanent branch tiers, promoted one direction only:
+Four tiers, promoted one direction only. The three upper tiers are permanent; work branches carry hands-on commits:
 - **`main`** — final stable, verified. Only merges from `dev`.
-- **`dev`** — active development integration for daily commits; features verified here (staging) before promotion to `main`.
-- **`feat/<topic>`** — all new work: features, fixes, subtasks. Branch off `dev`, merge back into `dev`.
+- **`dev`** — staging integration; features verified here before promotion to `main`.
+- **`feat`** — feature integration; receives merges from work branches once verified.
+- **work branch** `<category>/<FEATURE>` — all hands-on commits. Branch off `feat`.
+
+Promotion flow: `work branch` → `feat` → `dev` → `main`.
 
 ## Flow (Optional, User-Requested)
 
 1. Create or confirm issue context.
-2. Create a `feat/<topic>` branch from `dev`.
-3. Implement change in small, reviewable commits using the `<category>: <FEATURE>: <short information>` commit format.
-4. Open PR against `dev` with clear rationale and validation evidence.
+2. Create a `<category>/<FEATURE>` work branch from `feat`.
+3. Implement change in small, reviewable commits using the `<category>: <FEATURE>: <short information>` commit format. Fixes for this in-flight work stay on the same branch — never a new branch.
+4. Open PR against `feat` with clear rationale and validation evidence.
 5. Address feedback and update PR.
 6. Request human review.
-7. After `dev` verifies the feature on staging, promote `dev` into `main`. Never delete the feature branch.
+7. After the feature is verified, promote `feat` → `dev` → `main` (staging verify at `dev`). Never delete the work branch.
 
 ## Issue and Branch Guidance
 
 - Keep issue scoped to a clear user problem and acceptance criteria.
-- All new work — features, fixes, and subtasks — uses a `feat/<topic>` branch off `dev`:
-  - `feat/<issue-id>-<short-topic>`
+- All hands-on work uses a `<category>/<FEATURE>` work branch off `feat`:
+  - e.g. `add/RGB`, `fix/SENSOR`, or `<category>/<issue-id>-<TOPIC>`
+- Fixes and subtasks for in-flight work stay on that feature's existing work branch, regardless of commit category.
 - Never delete a branch after pushing or merging it. Branches are permanent in this model.
 
 ## PR Guidance

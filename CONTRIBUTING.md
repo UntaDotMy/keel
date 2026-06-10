@@ -16,14 +16,15 @@ This repository is a managed Claude Code skill pack, not a loose prompt collecti
 
 ## Feature Delivery Rules
 
-- Branch model: `main` (stable) ← `dev` (daily integration / staging verification) ← `feat/<topic>` (all new features, fixes, subtasks; branch off `dev`).
-- One feature = one `feat/<topic>` branch = one merge request into `dev`.
-- Do not mix unrelated features or fixes in the same branch.
+- Branch model: `main` (stable) ← `dev` (staging verification) ← `feat` (feature integration) ← `<category>/<FEATURE>` work branch (all hands-on commits; branch off `feat`).
+- One feature = one `<category>/<FEATURE>` work branch = one merge request into `feat`.
+- Fixes for in-flight work stay on the same work branch — never open a new branch for a fix to work already underway.
+- Do not mix unrelated features in the same branch.
 - **Never delete a branch** after pushing or merging it (`git branch -d/-D`, `git push origin --delete` are not part of the normal flow).
 - Use `git add -p` when selective staging is required.
 - Review `git diff --cached` before each commit.
-- Commit subjects strictly follow `<category>: <FEATURE>: <short information>` (categories lowercase: add, config, refactor, wip, fix, docs; FEATURE uppercase, e.g. `wip: RGB: Build light effect mode (multi color)`).
-- Run `claude-skills git-workflow preflight --repo-root . --base-ref origin/dev` before push or merge-request creation (use `origin/main` only when promoting `dev` to `main`).
+- Commit subjects strictly follow `<category>: <FEATURE>: <short information>` (colon-separated; categories lowercase: add, config, refactor, wip, fix, docs; FEATURE uppercase, e.g. `wip: RGB: Build light effect mode (multi color)`). The commit uses colons; the branch name uses a slash (`add/RGB`) — never conflate them.
+- Run `claude-skills git-workflow preflight --repo-root . --base-ref origin/feat` before push or merge-request creation (`origin/dev` when promoting `feat` to `dev`; `origin/main` only when promoting `dev` to `main`).
 - When opening a PR or MR from the CLI, use a real multiline body or `--body-file` instead of embedding escaped newline sequences such as `\\n` in the published text.
 - Follow [WORKFLOW.md](WORKFLOW.md) when the change touches branching, merge-request shape, or reviewer expectations.
 
