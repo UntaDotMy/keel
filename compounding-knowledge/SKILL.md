@@ -3,6 +3,7 @@ name: compounding-knowledge
 description: Capture each solved problem as a durable, discoverable knowledge artifact so future work starts ahead instead of re-deriving it. Use after solving a non-trivial problem, debugging a tricky failure, or making a reusable decision — write a categorized solution note (problem, root cause, solution, evidence) to a durable location, dedupe against existing notes, and wire it into the project's discoverability pointers (CLAUDE.md / AGENTS.md / SYSTEM_MAP) so the next agent actually finds it. Use when the user says "capture this", "remember how we solved this", "write this up", or after a hard-won fix worth keeping. The deliberate counterpart to the automatic learn loop; this is the human-readable, project-local knowledge base.
 when_to_use: After solving a non-trivial problem or making a reusable decision worth keeping. Write a categorized, deduped solution note and make it discoverable from the project's pointer files. Complements the automatic learn loop (which generates skills from behavior) with durable human-readable artifacts.
 allowed-tools: Read, Grep, Glob, Edit, Write, Bash(claude-skills memory:*)
+user-invocable: false
 effort: medium
 ---
 

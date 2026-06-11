@@ -3,6 +3,7 @@ name: git-expert
 description: Guides safe Git workflows: branching, commits, pull requests, merges, conflict resolution, and history repair, with explicit risk explanations and reversible defaults. Use when planning non-trivial Git operations, recovering shared history, cleaning up secrets, or coordinating issue-driven worktree, branch, and PR flow.
 when_to_use: Safe Git workflow and version control.
 allowed-tools: Read, Grep, Glob, Bash(git:*), Bash(gh:*), Bash(claude-skills git-workflow:*)
+argument-hint: "[branch-name] [base-ref] [commit-message]"
 effort: medium
 ---
 

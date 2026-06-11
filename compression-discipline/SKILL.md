@@ -3,6 +3,7 @@ name: compression-discipline
 description: Per-turn output-compression playbook. Use when the per-prompt UserPromptSubmit hook injects "Output compression is on" — the session has accumulated enough tool calls that context is filling. Three concrete actions: read narrower line ranges, search before reading, summarize logs instead of pasting them.
 when_to_use: Heavy investigation turns where the session has already burned a chunk of the context window through earlier tool calls. The auto compression hint hooks this skill on at the threshold.
 allowed-tools: Read, Grep, Glob, Bash(claude-skills memory:*)
+user-invocable: false
 effort: low
 ---
 

@@ -3,6 +3,7 @@ name: memory-status-reporter
 description: Produces human-style memory status reports from Claude Code memory artifacts: learning recap, mistake ledger, rewarded patterns, research-cache health, and remembered user needs. Use when the user asks "what did you learn today", "show memory status", "what mistakes happened and are they resolved", "how is memory growing", or "summarize what you understand about my needs".
 when_to_use: Human-style memory health and learning reports.
 allowed-tools: Read, Grep, Glob, Bash(claude-skills memory:*)
+user-invocable: false
 effort: low
 ---
 

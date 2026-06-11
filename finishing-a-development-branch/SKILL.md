@@ -3,6 +3,7 @@ name: finishing-a-development-branch
 description: Close out a completed branch the right way — verify, review, then present merge/PR options rather than acting unilaterally. Use when implementation is done and tests pass and you are ready to integrate — run the full suite, confirm the completion gate, route non-trivial work through reviewer, then offer the merge/PR path into dev. Use when the user says "finish this", "wrap up the branch", "open the PR", or "merge it". Never force-push, never merge to main unilaterally, never delete a branch — this repo keeps every branch permanently after merge. Pairs with reviewer, git-expert, and using-git-worktrees.
 when_to_use: Implementation complete and tests green, ready to integrate a branch. Verify the full suite, confirm the completion gate, review non-trivial work, then present merge/PR options into dev. Branches are never deleted. Pairs with reviewer, git-expert, and using-git-worktrees.
 allowed-tools: Read, Grep, Glob, Bash(git status:*), Bash(git log:*), Bash(git diff:*), Bash(claude-skills memory:*)
+disallowed-tools: Edit, Write, Bash(git push:*)
 effort: medium
 ---
 
