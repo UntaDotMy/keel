@@ -49,17 +49,57 @@ Each specialist contains three artifacts, plus an optional reference library:
 
 ## Schema Compliance Notes
 
-**SKILL.md frontmatter** follows the official Claude Code skill spec. Per the docs, all SKILL.md frontmatter fields are technically optional, but `name` and `description` are **strongly recommended** because the skill matcher uses them to decide when to load the skill. The combined `description` + `when_to_use` text is capped at 1,536 characters. The fields used in this project are all documented Claude Code fields: `name`, `description`, `when_to_use`, `allowed-tools`, `effort`, and `paths`. Reference: https://code.claude.com/docs/en/skills.
+**SKILL.md frontmatter** follows the official Claude Code skill spec. Per the docs, all SKILL.md frontmatter fields are technically optional, but `name` and `description` are **strongly recommended** because the skill matcher uses them to decide when to load the skill. The combined `description` + `when_to_use` text is capped at 1,536 characters. The fields currently used by claude-core's own skills are: `name`, `description`, `when_to_use`, `allowed-tools`, `effort`, and `paths`. All other official fields are supported and documented here for completeness:
 
-Other official optional fields not currently used here include `disable-model-invocation`, `user-invocable`, `disallowed-tools`, `argument-hint`, `arguments`, `model`, `context`, `agent`, `hooks`, and `shell`. Add them deliberately when a skill needs that capability.
+| Field | Purpose |
+|---|---|
+| `name` | Display name; defaults to directory name. Controls invocation name only for plugin-root `SKILL.md` |
+| `description` | Strongly recommended. Truncated at 1,536 chars combined with `when_to_use` in skill listings |
+| `when_to_use` | Additional trigger context, appended to `description` in listings, counts toward 1,536-char cap |
+| `disable-model-invocation` | Set `true` to prevent auto-loading — only manual `/name` invocation. Default: `false` |
+| `user-invocable` | Set `false` to hide from `/` menu. Default: `true` |
+| `allowed-tools` | Grant permission for listed tools while skill is active (scoped patterns like `Bash(git diff:*)` work here) |
+| `disallowed-tools` | Remove tools from the pool while skill is active; clears on next message |
+| `model` | Override model for the rest of the current turn: `sonnet`, `opus`, `haiku`, `fable`, full ID, or `inherit` |
+| `effort` | Override effort level: `low`, `medium`, `high`, `xhigh`, `max` (ultracode = `xhigh`) |
+| `context` | Set to `fork` to run the skill in a forked subagent context |
+| `agent` | Which subagent type to use when `context: fork` is set (`Explore`, `Plan`, `general-purpose`, or custom) |
+| `hooks` | Hooks scoped to this skill's lifecycle (see Hook events table) |
+| `paths` | Glob patterns limiting when the skill auto-activates (comma-separated string or YAML list) |
+| `shell` | Shell for `` !`command` `` and ` ```! ` blocks: `bash` (default) or `powershell` (requires `CLAUDE_CODE_USE_POWERSHELL_TOOL=1`) |
+| `argument-hint` | Autocomplete hint shown for expected arguments, e.g. `[issue-number]` or `[filename] [format]` |
+| `arguments` | Named positional arguments for `$name` substitution in skill content; names map to argument positions |
 
-**Subagent frontmatter** (`.claude/agents/<name>.md`) follows the official spec: `name` and `description` are required; `tools` (comma-separated bare tool names), `model` (`opus`, `sonnet`, `haiku`, or `inherit`), `color`, and `skills` (a YAML list of bare skill names to preload at startup) are optional. Note: scoped tool patterns like `Bash(git diff:*)` work in SKILL.md `allowed-tools` but not in subagent `tools` — subagents use bare tool names. A consequence: the six read-only review subagents (`reviewer`, `security-and-compliance-auditor`, `git-expert`, `preserve-existing-flow`, `ux-research-and-experience-strategy`, `memory-status-reporter`) correctly omit `Edit`/`Write` but still carry an unscoped `Bash` grant, so their read-only contract is enforced by instruction (the `_shared/subagent-iron-law.md` "respect their intent" rule), not by the tool grant — a determined shell command could still mutate the tree. Each managed subagent preloads its same-named skill via `skills:` so the full skill content is in context from startup rather than loaded on demand; `skills` is supported for plugin subagents and a missing/disabled skill is skipped with a debug-log warning. Reference: https://code.claude.com/docs/en/sub-agents.
+String substitutions available in skill content: `$ARGUMENTS`, `$ARGUMENTS[N]` / `$N`, `$name`, `${CLAUDE_SESSION_ID}`, `${CLAUDE_EFFORT}`, `${CLAUDE_SKILL_DIR}`. Reference: https://code.claude.com/docs/en/skills.
 
-**Hook events** (`.claude/hooks.json`) are wired through `claude-skills hook <event>` for every Claude Code lifecycle event the manager observes. The `HOOK_EVENTS` table in `rust/crates/claude-skills/src/hooks/claude.rs` defines **30 events**, of which 28 install into `settings.json`. Two rows carry `installs_in_settings: false`: `FileChanged` (its matcher doubles as a per-repo watch list, so an empty matcher would ship dead config) and `MessageDisplay` (no matcher, fires on every assistant message, emits `hookSpecificOutput.displayContent` — auto-installing would either be a no-op or silently rewrite on-screen text, so it stays opt-in). Both still dispatch for ad-hoc invocations (`claude-skills hook file-changed`, `claude-skills hook message-display`). Events the runtime does not actively emit are stubbed for forward-compatibility — the dispatcher no-ops until behavior is needed. When Anthropic adds or renames events, update both `HOOK_EVENTS` and the generated `.claude/hooks.json`. Reference: https://code.claude.com/docs/en/hooks.
+**Subagent frontmatter** (`.claude/agents/<name>.md`) follows the official spec: `name` and `description` are required. Full field reference:
+
+| Field | Required | Purpose |
+|---|---|---|
+| `name` | Yes | Lowercase letters and hyphens. Hooks receive this as `agent_type` |
+| `description` | Yes | When Claude should delegate to this subagent |
+| `tools` | No | Allowlist of tools. Scoped patterns like `Bash(git diff:*)` do NOT work here — subagents use bare tool names only |
+| `disallowedTools` | No | Denylist; applied before `tools` allowlist is resolved |
+| `model` | No | `sonnet`, `opus`, `haiku`, `fable`, full ID, or `inherit` (default) |
+| `permissionMode` | No | `default`, `acceptEdits`, `auto`, `dontAsk`, `bypassPermissions`, `plan` |
+| `maxTurns` | No | Maximum agentic turns before subagent stops |
+| `skills` | No | Preload skills into subagent context at startup; full content injected, not just description. `disable-model-invocation: true` skills cannot be preloaded |
+| `mcpServers` | No | Inline or string-reference MCP server definitions scoped to this subagent |
+| `hooks` | No | Lifecycle hooks scoped to this subagent |
+| `memory` | No | `user` (`~/.claude/agent-memory/<name>/`), `project` (`.claude/agent-memory/<name>/`), or `local` (`.claude/agent-memory-local/<name>/`) — enables cross-session learning |
+| `background` | No | Set `true` to always run as a background task |
+| `effort` | No | Override effort level: `low`, `medium`, `high`, `xhigh`, `max` |
+| `isolation` | No | Set to `worktree` to run in a temporary git worktree (isolated checkout, auto-cleanup if no changes) |
+| `color` | No | Display color in task list: `red`, `blue`, `green`, `yellow`, `purple`, `orange`, `pink`, `cyan` |
+| `initialPrompt` | No | Auto-submitted as first user turn when agent runs as main session via `--agent` or `agent` setting |
+
+Note: scoped tool patterns like `Bash(git diff:*)` work in SKILL.md `allowed-tools` but NOT in subagent `tools` — subagents use bare tool names only. A consequence: the six read-only review subagents (`reviewer`, `security-and-compliance-auditor`, `git-expert`, `preserve-existing-flow`, `ux-research-and-experience-strategy`, `memory-status-reporter`) correctly omit `Edit`/`Write` but still carry an unscoped `Bash` grant, so their read-only contract is enforced by instruction (the `_shared/subagent-iron-law.md` "respect their intent" rule), not by the tool grant. Each managed subagent preloads its same-named skill via `skills:` so the full skill content is in context from startup rather than loaded on demand; `skills` is supported for plugin subagents and a missing/disabled skill is skipped with a debug-log warning. Reference: https://code.claude.com/docs/en/sub-agents.
+
+**Hook events** (`.claude/hooks.json`) are wired through `claude-skills hook <event>` for every Claude Code lifecycle event the manager observes. The `HOOK_EVENTS` table in `rust/crates/claude-skills/src/hooks/claude.rs` defines **30 events**, of which 28 install into `settings.json`. Two rows carry `installs_in_settings: false`: `FileChanged` (its matcher doubles as a per-repo watch list, so an empty matcher would ship dead config) and `MessageDisplay` (no matcher, fires on every assistant message, emits `hookSpecificOutput.displayContent` — auto-installing would either be a no-op or silently rewrite on-screen text, so it stays opt-in). Both still dispatch for ad-hoc invocations (`claude-skills hook file-changed`, `claude-skills hook message-display`). Events the runtime does not actively emit are stubbed for forward-compatibility. Hook types supported: `command` (shell scripts), `http` (POST event JSON to a URL), `mcp_tool` (call an MCP server tool), `prompt` (evaluate a prompt with an LLM using `$ARGUMENTS` for context), and `agent` (run an agentic verifier with tools for complex verification). Elicitation events (`Elicitation`, `ElicitationResult`) handle MCP server user-input requests — the hook can accept/decline/cancel via `hookSpecificOutput.action`. When Anthropic adds or renames events, update both `HOOK_EVENTS` and the generated `.claude/hooks.json`. Reference: https://code.claude.com/docs/en/hooks.
 
 **Output styles**: Claude Code ships four built-in output styles — `Default`, `Proactive`, `Explanatory`, and `Learning`. The active style for this project is set in `.claude/settings.local.json`. Reference: https://code.claude.com/docs/en/output-styles.
 
-**Plugin manifest** (`.claude-plugin/plugin.json`) follows the official plugin schema. Only `name` is required; `displayName`, `version`, `description`, `skills`, `agents`, `hooks`, `commands`, `mcpServers`, `outputStyles`, `lspServers`, `experimental.themes`, `experimental.monitors`, `userConfig`, `channels`, and `dependencies` are optional. This project uses `skills`, `agents`, `commands` (set to `["./commands/"]`), `hooks`, and `mcpServers`. Per the official reference, listing `commands` **replaces** the default `commands/` scan, so the explicit `["./commands/"]` keeps the default directory. Command `.md` files live at the plugin root `commands/` (not inside `.claude-plugin/`). Reference: https://code.claude.com/docs/en/plugins-reference.
+**Plugin manifest** (`.claude-plugin/plugin.json`) follows the official plugin schema. Only `name` is required; `displayName`, `version`, `description`, `author`, `homepage`, `repository`, `license`, `keywords`, `skills`, `agents`, `hooks`, `commands`, `mcpServers`, `outputStyles`, `lspServers`, `experimental.themes`, `experimental.monitors`, `userConfig`, `channels`, and `dependencies` are optional. Notable fields: `displayName` (human-readable name with spaces, shown in `/plugin` picker; `name` is used for namespacing only), `defaultEnabled` (ship plugin in disabled state; users opt in via `/plugin` or `claude plugin enable`), `shell` (for hook scripts; `powershell` on Windows requires `CLAUDE_CODE_USE_POWERSHELL_TOOL=1`). This project uses `skills`, `agents`, `commands` (set to `["./commands/"]`), `hooks`, and `mcpServers`. Per the official reference, listing `commands` **replaces** the default `commands/` scan, so the explicit `["./commands/"]` keeps the default directory. Command `.md` files live at the plugin root `commands/` (not inside `.claude-plugin/`). For `hooks` and `mcpServers`, multiple source paths are merged rather than replaced. Reference: https://code.claude.com/docs/en/plugins-reference.
 
 **Token-saving proxy**: command-output compaction lives in `rust/crates/claude-skills/src/proxy/`. The native `claude-skills run -- <command>`, `claude-skills rewrite`, and `claude-skills gain` surfaces own this work. When Claude Code introduces native compaction primitives, prefer them and keep this layer thin.
 
@@ -74,9 +114,10 @@ Other official optional fields not currently used here include `disable-model-in
 1. Routing is driven by Claude Code's native skill matcher against the installed `~/.claude/skills/<name>/SKILL.md` files — each skill's frontmatter (`description`, `when_to_use`) is what triggers selection. The bootstrap skill `using-claude-core/SKILL.md` is injected verbatim into `SessionStart` `hookSpecificOutput.additionalContext` per the official Claude Code hooks schema, so the iron law (understand before building, research first, invoke skills before responding, find the root cause) and the full skill catalog land in model context once at session start. `UserPromptSubmit` then restates the iron law in compact form on every turn.
 2. Run `preserve-existing-flow` before editing any existing source file.
 3. Run `reviewer` before closing **non-trivial** work. Trivial exemptions: docs-only, formatting-only, generated-only, single-line typo or comment fixes, and explicitly throw-away work the user asked for. Everything else (logic changes, multi-file edits, public-API touches, security-sensitive surfaces, brownfield rewrites) goes through `reviewer` before close.
-4. Delegate to the matching `.claude/agents/<name>.md` subagent for heavy work that benefits from an isolated context window (saves main-thread tokens).
+4. Delegate to the matching `.claude/agents/<name>.md` subagent for heavy work that benefits from an isolated context window (saves main-thread tokens). Subagents cannot spawn other subagents; use `Skill` tool or chain from the main conversation instead.
 5. Use `templates/` for commit bodies, PR bodies, final responses, and review summaries.
 6. Read `WORKFLOW.md` for branch naming, commit format, and completion rules.
+7. **Agent teams** (agent teams are different from subagents): Teammates communicate via `SendMessage` tool with the agent's ID as the `to` field. Resumed subagents retain full conversation history and auto-resume in the background when they receive a `SendMessage`. The `SubagentStop` event fires when a subagent finishes; `TeammateIdle` fires when a teammate is about to go idle — both support matchers to target specific agent types. Background subagents run concurrently with auto-deny on permission prompts; foreground subagents block until complete. Set `CLAUDE_CODE_FORK_SUBAGENT=1` to make every subagent spawn a fork that inherits the full conversation history. Reference: https://code.claude.com/docs/en/agent-teams.
 7. **Writing Discipline** applies to all written output — docs, code comments, commit/PR text, review notes, chat replies: write less, be accurate not impressive, lead with the point, no filler or AI tells, stay on the asked scope. Full rule in `_shared/common-discipline.md` § Writing Discipline.
 
 ### Enforcement Gates (PostToolBatch)
@@ -101,6 +142,23 @@ Each env var takes three values: **unset / anything else → non-blocking nudge*
 - `claude-skills hook install` — Wire hooks into Claude Code's `settings.json`
 - `claude-skills doctor` — Report MCP registration health (including `alwaysLoad` state)
 - `claude-skills repair` — Re-pin the MCP server entry in `~/.claude.json`
+
+**Additional CLI surfaces** not yet wired to `claude-skills` subcommands:
+- `claude --agents '<json>'` — Pass inline subagent definitions (JSON) for the current session only; supports the same frontmatter fields as file-based subagents including `prompt`, `tools`, `model`, `maxTurns`, `mcpServers`, `hooks`, `skills`, `memory`, `effort`, `background`, `isolation`, and `color`
+- `claude --agent <name>` — Run the entire session as a named subagent; the subagent's system prompt replaces the default, `CLAUDE.md` still loads normally
+- `claude --plugin-dir <path>` or `claude --plugin-url <url>` — Load a plugin for the current session without installing it
+- `@skills-dir` plugins: any `~/.claude/skills/<name>/` directory containing `.claude-plugin/plugin.json` loads as `<name>@skills-dir` with no install step; also scaffoldable via `claude plugin init <name>` or `claude plugin new`. Project-scope `@skills-dir` plugins load only from the `.claude/skills/` of the directory where Claude Code was launched (not parent directories); launch from the repo root or run `/reload-plugins` after changing directories
+
+### Managed Profile Schema
+
+Managed profiles (`<name>/agents/claude.yaml`) wire the `claude-skills` runtime to specific reasoning effort and tool policy. Supported fields:
+
+| Field | Purpose |
+|---|---|
+| `agent` | Default subagent to spawn for this profile (e.g. `Explore`, `Plan`, `general-purpose`) |
+| `maxTurns` | Maximum agentic turns per session before auto-terminating |
+| `effort` | Default effort level: `low`, `medium`, `high`, `xhigh`, `max` (ultracode = `xhigh`) |
+| `permissionMode` | Tool permission mode for the managed subagent: `default`, `acceptEdits`, `auto`, `dontAsk`, `bypassPermissions`, `plan` |
 
 ### Declarative Filter Registry
 

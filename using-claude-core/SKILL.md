@@ -217,6 +217,17 @@ Use these via the Agent tool when the work benefits from an isolated context
 window. Same names as the skills — pick the subagent when token-saving delegation
 matters, pick the skill when the work belongs in the main thread.
 
+**Subagents cannot spawn subagents.** If a subagent needs to delegate, route back
+to the main thread via `Skill` tool or a documented workflow step instead of spawning
+nested agents.
+
+**Agent teams:** Teammates communicate via the `SendMessage` tool with the agent's ID
+as the `to` field. Resumed subagents retain full conversation history and auto-resume
+in the background when they receive a `SendMessage`. The `SubagentStop` event fires
+when a subagent finishes; `TeammateIdle` fires when a teammate is about to go idle —
+both support matchers to target specific agent types. Set `CLAUDE_CODE_FORK_SUBAGENT=1`
+to make every subagent spawn a fork that inherits the full conversation history.
+
 Subagents do not inherit this SessionStart bootstrap — each spawns with a fresh
 context window. To keep them aligned with the same research-first contract, every
 `.claude/agents/*.md` definition opens with an instruction to read

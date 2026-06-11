@@ -30,6 +30,7 @@ Token-saving rule: prevent noisy raw command output from entering Claude Code co
 6. **Release ladder is fail-closed** — Smoke → Functional → Integration → UI → Load → Stress → Security. Mark not-applicable only with explicit, evidence-backed reasoning.
 7. **Completion reconciliation** — re-read the working brief and impacted surface before final answer. Every explicit user requirement maps to evidence or a verified blocker. No partial-as-complete.
 8. **Writing Discipline** — all written output (docs, code comments, commit/PR text, review notes, chat): write less, be accurate not impressive, lead with the point, no filler or AI tells, stay on the asked scope. Full rule in `_shared/common-discipline.md` § Writing Discipline.
+9. **Agent teams** — use `designing-agent-teams` when a task needs coordinated multi-agent decomposition. Subagents cannot spawn subagents — route delegation back to the main thread. Teammates communicate via `SendMessage(to: <agent-id>)`. Resumed subagents retain full history and auto-resume in background on `SendMessage`; `SubagentStop` and `TeammateIdle` events fire on lifecycle. Set `CLAUDE_CODE_FORK_SUBAGENT=1` to fork conversation history into every subagent.
 
 ## Skill Ownership Map (Claude Code CLI)
 

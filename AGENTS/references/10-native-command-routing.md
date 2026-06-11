@@ -103,7 +103,7 @@ To enable automatic command output compaction, run:
 claude-skills hook install
 ```
 
-The one-line installer refreshes the managed hook set automatically, and `claude-skills hook install` can refresh it manually. The hook set points at the current claude-skills command surface. `PreToolUse` transparently rewrites supported shell commands via `toolInputOverride`; the other supported lifecycle events (`PermissionRequest`, `PostToolUse`, `PreCompact`, `PostCompact`, `SessionStart`, `UserPromptSubmit`, and `Stop`) are native lifecycle/checkpoint surfaces.
+The one-line installer refreshes the managed hook set automatically, and `claude-skills hook install` can refresh it manually. The hook set points at the current claude-skills command surface. `PreToolUse` transparently rewrites supported shell commands via `toolInputOverride`; the other supported lifecycle events (`PermissionRequest`, `PostToolUse`, `PreCompact`, `PostCompact`, `SessionStart`, `UserPromptSubmit`, `MessageSend`, `MessageReceive`, `SubagentStop`, `TeammateIdle`, `SubagentStart`, `Resume`, `Stop`, and `Elicitation`) are native lifecycle/checkpoint surfaces. `FileChanged` is also supported (fires on watched file changes; its matcher doubles as a per-repo watch list, so it is not auto-installed when the matcher is empty). `MessageDisplay` fires on every assistant message and emits `hookSpecificOutput.displayContent` — not auto-installed to avoid silently rewriting on-screen text. Both `FileChanged` and `MessageDisplay` are still dispatchable via `claude-skills hook file-changed` and `claude-skills hook message-display` for ad-hoc invocations.
 
 ### Supported Command Wrapper
 

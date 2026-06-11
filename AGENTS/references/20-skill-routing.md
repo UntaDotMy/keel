@@ -55,13 +55,43 @@ Load specialist skills when the task clearly requires domain expertise:
 ## Skill-Focused Execution
 
 - Keep one primary skill responsible for the user-facing answer.
-- Compose supporting skills only through deterministic, documented workflow steps when they add clear value.
+- Compose supporting skills only through deterministic, documented workflow steps when they add value.
 - Keep context boundaries explicit: expose only the instructions, files, tool results, and memory artifacts needed for the current task.
 - Use native `claude-skills` commands for routing, validation, review, memory, and compaction when those surfaces own the job.
+- **Subagents cannot spawn subagents.** If a subagent needs to delegate, route back to the main thread via `Skill` tool or a documented workflow step instead of spawning nested agents.
+- **`context: fork`** — a skill can set `context: fork` in its frontmatter to run in a forked subagent context. This is distinct from subagent delegation: the skill's own instructions run in the fork, not the skill's description alone. The `agent` field names the subagent type when `context: fork` is set. Use `context: fork` when the skill's heavy logic would otherwise consume too much of the main-thread context window.
+- **`disallowed-tools`** — a skill can set `disallowed-tools` to remove tools from the pool while active; the block clears on the next message. Useful for safety-constrained skill surfaces (e.g., a read-only review skill that should not accidentally get write access).
+- **`disable-model-invocation: true`** — prevents auto-loading; only manual `/name` invocation works. Skills with this flag cannot be preloaded via a subagent's `skills:` list.
+- **String substitutions in skill content** — available tokens: `$ARGUMENTS` (all positional arguments), `$ARGUMENTS[N]` / `$N` (positional argument at index N), `$name` (skill name from frontmatter), `${CLAUDE_SESSION_ID}`, `${CLAUDE_EFFORT}`, `${CLAUDE_SKILL_DIR}`. Use `$ARGUMENTS` and `$ARGUMENTS[N]` in skill body text to reference user-provided arguments; use `argument-hint` and `arguments` in frontmatter to define expected argument names and positions.
 
 ### Agent Profiles
 
-Your managed Claude Code home should expose these 24 skill-owned agent profiles under `~/.claude/agent-profiles/*.toml`:
+claude-core ships 24 managed profiles under `~/.claude/skills/<name>/agents/claude.yaml`
+(`<name>/agents/claude.yaml` in the repo, synced to the install path by `claude-skills
+install`). Each YAML wires the `claude-skills` runtime to specific reasoning effort and
+tool policy. Supported fields: `agent` (default subagent type: `Explore`, `Plan`,
+`general-purpose`, etc.), `maxTurns` (maximum agentic turns per session), `effort`
+(default effort: `low`, `medium`, `high`, `xhigh`, `max`), `permissionMode` (tool
+permission mode: `default`, `acceptEdits`, `auto`, `dontAsk`, `bypassPermissions`,
+`plan`). The managed profile is **not** visible to Claude Code itself — it only
+configures how `claude-skills` orchestrates work.
+
+When Claude Code spawns a managed subagent (via `Skill("<name>")` in the main thread),
+it reads the matching subagent definition from `.claude/agents/<name>.md` (repo path)
+or `~/.claude/agents/<name>.md` (install path). Subagent frontmatter supports:
+`name` (required), `description` (required), `tools` (bare tool names, no scoped
+patterns), `disallowedTools` (denylist applied before allowlist), `model`
+(`sonnet`/`opus`/`haiku`/`fable`/full ID/`inherit`), `permissionMode`, `maxTurns`,
+`skills` (preload skill content at startup; skills with `disable-model-invocation:
+true` cannot be preloaded), `mcpServers` (inline or string-reference, scoped to this
+subagent), `hooks` (lifecycle hooks scoped to this subagent), `memory`
+(`user`/`project`/`local` for cross-session learning), `background` (run as
+background task), `effort`, `isolation` (`worktree` for isolated git checkout),
+`color` (`red`/`blue`/`green`/`yellow`/`purple`/`orange`/`pink`/`cyan`), and
+`initialPrompt` (auto-submitted as first user turn). Note: scoped tool patterns like
+`Bash(git diff:*)` work in SKILL.md `allowed-tools` but NOT in subagent `tools`.
+
+The 24 profiles mirror the 24 specialist skills:
 
 - **backend-and-data-architecture**: Backend systems, APIs, data models, caching, and messaging
 - **cloud-and-devops-expert**: Infrastructure, CI/CD, containers, and IaC
