@@ -567,10 +567,12 @@ mod tests {
             "system_map_refresh",
             "context_brief",
             "cli",
+            "sprint",
+            "user_story_lint",
         ] {
             assert!(names.contains(&expected), "missing {expected}: {names:?}");
         }
-        assert_eq!(names.len(), 14, "names: {names:?}");
+        assert_eq!(names.len(), 16, "names: {names:?}");
     }
 
     #[test]

@@ -60,3 +60,6 @@ todo.local.md
 VALIDATION_REPORT.md
 flow-check.json
 verify_*.ps1
+
+# Third-party comparison directories
+karpathy-skills-cmp/

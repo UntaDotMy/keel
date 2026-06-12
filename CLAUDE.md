@@ -35,7 +35,7 @@ A "skill" runs in the main thread (instructions inline, costs ongoing tokens). A
 - `.claude/review.json` — Review policy configuration.
 - `.claude/hooks.json` — Claude Code hook wiring rendered by `claude-skills hook install`.
 - `.claude-plugin/plugin.json` — Plugin manifest for Claude Code's plugin system.
-- `commands/` — Custom slash commands (`/claude-core:<name>`) wrapping the implemented CLI surfaces: `workflow`, `review`, `recall`, `gain`. Registered via the `commands` key in the plugin manifest. The native `claude-skills install` also syncs them to `~/.claude/commands/` via `sync_commands`, so they work whether installed through the plugin path or the native installer.
+- `commands/` — Custom slash commands (`/claude-core:<name>`) wrapping the implemented CLI surfaces: `workflow`, `review`, `recall`, `gain`, `sprint`, `user-story`. Registered via the `commands` key in the plugin manifest. The native `claude-skills install` also syncs them to `~/.claude/commands/` via `sync_commands`, so they work whether installed through the plugin path or the native installer.
 
 ## Specialist Layout
 
@@ -118,7 +118,7 @@ Note: scoped tool patterns like `Bash(git diff:*)` work in SKILL.md `allowed-too
 5. Use `templates/` for commit bodies, PR bodies, final responses, and review summaries.
 6. Read `WORKFLOW.md` for branch naming, commit format, and completion rules.
 7. **Agent teams** (agent teams are different from subagents): Teammates communicate via `SendMessage` tool with the agent's ID as the `to` field. Resumed subagents retain full conversation history and auto-resume in the background when they receive a `SendMessage`. The `SubagentStop` event fires when a subagent finishes; `TeammateIdle` fires when a teammate is about to go idle — both support matchers to target specific agent types. Background subagents run concurrently with auto-deny on permission prompts; foreground subagents block until complete. Set `CLAUDE_CODE_FORK_SUBAGENT=1` to make every subagent spawn a fork that inherits the full conversation history. Reference: https://code.claude.com/docs/en/agent-teams.
-7. **Writing Discipline** applies to all written output — docs, code comments, commit/PR text, review notes, chat replies: write less, be accurate not impressive, lead with the point, no filler or AI tells, stay on the asked scope. Full rule in `_shared/common-discipline.md` § Writing Discipline.
+8. **Writing Discipline** applies to all written output — docs, code comments, commit/PR text, review notes, chat replies: write less, be accurate not impressive, lead with the point, no filler or AI tells, stay on the asked scope. Full rule in `_shared/common-discipline.md` § Writing Discipline.
 
 ### Enforcement Gates (PostToolBatch)
 
@@ -142,6 +142,8 @@ Each env var takes three values: **unset / anything else → non-blocking nudge*
 - `claude-skills workflow finish` — Finish branch with proof
 - `claude-skills run -- <command>` — Run with output compaction
 - `claude-skills memory scope resolve --create-missing --refresh-system-map` — Refresh memory
+- `claude-skills sprint plan|status|advance|review|list` — Drive a Scrum-style sprint loop over confirmed user stories
+- `claude-skills user-story lint` — Validate user stories against strict Agile/Jira format (Connextra + Gherkin + INVEST)
 - `claude-skills hook install` — Wire hooks into Claude Code's `settings.json`
 - `claude-skills doctor` — Report MCP registration health (including `alwaysLoad` state)
 - `claude-skills repair` — Re-pin the MCP server entry in `~/.claude.json`

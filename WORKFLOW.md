@@ -133,6 +133,7 @@ Automation cannot prove semantic single-feature scope perfectly. Human review an
 
 ## Completion and Re-Audit Rules
 
+- **Honest-closeout gate** (`CLAUDE_SKILLS_STORY_CLOSEOUT_GATE`): if the workspace has an active sprint with open or blocked stories, the PostToolBatch gate injects a gap report naming each unfinished story. Do not present work as done while stories remain incomplete — loop back, finish them, or document the blocker honestly. Clear the gate by advancing stories (`claude-skills sprint advance --id <id> --state done`) until `claude-skills sprint review` reports COMPLETE.
 - Do not call a task done when the implementation is only partially complete.
 - For brownfield work, identify the preserved flow before implementation: target file or function, current behavior to preserve, entry point, producer, source of truth, storage or queue, side-effect owner, consumer, cleanup or recovery, edit boundary, and validation needed. If that ownership path is still unknown, keep reading or report the blocker instead of patching the first suspicious branch.
 - Existing source-file edits need preserve-existing-flow evidence in the global per-workspace flow-check artifact unless the task is docs-only, formatting-only, generated-only, or explicitly greenfield. Use `claude-skills flow start`, `claude-skills flow check`, and `claude-skills flow finish` to create and validate that artifact.

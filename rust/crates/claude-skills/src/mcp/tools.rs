@@ -197,7 +197,7 @@ pub(super) fn handle_tools_list() -> Value {
             },
             {
                 "name": "cli",
-                "description": "Run any claude-skills CLI subcommand and get its compacted output — the full toolkit surface (review, git-workflow, workflow, memory, memoriesv2, orchestration, flow, code-search, config-audit, skill-lint, checkpoint, gain, session, telemetry, status, doctor, ...). Pass the subcommand and flags as `args`. Read/inspection subcommands run directly; destructive or management subcommands (install, update, repair, uninstall, validate, all, self-replace, `checkpoint restore`, and `hook install`/`hook uninstall`) require `confirm: true`. The `mcp` subcommand is refused. Prefer the dedicated tools (recall, skill_route, brief_create, ...) when one fits; use cli for everything else.",
+                "description": "Run any claude-skills CLI subcommand and get its compacted output — the full toolkit surface (review, git-workflow, workflow, memory, memoriesv2, orchestration, flow, code-search, config-audit, skill-lint, checkpoint, gain, session, telemetry, status, doctor, ...). Pass the subcommand and flags as `args`. Read/inspection subcommands run directly; destructive or management subcommands (install, update, repair, uninstall, validate, all, self-replace, `checkpoint restore`, and `hook install`/`hook uninstall`) require `confirm: true`. The `mcp` subcommand is refused. Prefer the dedicated tools (recall, skill_route, brief_create, sprint, user_story_lint, ...) when one fits; use cli for everything else.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -205,6 +205,29 @@ pub(super) fn handle_tools_list() -> Value {
                         "confirm": { "type": "boolean", "description": "Required true to run a destructive/management subcommand. Default false." }
                     },
                     "required": ["args"]
+                }
+            },
+            {
+                "name": "sprint",
+                "description": "Drive the Scrum-style sprint loop (plan → implement → verify → review → LOOP until every story is Done). Subcommands: `plan` (create a sprint from confirmed stories), `status` (show current sprint state), `advance` (move a story to the next state), `review` (fail-closed gate that verifies every story meets Definition of Done), `list` (show all sprints). The sprint **must not** close until every story is Done — this is the anti-partial-completion backstop.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["plan", "status", "advance", "review", "list"], "description": "Sprint operation to perform." },
+                        "args": { "type": "array", "items": { "type": "string" }, "description": "Additional arguments for the action (e.g. story-id for advance, workspace-root for plan)." }
+                    },
+                    "required": ["action"]
+                }
+            },
+            {
+                "name": "user_story_lint",
+                "description": "Validate user stories against strict Agile/Jira format (Connextra \"As a/I want/so that\" + Gherkin Given/When/Then, validated against INVEST). Use before building to confirm the requirement spec is well-formed. Stories that fail INVEST or lack Gherkin criteria **must not** proceed to implementation.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "file": { "type": "string", "description": "Path to markdown file containing the stories." },
+                        "stdin": { "type": "string", "description": "Story text to validate (alternative to file)." }
+                    }
                 }
             }
         ]
@@ -240,6 +263,8 @@ pub(super) fn handle_tools_call(params: &Value) -> Result<Value, MethodError> {
         "system_map_refresh" => tool_system_map_refresh(&arguments),
         "context_brief" => tool_context_brief(&arguments),
         "cli" => tool_cli(&arguments),
+        "sprint" => tool_sprint(&arguments),
+        "user_story_lint" => tool_user_story_lint(&arguments),
         other => {
             return Err(MethodError {
                 code: JSON_RPC_INVALID_PARAMS,
@@ -781,6 +806,122 @@ fn tool_cli(arguments: &Value) -> Result<String, String> {
     ))
 }
 
+/// Sprint tool: drive the Scrum-style sprint loop (plan, status, advance, review, list).
+/// Thin wrapper over the CLI sprint commands, preserving the same interface.
+fn tool_sprint(arguments: &Value) -> Result<String, String> {
+    let action = arguments
+        .get("action")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "sprint: missing action (plan|status|advance|review|list)".to_string())?;
+
+    let args: Vec<String> = match arguments.get("args") {
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect(),
+        Some(Value::Null) | None => Vec::new(),
+        _ => return Err("sprint: args must be a JSON array of strings".to_string()),
+    };
+
+    let executable = env::current_exe().map_err(|error| format!("sprint: locate self: {error}"))?;
+    let mut child = Command::new(&executable);
+    child.arg("sprint");
+    child.arg(action);
+    for argument in &args {
+        child.arg(argument);
+    }
+    child.env("CLAUDE_SKILLS_HOOK", "mcp");
+    child.stdin(Stdio::null());
+    child.stdout(Stdio::piped());
+    child.stderr(Stdio::piped());
+    let output = child
+        .output()
+        .map_err(|error| format!("sprint: spawn: {error}"))?;
+    let stdout_text = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr_text = String::from_utf8_lossy(&output.stderr).to_string();
+    Ok(render_run_command_report(
+        &format!("claude-skills sprint {} {}", action, args.join(" ")),
+        output.status.code().unwrap_or(-1),
+        &stdout_text,
+        &stderr_text,
+    ))
+}
+
+/// User story lint tool: validate user stories against strict Agile/Jira format.
+/// Thin wrapper over the CLI user-story lint command.
+fn tool_user_story_lint(arguments: &Value) -> Result<String, String> {
+    let file = arguments
+        .get("file")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    let stdin = arguments
+        .get("stdin")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    if file.is_none() && stdin.is_none() {
+        return Err("user_story_lint: must provide either 'file' or 'stdin'".to_string());
+    }
+
+    let executable =
+        env::current_exe().map_err(|error| format!("user_story_lint: locate self: {error}"))?;
+    let mut child = Command::new(&executable);
+    child.arg("user-story");
+    child.arg("lint");
+
+    if let Some(file_path) = file {
+        child.arg("--file");
+        child.arg(file_path);
+    } else if let Some(stdin_text) = stdin {
+        child.arg("--stdin");
+        child.stdin(Stdio::piped());
+        child.stdout(Stdio::piped());
+        child.stderr(Stdio::piped());
+        let mut child_proc = child
+            .spawn()
+            .map_err(|error| format!("user_story_lint: spawn: {error}"))?;
+        if let Some(stdin_pipe) = child_proc.stdin.as_mut() {
+            use std::io::Write;
+            stdin_pipe
+                .write_all(stdin_text.as_bytes())
+                .map_err(|error| format!("user_story_lint: write stdin: {error}"))?;
+        }
+        let output = child_proc
+            .wait_with_output()
+            .map_err(|error| format!("user_story_lint: wait: {error}"))?;
+        let stdout_text = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr_text = String::from_utf8_lossy(&output.stderr).to_string();
+        return Ok(render_run_command_report(
+            "claude-skills user-story lint --stdin",
+            output.status.code().unwrap_or(-1),
+            &stdout_text,
+            &stderr_text,
+        ));
+    }
+
+    child.stdin(Stdio::null());
+    child.stdout(Stdio::piped());
+    child.stderr(Stdio::piped());
+    let output = child
+        .output()
+        .map_err(|error| format!("user_story_lint: spawn: {error}"))?;
+    let stdout_text = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr_text = String::from_utf8_lossy(&output.stderr).to_string();
+    Ok(render_run_command_report(
+        &format!(
+            "claude-skills user-story lint --file {}",
+            file.unwrap_or("")
+        ),
+        output.status.code().unwrap_or(-1),
+        &stdout_text,
+        &stderr_text,
+    ))
+}
+
 /// Resolve the default Claude home, prefixing any failure with the calling
 /// tool's name so a resolution error reads `"<tool>: <reason>"` in the
 /// tool-result envelope. Every handler resolves the same way; this keeps the
@@ -864,10 +1005,12 @@ mod tests {
             "system_map_refresh",
             "context_brief",
             "cli",
+            "sprint",
+            "user_story_lint",
         ] {
             assert!(names.contains(&expected), "missing {expected}: {names:?}");
         }
-        assert_eq!(names.len(), 14, "names: {names:?}");
+        assert_eq!(names.len(), 16, "names: {names:?}");
     }
 
     #[test]
@@ -1093,5 +1236,26 @@ mod tests {
         let report = render_run_command_report("true", 0, "", "");
         assert!(report.contains("exit code: 0\n"));
         assert!(report.contains("(no output)"));
+    }
+
+    #[test]
+    fn tools_list_includes_sprint_and_user_story_lint() {
+        let response = handle_tools_list();
+        let tools = response["tools"].as_array().expect("tools array");
+        let tool_names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+
+        assert!(
+            tool_names.contains(&"sprint"),
+            "sprint tool not in tools list"
+        );
+        assert!(
+            tool_names.contains(&"user_story_lint"),
+            "user_story_lint tool not in tools list"
+        );
+        assert_eq!(
+            tools.len(),
+            16,
+            "expected 16 tools (added sprint and user_story_lint)"
+        );
     }
 }

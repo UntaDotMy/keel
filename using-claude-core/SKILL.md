@@ -161,7 +161,7 @@ skill matcher fires. The full text and the tactical rules they imply live in
 
 **Writing Discipline** governs every word you write — docs, code comments, commit/PR text, review notes, and chat replies. Write less, be accurate not impressive, lead with the point, no filler or AI tells, stay on the asked scope. Full rule in `_shared/common-discipline.md` § Writing Discipline.
 
-## Skill catalog (42 skills installed under ~/.claude/skills/)
+## Skill catalog (43 skills installed under ~/.claude/skills/)
 
 Source: each `<name>/SKILL.md` in this repo. Use the Skill tool with the bare
 name (e.g. `Skill("reviewer")`). The count excludes this bootstrap skill itself
@@ -271,6 +271,8 @@ Each command file maps only to commands that actually ship in the Rust runtime.
 - `/claude-core:review [pre-commit|pre-pr|gates] [base-ref]` — run the native review gates on the current diff.
 - `/claude-core:recall <terms>` — FTS5 search over durable memory (working briefs, system maps, memoriesv2).
 - `/claude-core:gain [since]` — report command-output compaction token savings.
+- `/claude-core:sprint [plan|status|advance|review|list] [story-id]` — drive a Scrum-style sprint loop over confirmed user stories (fail-closed: loops until every story is Done).
+- `/claude-core:user-story [lint] [file-path]` — validate user stories against strict Agile/Jira format (Connextra + Gherkin + INVEST).
 
 These exist so the surface is reachable from the `/` menu, not only by the skill
 matcher or raw CLI. They never invoke planned-but-unimplemented commands.
