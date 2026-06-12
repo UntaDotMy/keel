@@ -4,6 +4,7 @@ description: Brownfield change-safety analyst. Use proactively before editing an
 tools: Read, Grep, Glob, Bash
 disallowedTools: Edit, Write
 maxTurns: 30
+memory: project
 model: sonnet
 skills:
   - preserve-existing-flow

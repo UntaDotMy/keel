@@ -91,6 +91,8 @@
   ],
   "commands": ["./commands/"],
   "hooks": "./.claude/hooks.json",
+  "outputStyles": "./output-styles/",
+  "lspServers": "./.lsp.json",
   "mcpServers": {
     "claude_core": {
       "command": "claude-skills",

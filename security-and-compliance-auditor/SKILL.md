@@ -3,6 +3,12 @@ name: security-and-compliance-auditor
 description: Performs application and infrastructure security review: threat modeling, exploitability analysis, remediation quality, and compliance evidence (SOC2, GDPR). Use when changes touch auth, secrets, input validation, data handling, IAM, or compliance-sensitive surfaces, or when a vulnerability needs reproduction and a fix plan.
 when_to_use: Security reviews, threat modeling, compliance, and remediation quality.
 allowed-tools: Read, Grep, Glob, Bash(git diff:*), Bash(git log:*), Bash(npm audit:*), Bash(yarn audit:*), Bash(pnpm audit:*), Bash(cargo audit:*), Bash(pip-audit:*), Bash(safety:*), Bash(semgrep:*), Bash(trivy:*), Bash(gitleaks:*), Bash(claude-skills memory:*)
+hooks:
+  PreToolUse:
+    - matcher: "Edit|Write|MultiEdit|NotebookEdit"
+      hooks:
+        - type: command
+          command: "echo 'Security audit is read-only: surface the finding and fix plan, then let a builder role apply the change.' >&2; exit 2"
 effort: high
 ---
 

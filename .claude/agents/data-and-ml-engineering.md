@@ -2,6 +2,8 @@
 name: data-and-ml-engineering
 description: Data engineering and ML/MLOps specialist. Use for analytical and machine-learning data flow — ETL/ELT pipelines, batch and streaming ingestion, warehouse and lakehouse modeling (dbt, dimensional models, partitioning), data quality and contracts, orchestration (Airflow, Dagster, Prefect), and the ML lifecycle from feature engineering and training to evaluation, model serving, and drift monitoring. Enforces idempotent backfillable pipelines, quality gates, train/serve parity, eval-before-ship, and reproducibility.
 tools: Read, Grep, Glob, Edit, Write, Bash
+mcpServers:
+  - claude_core
 model: inherit
 skills:
   - data-and-ml-engineering

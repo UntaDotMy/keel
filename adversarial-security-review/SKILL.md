@@ -3,6 +3,9 @@ name: adversarial-security-review
 description: Stress-test code and configuration from an attacker's perspective using a structured red-team / blue-team / adjudicator pass, beyond a checklist scan. Use when a change touches auth, secrets, input handling, agent/hook config, permissions, or anything an attacker would target — first think like the attacker (enumerate concrete exploit paths), then like the defender (existing mitigations), then adjudicate each claimed finding to a confirmed/refuted verdict with evidence so false positives do not drown the real risk. Use when the user says "security review", "threat model this", "can this be exploited", or before shipping security-sensitive code. Complements claude-skills config-audit (the deterministic static scan) and security-and-compliance-auditor (the standards/compliance lens).
 when_to_use: Security-sensitive changes — auth, secrets, input validation, agent/hook/MCP config, permissions, data handling. Run the red-team/blue-team/adjudicator loop to confirm exploitability with evidence. Complements config-audit (static scan) and security-and-compliance-auditor (compliance).
 allowed-tools: Read, Grep, Glob, Bash(claude-skills config-audit:*)
+context: fork
+agent: general-purpose
+model: opus
 effort: xhigh
 ---
 
