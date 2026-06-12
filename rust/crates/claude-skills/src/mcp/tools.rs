@@ -867,7 +867,8 @@ fn tool_user_story_lint(arguments: &Value) -> Result<String, String> {
         return Err("user_story_lint: must provide either 'file' or 'stdin'".to_string());
     }
 
-    let executable = env::current_exe().map_err(|error| format!("user_story_lint: locate self: {error}"))?;
+    let executable =
+        env::current_exe().map_err(|error| format!("user_story_lint: locate self: {error}"))?;
     let mut child = Command::new(&executable);
     child.arg("user-story");
     child.arg("lint");
@@ -911,7 +912,10 @@ fn tool_user_story_lint(arguments: &Value) -> Result<String, String> {
     let stdout_text = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr_text = String::from_utf8_lossy(&output.stderr).to_string();
     Ok(render_run_command_report(
-        &format!("claude-skills user-story lint --file {}", file.unwrap_or("")),
+        &format!(
+            "claude-skills user-story lint --file {}",
+            file.unwrap_or("")
+        ),
         output.status.code().unwrap_or(-1),
         &stdout_text,
         &stderr_text,
@@ -1238,10 +1242,7 @@ mod tests {
     fn tools_list_includes_sprint_and_user_story_lint() {
         let response = handle_tools_list();
         let tools = response["tools"].as_array().expect("tools array");
-        let tool_names: Vec<&str> = tools
-            .iter()
-            .filter_map(|t| t["name"].as_str())
-            .collect();
+        let tool_names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
 
         assert!(
             tool_names.contains(&"sprint"),
