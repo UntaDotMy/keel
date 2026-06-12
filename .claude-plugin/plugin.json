@@ -63,7 +63,8 @@
     "./websocket-realtime-design",
     "./writing-plans",
     "./writing-skills",
-    "./writing-user-stories"
+    "./writing-user-stories",
+    "./requesting-code-review"
   ],
   "agents": [
     "./.claude/agents/api-contract-design.md",

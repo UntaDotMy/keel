@@ -532,12 +532,35 @@ not. After review these are **deliberate scope boundaries**, not defects — the
 conflict with the "single Rust binary, Claude-Code-native, discipline-over-volume"
 positioning. Recorded here so each is a chosen tradeoff:
 
+- **Product-management domain skills (B1).** Product-management skills (roadmaps,
+  PRDs, stakeholder alignment, prioritization frameworks) belong to a different
+  tool category. claude-core is engineering-delivery rails, not a product-management
+  platform. Building PM skills would dilute the engineering focus and expand the
+  surface beyond the single-binary discipline stance. **Not pursued.**
+- **Autonomous board-to-PR agent (B2).** Full-autonomy agents that take a ticket
+  from a project board and drive it to a merged PR without human checkpoints
+  contradict the "human-in-the-loop at every decision point" discipline. claude-core
+  ships orchestration *patterns* (`designing-agent-teams`, `dispatching-parallel-agents`,
+  `subagent-driven-development`) over Claude Code's native subagents/agent-teams/
+  background-agents, with explicit human review gates at closeout. Autonomous
+  board-to-PR would bypass those gates. **Not pursued.**
 - **Multi-agent swarm runtime** (topologies/consensus, à la claude-flow). claude-core
   ships orchestration *patterns* (`designing-agent-teams`, `dispatching-parallel-agents`,
   `subagent-driven-development`) over Claude Code's native subagents/agent-teams/
   background-agents, not a separate swarm engine with consensus. A swarm runtime is
   outside Claude Code's native execution model and would contradict the single-binary
   stance. **Not pursued.**
+- **Recency social research (B3).** Real-time social-media trend research and
+  engagement signals are outside the engineering-delivery scope. claude-core's
+  memory surfaces (`compounding-knowledge`, `instincts`, `working-briefs`) capture
+  durable project knowledge, not ephemeral social signals. Niche capability with
+  no clear integration into the delivery workflow. **Not pursued.**
+- **Benchmark game harness (B4).** Public benchmark leaderboards and competitive
+  scoring against other AI coding tools are marketing artifacts, not engineering
+  value. claude-core's head-to-head scorecard (`docs/competitive-gap-closure.md`)
+  is capability-based and honest about gaps, not a gamified leaderboard. The
+  discipline-over-volume stance means we don't optimize for benchmark scores
+  that diverge from real delivery value. **Not pursued.**
 - **Exhaustive per-language / niche-vertical library breadth** (191-agent megalibraries
   like wshobson). claude-core is curated-not-exhaustive by design: ~40 skills covering
   delivery domains and methodology, not one-agent-per-language. The matcher quality and
