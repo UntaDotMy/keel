@@ -136,6 +136,15 @@ impl Application {
             "code-search" => {
                 utility::run_code_search_command(command_arguments, standard_output, standard_error)
             }
+            "code-graph" => {
+                utility::run_code_graph_command(command_arguments, standard_output, standard_error)
+            }
+            "user-story" => {
+                utility::run_user_story_command(command_arguments, standard_output, standard_error)
+            }
+            "sprint" => {
+                utility::run_sprint_command(command_arguments, standard_output, standard_error)
+            }
             "skill-lint" => {
                 utility::run_skill_lint_command(command_arguments, standard_output, standard_error)
             }
