@@ -121,6 +121,12 @@ pub struct CycleReport {
     pub agents_generated: usize,
     /// Auto-learned instincts decayed and removed because their pattern aged out.
     pub instincts_pruned: usize,
+    /// A2: generated skills rolled back because their promotion prediction was
+    /// falsified — the behavior that justified the skill no longer recurs at the
+    /// trust bar, and the skill was still at its template state (never a manual
+    /// edit). Removing a wrong skill is the empirical-falsification half of the
+    /// evidence→prediction→falsify discipline.
+    pub skills_rolled_back: usize,
     /// Human-readable per-skill notes (skill name -> what happened).
     pub notes: Vec<String>,
     /// Synthesis briefs for generated skills still at their template state.
@@ -252,7 +258,132 @@ pub fn run_learning_cycle(
         }
     }
 
+    // 4. A2 — evaluate every generated skill's falsifiable prediction and roll
+    // back the ones whose justifying behavior no longer holds. This runs after
+    // instincts were refreshed and decayed (step 2/2b), so the trust check sees
+    // current behavior. Skipped on a dry run (it mutates disk).
+    if !options.dry_run {
+        report.skills_rolled_back = evaluate_predictions_and_rollback(claude_home, log);
+    }
+
     report
+}
+
+/// A2: empirical falsification of generated-skill predictions.
+///
+/// For every loop-generated skill, re-check the prediction recorded at promotion
+/// time (the signatures that justified it). A skill is rolled back — its skill
+/// directory and paired generated agent removed — only when ALL of these hold:
+/// - the marker carries a non-empty prediction (pre-A2 markers are never touched);
+/// - the on-disk SKILL.md is still byte-identical to what the loop generated (a
+///   skill the agent manually refined is respected, exactly like the no-clobber
+///   guard everywhere else in this module);
+/// - the project no longer sustains enough of the predicted signatures at the
+///   trust bar (confidence >= SKILL_MIN_CONFIDENCE across >= 2 sessions) to meet
+///   `SKILL_MIN_INSTINCTS` — i.e. the prediction "this behavior will keep
+///   happening" is falsified.
+///
+/// Returns the number of skills rolled back. Fail-open: any per-skill error logs
+/// and continues so one bad skill cannot abort the sweep or the SessionEnd hook.
+fn evaluate_predictions_and_rollback(claude_home: &Path, log: &mut dyn std::io::Write) -> usize {
+    let skills_root = skills_directory(claude_home);
+    let Ok(entries) = fs::read_dir(&skills_root) else {
+        return 0;
+    };
+    let store = RecordStore::new(claude_home, INSTINCT_GROUP);
+    let records = store.list_records().unwrap_or_default();
+
+    let mut rolled_back = 0usize;
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        let Some(marker) = read_marker(&dir.join(LEARNING_META_FILE)) else {
+            continue; // not a loop-generated skill
+        };
+        // No prediction recorded (pre-A2 marker): nothing to falsify.
+        if marker.predicted_signatures.is_empty() || marker.project.trim().is_empty() {
+            continue;
+        }
+        // Respect a manual refinement: a skill whose content the agent changed is
+        // no longer a template and must never be auto-removed.
+        let on_disk = fs::read(dir.join("SKILL.md")).unwrap_or_default();
+        if fnv1a_64(&on_disk) != marker.generated_hash {
+            continue;
+        }
+
+        // Count how many predicted signatures still hold at the trust bar.
+        let still_trusted = count_trusted_predicted_signatures(
+            &records,
+            &marker.project,
+            &marker.predicted_signatures,
+        );
+        // Prediction stands while the project still justifies a skill.
+        if still_trusted >= SKILL_MIN_INSTINCTS {
+            continue;
+        }
+
+        // Falsified: remove the skill directory and its paired generated agent.
+        let skill_name = entry.file_name().to_string_lossy().to_string();
+        match fs::remove_dir_all(&dir) {
+            Ok(_) => {
+                rolled_back += 1;
+                let agent_path = agents_directory(claude_home).join(format!("{skill_name}.md"));
+                if agent_path.is_file() {
+                    let body = fs::read_to_string(&agent_path).unwrap_or_default();
+                    if body.contains("generated: true") {
+                        let _ = fs::remove_file(&agent_path);
+                    }
+                }
+                let _ = writeln!(
+                    log,
+                    "claude-skills learn: rolled back {skill_name} (prediction falsified: \
+                     {still_trusted}/{} predicted signatures still trusted)",
+                    marker.predicted_signatures.len()
+                );
+            }
+            Err(error) => {
+                let _ = writeln!(
+                    log,
+                    "claude-skills learn: rollback {skill_name} failed: {error}"
+                );
+            }
+        }
+    }
+    rolled_back
+}
+
+/// Count how many of `predicted` signatures are still trusted for `project` in the
+/// instinct store (confidence >= SKILL_MIN_CONFIDENCE AND seen across >= 2
+/// sessions) — the same trust bar `evolve_skill` used to promote them.
+fn count_trusted_predicted_signatures(
+    records: &[(String, Record)],
+    project: &str,
+    predicted: &[String],
+) -> usize {
+    let predicted_set: std::collections::BTreeSet<&str> =
+        predicted.iter().map(String::as_str).collect();
+    let mut trusted = std::collections::BTreeSet::new();
+    for (_, record) in records {
+        if field(record, "project") != Some(project) {
+            continue;
+        }
+        let trigger = field(record, "trigger").unwrap_or("");
+        if !predicted_set.contains(trigger) {
+            continue;
+        }
+        let confidence: i64 = field(record, "confidence")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0);
+        let sessions: usize = field(record, "sessions")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0);
+        if confidence >= SKILL_MIN_CONFIDENCE && sessions >= 2 {
+            trusted.insert(trigger.to_string());
+        }
+    }
+    trusted.len()
 }
 
 /// Render a compact, always-on digest of the trusted instincts for the project
@@ -447,6 +578,7 @@ pub fn run_learn_command(
                     "instinctsRecorded": report.instincts_recorded,
                     "skillsGenerated": report.skills_generated,
                     "skillsRespected": report.skills_respected,
+                    "skillsRolledBack": report.skills_rolled_back,
                     "agentsGenerated": report.agents_generated,
                     "notes": report.notes,
                     "synthesisBriefs": briefs,
@@ -469,10 +601,11 @@ pub fn run_learn_command(
                 };
                 let _ = writeln!(
                     standard_output,
-                    "learn {action}: {verb} {} instinct(s); {} skill(s) generated, {} respected, {} agent(s) generated",
+                    "learn {action}: {verb} {} instinct(s); {} skill(s) generated, {} respected, {} rolled back, {} agent(s) generated",
                     report.instincts_recorded,
                     report.skills_generated,
                     report.skills_respected,
+                    report.skills_rolled_back,
                     report.agents_generated
                 );
                 for note in &report.notes {
@@ -820,6 +953,10 @@ fn evolve_skill(
     let meta_path = skill_dir.join(LEARNING_META_FILE);
 
     let signature_set = signature_set(instincts);
+    // A2: the prediction is exactly the signatures justifying this skill. If the
+    // project later stops sustaining enough of these at the trust bar, the
+    // prediction is falsified and the skill is rolled back.
+    let predicted_signatures = predicted_signatures(instincts);
     let content = render_skill(&skill_name, project, instincts);
     let content_hash = fnv1a_64(content.as_bytes());
 
@@ -861,7 +998,13 @@ fn evolve_skill(
     if let Err(error) = fs::write(&skill_path, content.as_bytes()) {
         return EvolveOutcome::Failed(format!("write {}: {error}", display_path(&skill_path)));
     }
-    if let Err(error) = write_marker(&meta_path, content_hash, &signature_set, project) {
+    if let Err(error) = write_marker(
+        &meta_path,
+        content_hash,
+        &signature_set,
+        project,
+        &predicted_signatures,
+    ) {
         return EvolveOutcome::Failed(error);
     }
 
@@ -926,6 +1069,16 @@ fn signature_set(instincts: &[TrustedInstinct]) -> String {
     let mut signatures: Vec<&str> = instincts.iter().map(|i| i.signature.as_str()).collect();
     signatures.sort_unstable();
     signatures.join("\n")
+}
+
+/// A2: the sorted, de-duplicated signatures recorded as a skill's falsifiable
+/// prediction at promotion time. Same content as `signature_set` but as a list,
+/// so the marker can store and a later cycle can re-check each one individually.
+fn predicted_signatures(instincts: &[TrustedInstinct]) -> Vec<String> {
+    let mut signatures: Vec<String> = instincts.iter().map(|i| i.signature.clone()).collect();
+    signatures.sort();
+    signatures.dedup();
+    signatures
 }
 
 /// Render the deterministic SKILL.md body for a project's trusted instincts.
@@ -1008,6 +1161,13 @@ struct LearningMarker {
     generated_hash: u64,
     signature_set: String,
     project: String,
+    /// A2 (falsifiable prediction): the signatures whose trusted recurrence
+    /// justified generating this skill, recorded at promotion time. A later cycle
+    /// re-checks them — if the project no longer sustains enough of these at the
+    /// trust bar, the prediction ("this behavior will keep happening") is
+    /// falsified and the skill is rolled back. Empty for pre-A2 markers, which the
+    /// evaluator treats as "no prediction to falsify" (never auto-rolled-back).
+    predicted_signatures: Vec<String>,
 }
 
 fn read_marker(path: &Path) -> Option<LearningMarker> {
@@ -1024,10 +1184,21 @@ fn read_marker(path: &Path) -> Option<LearningMarker> {
         .and_then(|v| v.as_str())
         .unwrap_or_default()
         .to_string();
+    let predicted_signatures = value
+        .get("predictedSignatures")
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
     Some(LearningMarker {
         generated_hash: generated_hash.parse().ok()?,
         signature_set,
         project,
+        predicted_signatures,
     })
 }
 
@@ -1036,12 +1207,14 @@ fn write_marker(
     content_hash: u64,
     signature_set: &str,
     project: &str,
+    predicted_signatures: &[String],
 ) -> Result<(), String> {
     let value = serde_json::json!({
         "generator": "claude-skills-learning",
         "generatedHash": content_hash.to_string(),
         "signatureSet": signature_set,
         "project": project,
+        "predictedSignatures": predicted_signatures,
     });
     let serialized = serde_json::to_string_pretty(&value)
         .map_err(|error| format!("serialize marker: {error}"))?;
@@ -1687,6 +1860,187 @@ mod tests {
     fn synthesis_nudge_empty_for_project_without_generated_skill() {
         isolated_home("synth-nudge-empty", |root| {
             assert!(project_synthesis_nudge(root, "/work/noskill").is_empty());
+        });
+    }
+
+    // ---- A2: falsifiable prediction + rollback ----
+
+    /// Write a template-state generated skill directory with a marker carrying a
+    /// falsifiable prediction, mirroring exactly what `evolve_skill` writes. Used to
+    /// test step-4 evaluation in isolation, without depending on observation-window
+    /// timing (the real falsification path is multi-day decay, which a unit test
+    /// cannot wait for).
+    fn seed_generated_skill(root: &Path, project: &str, predicted: &[&str]) {
+        let slug = project_slug(project);
+        let skill_dir = skills_directory(root).join(format!("learned-{slug}"));
+        fs::create_dir_all(&skill_dir).expect("mkdir skill");
+        let content =
+            format!("---\nname: learned-{slug}\ngenerated: true\nprovenance: learned\n---\nbody\n");
+        fs::write(skill_dir.join("SKILL.md"), &content).expect("write skill");
+        let marker = serde_json::json!({
+            "generator": "claude-skills-learning",
+            "generatedHash": fnv1a_64(content.as_bytes()).to_string(),
+            "signatureSet": predicted.join("\n"),
+            "project": project,
+            "predictedSignatures": predicted,
+        });
+        fs::write(
+            skill_dir.join(LEARNING_META_FILE),
+            serde_json::to_string_pretty(&marker).unwrap(),
+        )
+        .expect("write marker");
+        // Pair a generated agent so rollback can verify it is removed too.
+        let agent_path = agents_directory(root).join(format!("learned-{slug}.md"));
+        fs::create_dir_all(agent_path.parent().unwrap()).expect("mkdir agents");
+        fs::write(
+            &agent_path,
+            format!("---\nname: learned-{slug}\ngenerated: true\n---\nbody\n"),
+        )
+        .expect("write agent");
+    }
+
+    #[test]
+    fn marker_records_predicted_signatures_at_promotion() {
+        isolated_home("a2-marker", |root| {
+            seed_bash("predproj", "cargo test", 6, 2);
+            seed_bash("predproj", "git commit", 6, 2);
+            let mut log = Vec::new();
+            run_learning_cycle(root, &CycleOptions::default(), &mut log);
+
+            let meta = skills_directory(root)
+                .join("learned-predproj")
+                .join(LEARNING_META_FILE);
+            let marker = read_marker(&meta).expect("marker exists");
+            assert_eq!(
+                marker.predicted_signatures,
+                vec!["cargo test".to_string(), "git commit".to_string()],
+                "promotion records the justifying signatures as the prediction"
+            );
+        });
+    }
+
+    #[test]
+    fn falsified_prediction_rolls_back_template_skill() {
+        isolated_home("a2-rollback", |root| {
+            // A previously-generated skill predicting two signatures, but the
+            // instinct store no longer trusts ANY of them (the behavior stopped and
+            // the instincts decayed away over prior cycles). The prediction is
+            // therefore falsified.
+            seed_generated_skill(root, "rbproj", &["cargo test", "git commit"]);
+            assert!(skills_directory(root).join("learned-rbproj").exists());
+
+            // Unrelated live signal so the cycle proceeds past the empty-observation
+            // early return and reaches step 4.
+            seed_bash("otherproj", "npm test", 4, 2);
+            let mut log = Vec::new();
+            let report = run_learning_cycle(root, &CycleOptions::default(), &mut log);
+            assert_eq!(
+                report.skills_rolled_back, 1,
+                "a falsified prediction must roll the skill back"
+            );
+            assert_removed_eventually(&skills_directory(root).join("learned-rbproj"));
+            assert_removed_eventually(&agents_directory(root).join("learned-rbproj.md"));
+        });
+    }
+
+    #[test]
+    fn rollback_respects_manually_refined_skill() {
+        isolated_home("a2-respect", |root| {
+            seed_generated_skill(root, "keepproj", &["cargo test", "git commit"]);
+            // The agent refines the skill (hash now differs from the marker).
+            let skill_path = skills_directory(root)
+                .join("learned-keepproj")
+                .join("SKILL.md");
+            fs::write(
+                &skill_path,
+                "---\nname: learned-keepproj\ngenerated: true\nprovenance: learned\n---\nHand-authored.\n",
+            )
+            .expect("refine");
+
+            // Prediction is falsified (no trusted instincts), but a manually-refined
+            // skill is never auto-removed.
+            seed_bash("liveproj", "npm test", 4, 2);
+            let mut log = Vec::new();
+            let report = run_learning_cycle(root, &CycleOptions::default(), &mut log);
+            assert_eq!(
+                report.skills_rolled_back, 0,
+                "a manually-refined skill must survive a falsified prediction"
+            );
+            assert!(
+                skill_path.exists(),
+                "the refined skill file must still be present"
+            );
+            let body = fs::read_to_string(&skill_path).expect("read");
+            assert!(body.contains("Hand-authored"), "manual prose preserved");
+        });
+    }
+
+    #[test]
+    fn still_trusted_prediction_keeps_skill() {
+        isolated_home("a2-keep", |root| {
+            seed_generated_skill(root, "steadyproj", &["cargo test", "git commit"]);
+            // The behavior still holds: write trusted instincts for both predicted
+            // signatures (confidence >= bar, >= 2 sessions). The skill must stay.
+            let store = RecordStore::new(root, INSTINCT_GROUP);
+            for trigger in ["cargo test", "git commit"] {
+                let id = instinct_id("steadyproj", trigger);
+                store
+                    .write_record(
+                        &id,
+                        &vec![
+                            ("id".into(), id.clone()),
+                            ("trigger".into(), trigger.into()),
+                            ("guidance".into(), "x".into()),
+                            ("confidence".into(), "6".into()),
+                            ("sessions".into(), "2".into()),
+                            ("project".into(), "steadyproj".into()),
+                            ("source".into(), SOURCE_OBSERVED.into()),
+                        ],
+                    )
+                    .expect("seed trusted");
+            }
+
+            seed_bash("liveproj", "npm test", 4, 2);
+            let mut log = Vec::new();
+            let report = run_learning_cycle(root, &CycleOptions::default(), &mut log);
+            assert_eq!(
+                report.skills_rolled_back, 0,
+                "a prediction that still holds must keep the skill"
+            );
+            assert!(skills_directory(root).join("learned-steadyproj").exists());
+        });
+    }
+
+    #[test]
+    fn pre_a2_marker_without_prediction_is_never_rolled_back() {
+        isolated_home("a2-legacy", |root| {
+            // Simulate a skill generated before A2: marker has no predictedSignatures.
+            let skill_dir = skills_directory(root).join("learned-legacyproj");
+            fs::create_dir_all(&skill_dir).expect("mkdir");
+            let content = "---\nname: learned-legacyproj\ngenerated: true\n---\nbody\n";
+            fs::write(skill_dir.join("SKILL.md"), content).expect("write skill");
+            let legacy_marker = serde_json::json!({
+                "generator": "claude-skills-learning",
+                "generatedHash": fnv1a_64(content.as_bytes()).to_string(),
+                "signatureSet": "cargo test",
+                "project": "legacyproj",
+                // no predictedSignatures key
+            });
+            fs::write(
+                skill_dir.join(LEARNING_META_FILE),
+                serde_json::to_string_pretty(&legacy_marker).unwrap(),
+            )
+            .expect("write marker");
+
+            // Some live signal so the cycle runs.
+            seed_bash("liveproj", "npm test", 4, 2);
+            let mut log = Vec::new();
+            let report = run_learning_cycle(root, &CycleOptions::default(), &mut log);
+            assert_eq!(
+                report.skills_rolled_back, 0,
+                "a pre-A2 marker with no prediction must never be auto-rolled-back"
+            );
+            assert!(skill_dir.exists(), "legacy generated skill is preserved");
         });
     }
 }

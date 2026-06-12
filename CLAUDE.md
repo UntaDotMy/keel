@@ -5,7 +5,7 @@
 This is the claude-core project — native delivery rails for Claude Code. It provides:
 - 1 bootstrap **skill** (`using-claude-core/SKILL.md`) injected verbatim at every `SessionStart` to establish the research-first iron law and list every other skill
 - 24 specialist Claude Code **skills** for software delivery (`<name>/SKILL.md`)
-- 16 technique/process **skills** (`brainstorming`, `test-driven-development`, `systematic-debugging`, `writing-plans`, `executing-plans`, `subagent-driven-development`, `dispatching-parallel-agents`, `using-git-worktrees`, `finishing-a-development-branch`, `receiving-code-review`, `writing-skills`, `designing-agent-teams`, `compounding-knowledge`, `adversarial-security-review`, plus the token-discipline pair `compression-discipline` and `output-economy`) — main-thread skills with no subagent or managed profile. This makes 41 `SKILL.md` directories total (24 specialists + 16 technique + 1 bootstrap); 40 are matcher-invokable (all but the bootstrap, which loads automatically at SessionStart). `requesting-code-review` is an alias pointer to `reviewer`, not a directory.
+- 18 technique/process **skills** (`brainstorming`, `writing-user-stories`, `running-a-sprint`, `test-driven-development`, `systematic-debugging`, `writing-plans`, `executing-plans`, `subagent-driven-development`, `dispatching-parallel-agents`, `using-git-worktrees`, `finishing-a-development-branch`, `receiving-code-review`, `writing-skills`, `designing-agent-teams`, `compounding-knowledge`, `adversarial-security-review`, plus the token-discipline pair `compression-discipline` and `output-economy`) — main-thread skills with no subagent or managed profile. This makes 43 `SKILL.md` directories total (24 specialists + 18 technique + 1 bootstrap); 42 are matcher-invokable (all but the bootstrap, which loads automatically at SessionStart). `requesting-code-review` is an alias pointer to `reviewer`, not a directory.
 - 24 matching Claude Code **subagents** for token-efficient delegation (`.claude/agents/<name>.md`)
 - 24 internal **managed profiles** consumed by the CLI (`<name>/agents/claude.yaml`)
 - Workflow routing and escalation rules
@@ -122,10 +122,13 @@ Note: scoped tool patterns like `Bash(git diff:*)` work in SKILL.md `allowed-too
 
 ### Enforcement Gates (PostToolBatch)
 
-Two default-on PostToolBatch gates are the only model-independent backstop for the Iron Law — hooks cannot force a tool/Skill call, but they can inject a reminder when a required artifact is missing. Both live in `rust/crates/claude-skills/src/runner/hook_lifecycle.rs`:
+Three default-on PostToolBatch gates are the only model-independent backstop for the Iron Law — hooks cannot force a tool/Skill call, but they can inject a reminder when a required artifact is missing. All three live in `rust/crates/claude-skills/src/runner/hook_lifecycle.rs`:
 
 - **Working-brief gate** (`CLAUDE_SKILLS_BRIEF_GATE`, front of the law) — fires once when a session edits code but no working brief was written this session. Clear it by writing one: `claude-skills memory working-brief write --request "..." --acceptance-criteria "..."`, or the `brief_create` MCP tool.
 - **Review gate** (`CLAUDE_SKILLS_REVIEW_GATE`, back of the law) — fires once when a session edits code but records no reviewer pass since the last edit. Clear it by invoking the `reviewer` skill or running `claude-skills review pre-pr`.
+- **Honest-closeout gate** (`CLAUDE_SKILLS_STORY_CLOSEOUT_GATE`, the honesty backstop) — fires when the current workspace has an **active sprint** (`claude-skills sprint` story records exist) that is not COMPLETE, injecting a gap report that names each open/blocked story and tells the agent to state it as a gap and loop back rather than present the work as done. This is why an incomplete sprint cannot be soft-closed: the user-visible "I found these gaps, I'm not done" is enforced at the one end-of-turn event that can inject context. Distinct from the other two in two ways: it is **scoped to user-story work** (silent when there is no sprint, so ordinary and question turns are untouched — the "if based on user stories, else ignore" rule), and it is **not gated on this turn editing code** (an incomplete sprint matters at closeout even on a no-edit summary turn). Clear it by finishing the stories (`claude-skills sprint advance --id <id> --state done` as each passes its acceptance criteria and review) until `claude-skills sprint review` reports COMPLETE.
+
+Why this gate lives on PostToolBatch and not Stop/SessionEnd: the Claude Code hooks schema only accepts `hookSpecificOutput.additionalContext` (the channel that injects text into the model's context) on a subset of events. `Stop`, `SubagentStop`, and `SessionEnd` — the literal "final output" moments — carry top-level decision fields only and **cannot inject context**, so an honest-gap report placed there would never reach the model. `PostToolBatch` is the one end-of-turn event that can inject, so all three gates ride it.
 
 Each env var takes three values: **unset / anything else → non-blocking nudge** (the default — the reminder is injected via `hookSpecificOutput.additionalContext`, so the agent is told to act but the turn is *not* halted); **`block` → opt-in hard stop** (`decision: "block"`, refuses closeout until the artifact exists); **`off` (or `…_MAX_BLOCKS=0`) → disabled**. Whichever mode is set, each gate fires at most `…_MAX_BLOCKS` time(s) per session (default 1) via a monotonic counter, then falls through to the generic advisory — so it can neither loop nor spam — and fails open to the advisory on any telemetry error. Pure-research and question turns (no code edits) never fire a gate.
 
@@ -229,4 +232,63 @@ under `refs/claude-checkpoints/<id>` (non-destructive); `restore --id <id>
 --confirm` reapplies one, taking an automatic pre-restore safety snapshot first so
 the restore is itself reversible. It does not capture conversation state (only
 Claude Code's `/rewind` can), so the two are complementary.
+
+## Code Graph
+
+`claude-skills code-graph build|impact` is a deterministic codebase-understanding
+graph — the structural layer the flat `SYSTEM_MAP` and the manual
+`preserve-existing-flow` owner trace lacked. `build` scans the workspace and writes
+a committable JSON artifact (default `.understand/code-graph.json`) of nodes
+(source files with their top-level symbol definitions and import specifiers) and
+edges (cross-file `imports` dependencies). Extraction is line-based and
+dependency-free (no tree-sitter grammar, no LLM): nodes sort by path, edges by
+(from,to,kind), so two runs over the same tree produce byte-identical JSON. Edges
+are only emitted when an import resolves to a real in-repo file — relative JS/TS
+imports (with `index` resolution), relative Python imports (with `__init__`), and
+Rust `mod` declarations; bare/package imports stay as node `imports` strings and
+are never invented as edges, so the graph stays honest. `impact --changed a,b,c`
+rebuilds the graph and reports the transitive reverse-dependency closure (every
+in-repo file that imports the changed files, directly or indirectly), excluding the
+changed files themselves — the cheap "what could this edit break" query for review
+scoping. Supported languages: Rust, JavaScript/TypeScript, Python, Go (Go records
+import specifiers but does not resolve package paths to files, by design).
+
+## User Stories
+
+`claude-skills user-story lint --file <stories.md>` (or `--stdin`) is the
+deterministic strict-format validator behind the `writing-user-stories` skill —
+the requirements-capture front of the workflow. It parses a markdown story set and
+**fails** (exit 1) when a story is missing a Connextra clause (role/goal/benefit,
+"As a `<role>`, I want `<goal>`, so that `<benefit>`") or has no Gherkin acceptance
+scenario (Given/When/Then), and **warns** on INVEST risks (filler benefit clause,
+an "and"-chained goal that should be split). A document with no parseable story
+also fails, so an empty or garbage artifact never passes silently. Parsing is
+line-based and case-insensitive on the keyword anchors, so two runs over the same
+input produce identical findings. It is the structural gate for user stories the
+way `skill-lint` is for SKILL.md and `config-audit` is for the config surface:
+catch a malformed artifact before it is trusted, without invoking the live model.
+The `writing-user-stories` skill runs on every requirement-bearing prompt — it
+converts the prompt completely into stories, validates them with this command,
+confirms them with the user via `AskUserQuestion`, and captures them in the working
+brief as the anti-drift spec that `reviewer` Stage 1 reconciles the diff against.
+
+## Sprint Loop
+
+`claude-skills sprint plan|status|advance|review|list` is the Scrum-style sprint
+ledger behind the `running-a-sprint` skill. The confirmed user stories become a
+sprint backlog (`plan --story "..."`, each item starts `todo`); `advance --id <id>
+--state <todo|in-progress|blocked|done>` moves a story across the board; `status`
+shows the board (daily-scrum view); and `review` is the **fail-closed loop gate** —
+it exits 0 (COMPLETE) only when there is at least one story and every story is
+`done`, and exits non-zero (NOT COMPLETE) while any story is `todo`,
+`in-progress`, or `blocked`, naming the open ones. A `blocked` story is explicitly
+not done, so it keeps the sprint open rather than being silently counted complete;
+an empty sprint is "not complete", not "done". State is durable per workspace
+(`<claude_home>/sprint/<workspace-slug>/`, one record per story) so the loop —
+"which stories are still open" — survives compaction and a fresh session. The
+`running-a-sprint` skill orchestrates the loop: plan the backlog from confirmed
+stories, drive each story implement → verify-against-its-Gherkin-criteria →
+`reviewer` to Definition of Done, then `sprint review` and loop back on any open
+story until COMPLETE, then demo the increment and capture a retrospective to
+memory.
 

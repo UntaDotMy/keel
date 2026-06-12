@@ -161,7 +161,7 @@ skill matcher fires. The full text and the tactical rules they imply live in
 
 **Writing Discipline** governs every word you write — docs, code comments, commit/PR text, review notes, and chat replies. Write less, be accurate not impressive, lead with the point, no filler or AI tells, stay on the asked scope. Full rule in `_shared/common-discipline.md` § Writing Discipline.
 
-## Skill catalog (40 skills installed under ~/.claude/skills/)
+## Skill catalog (42 skills installed under ~/.claude/skills/)
 
 Source: each `<name>/SKILL.md` in this repo. Use the Skill tool with the bare
 name (e.g. `Skill("reviewer")`). The count excludes this bootstrap skill itself
@@ -180,6 +180,8 @@ separate skill directory — it routes to `reviewer`.
 - `preserve-existing-flow` — Pre-edit ownership trace before changing existing behavior in a brownfield codebase.
 - `reviewer` — Production-readiness review and quality gate after implementation. Returns Pass / Conditional Pass / Fail.
 - `brainstorming` — Socratic design exploration before implementation: refine an open-ended idea into a concrete, agreed design with trade-offs, captured in the working brief before any code. The generative front half of Think-Before-Coding.
+- `writing-user-stories` — Convert a requirement-bearing prompt completely into strict Agile/Jira user stories (Connextra "As a/I want/so that" + Gherkin Given/When/Then, validated against INVEST), confirm them with the user via AskUserQuestion, and capture them in the working brief as the anti-drift spec. Runs first on any feature/change/fix ask, before brainstorming or coding. Validate format with `claude-skills user-story lint`.
+- `running-a-sprint` — Run the confirmed user stories as a Scrum-style sprint loop: backlog → per-story implement→verify-against-Gherkin→review → LOOP until every story meets Definition of Done → increment + retro. Use for multi-story or multi-step builds that must finish completely, not partially. Backed by `claude-skills sprint` (durable per-story state, fail-closed review gate). The orchestration layer above writing-user-stories and the implementation skills.
 - `test-driven-development` — The tight RED-GREEN-REFACTOR loop: write the failing test first, make it pass with the minimum change, refactor under green. The per-change companion to qa-and-automation-engineer's coverage strategy.
 - `systematic-debugging` — Root-cause-first defect work: reproduce the symptom, trace it end-to-end with file:line evidence, fix the source of truth, prove it with a regression test. Use instead of patching the first suspicious line.
 - `writing-plans` — Turn an agreed design into an ordered, per-step-verifiable implementation plan (each step names its files and its check), captured in the working brief. The front half of execution.

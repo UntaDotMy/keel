@@ -49,6 +49,7 @@
     "./react-performance-audit",
     "./receiving-code-review",
     "./reviewer",
+    "./running-a-sprint",
     "./security-and-compliance-auditor",
     "./software-development-life-cycle",
     "./stripe-integration",
@@ -61,7 +62,8 @@
     "./web-development-life-cycle",
     "./websocket-realtime-design",
     "./writing-plans",
-    "./writing-skills"
+    "./writing-skills",
+    "./writing-user-stories"
   ],
   "agents": [
     "./.claude/agents/api-contract-design.md",

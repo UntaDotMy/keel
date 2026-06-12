@@ -18,7 +18,10 @@ use crate::proxy::raw_store::RawStore;
 use crate::runner::shell_rewrite::{rewrite_command_text_for_shell, RewriteShell};
 use crate::runner::tool_timings;
 use crate::runner::{learning, observation};
-use crate::runtime::{display_path, installed_executable_path, resolve_claude_home, write_text};
+use crate::runtime::{
+    display_path, installed_executable_path, resolve_claude_home, resolve_repository_root,
+    write_text,
+};
 use crate::utility;
 
 const RAW_OUTPUT_DEFAULT_RETENTION_DAYS: u64 = 14;
@@ -1567,6 +1570,71 @@ fn review_gate_max_blocks() -> u64 {
         .unwrap_or(GATE_DEFAULT_MAX_BLOCKS)
 }
 
+// ---- Honest-closeout story-gap gate (PostToolBatch) ----
+//
+// The end-of-turn moment where the user wants "I found these gaps, I'm not
+// done" cannot live in a Stop/SubagentStop/SessionEnd hook — those events do not
+// accept `hookSpecificOutput.additionalContext` per the Claude Code schema, so
+// they cannot inject text into the model's context. PostToolBatch is the one
+// end-of-turn event that can, so the honest-closeout gate rides here alongside
+// the brief/review gates. It is scoped to user-story work: it fires only when the
+// current workspace has an ACTIVE SPRINT (story records exist) whose stories are
+// not all Done. With no sprint it is silent, so ordinary and question turns are
+// untouched — exactly the "if based on user stories, else ignore" contract.
+const STORY_CLOSEOUT_GATE_ENV_VAR: &str = "CLAUDE_SKILLS_STORY_CLOSEOUT_GATE";
+const STORY_CLOSEOUT_GATE_MAX_BLOCKS_ENV_VAR: &str = "CLAUDE_SKILLS_STORY_CLOSEOUT_GATE_MAX_BLOCKS";
+
+/// Story-closeout gate behavior. Default `Nudge`;
+/// `CLAUDE_SKILLS_STORY_CLOSEOUT_GATE=block` makes it a hard stop; `=off` disables.
+fn story_closeout_gate_mode() -> GateMode {
+    gate_mode(STORY_CLOSEOUT_GATE_ENV_VAR)
+}
+
+fn story_closeout_gate_max_blocks() -> u64 {
+    std::env::var(STORY_CLOSEOUT_GATE_MAX_BLOCKS_ENV_VAR)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(GATE_DEFAULT_MAX_BLOCKS)
+}
+
+fn story_closeout_gate_blocks_path(claude_home: &Path, session_id: &str) -> PathBuf {
+    let key = if session_id.trim().is_empty() {
+        "no-session".to_string()
+    } else {
+        sanitize_memory_key(session_id)
+    };
+    claude_home
+        .join("state")
+        .join("story-closeout-gate-blocks")
+        .join(key)
+}
+
+/// Build the honest-closeout gate message naming each open story as a gap. `mode`
+/// selects blocking vs non-blocking phrasing; both name the loop-back action, the
+/// clearing action (finish the stories / mark them done), the bound, and the
+/// off-switch.
+fn story_closeout_gate_message(
+    mode: GateMode,
+    open: &[crate::utility::sprint::OpenStory],
+) -> String {
+    let mut gaps = String::new();
+    for story in open {
+        gaps.push_str(&format!(
+            "\n  - [{}] {} :: {}",
+            story.state, story.id, story.story
+        ));
+    }
+    let preamble = match mode {
+        GateMode::Block => "Honest-closeout gate (CLAUDE_SKILLS_STORY_CLOSEOUT_GATE=block): this workspace has an active sprint that is NOT complete.",
+        _ => "Honest-closeout reminder (CLAUDE_SKILLS_STORY_CLOSEOUT_GATE, on by default as a non-blocking nudge): this workspace has an active sprint that is NOT complete.",
+    };
+    let tail = match mode {
+        GateMode::Block => "Do NOT present this work as done. State each open story above as an honest gap, then loop back and finish it. Mark a story done with `claude-skills sprint advance --id <id> --state done` once its acceptance criteria pass and it is reviewed; `claude-skills sprint review` clears this gate when every story is Done. Blocks at most CLAUDE_SKILLS_STORY_CLOSEOUT_GATE_MAX_BLOCKS time(s) per session (default 1), then lets the turn through, so it cannot loop. Set CLAUDE_SKILLS_STORY_CLOSEOUT_GATE=off to disable.",
+        _ => "Before you present this as finished: state each open story above as an honest gap and loop back to it rather than calling the work complete. Mark a story done with `claude-skills sprint advance --id <id> --state done` once its acceptance criteria pass and it is reviewed; `claude-skills sprint review` clears this gate when every story is Done. This is advisory and does not stop the turn; it appears at most CLAUDE_SKILLS_STORY_CLOSEOUT_GATE_MAX_BLOCKS time(s) per session (default 1). Set CLAUDE_SKILLS_STORY_CLOSEOUT_GATE=block to make it a hard stop, or =off to disable.",
+    };
+    format!("{preamble} Open stories (Definition of Done not met):{gaps}\n{tail}")
+}
+
 const BRIEF_GATE_ENV_VAR: &str = "CLAUDE_SKILLS_BRIEF_GATE";
 const BRIEF_GATE_MAX_BLOCKS_ENV_VAR: &str = "CLAUDE_SKILLS_BRIEF_GATE_MAX_BLOCKS";
 
@@ -2048,12 +2116,14 @@ fn run_hook_post_tool_batch(
 ) -> u8 {
     let review_mode = review_gate_mode();
     let brief_mode = brief_gate_mode();
+    let closeout_mode = story_closeout_gate_mode();
     let review_on = review_mode != GateMode::Off && review_gate_max_blocks() > 0;
     let brief_on = brief_mode != GateMode::Off && brief_gate_max_blocks() > 0;
+    let closeout_on = closeout_mode != GateMode::Off && story_closeout_gate_max_blocks() > 0;
 
-    // Both gates off: skip stdin entirely and emit the advisory reminder. This
+    // All gates off: skip stdin entirely and emit the advisory reminder. This
     // keeps the fully-disabled path cheap and side-effect-free.
-    if !review_on && !brief_on {
+    if !review_on && !brief_on && !closeout_on {
         return emit_post_tool_batch_advisory(standard_output, standard_error);
     }
 
@@ -2078,68 +2148,142 @@ fn run_hook_post_tool_batch(
 
     let stats = session_edit_stats(&claude_home, session_id);
 
-    // Both gates only fire when code changed this session. Short-circuit the
-    // no-edit case so pure-research and question turns pay no gate IO and never
-    // fire — this is the same `edit_count == 0 → Advisory` rule decide_gate
-    // enforces, hoisted to skip the brief/review lookups entirely.
-    if stats.count == 0 {
-        return emit_post_tool_batch_advisory(standard_output, standard_error);
-    }
-
-    // Brief gate FIRST (front of the law: understand/plan before building).
-    if brief_on {
-        let start = session_start_ms(&claude_home, session_id);
-        let satisfied = brief_written_this_session(&claude_home, &stats.last_cwd, start);
-        let blocks_path = brief_gate_blocks_path(&claude_home, session_id);
-        let blocks_issued = read_counter_value(&blocks_path);
-        let decision = decide_gate(
-            brief_mode,
-            brief_gate_max_blocks(),
-            blocks_issued,
-            stats.count,
-            satisfied,
-        );
-        if decision != GateDecision::Advisory {
-            // Increment FIRST so the cap counts down even if rendering fails or
-            // the model ignores the message — the monotonic counter is the
-            // termination guarantee and must advance before anything else.
-            let _ = increment_counter_file(&blocks_path);
-            return emit_gate_decision(
-                decision,
-                brief_gate_message(brief_mode),
-                standard_output,
-                standard_error,
+    // Brief and review gates only fire when code changed this session — pure
+    // research and question turns never trip them. The honest-closeout gate is
+    // evaluated separately below because it keys off sprint state, not edits: an
+    // incomplete sprint matters at closeout even on a no-edit summary turn.
+    if stats.count > 0 {
+        // Brief gate FIRST (front of the law: understand/plan before building).
+        if brief_on {
+            let start = session_start_ms(&claude_home, session_id);
+            let satisfied = brief_written_this_session(&claude_home, &stats.last_cwd, start);
+            let blocks_path = brief_gate_blocks_path(&claude_home, session_id);
+            let blocks_issued = read_counter_value(&blocks_path);
+            let decision = decide_gate(
+                brief_mode,
+                brief_gate_max_blocks(),
+                blocks_issued,
+                stats.count,
+                satisfied,
             );
+            if decision != GateDecision::Advisory {
+                // Increment FIRST so the cap counts down even if rendering fails or
+                // the model ignores the message — the monotonic counter is the
+                // termination guarantee and must advance before anything else.
+                let _ = increment_counter_file(&blocks_path);
+                return emit_gate_decision(
+                    decision,
+                    brief_gate_message(brief_mode),
+                    standard_output,
+                    standard_error,
+                );
+            }
+        }
+
+        // Review gate SECOND (back of the law: review before close).
+        if review_on {
+            let reviewed = review_marker_ms(&claude_home, &stats.last_cwd)
+                .map(|marker_ms| marker_ms >= stats.last_edit_ms)
+                .unwrap_or(false);
+            let blocks_path = review_gate_blocks_path(&claude_home, session_id);
+            let blocks_issued = read_counter_value(&blocks_path);
+            let decision = decide_gate(
+                review_mode,
+                review_gate_max_blocks(),
+                blocks_issued,
+                stats.count,
+                reviewed,
+            );
+            if decision != GateDecision::Advisory {
+                let _ = increment_counter_file(&blocks_path);
+                return emit_gate_decision(
+                    decision,
+                    review_gate_message(review_mode),
+                    standard_output,
+                    standard_error,
+                );
+            }
         }
     }
 
-    // Review gate SECOND (back of the law: review before close).
-    if review_on {
-        let reviewed = review_marker_ms(&claude_home, &stats.last_cwd)
-            .map(|marker_ms| marker_ms >= stats.last_edit_ms)
-            .unwrap_or(false);
-        let blocks_path = review_gate_blocks_path(&claude_home, session_id);
-        let blocks_issued = read_counter_value(&blocks_path);
-        let decision = decide_gate(
-            review_mode,
-            review_gate_max_blocks(),
-            blocks_issued,
-            stats.count,
-            reviewed,
-        );
-        if decision != GateDecision::Advisory {
+    // Honest-closeout gate (final honesty: do not present an incomplete sprint as
+    // done). Scoped to user-story work: fires only when the workspace has an
+    // ACTIVE sprint with open stories. Silent when there is no sprint, so ordinary
+    // and question turns are untouched — independent of edit count by design.
+    if closeout_on {
+        if let Some(decision_and_message) =
+            evaluate_story_closeout_gate(&claude_home, session_id, &stats, closeout_mode)
+        {
+            let (decision, message, blocks_path) = decision_and_message;
             let _ = increment_counter_file(&blocks_path);
-            return emit_gate_decision(
-                decision,
-                review_gate_message(review_mode),
-                standard_output,
-                standard_error,
-            );
+            return emit_gate_decision(decision, message, standard_output, standard_error);
         }
     }
 
-    // Neither gate fired → advisory reminder.
+    // No gate fired → advisory reminder.
     emit_post_tool_batch_advisory(standard_output, standard_error)
+}
+
+/// Decide whether the honest-closeout gate fires this turn, returning the
+/// `(decision, message, counter_path)` when it does (so the caller increments the
+/// counter and emits) or `None` to fall through. Fail-open: any error resolving
+/// the workspace or reading the sprint store yields `None`.
+///
+/// Fires when the workspace has an active sprint (`Some(open)`) with at least one
+/// open story, the gate is under its per-session cap, and the mode is not Off.
+/// Stays silent when there is no sprint (`None`) or every story is Done
+/// (`Some(empty)`).
+fn evaluate_story_closeout_gate(
+    claude_home: &Path,
+    session_id: &str,
+    stats: &SessionEditStats,
+    mode: GateMode,
+) -> Option<(GateDecision, String, PathBuf)> {
+    // Resolve the workspace the same way the sprint CLI does so the slug — and
+    // therefore the store directory — matches the records `sprint plan` wrote.
+    // Prefer the cwd of the last edit (set when this session changed code), else
+    // the repository root, else the process cwd.
+    let workspace_root = if !stats.last_cwd.trim().is_empty() {
+        stats.last_cwd.clone()
+    } else {
+        let repo_root: Option<PathBuf> = resolve_repository_root("")
+            .ok()
+            .or_else(|| std::env::current_dir().ok());
+        match repo_root {
+            Some(path) => display_path(&path),
+            None => String::new(),
+        }
+    };
+    if workspace_root.is_empty() {
+        return None;
+    }
+    let open =
+        match crate::utility::sprint::open_stories_for_workspace(claude_home, &workspace_root) {
+            Ok(Some(open)) if !open.is_empty() => open,
+            // No active sprint, sprint complete, or read error → silent / fail-open.
+            _ => return None,
+        };
+    let blocks_path = story_closeout_gate_blocks_path(claude_home, session_id);
+    let blocks_issued = read_counter_value(&blocks_path);
+    // edit_count is passed as 1 (applicable): the gate's applicability is the
+    // active incomplete sprint, not whether this specific turn edited code, so it
+    // must fire on a no-edit closeout turn too. `satisfied` is false here because
+    // we already filtered to a non-empty open-story set.
+    let decision = decide_gate(
+        mode,
+        story_closeout_gate_max_blocks(),
+        blocks_issued,
+        1,
+        false,
+    );
+    if decision == GateDecision::Advisory {
+        return None;
+    }
+    Some((
+        decision,
+        story_closeout_gate_message(mode, &open),
+        blocks_path,
+    ))
 }
 
 /// Route a fired gate's [`GateDecision`] to the matching emitter: `Nudge` →
@@ -4681,6 +4825,222 @@ mod tests {
         match previous_brief {
             Some(value) => std::env::set_var(BRIEF_GATE_ENV_VAR, value),
             None => std::env::remove_var(BRIEF_GATE_ENV_VAR),
+        }
+        let _ = std::fs::remove_dir_all(&claude_home);
+    }
+
+    /// Seed the sprint store for `workspace_cwd` with the given (story, state)
+    /// pairs, using the same slug + group the gate resolves, so the gate sees a
+    /// real active sprint. Returns nothing; the records land under
+    /// `<home>/sprint/<slug>/`.
+    fn seed_sprint(claude_home: &std::path::Path, workspace_cwd: &str, stories: &[(&str, &str)]) {
+        let slug = crate::utility::sprint::workspace_slug_for_test(workspace_cwd);
+        let store =
+            crate::utility::record_store::RecordStore::new(claude_home, &format!("sprint/{slug}"));
+        for (index, (story, state)) in stories.iter().enumerate() {
+            let id = format!("s{}", index + 1);
+            let record: crate::utility::record_store::Record = vec![
+                ("id".into(), id.clone()),
+                ("story".into(), (*story).into()),
+                ("state".into(), (*state).into()),
+                ("note".into(), String::new()),
+            ];
+            store.write_record(&id, &record).expect("seed sprint story");
+        }
+    }
+
+    /// Seed one edit-class timing row so `session_edit_stats` reports the given
+    /// cwd and a non-zero count (the closeout gate resolves the workspace from the
+    /// last edit's cwd).
+    fn seed_edit_row(claude_home: &std::path::Path, session_id: &str, cwd: &str) {
+        let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let timings_dir = claude_home.join("state").join("tool-timings");
+        std::fs::create_dir_all(&timings_dir).expect("create timings dir");
+        let row = serde_json::json!({
+            "recorded_at_ms": now_ms(),
+            "event": "PostToolUse",
+            "tool_name": "Edit",
+            "duration_ms": 5u64,
+            "session_id": session_id,
+            "cwd": cwd,
+            "effort_level": "",
+        });
+        std::fs::write(
+            timings_dir.join(format!("{date}.jsonl")),
+            format!("{row}\n"),
+        )
+        .expect("write timings row");
+    }
+
+    #[test]
+    fn story_closeout_gate_nudges_when_sprint_incomplete_then_silent_without_sprint() {
+        // The honest-closeout gate (story 1 + 2 + 3). Isolates it by disabling the
+        // brief and review gates. Proves:
+        //   1. Active sprint with an open story -> NON-BLOCKING nudge naming the gap
+        //      (no `decision` field), and the counter advances (bounded).
+        //   2. A different workspace with NO sprint -> the gate stays silent and the
+        //      turn falls through to the generic advisory.
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let claude_home = temp_brief_gate_home("e2e-closeout");
+        let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
+        let previous_review = std::env::var(REVIEW_GATE_ENV_VAR).ok();
+        let previous_brief = std::env::var(BRIEF_GATE_ENV_VAR).ok();
+        let previous_closeout = std::env::var(STORY_CLOSEOUT_GATE_ENV_VAR).ok();
+        std::env::set_var("CLAUDE_TARGET_OVERRIDE", &claude_home);
+        std::env::set_var(REVIEW_GATE_ENV_VAR, "off");
+        std::env::set_var(BRIEF_GATE_ENV_VAR, "off");
+        std::env::remove_var(STORY_CLOSEOUT_GATE_ENV_VAR); // default → nudge
+
+        // Workspace WITH an incomplete sprint.
+        let open_cwd = "D:/Nasri/Project/closeout-open";
+        let session_id = "sess-closeout-open";
+        seed_edit_row(&claude_home, session_id, open_cwd);
+        seed_sprint(
+            &claude_home,
+            open_cwd,
+            &[
+                ("As a dev, I want A, so that X.", "done"),
+                ("As a dev, I want B, so that Y.", "todo"),
+            ],
+        );
+        let stdin_json = format!("{{\"session_id\":\"{session_id}\"}}");
+
+        let mut out1 = Vec::new();
+        let mut err1 = Vec::new();
+        let code1 = run_hook_post_tool_batch(&mut stdin_json.as_bytes(), &mut out1, &mut err1);
+        let out1_text = String::from_utf8_lossy(&out1);
+        assert_eq!(code1, 0, "stderr: {}", String::from_utf8_lossy(&err1));
+        assert!(
+            !out1_text.contains("\"decision\""),
+            "default closeout gate must NOT block: {out1_text}"
+        );
+        assert!(
+            out1_text.contains("additionalContext")
+                && out1_text.contains("CLAUDE_SKILLS_STORY_CLOSEOUT_GATE")
+                && out1_text.contains("s2"),
+            "closeout nudge must name the open story s2 as a gap: {out1_text}"
+        );
+        let blocks_path = story_closeout_gate_blocks_path(&claude_home, session_id);
+        assert_eq!(
+            read_counter_value(&blocks_path),
+            1,
+            "closeout counter must advance to 1 after the nudge"
+        );
+
+        // Workspace WITHOUT a sprint -> gate silent, generic advisory.
+        let none_cwd = "D:/Nasri/Project/closeout-none";
+        let none_session = "sess-closeout-none";
+        seed_edit_row(&claude_home, none_session, none_cwd);
+        let none_stdin = format!("{{\"session_id\":\"{none_session}\"}}");
+        let mut out2 = Vec::new();
+        let mut err2 = Vec::new();
+        let code2 = run_hook_post_tool_batch(&mut none_stdin.as_bytes(), &mut out2, &mut err2);
+        let out2_text = String::from_utf8_lossy(&out2);
+        assert_eq!(code2, 0, "stderr: {}", String::from_utf8_lossy(&err2));
+        assert!(
+            !out2_text.contains("CLAUDE_SKILLS_STORY_CLOSEOUT_GATE"),
+            "no sprint -> closeout gate must stay silent: {out2_text}"
+        );
+        assert!(
+            out2_text.contains("Closeout check"),
+            "no-sprint turn must fall through to the generic advisory: {out2_text}"
+        );
+
+        match previous_home {
+            Some(value) => std::env::set_var("CLAUDE_TARGET_OVERRIDE", value),
+            None => std::env::remove_var("CLAUDE_TARGET_OVERRIDE"),
+        }
+        match previous_review {
+            Some(value) => std::env::set_var(REVIEW_GATE_ENV_VAR, value),
+            None => std::env::remove_var(REVIEW_GATE_ENV_VAR),
+        }
+        match previous_brief {
+            Some(value) => std::env::set_var(BRIEF_GATE_ENV_VAR, value),
+            None => std::env::remove_var(BRIEF_GATE_ENV_VAR),
+        }
+        match previous_closeout {
+            Some(value) => std::env::set_var(STORY_CLOSEOUT_GATE_ENV_VAR, value),
+            None => std::env::remove_var(STORY_CLOSEOUT_GATE_ENV_VAR),
+        }
+        let _ = std::fs::remove_dir_all(&claude_home);
+    }
+
+    #[test]
+    fn story_closeout_gate_blocks_when_opted_in_and_silent_when_complete() {
+        // Proves the opt-in hard stop (=block) fires with `decision:block` on an
+        // incomplete sprint, and that a fully-Done sprint never fires (silent).
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let claude_home = temp_brief_gate_home("e2e-closeout-block");
+        let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
+        let previous_review = std::env::var(REVIEW_GATE_ENV_VAR).ok();
+        let previous_brief = std::env::var(BRIEF_GATE_ENV_VAR).ok();
+        let previous_closeout = std::env::var(STORY_CLOSEOUT_GATE_ENV_VAR).ok();
+        std::env::set_var("CLAUDE_TARGET_OVERRIDE", &claude_home);
+        std::env::set_var(REVIEW_GATE_ENV_VAR, "off");
+        std::env::set_var(BRIEF_GATE_ENV_VAR, "off");
+        std::env::set_var(STORY_CLOSEOUT_GATE_ENV_VAR, "block");
+
+        // Incomplete sprint -> decision:block.
+        let block_cwd = "D:/Nasri/Project/closeout-block";
+        let block_session = "sess-closeout-block";
+        seed_edit_row(&claude_home, block_session, block_cwd);
+        seed_sprint(
+            &claude_home,
+            block_cwd,
+            &[("As a dev, I want C, so that Z.", "blocked")],
+        );
+        let block_stdin = format!("{{\"session_id\":\"{block_session}\"}}");
+        let mut out1 = Vec::new();
+        let mut err1 = Vec::new();
+        let code1 = run_hook_post_tool_batch(&mut block_stdin.as_bytes(), &mut out1, &mut err1);
+        let out1_text = String::from_utf8_lossy(&out1);
+        assert_eq!(code1, 0, "stderr: {}", String::from_utf8_lossy(&err1));
+        assert!(
+            out1_text.contains("\"decision\"") && out1_text.contains("block"),
+            "STORY_CLOSEOUT_GATE=block must emit a hard stop on an incomplete sprint: {out1_text}"
+        );
+
+        // Fully-Done sprint -> silent (generic advisory), even under =block.
+        let done_cwd = "D:/Nasri/Project/closeout-done";
+        let done_session = "sess-closeout-done";
+        seed_edit_row(&claude_home, done_session, done_cwd);
+        seed_sprint(
+            &claude_home,
+            done_cwd,
+            &[("As a dev, I want D, so that W.", "done")],
+        );
+        let done_stdin = format!("{{\"session_id\":\"{done_session}\"}}");
+        let mut out2 = Vec::new();
+        let mut err2 = Vec::new();
+        let code2 = run_hook_post_tool_batch(&mut done_stdin.as_bytes(), &mut out2, &mut err2);
+        let out2_text = String::from_utf8_lossy(&out2);
+        assert_eq!(code2, 0, "stderr: {}", String::from_utf8_lossy(&err2));
+        assert!(
+            !out2_text.contains("\"decision\""),
+            "a fully-Done sprint must not fire the closeout gate: {out2_text}"
+        );
+
+        match previous_home {
+            Some(value) => std::env::set_var("CLAUDE_TARGET_OVERRIDE", value),
+            None => std::env::remove_var("CLAUDE_TARGET_OVERRIDE"),
+        }
+        match previous_review {
+            Some(value) => std::env::set_var(REVIEW_GATE_ENV_VAR, value),
+            None => std::env::remove_var(REVIEW_GATE_ENV_VAR),
+        }
+        match previous_brief {
+            Some(value) => std::env::set_var(BRIEF_GATE_ENV_VAR, value),
+            None => std::env::remove_var(BRIEF_GATE_ENV_VAR),
+        }
+        match previous_closeout {
+            Some(value) => std::env::set_var(STORY_CLOSEOUT_GATE_ENV_VAR, value),
+            None => std::env::remove_var(STORY_CLOSEOUT_GATE_ENV_VAR),
         }
         let _ = std::fs::remove_dir_all(&claude_home);
     }
