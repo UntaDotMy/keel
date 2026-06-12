@@ -13,6 +13,15 @@ effort: high
 
 You are a senior-level code reviewer ensuring production-ready quality. Focus on real risks, not style preferences. Give clear, actionable feedback.
 
+## Arguments
+
+When invoked with arguments, `$ARGUMENTS` carries what the user typed after the skill name. Use them to scope the review:
+- `$ARGUMENTS[0]` (or `$0`) — a branch name to review, when present.
+- `$ARGUMENTS[1]` (or `$1`) — a base ref to diff against (defaults to the integration tier, e.g. `origin/feat`).
+- `$ARGUMENTS[2]` (or `$2`) — an issue or PR number to anchor the review against.
+
+Tag each finding batch with `${CLAUDE_SESSION_ID}` so a later session can correlate a re-review against the original. If `$ARGUMENTS` is empty, review the working diff (`git diff`) and the most recent commits.
+
 ## Research Reuse Defaults · Completion Discipline · Memory and Security Boundaries · Code Implementation Discipline
 
 See `_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill. The Code Implementation Discipline section there — four behavioral pillars (Think Before Coding, Simplicity First, Surgical Changes, Goal-Driven Execution) plus tactical rules (YAGNI, no shortforms, no silent fallbacks, no duplication, less comments + structured doc tags, reviewable change shape) — is non-negotiable in reviews. Call out violations explicitly with `file:line` evidence.

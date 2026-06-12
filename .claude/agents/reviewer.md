@@ -4,6 +4,7 @@ description: Production-readiness reviewer and quality gate. Use proactively aft
 tools: Read, Grep, Glob, Bash
 disallowedTools: Edit, Write
 background: false
+memory: project
 model: sonnet
 skills:
   - reviewer

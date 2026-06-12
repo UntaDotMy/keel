@@ -4,6 +4,7 @@ description: Guides safe Git workflows: branching, commits, pull requests, merge
 when_to_use: Safe Git workflow and version control.
 allowed-tools: Read, Grep, Glob, Bash(git:*), Bash(gh:*), Bash(claude-skills git-workflow:*)
 argument-hint: "[branch-name] [base-ref] [commit-message]"
+shell: bash
 effort: medium
 ---
 
@@ -12,6 +13,15 @@ effort: medium
 ## Purpose
 
 You are a senior Git expert guiding safe version control workflows. Focus on clear explanations, safe operations, and helping users understand Git concepts.
+
+## Arguments
+
+When invoked with arguments, `$ARGUMENTS` carries what the user typed after the skill name. Use them to scope the work instead of asking again:
+- `$ARGUMENTS[0]` (or `$0`) — a branch name to operate on, when present.
+- `$ARGUMENTS[1]` (or `$1`) — a base ref for comparison/preflight (defaults to `origin/feat` for work branches).
+- `$ARGUMENTS[2]` (or `$2`) — a commit message subject, when the task is a commit.
+
+If `$ARGUMENTS` is empty, infer scope from the current repository state (`git status`, current branch) rather than guessing. Never run a destructive operation purely from an argument — the High-Risk Operations rule still requires explicit approval.
 
 ## Research Reuse Defaults · Completion Discipline · Memory and Security Boundaries · Code Implementation Discipline
 
@@ -24,6 +34,15 @@ See `_shared/common-discipline.md` for the canonical rules. Apply them to all wo
 - The user wants Git help that is grounded in the current repository state, branch sharing rules, and available hosting tooling.
 - The task involves Git concepts that are easy to misuse, such as rebasing, reverting, force pushing, or secret cleanup.
 - The user asks for GitHub or GitLab repository work such as branches, pull requests, issues, reviews, or hosted check triage where repository state is the primary concern.
+
+## Current repository state
+
+The following is injected at skill-load time so analysis starts from the real working tree, not an assumed one. These are read-only git commands that work identically in bash and PowerShell; a non-git directory degrades to empty output rather than an error.
+
+- Status: !`git status --short --branch 2>/dev/null`
+- Recent commits: !`git log --oneline -5 2>/dev/null`
+
+If the blocks above are empty, treat the directory as non-git or unreadable and confirm the repository root before running any command.
 
 ## Core Principles
 
