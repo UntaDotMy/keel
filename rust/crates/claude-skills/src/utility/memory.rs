@@ -1405,6 +1405,16 @@ fn run_working_brief_write(
             return 1;
         }
     };
+    // Sync the recall FTS index now so the brief is searchable on the very next
+    // `recall` without a separate trigger. Best-effort: the brief on disk is
+    // durable regardless, and a failed sync is reconciled by the next read-path
+    // sync.
+    if let Err(error) = crate::utility::recall::reindex_after_write(&claude_home) {
+        let _ = writeln!(
+            standard_error,
+            "{command_group} working-brief write: recall index sync skipped ({error})"
+        );
+    }
     if flag_set.bool_value("json") {
         let payload = Value::Object(vec![
             ("written".into(), Value::Bool(true)),

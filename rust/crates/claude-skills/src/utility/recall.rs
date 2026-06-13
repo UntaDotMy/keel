@@ -583,6 +583,30 @@ pub fn recall_database_path(claude_home: &Path) -> PathBuf {
     claude_home.join("recall-index.sqlite3")
 }
 
+/// Sync the recall FTS index immediately after a memory write so the new
+/// content is searchable on the very next `recall` with no separate trigger.
+///
+/// Memory writes (`memory remember`, `research-cache record`, `working-brief
+/// write`) land the file on disk synchronously, but historically the FTS index
+/// was only refreshed on a read-path call (`recall <query>` / `recall status`).
+/// That left a window where a freshly-written memory was durable but not yet
+/// searchable — the "I saved it but recall can't find it" gap. Calling this at
+/// the end of each write closes the window.
+///
+/// Best-effort by contract: this opens the index and runs the same non-forced
+/// `sync_recall_index` the read path uses, but every failure is folded into the
+/// returned `Result` for the caller to log and ignore. A memory write must never
+/// fail because the index could not be opened or synced — the durable file on
+/// disk is the source of truth, and the next read-path sync will reconcile it
+/// anyway. The next-read-path-sync fallback is exactly why callers can treat an
+/// `Err` here as advisory.
+pub fn reindex_after_write(claude_home: &Path) -> Result<(), String> {
+    let database_path = recall_database_path(claude_home);
+    let mut connection = open_recall_connection(&database_path)?;
+    sync_recall_index(&mut connection, claude_home, false)?;
+    Ok(())
+}
+
 /// Snapshot of recall-index health used by surfaces that just need to read
 /// the current document count, last sync timestamp, and on-disk index path.
 /// Built on top of the same `sync_recall_index` + `count_documents` pair the
@@ -1294,6 +1318,40 @@ mod tests {
             assert!(
                 rendered.contains("working-briefs/wb-1.json"),
                 "JSON working brief must be recallable; rendered: {rendered}"
+            );
+        });
+    }
+
+    #[test]
+    fn reindex_after_write_makes_a_write_searchable_without_a_read_path_sync() {
+        // s4 isolation: a memory write calls reindex_after_write, which must
+        // leave the FTS index already populated. We prove this by querying the
+        // index DIRECTLY (open connection + query_recall_index) WITHOUT calling
+        // the read-path search_recall_index — that read path re-syncs on every
+        // call and would mask whether the WRITE-time sync actually ran. Hits here
+        // can only come from reindex_after_write having indexed the file.
+        run_with_home("claude-skills-reindex-after-write", |claude_home| {
+            write_memory(
+                claude_home,
+                "memory/research-cache/rc-42.json",
+                "{\n  \"id\": \"rc-42\",\n  \"question\": \"how to defeat blind tool search\",\n  \"answer\": \"push recall content at session start\"\n}\n",
+            );
+
+            // The write-time sync the production handlers now call.
+            reindex_after_write(claude_home).expect("reindex_after_write succeeds");
+
+            // Query the index directly — NO search_recall_index (no read-path sync).
+            let database_path = recall_database_path(claude_home);
+            let connection =
+                open_recall_connection(&database_path).expect("open recall index read-only");
+            let fts_query = build_fts_query("blind tool search").expect("non-empty query");
+            let hits = query_recall_index(&connection, &fts_query, 20).expect("query index");
+
+            assert!(
+                hits.iter()
+                    .any(|hit| hit.absolute_path.contains("rc-42.json")),
+                "reindex_after_write must index the new record so it is found with no read-path sync; hits: {:?}",
+                hits.iter().map(|h| &h.absolute_path).collect::<Vec<_>>()
             );
         });
     }

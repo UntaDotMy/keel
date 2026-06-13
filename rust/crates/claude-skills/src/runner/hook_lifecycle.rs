@@ -54,6 +54,12 @@ const SYSTEM_MAP_REFRESH_DEFAULT_THRESHOLD: u64 = 10;
 /// other value leaves the self-heal enabled.
 const MCP_SELF_HEAL_ENV_VAR: &str = "CLAUDE_SKILLS_MCP_SELF_HEAL";
 
+/// Env var that disables the SessionEnd auto-capture of a session work summary
+/// to memory. Unset (the default) keeps it on; set to `off` to skip it. Any
+/// other value leaves it enabled. The capture is silent on sessions that did no
+/// edit-class work, so research/question-only turns never write a summary.
+const SESSION_CAPTURE_ENV_VAR: &str = "CLAUDE_SKILLS_SESSION_CAPTURE";
+
 /// Iterate canonical hook event names. Single-line wrapper around the table so
 /// existing for-loops keep their `for event in claude_hook_event_names()` shape
 /// without caring that the source is a typed row table.
@@ -165,6 +171,20 @@ pub fn run_hook_command(
         "session-start" => {
             maybe_self_heal_mcp_registration(standard_error);
             run_hook_lifecycle("session-start", standard_output, standard_error)
+        }
+
+        // SessionEnd reads stdin for `session_id` so the auto-capture can scope a
+        // work summary to this session's edit-class observations and write it to
+        // memory (the "after do, save to memory" half — so the next session
+        // starts informed without the model remembering to write a note). Routed
+        // here (not the stdin-blind lifecycle path) because the summary needs the
+        // session id from the payload. The capture runs first, then the lifecycle
+        // path still performs the existing SessionEnd side effects (system-map
+        // refresh, store prunes, learning). Stdin is injected so tests can pass
+        // `&mut std::io::empty()`.
+        "session-end" => {
+            let mut stdin = std::io::stdin().lock();
+            run_hook_session_end(&mut stdin, standard_output, standard_error)
         }
 
         // Every other slug is dispatched if and only if it appears in the canonical
@@ -1076,12 +1096,21 @@ fn session_start_context() -> String {
     // (no manual slash). The nudge self-clears once the agent refines the skill,
     // because the content-hash no-clobber guard then reports it as non-template.
     let mut context = format!("{COMPACT_BOOTSTRAP}\n\n{}", memory_scope_summary());
+    // PUSH actual workspace memory content (map head + newest brief + most
+    // recent note) so the agent starts informed instead of having to blind-search
+    // with system_map/recall. Bounded and may be empty (fresh workspace); the
+    // truncation-cap test guards the total SessionStart size.
+    let workspace_digest = workspace_memory_digest();
+    if !workspace_digest.trim().is_empty() {
+        context.push_str("\n\n");
+        context.push_str(&workspace_digest);
+    }
     if let (Ok(claude_home), Ok(cwd)) = (resolve_claude_home(""), std::env::current_dir()) {
         let cwd = cwd.to_string_lossy();
-        let digest = learning::project_instinct_digest(&claude_home, &cwd);
-        if !digest.trim().is_empty() {
+        let instinct_digest = learning::project_instinct_digest(&claude_home, &cwd);
+        if !instinct_digest.trim().is_empty() {
             context.push_str("\n\n");
-            context.push_str(&digest);
+            context.push_str(&instinct_digest);
         }
         let synthesis = learning::project_synthesis_nudge(&claude_home, &cwd);
         if !synthesis.trim().is_empty() {
@@ -1097,13 +1126,22 @@ fn pre_compact_context() -> String {
 }
 
 fn post_compact_context() -> String {
-    format!(
+    let mut context = format!(
 
         "After compaction, resume using claude-skills automatically: reload workspace memory/system map, re-establish workflow proof state, and run review gates before final closeout.\n\n{}",
 
         memory_scope_summary()
 
-    )
+    );
+    // Re-PUSH the workspace digest after compaction: the original SessionStart
+    // push has dropped out of the window, so the resumed turn would otherwise be
+    // back to blind-searching. Same bounded content as session start.
+    let digest = workspace_memory_digest();
+    if !digest.trim().is_empty() {
+        context.push_str("\n\n");
+        context.push_str(&digest);
+    }
+    context
 }
 
 /// Per-prompt research-first iron law.
@@ -2617,6 +2655,185 @@ fn maybe_self_heal_mcp_registration(standard_error: &mut dyn Write) {
     }
 }
 
+/// SessionEnd dispatch body with injectable stdin so the real arm ordering is
+/// testable. Runs the auto-capture FIRST (it needs the `session_id` from the
+/// payload), then delegates to the lifecycle path for the existing SessionEnd
+/// side effects (system-map refresh, store prunes, learning). The ordering is
+/// load-bearing — capture must read the observation log before the lifecycle
+/// path's prune could touch it — so it is exercised end-to-end by a test that
+/// drives this function with injected bytes, exactly as `run_hook_post_tool_batch`
+/// is tested.
+fn run_hook_session_end(
+    standard_input: &mut dyn Read,
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    maybe_capture_session_summary(standard_input, standard_error);
+    run_hook_lifecycle("session-end", standard_output, standard_error)
+}
+
+/// Auto-capture a one-line work summary to memory at SessionEnd.
+///
+/// This is the "after do, save to memory" half of the contract: the next
+/// session starts informed without the model having to remember to write a
+/// note. It reuses the behavioral observation log (the same edit/command
+/// signatures the learning loop reads) to summarize what this session actually
+/// did, then writes it through `memory research-cache record` — the path that
+/// now syncs the recall index (s4), so the summary is immediately recallable.
+///
+/// Silent on sessions that did no edit-class work: a pure research or question
+/// turn produces no summary, so the memory store is not polluted with noise.
+///
+/// Best-effort by contract: every failure path returns without writing and
+/// without changing the caller's exit code. The SessionEnd prunes and learning
+/// cycle are the load-bearing work; this capture is additive.
+fn maybe_capture_session_summary(standard_input: &mut dyn Read, standard_error: &mut dyn Write) {
+    if std::env::var(SESSION_CAPTURE_ENV_VAR)
+        .map(|value| value.trim().eq_ignore_ascii_case("off"))
+        .unwrap_or(false)
+    {
+        return;
+    }
+
+    // The session id arrives on stdin (Claude Code writes the hook payload then
+    // closes the handle). Without it we cannot scope the summary to this
+    // session, so fail open — silently skip rather than summarize the wrong work.
+    let stdin_payload: Option<JsonDocument> = {
+        let mut text = String::new();
+        match standard_input.read_to_string(&mut text) {
+            Ok(_) if !text.trim().is_empty() => serde_json::from_str(&text).ok(),
+            _ => None,
+        }
+    };
+    let session_id = stdin_payload
+        .as_ref()
+        .and_then(|payload| payload.get("session_id"))
+        .and_then(JsonDocument::as_str)
+        .unwrap_or_default();
+    if session_id.trim().is_empty() {
+        return;
+    }
+
+    let Some(summary) = build_session_summary(session_id) else {
+        return; // No edit-class work this session — stay silent.
+    };
+
+    // Write through the family command so the capture inherits the s4 index
+    // sync. --question/--answer are the research-cache record fields; we frame
+    // the summary as a recallable Q/A note. Errors are swallowed: a failed
+    // capture must never wedge SessionEnd. stdout is discarded (the record id
+    // print is noise here); only stderr is surfaced on failure.
+    let mut capture_stderr = Vec::new();
+    let code = crate::utility::memory_families::run_memory_family_command(
+        "memory",
+        "research-cache",
+        &[
+            "record".to_string(),
+            "--question".to_string(),
+            summary.question,
+            "--answer".to_string(),
+            summary.answer,
+            "--source".to_string(),
+            format!("auto-capture session {session_id}"),
+        ],
+        &mut std::io::sink(),
+        &mut capture_stderr,
+    );
+    if code != 0 {
+        let _ = writeln!(
+            standard_error,
+            "claude-skills: session auto-capture skipped ({})",
+            String::from_utf8_lossy(&capture_stderr).trim()
+        );
+    }
+}
+
+/// A session work summary framed as a recallable question/answer pair.
+struct SessionSummary {
+    question: String,
+    answer: String,
+}
+
+/// Build a work summary for `session_id` from this session's edit-class
+/// behavioral observations, or `None` when the session edited nothing.
+///
+/// Reads today's observation rows (the learning loop's source), filters to this
+/// session's edit/command signatures, and renders a compact "what changed"
+/// line: the working directory, the count of edits, the distinct file
+/// extensions touched, and the distinct command signatures run. This is
+/// deliberately low-cardinality (extensions and command verbs, not full paths)
+/// so the note is a useful recall anchor without leaking long arguments.
+fn build_session_summary(session_id: &str) -> Option<SessionSummary> {
+    let rows = crate::runner::observation::iter_recent_rows(1).ok()?;
+    let mut edit_count = 0usize;
+    let mut command_count = 0usize;
+    let mut extensions: Vec<String> = Vec::new();
+    let mut commands: Vec<String> = Vec::new();
+    let mut cwd = String::new();
+    for row in rows {
+        if row.session_id != session_id {
+            continue;
+        }
+        if cwd.is_empty() && !row.cwd.is_empty() {
+            cwd = row.cwd.clone();
+        }
+        if let Some(extension) = row.signature.strip_prefix("edit:") {
+            edit_count += 1;
+            let extension = extension.to_string();
+            if !extensions.contains(&extension) {
+                extensions.push(extension);
+            }
+        } else {
+            command_count += 1;
+            if !commands.contains(&row.signature) {
+                commands.push(row.signature.clone());
+            }
+        }
+    }
+
+    // Only capture when the session actually edited code. Command-only sessions
+    // (ran tests, browsed git) are not durable "work done" worth a memory note.
+    if edit_count == 0 {
+        return None;
+    }
+
+    // Use only the final path component, not the full cwd: the full path can
+    // carry a username or other sensitive directory names, and the doc contract
+    // promises low-cardinality anchors, not full paths. `file_name` handles
+    // both `/` and `\` separators via the OS path parser.
+    let workspace = if cwd.is_empty() {
+        "unknown workspace".to_string()
+    } else {
+        std::path::Path::new(&cwd)
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| "unknown workspace".to_string())
+    };
+    let question = format!("What was done in {workspace} on {}?", today_date_string());
+    let mut answer = format!(
+        "Edited {edit_count} file(s) ({}).",
+        if extensions.is_empty() {
+            "no recorded extension".to_string()
+        } else {
+            extensions.join(", ")
+        }
+    );
+    if command_count > 0 {
+        answer.push_str(&format!(
+            " Ran {command_count} command(s): {}.",
+            commands.join(", ")
+        ));
+    }
+    Some(SessionSummary { question, answer })
+}
+
+/// Local calendar date as `YYYY-MM-DD`, matching the observation-log naming so a
+/// captured summary's date lines up with the rows it was built from.
+fn today_date_string() -> String {
+    chrono::Local::now().format("%Y-%m-%d").to_string()
+}
+
 fn refresh_memory_scope_for_current_directory(standard_error: &mut dyn Write) -> Option<PathBuf> {
     let workspace_root = std::env::current_dir().ok()?;
 
@@ -2670,6 +2887,121 @@ fn memory_scope_summary() -> String {
         None => "Workspace memory system map: unavailable; create it with claude-skills memory scope resolve --create-missing --refresh-system-map before repo-structure claims.".to_string(),
 
     }
+}
+
+/// Byte budget for the whole pushed workspace digest. The SessionStart context
+/// must stay under the ~9KB truncation ceiling (see the cap test); the compact
+/// bootstrap + memory pointer already spend most of that, so the digest gets a
+/// deliberately small slice. Sections are capped individually below this so the
+/// digest degrades gracefully (drop the tail) rather than blowing the ceiling.
+const WORKSPACE_DIGEST_MAX_BYTES: usize = 2200;
+/// Per-section caps inside the digest. The system-map head is the most valuable
+/// (it answers "what is this repo" without a tool call), so it gets the largest
+/// share; the brief and memory note are one-liners pointing the model at detail
+/// it can pull with `recall`/`brief_get` if needed.
+const DIGEST_MAP_HEAD_MAX_BYTES: usize = 1400;
+const DIGEST_BRIEF_MAX_BYTES: usize = 500;
+const DIGEST_MEMORY_MAX_BYTES: usize = 300;
+
+/// Build a bounded digest of ACTUAL workspace memory content to PUSH into
+/// context at session start and post-compact — so the agent does not have to
+/// blind-search (call `system_map`/`recall`) before it knows the basics.
+///
+/// Three sections, each independently capped and any of which may be empty:
+///   1. The head of the workspace SYSTEM_MAP.md (the structural map), so
+///      "what is this project / where does X live" is answered up front.
+///   2. The newest working brief for this workspace (request + first acceptance
+///      criterion), so a resumed or fresh session sees the active intent.
+///   3. The most recent durable memory note (research-cache record, which now
+///      includes the s5 SessionEnd auto-capture), so "what was last done here"
+///      is visible without a recall call.
+///
+/// Returns an empty string when nothing is available (first run in a fresh
+/// workspace), so the caller appends nothing. The whole digest is truncated to
+/// [`WORKSPACE_DIGEST_MAX_BYTES`] on a line boundary as a final guard. This is
+/// the PUSH half of the contract; the model can still PULL the full artifacts
+/// with `system_map`, `recall`, and `brief_get` when it needs more than the head.
+fn workspace_memory_digest() -> String {
+    let Ok(claude_home) = resolve_claude_home("") else {
+        return String::new();
+    };
+    let Ok(workspace_root) = std::env::current_dir() else {
+        return String::new();
+    };
+    let workspace_display = display_path(&workspace_root);
+
+    let mut sections: Vec<String> = Vec::new();
+
+    // 1. System-map head.
+    if let Some(map_path) = memory_system_map_path_for_workspace(&workspace_root) {
+        if let Ok(map_body) = fs::read_to_string(&map_path) {
+            let head = truncate_on_line_boundary(map_body.trim(), DIGEST_MAP_HEAD_MAX_BYTES);
+            if !head.trim().is_empty() {
+                sections.push(format!(
+                    "## Workspace map (head; full map at {})\n{head}",
+                    display_path(&map_path)
+                ));
+            }
+        }
+    }
+
+    // 2. Newest working brief for THIS workspace (fall back to newest overall
+    //    when none is workspace-tagged, since legacy briefs have no workspace).
+    if let Ok(briefs) = crate::utility::working_brief::list_briefs(&claude_home) {
+        let newest = briefs
+            .iter()
+            .rev()
+            .find(|brief| brief.workspace == workspace_display)
+            .or_else(|| briefs.last());
+        if let Some(brief) = newest {
+            let mut line = format!("## Active working brief ({})\n{}", brief.id, brief.request);
+            if let Some(first_criterion) = brief.acceptance_criteria.first() {
+                line.push_str(&format!("\nAcceptance: {first_criterion}"));
+            }
+            sections.push(truncate_on_line_boundary(&line, DIGEST_BRIEF_MAX_BYTES));
+        }
+    }
+
+    // 3. Most recent durable memory note (includes s5 SessionEnd auto-capture).
+    let store =
+        crate::utility::record_store::RecordStore::new(&claude_home, "memory/research-cache");
+    if let Ok(mut records) = store.list_records() {
+        // Ids are time-ordered hex (rc-<millis:x>), so the last id is newest.
+        records.sort_by(|left, right| left.0.cmp(&right.0));
+        if let Some((_, fields)) = records.last() {
+            let lookup = |key: &str| {
+                fields
+                    .iter()
+                    .find(|(field_key, _)| field_key == key)
+                    .map(|(_, value)| value.as_str())
+                    .unwrap_or_default()
+            };
+            let question = lookup("question");
+            let answer = lookup("answer");
+            if !question.is_empty() || !answer.is_empty() {
+                let line = format!("## Most recent memory note\nQ: {question}\nA: {answer}");
+                sections.push(truncate_on_line_boundary(&line, DIGEST_MEMORY_MAX_BYTES));
+            }
+        }
+    }
+
+    if sections.is_empty() {
+        return String::new();
+    }
+
+    let header = "# Workspace memory (pushed so you need not blind-search; pull more with system_map/recall/brief_get)";
+    let body = format!("{header}\n\n{}", sections.join("\n\n"));
+    truncate_on_line_boundary(&body, WORKSPACE_DIGEST_MAX_BYTES)
+}
+
+/// Truncate `text` to at most `max_bytes` on a line boundary for the workspace
+/// digest, appending a short elision marker. A thin wrapper over the shared,
+/// UTF-8-safe `skill_match::truncate_on_line_boundary` so the digest and the
+/// per-prompt skill brief share one correct implementation (the earlier local
+/// copy sliced `&str` by raw byte index and panicked on a multibyte char at the
+/// boundary — map/brief/note text routinely contains em-dashes and smart quotes).
+fn truncate_on_line_boundary(text: &str, max_bytes: usize) -> String {
+    crate::utility::skill_match::truncate_on_line_boundary(text, max_bytes, "\n…[truncated]")
 }
 
 fn memory_system_map_path_for_workspace(workspace_root: &Path) -> Option<PathBuf> {
@@ -5297,7 +5629,6 @@ mod tests {
         // operating contract, the pointer delivers the workspace-specific
         // memory path that CLAUDE.md cannot know in advance.
         let context = session_start_context();
-
         // Bootstrap skill markers — these come from
         // <repo>/using-claude-core/SKILL.md via include_str! and are what
         // make the model treat skill invocation as non-optional.
@@ -5425,6 +5756,158 @@ mod tests {
             byte_len < TRUNCATION_CEILING_BYTES,
             "SessionStart context is {byte_len} bytes, at/over the {TRUNCATION_CEILING_BYTES}-byte ceiling — Claude Code truncates additionalContext above ~10KB, so the operating contract would be cut off mid-way and the model would never see the full iron law. Trim the compact bootstrap or move detail into the on-demand Skill(\"using-claude-core\") body."
         );
+
+        // Major-3 guard: in a fresh test env `workspace_memory_digest()` is
+        // empty, so the line above only certifies the base context. But at
+        // runtime the digest is appended and is independently bounded by
+        // WORKSPACE_DIGEST_MAX_BYTES. Certify the WORST CASE — base context plus
+        // a maxed-out digest — still clears the ceiling, so a future bootstrap
+        // growth that would overflow once the digest is present fails loudly
+        // here instead of silently truncating in production.
+        let worst_case = byte_len + WORKSPACE_DIGEST_MAX_BYTES;
+        assert!(
+            worst_case < TRUNCATION_CEILING_BYTES,
+            "SessionStart base ({byte_len} B) + a maxed workspace digest ({WORKSPACE_DIGEST_MAX_BYTES} B) = {worst_case} B would cross the {TRUNCATION_CEILING_BYTES}-byte ceiling. Shrink the bootstrap or WORKSPACE_DIGEST_MAX_BYTES so the pushed digest can never truncate the iron law."
+        );
+    }
+
+    #[test]
+    fn workspace_memory_digest_pushes_real_content_and_stays_bounded() {
+        // s2: the digest must PUSH actual content (system-map head + newest
+        // brief + most recent memory note), not just a pointer, and stay within
+        // its byte budget so the SessionStart ceiling is never threatened.
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let unique = format!(
+            "ws-digest-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        );
+        let base = std::env::temp_dir().join(unique);
+        let claude_home = base.join(".claude");
+        std::fs::create_dir_all(&claude_home).unwrap();
+
+        // The digest reads the map by the same path helper the production code
+        // uses, keyed off the current working directory. Drive cwd to a stable
+        // workspace and seed a SYSTEM_MAP.md there.
+        let workspace = base.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let previous_cwd = std::env::current_dir().ok();
+        let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
+        std::env::set_var("CLAUDE_TARGET_OVERRIDE", &claude_home);
+        std::env::set_current_dir(&workspace).unwrap();
+
+        // 1. Seed the system map at the workspace-keyed reference path.
+        if let Some(map_path) =
+            memory_system_map_path_for_workspace(&std::env::current_dir().unwrap())
+        {
+            std::fs::create_dir_all(map_path.parent().unwrap()).unwrap();
+            std::fs::write(
+                &map_path,
+                "# SYSTEM MAP\n\nThis repo is the WIDGET-FACTORY service.\nEntry: src/main.rs\n",
+            )
+            .unwrap();
+        }
+
+        // 2. Seed a working brief tagged for this workspace.
+        let workspace_display = display_path(&std::env::current_dir().unwrap());
+        let brief = crate::utility::working_brief::create_brief(
+            "wb-digesttest".to_string(),
+            "Ship the FROBNICATE endpoint".to_string(),
+            vec![],
+            vec!["frobnicate returns 200".to_string()],
+            vec![],
+            workspace_display,
+            "2026-06-13T00:00:00Z".to_string(),
+        );
+        crate::utility::working_brief::write_brief(&claude_home, &brief).unwrap();
+
+        // 3. Seed a recent memory note.
+        crate::utility::memory_families::run_memory_family_command(
+            "memory",
+            "research-cache",
+            &[
+                "record".to_string(),
+                "--question".to_string(),
+                "What was last done in WIDGET-FACTORY?".to_string(),
+                "--answer".to_string(),
+                "Wired the GIZMO cache layer".to_string(),
+            ],
+            &mut std::io::sink(),
+            &mut std::io::sink(),
+        );
+
+        let digest = workspace_memory_digest();
+
+        // Restore env/cwd before assertions.
+        if let Some(cwd) = previous_cwd {
+            let _ = std::env::set_current_dir(cwd);
+        }
+        match previous_home {
+            Some(value) => std::env::set_var("CLAUDE_TARGET_OVERRIDE", value),
+            None => std::env::remove_var("CLAUDE_TARGET_OVERRIDE"),
+        }
+
+        // Real content from all three sources is PUSHED, not pointed at.
+        assert!(
+            digest.contains("WIDGET-FACTORY"),
+            "digest must embed the actual system-map head: {digest}"
+        );
+        assert!(
+            digest.contains("FROBNICATE"),
+            "digest must embed the actual working-brief request: {digest}"
+        );
+        assert!(
+            digest.contains("GIZMO"),
+            "digest must embed the actual most-recent memory note: {digest}"
+        );
+        // Bounded.
+        assert!(
+            digest.len() <= WORKSPACE_DIGEST_MAX_BYTES + 40,
+            "digest length {} exceeds its byte budget",
+            digest.len()
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn truncate_on_line_boundary_cuts_at_newline_and_marks_elision() {
+        let text = "alpha line\nbeta line\ngamma line\ndelta line\n";
+        // Cap mid-"gamma": must cut back to the end of "beta line".
+        let cut = truncate_on_line_boundary(text, 25);
+        assert!(cut.starts_with("alpha line\nbeta line"));
+        assert!(cut.contains("[truncated]"));
+        assert!(!cut.contains("gamma"));
+        // Under cap → returned unchanged.
+        assert_eq!(truncate_on_line_boundary("short", 100), "short");
+    }
+
+    #[test]
+    fn truncate_on_line_boundary_does_not_panic_on_multibyte_at_cap() {
+        // Blocker regression: the earlier local impl sliced `&str` by raw byte
+        // index (`&text[..max_bytes]`), which panics when a multibyte char
+        // straddles the cap. Workspace map / brief / note text routinely carries
+        // em-dashes, ellipses, smart quotes, and arrows, so this is a real
+        // SessionStart panic path. Build a single line (no newline in range, so
+        // the char-boundary fallback is exercised) packed with em-dashes and set
+        // a cap that lands inside one. Must return a truncated string, not panic.
+        let text = "—".repeat(200); // each '—' is 3 UTF-8 bytes; no newline
+        for cap in [10usize, 25, 31, 100, 199] {
+            let out = truncate_on_line_boundary(&text, cap);
+            // Did not panic, stayed within budget + the marker allowance, and
+            // never split a char (valid UTF-8 by construction of the return type).
+            assert!(out.len() <= cap + 32, "cap {cap}: len {}", out.len());
+        }
+        // A CJK line (3-byte chars) with the cut inside a character, too.
+        let cjk = "你好世界你好世界你好世界"; // 12 chars × 3 bytes = 36 bytes
+        let out = truncate_on_line_boundary(cjk, 10);
+        assert!(out.contains("[truncated]"));
     }
 
     #[test]
@@ -5661,6 +6144,193 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn session_end_dispatch_auto_captures_work_summary_to_memory() {
+        // s5: SessionEnd must auto-write a recallable work summary built from this
+        // session's edit-class observations, and that write must be searchable
+        // immediately (it routes through the research-cache record path, which
+        // s4 made index-syncing). We isolate the home via CLAUDE_TARGET_OVERRIDE.
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let unique = format!(
+            "session-end-capture-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        );
+        let claude_home = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&claude_home).unwrap();
+
+        // Seed this session's observation rows: two edits and one command.
+        let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let obs_dir = claude_home.join("state").join("observations");
+        std::fs::create_dir_all(&obs_dir).unwrap();
+        let session_id = "sess-capture-1";
+        let cwd = "D:/Nasri/Project/capture-demo";
+        let rows = format!(
+            "{}\n{}\n{}\n",
+            serde_json::json!({"recorded_at_ms": now_ms(), "session_id": session_id, "cwd": cwd, "tool_name": "Edit", "signature": "edit:rs", "detail": "src/lib.rs"}),
+            serde_json::json!({"recorded_at_ms": now_ms(), "session_id": session_id, "cwd": cwd, "tool_name": "Edit", "signature": "edit:md", "detail": "README.md"}),
+            serde_json::json!({"recorded_at_ms": now_ms(), "session_id": session_id, "cwd": cwd, "tool_name": "Bash", "signature": "cargo test", "detail": "cargo test"}),
+        );
+        std::fs::write(obs_dir.join(format!("{date}.jsonl")), rows).unwrap();
+
+        let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
+        let previous_capture = std::env::var(SESSION_CAPTURE_ENV_VAR).ok();
+        // SessionEnd's lifecycle path also runs learning; keep it off so the test
+        // is scoped to the capture behavior only.
+        let previous_learning = std::env::var("CLAUDE_SKILLS_LEARNING").ok();
+        std::env::set_var("CLAUDE_TARGET_OVERRIDE", &claude_home);
+        std::env::remove_var(SESSION_CAPTURE_ENV_VAR); // default → on
+        std::env::set_var("CLAUDE_SKILLS_LEARNING", "off");
+
+        let stdin_json = format!("{{\"session_id\":\"{session_id}\"}}");
+        // Drive the REAL dispatch body with injected stdin (Major 2 fix): this
+        // exercises the production "session-end" arm ordering — capture before
+        // the lifecycle side effects — not just the helper in isolation.
+        let code = run_hook_session_end(
+            &mut stdin_json.as_bytes(),
+            &mut std::io::sink(),
+            &mut std::io::sink(),
+        );
+        assert_eq!(code, 0, "session-end dispatch must exit 0");
+
+        // Restore env before assertions.
+        match previous_home {
+            Some(value) => std::env::set_var("CLAUDE_TARGET_OVERRIDE", value),
+            None => std::env::remove_var("CLAUDE_TARGET_OVERRIDE"),
+        }
+        match previous_capture {
+            Some(value) => std::env::set_var(SESSION_CAPTURE_ENV_VAR, value),
+            None => std::env::remove_var(SESSION_CAPTURE_ENV_VAR),
+        }
+        match previous_learning {
+            Some(value) => std::env::set_var("CLAUDE_SKILLS_LEARNING", value),
+            None => std::env::remove_var("CLAUDE_SKILLS_LEARNING"),
+        }
+
+        // A research-cache record must now exist carrying the summary.
+        let rc_dir = claude_home.join("memory").join("research-cache");
+        let mut found_summary = false;
+        if let Ok(entries) = std::fs::read_dir(&rc_dir) {
+            for entry in entries.flatten() {
+                let body = std::fs::read_to_string(entry.path()).unwrap_or_default();
+                if body.contains("Edited 2 file(s)")
+                    && body.contains("rs")
+                    && body.contains("md")
+                    && body.contains("cargo test")
+                {
+                    found_summary = true;
+                }
+            }
+        }
+        assert!(
+            found_summary,
+            "SessionEnd must write a research-cache record summarizing the 2 edits + cargo test"
+        );
+
+        // And it must be immediately recallable (s4 index sync on the write path).
+        let hit = crate::utility::recall::search_recall_index(&claude_home, "Edited file", 20)
+            .expect("recall search runs");
+        assert!(
+            hit.map(|result| !result.hits.is_empty()).unwrap_or(false),
+            "the auto-captured summary must be recallable right after SessionEnd"
+        );
+
+        let _ = std::fs::remove_dir_all(&claude_home);
+    }
+
+    #[test]
+    fn session_end_capture_is_silent_without_edits_and_respects_off_switch() {
+        // Two guarantees: (1) a session that edited nothing produces no summary
+        // (no memory pollution from research/question turns); (2) the off switch
+        // fully disables capture even when edits exist.
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let unique = format!(
+            "session-end-capture-off-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        );
+        let claude_home = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&claude_home).unwrap();
+        let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let obs_dir = claude_home.join("state").join("observations");
+        std::fs::create_dir_all(&obs_dir).unwrap();
+
+        let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
+        let previous_capture = std::env::var(SESSION_CAPTURE_ENV_VAR).ok();
+        std::env::set_var("CLAUDE_TARGET_OVERRIDE", &claude_home);
+
+        // Case 1: command-only session (no edits) with capture ON → silent.
+        std::env::remove_var(SESSION_CAPTURE_ENV_VAR);
+        let read_only_session = "sess-readonly";
+        std::fs::write(
+            obs_dir.join(format!("{date}.jsonl")),
+            format!(
+                "{}\n",
+                serde_json::json!({"recorded_at_ms": now_ms(), "session_id": read_only_session, "cwd": "D:/x", "tool_name": "Bash", "signature": "cargo test", "detail": "cargo test"})
+            ),
+        )
+        .unwrap();
+        maybe_capture_session_summary(
+            &mut format!("{{\"session_id\":\"{read_only_session}\"}}").as_bytes(),
+            &mut std::io::sink(),
+        );
+        assert!(
+            !claude_home.join("memory").join("research-cache").exists()
+                || std::fs::read_dir(claude_home.join("memory").join("research-cache"))
+                    .map(|mut e| e.next().is_none())
+                    .unwrap_or(true),
+            "a no-edit session must write no summary"
+        );
+
+        // Case 2: edits exist but capture is OFF → still no summary.
+        std::env::set_var(SESSION_CAPTURE_ENV_VAR, "off");
+        let edit_session = "sess-edits-off";
+        std::fs::write(
+            obs_dir.join(format!("{date}.jsonl")),
+            format!(
+                "{}\n",
+                serde_json::json!({"recorded_at_ms": now_ms(), "session_id": edit_session, "cwd": "D:/x", "tool_name": "Edit", "signature": "edit:rs", "detail": "src/lib.rs"})
+            ),
+        )
+        .unwrap();
+        maybe_capture_session_summary(
+            &mut format!("{{\"session_id\":\"{edit_session}\"}}").as_bytes(),
+            &mut std::io::sink(),
+        );
+
+        match previous_home {
+            Some(value) => std::env::set_var("CLAUDE_TARGET_OVERRIDE", value),
+            None => std::env::remove_var("CLAUDE_TARGET_OVERRIDE"),
+        }
+        match previous_capture {
+            Some(value) => std::env::set_var(SESSION_CAPTURE_ENV_VAR, value),
+            None => std::env::remove_var(SESSION_CAPTURE_ENV_VAR),
+        }
+
+        let rc_dir = claude_home.join("memory").join("research-cache");
+        let wrote_anything = std::fs::read_dir(&rc_dir)
+            .map(|mut e| e.next().is_some())
+            .unwrap_or(false);
+        assert!(
+            !wrote_anything,
+            "with the off switch set, no summary must be written even when edits exist"
+        );
+
+        let _ = std::fs::remove_dir_all(&claude_home);
     }
 
     #[test]
