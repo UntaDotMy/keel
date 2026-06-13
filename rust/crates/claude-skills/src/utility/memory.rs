@@ -78,6 +78,18 @@ pub fn run_memory_command(
                 standard_error,
             )
         }
+        // `remember` is the intuitive "save this finding" verb agents reach for.
+        // It is sugar over `research-cache record`: it accepts the natural
+        // `--family/--title/--text` shape and translates it into the family's
+        // real `--question/--answer` flags so the obvious call succeeds instead
+        // of failing closed. `--question`/`--answer` are accepted as direct
+        // aliases for callers who already know the underlying shape.
+        "remember" => run_remember_command(
+            command_group,
+            &arguments[1..],
+            standard_output,
+            standard_error,
+        ),
         // `report` is a compact health summary across the implemented families —
         // an alias for `status` so older docs that called `memory report` resolve.
         "report" => crate::utility::memory_families::run_memory_family_command(
@@ -114,6 +126,116 @@ pub fn run_memory_command(
             1
         }
     }
+}
+
+/// `memory remember` — the intuitive "save this finding" verb.
+///
+/// Agents naturally reach for `memory remember --family research-cache --title
+/// "..." --text "..."`. Rather than fail that closed, this handler accepts that
+/// natural shape (plus the underlying `--question/--answer` as direct aliases)
+/// and forwards it to the matching memory family's `record` handler. Today only
+/// `research-cache` has a `record` verb, so any other `--family` value is
+/// rejected with a clear message instead of silently writing nowhere.
+fn run_remember_command(
+    command_group: &str,
+    arguments: &[String],
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let label = format!("{command_group} remember");
+    if !arguments.is_empty() && is_help_argument(&arguments[0]) {
+        let _ = writeln!(
+            standard_output,
+            "Usage: claude-skills {command_group} remember [--family research-cache] --title <text> --text <text> [--source <text>] [--freshness <text>]\n  Sugar over `{command_group} research-cache record`. --question/--answer are accepted as aliases for --title/--text."
+        );
+        return 0;
+    }
+
+    let mut flags = FlagSet::new(label.clone());
+    flags.string_flag("family", "research-cache");
+    flags.string_flag("title", "");
+    flags.string_flag("text", "");
+    // Direct aliases for callers who already know the underlying family shape.
+    flags.string_flag("question", "");
+    flags.string_flag("answer", "");
+    flags.string_flag("source", "");
+    flags.string_flag("freshness", "");
+    flags.string_flag("claude-home", "");
+    flags.bool_flag("json", false);
+    if let Err(error) = flags.parse(arguments) {
+        let _ = writeln!(standard_error, "{}", error.message);
+        return 1;
+    }
+
+    let family = flags.string_value("family").trim();
+    if family != "research-cache" {
+        let _ = writeln!(
+            standard_error,
+            "{label}: --family {family} has no record verb. Only `research-cache` is supported by `remember` today (use `claude-skills {command_group} {family} ...` directly for other families)."
+        );
+        return 1;
+    }
+
+    // --title/--text are the natural names; --question/--answer are aliases.
+    let title = {
+        let t = flags.string_value("title").trim();
+        if t.is_empty() {
+            flags.string_value("question").trim()
+        } else {
+            t
+        }
+    };
+    let text = {
+        let t = flags.string_value("text").trim();
+        if t.is_empty() {
+            flags.string_value("answer").trim()
+        } else {
+            t
+        }
+    };
+    if title.is_empty() || text.is_empty() {
+        let _ = writeln!(
+            standard_error,
+            "{label}: --title (or --question) and --text (or --answer) are required"
+        );
+        return 1;
+    }
+
+    // Re-assemble the underlying `research-cache record` argument vector and
+    // forward to the existing handler so there is exactly one write path.
+    let mut forwarded: Vec<String> = vec![
+        "record".to_string(),
+        "--question".to_string(),
+        title.to_string(),
+        "--answer".to_string(),
+        text.to_string(),
+    ];
+    let source = flags.string_value("source").trim();
+    if !source.is_empty() {
+        forwarded.push("--source".to_string());
+        forwarded.push(source.to_string());
+    }
+    let freshness = flags.string_value("freshness").trim();
+    if !freshness.is_empty() {
+        forwarded.push("--freshness".to_string());
+        forwarded.push(freshness.to_string());
+    }
+    let claude_home = flags.string_value("claude-home").trim();
+    if !claude_home.is_empty() {
+        forwarded.push("--claude-home".to_string());
+        forwarded.push(claude_home.to_string());
+    }
+    if flags.bool_value("json") {
+        forwarded.push("--json".to_string());
+    }
+
+    crate::utility::memory_families::run_memory_family_command(
+        command_group,
+        "research-cache",
+        &forwarded,
+        standard_output,
+        standard_error,
+    )
 }
 
 pub fn run_orchestration_command(
@@ -2841,6 +2963,134 @@ mod tests {
         let candidate = std::env::temp_dir().join(format!("{label}-{unique_suffix}"));
         fs::create_dir_all(&candidate).expect("create tempdir");
         candidate
+    }
+
+    #[test]
+    fn memory_remember_natural_form_records_and_is_retrievable() {
+        let home = tempdir_under("claude-skills-remember-natural");
+        let h = home.to_string_lossy().to_string();
+
+        // Natural --family/--title/--text form (the shape agents reach for).
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let code = run_memory_command(
+            "memory",
+            &[
+                "remember".to_string(),
+                "--family".to_string(),
+                "research-cache".to_string(),
+                "--title".to_string(),
+                "Kiro-Go embed pattern".to_string(),
+                "--text".to_string(),
+                "go:embed must live in main package".to_string(),
+                "--claude-home".to_string(),
+                h.clone(),
+            ],
+            &mut stdout,
+            &mut stderr,
+        );
+        assert_eq!(code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
+
+        // The --question/--answer aliases must also work.
+        let mut stdout2: Vec<u8> = Vec::new();
+        let mut stderr2: Vec<u8> = Vec::new();
+        let code = run_memory_command(
+            "memory",
+            &[
+                "remember".to_string(),
+                "--question".to_string(),
+                "alias question".to_string(),
+                "--answer".to_string(),
+                "alias answer".to_string(),
+                "--claude-home".to_string(),
+                h.clone(),
+            ],
+            &mut stdout2,
+            &mut stderr2,
+        );
+        assert_eq!(code, 0, "stderr: {}", String::from_utf8_lossy(&stderr2));
+
+        // Both must be retrievable through the underlying research-cache family.
+        let mut lookup_out: Vec<u8> = Vec::new();
+        let mut lookup_err: Vec<u8> = Vec::new();
+        let code = run_memory_command(
+            "memory",
+            &[
+                "research-cache".to_string(),
+                "lookup".to_string(),
+                "--query".to_string(),
+                "embed".to_string(),
+                "--claude-home".to_string(),
+                h.clone(),
+            ],
+            &mut lookup_out,
+            &mut lookup_err,
+        );
+        assert_eq!(code, 0, "stderr: {}", String::from_utf8_lossy(&lookup_err));
+        let out = String::from_utf8_lossy(&lookup_out);
+        assert!(
+            out.contains("go:embed must live in main package"),
+            "stdout: {out}"
+        );
+
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn memory_remember_rejects_missing_fields_and_unsupported_family() {
+        let home = tempdir_under("claude-skills-remember-reject");
+        let h = home.to_string_lossy().to_string();
+
+        // Missing --text/--answer must fail closed.
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let code = run_memory_command(
+            "memory",
+            &[
+                "remember".to_string(),
+                "--title".to_string(),
+                "only a title".to_string(),
+                "--claude-home".to_string(),
+                h.clone(),
+            ],
+            &mut stdout,
+            &mut stderr,
+        );
+        assert_eq!(code, 1);
+        assert!(
+            String::from_utf8_lossy(&stderr).contains("required"),
+            "stderr: {}",
+            String::from_utf8_lossy(&stderr)
+        );
+
+        // A family with no record verb must be rejected with a clear message,
+        // never silently write nowhere.
+        let mut stdout2: Vec<u8> = Vec::new();
+        let mut stderr2: Vec<u8> = Vec::new();
+        let code = run_memory_command(
+            "memory",
+            &[
+                "remember".to_string(),
+                "--family".to_string(),
+                "entity".to_string(),
+                "--title".to_string(),
+                "t".to_string(),
+                "--text".to_string(),
+                "x".to_string(),
+                "--claude-home".to_string(),
+                h.clone(),
+            ],
+            &mut stdout2,
+            &mut stderr2,
+        );
+        assert_eq!(code, 1);
+        assert!(
+            String::from_utf8_lossy(&stderr2).contains("no record verb"),
+            "stderr: {}",
+            String::from_utf8_lossy(&stderr2)
+        );
+
+        let _ = fs::remove_dir_all(&home);
     }
 
     fn route(request: &str) -> (u8, String, String) {
