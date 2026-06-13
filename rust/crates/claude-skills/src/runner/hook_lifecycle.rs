@@ -48,6 +48,12 @@ const MANAGED_PRE_TOOL_USE_EVENT: &str = "PreToolUse";
 /// it to `0` disables the periodic refresh.
 const SYSTEM_MAP_REFRESH_DEFAULT_THRESHOLD: u64 = 10;
 
+/// Env var that disables the SessionStart MCP-registration self-heal. Unset (the
+/// default) keeps the self-heal on; set to `off` to skip it (used by tests that
+/// must not touch any `~/.claude.json`, and as an operator escape hatch). Any
+/// other value leaves the self-heal enabled.
+const MCP_SELF_HEAL_ENV_VAR: &str = "CLAUDE_SKILLS_MCP_SELF_HEAL";
+
 /// Iterate canonical hook event names. Single-line wrapper around the table so
 /// existing for-loops keep their `for event in claude_hook_event_names()` shape
 /// without caring that the source is a typed row table.
@@ -141,6 +147,24 @@ pub fn run_hook_command(
         "post-tool-batch" => {
             let mut stdin = std::io::stdin().lock();
             run_hook_post_tool_batch(&mut stdin, standard_output, standard_error)
+        }
+
+        // SessionStart re-asserts the claude_core MCP registration before the
+        // normal lifecycle context render. This is the self-heal for a drifted
+        // ~/.claude.json entry: install/update/repair re-register, but a binary
+        // swapped in by any other path (manual copy, partial install,
+        // __self-replace) leaves a previously-written entry untouched — so an
+        // entry missing `alwaysLoad` would persist and the MCP tools would stay
+        // deferred behind ToolSearch. Running the idempotent re-registration on
+        // every session boot closes that window: it is a no-op on a healthy
+        // config and silently repairs drift on the next launch. Best-effort —
+        // a failure is reported to stderr but never changes the hook exit code,
+        // because the SessionStart context render is load-bearing and MCP is not.
+        // Routed here (not in run_hook_lifecycle) so the inner lifecycle unit
+        // test stays free of any ~/.claude.json write.
+        "session-start" => {
+            maybe_self_heal_mcp_registration(standard_error);
+            run_hook_lifecycle("session-start", standard_output, standard_error)
         }
 
         // Every other slug is dispatched if and only if it appears in the canonical
@@ -2542,6 +2566,55 @@ fn run_session_end_learning(standard_error: &mut dyn Write) {
 /// predicate instead of a chain of equality checks.
 fn should_refresh_system_map(event_name: &str) -> bool {
     matches!(event_name, "SessionStart" | "PreCompact" | "SessionEnd")
+}
+
+/// Idempotently re-assert the `claude_core` MCP registration at session start.
+///
+/// This is the drift self-heal: `register_mcp_server` writes `~/.claude.json`
+/// only when the live entry differs from the desired one (which carries
+/// `alwaysLoad: true`), so this costs nothing on a healthy config and silently
+/// repairs an entry left stale by any binary-swap path that never re-ran
+/// install/update/repair. Honors `CLAUDE_TARGET_OVERRIDE` through
+/// `resolve_claude_home`, and only writes for a standard `~/.claude` home
+/// (`self_heal_registration` guards that), so the suite's throwaway homes are
+/// never touched.
+///
+/// Best-effort: every failure path is swallowed to stderr. The caller must not
+/// change its exit code based on this — the SessionStart context render is the
+/// load-bearing work; MCP registration is additive.
+fn maybe_self_heal_mcp_registration(standard_error: &mut dyn Write) {
+    if std::env::var(MCP_SELF_HEAL_ENV_VAR)
+        .map(|value| value.trim().eq_ignore_ascii_case("off"))
+        .unwrap_or(false)
+    {
+        return;
+    }
+    let claude_home = match resolve_claude_home("") {
+        Ok(path) => path,
+        Err(_) => return,
+    };
+    match crate::manager::mcp_register::self_heal_registration(&claude_home) {
+        // Skipped (non-standard home) or already current → nothing to report.
+        None | Some(Ok(crate::manager::mcp_register::McpRegistration::AlreadyCurrent)) => {}
+        Some(Ok(crate::manager::mcp_register::McpRegistration::Added)) => {
+            let _ = writeln!(
+                standard_error,
+                "claude-skills: registered claude_core MCP server in ~/.claude.json (alwaysLoad). Restart Claude Code to load the tools into context."
+            );
+        }
+        Some(Ok(crate::manager::mcp_register::McpRegistration::Updated)) => {
+            let _ = writeln!(
+                standard_error,
+                "claude-skills: repaired drifted claude_core MCP entry in ~/.claude.json (alwaysLoad). Restart Claude Code to load the tools into context."
+            );
+        }
+        Some(Err(error)) => {
+            let _ = writeln!(
+                standard_error,
+                "claude-skills: MCP self-heal skipped ({error})"
+            );
+        }
+    }
 }
 
 fn refresh_memory_scope_for_current_directory(standard_error: &mut dyn Write) -> Option<PathBuf> {
@@ -5462,6 +5535,132 @@ mod tests {
             output.get("systemMessage").is_none(),
             "SessionStart must not emit top-level systemMessage — additionalContext is the documented vehicle for model-context injection"
         );
+    }
+
+    #[test]
+    fn session_start_dispatch_self_heals_drifted_mcp_registration() {
+        // End-to-end through the production entry point: a SessionStart hook
+        // dispatched via run_hook_command must repair a drifted ~/.claude.json
+        // (an entry missing `alwaysLoad`) without the user running
+        // install/update/repair. This is the fix for the "binary swapped without
+        // re-registering" drift vector. We isolate the home via
+        // CLAUDE_TARGET_OVERRIDE pointed at a real `.claude` dir so the self-heal
+        // is active (it skips non-`.claude` homes) yet never touches the real one.
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let unique = format!(
+            "session-start-selfheal-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        );
+        let base = std::env::temp_dir().join(unique);
+        // The home must be literally `.claude` for the self-heal to engage.
+        let claude_home = base.join(".claude");
+        std::fs::create_dir_all(&claude_home).unwrap();
+        // ~/.claude.json lives beside the .claude dir (parent), per
+        // mcp_config_path — resolve it the same way the production code does.
+        let config_path = crate::manager::mcp_register::mcp_config_path(&claude_home);
+        // Seed a DRIFTED entry: present but missing alwaysLoad.
+        std::fs::write(
+            &config_path,
+            r#"{"mcpServers":{"claude_core":{"type":"stdio","command":"old","args":["mcp","serve"],"env":{}}}}"#,
+        )
+        .unwrap();
+
+        let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
+        let previous_self_heal = std::env::var(MCP_SELF_HEAL_ENV_VAR).ok();
+        std::env::set_var("CLAUDE_TARGET_OVERRIDE", &claude_home);
+        std::env::remove_var(MCP_SELF_HEAL_ENV_VAR); // default → on
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = run_hook_command(&["session-start".to_string()], &mut stdout, &mut stderr);
+
+        // Restore env before assertions so a failure cannot leak the override.
+        match previous_home {
+            Some(value) => std::env::set_var("CLAUDE_TARGET_OVERRIDE", value),
+            None => std::env::remove_var("CLAUDE_TARGET_OVERRIDE"),
+        }
+        match previous_self_heal {
+            Some(value) => std::env::set_var(MCP_SELF_HEAL_ENV_VAR, value),
+            None => std::env::remove_var(MCP_SELF_HEAL_ENV_VAR),
+        }
+
+        assert_eq!(code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
+        // The SessionStart context still renders (load-bearing work survives).
+        let output: JsonDocument =
+            serde_json::from_slice(&stdout).expect("SessionStart still emits valid JSON");
+        assert_eq!(
+            output["hookSpecificOutput"]["hookEventName"], "SessionStart",
+            "self-heal must not disturb the SessionStart context render"
+        );
+        // And the drifted entry is now repaired with alwaysLoad:true.
+        let parsed: JsonDocument =
+            serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+        assert_eq!(
+            parsed["mcpServers"]["claude_core"]["alwaysLoad"],
+            serde_json::json!(true),
+            "SessionStart dispatch must repair the drifted entry to carry alwaysLoad:true"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn session_start_dispatch_respects_self_heal_off_switch() {
+        // The off switch must fully disable the write so an operator (or a test)
+        // can opt out. With it off, a drifted entry stays drifted.
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let unique = format!(
+            "session-start-selfheal-off-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        );
+        let base = std::env::temp_dir().join(unique);
+        let claude_home = base.join(".claude");
+        std::fs::create_dir_all(&claude_home).unwrap();
+        let config_path = crate::manager::mcp_register::mcp_config_path(&claude_home);
+        let drifted = r#"{"mcpServers":{"claude_core":{"type":"stdio","command":"old","args":["mcp","serve"],"env":{}}}}"#;
+        std::fs::write(&config_path, drifted).unwrap();
+
+        let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
+        let previous_self_heal = std::env::var(MCP_SELF_HEAL_ENV_VAR).ok();
+        std::env::set_var("CLAUDE_TARGET_OVERRIDE", &claude_home);
+        std::env::set_var(MCP_SELF_HEAL_ENV_VAR, "off");
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = run_hook_command(&["session-start".to_string()], &mut stdout, &mut stderr);
+
+        match previous_home {
+            Some(value) => std::env::set_var("CLAUDE_TARGET_OVERRIDE", value),
+            None => std::env::remove_var("CLAUDE_TARGET_OVERRIDE"),
+        }
+        match previous_self_heal {
+            Some(value) => std::env::set_var(MCP_SELF_HEAL_ENV_VAR, value),
+            None => std::env::remove_var(MCP_SELF_HEAL_ENV_VAR),
+        }
+
+        assert_eq!(code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
+        // The off switch left the drifted entry untouched, byte for byte.
+        assert_eq!(
+            std::fs::read_to_string(&config_path).unwrap(),
+            drifted,
+            "with the self-heal off, the drifted entry must be left exactly as-is"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

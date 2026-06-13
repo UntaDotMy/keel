@@ -136,6 +136,47 @@ pub fn register_mcp_server(claude_home: &Path) -> Result<McpRegistration, String
     Ok(outcome)
 }
 
+/// True when `claude_home` is a real `~/.claude` directory (its final path
+/// component is literally `.claude`).
+///
+/// Auto-writing `~/.claude.json` is only meaningful next to a standard Claude
+/// home. The integration suite and several hook tests install into throwaway
+/// `--claude-home` / `CLAUDE_TARGET_OVERRIDE` directories that are NOT named
+/// `.claude`; gating every automatic registration site on this predicate keeps
+/// real installs and the SessionStart self-heal fully automatic while leaving
+/// tests hermetic. `register_mcp_server` itself stays unconditional so explicit
+/// operator recovery (`repair`) and tests with a real `.claude` home can always
+/// force a write.
+pub fn is_standard_claude_home(claude_home: &Path) -> bool {
+    claude_home
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name == ".claude")
+        .unwrap_or(false)
+}
+
+/// Idempotently re-assert the `claude_core` MCP registration, but only for a
+/// standard `~/.claude` home. Returns `None` when skipped (non-standard home),
+/// or `Some(result)` carrying the [`register_mcp_server`] outcome.
+///
+/// This is the self-heal entry point shared by the SessionStart hook and the
+/// post-`__self-replace` step. Its whole purpose is to close the drift window:
+/// `register_mcp_server` writes only when the live entry differs from the
+/// desired one (it no-ops as `AlreadyCurrent` otherwise), so calling this on
+/// every session is free on a healthy config and silently repairs a drifted
+/// entry — e.g. one written by an older binary that predates `alwaysLoad`, or
+/// left stale by a binary swap that never re-ran `install`/`update`/`repair`.
+///
+/// Best-effort by contract: callers must treat a returned `Err` as advisory and
+/// never fail their own operation on it (MCP is additive, not load-bearing for
+/// the skill pack).
+pub fn self_heal_registration(claude_home: &Path) -> Option<Result<McpRegistration, String>> {
+    if !is_standard_claude_home(claude_home) {
+        return None;
+    }
+    Some(register_mcp_server(claude_home))
+}
+
 /// Outcome of an unregistration attempt, for caller-facing reporting.
 #[derive(Debug, PartialEq, Eq)]
 pub enum McpUnregistration {
@@ -408,5 +449,68 @@ mod tests {
             "must not overwrite a non-object config"
         );
         let _ = fs::remove_dir_all(claude_home.parent().unwrap());
+    }
+
+    #[test]
+    fn self_heal_repairs_drifted_entry_then_is_a_noop() {
+        // The whole point of the SessionStart self-heal: an entry written by an
+        // older binary that predates `alwaysLoad` (or left stale by a binary
+        // swap) must be repaired to carry `alwaysLoad: true`, and a second pass
+        // must no-op rather than churn the file.
+        let claude_home = unique_home("selfheal-drift");
+        let config_path = mcp_config_path(&claude_home);
+        // Seed a DRIFTED entry: present, but missing alwaysLoad — exactly the
+        // shape `claude mcp add` or a pre-alwaysLoad binary would leave behind.
+        let seed = json!({
+            "mcpServers": {
+                "claude_core": { "type": "stdio", "command": "old", "args": ["mcp", "serve"], "env": {} }
+            }
+        });
+        fs::write(&config_path, serde_json::to_string_pretty(&seed).unwrap()).unwrap();
+
+        // First self-heal repairs it.
+        let outcome = self_heal_registration(&claude_home).expect("standard home → Some");
+        assert_eq!(outcome.expect("repair ok"), McpRegistration::Updated);
+        let text = fs::read_to_string(&config_path).unwrap();
+        let parsed: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            parsed["mcpServers"][MCP_SERVER_KEY]["alwaysLoad"],
+            json!(true),
+            "self-heal must write alwaysLoad:true onto a drifted entry"
+        );
+
+        // Second self-heal is a no-op — the entry already matches.
+        let again = self_heal_registration(&claude_home).expect("standard home → Some");
+        assert_eq!(again.expect("noop ok"), McpRegistration::AlreadyCurrent);
+
+        let _ = fs::remove_dir_all(claude_home.parent().unwrap());
+    }
+
+    #[test]
+    fn self_heal_skips_non_standard_home() {
+        // Test/integration homes are throwaway dirs NOT named `.claude`. The
+        // self-heal must skip them entirely (return None, write nothing) so the
+        // suite never races on or pollutes a real ~/.claude.json.
+        let standard = unique_home("selfheal-standard");
+        // A sibling dir that is NOT `.claude`.
+        let non_standard = standard.parent().unwrap().join("not-dot-claude");
+        fs::create_dir_all(&non_standard).unwrap();
+
+        assert!(is_standard_claude_home(&standard), "`.claude` is standard");
+        assert!(
+            !is_standard_claude_home(&non_standard),
+            "a non-`.claude` dir is not standard"
+        );
+        assert!(
+            self_heal_registration(&non_standard).is_none(),
+            "self-heal must skip a non-standard home"
+        );
+        // And it wrote nothing beside the non-standard home.
+        assert!(
+            !mcp_config_path(&non_standard).exists(),
+            "self-heal must not create a .claude.json beside a non-standard home"
+        );
+
+        let _ = fs::remove_dir_all(standard.parent().unwrap());
     }
 }

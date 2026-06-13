@@ -188,12 +188,7 @@ pub fn install_from_paths(
 /// Registration is best-effort: a failure is reported in the summary but never
 /// fails the install (MCP is additive, not load-bearing for the skill pack).
 fn maybe_register_mcp_server(claude_home: &Path) -> Option<String> {
-    let is_standard_home = claude_home
-        .file_name()
-        .and_then(|name| name.to_str())
-        .map(|name| name == ".claude")
-        .unwrap_or(false);
-    if !is_standard_home {
+    if !super::mcp_register::is_standard_claude_home(claude_home) {
         return None;
     }
     match super::mcp_register::register_mcp_server(claude_home) {
@@ -1427,7 +1422,20 @@ pub fn run_self_replace_command(arguments: &[String], standard_error: &mut dyn W
     }
     for _ in 0..60 {
         match atomic_copy_executable(&source, &target) {
-            Ok(()) => return 0,
+            Ok(()) => {
+                // The binary was just swapped in. A swap is exactly the drift
+                // vector that leaves a stale ~/.claude.json entry behind: the
+                // new binary knows about `alwaysLoad`, but nothing re-ran
+                // registration. Re-assert it now (idempotent — a no-op when the
+                // entry already matches) so the repair does not have to wait for
+                // the next SessionStart. The target is <claude_home>/claude-skills
+                // (+ extension), so its parent is the claude home. Best-effort:
+                // a failure here must not fail the swap.
+                if let Some(claude_home) = target.parent() {
+                    let _ = super::mcp_register::self_heal_registration(claude_home);
+                }
+                return 0;
+            }
             Err(_) => thread::sleep(Duration::from_millis(250)),
         }
     }
