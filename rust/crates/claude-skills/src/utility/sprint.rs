@@ -115,7 +115,7 @@ pub fn run_sprint_command(
              \x20          story is not Done (so the loop continues).\n\
              list     Alias for status.\n\
              \n\
-             Common flags: --workspace-root <path>  --json"
+             Common flags: --workspace-root <path>  --claude-home <path>  --json"
         );
         return if action.is_empty() { 1 } else { 0 };
     }
@@ -132,13 +132,17 @@ pub fn run_sprint_command(
 }
 
 /// Resolve the per-workspace sprint store. The group path is keyed by a slug of
-/// the workspace root so two projects never share a backlog.
+/// the workspace root so two projects never share a backlog. `claude_home` is
+/// the resolved value of the `--claude-home` flag (empty = default home), so the
+/// sprint store can be isolated for tests and redirected by callers just like
+/// every other stateful family (`memory`, `workflow`, `orchestration`).
 fn resolve_store(
     workspace_root: &str,
+    claude_home: &str,
     label: &str,
     standard_error: &mut dyn Write,
 ) -> Option<RecordStore> {
-    let claude_home = match resolve_claude_home("") {
+    let claude_home = match resolve_claude_home(claude_home) {
         Ok(path) => path,
         Err(error) => {
             let _ = writeln!(standard_error, "{label}: {error}");
@@ -187,6 +191,7 @@ fn run_plan(
     flags.string_flag("story", "");
     flags.string_flag("id", "");
     flags.string_flag("workspace-root", "");
+    flags.string_flag("claude-home", "");
     flags.bool_flag("json", false);
     if let Err(error) = flags.parse(arguments) {
         let _ = writeln!(standard_error, "sprint plan: {}", error.message);
@@ -202,6 +207,7 @@ fn run_plan(
     }
     let Some(store) = resolve_store(
         flags.string_value("workspace-root"),
+        flags.string_value("claude-home"),
         "sprint plan",
         standard_error,
     ) else {
@@ -254,6 +260,7 @@ fn run_advance(
     flags.string_flag("state", "");
     flags.string_flag("note", "");
     flags.string_flag("workspace-root", "");
+    flags.string_flag("claude-home", "");
     flags.bool_flag("json", false);
     if let Err(error) = flags.parse(arguments) {
         let _ = writeln!(standard_error, "sprint advance: {}", error.message);
@@ -279,6 +286,7 @@ fn run_advance(
     }
     let Some(store) = resolve_store(
         flags.string_value("workspace-root"),
+        flags.string_value("claude-home"),
         "sprint advance",
         standard_error,
     ) else {
@@ -323,6 +331,7 @@ fn run_status(
 ) -> u8 {
     let mut flags = FlagSet::new("sprint status");
     flags.string_flag("workspace-root", "");
+    flags.string_flag("claude-home", "");
     flags.bool_flag("json", false);
     if let Err(error) = flags.parse(arguments) {
         let _ = writeln!(standard_error, "sprint status: {}", error.message);
@@ -330,6 +339,7 @@ fn run_status(
     }
     let Some(store) = resolve_store(
         flags.string_value("workspace-root"),
+        flags.string_value("claude-home"),
         "sprint status",
         standard_error,
     ) else {
@@ -398,6 +408,7 @@ fn run_review(
 ) -> u8 {
     let mut flags = FlagSet::new("sprint review");
     flags.string_flag("workspace-root", "");
+    flags.string_flag("claude-home", "");
     flags.bool_flag("json", false);
     if let Err(error) = flags.parse(arguments) {
         let _ = writeln!(standard_error, "sprint review: {}", error.message);
@@ -405,6 +416,7 @@ fn run_review(
     }
     let Some(store) = resolve_store(
         flags.string_value("workspace-root"),
+        flags.string_value("claude-home"),
         "sprint review",
         standard_error,
     ) else {
@@ -572,6 +584,65 @@ mod tests {
             assert!(out.contains("0/1 stories Done"), "status: {out}");
             assert!(out.contains("[todo]"), "story starts todo: {out}");
         });
+    }
+
+    #[test]
+    fn claude_home_flag_isolates_the_sprint_store() {
+        // Regression: sprint subcommands previously defined no --claude-home flag
+        // and resolve_store hardcoded resolve_claude_home(""), so sprint state
+        // could only ever live in the real ~/.claude (untestable, unredirectable).
+        // This pins the fix: --claude-home routes the store to the given home,
+        // and an env-resolved "real" home (CLAUDE_TARGET_OVERRIDE) stays empty.
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let base = std::env::temp_dir().join(format!(
+            "claude-skills-sprint-home-{}-{nanos}",
+            std::process::id()
+        ));
+        let explicit_home = base.join("explicit");
+        let sentinel_home = base.join("sentinel");
+        fs::create_dir_all(&explicit_home).expect("create explicit home");
+        fs::create_dir_all(&sentinel_home).expect("create sentinel home");
+
+        let previous = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
+        std::env::set_var("CLAUDE_TARGET_OVERRIDE", &sentinel_home);
+
+        let explicit = explicit_home.to_string_lossy().to_string();
+        let (code, _, err) = run(&[
+            "plan",
+            "--workspace-root",
+            "/work/homeflag",
+            "--claude-home",
+            &explicit,
+            "--story",
+            "As a dev, I want isolation, so that tests are safe.",
+        ]);
+
+        match previous {
+            Some(value) => std::env::set_var("CLAUDE_TARGET_OVERRIDE", value),
+            None => std::env::remove_var("CLAUDE_TARGET_OVERRIDE"),
+        }
+
+        assert_eq!(code, 0, "stderr: {err}");
+        // The sprint store must exist under the explicit home...
+        let explicit_sprint = explicit_home.join("sprint");
+        assert!(
+            explicit_sprint.is_dir(),
+            "sprint store must be created under --claude-home"
+        );
+        // ...and the env-resolved sentinel home must be untouched.
+        let sentinel_sprint = sentinel_home.join("sprint");
+        assert!(
+            !sentinel_sprint.exists(),
+            "sprint must NOT write the env-resolved home when --claude-home is given"
+        );
+
+        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]
