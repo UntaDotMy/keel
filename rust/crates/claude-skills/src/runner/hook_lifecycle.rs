@@ -71,11 +71,11 @@ pub fn run_hook_command(
     let slug = arguments[0].as_str();
 
     match slug {
-        "install" => run_hook_install(standard_output, standard_error),
+        "install" => run_hook_install(&arguments[1..], standard_output, standard_error),
 
-        "uninstall" => run_hook_uninstall(standard_output, standard_error),
+        "uninstall" => run_hook_uninstall(&arguments[1..], standard_output, standard_error),
 
-        "list" | "show" => run_hook_list(standard_output, standard_error),
+        "list" | "show" => run_hook_list(&arguments[1..], standard_output, standard_error),
 
         "instructions" => run_hook_instructions(&arguments[1..], standard_output, standard_error),
 
@@ -163,8 +163,18 @@ pub fn run_hook_command(
     }
 }
 
-fn run_hook_install(standard_output: &mut dyn Write, standard_error: &mut dyn Write) -> u8 {
-    let claude_home = match resolve_claude_home("") {
+fn run_hook_install(
+    arguments: &[String],
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let mut flag_set = FlagSet::new("hook install");
+    flag_set.string_flag("claude-home", "");
+    if let Err(parse_error) = flag_set.parse(arguments) {
+        let _ = writeln!(standard_error, "{}", parse_error.message);
+        return 1;
+    }
+    let claude_home = match resolve_claude_home(flag_set.string_value("claude-home")) {
         Ok(path) => path,
 
         Err(error) => {
@@ -215,8 +225,18 @@ fn run_hook_install(standard_output: &mut dyn Write, standard_error: &mut dyn Wr
     }
 }
 
-fn run_hook_uninstall(standard_output: &mut dyn Write, standard_error: &mut dyn Write) -> u8 {
-    let claude_home = match resolve_claude_home("") {
+fn run_hook_uninstall(
+    arguments: &[String],
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let mut flag_set = FlagSet::new("hook uninstall");
+    flag_set.string_flag("claude-home", "");
+    if let Err(parse_error) = flag_set.parse(arguments) {
+        let _ = writeln!(standard_error, "{}", parse_error.message);
+        return 1;
+    }
+    let claude_home = match resolve_claude_home(flag_set.string_value("claude-home")) {
         Ok(path) => path,
 
         Err(error) => {
@@ -267,8 +287,18 @@ fn run_hook_uninstall(standard_output: &mut dyn Write, standard_error: &mut dyn 
     }
 }
 
-fn run_hook_list(standard_output: &mut dyn Write, standard_error: &mut dyn Write) -> u8 {
-    let claude_home = match resolve_claude_home("") {
+fn run_hook_list(
+    arguments: &[String],
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let mut flag_set = FlagSet::new("hook list");
+    flag_set.string_flag("claude-home", "");
+    if let Err(parse_error) = flag_set.parse(arguments) {
+        let _ = writeln!(standard_error, "{}", parse_error.message);
+        return 1;
+    }
+    let claude_home = match resolve_claude_home(flag_set.string_value("claude-home")) {
         Ok(path) => path,
 
         Err(error) => {
@@ -282,7 +312,12 @@ fn run_hook_list(standard_output: &mut dyn Write, standard_error: &mut dyn Write
 
     match fs::read_to_string(&hook_path) {
         Ok(text) => {
-            let _ = writeln!(standard_output, "{text}");
+            // Redact secret-pattern values before printing. `settings.json`
+            // routinely carries an `env` block with a live `ANTHROPIC_AUTH_TOKEN`
+            // (and may hold API keys/passwords), and `hook list`/`show` output
+            // lands in logs, screen shares, and subagent transcripts. Printing
+            // verbatim would leak a live credential, so mask known-secret keys.
+            let _ = writeln!(standard_output, "{}", redact_secrets_in_settings(&text));
 
             0
         }
@@ -302,6 +337,96 @@ fn run_hook_list(standard_output: &mut dyn Write, standard_error: &mut dyn Write
 
             1
         }
+    }
+}
+
+/// True when a settings key name looks like it holds a secret. Case-insensitive
+/// substring match on the conventional secret markers so `ANTHROPIC_AUTH_TOKEN`,
+/// `OPENAI_API_KEY`, `*_SECRET`, and `*PASSWORD*` are all caught. The match is
+/// deliberately broad (redacting a non-secret is harmless; leaking a secret is
+/// not), but it is NOT exhaustive — keys like `DATABASE_URL` that can embed a
+/// credential in a value are not caught here.
+fn is_secret_key(key: &str) -> bool {
+    let lower = key.to_ascii_lowercase();
+    let keyword_match = ["token", "secret", "password", "passwd", "api_key", "apikey"]
+        .iter()
+        .any(|marker| lower.contains(marker));
+    // `*_KEY` always; a bare `*key` suffix only when paired with an auth/api/
+    // access marker, so `monkey`/`passkey` do not trigger a false redaction.
+    let key_suffix_match = lower.ends_with("_key")
+        || (lower.ends_with("key")
+            && (lower.contains("auth") || lower.contains("api") || lower.contains("access")));
+    keyword_match || key_suffix_match
+}
+
+/// Mask a secret value, preserving a short prefix so an operator can still
+/// recognize which credential it is without exposing the whole token. Short
+/// values are fully masked. Counts by characters (not bytes) and slices on a
+/// char boundary so a multi-byte UTF-8 value can never panic.
+fn mask_secret_value(value: &str) -> String {
+    if value.chars().count() <= 4 {
+        "****".to_string()
+    } else {
+        let prefix: String = value.chars().take(4).collect();
+        format!("{prefix}…(redacted)")
+    }
+}
+
+/// Walk a parsed settings document and replace every string value whose key
+/// looks like a secret with a masked form. Recurses through objects and arrays
+/// so an `env` block at any depth is covered. On parse failure the raw text is
+/// NOT returned (it could contain a live token) — a suppression notice is
+/// returned instead, so a malformed settings.json can never leak a credential
+/// through `hook list`/`show`.
+fn redact_secrets_in_settings(raw: &str) -> String {
+    match serde_json::from_str::<JsonDocument>(raw) {
+        Ok(mut document) => {
+            redact_secrets_in_value(&mut document, false);
+            // A re-serialization failure is implausible for a value we just
+            // parsed, but if it happens we still must not fall back to the raw
+            // (un-redacted) text — suppress instead of leaking.
+            serde_json::to_string_pretty(&document).unwrap_or_else(|_| {
+                "[settings.json could not be re-serialized — output suppressed to prevent secret leak]"
+                    .to_string()
+            })
+        }
+        Err(_) => "[settings.json is not valid JSON — output suppressed to prevent secret leak]"
+            .to_string(),
+    }
+}
+
+/// Recursive worker for [`redact_secrets_in_settings`]. `parent_key_is_secret`
+/// carries down whether the immediate parent object key was itself a secret
+/// marker, so a value reached via a secret key is masked even if it is nested.
+fn redact_secrets_in_value(value: &mut JsonDocument, parent_key_is_secret: bool) {
+    match value {
+        JsonDocument::Object(map) => {
+            for (key, child) in map.iter_mut() {
+                // Once we are under a secret-named key, every descendant is
+                // sensitive — OR the carry-down in so the chain survives an
+                // intermediate object (e.g. {"api_key": {"primary": "..."}}),
+                // not just a direct string or array.
+                let key_is_secret = parent_key_is_secret || is_secret_key(key);
+                if key_is_secret {
+                    if let JsonDocument::String(secret) = child {
+                        *secret = mask_secret_value(secret);
+                        // Already masked this string; skip the recursion below
+                        // so we do not walk into it a second time.
+                        continue;
+                    }
+                }
+                redact_secrets_in_value(child, key_is_secret);
+            }
+        }
+        JsonDocument::Array(items) => {
+            for item in items.iter_mut() {
+                redact_secrets_in_value(item, parent_key_is_secret);
+            }
+        }
+        JsonDocument::String(text) if parent_key_is_secret => {
+            *text = mask_secret_value(text);
+        }
+        _ => {}
     }
 }
 
@@ -2549,6 +2674,7 @@ fn run_hook_diagnose(
 ) -> u8 {
     let mut flag_set = FlagSet::new("hook diagnose");
     flag_set.string_flag("format", "text");
+    flag_set.string_flag("claude-home", "");
 
     if let Err(parse_error) = flag_set.parse(arguments) {
         let _ = writeln!(standard_error, "{}", parse_error.message);
@@ -2564,7 +2690,7 @@ fn run_hook_diagnose(
         return 1;
     }
 
-    let claude_home = match resolve_claude_home("") {
+    let claude_home = match resolve_claude_home(flag_set.string_value("claude-home")) {
         Ok(path) => path,
         Err(error) => {
             let _ = writeln!(standard_error, "{error}");
@@ -5580,6 +5706,191 @@ mod tests {
         let unique = format!("{}-{}", name, std::process::id());
 
         std::env::temp_dir().join(unique).join("settings.json")
+    }
+
+    #[test]
+    fn hook_install_honors_claude_home_flag_and_never_touches_real_home() {
+        // DEFECT 1 regression: `hook install` previously hardcoded
+        // resolve_claude_home("") and so always wrote the real ~/.claude,
+        // ignoring --claude-home. A probe that believed it was isolated
+        // rewrote the user's live settings.json. This test pins the fix:
+        // --claude-home must route the write to the requested dir, and the
+        // env-resolved "real" home (CLAUDE_TARGET_OVERRIDE) must be untouched.
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let unique = format!("hook-install-isolation-{}", std::process::id());
+        let base = std::env::temp_dir().join(unique);
+        let isolated_home = base.join("isolated");
+        let sentinel_real_home = base.join("sentinel-real");
+        std::fs::create_dir_all(&isolated_home).unwrap();
+        std::fs::create_dir_all(&sentinel_real_home).unwrap();
+
+        // Point the env-resolved "real" home at a sentinel so we can prove the
+        // install did NOT fall through to it.
+        let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
+        std::env::set_var("CLAUDE_TARGET_OVERRIDE", &sentinel_real_home);
+
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let code = run_hook_command(
+            &[
+                "install".to_string(),
+                "--claude-home".to_string(),
+                isolated_home.to_string_lossy().to_string(),
+            ],
+            &mut stdout,
+            &mut stderr,
+        );
+
+        // Restore env before assertions so a failure does not leak override.
+        match previous_home {
+            Some(value) => std::env::set_var("CLAUDE_TARGET_OVERRIDE", value),
+            None => std::env::remove_var("CLAUDE_TARGET_OVERRIDE"),
+        }
+
+        assert_eq!(code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
+        let isolated_settings = isolated_home.join(crate::hooks::claude::SETTINGS_FILE_NAME);
+        let sentinel_settings = sentinel_real_home.join(crate::hooks::claude::SETTINGS_FILE_NAME);
+        assert!(
+            isolated_settings.is_file(),
+            "hook install must write settings.json under --claude-home"
+        );
+        assert!(
+            !sentinel_settings.exists(),
+            "hook install must NOT write the env-resolved real home when --claude-home is given"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn hook_list_redacts_secret_env_values() {
+        // WARN A regression: hook list/show printed settings.json verbatim,
+        // leaking a live ANTHROPIC_AUTH_TOKEN in any captured output. The fix
+        // masks secret-pattern keys while leaving non-secret structure intact.
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let unique = format!("hook-list-redact-{}", std::process::id());
+        let home = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&home).unwrap();
+        let settings = home.join(crate::hooks::claude::SETTINGS_FILE_NAME);
+        std::fs::write(
+            &settings,
+            r#"{
+  "env": {
+    "ANTHROPIC_AUTH_TOKEN": "sk-secret-token-value-123456",
+    "OPENAI_API_KEY": "key-abcdefghijklmnop",
+    "ANTHROPIC_BASE_URL": "https://api.example.com"
+  },
+  "hooks": {}
+}"#,
+        )
+        .unwrap();
+
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let code = run_hook_command(
+            &[
+                "list".to_string(),
+                "--claude-home".to_string(),
+                home.to_string_lossy().to_string(),
+            ],
+            &mut stdout,
+            &mut stderr,
+        );
+        assert_eq!(code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
+        let out = String::from_utf8_lossy(&stdout);
+
+        // The raw secret values must be gone.
+        assert!(
+            !out.contains("sk-secret-token-value-123456"),
+            "auth token must be redacted, got: {out}"
+        );
+        assert!(
+            !out.contains("key-abcdefghijklmnop"),
+            "api key must be redacted, got: {out}"
+        );
+        // A recognizable prefix is kept so operators can still identify it.
+        assert!(out.contains("…(redacted)"), "masked marker missing: {out}");
+        // Non-secret values stay readable.
+        assert!(
+            out.contains("https://api.example.com"),
+            "non-secret base url must remain visible: {out}"
+        );
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn is_secret_key_classifies_known_markers() {
+        assert!(is_secret_key("ANTHROPIC_AUTH_TOKEN"));
+        assert!(is_secret_key("OPENAI_API_KEY"));
+        assert!(is_secret_key("some_secret"));
+        assert!(is_secret_key("DB_PASSWORD"));
+        assert!(is_secret_key("ACCESS_KEY"));
+        assert!(!is_secret_key("ANTHROPIC_BASE_URL"));
+        assert!(!is_secret_key("matcher"));
+        assert!(!is_secret_key("command"));
+        // A bare `*key` suffix must NOT trigger without an auth/api/access
+        // marker, so ordinary words are not falsely redacted.
+        assert!(!is_secret_key("monkey"));
+        assert!(!is_secret_key("passkey"));
+    }
+
+    #[test]
+    fn mask_secret_value_handles_multibyte_utf8_without_panicking() {
+        // Regression: slicing &value[..4] by byte offset panics if a multi-byte
+        // char straddles offset 4. Mask by chars so this can never panic.
+        let masked = mask_secret_value("sk-¥token-multibyte-value");
+        assert!(masked.ends_with("…(redacted)"), "got: {masked}");
+        assert!(
+            !masked.contains("multibyte-value"),
+            "tail must be hidden: {masked}"
+        );
+        // Short multi-byte value is fully masked, also without panicking.
+        assert_eq!(mask_secret_value("¥¥"), "****");
+    }
+
+    #[test]
+    fn redact_settings_suppresses_malformed_json_instead_of_leaking() {
+        // Regression: the parse-failure path must NOT return the raw text — a
+        // truncated/garbage settings.json could otherwise dump a live token.
+        let malformed = r#"{"env":{"ANTHROPIC_AUTH_TOKEN":"sk-leaky-secret-123"} TRAILING GARBAGE"#;
+        let out = redact_secrets_in_settings(malformed);
+        assert!(
+            !out.contains("sk-leaky-secret-123"),
+            "malformed JSON must not leak the secret, got: {out}"
+        );
+        assert!(
+            out.contains("suppressed"),
+            "expected suppression notice: {out}"
+        );
+    }
+
+    #[test]
+    fn redact_settings_masks_secret_in_nested_object() {
+        // A secret reached via a secret-named parent key, nested one level deep,
+        // must still be masked (the parent_key_is_secret carry-down path).
+        let nested = r#"{"credentials":{"value":"deep-secret-token-value"},"hooks":{}}"#;
+        // "credentials" is not itself a marker, but "token" inside the value is
+        // not how we detect it — detection is by KEY. Use a secret key wrapping
+        // an object to exercise the carry-down.
+        let by_secret_parent = r#"{"api_key":{"primary":"nested-secret-abcdef"},"hooks":{}}"#;
+        let out = redact_secrets_in_settings(by_secret_parent);
+        assert!(
+            !out.contains("nested-secret-abcdef"),
+            "secret under a secret-named parent key must be masked: {out}"
+        );
+        // A non-secret nested value stays visible.
+        let out2 = redact_secrets_in_settings(nested);
+        assert!(
+            out2.contains("deep-secret-token-value"),
+            "value under a non-secret key stays visible: {out2}"
+        );
     }
 
     #[test]
