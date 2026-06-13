@@ -38,6 +38,16 @@ use crate::runtime::{safe_path_segment, skills_directory};
 /// the bar at "roughly one distinctive token" regardless of how many skills are
 /// installed. At 0.75: a unique (df=1) or near-unique (df=2) token clears,
 /// while a borderline df=3 token needs a name-boost or a second hit to qualify.
+///
+/// NOTE (investigated during the s3 skill-loading work): lowering this floor in
+/// isolation is inert. The only band it would open is a lone df=3 token, but a
+/// df=3 token is shared by three skills, so such a prompt is a three-way tie that
+/// the `DISTINCTIVENESS_MARGIN` guard rejects anyway. To beat the margin over a
+/// sibling holding the same token the winner must already exceed the 0.75 floor.
+/// The real lever for "skills don't load as needed" is therefore the curated
+/// keyword tier (`CURATED_SKILL_TRIGGERS`), which routes the high-frequency,
+/// non-distinctive specialist vocabulary the statistical tier correctly declines
+/// to guess on — not a floor change that the margin guard makes a no-op.
 const MIN_SCORE_FACTOR: f64 = 0.75;
 
 /// The winner must beat the runner-up by this factor. Prevents firing when two
@@ -265,6 +275,178 @@ const CURATED_SKILL_TRIGGERS: &[(&str, &[&str])] = &[
             "journey map",
         ],
     ),
+    // Git workflow asks. "git" tokens recur across many skills (every closeout
+    // and branch skill mentions them), so the IDF matcher rarely finds them
+    // distinctive. These verb-anchored phrases route the actual git-operation
+    // asks to the specialist.
+    (
+        "git-expert",
+        &[
+            "merge conflict",
+            "rebase",
+            "force push",
+            "cherry-pick",
+            "git history",
+            "rewrite history",
+            "squash commits",
+            "undo the commit",
+            "revert the commit",
+            "resolve the conflict",
+            "detached head",
+            "git workflow",
+        ],
+    ),
+    // Security / compliance review asks. Security vocabulary is sprinkled across
+    // the reviewer and auditor skills, so it ties; these phrases pick the auditor
+    // for the threat-modeling / compliance class of work specifically.
+    (
+        "security-and-compliance-auditor",
+        &[
+            "threat model",
+            "threat modeling",
+            "security audit",
+            "security review",
+            "vulnerability",
+            "owasp",
+            "soc2",
+            "gdpr",
+            "pen test",
+            "penetration test",
+            "is this secure",
+            "security hardening",
+        ],
+    ),
+    // QA / test-strategy asks (distinct from TDD's moment-to-moment loop and
+    // debugging's failing-test trace): coverage strategy, e2e suites, the release
+    // ladder, flaky-suite triage at the strategy level.
+    (
+        "qa-and-automation-engineer",
+        &[
+            "test strategy",
+            "test plan",
+            "test coverage",
+            "coverage strategy",
+            "end-to-end tests",
+            "e2e tests",
+            "integration test suite",
+            "regression suite",
+            "release ladder",
+            "qa strategy",
+            "automation strategy",
+        ],
+    ),
+    // Cloud / DevOps / infra asks. Infra vocabulary spans many skills; these
+    // phrases anchor the deploy/pipeline/IaC class to the specialist.
+    (
+        "cloud-and-devops-expert",
+        &[
+            "ci/cd",
+            "ci pipeline",
+            "cd pipeline",
+            "github actions",
+            "terraform",
+            "kubernetes",
+            "helm chart",
+            "dockerfile",
+            "deploy to production",
+            "deployment pipeline",
+            "infrastructure as code",
+            "rollout strategy",
+        ],
+    ),
+    // API contract asks. "api" alone is everywhere; these phrases target the
+    // contract-design / versioning / breaking-change class.
+    (
+        "api-contract-design",
+        &[
+            "api contract",
+            "openapi",
+            "breaking change",
+            "api versioning",
+            "rest endpoint",
+            "graphql schema",
+            "grpc",
+            "json schema",
+            "pagination semantics",
+            "idempotency key",
+            "error taxonomy",
+        ],
+    ),
+    // Auth / identity build asks. Auth words recur across the security and
+    // backend skills; these phrases route the build-a-login-flow class to the
+    // identity specialist.
+    (
+        "authentication-and-identity",
+        &[
+            "oauth",
+            "oidc",
+            "openid connect",
+            "saml",
+            "single sign-on",
+            "sso flow",
+            "jwt",
+            "refresh token",
+            "session management",
+            "password hashing",
+            "passkey",
+            "webauthn",
+            "multi-factor",
+            "login flow",
+        ],
+    ),
+    // Observability / incident asks. "monitor"/"alert" are generic; these phrases
+    // target the telemetry / SLO / paging / postmortem class.
+    (
+        "observability-and-incident-response",
+        &[
+            "slo",
+            "sli",
+            "error budget",
+            "burn rate",
+            "alerting rules",
+            "paging",
+            "on-call",
+            "runbook",
+            "postmortem",
+            "incident response",
+            "distributed tracing",
+            "opentelemetry",
+        ],
+    ),
+    // Dependency / supply-chain asks. Routes the upgrade/lockfile/SBOM class.
+    (
+        "dependency-and-supply-chain",
+        &[
+            "dependency upgrade",
+            "bump the version",
+            "lockfile",
+            "transitive dependency",
+            "dependabot",
+            "renovate",
+            "sbom",
+            "supply chain",
+            "major version migration",
+            "typosquat",
+        ],
+    ),
+    // Data / ML engineering asks. Routes the pipeline / warehouse / model class.
+    (
+        "data-and-ml-engineering",
+        &[
+            "etl pipeline",
+            "elt pipeline",
+            "data pipeline",
+            "data warehouse",
+            "dbt model",
+            "airflow",
+            "feature engineering",
+            "model training",
+            "model serving",
+            "drift monitoring",
+            "batch ingestion",
+            "streaming ingestion",
+        ],
+    ),
 ];
 
 /// Pure curated-tier lookup (no IO) so the trigger phrases are unit-testable.
@@ -397,7 +579,14 @@ fn inline_brief_from_source(text: &str) -> Option<String> {
         brief.push_str(description.trim());
         brief.push_str("\n\n");
     }
-    brief.push_str(truncate_on_line_boundary(body.trim_start(), INLINE_BRIEF_MAX_BYTES).trim_end());
+    brief.push_str(
+        truncate_on_line_boundary(
+            body.trim_start(),
+            INLINE_BRIEF_MAX_BYTES,
+            "\n\n[skill brief truncated — call Skill(\"<name>\") for the full body]",
+        )
+        .trim_end(),
+    );
 
     let trimmed = brief.trim().to_string();
     if trimmed.is_empty() {
@@ -431,10 +620,17 @@ fn strip_frontmatter_block(text: &str) -> &str {
 }
 
 /// Truncate `text` to at most `max_bytes`, backing up to the last newline so the
-/// brief never ends mid-line. Falls back to a hard byte cut on a char boundary
-/// when the first line already exceeds the cap. Appends an explicit elision
-/// marker when content was dropped so the model knows the skill continues.
-fn truncate_on_line_boundary(text: &str, max_bytes: usize) -> String {
+/// result never ends mid-line. Falls back to a hard byte cut on a char boundary
+/// when the first line already exceeds the cap. Appends `marker` when content was
+/// dropped so the consumer knows it continues; returns the text unchanged (no
+/// marker) when it already fits.
+///
+/// UTF-8 safe: the only byte-position cut is at a `\n` (ASCII) found by
+/// `rposition`, and the no-newline fallback explicitly backs `end` up to a char
+/// boundary — so it never slices through a multibyte character. Shared by the
+/// per-prompt skill brief and the SessionStart workspace digest, which is why the
+/// marker is a parameter rather than hard-coded.
+pub fn truncate_on_line_boundary(text: &str, max_bytes: usize, marker: &str) -> String {
     if text.len() <= max_bytes {
         return text.to_string();
     }
@@ -453,7 +649,7 @@ fn truncate_on_line_boundary(text: &str, max_bytes: usize) -> String {
             end
         });
     let mut truncated = text[..cut].trim_end().to_string();
-    truncated.push_str("\n\n[skill brief truncated — call Skill(\"<name>\") for the full body]");
+    truncated.push_str(marker);
     truncated
 }
 
@@ -1105,5 +1301,129 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn curated_tier_routes_expanded_specialist_prompts() {
+        // s3: the curated tier was extended to cover specialist skills whose
+        // vocabulary is high-frequency across the corpus (so the IDF matcher
+        // correctly stays silent) yet which obvious phrasing clearly calls for.
+        // Each pair is a representative prompt that previously matched nothing.
+        let cases: &[(&str, &str)] = &[
+            ("help me resolve this merge conflict", "git-expert"),
+            ("I need to rebase onto main", "git-expert"),
+            (
+                "can you do a threat model for this service",
+                "security-and-compliance-auditor",
+            ),
+            (
+                "we need a security audit before launch",
+                "security-and-compliance-auditor",
+            ),
+            (
+                "what's our test strategy for this release",
+                "qa-and-automation-engineer",
+            ),
+            (
+                "set up e2e tests for checkout",
+                "qa-and-automation-engineer",
+            ),
+            ("fix the ci/cd pipeline", "cloud-and-devops-expert"),
+            (
+                "write a terraform module for the vpc",
+                "cloud-and-devops-expert",
+            ),
+            (
+                "design the openapi contract for users",
+                "api-contract-design",
+            ),
+            (
+                "is this a breaking change to the api",
+                "api-contract-design",
+            ),
+            (
+                "implement the oauth login flow",
+                "authentication-and-identity",
+            ),
+            (
+                "rotate the refresh token on reuse",
+                "authentication-and-identity",
+            ),
+            (
+                "define an slo and error budget",
+                "observability-and-incident-response",
+            ),
+            (
+                "write the runbook for this postmortem",
+                "observability-and-incident-response",
+            ),
+            (
+                "bump the version of this dependency",
+                "dependency-and-supply-chain",
+            ),
+            (
+                "generate an sbom for the release",
+                "dependency-and-supply-chain",
+            ),
+            (
+                "build the etl pipeline into the warehouse",
+                "data-and-ml-engineering",
+            ),
+            (
+                "add drift monitoring to model serving",
+                "data-and-ml-engineering",
+            ),
+        ];
+        for (prompt, expected) in cases {
+            assert_eq!(
+                curated_skill_for_prompt(prompt),
+                Some(*expected),
+                "expanded curated prompt must route correctly: {prompt:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn curated_tier_still_silent_on_ordinary_prose_after_expansion() {
+        // The expanded phrase sets must not trip on incidental prose — guard
+        // against over-broad triggers introduced by the s3 expansion.
+        for prompt in [
+            "I read the api docs this morning",
+            "the team had a great sprint",
+            "let's grab coffee and talk about the data",
+            "the security guard waved me through",
+            "we deployed a new logo to the site",
+        ] {
+            assert_eq!(
+                curated_skill_for_prompt(prompt),
+                None,
+                "ordinary prose must not trip a curated trigger: {prompt:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn statistical_matcher_keeps_generic_and_tie_silence() {
+        // Regression guard for the conservative statistical tier the curated
+        // expansion sits beside: a purely generic prompt (no distinctive token)
+        // and a two-way tie must both still return None. (During s3 we confirmed
+        // a MIN_SCORE_FACTOR loosen is inert because the margin guard rejects the
+        // df=3 tie it would open, so the floor stays at 0.75 and these guarantees
+        // are unchanged.)
+        let corpus = sample_corpus();
+        assert_eq!(
+            score_prompt_against_skills("can you help me write a small function", &corpus),
+            None,
+            "generic prompt must stay silent"
+        );
+        let tie_corpus = vec![
+            skill("alpha-tool", "shared widget handling", ""),
+            skill("beta-tool", "shared widget handling", ""),
+        ];
+        assert_eq!(
+            score_prompt_against_skills("widget", &tie_corpus),
+            None,
+            "ambiguous tie must stay silent"
+        );
     }
 }

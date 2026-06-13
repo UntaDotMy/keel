@@ -162,15 +162,27 @@ fn run_research_cache(
             ];
             let store = family_store(&home, command_group, "research-cache");
             match store.write_record(&id, &record) {
-                Ok(path) => emit_created(
-                    &label,
-                    &id,
-                    &path,
-                    &record,
-                    flags.bool_value("json"),
-                    standard_output,
-                    standard_error,
-                ),
+                Ok(path) => {
+                    // Sync the recall FTS index now so the record is searchable
+                    // on the very next `recall` without a separate trigger.
+                    // Best-effort: the file on disk is durable regardless, and a
+                    // failed sync is reconciled by the next read-path sync.
+                    if let Err(error) = crate::utility::recall::reindex_after_write(&home) {
+                        let _ = writeln!(
+                            standard_error,
+                            "{label}: recall index sync skipped ({error})"
+                        );
+                    }
+                    emit_created(
+                        &label,
+                        &id,
+                        &path,
+                        &record,
+                        flags.bool_value("json"),
+                        standard_output,
+                        standard_error,
+                    )
+                }
                 Err(error) => {
                     let _ = writeln!(standard_error, "{label}: {error}");
                     1
