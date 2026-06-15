@@ -2,6 +2,7 @@
 name: observability-and-incident-response
 description: Observability and incident-response specialist. Use for telemetry design, SLO/SLI and error-budget definition, alert and paging rules, dashboards, runbooks, and incident or postmortem review. Wires metrics, logs, and traces through OpenTelemetry, computes burn-rate paging, links alerts to runbook actions, and turns postmortems into tracked fixes.
 tools: Read, Grep, Glob, Edit, Write, Bash
+memory: project
 model: inherit
 skills:
   - observability-and-incident-response

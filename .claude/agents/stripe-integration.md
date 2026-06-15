@@ -2,6 +2,7 @@
 name: stripe-integration
 description: Stripe integration specialist. Use for Checkout, Payment Intents, Subscriptions, Webhooks, Connect, refunds, disputes, and 3DS/SCA flows. Enforces signed webhooks, idempotency keys on every mutating call, integer-minor-unit money handling, entitlement-on-succeeded discipline, and Stripe-as-source-of-truth reconciliation.
 tools: Read, Grep, Glob, Edit, Write, Bash
+memory: project
 model: inherit
 skills:
   - stripe-integration

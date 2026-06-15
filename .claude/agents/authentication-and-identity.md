@@ -2,6 +2,7 @@
 name: authentication-and-identity
 description: Authentication and identity build specialist. Use to implement login, session, token, and SSO flows — OAuth2/OIDC authorization-code with PKCE, client-credentials and device flows, SAML/SSO federation, JWT and opaque token issuance/validation/rotation, refresh-token rotation with reuse detection, MFA, passkeys/WebAuthn, argon2/bcrypt password storage, and secure cookie/CSRF handling. Complements the security auditor — that finds, this builds.
 tools: Read, Grep, Glob, Edit, Write, Bash
+memory: project
 model: inherit
 skills:
   - authentication-and-identity

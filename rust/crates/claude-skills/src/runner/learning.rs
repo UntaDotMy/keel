@@ -840,6 +840,17 @@ fn instinct_id(project: &str, signature: &str) -> String {
 }
 
 fn guidance_for(cluster: &Cluster) -> String {
+    // A recurring FAILURE (signature suffixed by observation::FAILURE_SIGNATURE_SUFFIX)
+    // is a "what reliably goes wrong here" warning, not a habit to repeat — phrase
+    // it so the SessionStart digest reads as a caution.
+    if let Some(base) = cluster
+        .signature
+        .strip_suffix(crate::runner::observation::FAILURE_SIGNATURE_SUFFIX)
+    {
+        return format!(
+            "`{base}` has failed repeatedly in this project — check the known failure mode before relying on it"
+        );
+    }
     match cluster.tool_name.as_str() {
         "Bash" => format!("Frequently runs `{}` in this project", cluster.signature),
         "Edit" | "Write" | "MultiEdit" | "NotebookEdit" => {
@@ -1452,6 +1463,37 @@ mod tests {
             let record = store.read_record(&id).expect("read").expect("exists");
             assert_eq!(field(&record, "source"), Some("observed"));
             assert_eq!(field(&record, "trigger"), Some("cargo test"));
+        });
+    }
+
+    #[test]
+    fn recurring_failure_becomes_a_caution_instinct() {
+        isolated_home("failure-instinct", |root| {
+            // A command that fails repeatedly across two sessions clusters under a
+            // distinct `… (failed)` signature and must surface as a caution, not a
+            // "frequently runs" habit — the Reflexion-style learn-from-mistakes path.
+            for index in 0..4 {
+                let session = format!("s{}", index % 2);
+                let input = json!({
+                    "tool_name": "Bash",
+                    "session_id": session,
+                    "cwd": "/work/gamma",
+                    "tool_input": { "command": "cargo test --workspace" },
+                });
+                observation::record_failure_observation(&input).expect("record failure");
+            }
+            let mut log = Vec::new();
+            let report = run_learning_cycle(root, &CycleOptions::default(), &mut log);
+            assert_eq!(report.instincts_recorded, 1);
+            let store = RecordStore::new(root, INSTINCT_GROUP);
+            let failed_sig = format!("cargo test{}", observation::FAILURE_SIGNATURE_SUFFIX);
+            let id = instinct_id("gamma", &failed_sig);
+            let record = store.read_record(&id).expect("read").expect("exists");
+            let guidance = field(&record, "guidance").unwrap_or("");
+            assert!(
+                guidance.contains("failed repeatedly"),
+                "failure instinct must read as a caution, got: {guidance}"
+            );
         });
     }
 

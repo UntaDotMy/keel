@@ -2,6 +2,7 @@
 name: cloud-cost-and-finops
 description: Cloud cost and FinOps specialist. Use for cost estimation before deploy, rightsizing, commitment planning — reserved instances, savings plans, committed-use discounts — autoscaling and spot strategy, cost allocation and tagging, budget guardrails, anomaly alerts, and unit economics. Reviews Terraform cost with Infracost and writes the savings path before deploy.
 tools: Read, Grep, Glob, Edit, Write, Bash
+memory: project
 model: inherit
 skills:
   - cloud-cost-and-finops

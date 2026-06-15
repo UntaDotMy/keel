@@ -150,6 +150,16 @@ The four pillars above govern *what* you choose to build. The rules below govern
 - When a helper lives in a private module but a second caller in another module needs it, promote its visibility (`pub`/`export`) rather than duplicating.
 - A new function "almost like" an existing one is a refactor signal, not a new function.
 
+#### Comments Must Be Short
+
+Long, chatty, multi-paragraph comments make a diff hard to review. Keep them tight:
+
+- One line is the default. A comment that explains *why* a line exists should fit on one line above it. If it needs two, the code probably needs a better name or a doc tag, not a longer comment.
+- No narrative blocks. Do not write multi-sentence essays, background stories, or "here is what happened and why we chose this" paragraphs inside the code body. State the reason in a clause and stop.
+- A doc comment on a function or type states what it does in one or two sentences, then uses structured tags (`# Errors`, `@param`, etc.) for the contract. It is not a place for design history.
+- If a reason genuinely needs more than a line or two, it belongs in the working brief, the commit body, or a linked doc — not wedged into the source. Link to it; do not inline it.
+- The test: a reviewer scanning the diff should read each comment in one glance. If a comment takes longer to read than the code it describes, cut it.
+
 #### Less Comments, Prefer Structured Doc Tags
 
 - Code is the primary documentation. If you have to spend effort to figure out what a fragment does, extract it into a function with an intention-revealing name (Fowler, [FunctionLength](https://martinfowler.com/bliki/FunctionLength.html), [CodeAsDocumentation](https://martinfowler.com/bliki/CodeAsDocumentation.html)).
