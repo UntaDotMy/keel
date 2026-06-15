@@ -2,6 +2,7 @@
 name: react-performance-audit
 description: React performance specialist. Use for runtime profiling, render-cost reduction, memoization (`React.memo`, `useMemo`, `useCallback`), bundle-size and code-splitting decisions, list virtualization, suspense and concurrent-rendering tuning, and Core Web Vitals investigations on React apps.
 tools: Read, Grep, Glob, Edit, Write, Bash
+memory: project
 model: inherit
 skills:
   - react-performance-audit

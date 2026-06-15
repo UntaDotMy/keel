@@ -51,7 +51,35 @@ pub struct Observation {
 /// `record_tool_timing`, so no second stdin read is needed. Returns `Ok(false)`
 /// when the call carries no learnable signature (an unknown tool with no input)
 /// so the caller can stay silent, and `Ok(true)` when a row was appended.
+///
+/// This is the SUCCESS path. Failed tool calls go through
+/// [`record_failure_observation`] so the learning loop can distinguish "what the
+/// user does" from "what reliably goes wrong here".
 pub fn record_observation(input: &JsonDocument) -> std::io::Result<bool> {
+    record_observation_with_outcome(input, false)
+}
+
+/// Append a FAILURE observation derived from a PostToolUseFailure hook `input`.
+///
+/// Identical capture to [`record_observation`] except the derived signature is
+/// suffixed with [`FAILURE_SIGNATURE_SUFFIX`] so a failing `cargo test` clusters
+/// separately from a passing one. A failure pattern that recurs at the trust bar
+/// becomes its own instinct and surfaces in the SessionStart digest — the
+/// Reflexion-style "learn from what goes wrong" signal, built on the same
+/// observe→instinct pipeline as success capture. Returns `Ok(false)` when the
+/// failed call carries no learnable signature.
+pub fn record_failure_observation(input: &JsonDocument) -> std::io::Result<bool> {
+    record_observation_with_outcome(input, true)
+}
+
+/// Marker appended to a signature when the observed tool call FAILED. Kept as a
+/// human-readable suffix (not a separate JSON field) so the existing
+/// signature-keyed clustering, instinct ids, and digest phrasing pick it up with
+/// no schema change — a failed `cargo test` simply has signature
+/// `cargo test (failed)` and clusters on its own.
+pub const FAILURE_SIGNATURE_SUFFIX: &str = " (failed)";
+
+fn record_observation_with_outcome(input: &JsonDocument, failed: bool) -> std::io::Result<bool> {
     let tool_name = input
         .get("tool_name")
         .and_then(JsonDocument::as_str)
@@ -60,9 +88,12 @@ pub fn record_observation(input: &JsonDocument) -> std::io::Result<bool> {
         return Ok(false);
     }
 
-    let Some((signature, detail)) = derive_signature(tool_name, input) else {
+    let Some((mut signature, detail)) = derive_signature(tool_name, input) else {
         return Ok(false);
     };
+    if failed {
+        signature.push_str(FAILURE_SIGNATURE_SUFFIX);
+    }
 
     let Some(path) = observations_path_for_today() else {
         return Ok(false);
@@ -449,6 +480,51 @@ mod tests {
             assert!(record_observation(&input).expect("record"));
             let rows = iter_recent_rows(1).expect("iter");
             assert_eq!(rows[0].signature, "edit:rs");
+        });
+    }
+
+    #[test]
+    fn record_failure_observation_suffixes_signature() {
+        with_isolated_claude_home("failure", |_root| {
+            let input = json!({
+                "tool_name": "Bash",
+                "session_id": "s1",
+                "cwd": "/repo",
+                "tool_input": { "command": "cargo test --workspace" },
+            });
+            assert!(record_failure_observation(&input).expect("record"));
+            let rows = iter_recent_rows(1).expect("iter");
+            assert_eq!(rows.len(), 1);
+            assert_eq!(
+                rows[0].signature,
+                format!("cargo test{FAILURE_SIGNATURE_SUFFIX}"),
+                "a failed call must cluster under a distinct failure signature"
+            );
+        });
+    }
+
+    #[test]
+    fn success_and_failure_of_same_command_cluster_separately() {
+        with_isolated_claude_home("split", |_root| {
+            let input = json!({
+                "tool_name": "Bash",
+                "session_id": "s1",
+                "cwd": "/repo",
+                "tool_input": { "command": "cargo test" },
+            });
+            assert!(record_observation(&input).expect("ok"));
+            assert!(record_failure_observation(&input).expect("fail"));
+            let rows = iter_recent_rows(1).expect("iter");
+            let signatures: std::collections::BTreeSet<&str> =
+                rows.iter().map(|r| r.signature.as_str()).collect();
+            assert!(
+                signatures.contains("cargo test"),
+                "success signature present"
+            );
+            assert!(
+                signatures.contains(&*format!("cargo test{FAILURE_SIGNATURE_SUFFIX}")),
+                "failure signature present and distinct"
+            );
         });
     }
 

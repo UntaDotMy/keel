@@ -2,6 +2,7 @@
 name: software-development-life-cycle
 description: End-to-end software engineering lifecycle coordinator. Use for cross-domain planning, architecture framing, sequencing multi-step delivery work, or when a request spans multiple specialist domains and needs coordinated execution from planning through release.
 tools: Read, Grep, Glob, Edit, Write, Bash
+memory: project
 model: inherit
 skills:
   - software-development-life-cycle

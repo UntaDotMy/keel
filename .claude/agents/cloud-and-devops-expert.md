@@ -2,6 +2,7 @@
 name: cloud-and-devops-expert
 description: Cloud infrastructure and DevOps specialist. Use for IaC (Terraform, Pulumi, CloudFormation), CI/CD pipeline design, Kubernetes/container orchestration, cloud architecture (AWS/GCP/Azure), and operational concerns like rollout strategy, observability, and incident response.
 tools: Read, Grep, Glob, Edit, Write, Bash
+memory: project
 model: inherit
 skills:
   - cloud-and-devops-expert

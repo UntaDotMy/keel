@@ -2,6 +2,7 @@
 name: api-contract-design
 description: API contract design specialist. Use for OpenAPI, GraphQL, gRPC, and JSON Schema work — adding or removing endpoints, evolving fields, classifying breaking changes, defining error taxonomies, idempotency rules, and pagination semantics. Routes generated-client drift and SDK migration windows.
 tools: Read, Grep, Glob, Edit, Write, Bash
+memory: project
 model: inherit
 skills:
   - api-contract-design

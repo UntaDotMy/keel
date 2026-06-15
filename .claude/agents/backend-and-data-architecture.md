@@ -2,6 +2,7 @@
 name: backend-and-data-architecture
 description: Backend and data-engineering specialist. Use for API design, microservices boundaries, database schemas, caching strategy, event-driven patterns, message queues, and data-flow architecture decisions.
 tools: Read, Grep, Glob, Edit, Write, Bash
+memory: project
 model: inherit
 skills:
   - backend-and-data-architecture

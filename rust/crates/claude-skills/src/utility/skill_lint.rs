@@ -222,6 +222,16 @@ fn lint_skill(skill_path: &Path) -> SkillReport {
         ));
     }
 
+    // Trigger language: the matcher activates far more reliably when the text
+    // states WHEN to use the skill, not just what it is. Warn when no trigger
+    // phrase is present so a passive description gets tightened.
+    if !description.trim().is_empty() && !has_trigger_language(&description, &when_to_use) {
+        report.warnings.push(
+            "description has no trigger phrase (e.g. \"Use when...\", \"Use for...\", \"Use to...\") — passive descriptions activate less reliably"
+                .to_string(),
+        );
+    }
+
     // allowed-tools: not required, but a skill that runs Bash without scoping it
     // is a common footgun — warn so it is a deliberate choice.
     if field(&fields, "allowed-tools").is_none() {
@@ -306,6 +316,38 @@ fn field(fields: &[(String, String)], key: &str) -> Option<String> {
         .iter()
         .find(|(field_key, _)| field_key == key)
         .map(|(_, value)| value.clone())
+}
+
+/// True when the trigger text names a condition for loading the skill. Passive
+/// "X is a Y specialist" descriptions activate less reliably than ones that say
+/// when to use them, so the matcher signal lives in these phrases.
+fn has_trigger_language(description: &str, when_to_use: &str) -> bool {
+    let text = format!("{description} {when_to_use}").to_ascii_lowercase();
+    const TRIGGERS: &[&str] = &[
+        "use when",
+        "use this",
+        "use for",
+        "use to",
+        "use before",
+        "use after",
+        "use on",
+        "use during",
+        "use it",
+        "use proactively",
+        "when you",
+        "when the",
+        "when a",
+        "when working",
+        "when editing",
+        "when adding",
+        "invoke when",
+        "call when",
+        "trigger when",
+        "for tasks",
+        "whenever",
+        "always",
+    ];
+    TRIGGERS.iter().any(|phrase| text.contains(phrase))
 }
 
 /// Extract `references/<file>` paths mentioned in the skill body. Matches the
@@ -447,5 +489,60 @@ mod tests {
         assert_eq!(field(&fields, "name").as_deref(), Some("x"));
         assert_eq!(field(&fields, "description").as_deref(), Some("hi"));
         assert!(field(&fields, "nested").is_none());
+    }
+
+    #[test]
+    fn passive_description_warns_about_trigger_language() {
+        let (root, skill_path) = temp_skill(
+            "passive",
+            "---\nname: passive\ndescription: A backend specialist for APIs and databases.\nallowed-tools: Read\n---\nbody\n",
+        );
+        let report = lint_skill(&skill_path);
+        assert!(
+            report.ok(),
+            "passive description is a warning, not an error"
+        );
+        assert!(
+            report.warnings.iter().any(|w| w.contains("trigger phrase")),
+            "expected a trigger-language warning, got: {:?}",
+            report.warnings
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn trigger_phrase_description_has_no_warning() {
+        let (root, skill_path) = temp_skill(
+            "active",
+            "---\nname: active\ndescription: Backend specialist. Use when designing APIs or database schemas.\nallowed-tools: Read\n---\nbody\n",
+        );
+        let report = lint_skill(&skill_path);
+        assert!(
+            !report.warnings.iter().any(|w| w.contains("trigger phrase")),
+            "a description with a trigger phrase must not warn: {:?}",
+            report.warnings
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn has_trigger_language_accepts_common_phrasings() {
+        assert!(has_trigger_language("Use before adding columns.", ""));
+        assert!(has_trigger_language(
+            "Use on every requirement-bearing prompt.",
+            ""
+        ));
+        assert!(has_trigger_language(
+            "Bootstrap skill.",
+            "Always. Auto-loaded."
+        ));
+        assert!(has_trigger_language(
+            "Specialist.",
+            "Use when editing existing code."
+        ));
+        assert!(!has_trigger_language(
+            "A backend and data specialist for APIs and databases.",
+            "Backend tasks."
+        ));
     }
 }

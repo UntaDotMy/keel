@@ -4,6 +4,7 @@ description: Data engineering and ML/MLOps specialist. Use for analytical and ma
 tools: Read, Grep, Glob, Edit, Write, Bash
 mcpServers:
   - claude_core
+memory: project
 model: inherit
 skills:
   - data-and-ml-engineering

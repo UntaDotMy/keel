@@ -3,6 +3,7 @@ name: ux-research-and-experience-strategy
 description: UX research and experience strategy specialist. Use for user research planning, journey mapping, usability evaluation, evidence-based product decisions, and recovery-path design. Validates user needs before design or implementation.
 tools: Read, Grep, Glob, Bash
 disallowedTools: Edit, Write
+memory: project
 model: sonnet
 skills:
   - ux-research-and-experience-strategy

@@ -2,6 +2,7 @@
 name: internationalization-and-localization
 description: Internationalization and localization specialist. Use for the message, locale, and translation layer — message catalog design/extraction, ICU MessageFormat with plurals/gender, locale-aware number/date/currency formatting, RTL/bidi, fallback chains, pseudo-localization, and Unicode correctness. Calls out fragment concatenation, missing plural categories, hand-formatted locale values, and undefined fallbacks before they ship.
 tools: Read, Grep, Glob, Edit, Write, Bash
+memory: project
 model: inherit
 skills:
   - internationalization-and-localization

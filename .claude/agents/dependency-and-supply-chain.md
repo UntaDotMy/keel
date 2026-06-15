@@ -2,6 +2,7 @@
 name: dependency-and-supply-chain
 description: Dependency and supply-chain action specialist. Use to perform the work — dependency upgrades, lockfile hygiene and dedup, major-version migration planning, transitive-dependency triage, Renovate/Dependabot config, pinning strategy, SBOM generation, provenance/signing, and typosquatting checks across npm/pnpm/yarn, cargo, pip/uv, and go. Complements the auditor that finds and scores — this fixes and upgrades.
 tools: Read, Grep, Glob, Edit, Write, Bash
+memory: project
 model: inherit
 skills:
   - dependency-and-supply-chain
