@@ -202,18 +202,15 @@ fn run_recall_search(
         return 1;
     }
 
-    let fts_query = match build_fts_query(trimmed_query) {
-        Some(fts_query) => fts_query,
-        None => {
+    let cascade = match cascade_recall_query(&connection, trimmed_query, limit) {
+        Ok(Some(cascade)) => cascade,
+        Ok(None) => {
             let _ = writeln!(
                 standard_error,
                 "{command_group} recall: query has no searchable terms"
             );
             return 1;
         }
-    };
-    let matches = match query_recall_index(&connection, &fts_query, limit) {
-        Ok(matches) => matches,
         Err(error_message) => {
             let _ = writeln!(
                 standard_error,
@@ -222,6 +219,8 @@ fn run_recall_search(
             return 1;
         }
     };
+    let matches = cascade.hits;
+    let stage = cascade.stage;
 
     if flag_set.bool_value("json") {
         let payload = build_search_json(trimmed_query, &claude_home, &matches);
@@ -234,7 +233,7 @@ fn run_recall_search(
 
     let _ = writeln!(
         standard_output,
-        "{command_group} recall: query={:?} matches={}",
+        "{command_group} recall: query={:?} matches={} stage={stage}",
         trimmed_query,
         matches.len()
     );
@@ -557,11 +556,11 @@ fn split_flags_and_query(arguments: &[String]) -> Result<(Vec<String>, Vec<Strin
     Ok((flag_arguments, query_arguments))
 }
 
-/// Quote each token in the user query for FTS5 and AND them together so the
-/// default behaviour is "all words must appear, in any order, with prefix
-/// match". This intentionally hides FTS5 syntax from the caller; advanced raw
-/// queries can be added later if there's demand.
-pub fn build_fts_query(raw_query: &str) -> Option<String> {
+/// Strip punctuation from each whitespace-separated word, keeping alphanumerics
+/// plus the intra-token marks `-`, `_`, `.` (so `breaking-change` and
+/// `recall-index.sqlite3` survive as single tokens). Shared by every query
+/// builder so the exact, relaxed, and fuzzy stages tokenize identically.
+fn clean_query_tokens(raw_query: &str) -> Vec<String> {
     let mut tokens: Vec<String> = Vec::new();
     for token in raw_query.split_whitespace() {
         let cleaned: String = token
@@ -569,14 +568,51 @@ pub fn build_fts_query(raw_query: &str) -> Option<String> {
             .filter(|character| character.is_alphanumeric() || matches!(character, '-' | '_' | '.'))
             .collect();
         if !cleaned.is_empty() {
-            tokens.push(format!("\"{cleaned}\"*"));
+            tokens.push(cleaned);
         }
     }
+    tokens
+}
+
+/// Quote each token in the user query for FTS5 and AND them together so the
+/// default behaviour is "all words must appear, in any order, with prefix
+/// match". This intentionally hides FTS5 syntax from the caller; advanced raw
+/// queries can be added later if there's demand.
+pub fn build_fts_query(raw_query: &str) -> Option<String> {
+    let tokens = clean_query_tokens(raw_query);
     if tokens.is_empty() {
         None
     } else {
-        Some(tokens.join(" AND "))
+        Some(
+            tokens
+                .iter()
+                .map(|token| format!("\"{token}\"*"))
+                .collect::<Vec<_>>()
+                .join(" AND "),
+        )
     }
+}
+
+/// Relaxed variant: OR the prefix-matched tokens instead of AND. Used as the
+/// second cascade stage when the strict AND query returns nothing — a
+/// multi-word query where one term is misspelled or absent ("stripe webhok
+/// signature") still finds the documents that match the remaining terms.
+///
+/// Returns `None` for a single token: with one term, `OR` and `AND` produce an
+/// identical FTS5 expression, so the relaxed stage would just repeat the exact
+/// stage. Skipping it keeps the cascade from running a redundant query.
+pub fn build_relaxed_fts_query(raw_query: &str) -> Option<String> {
+    let tokens = clean_query_tokens(raw_query);
+    if tokens.len() < 2 {
+        return None;
+    }
+    Some(
+        tokens
+            .iter()
+            .map(|token| format!("\"{token}\"*"))
+            .collect::<Vec<_>>()
+            .join(" OR "),
+    )
 }
 
 pub fn recall_database_path(claude_home: &Path) -> PathBuf {
@@ -632,6 +668,10 @@ pub struct RecallStatusSnapshot {
 #[derive(Debug, Clone)]
 pub struct RecallSearchResult {
     pub fts_query: String,
+    /// Which cascade stage produced these hits: `"exact"`, `"relaxed"`, or
+    /// `"fuzzy"`. Lets callers tell the user a fuzzy hit is a typo-tolerant
+    /// guess rather than an exact match.
+    pub stage: &'static str,
     pub hits: Vec<RecallHit>,
 }
 
@@ -652,12 +692,17 @@ pub fn search_recall_index(
     let database_path = recall_database_path(claude_home);
     let mut connection = open_recall_connection(&database_path)?;
     sync_recall_index(&mut connection, claude_home, false)?;
-    let fts_query = match build_fts_query(trimmed_query) {
-        Some(query) => query,
-        None => return Ok(None),
-    };
-    let hits = query_recall_index(&connection, &fts_query, limit)?;
-    Ok(Some(RecallSearchResult { fts_query, hits }))
+    // Run the shared 3-stage cascade (exact -> relaxed -> fuzzy) so the
+    // programmatic surface and the CLI resolve a query identically. `None`
+    // means the query had no searchable terms after stripping punctuation.
+    match cascade_recall_query(&connection, trimmed_query, limit)? {
+        Some(cascade) => Ok(Some(RecallSearchResult {
+            fts_query: cascade.query_expression,
+            stage: cascade.stage,
+            hits: cascade.hits,
+        })),
+        None => Ok(None),
+    }
 }
 
 /// Open (and if necessary create) the recall index under `claude_home`, run a
@@ -1063,6 +1108,213 @@ pub fn query_recall_index(
         });
     }
     Ok(hits)
+}
+
+/// Outcome of the 3-stage recall cascade: the expression that produced the
+/// returned hits, a stable stage label (`"exact"`, `"relaxed"`, or `"fuzzy"`),
+/// and the hits. The label lets callers tell the user *how* a result was found
+/// — an honest signal that a fuzzy hit is a typo-tolerant guess, not an exact
+/// match.
+#[derive(Debug, Clone)]
+pub struct CascadeResult {
+    pub query_expression: String,
+    pub stage: &'static str,
+    pub hits: Vec<RecallHit>,
+}
+
+/// Run the lexical recall cascade: exact (AND prefix) → relaxed (OR prefix) →
+/// fuzzy (trigram similarity). Each stage runs ONLY when the previous returned
+/// zero hits, so an ordinary exact-match query pays nothing for the fallbacks.
+/// This is the single shared entry point for both the CLI `recall` search and
+/// the programmatic `search_recall_index`, so the two surfaces can never
+/// diverge on how a query is resolved.
+///
+/// Returns `Ok(None)` when the query has no searchable terms after stripping
+/// punctuation (mirrors `build_fts_query` returning `None`). When all three
+/// stages find nothing, returns a `CascadeResult` with empty `hits` and the
+/// `"exact"` expression, preserving the caller's "matches=0" contract.
+///
+/// This is deliberately NOT semantic/vector search: it is typo- and
+/// morphology-tolerant LEXICAL matching with no embeddings, no model, and no
+/// network — keeping recall fully in-process and dependency-free.
+fn cascade_recall_query(
+    connection: &Connection,
+    raw_query: &str,
+    limit: usize,
+) -> Result<Option<CascadeResult>, String> {
+    let exact = match build_fts_query(raw_query) {
+        Some(query) => query,
+        None => return Ok(None),
+    };
+
+    let exact_hits = query_recall_index(connection, &exact, limit)?;
+    if !exact_hits.is_empty() {
+        return Ok(Some(CascadeResult {
+            query_expression: exact,
+            stage: "exact",
+            hits: exact_hits,
+        }));
+    }
+
+    // Stage 2 — relaxed OR: only meaningful for multi-term queries (a single
+    // token's OR and AND expressions are identical, so build_relaxed returns
+    // None and we skip straight to fuzzy).
+    if let Some(relaxed) = build_relaxed_fts_query(raw_query) {
+        let relaxed_hits = query_recall_index(connection, &relaxed, limit)?;
+        if !relaxed_hits.is_empty() {
+            return Ok(Some(CascadeResult {
+                query_expression: relaxed,
+                stage: "relaxed",
+                hits: relaxed_hits,
+            }));
+        }
+    }
+
+    // Stage 3 — fuzzy trigram scan: recovers single-word typos that prefix
+    // matching cannot reach (e.g. "webhok" -> "webhook").
+    let tokens = clean_query_tokens(raw_query);
+    let fuzzy_hits = query_recall_index_fuzzy(connection, &tokens, limit)?;
+    if !fuzzy_hits.is_empty() {
+        return Ok(Some(CascadeResult {
+            query_expression: format!("fuzzy({})", tokens.join(" ")),
+            stage: "fuzzy",
+            hits: fuzzy_hits,
+        }));
+    }
+
+    Ok(Some(CascadeResult {
+        query_expression: exact,
+        stage: "exact",
+        hits: Vec::new(),
+    }))
+}
+
+/// Minimum Sørensen–Dice trigram similarity for the fuzzy stage to accept a
+/// word as a match. 0.45 catches single-character typos in words of moderate
+/// length (e.g. "webhok" vs "webhook" scores ~0.67) without admitting unrelated
+/// short words (which share few trigrams). Tuned conservatively: the fuzzy
+/// stage only runs when the exact AND relaxed stages both returned nothing, so
+/// a slightly low threshold here trades a few false positives for recovering a
+/// query that would otherwise return zero hits.
+const FUZZY_MIN_SIMILARITY: f64 = 0.45;
+
+/// Lowercased set of 3-character shingles of `word`, the unit the fuzzy stage
+/// compares. A word shorter than 3 chars yields a single shingle of itself so
+/// it still participates rather than silently scoring zero.
+fn trigrams(word: &str) -> std::collections::HashSet<String> {
+    let chars: Vec<char> = word.to_lowercase().chars().collect();
+    let mut set = std::collections::HashSet::new();
+    if chars.len() < 3 {
+        if !chars.is_empty() {
+            set.insert(chars.iter().collect());
+        }
+        return set;
+    }
+    for window in chars.windows(3) {
+        set.insert(window.iter().collect());
+    }
+    set
+}
+
+/// Sørensen–Dice coefficient over trigram sets: `2|A∩B| / (|A|+|B|)`, ranging
+/// 0.0 (no shared trigrams) to 1.0 (identical). Dice normalizes for differing
+/// word lengths, so "webhook" vs "webhok" scores high while "webhook" vs "web"
+/// does not — exactly the discrimination a typo-tolerant recall needs.
+fn trigram_similarity(left: &str, right: &str) -> f64 {
+    let left_grams = trigrams(left);
+    let right_grams = trigrams(right);
+    if left_grams.is_empty() || right_grams.is_empty() {
+        return 0.0;
+    }
+    let shared = left_grams.intersection(&right_grams).count();
+    (2.0 * shared as f64) / (left_grams.len() + right_grams.len()) as f64
+}
+
+/// Split text into candidate words on the same boundary set recall tokenizes
+/// queries with (alphanumerics plus `-`, `_`, `.`), so a content word and a
+/// query token are compared on equal footing.
+fn split_words(text: &str) -> impl Iterator<Item = &str> {
+    text.split(|character: char| {
+        !character.is_alphanumeric() && !matches!(character, '-' | '_' | '.')
+    })
+    .filter(|word| !word.is_empty())
+}
+
+/// Last-resort fuzzy search: scan each indexed document and score it by the best
+/// trigram similarity between any query token and any word in the document. Only
+/// called when the exact and relaxed FTS stages both returned nothing, so the
+/// brute-force content scan runs rarely and at the single-user corpus scale the
+/// index targets. Documents whose best match clears `FUZZY_MIN_SIMILARITY` are
+/// returned ranked by descending similarity, with a snippet of the line that
+/// produced the match. This recovers single-word typos ("webhok" -> "webhook")
+/// that prefix matching cannot reach.
+fn query_recall_index_fuzzy(
+    connection: &Connection,
+    query_tokens: &[String],
+    limit: usize,
+) -> Result<Vec<RecallHit>, String> {
+    if query_tokens.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut statement = connection
+        .prepare("SELECT path, content FROM documents")
+        .map_err(|database_error| format!("prepare fuzzy scan: {database_error}"))?;
+    let row_iterator = statement
+        .query_map([], |row| {
+            let path: String = row.get(0)?;
+            let content: String = row.get(1)?;
+            Ok((path, content))
+        })
+        .map_err(|database_error| format!("fuzzy scan: {database_error}"))?;
+
+    let mut scored: Vec<(f64, RecallHit)> = Vec::new();
+    for row_result in row_iterator {
+        let (absolute_path, content) =
+            row_result.map_err(|database_error| format!("read fuzzy row: {database_error}"))?;
+        let mut best_similarity = 0.0f64;
+        let mut best_line = 0usize;
+        let mut best_word = String::new();
+        for (line_index, line) in content.lines().enumerate() {
+            for word in split_words(line) {
+                for token in query_tokens {
+                    let similarity = trigram_similarity(token, word);
+                    if similarity > best_similarity {
+                        best_similarity = similarity;
+                        best_line = line_index + 1;
+                        best_word = word.to_string();
+                    }
+                }
+            }
+        }
+        if best_similarity >= FUZZY_MIN_SIMILARITY {
+            let line_text = content
+                .lines()
+                .nth(best_line.saturating_sub(1))
+                .unwrap_or_default();
+            let snippet = format!("[~{best_word}] {}", collapse_whitespace(line_text));
+            scored.push((
+                best_similarity,
+                RecallHit {
+                    absolute_path,
+                    score: best_similarity,
+                    line: best_line,
+                    snippet,
+                },
+            ));
+        }
+    }
+    // Descending similarity: best fuzzy match first. partial_cmp can only be
+    // None for NaN, which trigram_similarity never produces (finite divides of
+    // non-negative counts), so the unwrap_or keeps the sort total without a
+    // panic path.
+    scored.sort_by(|left, right| {
+        right
+            .0
+            .partial_cmp(&left.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    scored.truncate(limit);
+    Ok(scored.into_iter().map(|(_, hit)| hit).collect())
 }
 
 /// Returns the (1-indexed) line of `content` that contains the first FTS5
@@ -1548,6 +1800,126 @@ mod tests {
             assert_eq!(exit_code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
             let rendered = String::from_utf8_lossy(&stdout);
             assert!(rendered.contains("matches=0"), "rendered: {rendered}");
+        });
+    }
+
+    #[test]
+    fn trigram_similarity_scores_typo_high_and_unrelated_low() {
+        // A single-character typo keeps most trigrams, so similarity stays high.
+        let typo = trigram_similarity("webhook", "webhok");
+        assert!(typo > FUZZY_MIN_SIMILARITY, "webhook~webhok = {typo}");
+        // Identical words are 1.0.
+        assert_eq!(trigram_similarity("postgres", "postgres"), 1.0);
+        // Unrelated words share almost no trigrams, staying below the floor so
+        // the fuzzy stage does not turn into a noise generator.
+        let unrelated = trigram_similarity("webhook", "kubernetes");
+        assert!(
+            unrelated < FUZZY_MIN_SIMILARITY,
+            "webhook~kubernetes = {unrelated}"
+        );
+        // A short query word vs a long content word: low, because the prefix
+        // overlap is small relative to the combined trigram sets.
+        let prefix_only = trigram_similarity("web", "webhook");
+        assert!(
+            prefix_only < FUZZY_MIN_SIMILARITY,
+            "web~webhook = {prefix_only}"
+        );
+    }
+
+    #[test]
+    fn relaxed_query_is_none_for_single_token_and_or_joined_for_many() {
+        // One token: OR and AND are identical, so the relaxed stage is skipped.
+        assert!(build_relaxed_fts_query("webhook").is_none());
+        // Multiple tokens are OR-joined so a partly-wrong query still matches.
+        assert_eq!(
+            build_relaxed_fts_query("stripe webhook signature").unwrap(),
+            "\"stripe\"* OR \"webhook\"* OR \"signature\"*"
+        );
+    }
+
+    #[test]
+    fn recall_recovers_single_word_typo_via_fuzzy_stage() {
+        // The whole point of finding #2: a typo'd query that the exact
+        // AND-prefix stage cannot match must still recover the document through
+        // the fuzzy trigram stage. "webhok" is not a prefix of "webhook", so
+        // the old lexical-only recall returned zero; the cascade now finds it.
+        run_with_home("claude-skills-recall-fuzzy", |claude_home| {
+            write_memory(
+                claude_home,
+                "memories/security/incident.md",
+                "# Webhook signature incident\n\nVerify the webhook signature on every event.\n",
+            );
+            let mut stdout: Vec<u8> = Vec::new();
+            let mut stderr: Vec<u8> = Vec::new();
+            let exit_code =
+                run_recall_command("memory", &["webhok".to_string()], &mut stdout, &mut stderr);
+            assert_eq!(exit_code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
+            let rendered = String::from_utf8_lossy(&stdout);
+            assert!(
+                rendered.contains("stage=fuzzy"),
+                "typo query should resolve via the fuzzy stage; rendered: {rendered}"
+            );
+            assert!(
+                rendered.contains("memories/security/incident.md"),
+                "fuzzy stage must recover the webhook document for the typo `webhok`; rendered: {rendered}"
+            );
+        });
+    }
+
+    #[test]
+    fn recall_uses_relaxed_stage_when_one_term_is_absent() {
+        // A multi-term query where one term does not appear in any document:
+        // strict AND returns nothing, but the relaxed OR stage still surfaces
+        // the documents matching the terms that DO appear.
+        run_with_home("claude-skills-recall-relaxed", |claude_home| {
+            write_memory(
+                claude_home,
+                "memories/db/migration.md",
+                "# Postgres migration\n\nLock timeout strategy for online schema changes.\n",
+            );
+            let mut stdout: Vec<u8> = Vec::new();
+            let mut stderr: Vec<u8> = Vec::new();
+            // "kubernetes" appears nowhere; "postgres" does. AND fails, OR wins.
+            let exit_code = run_recall_command(
+                "memory",
+                &["postgres".to_string(), "kubernetes".to_string()],
+                &mut stdout,
+                &mut stderr,
+            );
+            assert_eq!(exit_code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
+            let rendered = String::from_utf8_lossy(&stdout);
+            assert!(
+                rendered.contains("stage=relaxed"),
+                "partly-absent query should resolve via the relaxed stage; rendered: {rendered}"
+            );
+            assert!(
+                rendered.contains("memories/db/migration.md"),
+                "relaxed stage must surface the postgres document; rendered: {rendered}"
+            );
+        });
+    }
+
+    #[test]
+    fn recall_prefers_exact_stage_when_it_matches() {
+        // When the strict AND stage finds hits, the cascade must NOT fall
+        // through to relaxed/fuzzy — an exact match is the most precise result
+        // and the stage label must report "exact".
+        run_with_home("claude-skills-recall-exact-stage", |claude_home| {
+            write_memory(
+                claude_home,
+                "memories/api/contract.md",
+                "# API contract\n\nOpenAPI breaking change checklist.\n",
+            );
+            let mut stdout: Vec<u8> = Vec::new();
+            let mut stderr: Vec<u8> = Vec::new();
+            let exit_code =
+                run_recall_command("memory", &["openapi".to_string()], &mut stdout, &mut stderr);
+            assert_eq!(exit_code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
+            let rendered = String::from_utf8_lossy(&stdout);
+            assert!(
+                rendered.contains("stage=exact"),
+                "a clean match must resolve at the exact stage; rendered: {rendered}"
+            );
         });
     }
 

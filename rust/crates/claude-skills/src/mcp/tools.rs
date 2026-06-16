@@ -329,9 +329,13 @@ fn render_recall_payload(
     limit: usize,
     result: Option<RecallSearchResult>,
 ) -> Value {
-    let (fts_query, hits) = match result {
-        Some(search_result) => (search_result.fts_query, search_result.hits),
-        None => (String::new(), Vec::new()),
+    let (fts_query, stage, hits) = match result {
+        Some(search_result) => (
+            search_result.fts_query,
+            search_result.stage,
+            search_result.hits,
+        ),
+        None => (String::new(), "exact", Vec::new()),
     };
     let matches: Vec<Value> = hits
         .iter()
@@ -349,6 +353,7 @@ fn render_recall_payload(
     json!({
         "query": query,
         "ftsQuery": fts_query,
+        "stage": stage,
         "limit": limit,
         "claudeHome": display_path(claude_home),
         "count": matches.len(),
