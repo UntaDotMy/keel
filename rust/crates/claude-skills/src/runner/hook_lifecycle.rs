@@ -112,19 +112,19 @@ pub fn run_hook_command(
         // earlier `Unknown hook command: post-tool-use-failure` regression.
         "post-tool-use-failure" => run_hook_post_tool_use_failure(standard_error),
 
-        // Stop: per code.claude.com/docs/en/hooks Stop supports
-        // hookSpecificOutput.additionalContext (the conversation continues
-        // so Claude can act on it) and decision:"block" (prevents stopping).
-        // The handler must always exit 0 — a non-zero exit triggers a
-        // stop-loop cascade. We route through run_hook_lifecycle so the
-        // closeout context (previously crammed into PostToolBatch) can land
-        // at the natural "about to stop" moment.
-        "stop" => run_hook_lifecycle("stop", standard_output, standard_error),
-
-        // SubagentStop: per the official docs SubagentStop also supports
-        // additionalContext. Route through lifecycle so future context
-        // injection is wired. Must exit 0 for the same cascade reason.
-        "subagent-stop" => run_hook_lifecycle("subagent-stop", standard_output, standard_error),
+        // Stop and SubagentStop must never return a non-zero exit code, and must
+        // never emit hookSpecificOutput.additionalContext. Two distinct hazards:
+        //   1. A non-zero exit makes Claude Code re-run the turn, which cascades
+        //      into a stop loop.
+        //   2. additionalContext on a Stop hook means "keep going" — emitting it
+        //      unconditionally makes the agent loop forever (finish -> inject ->
+        //      forced to continue -> finish -> inject -> ...). This was the
+        //      regression shipped in PR #121 and reverted here.
+        // The closeout reminder lives on PostToolBatch instead, which fires
+        // mid-turn before the next model call and cannot loop. Short-circuit to
+        // exit 0 with no output so no downstream change can re-introduce either
+        // hazard.
+        "stop" | "subagent-stop" => 0,
 
         // Notification fires when Claude Code wants the user's attention
         // (permission prompt, idle reminder). CC 2.1.141 added the
@@ -1256,26 +1256,24 @@ fn lifecycle_additional_context(subcommand: &str) -> String {
         // falling back to a stdin-blind path that drops the nudge.
 
         // PostToolBatch fires after a batch of parallel tools resolves, just
-        // before the next model turn. We inject a reviewer-on-close reminder
-        // here as a supplementary gate — PostToolBatch fires more frequently
-        // than Stop and can catch issues mid-turn. The Stop event also
-        // injects closeout context at the natural "about to stop" moment.
+        // before the next model turn. This is the home for the closeout /
+        // reviewer-on-close reminder: it runs mid-turn before the next model
+        // call, so it can nudge without ever forcing an extra turn. Stop is
+        // deliberately NOT used for this — additionalContext on a Stop hook
+        // means "keep going", which loops (see the "stop" dispatch arm).
         "post-tool-batch" => post_tool_batch_context(),
-
-        // Stop: inject closeout context at the natural "about to stop" moment.
-        // Per code.claude.com/docs/en/hooks Stop supports additionalContext
-        // and the conversation continues so Claude can act on it.
-        "stop" => stop_context(),
 
         // SubagentStart: inject a compact iron law reminder so spawned
         // subagents start with the core operating contract.
         "subagent-start" => subagent_start_context(),
 
-        // Silenced events. SessionEnd fires at session termination and cannot
-        // inject context. SubagentStop can inject context but we keep it
-        // silent to avoid token cost on every subagent teardown. PostToolUse
-        // and PostToolUseFailure are owned by their dedicated dispatch arms.
-        "subagent-stop" | "session-end" | "post-tool-use" | "post-tool-use-failure" => {
+        // Silenced events. Stop / SubagentStop are silenced because emitting
+        // additionalContext on them forces the turn to continue (infinite
+        // loop); they are also short-circuited to exit 0 in run_hook_command,
+        // so this arm is a second line of defense. SessionEnd fires at session
+        // termination. PostToolUse and PostToolUseFailure are owned by their
+        // dedicated dispatch arms.
+        "stop" | "subagent-stop" | "session-end" | "post-tool-use" | "post-tool-use-failure" => {
             String::new()
         }
 
@@ -1913,14 +1911,6 @@ fn count_session_tool_timing_rows(claude_home: &Path, session_id: &str) -> usize
 /// rationalized past prior versions of this text.
 fn post_tool_batch_context() -> String {
     "Closeout check: if this batch changed code with logic edits, multi-file changes, public-API touches, or security-sensitive surfaces, route the diff through a reviewer pass before final closeout. Trivial work (docs-only, formatting-only, single-line typo or comment fixes, generated-only) does not need a full reviewer pass. The standard is: non-trivial code does not self-review. Note: the default-on working-brief and review gates are intentionally blunt and do not detect triviality, so any code-changing session may receive one bounded, clearable reminder — by default a non-blocking nudge that does not stop the turn; follow its message to satisfy or disable it (`…=off`), or set `…=block` if you want it to hard-stop instead. If a project-level CLAUDE.md or AGENTS.md defines stricter routing rules, those take precedence. If this reminder feels like wrapper noise, that is the rationalization the rule names — re-read the diff and decide deliberately before skipping.".to_string()
-}
-
-/// Stop closeout context — injected at the natural "about to stop" moment.
-/// Per the official docs, Stop supports additionalContext and the conversation
-/// continues so Claude can act on it. This is the right place for final
-/// closeout validation that was previously forced onto PostToolBatch.
-fn stop_context() -> String {
-    "Stop closeout: before finalizing, verify that all stated work is actually complete. If you edited code, confirm tests pass. If you have an active sprint, check `claude-skills sprint review` — do not present partial work as done. If the work was non-trivial, ensure a reviewer pass was run. State any remaining gaps honestly rather than closing with incomplete work.".to_string()
 }
 
 /// SubagentStart context — injected into every spawned subagent so it starts
@@ -7059,11 +7049,13 @@ mod tests {
 
     #[test]
     fn stop_and_subagent_stop_short_circuit_at_dispatch() {
-        // Stop and SubagentStop must always exit 0. Per the official docs both
-        // events now support hookSpecificOutput.additionalContext, so Stop emits
-        // closeout context while SubagentStop stays silent (kept silent to save
-        // token cost on every subagent teardown). A non-zero exit triggers a
-        // stop-cascade bug (Claude Code re-runs the turn on a non-zero Stop exit).
+        // Stop and SubagentStop must always exit 0 AND emit no stdout. Two
+        // distinct hazards this guards against:
+        //   1. A non-zero exit makes Claude Code re-run the turn (stop cascade).
+        //   2. Any stdout carrying hookSpecificOutput.additionalContext on a Stop
+        //      hook means "keep going" — so emitting it makes the agent loop
+        //      forever. This was the PR #121 regression; the dispatch arm now
+        //      short-circuits both events to exit 0 with no output.
         for subcommand in ["stop", "subagent-stop"] {
             let mut stdout = Vec::new();
             let mut stderr = Vec::new();
@@ -7077,25 +7069,11 @@ mod tests {
                 String::from_utf8_lossy(&stderr)
             );
 
-            if subcommand == "stop" {
-                // Stop now emits closeout context via additionalContext
-                assert!(
-                    !stdout.is_empty(),
-                    "stop must emit closeout context on stdout",
-                );
-                let stdout_str = String::from_utf8_lossy(&stdout);
-                assert!(
-                    stdout_str.contains("additionalContext"),
-                    "stop output must contain additionalContext; got: {stdout_str}",
-                );
-            } else {
-                // SubagentStop stays silent to save token cost
-                assert!(
-                    stdout.is_empty(),
-                    "{subcommand} must emit no stdout; got: {}",
-                    String::from_utf8_lossy(&stdout)
-                );
-            }
+            assert!(
+                stdout.is_empty(),
+                "{subcommand} must emit no stdout (additionalContext would loop the turn); got: {}",
+                String::from_utf8_lossy(&stdout)
+            );
         }
     }
 
