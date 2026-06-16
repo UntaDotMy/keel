@@ -219,9 +219,24 @@ pub fn run_proxy(
                 &crate::proxy::render::render_compact_result(&compact_result),
                 flag_set.string_value("max-lines").parse().unwrap_or(0),
             );
+            // Break-even guard: never emit compacted output that is larger than
+            // the raw it replaces. On small or already-terse command output the
+            // fixed wrapper overhead (the PASS/FAIL prefix + the raw-recovery
+            // footer) can exceed what compaction saves, which would INFLATE the
+            // agent's context — the opposite of this proxy's purpose. The real
+            // eval (`claude-skills eval`) measured this on small fixtures
+            // (npm install, kubectl get, a small failing test) before the guard:
+            // they grew by up to 30%. When compaction does not actually shrink
+            // the exact o200k_base token count, fall through to the neutralized
+            // raw passthrough so a command that did not benefit pays no penalty.
+            let raw_tokens =
+                TokenMeter::count_bytes(&result.stdout) + TokenMeter::count_bytes(&result.stderr);
+            let rendered_tokens = TokenMeter::count_text(&rendered);
+            let compaction_reduces_tokens = rendered_tokens < raw_tokens;
             let use_compact_output = !flag_set.bool_value("full")
                 && !flag_set.bool_value("no-compact")
-                && compact_result.compacted;
+                && compact_result.compacted
+                && compaction_reduces_tokens;
 
             meta.adapter_name = compact_result.adapter_name.clone();
             meta.compacted = use_compact_output;

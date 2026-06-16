@@ -188,6 +188,13 @@ impl Application {
             "bench" => {
                 utility::run_bench_command(command_arguments, standard_output, standard_error)
             }
+            "eval" => utility::run_eval_command(command_arguments, standard_output, standard_error),
+            "observe" => {
+                utility::run_observe_command(command_arguments, standard_output, standard_error)
+            }
+            "dispatch" => {
+                utility::run_dispatch_command(command_arguments, standard_output, standard_error)
+            }
             "flow" => self.run_flow_command(command_arguments, standard_output, standard_error),
             "telemetry" => {
                 runner::run_telemetry_command(command_arguments, standard_output, standard_error)
