@@ -4,6 +4,8 @@ description: Mobile app specialist for Android (Kotlin/Java), iOS (Swift/Obj-C),
 tools: Read, Grep, Glob, Edit, Write, Bash
 memory: project
 model: inherit
+effort: high
+color: blue
 skills:
   - mobile-development-life-cycle
 ---

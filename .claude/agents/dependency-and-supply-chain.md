@@ -4,6 +4,8 @@ description: Dependency and supply-chain action specialist. Use to perform the w
 tools: Read, Grep, Glob, Edit, Write, Bash
 memory: project
 model: inherit
+effort: medium
+color: yellow
 skills:
   - dependency-and-supply-chain
 ---

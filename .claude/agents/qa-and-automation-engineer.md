@@ -4,6 +4,8 @@ description: QA and test-automation specialist. Use proactively when tests need 
 tools: Read, Grep, Glob, Edit, Write, Bash
 memory: project
 model: inherit
+effort: high
+color: green
 skills:
   - qa-and-automation-engineer
 ---

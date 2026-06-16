@@ -4,6 +4,8 @@ description: API contract design specialist. Use for OpenAPI, GraphQL, gRPC, and
 tools: Read, Grep, Glob, Edit, Write, Bash
 memory: project
 model: inherit
+effort: medium
+color: green
 skills:
   - api-contract-design
 ---

@@ -6,6 +6,8 @@ disallowedTools: Edit, Write
 background: false
 memory: project
 model: sonnet
+effort: high
+color: red
 skills:
   - reviewer
 ---

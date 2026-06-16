@@ -4,6 +4,8 @@ description: Stripe integration specialist. Use for Checkout, Payment Intents, S
 tools: Read, Grep, Glob, Edit, Write, Bash
 memory: project
 model: inherit
+effort: high
+color: purple
 skills:
   - stripe-integration
 ---

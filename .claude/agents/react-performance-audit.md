@@ -4,6 +4,8 @@ description: React performance specialist. Use for runtime profiling, render-cos
 tools: Read, Grep, Glob, Edit, Write, Bash
 memory: project
 model: inherit
+effort: medium
+color: orange
 skills:
   - react-performance-audit
 ---

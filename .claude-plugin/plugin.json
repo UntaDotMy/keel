@@ -103,5 +103,37 @@
       "env": {},
       "alwaysLoad": true
     }
+  },
+  "userConfig": {
+    "review_strictness": {
+      "type": "string",
+      "title": "Review strictness",
+      "description": "How strict the reviewer gate should be: 'advisory' (nudge only), 'strict' (block on missing review), or 'off' (disabled)",
+      "default": "advisory"
+    },
+    "system_map_refresh_interval": {
+      "type": "number",
+      "title": "System map refresh interval",
+      "description": "Number of edit-class tool calls between automatic SYSTEM_MAP.md refreshes. Set to 0 to disable.",
+      "default": 10
+    },
+    "memory_retention_days": {
+      "type": "number",
+      "title": "Memory retention days",
+      "description": "Number of days to retain raw output and tool timing data before pruning.",
+      "default": 14,
+      "min": 1,
+      "max": 90
+    }
+  },
+  "experimental": {
+    "monitors": [
+      {
+        "name": "build-watcher",
+        "command": "cargo check --message-format short 2>&1 | tail -20",
+        "description": "Watches for Rust compilation errors after edits",
+        "when": "on-skill-invoke:claude-core:review"
+      }
+    ]
   }
 }

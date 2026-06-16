@@ -4,6 +4,8 @@ description: UI design systems and responsive interface specialist. Use for desi
 tools: Read, Grep, Glob, Edit, Write, Bash
 memory: project
 model: inherit
+effort: medium
+color: purple
 skills:
   - ui-design-systems-and-responsive-interfaces
 ---

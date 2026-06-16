@@ -5,6 +5,8 @@ tools: Read, Grep, Glob, Bash
 disallowedTools: Edit, Write
 memory: project
 model: sonnet
+effort: medium
+color: blue
 skills:
   - git-expert
 ---

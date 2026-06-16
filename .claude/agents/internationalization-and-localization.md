@@ -4,6 +4,8 @@ description: Internationalization and localization specialist. Use for the messa
 tools: Read, Grep, Glob, Edit, Write, Bash
 memory: project
 model: inherit
+effort: medium
+color: cyan
 skills:
   - internationalization-and-localization
 ---

@@ -4,6 +4,8 @@ description: Backend and data-engineering specialist. Use for API design, micros
 tools: Read, Grep, Glob, Edit, Write, Bash
 memory: project
 model: inherit
+effort: high
+color: green
 skills:
   - backend-and-data-architecture
 ---

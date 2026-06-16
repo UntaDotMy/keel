@@ -4,6 +4,8 @@ description: Cloud infrastructure and DevOps specialist. Use for IaC (Terraform,
 tools: Read, Grep, Glob, Edit, Write, Bash
 memory: project
 model: inherit
+effort: high
+color: orange
 skills:
   - cloud-and-devops-expert
 ---
