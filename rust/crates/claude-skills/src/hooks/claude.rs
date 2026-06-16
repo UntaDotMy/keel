@@ -105,16 +105,16 @@ pub const HOOK_EVENTS: &[HookEvent] = &[
         name: "PermissionRequest",
         slug: "permission-request",
         matcher: "",
-        status: "Permission lifecycle hook (reserved; dispatch is currently a no-op)",
-        supports_hook_specific_output: false,
+        status: "Auto-approving claude-skills commands",
+        supports_hook_specific_output: true,
         installs_in_settings: true,
     },
     HookEvent {
         name: "PermissionDenied",
         slug: "permission-denied",
         matcher: "",
-        status: "Permission-denied hook (reserved; dispatch is currently a no-op)",
-        supports_hook_specific_output: false,
+        status: "Signaling retry on transient permission denial",
+        supports_hook_specific_output: true,
         installs_in_settings: true,
     },
     HookEvent {
@@ -137,16 +137,21 @@ pub const HOOK_EVENTS: &[HookEvent] = &[
         name: "UserPromptExpansion",
         slug: "user-prompt-expansion",
         matcher: "",
-        status: "Prompt-expansion hook (reserved; dispatch is currently a no-op)",
+        status: "Prompt-expansion hook (reserved)",
         supports_hook_specific_output: true,
         installs_in_settings: true,
     },
     HookEvent {
+        // Per code.claude.com/docs/en/hooks Stop supports both
+        // hookSpecificOutput.additionalContext and decision:"block" (which
+        // prevents stopping and continues the conversation). The handler
+        // must still always exit 0 — a non-zero exit triggers a stop-loop
+        // cascade. Context injection and decision control are JSON-level.
         name: "Stop",
         slug: "stop",
         matcher: "",
-        status: "Closing native session state",
-        supports_hook_specific_output: false,
+        status: "Injecting closeout context",
+        supports_hook_specific_output: true,
         installs_in_settings: true,
     },
     HookEvent {
@@ -161,16 +166,18 @@ pub const HOOK_EVENTS: &[HookEvent] = &[
         name: "SubagentStart",
         slug: "subagent-start",
         matcher: "",
-        status: "Subagent-start hook (reserved; dispatch is currently a no-op)",
+        status: "Injecting iron law context into spawned subagent",
         supports_hook_specific_output: true,
         installs_in_settings: true,
     },
     HookEvent {
+        // Per code.claude.com/docs/en/hooks SubagentStop supports both
+        // hookSpecificOutput.additionalContext and decision:"block".
         name: "SubagentStop",
         slug: "subagent-stop",
         matcher: "",
         status: "Closing subagent lifecycle",
-        supports_hook_specific_output: false,
+        supports_hook_specific_output: true,
         installs_in_settings: true,
     },
     HookEvent {
@@ -217,7 +224,7 @@ pub const HOOK_EVENTS: &[HookEvent] = &[
         name: "CwdChanged",
         slug: "cwd-changed",
         matcher: "",
-        status: "Working-directory-change hook (reserved; dispatch is currently a no-op)",
+        status: "Refreshing system map for new working directory",
         supports_hook_specific_output: false,
         installs_in_settings: true,
     },
@@ -521,12 +528,16 @@ mod tests {
             "SessionStart",
             "Setup",
             "SubagentStart",
+            "SubagentStop",
             "UserPromptSubmit",
             "UserPromptExpansion",
             "PreToolUse",
             "PostToolUse",
             "PostToolUseFailure",
             "PostToolBatch",
+            "Stop",
+            "PermissionRequest",
+            "PermissionDenied",
         ];
         for event in HOOK_EVENTS {
             let expected = allowed.contains(&event.name);
@@ -548,7 +559,7 @@ mod tests {
             "post-tool-use-failure"
         );
         assert_eq!(lifecycle_subcommand("ZZZ"), "unknown");
-        assert_eq!(status_message("Stop"), "Closing native session state");
+        assert_eq!(status_message("Stop"), "Injecting closeout context");
         assert_eq!(status_message("ZZZ"), "Native lifecycle hook");
         assert_eq!(pre_tool_matcher(), "Bash");
         assert_eq!(post_tool_matcher(), "");

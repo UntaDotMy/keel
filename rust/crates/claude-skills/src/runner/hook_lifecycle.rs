@@ -112,14 +112,19 @@ pub fn run_hook_command(
         // earlier `Unknown hook command: post-tool-use-failure` regression.
         "post-tool-use-failure" => run_hook_post_tool_use_failure(standard_error),
 
-        // Stop and SubagentStop must never return a non-zero exit code. Claude Code
-        // treats a failing Stop hook as a signal to re-run the turn, which cascades
-        // into a stop loop. lifecycle_additional_context already returns empty
-        // string for these events, but routing them through run_hook_lifecycle
-        // leaves a regression surface — any future change that introduces context,
-        // mishandles serde, or panics could re-introduce the cascade. Short-circuit
-        // here so no downstream change can accidentally bring back the bug.
-        "stop" | "subagent-stop" => 0,
+        // Stop: per code.claude.com/docs/en/hooks Stop supports
+        // hookSpecificOutput.additionalContext (the conversation continues
+        // so Claude can act on it) and decision:"block" (prevents stopping).
+        // The handler must always exit 0 — a non-zero exit triggers a
+        // stop-loop cascade. We route through run_hook_lifecycle so the
+        // closeout context (previously crammed into PostToolBatch) can land
+        // at the natural "about to stop" moment.
+        "stop" => run_hook_lifecycle("stop", standard_output, standard_error),
+
+        // SubagentStop: per the official docs SubagentStop also supports
+        // additionalContext. Route through lifecycle so future context
+        // injection is wired. Must exit 0 for the same cascade reason.
+        "subagent-stop" => run_hook_lifecycle("subagent-stop", standard_output, standard_error),
 
         // Notification fires when Claude Code wants the user's attention
         // (permission prompt, idle reminder). CC 2.1.141 added the
@@ -130,6 +135,31 @@ pub fn run_hook_command(
         // top-level-only (no hookSpecificOutput), so we own dispatch here
         // rather than going through the lifecycle path.
         "notification" => run_hook_notification(standard_output),
+
+        // PermissionRequest: auto-approve claude-skills commands to reduce
+        // permission prompt friction. Reads stdin to check tool_name/tool_input.
+        "permission-request" => {
+            let mut stdin = std::io::stdin().lock();
+            run_hook_permission_request(&mut stdin, standard_output, standard_error)
+        }
+
+        // PermissionDenied: signal retry:true so the model knows it can
+        // retry the denied call. Reads stdin to check tool context.
+        "permission-denied" => {
+            let mut stdin = std::io::stdin().lock();
+            run_hook_permission_denied(&mut stdin, standard_output, standard_error)
+        }
+
+        // SubagentStart: inject iron law context into spawned subagents so
+        // they start informed instead of blind. Reads stdin for agent_type.
+        "subagent-start" => {
+            let mut stdin = std::io::stdin().lock();
+            run_hook_subagent_start(&mut stdin, standard_output, standard_error)
+        }
+
+        // CwdChanged: refresh system map when the working directory changes
+        // so the workspace pointer stays current.
+        "cwd-changed" => run_hook_cwd_changed(standard_output, standard_error),
 
         // UserPromptSubmit reads the same stdin payload Claude Code delivers to
         // PreToolUse so we can read `session_id` and apply the optional
@@ -620,6 +650,10 @@ fn run_hook_pre_tool_use(standard_output: &mut dyn Write, standard_error: &mut d
 
             },
 
+            "allowRules": [
+                format!("Bash({}:*)", rewrite.rewritten_command.split_whitespace().next().unwrap_or("claude-skills")),
+            ],
+
         }
 
     });
@@ -832,6 +866,206 @@ fn run_hook_notification(standard_output: &mut dyn Write) -> u8 {
 /// hides this row from the transcript so the bell is the only side effect.
 const NOTIFICATION_BELL_OUTPUT: &str = "{\"suppressOutput\":true,\"terminalSequence\":\"\\u0007\"}";
 
+/// PermissionRequest handler.
+///
+/// Auto-approves Bash commands that invoke `claude-skills` to reduce permission
+/// prompt friction. For all other tool calls, returns 0 (no output) to let
+/// Claude Code handle the permission dialog normally.
+fn run_hook_permission_request(
+    stdin: &mut dyn Read,
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let input_text = match read_stdin_text(stdin) {
+        Ok(text) => text,
+        Err(error) => {
+            let _ = writeln!(standard_error, "claude-skills permission-request: {error}");
+            return 0;
+        }
+    };
+
+    let input: JsonDocument = match serde_json::from_str(&input_text) {
+        Ok(value) => value,
+        Err(error) => {
+            let _ = writeln!(
+                standard_error,
+                "claude-skills permission-request: decode: {error}"
+            );
+            return 0;
+        }
+    };
+
+    let tool_name = input
+        .get("tool_name")
+        .and_then(JsonDocument::as_str)
+        .unwrap_or_default();
+
+    // Only auto-approve Bash calls to claude-skills
+    if tool_name != "Bash" {
+        return 0;
+    }
+
+    let command = input
+        .get("tool_input")
+        .and_then(|ti| ti.get("command"))
+        .and_then(JsonDocument::as_str)
+        .unwrap_or_default();
+
+    if !command.starts_with("claude-skills ") && !command.starts_with("claude-skills.exe ") {
+        return 0;
+    }
+
+    let payload = serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": "PermissionRequest",
+            "decision": {
+                "behavior": "allow",
+                "allowRules": ["Bash(claude-skills *)"],
+            },
+        }
+    });
+
+    match serde_json::to_string_pretty(&payload) {
+        Ok(rendered) => {
+            let _ = writeln!(standard_output, "{rendered}");
+            0
+        }
+        Err(error) => {
+            let _ = writeln!(
+                standard_error,
+                "claude-skills permission-request: render: {error}"
+            );
+            0
+        }
+    }
+}
+
+/// PermissionDenied handler.
+///
+/// Signals `retry: true` so the model knows it can retry the denied call.
+/// This is useful when a permission was denied transiently by the auto-mode
+/// classifier — the model gets explicit feedback that retrying is allowed.
+fn run_hook_permission_denied(
+    stdin: &mut dyn Read,
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let input_text = match read_stdin_text(stdin) {
+        Ok(text) => text,
+        Err(error) => {
+            let _ = writeln!(standard_error, "claude-skills permission-denied: {error}");
+            return 0;
+        }
+    };
+
+    let _input: JsonDocument = match serde_json::from_str(&input_text) {
+        Ok(value) => value,
+        Err(error) => {
+            let _ = writeln!(
+                standard_error,
+                "claude-skills permission-denied: decode: {error}"
+            );
+            return 0;
+        }
+    };
+
+    let payload = serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": "PermissionDenied",
+            "retry": true,
+        }
+    });
+
+    match serde_json::to_string_pretty(&payload) {
+        Ok(rendered) => {
+            let _ = writeln!(standard_output, "{rendered}");
+            0
+        }
+        Err(error) => {
+            let _ = writeln!(
+                standard_error,
+                "claude-skills permission-denied: render: {error}"
+            );
+            0
+        }
+    }
+}
+
+/// SubagentStart handler.
+///
+/// Injects a compact iron law reminder into the subagent's context at spawn
+/// time, so subagents start informed instead of blind. Uses
+/// hookSpecificOutput.additionalContext per code.claude.com/docs/en/hooks.
+fn run_hook_subagent_start(
+    stdin: &mut dyn Read,
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let input_text = match read_stdin_text(stdin) {
+        Ok(text) => text,
+        Err(error) => {
+            let _ = writeln!(standard_error, "claude-skills subagent-start: {error}");
+            return 0;
+        }
+    };
+
+    let _input: JsonDocument = match serde_json::from_str(&input_text) {
+        Ok(value) => value,
+        Err(error) => {
+            let _ = writeln!(
+                standard_error,
+                "claude-skills subagent-start: decode: {error}"
+            );
+            return 0;
+        }
+    };
+
+    let context = subagent_start_context();
+    if context.trim().is_empty() {
+        return 0;
+    }
+
+    let payload = serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": "SubagentStart",
+            "additionalContext": context,
+        },
+        "suppressOutput": true,
+    });
+
+    match serde_json::to_string_pretty(&payload) {
+        Ok(rendered) => {
+            let _ = writeln!(standard_output, "{rendered}");
+            0
+        }
+        Err(error) => {
+            let _ = writeln!(
+                standard_error,
+                "claude-skills subagent-start: render: {error}"
+            );
+            0
+        }
+    }
+}
+
+/// CwdChanged handler.
+///
+/// Refreshes the system map when the working directory changes so the
+/// workspace pointer stays current. The refresh runs through the standard
+/// lifecycle path which already handles CwdChanged via should_refresh_system_map.
+fn run_hook_cwd_changed(standard_output: &mut dyn Write, standard_error: &mut dyn Write) -> u8 {
+    run_hook_lifecycle("cwd-changed", standard_output, standard_error)
+}
+
+/// Read all of stdin into a String. Shared by handlers that parse hook JSON.
+fn read_stdin_text(stdin: &mut dyn Read) -> Result<String, String> {
+    let mut buf = String::new();
+    stdin
+        .read_to_string(&mut buf)
+        .map_err(|e| format!("unable to read hook input: {e}"))?;
+    Ok(buf)
+}
+
 fn is_edit_class_tool(tool_name: &str) -> bool {
     matches!(tool_name, "Edit" | "Write" | "MultiEdit" | "NotebookEdit")
 }
@@ -969,11 +1203,30 @@ fn run_hook_lifecycle(
 /// could have shipped silently.
 pub(crate) fn render_lifecycle_payload(event: &HookEvent, context: &str) -> JsonDocument {
     if event.supports_hook_specific_output {
+        let mut hook_output = serde_json::json!({
+            "hookEventName": event.name,
+            "additionalContext": context,
+        });
+
+        // SessionStart: add watchPaths for key files so FileChanged fires
+        // when CLAUDE.md, Cargo.toml, or settings change during the session.
+        if event.name == "SessionStart" {
+            if let Ok(cwd) = std::env::current_dir() {
+                let watch_files: Vec<String> = [
+                    "CLAUDE.md",
+                    "Cargo.toml",
+                    "package.json",
+                    ".claude/settings.json",
+                ]
+                .iter()
+                .map(|f| display_path(&cwd.join(f)))
+                .collect();
+                hook_output["watchPaths"] = serde_json::json!(watch_files);
+            }
+        }
+
         serde_json::json!({
-            "hookSpecificOutput": {
-                "hookEventName": event.name,
-                "additionalContext": context,
-            },
+            "hookSpecificOutput": hook_output,
             "suppressOutput": true,
         })
     } else {
@@ -1004,21 +1257,25 @@ fn lifecycle_additional_context(subcommand: &str) -> String {
 
         // PostToolBatch fires after a batch of parallel tools resolves, just
         // before the next model turn. We inject a reviewer-on-close reminder
-        // here because Stop/SubagentStop are documented with top-level
-        // decision fields only — they do not accept additionalContext per
-        // the official Claude Code hooks schema. The reminder is portable:
-        // it states the trivial/non-trivial split inline so it works in any
-        // host repo, and treats project-level CLAUDE.md/AGENTS.md as an
-        // optional override rather than a required citation.
+        // here as a supplementary gate — PostToolBatch fires more frequently
+        // than Stop and can catch issues mid-turn. The Stop event also
+        // injects closeout context at the natural "about to stop" moment.
         "post-tool-batch" => post_tool_batch_context(),
 
-        // Silenced events. Stop/SubagentStop/SessionEnd fire per turn end and
-        // the schema rejects context injection on them. PostToolUse and
-        // PostToolUseFailure are owned by their dedicated dispatch arms in
-        // run_hook_command (they record duration_ms via tool_timings), so the
-        // lifecycle path returns empty for them too — the explicit listing
-        // is a documentation receipt, not a behaviour change.
-        "stop" | "subagent-stop" | "session-end" | "post-tool-use" | "post-tool-use-failure" => {
+        // Stop: inject closeout context at the natural "about to stop" moment.
+        // Per code.claude.com/docs/en/hooks Stop supports additionalContext
+        // and the conversation continues so Claude can act on it.
+        "stop" => stop_context(),
+
+        // SubagentStart: inject a compact iron law reminder so spawned
+        // subagents start with the core operating contract.
+        "subagent-start" => subagent_start_context(),
+
+        // Silenced events. SessionEnd fires at session termination and cannot
+        // inject context. SubagentStop can inject context but we keep it
+        // silent to avoid token cost on every subagent teardown. PostToolUse
+        // and PostToolUseFailure are owned by their dedicated dispatch arms.
+        "subagent-stop" | "session-end" | "post-tool-use" | "post-tool-use-failure" => {
             String::new()
         }
 
@@ -1656,6 +1913,21 @@ fn count_session_tool_timing_rows(claude_home: &Path, session_id: &str) -> usize
 /// rationalized past prior versions of this text.
 fn post_tool_batch_context() -> String {
     "Closeout check: if this batch changed code with logic edits, multi-file changes, public-API touches, or security-sensitive surfaces, route the diff through a reviewer pass before final closeout. Trivial work (docs-only, formatting-only, single-line typo or comment fixes, generated-only) does not need a full reviewer pass. The standard is: non-trivial code does not self-review. Note: the default-on working-brief and review gates are intentionally blunt and do not detect triviality, so any code-changing session may receive one bounded, clearable reminder — by default a non-blocking nudge that does not stop the turn; follow its message to satisfy or disable it (`…=off`), or set `…=block` if you want it to hard-stop instead. If a project-level CLAUDE.md or AGENTS.md defines stricter routing rules, those take precedence. If this reminder feels like wrapper noise, that is the rationalization the rule names — re-read the diff and decide deliberately before skipping.".to_string()
+}
+
+/// Stop closeout context — injected at the natural "about to stop" moment.
+/// Per the official docs, Stop supports additionalContext and the conversation
+/// continues so Claude can act on it. This is the right place for final
+/// closeout validation that was previously forced onto PostToolBatch.
+fn stop_context() -> String {
+    "Stop closeout: before finalizing, verify that all stated work is actually complete. If you edited code, confirm tests pass. If you have an active sprint, check `claude-skills sprint review` — do not present partial work as done. If the work was non-trivial, ensure a reviewer pass was run. State any remaining gaps honestly rather than closing with incomplete work.".to_string()
+}
+
+/// SubagentStart context — injected into every spawned subagent so it starts
+/// with the core operating contract instead of blind. Kept compact to avoid
+/// burning subagent context on a wall of text.
+fn subagent_start_context() -> String {
+    "claude-core iron law for this subagent: (1) Read SYSTEM_MAP and the owning file before claiming behavior. (2) Understand before building — restate the request and research what is needed. (3) Invoke relevant skills if there is even a 1% chance one applies. (4) Find the root cause — trace with file:line evidence before changing anything. Trust the codebase, not your knowledge base. Native MCP tools available: system_map, recall, run_command.".to_string()
 }
 
 // ----- PostToolBatch enforcement gates (review gate + working-brief gate) -----
@@ -2677,7 +2949,10 @@ fn run_session_end_learning(standard_error: &mut dyn Write) {
 /// isolation and the call site at `run_hook_lifecycle` reads as a single
 /// predicate instead of a chain of equality checks.
 fn should_refresh_system_map(event_name: &str) -> bool {
-    matches!(event_name, "SessionStart" | "PreCompact" | "SessionEnd")
+    matches!(
+        event_name,
+        "SessionStart" | "PreCompact" | "SessionEnd" | "CwdChanged"
+    )
 }
 
 /// Idempotently re-assert the `claude_core` MCP registration at session start.
@@ -4282,21 +4557,20 @@ mod tests {
 
     #[test]
     fn silenced_high_frequency_hooks_emit_no_additional_context() {
-        // PostToolUse / Stop / SubagentStop / SessionEnd fire per tool call or
-        // turn end. They either (a) are documented with top-level decision
-        // fields only and don't accept additionalContext per the official
-        // Claude Code schema, or (b) carry a per-prompt token cost that
-        // outweighs the value of any per-call reminder. The operating
-        // contract belongs in CLAUDE.md and SessionStart, both paid at most
-        // once per session. These events must stay silent.
+        // PostToolUse / SubagentStop / SessionEnd fire per tool call or
+        // turn end and carry a per-prompt token cost that outweighs the
+        // value of any per-call reminder. The operating contract belongs
+        // in CLAUDE.md and SessionStart, both paid at most once per session.
+        // These events must stay silent.
         //
-        // UserPromptSubmit and PostToolBatch are deliberately *not* in this
-        // list: they emit short research-first / reviewer-on-close pointers,
+        // Stop is deliberately NOT in this list: per the official docs it
+        // supports additionalContext and we now use it for closeout context.
+        // SubagentStart is also NOT here: it injects iron law context.
+        // UserPromptSubmit and PostToolBatch emit their own context,
         // gated by their own dedicated tests below.
         for subcommand in [
             "post-tool-use",
             "post-tool-use-failure",
-            "stop",
             "subagent-stop",
             "session-end",
         ] {
@@ -6785,13 +7059,11 @@ mod tests {
 
     #[test]
     fn stop_and_subagent_stop_short_circuit_at_dispatch() {
-        // Stop and SubagentStop must always exit 0 with empty output, even if
-        // a future change to lifecycle_additional_context, the JSON renderer,
-        // or the rendering path itself would otherwise emit text or fail.
-        // run_hook_command short-circuits these events before they reach
-        // run_hook_lifecycle so no downstream regression can re-introduce the
-        // stop-cascade bug (Claude Code re-runs the turn on a non-zero Stop
-        // exit, which loops).
+        // Stop and SubagentStop must always exit 0. Per the official docs both
+        // events now support hookSpecificOutput.additionalContext, so Stop emits
+        // closeout context while SubagentStop stays silent (kept silent to save
+        // token cost on every subagent teardown). A non-zero exit triggers a
+        // stop-cascade bug (Claude Code re-runs the turn on a non-zero Stop exit).
         for subcommand in ["stop", "subagent-stop"] {
             let mut stdout = Vec::new();
             let mut stderr = Vec::new();
@@ -6804,16 +7076,26 @@ mod tests {
                 "{subcommand} must always exit 0; stderr: {}",
                 String::from_utf8_lossy(&stderr)
             );
-            assert!(
-                stdout.is_empty(),
-                "{subcommand} must emit no stdout; got: {}",
-                String::from_utf8_lossy(&stdout)
-            );
-            assert!(
-                stderr.is_empty(),
-                "{subcommand} must emit no stderr; got: {}",
-                String::from_utf8_lossy(&stderr)
-            );
+
+            if subcommand == "stop" {
+                // Stop now emits closeout context via additionalContext
+                assert!(
+                    !stdout.is_empty(),
+                    "stop must emit closeout context on stdout",
+                );
+                let stdout_str = String::from_utf8_lossy(&stdout);
+                assert!(
+                    stdout_str.contains("additionalContext"),
+                    "stop output must contain additionalContext; got: {stdout_str}",
+                );
+            } else {
+                // SubagentStop stays silent to save token cost
+                assert!(
+                    stdout.is_empty(),
+                    "{subcommand} must emit no stdout; got: {}",
+                    String::from_utf8_lossy(&stdout)
+                );
+            }
         }
     }
 

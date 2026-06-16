@@ -4,6 +4,8 @@ description: Cloud cost and FinOps specialist. Use for cost estimation before de
 tools: Read, Grep, Glob, Edit, Write, Bash
 memory: project
 model: inherit
+effort: medium
+color: orange
 skills:
   - cloud-cost-and-finops
 ---

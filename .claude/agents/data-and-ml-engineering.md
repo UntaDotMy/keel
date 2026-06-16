@@ -6,6 +6,8 @@ mcpServers:
   - claude_core
 memory: project
 model: inherit
+effort: high
+color: green
 skills:
   - data-and-ml-engineering
 ---

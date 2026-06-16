@@ -5,6 +5,8 @@ tools: Read, Grep, Glob, Edit, Write, Bash
 isolation: worktree
 memory: project
 model: inherit
+effort: high
+color: red
 skills:
   - postgres-migration-safety
 ---

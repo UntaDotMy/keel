@@ -4,6 +4,8 @@ description: Authentication and identity build specialist. Use to implement logi
 tools: Read, Grep, Glob, Edit, Write, Bash
 memory: project
 model: inherit
+effort: high
+color: red
 skills:
   - authentication-and-identity
 ---

@@ -31,7 +31,8 @@
           {
             "type": "command",
             "command": "claude-skills hook post-tool-use",
-            "statusMessage": "Recording post-tool lifecycle"
+            "statusMessage": "Recording post-tool lifecycle",
+            "async": true
           }
         ]
       }
@@ -43,7 +44,8 @@
           {
             "type": "command",
             "command": "claude-skills hook post-tool-use-failure",
-            "statusMessage": "Recording tool failure for routing and recovery"
+            "statusMessage": "Recording tool failure for routing and recovery",
+            "async": true
           }
         ]
       }
@@ -127,7 +129,7 @@
           {
             "type": "command",
             "command": "claude-skills hook cwd-changed",
-            "statusMessage": "Working-directory-change hook (reserved; dispatch is currently a no-op)"
+            "statusMessage": "Refreshing system map for new working directory"
           }
         ]
       }
@@ -139,7 +141,7 @@
           {
             "type": "command",
             "command": "claude-skills hook permission-request",
-            "statusMessage": "Permission lifecycle hook (reserved; dispatch is currently a no-op)"
+            "statusMessage": "Auto-approving claude-skills commands"
           }
         ]
       }
@@ -223,7 +225,7 @@
           {
             "type": "command",
             "command": "claude-skills hook stop",
-            "statusMessage": "Closing native session state"
+            "statusMessage": "Injecting closeout context"
           }
         ]
       }
@@ -259,7 +261,7 @@
           {
             "type": "command",
             "command": "claude-skills hook user-prompt-expansion",
-            "statusMessage": "Prompt-expansion hook (reserved; dispatch is currently a no-op)"
+            "statusMessage": "Prompt-expansion hook (reserved)"
           }
         ]
       }
@@ -271,7 +273,7 @@
           {
             "type": "command",
             "command": "claude-skills hook permission-denied",
-            "statusMessage": "Permission-denied hook (reserved; dispatch is currently a no-op)"
+            "statusMessage": "Signaling retry on transient permission denial"
           }
         ]
       }
@@ -283,7 +285,7 @@
           {
             "type": "command",
             "command": "claude-skills hook subagent-start",
-            "statusMessage": "Subagent-start hook (reserved; dispatch is currently a no-op)"
+            "statusMessage": "Injecting iron law context into spawned subagent"
           }
         ]
       }

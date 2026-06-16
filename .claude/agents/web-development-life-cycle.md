@@ -4,6 +4,8 @@ description: Web application specialist. Use for website and web-app development
 tools: Read, Grep, Glob, Edit, Write, Bash
 memory: project
 model: inherit
+effort: high
+color: blue
 skills:
   - web-development-life-cycle
 ---

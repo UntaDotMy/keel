@@ -4,6 +4,8 @@ description: WebSocket and realtime-systems specialist. Use for Socket.IO, raw W
 tools: Read, Grep, Glob, Edit, Write, Bash
 memory: project
 model: inherit
+effort: medium
+color: cyan
 skills:
   - websocket-realtime-design
 ---

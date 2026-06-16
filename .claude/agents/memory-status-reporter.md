@@ -3,8 +3,10 @@ name: memory-status-reporter
 description: Memory health reporter. Use when user asks for a memory status report — "what did you learn today", "show memory status", "what mistakes happened and are they resolved", "how is memory growing", "summarize what you understand about my needs". Produces human-style narrative summaries.
 tools: Read, Grep, Glob, Bash
 disallowedTools: Edit, Write
-memory: project
+memory: user
 model: sonnet
+effort: low
+color: cyan
 skills:
   - memory-status-reporter
 ---

@@ -6,6 +6,8 @@ disallowedTools: Edit, Write
 maxTurns: 30
 memory: project
 model: sonnet
+effort: medium
+color: yellow
 skills:
   - preserve-existing-flow
 ---

@@ -4,6 +4,8 @@ description: End-to-end software engineering lifecycle coordinator. Use for cros
 tools: Read, Grep, Glob, Edit, Write, Bash
 memory: project
 model: inherit
+effort: high
+color: blue
 skills:
   - software-development-life-cycle
 ---

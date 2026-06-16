@@ -4,6 +4,8 @@ description: Observability and incident-response specialist. Use for telemetry d
 tools: Read, Grep, Glob, Edit, Write, Bash
 memory: project
 model: inherit
+effort: medium
+color: orange
 skills:
   - observability-and-incident-response
 ---
