@@ -102,19 +102,25 @@ pub const HOOK_EVENTS: &[HookEvent] = &[
         installs_in_settings: true,
     },
     HookEvent {
+        // PermissionRequest uses a dedicated handler that emits
+        // hookSpecificOutput.decision (NOT additionalContext), so this flag —
+        // which gates the additionalContext render path — stays false.
         name: "PermissionRequest",
         slug: "permission-request",
         matcher: "",
         status: "Auto-approving claude-skills commands",
-        supports_hook_specific_output: true,
+        supports_hook_specific_output: false,
         installs_in_settings: true,
     },
     HookEvent {
+        // PermissionDenied uses a dedicated handler that emits
+        // hookSpecificOutput.retry (NOT additionalContext), so this flag stays
+        // false for the same reason as PermissionRequest above.
         name: "PermissionDenied",
         slug: "permission-denied",
         matcher: "",
         status: "Signaling retry on transient permission denial",
-        supports_hook_specific_output: true,
+        supports_hook_specific_output: false,
         installs_in_settings: true,
     },
     HookEvent {
@@ -142,16 +148,20 @@ pub const HOOK_EVENTS: &[HookEvent] = &[
         installs_in_settings: true,
     },
     HookEvent {
-        // Per code.claude.com/docs/en/hooks Stop supports both
-        // hookSpecificOutput.additionalContext and decision:"block" (which
-        // prevents stopping and continues the conversation). The handler
-        // must still always exit 0 — a non-zero exit triggers a stop-loop
-        // cascade. Context injection and decision control are JSON-level.
+        // Stop is deliberately silent. The schema *does* allow
+        // hookSpecificOutput.additionalContext here, but additionalContext on a
+        // Stop hook means "continue the turn" — so injecting it unconditionally
+        // makes the agent loop forever (finish -> inject -> forced to continue ->
+        // finish -> inject -> ...). The closeout reminder lives on PostToolBatch
+        // instead, which fires mid-turn before the next model call and cannot
+        // loop. The handler also always exits 0 — a non-zero Stop exit cascades
+        // into a re-run loop of its own. See the regression history in
+        // run_hook_command's "stop" arm.
         name: "Stop",
         slug: "stop",
         matcher: "",
-        status: "Injecting closeout context",
-        supports_hook_specific_output: true,
+        status: "Closing native session state",
+        supports_hook_specific_output: false,
         installs_in_settings: true,
     },
     HookEvent {
@@ -171,13 +181,15 @@ pub const HOOK_EVENTS: &[HookEvent] = &[
         installs_in_settings: true,
     },
     HookEvent {
-        // Per code.claude.com/docs/en/hooks SubagentStop supports both
-        // hookSpecificOutput.additionalContext and decision:"block".
+        // SubagentStop is deliberately silent (same reasoning as Stop): the
+        // schema allows additionalContext but emitting it would force the
+        // subagent to continue. The handler emits nothing, so the flag stays
+        // false to match the render path it actually takes.
         name: "SubagentStop",
         slug: "subagent-stop",
         matcher: "",
         status: "Closing subagent lifecycle",
-        supports_hook_specific_output: true,
+        supports_hook_specific_output: false,
         installs_in_settings: true,
     },
     HookEvent {
@@ -524,20 +536,23 @@ mod tests {
         // Per code.claude.com/docs/en/hooks, these events accept
         // `hookSpecificOutput.additionalContext`. Everything else must use
         // top-level fields (`systemMessage`, `decision`, etc).
+        //
+        // Stop and SubagentStop are deliberately EXCLUDED even though the
+        // schema permits additionalContext on them: emitting it forces the
+        // turn to continue, which loops. PermissionRequest/PermissionDenied
+        // are also excluded — they emit `decision`/`retry` via dedicated
+        // handlers, not additionalContext, so the flag (which gates the
+        // additionalContext render path) stays false.
         let allowed = [
             "SessionStart",
             "Setup",
             "SubagentStart",
-            "SubagentStop",
             "UserPromptSubmit",
             "UserPromptExpansion",
             "PreToolUse",
             "PostToolUse",
             "PostToolUseFailure",
             "PostToolBatch",
-            "Stop",
-            "PermissionRequest",
-            "PermissionDenied",
         ];
         for event in HOOK_EVENTS {
             let expected = allowed.contains(&event.name);
@@ -559,7 +574,7 @@ mod tests {
             "post-tool-use-failure"
         );
         assert_eq!(lifecycle_subcommand("ZZZ"), "unknown");
-        assert_eq!(status_message("Stop"), "Injecting closeout context");
+        assert_eq!(status_message("Stop"), "Closing native session state");
         assert_eq!(status_message("ZZZ"), "Native lifecycle hook");
         assert_eq!(pre_tool_matcher(), "Bash");
         assert_eq!(post_tool_matcher(), "");
