@@ -200,7 +200,7 @@ fn audit_hooks_doc(document: &JsonValue, findings: &mut Vec<Finding>) {
                         ),
                     });
                 }
-                if looks_like_secret_literal(command) || command_embeds_secret(command) {
+                if command_embeds_secret(command) {
                     findings.push(Finding {
                         severity: Severity::High,
                         surface: format!("hooks.json:{event_name}"),
@@ -253,6 +253,37 @@ fn audit_settings_doc(document: &JsonValue, findings: &mut Vec<Finding>) {
                         "unscoped Bash allow rule grants arbitrary command execution: {rule_text}"
                     ),
                 });
+            } else if is_dangerous_bash_subcommand(rule_text) {
+                // A SCOPED Bash rule the unscoped check above misses, but scoped
+                // to a destructive/privilege command (sudo, rm, curl, chmod, …).
+                // Auto-allowing these is as dangerous as an unscoped grant.
+                findings.push(Finding {
+                    severity: Severity::High,
+                    surface: "settings.json:permissions.allow".to_string(),
+                    message: format!(
+                        "allow rule auto-approves a dangerous command without confirmation: {rule_text}"
+                    ),
+                });
+            } else if is_wildcard_filesystem_scope(rule_text) {
+                // A scope so broad (`Read(/**)`, `Write(~/**)`) it grants the
+                // whole filesystem — effectively unscoped despite the parentheses.
+                findings.push(Finding {
+                    severity: Severity::High,
+                    surface: "settings.json:permissions.allow".to_string(),
+                    message: format!(
+                        "allow rule grants filesystem-wide access (root/home wildcard): {rule_text}"
+                    ),
+                });
+            } else if is_wildcard_webfetch(rule_text) {
+                // WebFetch/WebSearch with a wildcard domain lets the agent reach
+                // any host — an exfiltration/SSRF surface worth a deliberate scope.
+                findings.push(Finding {
+                    severity: Severity::Medium,
+                    surface: "settings.json:permissions.allow".to_string(),
+                    message: format!(
+                        "allow rule permits network fetches to ANY domain (wildcard): {rule_text}"
+                    ),
+                });
             } else if is_unscoped_sensitive_allow(rule_text) {
                 // A bare tool name with no scope grants the whole tool. For
                 // filesystem- and network-capable tools (Write/Edit/WebFetch/
@@ -267,6 +298,150 @@ fn audit_settings_doc(document: &JsonValue, findings: &mut Vec<Finding>) {
             }
         }
     }
+
+    // enableAllProjectMcpServers auto-trusts EVERY MCP server a project declares,
+    // including ones added after review — a standing supply-chain surface.
+    if document
+        .get("enableAllProjectMcpServers")
+        .and_then(JsonValue::as_bool)
+        == Some(true)
+    {
+        findings.push(Finding {
+            severity: Severity::Medium,
+            surface: "settings.json:enableAllProjectMcpServers".to_string(),
+            message:
+                "enableAllProjectMcpServers auto-trusts every project MCP server without review"
+                    .to_string(),
+        });
+    }
+
+    // apiKeyHelper runs a shell command to mint the API key on every request; a
+    // compromised or over-broad helper is a credential-exposure surface.
+    if let Some(helper) = document.get("apiKeyHelper").and_then(JsonValue::as_str) {
+        if !helper.trim().is_empty() {
+            findings.push(Finding {
+                severity: Severity::Medium,
+                surface: "settings.json:apiKeyHelper".to_string(),
+                message: "apiKeyHelper runs a command to produce credentials — review it handles secrets safely"
+                    .to_string(),
+            });
+        }
+    }
+
+    // additionalDirectories extends the agent's filesystem reach beyond the
+    // workspace. An absolute, home (`~`), or parent (`..`) path grants access
+    // outside the project tree.
+    if let Some(dirs) = document
+        .get("permissions")
+        .and_then(|permissions| permissions.get("additionalDirectories"))
+        .and_then(JsonValue::as_array)
+    {
+        for dir in dirs {
+            let dir_text = dir.as_str().unwrap_or_default();
+            if reaches_outside_workspace(dir_text) {
+                findings.push(Finding {
+                    severity: Severity::Medium,
+                    surface: "settings.json:permissions.additionalDirectories".to_string(),
+                    message: format!(
+                        "additionalDirectories grants access outside the workspace: {dir_text}"
+                    ),
+                });
+            }
+        }
+    }
+}
+
+/// A SCOPED Bash allow rule (`Bash(<cmd>:*)`) whose command is destructive or
+/// privilege-escalating. The unscoped-Bash check catches `Bash`/`Bash(*)`; this
+/// catches the subtler `Bash(sudo:*)` form that auto-approves a specific
+/// dangerous command without confirmation.
+fn is_dangerous_bash_subcommand(rule_text: &str) -> bool {
+    let Some(inner) = rule_text
+        .strip_prefix("Bash(")
+        .and_then(|rest| rest.strip_suffix(')'))
+    else {
+        return false;
+    };
+    // The command is the token before the first `:` (the arg matcher).
+    let command = inner.split(':').next().unwrap_or(inner).trim();
+    let base = command.rsplit(['/', '\\']).next().unwrap_or(command);
+    matches!(
+        base,
+        "sudo"
+            | "rm"
+            | "rmdir"
+            | "curl"
+            | "wget"
+            | "chmod"
+            | "chown"
+            | "dd"
+            | "mkfs"
+            | "eval"
+            | "sh"
+            | "bash"
+            | "zsh"
+            | "nc"
+            | "ncat"
+    )
+}
+
+/// A filesystem-tool scope (`Read(...)`, `Write(...)`, `Edit(...)`) whose pattern
+/// reaches the filesystem root or the home directory — so broad it is
+/// effectively unscoped even though it has parentheses.
+fn is_wildcard_filesystem_scope(rule_text: &str) -> bool {
+    let fs_tool = ["Read(", "Write(", "Edit("]
+        .iter()
+        .find_map(|prefix| rule_text.strip_prefix(prefix));
+    let Some(inner) = fs_tool.and_then(|rest| rest.strip_suffix(')')) else {
+        return false;
+    };
+    let pattern = inner.trim();
+    pattern == "/**"
+        || pattern == "//**"
+        || pattern == "/*"
+        || pattern.starts_with("~/") && (pattern.ends_with("**") || pattern == "~/*")
+        || pattern == "~"
+        || pattern == "**"
+        || pattern == "*"
+}
+
+/// A `WebFetch`/`WebSearch` allow rule with a wildcard (or absent) domain scope,
+/// letting the agent reach any host.
+fn is_wildcard_webfetch(rule_text: &str) -> bool {
+    if rule_text == "WebFetch" || rule_text == "WebSearch" {
+        // Bare form is handled by is_unscoped_sensitive_allow; not here.
+        return false;
+    }
+    for prefix in ["WebFetch(", "WebSearch("] {
+        if let Some(inner) = rule_text
+            .strip_prefix(prefix)
+            .and_then(|r| r.strip_suffix(')'))
+        {
+            let scope = inner.trim();
+            return scope == "*"
+                || scope == "domain:*"
+                || scope.ends_with(":*") && scope.starts_with("domain:") && scope.contains('*');
+        }
+    }
+    false
+}
+
+/// Whether a directory path reaches outside the workspace tree: absolute
+/// (`/x`, `C:\x`), home-relative (`~`), or parent-traversing (`..`).
+fn reaches_outside_workspace(dir: &str) -> bool {
+    let trimmed = dir.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    trimmed.starts_with('/')
+        || trimmed.starts_with('~')
+        || trimmed.starts_with("..")
+        || trimmed.contains("/../")
+        || trimmed.contains("\\..\\")
+        // Windows drive-absolute, e.g. C:\ or C:/
+        || (trimmed.len() >= 3
+            && trimmed.as_bytes()[1] == b':'
+            && matches!(trimmed.as_bytes()[2], b'\\' | b'/'))
 }
 
 /// A bare (unscoped) allow rule for a sensitive tool — `Write`, `Edit`,
@@ -761,5 +936,144 @@ mod tests {
                 .unwrap();
         audit_manifest_doc(&doc, &mut findings);
         assert!(findings.is_empty(), "findings: {findings:?}");
+    }
+
+    #[test]
+    fn scoped_dangerous_bash_subcommand_is_high_severity() {
+        // `Bash(sudo:*)` is SCOPED (has parens), so the unscoped-Bash rule misses
+        // it — but it auto-approves privilege escalation, which the dangerous-
+        // subcommand rule must catch as high.
+        let mut findings = Vec::new();
+        let doc: JsonValue =
+            serde_json::from_str(r#"{"permissions":{"allow":["Bash(sudo:*)"]}}"#).unwrap();
+        audit_settings_doc(&doc, &mut findings);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.severity == Severity::High && f.message.contains("dangerous command")),
+            "Bash(sudo:*) must be flagged high: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn dangerous_bash_subcommand_classifier() {
+        assert!(is_dangerous_bash_subcommand("Bash(rm:*)"));
+        assert!(is_dangerous_bash_subcommand("Bash(curl:*)"));
+        assert!(is_dangerous_bash_subcommand("Bash(/usr/bin/sudo:*)"));
+        // A benign scoped command must NOT be flagged dangerous.
+        assert!(!is_dangerous_bash_subcommand("Bash(git diff:*)"));
+        assert!(!is_dangerous_bash_subcommand("Bash(cargo test:*)"));
+        // Not a Bash rule at all.
+        assert!(!is_dangerous_bash_subcommand("Read(src/**)"));
+    }
+
+    #[test]
+    fn filesystem_wide_scope_is_high_severity() {
+        let mut findings = Vec::new();
+        let doc: JsonValue =
+            serde_json::from_str(r#"{"permissions":{"allow":["Read(/**)"]}}"#).unwrap();
+        audit_settings_doc(&doc, &mut findings);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.severity == Severity::High && f.message.contains("filesystem-wide")),
+            "Read(/**) must be flagged high: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn wildcard_filesystem_scope_classifier() {
+        assert!(is_wildcard_filesystem_scope("Read(/**)"));
+        assert!(is_wildcard_filesystem_scope("Write(~/**)"));
+        assert!(is_wildcard_filesystem_scope("Edit(**)"));
+        // A real, bounded project scope must NOT trip it.
+        assert!(!is_wildcard_filesystem_scope("Read(src/**)"));
+        assert!(!is_wildcard_filesystem_scope("Write(docs/api.md)"));
+    }
+
+    #[test]
+    fn wildcard_webfetch_is_medium_severity() {
+        let mut findings = Vec::new();
+        let doc: JsonValue =
+            serde_json::from_str(r#"{"permissions":{"allow":["WebFetch(domain:*)"]}}"#).unwrap();
+        audit_settings_doc(&doc, &mut findings);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.severity == Severity::Medium && f.message.contains("ANY domain")),
+            "WebFetch(domain:*) must be flagged medium: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn scoped_webfetch_domain_is_clean() {
+        let mut findings = Vec::new();
+        let doc: JsonValue =
+            serde_json::from_str(r#"{"permissions":{"allow":["WebFetch(domain:docs.rs)"]}}"#)
+                .unwrap();
+        audit_settings_doc(&doc, &mut findings);
+        assert!(
+            findings.is_empty(),
+            "a real domain scope is clean: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn enable_all_project_mcp_servers_is_medium_severity() {
+        let mut findings = Vec::new();
+        let doc: JsonValue =
+            serde_json::from_str(r#"{"enableAllProjectMcpServers":true}"#).unwrap();
+        audit_settings_doc(&doc, &mut findings);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.severity == Severity::Medium && f.message.contains("auto-trusts")),
+            "enableAllProjectMcpServers must be flagged: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn api_key_helper_is_flagged() {
+        let mut findings = Vec::new();
+        let doc: JsonValue =
+            serde_json::from_str(r#"{"apiKeyHelper":"/opt/mint-key.sh"}"#).unwrap();
+        audit_settings_doc(&doc, &mut findings);
+        assert!(
+            findings.iter().any(|f| f.message.contains("apiKeyHelper")),
+            "apiKeyHelper must be flagged: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn additional_directories_outside_workspace_is_medium_severity() {
+        let mut findings = Vec::new();
+        let doc: JsonValue = serde_json::from_str(
+            r#"{"permissions":{"additionalDirectories":["~/.ssh","../secrets","docs"]}}"#,
+        )
+        .unwrap();
+        audit_settings_doc(&doc, &mut findings);
+        let flagged: Vec<_> = findings
+            .iter()
+            .filter(|f| f.message.contains("outside the workspace"))
+            .collect();
+        // ~/.ssh and ../secrets reach outside; the relative "docs" does not.
+        assert_eq!(
+            flagged.len(),
+            2,
+            "two outside paths must flag: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn reaches_outside_workspace_classifier() {
+        assert!(reaches_outside_workspace("/etc/passwd"));
+        assert!(reaches_outside_workspace("~/.ssh"));
+        assert!(reaches_outside_workspace("../parent"));
+        assert!(reaches_outside_workspace("C:\\Windows"));
+        assert!(reaches_outside_workspace("sub/../../escape"));
+        // In-workspace relative paths are fine.
+        assert!(!reaches_outside_workspace("docs"));
+        assert!(!reaches_outside_workspace("src/utility"));
+        assert!(!reaches_outside_workspace(""));
     }
 }
