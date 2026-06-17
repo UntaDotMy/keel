@@ -191,6 +191,23 @@ fn audit_hooks_doc(document: &JsonValue, findings: &mut Vec<Finding>) {
                                 .to_string(),
                     });
                 }
+                if invokes_inline_interpreter(command) {
+                    findings.push(Finding {
+                        severity: Severity::High,
+                        surface: format!("hooks.json:{event_name}"),
+                        message: format!(
+                            "hook command runs an inline interpreter (arbitrary-code execution distinct from shell chaining): {command}"
+                        ),
+                    });
+                }
+                if looks_like_secret_literal(command) || command_embeds_secret(command) {
+                    findings.push(Finding {
+                        severity: Severity::High,
+                        surface: format!("hooks.json:{event_name}"),
+                        message: "hook command embeds what looks like a committed secret literal"
+                            .to_string(),
+                    });
+                }
                 if !command.is_empty() && !is_managed_claude_skills_command(command) {
                     findings.push(Finding {
                         severity: Severity::Medium,
@@ -236,18 +253,60 @@ fn audit_settings_doc(document: &JsonValue, findings: &mut Vec<Finding>) {
                         "unscoped Bash allow rule grants arbitrary command execution: {rule_text}"
                     ),
                 });
+            } else if is_unscoped_sensitive_allow(rule_text) {
+                // A bare tool name with no scope grants the whole tool. For
+                // filesystem- and network-capable tools (Write/Edit/WebFetch/
+                // mcp__*) that is a broad grant worth a deliberate decision.
+                findings.push(Finding {
+                    severity: Severity::Medium,
+                    surface: "settings.json:permissions.allow".to_string(),
+                    message: format!(
+                        "unscoped allow rule grants a sensitive tool without scoping: {rule_text}"
+                    ),
+                });
             }
         }
     }
 }
 
+/// A bare (unscoped) allow rule for a sensitive tool — `Write`, `Edit`,
+/// `WebFetch`, `WebSearch`, or any `mcp__*` — grants the entire tool with no
+/// pattern restriction. Not as severe as unscoped `Bash` (handled separately as
+/// high), but worth a medium flag so least-privilege scoping is a conscious
+/// choice. A rule containing `(` is already scoped, so it is exempt.
+fn is_unscoped_sensitive_allow(rule_text: &str) -> bool {
+    if rule_text.contains('(') {
+        return false;
+    }
+    matches!(rule_text, "Write" | "Edit" | "WebFetch" | "WebSearch")
+        || rule_text.starts_with("mcp__")
+}
+
 /// Audit a plugin manifest document for MCP server env values that look like
-/// committed secret literals.
+/// committed secret literals, and for servers wired to a remote network URL
+/// (a supply-chain/exfiltration surface the agent talks to on every session).
 fn audit_manifest_doc(document: &JsonValue, findings: &mut Vec<Finding>) {
     let Some(servers) = document.get("mcpServers").and_then(JsonValue::as_object) else {
         return;
     };
     for (server_name, server) in servers {
+        // A `url`/`baseUrl`/`endpoint` pointing at a non-local http(s) host means
+        // the agent's tool calls flow to a third party. Flag medium so an
+        // intentional remote server is a deliberate, reviewed choice rather than
+        // a silent default.
+        for url_key in ["url", "baseUrl", "endpoint"] {
+            if let Some(url) = server.get(url_key).and_then(JsonValue::as_str) {
+                if is_remote_network_url(url) {
+                    findings.push(Finding {
+                        severity: Severity::Medium,
+                        surface: format!("plugin.json:mcpServers.{server_name}.{url_key}"),
+                        message: format!(
+                            "MCP server points at a remote network URL — tool calls flow to a third party: {url}"
+                        ),
+                    });
+                }
+            }
+        }
         let Some(env) = server.get("env").and_then(JsonValue::as_object) else {
             continue;
         };
@@ -263,6 +322,23 @@ fn audit_manifest_doc(document: &JsonValue, findings: &mut Vec<Finding>) {
             }
         }
     }
+}
+
+/// Whether `url` is a remote http(s) endpoint (not localhost/loopback). A local
+/// server (`http://localhost`, `127.0.0.1`, `::1`) is the normal stdio/loopback
+/// case and is not flagged; anything else over http(s) sends data off-box.
+fn is_remote_network_url(url: &str) -> bool {
+    let lowered = url.to_ascii_lowercase();
+    if !(lowered.starts_with("http://") || lowered.starts_with("https://")) {
+        return false;
+    }
+    let host = lowered
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
+    !(host.starts_with("localhost")
+        || host.starts_with("127.0.0.1")
+        || host.starts_with("[::1]")
+        || host.starts_with("0.0.0.0"))
 }
 
 /// A committed `settings.local.json` is a hygiene smell: it is per-developer and
@@ -319,6 +395,41 @@ fn contains_shell_metacharacters(command: &str) -> bool {
         || command.contains('>')
         || command.contains('<')
         || command.chars().any(|character| character.is_control())
+}
+
+/// Whether the command runs an inline interpreter — `bash -c "..."`,
+/// `python -c "..."`, `node -e "..."`, `sh -c`, `eval ...`, `perl -e`, `ruby -e`.
+/// This is an arbitrary-code-execution class DISTINCT from shell chaining: a
+/// command can pass `contains_shell_metacharacters` (no pipes or `;`) yet still
+/// run an attacker-controlled program through `-c`/`-e`/`eval`. AgentShield-style
+/// auditors flag this separately because the payload is the interpreter's input,
+/// not the shell's. Word-boundary matched so a path like `/usr/bin/evaluate`
+/// does not trip the `eval` rule.
+fn invokes_inline_interpreter(command: &str) -> bool {
+    let lowered = command.to_ascii_lowercase();
+    // Interpreter inline-code flags: `-c <code>` (sh/bash/python/zsh) and
+    // `-e <code>` (node/perl/ruby). Match the flag as a standalone token.
+    let has_inline_flag = lowered
+        .split_whitespace()
+        .any(|token| matches!(token, "-c" | "-e" | "--command" | "--eval"));
+    let runs_interpreter = [
+        "bash ", "sh ", "zsh ", "python ", "python3 ", "node ", "perl ", "ruby ",
+    ]
+    .iter()
+    .any(|interp| lowered.starts_with(interp) || lowered.contains(&format!("/{interp}")));
+    let has_eval_builtin = lowered
+        .split(|c: char| c.is_whitespace() || c == ';' || c == '&' || c == '|')
+        .any(|token| token == "eval");
+    (has_inline_flag && runs_interpreter) || has_eval_builtin
+}
+
+/// Whether a hook COMMAND line embeds a secret literal as one of its tokens —
+/// e.g. `claude-skills hook x --token AKIA...`. Distinct from auditing MCP env
+/// values: a secret pasted onto a hook command line is committed to config and
+/// shows up in process listings. Reuses `looks_like_secret_literal` per token so
+/// the detection rule stays in one place.
+fn command_embeds_secret(command: &str) -> bool {
+    command.split_whitespace().any(looks_like_secret_literal)
 }
 
 fn looks_like_secret_literal(value: &str) -> bool {
@@ -501,6 +612,134 @@ mod tests {
             serde_json::from_str(r#"{"permissions":{"allow":["Bash(git diff:*)"]}}"#).unwrap();
         audit_settings_doc(&doc, &mut findings);
         assert!(findings.is_empty(), "findings: {findings:?}");
+    }
+
+    #[test]
+    fn inline_interpreter_hook_is_high_severity() {
+        // `python -c "..."` runs arbitrary code without any shell metacharacter,
+        // so the shell-chaining detector alone would miss it.
+        let mut findings = Vec::new();
+        let doc: JsonValue = serde_json::from_str(
+            r#"{"hooks":{"SessionStart":[{"matcher":"","hooks":[{"type":"command","command":"python -c import os"}]}]}}"#,
+        )
+        .unwrap();
+        audit_hooks_doc(&doc, &mut findings);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.severity == Severity::High && f.message.contains("inline interpreter")),
+            "inline interpreter must be flagged: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn eval_builtin_hook_is_high_severity() {
+        let mut findings = Vec::new();
+        let doc: JsonValue = serde_json::from_str(
+            r#"{"hooks":{"Stop":[{"matcher":"","hooks":[{"type":"command","command":"eval some_var"}]}]}}"#,
+        )
+        .unwrap();
+        audit_hooks_doc(&doc, &mut findings);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.severity == Severity::High && f.message.contains("inline interpreter")),
+            "eval builtin must be flagged: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn invokes_inline_interpreter_does_not_false_positive_on_paths() {
+        // A path component like `/usr/bin/evaluate` must not trip the `eval`
+        // rule, and a plain managed command must not look like an interpreter.
+        assert!(!invokes_inline_interpreter(
+            "claude-skills hook pre-tool-use"
+        ));
+        assert!(!invokes_inline_interpreter("/usr/bin/evaluate --flag"));
+        assert!(invokes_inline_interpreter("bash -c \"rm -rf /\""));
+        assert!(invokes_inline_interpreter("node -e console.log(1)"));
+    }
+
+    #[test]
+    fn secret_on_hook_command_line_is_high_severity() {
+        let mut findings = Vec::new();
+        let doc: JsonValue = serde_json::from_str(
+            r#"{"hooks":{"SessionStart":[{"matcher":"","hooks":[{"type":"command","command":"claude-skills hook x --token AKIAIOSFODNN7EXAMPLEKEY12345678"}]}]}}"#,
+        )
+        .unwrap();
+        audit_hooks_doc(&doc, &mut findings);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.severity == Severity::High && f.message.contains("secret literal")),
+            "embedded secret must be flagged: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn unscoped_sensitive_allow_is_medium_severity() {
+        let mut findings = Vec::new();
+        let doc: JsonValue =
+            serde_json::from_str(r#"{"permissions":{"allow":["Write","WebFetch"]}}"#).unwrap();
+        audit_settings_doc(&doc, &mut findings);
+        let medium: Vec<_> = findings
+            .iter()
+            .filter(|f| f.severity == Severity::Medium && f.message.contains("sensitive tool"))
+            .collect();
+        assert_eq!(
+            medium.len(),
+            2,
+            "Write and WebFetch must each flag: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn scoped_sensitive_allow_is_clean() {
+        // A scoped rule (has parentheses) made a deliberate restriction.
+        let mut findings = Vec::new();
+        let doc: JsonValue =
+            serde_json::from_str(r#"{"permissions":{"allow":["Write(src/**)","Read"]}}"#).unwrap();
+        audit_settings_doc(&doc, &mut findings);
+        assert!(
+            findings.is_empty(),
+            "scoped Write and benign Read must be clean: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn remote_mcp_url_is_medium_severity() {
+        let mut findings = Vec::new();
+        let doc: JsonValue = serde_json::from_str(
+            r#"{"mcpServers":{"remote":{"url":"https://api.example.com/mcp"}}}"#,
+        )
+        .unwrap();
+        audit_manifest_doc(&doc, &mut findings);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.severity == Severity::Medium && f.message.contains("remote network URL")),
+            "remote MCP URL must be flagged: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn localhost_mcp_url_is_clean() {
+        let mut findings = Vec::new();
+        let doc: JsonValue =
+            serde_json::from_str(r#"{"mcpServers":{"local":{"url":"http://localhost:8080/mcp"}}}"#)
+                .unwrap();
+        audit_manifest_doc(&doc, &mut findings);
+        assert!(findings.is_empty(), "localhost is not remote: {findings:?}");
+    }
+
+    #[test]
+    fn is_remote_network_url_classifies_hosts() {
+        assert!(is_remote_network_url("https://evil.example.com"));
+        assert!(is_remote_network_url("http://10.0.0.5:9000"));
+        assert!(!is_remote_network_url("http://localhost:3000"));
+        assert!(!is_remote_network_url("http://127.0.0.1"));
+        assert!(!is_remote_network_url("stdio://local"));
+        assert!(!is_remote_network_url(""));
     }
 
     #[test]

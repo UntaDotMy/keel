@@ -1051,16 +1051,38 @@ fn collect_indexable_files(directory: &Path, out: &mut Vec<DocumentRecord>) -> R
 #[derive(Debug, Clone)]
 pub struct RecallHit {
     pub absolute_path: String,
+    /// Relevance score in `0.0..=1.0`, higher = more relevant. This is the
+    /// re-ranked relevance (term coverage + proximity), NOT the raw SQLite
+    /// `bm25()` value (which is negative and term-frequency-only). See
+    /// [`rerank_by_relevance`]: the cascade fetches a wider BM25 candidate set
+    /// and re-scores it so a document mentioning *all* query terms near each
+    /// other outranks one mentioning a single term many times — the lexical
+    /// analog of the topical cohesion embeddings provide, with no model.
     pub score: f64,
     pub line: usize,
     pub snippet: String,
 }
+
+/// How many BM25 candidates to pull per requested hit before the relevance
+/// re-rank trims back to `limit`. BM25 alone is term-frequency ranking, so the
+/// best coverage/proximity match can sit a few rows below a term-spam match;
+/// over-fetching gives the re-ranker the candidates it needs to promote. Capped
+/// in [`query_recall_index`] so a huge `limit` cannot scan the whole table.
+const RERANK_CANDIDATE_MULTIPLIER: usize = 4;
+const RERANK_CANDIDATE_CAP: usize = 200;
 
 pub fn query_recall_index(
     connection: &Connection,
     fts_query: &str,
     limit: usize,
 ) -> Result<Vec<RecallHit>, String> {
+    let raw_query_terms = fts_terms(fts_query);
+    // Over-fetch BM25 candidates so the relevance re-rank has room to promote a
+    // high-coverage match that BM25 alone ranked below a term-frequency match.
+    let candidate_limit = limit
+        .saturating_mul(RERANK_CANDIDATE_MULTIPLIER)
+        .min(RERANK_CANDIDATE_CAP)
+        .max(limit);
     let mut prepared_statement = connection
         .prepare(
             "SELECT \
@@ -1083,31 +1105,166 @@ pub fn query_recall_index(
                 close_marker,
                 SNIPPET_TOKENS,
                 fts_query,
-                limit as i64
+                candidate_limit as i64
             ],
             |row| {
                 let absolute_path: String = row.get(0)?;
-                let score: f64 = row.get(1)?;
+                // bm25() is read only to force SQLite to apply the ranking
+                // ORDER BY; the relevance re-rank uses the row's POSITION
+                // (bm25_rank) as the tie-break, not the raw score, so the value
+                // itself is intentionally discarded here.
+                let _bm25: f64 = row.get(1)?;
                 let snippet_text: String = row.get(2)?;
                 let content: String = row.get(3)?;
-                Ok((absolute_path, score, snippet_text, content))
+                Ok((absolute_path, snippet_text, content))
             },
         )
         .map_err(|database_error| format!("query: {database_error}"))?;
-    let mut hits: Vec<RecallHit> = Vec::new();
-    for row_result in query_iterator {
-        let (absolute_path, score, snippet_text, content) =
+    let mut candidates: Vec<RerankCandidate> = Vec::new();
+    for (rank, row_result) in query_iterator.enumerate() {
+        let (absolute_path, snippet_text, content) =
             row_result.map_err(|database_error| format!("read result row: {database_error}"))?;
         let line = locate_first_match_line(&content, &snippet_text);
         let display_snippet = render_snippet_for_display(&snippet_text);
-        hits.push(RecallHit {
-            absolute_path,
-            score,
-            line,
-            snippet: display_snippet,
+        candidates.push(RerankCandidate {
+            hit: RecallHit {
+                absolute_path,
+                score: 0.0,
+                line,
+                snippet: display_snippet,
+            },
+            content,
+            bm25_rank: rank,
         });
     }
-    Ok(hits)
+    Ok(rerank_by_relevance(candidates, &raw_query_terms, limit))
+}
+
+/// A BM25 candidate carried through the relevance re-rank. `content` is the full
+/// document text (used to measure term coverage and proximity); `bm25_rank` is
+/// the candidate's position in the BM25 ordering, used as a deterministic
+/// tie-breaker so equal-relevance hits keep SQLite's stable order.
+struct RerankCandidate {
+    hit: RecallHit,
+    content: String,
+    bm25_rank: usize,
+}
+
+/// Extract the bare terms from an FTS5 query expression like
+/// `"webhook"* AND "retry"*` → `["webhook", "retry"]`. The cascade builds these
+/// expressions with [`build_fts_query`]/[`build_relaxed_fts_query`], so the
+/// terms are always quoted-and-starred tokens joined by `AND`/`OR`; stripping
+/// the quotes and the trailing `*` recovers the user's words for scoring.
+fn fts_terms(fts_query: &str) -> Vec<String> {
+    let mut terms = Vec::new();
+    for raw in fts_query.split_whitespace() {
+        if raw == "AND" || raw == "OR" {
+            continue;
+        }
+        let term: String = raw
+            .trim_matches(|c| c == '"' || c == '*')
+            .to_ascii_lowercase();
+        if !term.is_empty() && !terms.contains(&term) {
+            terms.push(term);
+        }
+    }
+    terms
+}
+
+/// Re-rank BM25 candidates by lexical relevance and trim to `limit`. The score
+/// combines two signals BM25 ignores:
+///   - **coverage**: the fraction of distinct query terms that appear in the
+///     document — a doc matching all the query's words is topically on-point,
+///     which is the signal a semantic search would surface.
+///   - **proximity**: how tightly the matched terms cluster (best span across
+///     the matched terms in one line), so "webhook retry" matching adjacent
+///     words beats the two words appearing paragraphs apart.
+///
+/// Coverage dominates (weight 0.7) over proximity (0.3) because topical match
+/// matters more than adjacency. The result is normalized to `0.0..=1.0` and the
+/// BM25 rank breaks ties, keeping the ordering deterministic. A single-term
+/// query has coverage 1.0 for every candidate, so the re-rank degenerates
+/// gracefully to BM25 order (proximity is also 1.0), i.e. no behavior change.
+fn rerank_by_relevance(
+    mut candidates: Vec<RerankCandidate>,
+    query_terms: &[String],
+    limit: usize,
+) -> Vec<RecallHit> {
+    if query_terms.is_empty() {
+        candidates.truncate(limit);
+        return candidates.into_iter().map(|c| c.hit).collect();
+    }
+    let mut scored: Vec<(f64, usize, RecallHit)> = candidates
+        .drain(..)
+        .map(|candidate| {
+            let relevance = relevance_score(&candidate.content, query_terms);
+            (relevance, candidate.bm25_rank, candidate.hit)
+        })
+        .collect();
+    // Sort by descending relevance, then ascending BM25 rank as a stable
+    // tie-break. partial_cmp is only None for NaN, which relevance_score never
+    // produces (bounded sums of finite ratios), so unwrap_or keeps it total.
+    scored.sort_by(|left, right| {
+        right
+            .0
+            .partial_cmp(&left.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(left.1.cmp(&right.1))
+    });
+    scored.truncate(limit);
+    scored
+        .into_iter()
+        .map(|(relevance, _, mut hit)| {
+            hit.score = relevance;
+            hit
+        })
+        .collect()
+}
+
+/// Compute the `0.0..=1.0` relevance of `content` against `query_terms` as a
+/// weighted blend of term coverage and term proximity. Lowercased substring
+/// matching mirrors how the FTS prefix query matched in the first place (these
+/// candidates already matched the FTS query, so every term that *should* match
+/// does); the scoring just measures how *well*.
+fn relevance_score(content: &str, query_terms: &[String]) -> f64 {
+    let lowered = content.to_ascii_lowercase();
+    let matched: Vec<&String> = query_terms
+        .iter()
+        .filter(|term| lowered.contains(term.as_str()))
+        .collect();
+    if matched.is_empty() {
+        return 0.0;
+    }
+    let coverage = matched.len() as f64 / query_terms.len() as f64;
+    let proximity = best_line_proximity(&lowered, &matched);
+    0.7 * coverage + 0.3 * proximity
+}
+
+/// Proximity in `0.0..=1.0`: the best single line's term density, where a line
+/// containing more of the matched terms scores higher. For a single matched
+/// term this is 1.0 (it is fully "clustered" with itself). Measuring per line
+/// is a cheap, deterministic proxy for adjacency that needs no tokenizer-offset
+/// bookkeeping — a line mentioning both "webhook" and "retry" is tighter than
+/// the terms living in separate paragraphs.
+fn best_line_proximity(lowered_content: &str, matched_terms: &[&String]) -> f64 {
+    if matched_terms.len() < 2 {
+        return 1.0;
+    }
+    let mut best = 0.0f64;
+    for line in lowered_content.lines() {
+        let here = matched_terms
+            .iter()
+            .filter(|term| line.contains(term.as_str()))
+            .count();
+        let density = here as f64 / matched_terms.len() as f64;
+        if density > best {
+            best = density;
+        }
+        if best >= 1.0 {
+            break;
+        }
+    }
+    best
 }
 
 /// Outcome of the 3-stage recall cascade: the expression that produced the
@@ -1824,6 +1981,162 @@ mod tests {
             prefix_only < FUZZY_MIN_SIMILARITY,
             "web~webhook = {prefix_only}"
         );
+    }
+
+    #[test]
+    fn fts_terms_strips_quotes_stars_and_operators() {
+        assert_eq!(
+            fts_terms("\"webhook\"* AND \"retry\"*"),
+            vec!["webhook".to_string(), "retry".to_string()]
+        );
+        assert_eq!(
+            fts_terms("\"stripe\"* OR \"webhook\"*"),
+            vec!["stripe".to_string(), "webhook".to_string()]
+        );
+        // Duplicate terms collapse so coverage is over DISTINCT query words.
+        assert_eq!(fts_terms("\"x\"* AND \"x\"*"), vec!["x".to_string()]);
+    }
+
+    #[test]
+    fn relevance_prefers_full_coverage_over_term_spam() {
+        let terms = ["webhook".to_string(), "retry".to_string()];
+        // Document A repeats one term many times but never mentions the other.
+        let spam = "webhook webhook webhook webhook webhook handler config";
+        // Document B mentions both terms once, on the same line.
+        let covered = "the webhook retry policy backs off exponentially";
+        let spam_score = relevance_score(spam, &terms);
+        let covered_score = relevance_score(covered, &terms);
+        assert!(
+            covered_score > spam_score,
+            "full coverage ({covered_score}) must outrank term spam ({spam_score})"
+        );
+    }
+
+    #[test]
+    fn relevance_is_one_when_single_term_fully_present() {
+        // A single-term query degenerates to coverage 1.0 + proximity 1.0, so the
+        // re-rank is a no-op vs BM25 order — exactly the graceful degradation we
+        // want for the common one-word recall.
+        let terms = vec!["webhook".to_string()];
+        assert_eq!(relevance_score("a webhook arrives", &terms), 1.0);
+    }
+
+    #[test]
+    fn proximity_rewards_terms_on_the_same_line() {
+        let terms = ["webhook".to_string(), "retry".to_string()];
+        let near = "webhook retry happens here\nunrelated line\nanother";
+        let far = "webhook is mentioned here\n\n\nretry is way down here";
+        let matched_near: Vec<&String> = terms.iter().collect();
+        let near_prox = best_line_proximity(&near.to_ascii_lowercase(), &matched_near);
+        let far_prox = best_line_proximity(&far.to_ascii_lowercase(), &matched_near);
+        assert!(
+            near_prox > far_prox,
+            "same-line proximity ({near_prox}) must beat split-line ({far_prox})"
+        );
+        assert_eq!(
+            near_prox, 1.0,
+            "both terms on one line is maximal proximity"
+        );
+    }
+
+    #[test]
+    fn rerank_promotes_high_coverage_candidate_above_bm25_order() {
+        // Simulate BM25 returning a term-spam doc FIRST (rank 0) and a
+        // full-coverage doc SECOND (rank 1). The re-rank must promote the
+        // full-coverage doc to the top.
+        let terms = ["webhook".to_string(), "retry".to_string()];
+        let candidates = vec![
+            RerankCandidate {
+                hit: RecallHit {
+                    absolute_path: "spam.md".to_string(),
+                    score: 0.0,
+                    line: 1,
+                    snippet: String::new(),
+                },
+                content: "webhook webhook webhook webhook config".to_string(),
+                bm25_rank: 0,
+            },
+            RerankCandidate {
+                hit: RecallHit {
+                    absolute_path: "covered.md".to_string(),
+                    score: 0.0,
+                    line: 1,
+                    snippet: String::new(),
+                },
+                content: "webhook retry policy".to_string(),
+                bm25_rank: 1,
+            },
+        ];
+        let ranked = rerank_by_relevance(candidates, &terms, 10);
+        assert_eq!(
+            ranked[0].absolute_path, "covered.md",
+            "the doc covering both terms must rank first"
+        );
+        assert!(ranked[0].score > ranked[1].score);
+    }
+
+    #[test]
+    fn rerank_keeps_bm25_order_on_equal_relevance() {
+        // Two docs with identical relevance must preserve SQLite's BM25 order via
+        // the rank tie-break, so results stay deterministic.
+        let terms = vec!["webhook".to_string()];
+        let candidates = vec![
+            RerankCandidate {
+                hit: RecallHit {
+                    absolute_path: "first.md".to_string(),
+                    score: 0.0,
+                    line: 1,
+                    snippet: String::new(),
+                },
+                content: "webhook one".to_string(),
+                bm25_rank: 0,
+            },
+            RerankCandidate {
+                hit: RecallHit {
+                    absolute_path: "second.md".to_string(),
+                    score: 0.0,
+                    line: 1,
+                    snippet: String::new(),
+                },
+                content: "webhook two".to_string(),
+                bm25_rank: 1,
+            },
+        ];
+        let ranked = rerank_by_relevance(candidates, &terms, 10);
+        assert_eq!(ranked[0].absolute_path, "first.md");
+        assert_eq!(ranked[1].absolute_path, "second.md");
+    }
+
+    #[test]
+    fn multi_term_recall_ranks_best_coverage_first() {
+        // End-to-end: two real memory files, one covering both query terms and
+        // one covering only a single (repeated) term. The combined-coverage doc
+        // must come back first through the full search path.
+        run_with_home("claude-skills-recall-rerank", |claude_home| {
+            write_memory(
+                claude_home,
+                "memories/a-spam.md",
+                "# Webhooks\n\nwebhook webhook webhook webhook webhook delivery notes.\n",
+            );
+            write_memory(
+                claude_home,
+                "memories/b-covered.md",
+                "# Webhook retry\n\nThe webhook retry policy uses exponential backoff.\n",
+            );
+            let result = search_recall_index(claude_home, "webhook retry", 10)
+                .expect("search succeeds")
+                .expect("non-empty query");
+            assert_eq!(result.stage, "exact");
+            assert!(
+                result.hits[0].absolute_path.contains("b-covered.md"),
+                "the doc covering both terms must rank first; got: {:?}",
+                result
+                    .hits
+                    .iter()
+                    .map(|h| &h.absolute_path)
+                    .collect::<Vec<_>>()
+            );
+        });
     }
 
     #[test]
