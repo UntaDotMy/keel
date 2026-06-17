@@ -17,6 +17,7 @@ pub mod memory_families;
 pub mod observe;
 pub mod recall;
 pub mod record_store;
+pub mod semantic;
 pub mod session;
 pub mod skill_lint;
 pub mod skill_match;

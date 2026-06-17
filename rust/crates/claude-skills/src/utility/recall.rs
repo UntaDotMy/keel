@@ -1306,10 +1306,11 @@ fn cascade_recall_query(
 
     let exact_hits = query_recall_index(connection, &exact, limit)?;
     if !exact_hits.is_empty() {
+        let (hits, stage) = augment_with_semantic(connection, exact_hits, limit, "exact")?;
         return Ok(Some(CascadeResult {
             query_expression: exact,
-            stage: "exact",
-            hits: exact_hits,
+            stage,
+            hits,
         }));
     }
 
@@ -1319,10 +1320,11 @@ fn cascade_recall_query(
     if let Some(relaxed) = build_relaxed_fts_query(raw_query) {
         let relaxed_hits = query_recall_index(connection, &relaxed, limit)?;
         if !relaxed_hits.is_empty() {
+            let (hits, stage) = augment_with_semantic(connection, relaxed_hits, limit, "relaxed")?;
             return Ok(Some(CascadeResult {
                 query_expression: relaxed,
-                stage: "relaxed",
-                hits: relaxed_hits,
+                stage,
+                hits,
             }));
         }
     }
@@ -1344,6 +1346,104 @@ fn cascade_recall_query(
         stage: "exact",
         hits: Vec::new(),
     }))
+}
+
+/// Augment a thin lexical result with its latent-semantic neighbors (LSA), the
+/// cross-vocabulary recall that lexical matching structurally cannot reach. Runs
+/// ONLY when `lexical_hits` came back short of `limit` — a full result set has no
+/// room to augment and no reason to pay the on-demand SVD cost. When neighbors
+/// are appended, the stage label gains a `+semantic` suffix so the user can see
+/// the result was expanded beyond literal matches; otherwise the original lexical
+/// hits and stage pass through unchanged.
+///
+/// This is the "ahead of lexical" win: searching `authentication` returns the
+/// literal matches PLUS the co-occurring `login`/`token`/`session` documents that
+/// share no query term — learned from the corpus's own co-occurrence structure,
+/// with no model, no network, and no new dependency. It degrades safely: too few
+/// or too many documents, or a degenerate corpus, leaves the lexical hits as-is.
+fn augment_with_semantic(
+    connection: &Connection,
+    lexical_hits: Vec<RecallHit>,
+    limit: usize,
+    base_stage: &'static str,
+) -> Result<(Vec<RecallHit>, &'static str), String> {
+    let deficit = limit.saturating_sub(lexical_hits.len());
+    if deficit == 0 {
+        return Ok((lexical_hits, base_stage));
+    }
+
+    let corpus = load_all_documents(connection)?;
+    let Some(index) = super::semantic::build_semantic_index(&corpus) else {
+        return Ok((lexical_hits, base_stage));
+    };
+
+    // Map the lexical hits onto seed document indices, and exclude them from the
+    // neighbor search so we never duplicate a hit the user already has.
+    let seed: Vec<usize> = lexical_hits
+        .iter()
+        .filter_map(|hit| index.index_of(&hit.absolute_path))
+        .collect();
+    if seed.is_empty() {
+        return Ok((lexical_hits, base_stage));
+    }
+
+    let neighbors = index.neighbors_of(&seed, &seed, deficit);
+    if neighbors.is_empty() {
+        return Ok((lexical_hits, base_stage));
+    }
+
+    let mut hits = lexical_hits;
+    for (document_index, similarity) in neighbors {
+        hits.push(RecallHit {
+            absolute_path: index.path(document_index).to_string(),
+            score: similarity,
+            line: 1,
+            snippet: semantic_snippet(index.content(document_index)),
+        });
+    }
+    let stage = match base_stage {
+        "exact" => "exact+semantic",
+        "relaxed" => "relaxed+semantic",
+        _ => base_stage,
+    };
+    Ok((hits, stage))
+}
+
+/// First non-empty, non-heading line of a semantic neighbor's content, prefixed
+/// so the user can tell at a glance the hit came from semantic expansion rather
+/// than a literal match. A semantic neighbor has no FTS snippet (it was not found
+/// by a term query), so we synthesize a representative excerpt the same way the
+/// fuzzy stage builds its own.
+fn semantic_snippet(content: &str) -> String {
+    let excerpt = content
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with('#'))
+        .or_else(|| content.lines().map(str::trim).find(|line| !line.is_empty()))
+        .unwrap_or_default();
+    format!("[~semantic] {}", collapse_whitespace(excerpt))
+}
+
+/// Load every indexed document's `(path, content)` for the semantic index. This
+/// is the same full-corpus read the fuzzy stage performs, run only when semantic
+/// augmentation is actually attempted (thin lexical result), so the common
+/// full-result query never pays for it.
+fn load_all_documents(connection: &Connection) -> Result<Vec<(String, String)>, String> {
+    let mut statement = connection
+        .prepare("SELECT path, content FROM documents")
+        .map_err(|database_error| format!("prepare corpus load: {database_error}"))?;
+    let rows = statement
+        .query_map([], |row| {
+            let path: String = row.get(0)?;
+            let content: String = row.get(1)?;
+            Ok((path, content))
+        })
+        .map_err(|database_error| format!("corpus load: {database_error}"))?;
+    let mut documents = Vec::new();
+    for row in rows {
+        documents.push(row.map_err(|database_error| format!("read corpus row: {database_error}"))?);
+    }
+    Ok(documents)
 }
 
 /// Minimum Sørensen–Dice trigram similarity for the fuzzy stage to accept a
