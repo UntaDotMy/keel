@@ -148,6 +148,9 @@ impl Application {
             "skill-lint" => {
                 utility::run_skill_lint_command(command_arguments, standard_output, standard_error)
             }
+            "skill-eval" => {
+                utility::run_skill_eval_command(command_arguments, standard_output, standard_error)
+            }
             "config-audit" => utility::run_config_audit_command(
                 command_arguments,
                 standard_output,
