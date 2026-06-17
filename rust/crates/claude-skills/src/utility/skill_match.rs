@@ -104,7 +104,21 @@ pub fn match_skill_for_prompt(claude_home: &Path, prompt: &str) -> Option<SkillM
     if skills.is_empty() {
         return None;
     }
-    if let Some(found) = score_prompt_against_skills(prompt, &skills) {
+    resolve_skill_for_prompt(prompt, &skills)
+}
+
+/// Pure two-tier resolution over an already-loaded skill corpus: the IDF
+/// statistical matcher first, then the curated cross-cutting fallback (only for a
+/// curated skill that is actually present in `skills`). Extracted from
+/// [`match_skill_for_prompt`] so the exact production decision can be driven over
+/// a fixture corpus with no IO — this is what the behavioral skill-eval
+/// (`claude-skills skill-eval`) asserts against, so the eval tests the real
+/// activation path rather than a reimplementation of it.
+pub fn resolve_skill_for_prompt(prompt: &str, skills: &[SkillTerms]) -> Option<SkillMatch> {
+    if prompt.trim().is_empty() || skills.is_empty() {
+        return None;
+    }
+    if let Some(found) = score_prompt_against_skills(prompt, skills) {
         return Some(found);
     }
     // The IDF matcher stayed silent (no corpus-rare token). Before giving up,

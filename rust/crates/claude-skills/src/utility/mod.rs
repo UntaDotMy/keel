@@ -17,7 +17,9 @@ pub mod memory_families;
 pub mod observe;
 pub mod recall;
 pub mod record_store;
+pub mod semantic;
 pub mod session;
+pub mod skill_eval;
 pub mod skill_lint;
 pub mod skill_match;
 pub mod sprint;
@@ -39,6 +41,7 @@ pub use memory::{
 };
 pub use observe::run_observe_command;
 pub use session::run_session_command;
+pub use skill_eval::run_skill_eval_command;
 pub use skill_lint::run_skill_lint_command;
 pub use sprint::run_sprint_command;
 pub use user_story::run_user_story_command;
