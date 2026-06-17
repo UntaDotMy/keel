@@ -221,3 +221,76 @@ fn reviewer_subagent_pins_an_explicit_non_inherit_model() {
          the implementer's model, otherwise the gate loses its cross-model second-opinion property"
     );
 }
+
+/// The MCP server's tool count is asserted in CLAUDE.md prose ("gets N tools").
+/// Nothing mechanically tied that number to `mcp/tools.rs`, so the competitive
+/// audit caught CLAUDE.md still claiming 14 tools after `sprint` and
+/// `user_story_lint` were added (making 16). This test counts the tool
+/// definitions in code (each carries exactly one `"inputSchema":` key in
+/// `handle_tools_list`) and asserts CLAUDE.md documents that same count, so the
+/// number can no longer drift silently: add or remove an MCP tool and this fails
+/// until the prose is updated to match.
+#[test]
+fn mcp_tool_count_matches_documentation() {
+    let repo_root = repository_root();
+    let tools_src = fs::read_to_string(
+        repo_root
+            .join("rust")
+            .join("crates")
+            .join("claude-skills")
+            .join("src")
+            .join("mcp")
+            .join("tools.rs"),
+    )
+    .expect("read mcp/tools.rs");
+
+    // Each tool definition in `handle_tools_list` has exactly one inputSchema.
+    let tool_count = tools_src.matches("\"inputSchema\":").count();
+    assert_eq!(
+        tool_count, 16,
+        "expected 16 MCP tool definitions in mcp/tools.rs (one `\"inputSchema\":` each); got {tool_count}. \
+         If this changed intentionally, update the MCP server tool count in CLAUDE.md and this test together."
+    );
+
+    let claude_md = fs::read_to_string(repo_root.join("CLAUDE.md")).expect("read CLAUDE.md");
+    assert!(
+        claude_md.contains(&format!("{tool_count} tools")),
+        "CLAUDE.md must document the MCP server as exposing {tool_count} tools (the count in mcp/tools.rs); \
+         the prose says a different number, which is exactly the drift this test prevents."
+    );
+}
+
+/// Commands wired in `commands.rs` that the competitive audit flagged as
+/// undocumented (`dispatch`, `observe`) plus the real `eval` measurement must
+/// appear in CLAUDE.md so the Commands section reflects the shipped CLI surface.
+/// This is narrow on purpose — it pins the specific drift the audit found rather
+/// than asserting every internal verb (e.g. `raw`, `replay`, `__self-replace`)
+/// is documented — but it makes "shipped a new user-facing command without
+/// documenting it" a red CI check for these three.
+#[test]
+fn audit_flagged_commands_are_documented() {
+    let repo_root = repository_root();
+    let commands_src = fs::read_to_string(
+        repo_root
+            .join("rust")
+            .join("crates")
+            .join("claude-skills")
+            .join("src")
+            .join("commands.rs"),
+    )
+    .expect("read commands.rs");
+    let claude_md = fs::read_to_string(repo_root.join("CLAUDE.md")).expect("read CLAUDE.md");
+
+    for command in ["dispatch", "observe", "eval"] {
+        // Confirm the command is actually wired (a match arm) before requiring docs.
+        assert!(
+            commands_src.contains(&format!("\"{command}\" =>")),
+            "expected `{command}` to be a wired command arm in commands.rs"
+        );
+        assert!(
+            claude_md.contains(&format!("claude-skills {command}")),
+            "CLAUDE.md must document the `{command}` command (it is wired in commands.rs but missing \
+             from the Commands section — the exact drift the competitive audit flagged)."
+        );
+    }
+}

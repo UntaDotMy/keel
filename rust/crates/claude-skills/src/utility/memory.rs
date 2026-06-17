@@ -2311,6 +2311,17 @@ fn request_contains_keyword(request_lowercased: &str, keyword: &str) -> bool {
         .any(|token| token == keyword)
 }
 
+/// `bench` is a runtime-provenance / feature-parity marker, NOT a measurement.
+/// It exists to assert one fact: this is the Rust-native runtime (`runtime=rust`,
+/// `go_fallback=false`, zero third-party runtime deps) with the compaction feature
+/// set present. Its byte/savings numbers come from the hardcoded illustrative
+/// fixtures in [`benchmark_fixtures`] — they are a fixed parity sample, not a
+/// real run, and the output says so. For an actual, executed measurement of
+/// compaction savings (the genuine adapter pipeline over fixtures with exact
+/// o200k_base token deltas asserted in CI) use `claude-skills eval`
+/// (see `utility::eval::run_compaction_eval`). The two coexist on purpose:
+/// `bench` answers "what runtime/features ship", `eval` answers "how much does
+/// compaction actually save".
 pub fn run_bench_command(
     arguments: &[String],
     standard_output: &mut dyn Write,
@@ -2379,7 +2390,7 @@ pub fn run_bench_command(
     }
     let _ = writeln!(
         standard_output,
-        "claude-skills bench: rust native compaction benchmark passed"
+        "claude-skills bench: rust-native runtime + feature-parity marker (not a measurement)"
     );
     let _ = writeln!(
         standard_output,
@@ -2387,7 +2398,7 @@ pub fn run_bench_command(
     );
     let _ = writeln!(
         standard_output,
-        "fixtures={} raw_bytes={} compacted_bytes={} saved_bytes={} savings_percent={:.2}",
+        "fixtures={} raw_bytes={} compacted_bytes={} saved_bytes={} savings_percent={:.2} (illustrative fixtures — run `claude-skills eval` for real measured token savings)",
         fixtures.len(),
         raw_bytes,
         compacted_bytes,

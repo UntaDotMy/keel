@@ -517,6 +517,94 @@ Every comparator (RTK, caveman, superpowers, ECC) ships cross-harness adapters
 multi-harness or keep a deliberately Claude-native stance is a product decision,
 not a defect — recorded here so it is chosen, not drifted into.
 
+## 2026-06-17 audit: top-starred harness / workflow comparators
+
+This section extends the capability-based comparison to the **highest-adoption**
+Claude Code harness/workflow projects, selected by GitHub-API star count (a
+deterministic selection signal, distinct from using stars as a *quality* signal —
+the caution in the Comparators note still holds, and the superpowers anomaly below
+is exactly why). Five of these were absent from the table above. Audit run after
+the findings #1-5 merge (PR #123, `f694519`); each profile was built by reading
+the project's actual README/docs, not marketing copy.
+
+### New comparators (star counts via GitHub API, 2026-06-17)
+
+| Project | Stars | Category | Overlap with claude-core |
+| --- | --- | --- | --- |
+| `obra/superpowers` | ~230k* | skills framework | Already in the table above. *The API returned 229,888 — **above** `anthropics/claude-code` itself (132,832), which is implausible for a skills plugin. Reported as-returned and flagged; do not quote externally without a manual sanity-check. Confirms the standing "stars are not a trustworthy signal" stance. |
+| `github/spec-kit` | ~113k | spec-driven dev | Spec-as-source-of-truth pipeline (constitution→specify→plan→tasks→implement), agent-agnostic across 30+ agents. Strong gate *taxonomy* (Phase-1 Simplicity/Anti-Abstraction/Integration-First) but every gate is model-self-attested in-prompt; `[P]` parallel markers are annotations, not an executor. No worktree isolation, no recall index. |
+| `ruvnet/claude-flow` | ~60k | swarm orchestrator | The one comparator **ahead on memory**: HNSW vector store + knowledge graphs + neural self-learning (semantic recall we lack). Also broad: consensus topologies, GOAP A* planner, security gates (CVE/PII/injection). But benchmarks are self-reported, the lightweight plugin path is hollow (no MCP/memory tools — only the heavy npx+Docker+MongoDB path has them), and there is no worktree-isolated fail-closed merge. |
+| `bmad-code-org/BMAD-METHOD` | ~49k | agentic-agile personas | Role-persona pipeline (Analyst/PM/Architect/SM/Dev/QA) with "context-engineered" story files; mature methodology, multi-IDE. Orchestration is human-in-the-loop persona-switching — no parallel execution, no merge coordinator, no indexed memory, no self-eval. |
+| `eyaltoledano/claude-task-master` | ~28k | task manager | Dependency-aware PRD→task decomposition over an MCP surface; broad editor/provider reach. **No review/quality gates documented at all**, no worktree isolation, memory is task-state only (no recall). |
+| `automazeio/ccpm` | ~8k | PM workflow (GH Issues) | Closest parallel-dispatch peer: per-epic git worktrees + `conflicts_with`/`depends_on`/`parallel` task metadata. But the merge is LLM-narrated ("agents commit and coordinate via Git"), not a coded fail-closed coordinator; memory is flat markdown + grep-style bash scripts. |
+
+### Where claude-core leads across *all* of them (post-#123)
+
+The decisive axis is **enforcement mechanism**. Every project above enforces
+quality by instructing the model in markdown and trusting compliance (superpowers'
+"mandatory" workflows, spec-kit's Phase-1 gates, BMAD's TEA, ccpm's "No Vibe
+Coding"). claude-core is the only one that puts gates in **compiled Rust the model
+cannot talk past**. Four differentiators hold against every comparator:
+
+1. **Fail-closed git-worktree merge coordinator** (`utility/dispatch.rs`
+   `run_merge`): only a `complete` worker merges; conflict triggers `git merge
+   --abort` leaving a provably clean tree (asserted by
+   `merge_aborts_on_conflict_and_leaves_the_tree_clean`). ccpm and superpowers also
+   use worktrees but leave the merge to model narration — the guarantee lives in
+   their prompt, not their code. (Honest scope: `dispatch` owns the worktree
+   lifecycle + ledger + merge gate; it does **not** spawn agents — the main thread
+   still drives the subagents.)
+2. **Real, reproducible compaction eval** (`utility/eval.rs`): the genuine adapter
+   pipeline over fixtures with **exact o200k_base** token deltas and measured floors
+   asserted in CI — not the self-reported speedup multipliers claude-flow/ccpm
+   publish. (The legacy `bench` is a runtime-provenance/feature-parity marker, now
+   clearly labeled as such; `eval` is the measurement.)
+3. **Compaction break-even guard + prompt-injection neutralization** (`proxy/run.rs`):
+   compacted output is emitted only when strictly fewer exact tokens than raw, and
+   tool output is neutralized before the model sees it. No comparator has either —
+   they treat the harness as trusted and don't measure their own token effect.
+4. **Executable requirement-format gate** (`user_story.rs` Connextra+Gherkin+INVEST
+   lint + the fail-closed `sprint review`). spec-kit and BMAD have richer gate
+   *prose*; only claude-core validates the spec format in code and refuses closeout
+   on an incomplete sprint.
+
+### Where claude-core loses (honest)
+
+- **Semantic memory** — claude-flow's HNSW vector store + knowledge graphs beat our
+  lexical FTS5 + trigram-fuzzy cascade for meaning-based recall. Mitigations: their
+  memory tools are absent on the plugin path, and our lexical choice is the
+  deliberate single-clean-binary / no-network / no-embeddings trade.
+- **Eval breadth** — wshobson's `plugin-eval` (Static + LLM-Judge + 50-100-run Monte
+  Carlo certification) is a more sophisticated eval *framework*; ours is real and
+  reproducible but narrow (compaction fidelity only).
+- **Cross-harness reach** — the standing by-design loss: every comparator runs on
+  Codex/Cursor/Gemini/Copilot; we are Claude-Code-native. spec-kit (30+ agents) and
+  superpowers (10+ harnesses) lead hardest here.
+- **Adoption / validation** — 8k-230k stars of battle-testing vs a private repo.
+
+### Self-inflicted gaps from the #123 merge (found and fixed this pass)
+
+The audit's skeptical re-read of our own post-merge code surfaced drift the merge
+introduced — ironic, since finding #4 was itself a doc-parity test:
+
+- **MCP tool-count drift.** CLAUDE.md claimed the server exposes **14 tools**;
+  `mcp/tools.rs` defines **16** (`sprint` + `user_story_lint` were added without
+  updating the doc). Fixed CLAUDE.md (14→16, six tool groups) and added
+  `mcp_tool_count_matches_documentation` to `tests/doc_parity_test.rs` so the count
+  can no longer drift silently.
+- **Undocumented commands.** `dispatch` and `observe` were wired in `commands.rs`
+  but absent from the CLAUDE.md Commands section. Documented both (plus the real
+  `eval`) and added `audit_flagged_commands_are_documented` to pin them.
+- **`bench` mislabeled as measurement.** Its byte/savings numbers come from
+  hardcoded fixtures yet read like a real run. Investigation showed `bench` is not
+  dead code — it's a deliberate runtime-provenance / feature-parity marker
+  (`runtime=rust`, `goFallback=false`). Kept it (it carries a real signal) but
+  relabeled its output as illustrative and added a doc-comment pointing to `eval`
+  for actual measurement.
+
+All fixes verified: `cargo fmt`/`clippy -D warnings`/`build` clean, doc-parity
+suite green (7 tests, 2 new).
+
 ## What claude-core keeps (the moat)
 
 Fail-closed closeout discipline (reviewer gate, completion-gate ledger, release
