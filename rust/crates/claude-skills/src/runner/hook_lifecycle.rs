@@ -671,7 +671,7 @@ fn run_hook_pre_tool_use(standard_output: &mut dyn Write, standard_error: &mut d
                 "Unable to render Claude Code hook output: {error}"
             );
 
-            1
+            0
         }
     }
 }
@@ -1182,7 +1182,7 @@ fn run_hook_lifecycle(
                 "Unable to render Claude Code lifecycle hook output: {error}"
             );
 
-            1
+            0
         }
     }
 }
@@ -1352,7 +1352,7 @@ Working memory dies at compaction. To persist across sessions:
 ## The one thing to remember
 **Understand before you build. Research first. Invoke relevant skills before responding. Find the root cause. The repository — not your training data — is the source of truth.**"#;
 
-fn session_start_context() -> String {
+pub(crate) fn session_start_context() -> String {
     // SessionStart fires once per session and is the documented entry point
     // for delivering durable model context via
     // `hookSpecificOutput.additionalContext`. Per-prompt token cost is paid
@@ -1406,7 +1406,7 @@ fn pre_compact_context() -> String {
     "Before compaction, preserve claude-skills continuity: summarize active workflow stage, files changed, validation evidence, unresolved blockers, memory facts to save, and next review gate.".to_string()
 }
 
-fn post_compact_context() -> String {
+pub(crate) fn post_compact_context() -> String {
     let mut context = format!(
 
         "After compaction, resume using claude-skills automatically: reload workspace memory/system map, re-establish workflow proof state, and run review gates before final closeout.\n\n{}",
@@ -1440,11 +1440,50 @@ fn post_compact_context() -> String {
 /// turn. Body weight is roughly 320 tokens before `memory_scope_summary()` —
 /// within budget for a per-prompt injection but expensive enough that adding
 /// more text needs a deliberate reason.
-fn user_prompt_submit_context() -> String {
+/// Per-prompt iron-law base text (no skill match, no compression hint).
+/// Kept separate so the bridge `user-prompt` subcommand can compose the full
+/// per-prompt context from flat fields without needing stdin parsing.
+fn user_prompt_submit_core() -> String {
     format!(
         "Research-first: trust the codebase, not your knowledge base. Read SYSTEM_MAP and the owning module before claiming behavior. Invoke any relevant skill via the Skill tool BEFORE responding — even a 1% chance it applies means use it. Native claude_core MCP tools are always available — prefer them over guessing: `system_map` returns the workspace structural map (call it before any repo-structure or \"what is this project\" claim), `recall` runs full-text search over your saved memories and working briefs (call it before claiming what you remember or learned), and `run_command` routes noisy shell output through the compaction proxy. Understand before building: restate what the request actually asks, confirm the user story, and research what is genuinely needed before writing code — no guessing, no assuming, no building against an imagined spec. Researching first is what stops you building the wrong thing; the cost of an hour's research is always less than the cost of shipping the wrong feature. Find the root cause, not just the surface symptom: suspicion is a hypothesis, not a finding — trace the symptom end-to-end with file:line evidence and confirm the suspect is on that path before changing it. No assumptions. No jumping from \"this may be the case\" to a patch. Implementation discipline applies on every code-touching turn — Think Before Coding (state assumptions, deep-dive any suspected target before changing it), Simplicity First (minimum code, no speculative features or abstractions), Surgical Changes (every changed line traces to the request), Goal-Driven Execution (reproduce or trace the symptom before naming a root cause; turn the task into a verifiable goal before coding). Parallel fan-out: only batch agents in the same message when all four hold — no shared inputs, no shared file or git-index writes, no need to cancel/steer one based on another's interim result, and the work fits the current task scope. If any check fails, dispatch sequentially. {}",
         memory_scope_summary()
     )
+}
+
+pub(crate) fn user_prompt_submit_context(prompt_text: &str) -> String {
+    let mut base_context = user_prompt_submit_core();
+    let claude_home = resolve_claude_home("").ok();
+
+    // Inline the matched skill's own guidance when the prompt distinctively
+    // matches one installed skill.
+    if let (false, Some(home)) = (prompt_text.trim().is_empty(), claude_home.as_ref()) {
+        if let Some(matched) =
+            crate::utility::skill_match::match_skill_for_prompt(home, prompt_text)
+        {
+            let pointer = match crate::utility::skill_match::skill_inline_brief(home, &matched.name)
+            {
+                Some(brief) => skill_pointer_text(&matched.name, &brief),
+                None => skill_pointer_fallback(&matched.name),
+            };
+            base_context = format!("{pointer}\n\n{base_context}");
+        }
+    }
+
+    // Point repo/structure and memory questions at the MCP tools.
+    if !prompt_text.trim().is_empty() {
+        if let Some(pointer) = mcp_tool_pointer_for_prompt(prompt_text) {
+            base_context = format!("{pointer}\n\n{base_context}");
+        }
+    }
+
+    // Point code-CHANGE prompts at the read-map/recall front.
+    if !prompt_text.trim().is_empty() {
+        if let Some(pointer) = work_intent_pointer_for_prompt(prompt_text) {
+            base_context = format!("{pointer}\n\n{base_context}");
+        }
+    }
+
+    base_context
 }
 
 /// Concrete per-prompt skill guidance. Emitted only when the prompt
@@ -1670,14 +1709,6 @@ fn run_hook_user_prompt_submit(
     standard_output: &mut dyn Write,
     standard_error: &mut dyn Write,
 ) -> u8 {
-    // SessionStart already refreshed the system map at session boot; on every
-    // prompt afterwards `should_refresh_system_map("UserPromptSubmit")` is
-    // false, so this dispatcher does not duplicate that work.
-    //
-    // `standard_input` is injected by the caller — production passes a locked
-    // stdin handle (which Claude Code closes after writing the JSON payload),
-    // tests pass `std::io::empty()` so the read returns EOF immediately
-    // instead of blocking on an inherited console handle.
     let stdin_payload: Option<JsonDocument> = {
         let mut text = String::new();
         match standard_input.read_to_string(&mut text) {
@@ -1692,10 +1723,6 @@ fn run_hook_user_prompt_submit(
         .and_then(JsonDocument::as_str)
         .unwrap_or_default();
 
-    // The prompt text Claude Code delivers on stdin. This is what lets the
-    // per-prompt nudge name the *specific* matching skill instead of repeating
-    // the generic "invoke any relevant skill" reminder every turn. Absent or
-    // empty prompt → no skill pointer, just the base context (fail-open).
     let prompt_text = stdin_payload
         .as_ref()
         .and_then(|payload| payload.get("prompt"))
@@ -1704,57 +1731,7 @@ fn run_hook_user_prompt_submit(
 
     let claude_home = resolve_claude_home("").ok();
 
-    let mut base_context = user_prompt_submit_context();
-    // Prepend the matched skill's own guidance when the prompt distinctively
-    // matches one installed skill. Placed first so it is the first thing the
-    // model reads. Conservative by construction: `match_skill_for_prompt` stays
-    // silent for generic or ambiguous prompts (see utility::skill_match), so
-    // this never mis-routes — it only sharpens an already-clear signal.
-    //
-    // Inline the skill's *actual brief* rather than only asking for a
-    // `Skill()` call: injected context is consumed by the model as input
-    // regardless of whether it honors the tool-call instruction, so the
-    // guidance lands even behind a gateway model that ignores `Skill()`. Fall
-    // back to the bare pointer only when the body cannot be read.
-    if let (false, Some(home)) = (prompt_text.trim().is_empty(), claude_home.as_ref()) {
-        if let Some(matched) =
-            crate::utility::skill_match::match_skill_for_prompt(home, prompt_text)
-        {
-            let pointer = match crate::utility::skill_match::skill_inline_brief(home, &matched.name)
-            {
-                Some(brief) => skill_pointer_text(&matched.name, &brief),
-                None => skill_pointer_fallback(&matched.name),
-            };
-            base_context = format!("{pointer}\n\n{base_context}");
-        }
-    }
-
-    // Point repo/structure and memory questions at the claude_core MCP tools.
-    // The skill matcher above stays silent for these prompts (they carry no
-    // distinctive domain token), so without this the model gets no nudge to
-    // call `system_map`/`recall` and tends to answer from guesswork or ad-hoc
-    // file reads. Independent of the skill match — both can fire — and prepended
-    // last so the tool reminder is the first thing the model reads on exactly
-    // the prompts where reaching for the tool is the correct first move.
-    if !prompt_text.trim().is_empty() {
-        if let Some(pointer) = mcp_tool_pointer_for_prompt(prompt_text) {
-            base_context = format!("{pointer}\n\n{base_context}");
-        }
-    }
-
-    // Point code-CHANGE prompts at the read-map / recall / write-brief /
-    // preserve-flow front of the Iron Law. The question pointer above fires only
-    // on question-shaped asks; a work prompt ("rework X", "fix Y") would
-    // otherwise get no reminder to do the upfront research before editing — the
-    // exact gap that let the law go unenforced. Fires independently of the other
-    // two pointers (a prompt can be both a work ask and match a skill), and is
-    // prepended last so it sits at the very top of the per-prompt context on the
-    // turns where the upfront discipline matters most.
-    if !prompt_text.trim().is_empty() {
-        if let Some(pointer) = work_intent_pointer_for_prompt(prompt_text) {
-            base_context = format!("{pointer}\n\n{base_context}");
-        }
-    }
+    let base_context = user_prompt_submit_context(prompt_text);
 
     let final_context = match (session_id.is_empty(), claude_home.as_ref()) {
         (false, Some(home)) => match maybe_compression_hint(home, session_id) {
@@ -1787,7 +1764,7 @@ fn run_hook_user_prompt_submit(
                 standard_error,
                 "Unable to render Claude Code lifecycle hook output: {error}"
             );
-            1
+            0
         }
     }
 }
@@ -1994,6 +1971,12 @@ const REVIEW_GATE_MAX_BLOCKS_ENV_VAR: &str = "CLAUDE_SKILLS_REVIEW_GATE_MAX_BLOC
 /// of 0 disables firing entirely (a second escape hatch alongside the off-switch).
 const GATE_DEFAULT_MAX_BLOCKS: u64 = 1;
 
+/// Exposed for bridge `gate-status` so callers can compare counter values
+/// against the cap without importing the private `default_max_blocks_for`.
+pub(crate) fn default_max_blocks() -> u64 {
+    GATE_DEFAULT_MAX_BLOCKS
+}
+
 /// Default per-session fire cap for a gate, chosen by mode. `Escalate` needs at
 /// least 2 (fire 0 nudges, fire 1 blocks) or it could never escalate past the
 /// opening nudge; every other mode keeps the historical single fire. An explicit
@@ -2019,17 +2002,20 @@ enum GateMode {
     /// the reminder shows at most `…_MAX_BLOCKS` time(s) and never spams every
     /// batch. Opt-down from the escalating default: select with `nudge`.
     Nudge,
-    /// Always-block hard stop. Emit `decision: "block"` on every fire (up to the
-    /// cap) so Claude Code halts the turn until the requirement is met. Select
-    /// with `block` (case-insensitive).
+    /// Escalated feed-forward. Emit an imperative reminder via
+    /// `hookSpecificOutput.additionalContext` on every fire (up to the cap) so the
+    /// agent is told in strong terms to satisfy the requirement — but the turn is
+    /// NEVER halted (no `decision: "block"`). Select with `block` (case-insensitive).
     Block,
     /// DEFAULT. The honest answer to "not optional": a hook cannot force a
-    /// `Skill()`/Agent call, but it can refuse to let the turn close cheaply. The
-    /// FIRST fire is a non-blocking nudge (warn, do not interrupt mid-task); if
-    /// the requirement is STILL unmet on a later end-of-turn the gate ESCALATES to
-    /// `decision: "block"`. Strictly bounded by the per-session counter, so the
-    /// worst case is "one nudge, then one block, then advisory forever" — it can
-    /// neither be ignored for free nor wedge the session. Selected by an unset var
+    /// `Skill()`/Agent call, but it can feed corrective context forward so the turn
+    /// does not close cheaply. The FIRST fire is an advisory nudge (warn, do not
+    /// interrupt mid-task); if the requirement is STILL unmet on a later
+    /// end-of-turn the gate ESCALATES to an imperative reminder (still via
+    /// `additionalContext`, never a blocking decision). Strictly bounded by the
+    /// per-session counter, so the worst case is "one nudge, then one imperative,
+    /// then advisory forever" — it can neither be ignored for free nor wedge the
+    /// session, and it never stops the turn. Selected by an unset var
     /// or any unrecognized value, so a typo fails safe toward this default.
     Escalate,
 }
@@ -2318,9 +2304,11 @@ enum GateDecision {
     /// per-session counter so it shows at most `max_blocks` time(s). Emitted by
     /// `Nudge` mode always, and by the default `Escalate` mode on its first fire.
     Nudge,
-    /// Emit `decision: "block"` and increment the per-session counter — the hard
-    /// stop. Emitted by `Block` mode always, and by the default `Escalate` mode
-    /// once its opening nudge was issued and the requirement is still unmet.
+    /// Emit an imperative `additionalContext` reminder and increment the
+    /// per-session counter — escalated feed-forward, NOT a turn halt (no
+    /// `decision: "block"`). Emitted by `Block` mode always, and by the default
+    /// `Escalate` mode once its opening nudge was issued and the requirement is
+    /// still unmet.
     Block,
 }
 
@@ -2548,19 +2536,24 @@ fn emit_post_tool_batch_advisory(
     }
 }
 
-/// Emit a `decision: "block"` PostToolBatch payload with `reason`. Falls back
-/// to the advisory reminder if rendering fails so a serialization hiccup can
-/// never wedge the turn. The caller is responsible for incrementing the gate's
-/// block counter BEFORE calling this (the monotonic counter is the termination
-/// guarantee and must advance even if rendering fails).
+/// Emit a NON-BLOCKING feed-forward PostToolBatch payload with IMPERATIVE tone.
+///
+/// Previously emitted `decision: "block"` which halted the turn. Now emits
+/// `hookSpecificOutput.additionalContext` (identical shape to the nudge) but
+/// with imperative language ("Do NOT present this work as done") so the gate
+/// still asserts its requirement without stopping the turn. The per-session
+/// counter and cap logic are unchanged — the monotonic termination guarantee
+/// remains intact. Falls back to the advisory reminder on render failure.
 fn emit_post_tool_batch_block(
     reason: String,
     standard_output: &mut dyn Write,
     standard_error: &mut dyn Write,
 ) -> u8 {
     let payload = serde_json::json!({
-        "decision": "block",
-        "reason": reason,
+        "hookSpecificOutput": {
+            "hookEventName": "PostToolBatch",
+            "additionalContext": reason,
+        },
         "suppressOutput": true,
     });
     match serde_json::to_string_pretty(&payload) {
@@ -2895,7 +2888,7 @@ fn prune_observations_store(standard_error: &mut dyn Write) {
 /// skills. Fully automatic — no slash command. Set
 /// `CLAUDE_SKILLS_LEARNING=off` to disable. Errors are swallowed so a learning
 /// failure can never fail the SessionEnd hook.
-fn run_session_end_learning(standard_error: &mut dyn Write) {
+pub(crate) fn run_session_end_learning(standard_error: &mut dyn Write) {
     if std::env::var("CLAUDE_SKILLS_LEARNING")
         .map(|value| value.trim().eq_ignore_ascii_case("off"))
         .unwrap_or(false)
@@ -3009,6 +3002,65 @@ fn run_hook_session_end(
 ) -> u8 {
     maybe_capture_session_summary(standard_input, standard_error);
     run_hook_lifecycle("session-end", standard_output, standard_error)
+}
+
+/// Bridge-compatible SessionEnd: runs summary capture then learning WITHOUT
+/// stdin parsing (the bridge passes the session id directly). Calls
+/// `maybe_capture_session_summary_with_id` so the capture can scope itself
+/// without reading the hook JSON payload.
+pub(crate) fn run_bridge_session_end(
+    claude_home: &std::path::Path,
+    session_id: &str,
+    standard_error: &mut dyn Write,
+) {
+    maybe_capture_session_summary_with_id(claude_home, session_id, standard_error);
+    run_session_end_learning(standard_error);
+}
+
+/// Bridge-compatible variant of [`maybe_capture_session_summary`]: takes the
+/// session id directly instead of reading it from the hook stdin payload.
+fn maybe_capture_session_summary_with_id(
+    _claude_home: &std::path::Path,
+    session_id: &str,
+    standard_error: &mut dyn Write,
+) {
+    if std::env::var(SESSION_CAPTURE_ENV_VAR)
+        .map(|value| value.trim().eq_ignore_ascii_case("off"))
+        .unwrap_or(false)
+    {
+        return;
+    }
+    if session_id.trim().is_empty() {
+        return;
+    }
+
+    let Some(summary) = build_session_summary(session_id) else {
+        return;
+    };
+
+    let mut capture_stderr = Vec::new();
+    let code = crate::utility::memory_families::run_memory_family_command(
+        "memory",
+        "research-cache",
+        &[
+            "record".to_string(),
+            "--question".to_string(),
+            summary.question,
+            "--answer".to_string(),
+            summary.answer,
+            "--source".to_string(),
+            format!("auto-capture session {session_id}"),
+        ],
+        &mut std::io::sink(),
+        &mut capture_stderr,
+    );
+    if code != 0 {
+        let _ = writeln!(
+            standard_error,
+            "claude-skills: session auto-capture skipped ({})",
+            String::from_utf8_lossy(&capture_stderr).trim()
+        );
+    }
 }
 
 /// Auto-capture a one-line work summary to memory at SessionEnd.
@@ -3358,7 +3410,7 @@ fn memory_system_map_path_for_workspace(workspace_root: &Path) -> Option<PathBuf
     )
 }
 
-fn sanitize_memory_key(value: &str) -> String {
+pub(crate) fn sanitize_memory_key(value: &str) -> String {
     let mut key = String::new();
 
     let mut previous_dash = false;
@@ -5644,10 +5696,10 @@ mod tests {
         let out3_text = String::from_utf8_lossy(&out3);
         assert_eq!(code3, 0, "stderr: {}", String::from_utf8_lossy(&err3));
         assert!(
-            out3_text.contains("\"decision\"")
-                && out3_text.contains("block")
+            out3_text.contains("additionalContext")
+                && out3_text.contains("now a hard stop")
                 && out3_text.contains("CLAUDE_SKILLS_BRIEF_GATE"),
-            "BRIEF_GATE=block must restore the opt-in hard stop: {out3_text}"
+            "BRIEF_GATE=block must emit the feed-forward hard stop: {out3_text}"
         );
 
         match previous_home {
@@ -5729,8 +5781,8 @@ mod tests {
         let out2_text = String::from_utf8_lossy(&out2);
         assert_eq!(code2, 0, "stderr: {}", String::from_utf8_lossy(&err2));
         assert!(
-            out2_text.contains("\"decision\"") && out2_text.contains("block"),
-            "escalate second fire must BLOCK once the nudge was ignored: {out2_text}"
+            out2_text.contains("additionalContext") && out2_text.contains("now a hard stop"),
+            "escalate second fire must emit the feed-forward hard stop: {out2_text}"
         );
 
         // Third call: cap (2) spent → generic advisory, no decision field.
@@ -5878,10 +5930,10 @@ mod tests {
         let out3_text = String::from_utf8_lossy(&out3);
         assert_eq!(code3, 0, "stderr: {}", String::from_utf8_lossy(&err3));
         assert!(
-            out3_text.contains("\"decision\"")
-                && out3_text.contains("block")
+            out3_text.contains("additionalContext")
+                && out3_text.contains("now a hard stop")
                 && out3_text.contains("CLAUDE_SKILLS_REVIEW_GATE"),
-            "REVIEW_GATE=block must restore the opt-in hard stop: {out3_text}"
+            "REVIEW_GATE=block must emit the feed-forward hard stop: {out3_text}"
         );
 
         match previous_home {
@@ -6072,8 +6124,10 @@ mod tests {
         let out1_text = String::from_utf8_lossy(&out1);
         assert_eq!(code1, 0, "stderr: {}", String::from_utf8_lossy(&err1));
         assert!(
-            out1_text.contains("\"decision\"") && out1_text.contains("block"),
-            "STORY_CLOSEOUT_GATE=block must emit a hard stop on an incomplete sprint: {out1_text}"
+            out1_text.contains("additionalContext")
+                && out1_text.contains("Do NOT")
+                && out1_text.contains("now a hard stop"),
+            "STORY_CLOSEOUT_GATE=block must emit the feed-forward hard stop: {out1_text}"
         );
 
         // Fully-Done sprint -> silent (generic advisory), even under =block.

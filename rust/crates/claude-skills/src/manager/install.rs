@@ -56,6 +56,10 @@ pub struct InstallSummary {
     /// `additionalContext` reaching the model — so the iron law and tool/skill
     /// contract land even when the hook channel is dropped by a gateway/proxy.
     pub user_claude_md: Option<String>,
+    /// Human-readable outcome of the OpenCode plugin-path / MCP-registration
+    /// step, or `None` when skipped (non-standard `--claude-home`). Best-effort:
+    /// a failure is reported in the summary but never fails the install.
+    pub opencode_wiring: Option<String>,
 }
 
 struct FileTracker<'a> {
@@ -160,6 +164,7 @@ pub fn install_from_paths(
     let mcp_registration = maybe_register_mcp_server(claude_home);
     let hooks_installation = maybe_install_hooks(claude_home);
     let user_claude_md = maybe_sync_user_claude_md(claude_home);
+    let opencode_wiring = maybe_wire_opencode(repository_root, claude_home);
     Ok(InstallSummary {
         synced_skills,
         synced_agents,
@@ -173,6 +178,7 @@ pub fn install_from_paths(
         mcp_registration,
         hooks_installation,
         user_claude_md,
+        opencode_wiring,
     })
 }
 
@@ -243,6 +249,129 @@ fn maybe_install_hooks(claude_home: &Path) -> Option<String> {
         },
         Err(error) => Some(format!("skipped ({error})")),
     }
+}
+
+/// Wire claude_core into OpenCode: copy the bridge plugin into
+/// `~/.config/opencode/plugins/` (plural — the directory OpenCode actually
+/// loads, per opencode.ai/docs/plugins) and merge a `claude_core` MCP server
+/// into `opencode.json` (merge, never clobber). Guarded on standard `.claude`
+/// home; best-effort — a failure is reported in the summary, never fails install.
+fn maybe_wire_opencode(repository_root: &Path, claude_home: &Path) -> Option<String> {
+    let is_standard_home = claude_home
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name == ".claude")
+        .unwrap_or(false);
+    if !is_standard_home {
+        return None;
+    }
+
+    // Derive the home that owns THIS .claude from claude_home's parent, not from
+    // the process environment. This keeps `cargo test` hermetic (a temp .claude
+    // home wires into the temp parent, never the developer's real ~/.config) and
+    // makes the wiring honest for non-default --claude-home installs.
+    let home: PathBuf = match claude_home.parent() {
+        Some(path) => path.to_path_buf(),
+        None => return Some("skipped (no home directory)".to_string()),
+    };
+
+    let plugin_dir = home.join(".config").join("opencode").join("plugins");
+    if let Err(error) = std::fs::create_dir_all(&plugin_dir) {
+        return Some(format!("plugin dir skipped ({error})"));
+    }
+
+    // Copy the bridge plugin source into the OpenCode plugins directory so the
+    // bridge actually runs. Without this the dir + MCP entry exist but no plugin
+    // file loads, and none of the lifecycle wiring fires.
+    let plugin_source = repository_root.join("opencode").join("claude-core.ts");
+    let plugin_status = if plugin_source.is_file() {
+        let plugin_target = plugin_dir.join("claude-core.ts");
+        match std::fs::copy(&plugin_source, &plugin_target) {
+            Ok(_) => format!("plugin -> {}", display_path(&plugin_target)),
+            Err(error) => format!("plugin copy skipped ({error})"),
+        }
+    } else {
+        "plugin source absent".to_string()
+    };
+
+    let opencode_config_path = home.join(".config").join("opencode").join("opencode.json");
+    let binary = installed_executable_path(claude_home);
+    let mcp_entry = serde_json::json!({
+        "type": "local",
+        "command": [display_path(&binary), "mcp", "serve"],
+        "enabled": true,
+    });
+
+    let mcp_status = match merge_opencode_mcp(&opencode_config_path, "claude_core", &mcp_entry) {
+        Ok(OpencodeMcpResult::Added) => {
+            format!("MCP registered in {}", display_path(&opencode_config_path))
+        }
+        Ok(OpencodeMcpResult::AlreadyCurrent) => "MCP already current".to_string(),
+        Ok(OpencodeMcpResult::Updated) => {
+            format!("MCP updated in {}", display_path(&opencode_config_path))
+        }
+        Err(error) => format!("MCP skipped ({error})"),
+    };
+
+    Some(format!("{plugin_status}; {mcp_status}"))
+}
+
+#[derive(Debug)]
+enum OpencodeMcpResult {
+    Added,
+    AlreadyCurrent,
+    Updated,
+}
+
+fn merge_opencode_mcp(
+    config_path: &std::path::Path,
+    server_key: &str,
+    entry: &serde_json::Value,
+) -> Result<OpencodeMcpResult, String> {
+    let existing_text = crate::runtime::read_text_if_exists(config_path).unwrap_or_default();
+    // Editors and PowerShell on Windows commonly write a UTF-8 BOM; serde_json
+    // rejects a leading BOM as "expected value at line 1 column 1". Strip it.
+    let existing_text = existing_text
+        .strip_prefix('\u{feff}')
+        .unwrap_or(&existing_text);
+    let mut document: serde_json::Value = if existing_text.trim().is_empty() {
+        serde_json::json!({})
+    } else {
+        serde_json::from_str(existing_text).map_err(|error| format!("parse error: {error}"))?
+    };
+
+    if document.get("mcp").is_none() {
+        document["mcp"] = serde_json::json!({});
+    }
+    let current_mcp = document["mcp"]
+        .as_object_mut()
+        .ok_or("mcp is not an object")?;
+
+    let desired =
+        serde_json::to_string_pretty(entry).map_err(|error| format!("serialize error: {error}"))?;
+
+    if let Some(existing) = current_mcp.get(server_key) {
+        let existing_str = serde_json::to_string_pretty(existing)
+            .map_err(|error| format!("serialize error: {error}"))?;
+        if existing_str == desired {
+            return Ok(OpencodeMcpResult::AlreadyCurrent);
+        }
+        current_mcp.insert(server_key.to_string(), entry.clone());
+        write_text(
+            config_path,
+            &serde_json::to_string_pretty(&document)
+                .map_err(|error| format!("serialize error: {error}"))?,
+        )?;
+        return Ok(OpencodeMcpResult::Updated);
+    }
+
+    current_mcp.insert(server_key.to_string(), entry.clone());
+    write_text(
+        config_path,
+        &serde_json::to_string_pretty(&document)
+            .map_err(|error| format!("serialize error: {error}"))?,
+    )?;
+    Ok(OpencodeMcpResult::Added)
 }
 
 /// Sentinels delimiting the claude-core-managed region inside the user-global
@@ -474,6 +603,9 @@ pub fn write_install_summary(summary: &InstallSummary, output: &mut dyn Write) {
     }
     if let Some(claude_md_status) = &summary.user_claude_md {
         let _ = writeln!(output, "  User CLAUDE.md: {claude_md_status}");
+    }
+    if let Some(opencode_status) = &summary.opencode_wiring {
+        let _ = writeln!(output, "  OpenCode wiring: {opencode_status}");
     }
 }
 
@@ -1450,6 +1582,91 @@ pub fn run_self_replace_command(arguments: &[String], standard_error: &mut dyn W
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn merge_opencode_mcp_preserves_existing_keys_and_adds_claude_core() {
+        let dir = std::env::temp_dir().join(format!("ulw-mcp-merge-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let config = dir.join("opencode.json");
+        fs::write(
+            &config,
+            r#"{"theme":"dark","mcp":{"existing":{"type":"local","command":["foo"],"enabled":true}}}"#,
+        )
+        .unwrap();
+        let entry =
+            serde_json::json!({"type":"local","command":["bin","mcp","serve"],"enabled":true});
+        let result = merge_opencode_mcp(&config, "claude_core", &entry);
+        assert!(matches!(result, Ok(OpencodeMcpResult::Added)));
+        let parsed: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&config).unwrap()).unwrap();
+        assert_eq!(parsed["theme"], "dark");
+        assert_eq!(parsed["mcp"]["existing"]["command"][0], "foo");
+        assert_eq!(parsed["mcp"]["claude_core"]["command"][0], "bin");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn merge_opencode_mcp_tolerates_utf8_bom() {
+        let dir = std::env::temp_dir().join(format!("ulw-mcp-bom-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let config = dir.join("opencode.json");
+        let with_bom = format!("\u{feff}{}", r#"{"mcp":{}}"#);
+        fs::write(&config, with_bom).unwrap();
+        let entry =
+            serde_json::json!({"type":"local","command":["bin","mcp","serve"],"enabled":true});
+        let result = merge_opencode_mcp(&config, "claude_core", &entry);
+        assert!(
+            matches!(result, Ok(OpencodeMcpResult::Added)),
+            "BOM-prefixed config must parse, got {result:?}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn merge_opencode_mcp_creates_config_when_absent() {
+        let dir = std::env::temp_dir().join(format!("ulw-mcp-absent-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let config = dir.join("opencode.json");
+        let entry =
+            serde_json::json!({"type":"local","command":["bin","mcp","serve"],"enabled":true});
+        let result = merge_opencode_mcp(&config, "claude_core", &entry);
+        assert!(matches!(result, Ok(OpencodeMcpResult::Added)));
+        assert!(config.is_file());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn wire_opencode_lands_under_claude_home_parent_not_env_home() {
+        let base = std::env::temp_dir().join(format!("ulw-wire-herm-{}", std::process::id()));
+        let claude_home = base.join("owner-home").join(".claude");
+        let _ = fs::create_dir_all(&claude_home);
+        let repo = create_minimal_layout("wire-opencode-herm-repo");
+        let _ = fs::create_dir_all(repo.join("opencode"));
+        let _ = fs::write(
+            repo.join("opencode").join("claude-core.ts"),
+            "export default async () => ({});\n",
+        );
+
+        let summary = maybe_wire_opencode(&repo, &claude_home);
+        assert!(
+            summary.is_some(),
+            "standard .claude home must wire OpenCode"
+        );
+
+        let owner_config = base
+            .join("owner-home")
+            .join(".config")
+            .join("opencode")
+            .join("plugins")
+            .join("claude-core.ts");
+        assert!(
+            owner_config.is_file(),
+            "plugin must land under claude_home's parent"
+        );
+
+        let _ = fs::remove_dir_all(&base);
+        let _ = fs::remove_dir_all(&repo);
+    }
 
     #[test]
     fn resolve_install_repository_root_prefers_current_directory() {
