@@ -1842,7 +1842,7 @@ const COMPRESSION_HINT_DEFAULT_THRESHOLD: usize = 40;
 /// research-first iron law text. Token cost matters. Keep it surgical and
 /// actionable.
 fn compression_hint_text() -> &'static str {
-    "Output compression is on for this turn — context is heavy. Read narrower line ranges (offset+limit) instead of whole files. Search before reading: use Grep/Glob to locate the exact symbol, then Read only the relevant window. Summarize logs and command output instead of pasting them in full. Skill: compression-discipline."
+    "Output compression is on for this turn — context is heavy. Read narrower line ranges (offset+limit) instead of whole files. Search before reading: use your host's search tool to locate the exact symbol, then read only the relevant window. Summarize logs and command output instead of pasting them in full. Skill: compression-discipline."
 }
 
 /// Count tool-timings JSONL rows for `session_id` recorded today. Returns 0

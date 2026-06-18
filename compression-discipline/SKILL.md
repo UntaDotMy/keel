@@ -21,7 +21,7 @@ Read the smallest window that still answers the question. Search to locate the a
 
 ### 1. Narrow line ranges with `offset` + `limit`
 
-Default to `Read(file, offset, limit)` instead of `Read(file)` when the file is more than a few hundred lines. Once `Grep` or `Glob` has named the relevant line, `Read(file, offset=line-20, limit=80)` is enough to see the function plus context.
+Default to a ranged read (your host's read tool with `offset` + `limit`) instead of reading the whole file when it is more than a few hundred lines. Once a search tool has named the relevant line, reading `offset=line-20, limit=80` is enough to see the function plus context. (Use whatever your host names these: on Claude Code the `Read`/`Grep`/`Glob` tools, on OpenCode the lowercase `read`/`grep`/`glob` tools or `bash` equivalents.)
 
 The whole-file read is only correct when:
 - the file is genuinely small (under ~200 lines)
@@ -30,12 +30,12 @@ The whole-file read is only correct when:
 
 ### 2. Search before reading
 
-Use `Grep` or `Glob` to locate the symbol first. Then `Read` only the located range.
+Use your host's search tool to locate the symbol first, then read only the located range.
 
-Concrete pattern:
+Concrete pattern (tool names vary by host — Claude Code capitalizes, OpenCode is lowercase):
 ```
-Grep("fn user_prompt_submit_context", path="rust/")  # locate
-Read(file, offset=<found_line> - 5, limit=60)        # read window
+search for "fn user_prompt_submit_context" under rust/   # locate the line
+read that file at offset=<found_line> - 5, limit=60       # read the window
 ```
 
 This is the same shape as the project's recall index: search-first, read-second. Never `Read` a 2000-line file looking for a single function — the search tool is faster, cheaper, and more accurate.
@@ -53,7 +53,7 @@ The user already saw the full log on screen. The model's response only needs to 
 
 The UserPromptSubmit hook reads today's `<claude_home>/state/tool-timings/<YYYY-MM-DD>.jsonl` and counts rows tagged with the active `session_id`. When the count crosses `CLAUDE_SKILLS_COMPRESSION_HINT_AFTER` (default 40), the per-prompt `additionalContext` payload appends:
 
-> Output compression is on for this turn — context is heavy. Read narrower line ranges (offset+limit) instead of whole files. Search before reading: use Grep/Glob to locate the exact symbol, then Read only the relevant window. Summarize logs and command output instead of pasting them in full. Skill: compression-discipline.
+> Output compression is on for this turn — context is heavy. Read narrower line ranges (offset+limit) instead of whole files. Search before reading: use your host's search tool to locate the exact symbol, then read only the relevant window. Summarize logs and command output instead of pasting them in full. Skill: compression-discipline.
 
 That nudge is the trigger to load this skill and apply the three actions above for the rest of the session.
 
@@ -66,7 +66,7 @@ That nudge is the trigger to load this skill and apply the three actions above f
 ## Anti-Patterns
 
 - Pasting the entire build log because "the user might want to see it" — they ran the command, they already saw it.
-- Reading a 1500-line module to find one function instead of `Grep`-ing first.
+- Reading a 1500-line module to find one function instead of searching for it first.
 - Quoting 50 consecutive lines from a file the model just edited — a 3-line excerpt with a description of the rest is enough.
 - "I'll just read everything to be safe" — the safety budget is the context window, not the file.
 
