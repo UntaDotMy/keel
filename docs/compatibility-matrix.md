@@ -2,7 +2,7 @@
 
 This matrix documents the supported environments and key workflow surfaces for `keel`.
 
-The goal is to keep the supported entry points explicit for both human operators and AI agents. The managed install publishes the native CLI into the Claude Code home root, so an agent does not need to stay inside this repository checkout to call the tool.
+The goal is to keep the supported entry points explicit for both human operators and AI agents. The managed install publishes the native CLI into the harness home root, so an agent does not need to stay inside this repository checkout to call the tool.
 
 ## Preferred entry points
 
@@ -16,7 +16,7 @@ The goal is to keep the supported entry points explicit for both human operators
 | Context | Windows | macOS | Linux | Agent-friendly | Primary command shape | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
 | Source checkout with Rust toolchain | Supported | Supported | Supported | Supported | `cargo run --bin keel -- ...` | Best fit when iterating inside the repository itself. Workflow shell suggestions keep the source-checkout launcher instead of falling back to bare `keel`. |
-| Installed global CLI from Claude Code home | Supported | Supported | Supported | Supported | `~/.claude/keel(.exe) ...` | Preferred agent entry point when PATH is not guaranteed and the managed install already exists. Manager commands reuse the recorded owning checkout from install metadata when launched from another project, and workflow shell suggestions keep the installed executable surface. |
+| Installed global CLI from the harness home | Supported | Supported | Supported | Supported | `~/.claude/keel(.exe) ...` | Preferred agent entry point when PATH is not guaranteed and the managed install already exists. Manager commands reuse the recorded owning checkout from install metadata when launched from another project, and workflow shell suggestions keep the installed executable surface. |
 | Extracted release bundle | Supported | Supported | Supported | Supported | `./keel install` or `.\keel.exe install` | Useful on fresh machines before the managed install is present. The install command infers the release/source root from the current directory or executable location; `--repo-root` is only an advanced override. |
 | Hosted GitHub Actions runners | Supported | Supported | Supported | Supported | native Rust CLI or `cargo run --bin keel -- ...` | Current hosted proof already runs repo-wide and cross-OS manager loops on all three platforms. |
 
@@ -36,7 +36,7 @@ The goal is to keep the supported entry points explicit for both human operators
 
 ## Agent execution guidance
 
-When an AI agent is operating from an arbitrary workspace or a Claude Code home installation:
+When an AI agent is operating from an arbitrary workspace or a harness home installation:
 
 - Prefer the explicit installed path `~/.claude/keel` or `~/.claude/keel.exe` when PATH resolution is uncertain.
 - The installed global CLI records the owning checkout in install metadata, so manager commands can recover that source automatically when they are launched from another project.

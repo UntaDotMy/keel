@@ -1,5 +1,5 @@
 <!--
-Purpose: Describe the durable runtime rules for scoped memory, recovery, and long-running Claude Code work.
+Purpose: Describe the durable runtime rules for scoped memory, recovery, and long-running the harness work.
 Caller: Managed root guidance and contributors updating runtime-memory doctrine.
 Dependencies: Native memory scope, orchestration artifacts, and scoped reference lanes.
 Main Functions: Define compaction recovery, memory layering, and runtime guardrails.
@@ -9,7 +9,7 @@ Side Effects: Changes the synced runtime-memory guidance used by the managed ski
 
 ## Purpose
 
-This document captures the durable runtime rules that keep Claude Code skills aligned, secure, efficient, and stable across long-running work.
+This document captures the durable runtime rules that keep the harness skills aligned, secure, efficient, and stable across long-running work.
 
 ## WAL Protocol
 

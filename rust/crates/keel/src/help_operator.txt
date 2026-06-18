@@ -32,6 +32,7 @@
   skill-lint --repo-root <path> [--json]
   config-audit --repo-root <path> [--json]
   checkpoint create|list|show|restore [--id <id>] [--confirm]
+  work add|list|ready|blocked|dep|discovered|close|show  [--workspace-root <path>] [--json]
   telemetry summary [--days <N>] [--session <id>] [--top <N>] [--json]
   design-intelligence recommend [request...]
   memory scope resolve [--memory-base <path>] [--workspace-root <path>] [--create-missing] [--refresh-system-map] [--format json|compact]

@@ -1,8 +1,8 @@
-//! Purpose: Claude Code hook lifecycle management, installation, and removal.
+//! Purpose: the harness hook lifecycle management, installation, and removal.
 //! Caller: runner/mod.rs for hook command group.
 //! Dependencies: std::collections::BTreeMap, std::fs, std::path, serde_json, crate::runtime.
 //! Main Functions: run_hook_command, build_hooks_payload, remove_managed_hooks.
-//! Side Effects: Reads and writes Claude Code hooks.json configuration.
+//! Side Effects: Reads and writes the harness hooks.json configuration.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -114,7 +114,7 @@ pub fn run_hook_command(
 
         // Stop and SubagentStop must never return a non-zero exit code, and must
         // never emit hookSpecificOutput.additionalContext. Two distinct hazards:
-        //   1. A non-zero exit makes Claude Code re-run the turn, which cascades
+        //   1. A non-zero exit makes the harness re-run the turn, which cascades
         //      into a stop loop.
         //   2. additionalContext on a Stop hook means "keep going" — emitting it
         //      unconditionally makes the agent loop forever (finish -> inject ->
@@ -126,7 +126,7 @@ pub fn run_hook_command(
         // hazard.
         "stop" | "subagent-stop" => 0,
 
-        // Notification fires when Claude Code wants the user's attention
+        // Notification fires when the harness wants the user's attention
         // (permission prompt, idle reminder). CC 2.1.141 added the
         // `terminalSequence` field to hook JSON output for exactly this case
         // — emitting bells/desktop notifications without a controlling
@@ -161,7 +161,7 @@ pub fn run_hook_command(
         // so the workspace pointer stays current.
         "cwd-changed" => run_hook_cwd_changed(standard_output, standard_error),
 
-        // UserPromptSubmit reads the same stdin payload Claude Code delivers to
+        // UserPromptSubmit reads the same stdin payload the harness delivers to
         // PreToolUse so we can read `session_id` and apply the optional
         // compression-discipline nudge when that session has accumulated enough
         // tool-timings rows to suggest the context window is filling. The
@@ -562,7 +562,7 @@ fn run_hook_instructions(
 
     let _ = writeln!(
         standard_output,
-        "Claude Code exposes hook events including: {}.",
+        "the harness exposes hook events including: {}.",
         claude_hook_event_names().collect::<Vec<_>>().join(", ")
     );
 
@@ -592,7 +592,7 @@ fn run_hook_pre_tool_use(standard_output: &mut dyn Write, standard_error: &mut d
         Err(error) => {
             let _ = writeln!(
                 standard_error,
-                "Unable to read Claude Code hook input: {error}"
+                "Unable to read the harness hook input: {error}"
             );
 
             return 1;
@@ -605,7 +605,7 @@ fn run_hook_pre_tool_use(standard_output: &mut dyn Write, standard_error: &mut d
         Err(error) => {
             let _ = writeln!(
                 standard_error,
-                "Unable to decode Claude Code hook input: {error}"
+                "Unable to decode the harness hook input: {error}"
             );
 
             return 1;
@@ -665,7 +665,7 @@ fn run_hook_pre_tool_use(standard_output: &mut dyn Write, standard_error: &mut d
         Err(error) => {
             let _ = writeln!(
                 standard_error,
-                "Unable to render Claude Code hook output: {error}"
+                "Unable to render the harness hook output: {error}"
             );
 
             0
@@ -688,7 +688,7 @@ fn run_hook_post_tool_use(standard_error: &mut dyn Write) -> u8 {
     let input_text = match std::io::read_to_string(std::io::stdin()) {
         Ok(text) => text,
 
-        // PostToolUse must never fail loudly: a non-zero exit teaches Claude
+        // PostToolUse must never fail loudly: a non-zero exit teaches the harness
         // Code that the post-tool hook itself is broken. Log to stderr and
         // exit 0 — the lifecycle event is observability, not a gate.
         Err(error) => {
@@ -840,14 +840,14 @@ fn run_hook_post_tool_use_failure(standard_error: &mut dyn Write) -> u8 {
 ///
 /// CC 2.1.141 added a `terminalSequence` top-level field to hook JSON output
 /// so hooks can emit desktop notifications, window titles, and bells without
-/// a controlling terminal. The Notification event fires when Claude Code
+/// a controlling terminal. The Notification event fires when the harness
 /// raises a permission prompt or an idle "needs your attention" cue, so it
 /// is the natural place to ring the BEL. Allowed payload per the docs is
 /// OSC 0/1/2/9/99/777 and BEL — `\u{0007}` is the BEL and is in the
 /// allowlist. `suppressOutput` keeps the transcript clean.
 ///
 /// The handler is input-agnostic: the JSON output is the same regardless of
-/// what stdin contains, so we don't read it. Claude Code does not require
+/// what stdin contains, so we don't read it. The harness does not require
 /// the hook to drain the pipe.
 fn run_hook_notification(standard_output: &mut dyn Write) -> u8 {
     let _ = writeln!(standard_output, "{NOTIFICATION_BELL_OUTPUT}");
@@ -858,7 +858,7 @@ fn run_hook_notification(standard_output: &mut dyn Write) -> u8 {
 /// Hook JSON emitted by Notification. BEL is in the CC 2.1.141
 /// `terminalSequence` allowlist and is JSON-escaped as `\u0007` per
 /// RFC 8259 (control characters U+0000–U+001F MUST be escaped inside a
-/// JSON string). Claude Code unescapes the value before writing it to the
+/// JSON string). The harness unescapes the value before writing it to the
 /// terminal, which is what produces the audible bell. `suppressOutput`
 /// hides this row from the transcript so the bell is the only side effect.
 const NOTIFICATION_BELL_OUTPUT: &str = "{\"suppressOutput\":true,\"terminalSequence\":\"\\u0007\"}";
@@ -867,7 +867,7 @@ const NOTIFICATION_BELL_OUTPUT: &str = "{\"suppressOutput\":true,\"terminalSeque
 ///
 /// Auto-approves Bash commands that invoke `keel` to reduce permission
 /// prompt friction. For all other tool calls, returns 0 (no output) to let
-/// Claude Code handle the permission dialog normally.
+/// the harness handle the permission dialog normally.
 fn run_hook_permission_request(
     stdin: &mut dyn Read,
     standard_output: &mut dyn Write,
@@ -1158,7 +1158,7 @@ fn run_hook_lifecycle(
         Err(error) => {
             let _ = writeln!(
                 standard_error,
-                "Unable to render Claude Code lifecycle hook output: {error}"
+                "Unable to render the harness lifecycle hook output: {error}"
             );
 
             0
@@ -1166,7 +1166,7 @@ fn run_hook_lifecycle(
     }
 }
 
-/// Wrap `context` in the JSON payload Claude Code expects for `event`.
+/// Wrap `context` in the JSON payload the harness expects for `event`.
 ///
 /// Events whose schema accepts `hookSpecificOutput.additionalContext` get
 /// the per-event shape; everything else falls back to top-level
@@ -1217,7 +1217,7 @@ pub(crate) fn render_lifecycle_payload(event: &HookEvent, context: &str) -> Json
 }
 
 /// Look up the PascalCase event name for a kebab slug. Used by callers that have a
-/// slug in hand but need to reason in Claude Code's PascalCase vocabulary.
+/// slug in hand but need to reason in the harness's PascalCase vocabulary.
 fn lifecycle_additional_context(subcommand: &str) -> String {
     match subcommand {
         "session-start" => session_start_context(),
@@ -1262,7 +1262,7 @@ fn lifecycle_additional_context(subcommand: &str) -> String {
 
 /// Compact SessionStart bootstrap contract.
 ///
-/// This must land in the model's context *in full*. Claude Code truncates hook
+/// This must land in the model's context *in full*. The harness truncates hook
 /// `hookSpecificOutput.additionalContext` once it crosses ~10KB: the full text
 /// is persisted to `<project>/tool-results/hook-…-additionalContext.txt` and the
 /// model receives only a ~2KB preview plus a file pointer it never reads back.
@@ -1274,7 +1274,7 @@ fn lifecycle_additional_context(subcommand: &str) -> String {
 /// by a 2KB preview while a 5.9KB UserPromptSubmit context landed intact.
 ///
 /// The fix is to keep this block small enough to survive the cap. We drop the
-/// ~8.5KB skill catalog enumeration (Claude Code already injects its own native
+/// ~8.5KB skill catalog enumeration (the harness already injects its own native
 /// skill listing every session, so it was pure duplication) and the verbose
 /// prose, keeping the operative contract: the iron law, the rationalization Red
 /// Flags, the four discipline pillars, the always-on MCP tools, and the memory
@@ -1320,7 +1320,7 @@ This is the **Iron Law** of keel. It is loaded into your context at SessionStart
 - `run_command` — run noisy shell commands (test, build, lint, logs, search) through it so compacted output enters context instead of the raw stream.
 
 ## Skills & subagents
-40 specialist skills are installed under `~/.claude/skills/` (lifecycle, backend, cloud, security, `reviewer`, UI/UX, `preserve-existing-flow`, systematic-debugging, TDD, migrations, and more) — Claude Code lists them natively each session. Invoke by bare name, e.g. `Skill("reviewer")`. For the full catalog and routing rules, call `Skill("using-keel")`. 24 matching subagents in `.claude/agents/` handle delegated isolated-context work via the Agent tool. About to read or edit existing code? Invoke `preserve-existing-flow` first.
+40 specialist skills are installed under `~/.claude/skills/` (lifecycle, backend, cloud, security, `reviewer`, UI/UX, `preserve-existing-flow`, systematic-debugging, TDD, migrations, and more) — the harness lists them natively each session. Invoke by bare name, e.g. `Skill("reviewer")`. For the full catalog and routing rules, call `Skill("using-keel")`. 24 matching subagents in `.claude/agents/` handle delegated isolated-context work via the Agent tool. About to read or edit existing code? Invoke `preserve-existing-flow` first.
 
 ## Memory writes (when you learn something durable)
 Working memory dies at compaction. To persist across sessions:
@@ -1339,7 +1339,7 @@ pub(crate) fn session_start_context() -> String {
     // bootstrap contract instead of restating it on every UserPromptSubmit.
     //
     // The bootstrap MUST be the compact contract, not the full 27KB
-    // using-keel/SKILL.md. Claude Code truncates additionalContext above
+    // using-keel/SKILL.md. The harness truncates additionalContext above
     // ~10KB to a 2KB preview + a file pointer (verified against live
     // transcripts), so dumping the full skill here meant the model only ever saw
     // its first ~2KB. COMPACT_BOOTSTRAP keeps the operative contract under the
@@ -1675,7 +1675,7 @@ fn cue_used_as_verb(lowered: &str, cue: &str) -> bool {
 /// UserPromptSubmit dispatcher that reads stdin and composes the per-prompt
 /// `additionalContext`.
 ///
-/// Claude Code delivers a JSON payload on stdin for this event with at least
+/// the harness delivers a JSON payload on stdin for this event with at least
 /// `session_id`, `transcript_path`, `cwd`, and `prompt`. We use `session_id`
 /// to read today's tool-timings JSONL and decide whether enough tool calls
 /// have already happened in this session to merit the compression-discipline
@@ -1741,7 +1741,7 @@ fn run_hook_user_prompt_submit(
         Err(error) => {
             let _ = writeln!(
                 standard_error,
-                "Unable to render Claude Code lifecycle hook output: {error}"
+                "Unable to render the harness lifecycle hook output: {error}"
             );
             0
         }
@@ -1880,7 +1880,7 @@ fn subagent_start_context() -> String {
 //
 // The PostToolBatch hook fires after a batch of tool calls resolves, just
 // before the next model turn. Two gates ride here, both DEFAULT-ON, because
-// they are the only model-INDEPENDENT way to surface the Iron Law — Claude Code
+// they are the only model-INDEPENDENT way to surface the Iron Law — the harness
 // hooks cannot force a Skill()/MCP/tool call, but they CAN inject a reminder
 // (and, opt-in, refuse to let a turn close) when a required artifact is missing:
 //   * Review gate — fires when this session changed code but no reviewer pass
@@ -1900,7 +1900,7 @@ fn subagent_start_context() -> String {
 //     cannot force a Skill()/tool call, but it can refuse to let the turn close
 //     cheaply. First contact never interrupts mid-task; persistent neglect does.
 //   * Nudge (`…=nudge`, opt-down) — always a non-blocking reminder, never blocks.
-//   * Block (`…=block`, opt-up) — emit `decision: "block"` on every fire so Claude
+//   * Block (`…=block`, opt-up) — emit `decision: "block"` on every fire so the harness
 //     Code halts the turn until the requirement is met.
 //   * Off (`…=off`/`0`/`false`/`no`, or `…_MAX_BLOCKS=0`) — disabled; only the
 //     generic advisory reminder is emitted.
@@ -2041,7 +2041,7 @@ fn review_gate_max_blocks() -> u64 {
 //
 // The end-of-turn moment where the user wants "I found these gaps, I'm not
 // done" cannot live in a Stop/SubagentStop/SessionEnd hook — those events do not
-// accept `hookSpecificOutput.additionalContext` per the Claude Code schema, so
+// accept `hookSpecificOutput.additionalContext` per harness schema, so
 // they cannot inject text into the model's context. PostToolBatch is the one
 // end-of-turn event that can, so the honest-closeout gate rides here alongside
 // the brief/review gates. It is scoped to user-story work: it fires only when the
@@ -2587,7 +2587,7 @@ fn emit_post_tool_batch_nudge(
 
 /// PostToolBatch dispatcher running the three default-on enforcement gates.
 ///
-/// Reads stdin for `session_id` (Claude Code delivers the hook payload there,
+/// Reads stdin for `session_id` (the harness delivers the hook payload there,
 /// same as UserPromptSubmit). Evaluates the working-brief gate FIRST (the front
 /// of the Iron Law — understand before building), then the review gate (the
 /// back — review before close), then the honest-closeout gate.
@@ -2939,13 +2939,13 @@ fn maybe_self_heal_mcp_registration(standard_error: &mut dyn Write) {
         Some(Ok(crate::manager::mcp_register::McpRegistration::Added)) => {
             let _ = writeln!(
                 standard_error,
-                "keel: registered keel MCP server in ~/.claude.json (alwaysLoad). Restart Claude Code to load the tools into context."
+                "keel: registered keel MCP server in ~/.claude.json (alwaysLoad). Restart the harness to load the tools into context."
             );
         }
         Some(Ok(crate::manager::mcp_register::McpRegistration::Updated)) => {
             let _ = writeln!(
                 standard_error,
-                "keel: repaired drifted keel MCP entry in ~/.claude.json (alwaysLoad). Restart Claude Code to load the tools into context."
+                "keel: repaired drifted keel MCP entry in ~/.claude.json (alwaysLoad). Restart the harness to load the tools into context."
             );
         }
         Some(Err(error)) => {
@@ -3053,7 +3053,7 @@ fn maybe_capture_session_summary(standard_input: &mut dyn Read, standard_error: 
         return;
     }
 
-    // The session id arrives on stdin (Claude Code writes the hook payload then
+    // The session id arrives on stdin (the harness writes the hook payload then
     // closes the handle). Without it we cannot scope the summary to this
     // session, so fail open — silently skip rather than summarize the wrong work.
     let stdin_payload: Option<JsonDocument> = {
@@ -3320,7 +3320,34 @@ fn workspace_memory_digest() -> String {
         }
     }
 
-    // 3. Most recent durable memory note (includes s5 SessionEnd auto-capture).
+    // 3. Open work items for THIS workspace (the dependency-aware work graph).
+    //    Pushing ready + blocked items every session is the anti-drift property:
+    //    work discovered but not finished (including `discovered-from` captures)
+    //    stays reachable across compaction instead of being dropped. Mirrors the
+    //    sprint digest but at the finer-grained task-graph level.
+    if let Ok(Some(open)) =
+        crate::utility::work_graph::open_work_items_for_workspace(&claude_home, &workspace_display)
+    {
+        if !open.is_empty() {
+            let mut lines = String::from(
+                "## Open work items (keel work — finish or explicitly defer; do not drop)",
+            );
+            for item in open.iter().take(12) {
+                let blockers = if item.open_blockers.is_empty() {
+                    "ready".to_string()
+                } else {
+                    format!("blocked on {}", item.open_blockers.join(", "))
+                };
+                lines.push_str(&format!(
+                    "\n  - [{}] {} :: {} ({blockers})",
+                    item.status, item.id, item.title
+                ));
+            }
+            sections.push(truncate_on_line_boundary(&lines, DIGEST_BRIEF_MAX_BYTES));
+        }
+    }
+
+    // 4. Most recent durable memory note (includes s5 SessionEnd auto-capture).
     let store =
         crate::utility::record_store::RecordStore::new(&claude_home, "memory/research-cache");
     if let Ok(mut records) = store.list_records() {
@@ -3635,7 +3662,7 @@ fn settings_points_at_installed_executable(
     // case-insensitive, so the rendered hook command may carry the same path
     // with a different casing than `display_path()` returns. On Linux and
     // macOS, filesystems are case-sensitive and `~/.claude/keel` is a
-    // genuinely different file from `~/.Claude/keel` — lowercasing
+    // genuinely different file from `~/.the harness/keel` — lowercasing
     // would mask a real misconfiguration. `casefold` is therefore the identity
     // on Unix and `to_ascii_lowercase` only on Windows.
     let casefold = |value: &str| -> String {
@@ -3712,9 +3739,9 @@ fn is_help_argument(argument: &str) -> bool {
     matches!(argument, "help" | "--help" | "-h")
 }
 
-/// One managed hook entry as Claude Code's `args` exec form (added in CC 2.1.139).
+/// One managed hook entry as the harness's `args` exec form (added in CC 2.1.139).
 ///
-/// `command` is the bare executable path; `args` is the argv that follows. Claude
+/// `command` is the bare executable path; `args` is the argv that follows. The harness
 /// Code spawns the binary directly without going through a shell, so neither
 /// field needs shell quoting. Per code.claude.com/docs/en/hooks the `args` form
 /// supersedes the historical single-string `command` shape that required
@@ -3802,7 +3829,7 @@ pub fn remove_managed_hook_payload(hook_path: &Path) -> Result<(String, bool), S
 
 /// Strip the managed hook stanzas from `<claude_home>/settings.json`, writing
 /// the file back only when something changed. Used by `manager` uninstall so a
-/// full uninstall does not leave Claude Code firing hooks at a deleted binary.
+/// full uninstall does not leave the harness firing hooks at a deleted binary.
 /// A missing settings file is a no-op (nothing to clean), not an error.
 pub fn remove_managed_hook_payload_for_home(claude_home: &Path) -> Result<bool, String> {
     let hook_path = claude_home.join(crate::hooks::claude::SETTINGS_FILE_NAME);
@@ -4520,7 +4547,7 @@ mod tests {
         // PreToolUse stays Bash-scoped: the rewriter only operates on shell
         // commands. PostToolUse must fire for every tool — the handler gates
         // the edit-counter path on `is_edit_class_tool` (Edit/Write/MultiEdit/
-        // NotebookEdit) at runtime, which would be unreachable if Claude Code
+        // NotebookEdit) at runtime, which would be unreachable if the harness
         // only delivered Bash events. The empty matcher also lets
         // `tool_timings::record_tool_timing` sample non-Bash tools so the
         // compression-discipline nudge fires when context fills with file
@@ -4978,7 +5005,7 @@ mod tests {
         let previous_mode = std::env::var("CLAUDE_SKILLS_COMPRESSION_HINT").ok();
         std::env::remove_var("CLAUDE_SKILLS_COMPRESSION_HINT");
 
-        // Real Claude Code payload shape — UserPromptSubmit always carries a
+        // Real the harness payload shape — UserPromptSubmit always carries a
         // `session_id`. The hook fail-opens to the base context when the
         // session-keyed compression-hint heuristic returns None (no JSONL
         // rows recorded yet for this session in the current claude_home),
@@ -6287,7 +6314,7 @@ mod tests {
 
     #[test]
     fn session_start_context_stays_under_truncation_cap() {
-        // The bug this guards: Claude Code truncates hook
+        // The bug this guards: the harness truncates hook
         // `hookSpecificOutput.additionalContext` once it crosses ~10KB,
         // persisting the full text to a tool-results file and injecting only a
         // ~2KB preview + a file pointer the model never reads back. Verified
@@ -6333,7 +6360,7 @@ mod tests {
         let byte_len = context.len();
         assert!(
             byte_len < TRUNCATION_CEILING_BYTES,
-            "SessionStart context is {byte_len} bytes, at/over the {TRUNCATION_CEILING_BYTES}-byte ceiling — Claude Code truncates additionalContext above ~10KB, so the operating contract would be cut off mid-way and the model would never see the full iron law. Trim the compact bootstrap or move detail into the on-demand Skill(\"using-keel\") body."
+            "SessionStart context is {byte_len} bytes, at/over the {TRUNCATION_CEILING_BYTES}-byte ceiling — the harness truncates additionalContext above ~10KB, so the operating contract would be cut off mid-way and the model would never see the full iron law. Trim the compact bootstrap or move detail into the on-demand Skill(\"using-keel\") body."
         );
 
         // Major-3 guard: in a fresh test env `workspace_memory_digest()` is
@@ -6533,7 +6560,7 @@ mod tests {
             } else {
                 assert!(
                     payload.get("hookSpecificOutput").is_none(),
-                    "{}: top-level-only events must not emit hookSpecificOutput — the official Claude Code schema documents top-level decision fields only for this event",
+                    "{}: top-level-only events must not emit hookSpecificOutput — the official harness schema documents top-level decision fields only for this event",
                     event.name
                 );
                 assert_eq!(
@@ -7059,7 +7086,7 @@ mod tests {
     fn stop_and_subagent_stop_short_circuit_at_dispatch() {
         // Stop and SubagentStop must always exit 0 AND emit no stdout. Two
         // distinct hazards this guards against:
-        //   1. A non-zero exit makes Claude Code re-run the turn (stop cascade).
+        //   1. A non-zero exit makes the harness re-run the turn (stop cascade).
         //   2. Any stdout carrying hookSpecificOutput.additionalContext on a Stop
         //      hook means "keep going" — so emitting it makes the agent loop
         //      forever. This was the PR #121 regression; the dispatch arm now
@@ -7087,7 +7114,7 @@ mod tests {
 
     #[test]
     fn notification_emits_bell_terminal_sequence() {
-        // CC 2.1.141: Notification fires when Claude Code wants the user's
+        // CC 2.1.141: Notification fires when the harness wants the user's
         // attention (permission prompt, idle reminder). Our handler emits a
         // top-level `terminalSequence` carrying the BEL so the user hears
         // it even when the terminal is in the background. The output also

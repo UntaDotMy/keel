@@ -59,6 +59,20 @@ downstream symptoms").
 - Resist defense-in-depth band-aids: adding a null check three layers down hides
   the real bug. Add guards only where the contract actually says a guard belongs.
 
+### 3b. Find every sibling instance of the same cause
+
+- A root cause is a *pattern*, not a single line. The moment you name it, grep the
+  whole repo for the same shape: the same bad call, the same missing guard, the
+  same wrong type read, the same un-migrated API. The instance you reproduced is
+  rarely the only one.
+- Concrete: a string-vs-number parse bug at one site usually exists at every site
+  that parses that field; a renamed function breaks every caller; a wrong default
+  recurs in every copy of the idiom. Fix all of them in this turn, not just the one
+  the test happened to hit.
+- Show the search. Paste the grep/code-search query and its hit list, then confirm
+  each hit is fixed or explicitly out of scope. "I fixed the one I found" with no
+  search of the rest is an unfinished fix, not a done one.
+
 ### 4. Prove the fix
 
 - Write a regression test that fails against the old code and passes against the
@@ -91,11 +105,15 @@ downstream symptoms").
   without confirming the cause.
 - Tweaking the same suspect line more than twice with no new hypothesis. After two
   failed attempts, stop and re-trace from the symptom — the target is likely wrong.
+- Fixing the one instance the failing test exercised and stopping, without grepping
+  for the other sites that share the same root cause. A class fixed at one of N
+  sites ships N−1 live bugs.
 
 ## Validation
 
 Methodology skill; no `keel` subcommand. Self-check before claiming a
 defect fixed: can you reproduce the original symptom, name the cause with
-`file:line`, point at the source-of-truth change, and show a regression test that
+`file:line`, point at the source-of-truth change, show the search that proves you
+found every sibling instance of the same cause, and show a regression test that
 fails without the fix? If any of those is missing, the bug is diagnosed at best,
 not fixed.

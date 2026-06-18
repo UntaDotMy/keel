@@ -70,7 +70,7 @@ The tracked suite covers these scenario families in the published scorecard and 
 
 ## What this suite does not claim
 
-- no broad market-speed claim against every Claude Code workflow layer
+- no broad market-speed claim against every harness workflow layer
 - no universal benchmark for all tasks
 - no claim that every peer repo already has source-backed runs recorded for every shared-harness scenario
 - no wall-clock competition claim beyond the tracked scenarios in this repository

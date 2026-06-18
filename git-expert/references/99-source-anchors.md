@@ -19,14 +19,14 @@ Use these sources for current, evidence-backed Git workflow guidance.
 - `git cherry-pick`: https://git-scm.com/docs/git-cherry-pick
 - `git clean`: https://git-scm.com/docs/git-clean
 
-## Claude Code Agent Orchestration References
+## the harness Agent Orchestration References
 
-- Claude Code slash commands: https://docs.anthropic.com/en/docs/agents-and-tools/claude-code/cli-usage
-- Claude Code changelog: https://docs.anthropic.com/en/docs/agents-and-tools/claude-code/changelog
+- the harness slash commands: https://docs.anthropic.com/en/docs/agents-and-tools/claude-code/cli-usage
+- the harness changelog: https://docs.anthropic.com/en/docs/agents-and-tools/claude-code/changelog
 
-- (removed: js_repl is not part of Claude Code)
-- (removed: not part of Claude Code)
-- (removed: js_repl is not part of Claude Code)
+- (removed: js_repl is not part of the harness)
+- (removed: not part of the harness)
+- (removed: js_repl is not part of the harness)
 
 ## Collaboration and Pull Request Workflow
 

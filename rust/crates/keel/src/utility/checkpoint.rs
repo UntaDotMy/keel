@@ -1,12 +1,12 @@
 //! Purpose: Git-backed workspace code checkpoints — the buildable analog to
-//!   Claude Code's native `/rewind`. Snapshot the working tree non-destructively,
+//!   the harness's native `/rewind`. Snapshot the working tree non-destructively,
 //!   list/show snapshots, and restore one (guarded), so a bad edit run is undoable.
 //! Caller: commands.rs `checkpoint` dispatch.
 //! Dependencies: std::io, crate::args, crate::json, crate::runtime::{run_command, resolve_repository_root}.
 //! Side Effects: Creates git objects + refs under `refs/claude-checkpoints/`; `restore`
 //!   modifies the working tree (guarded by --confirm and an auto safety snapshot).
 //!
-//! Why this exists: native `/rewind` auto-captures Claude's edit-tool changes and
+//! Why this exists: native `/rewind` auto-captures the harness's edit-tool changes and
 //! can restore code+conversation. An external binary cannot hook the edit tool,
 //! but git already IS the code-undo. `checkpoint create` uses `git stash create`
 //! to capture tracked working-tree changes as a dangling commit, then pins it

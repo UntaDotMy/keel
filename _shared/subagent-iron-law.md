@@ -110,7 +110,7 @@ use: `status`, `research-cache`, `maintenance`, `agent-registry`,
 plus `report` (alias for `status`) and `index` (rebuilds the recall index).
 The same verbs work under `keel memoriesv2 ...`. The only verb that is
 not a memory subcommand is `hook`: it exits with a pointer to
-`keel hook install|list|instructions|diagnose`, which owns Claude Code
+`keel hook install|list|instructions|diagnose`, which owns the harness
 lifecycle hooks.
 
 ## Reporting back

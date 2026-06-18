@@ -15,7 +15,7 @@ Turn the active roadmap in [todo.md](../todo.md) into a delivery plan that makes
 
 The repo already has the foundations that the next roadmap should extend, not replace:
 
-- native memory scope resolution already exposes project-scoped global reference lanes under Claude Code home
+- native memory scope resolution already exposes project-scoped global reference lanes under the harness home
 - deterministic review and branch-closeout surfaces already exist through `review pre-commit`, `review pre-pr`, `review gates check`, and `git-workflow preflight`
 - managed root guidance, skill routing docs, and README surfaces already exist and can be strengthened instead of recreated
 - Rust tests and docs validation guard the prompt surface, help surface, and roadmap consistency

@@ -1,17 +1,17 @@
 <!--
 Purpose: Compact entry point for skill routing rules and the specialist roster. Detailed doctrine lives under AGENTS/references/.
-Caller: Synced Claude Code guidance files and contributors needing the routing summary.
+Caller: Synced the harness guidance files and contributors needing the routing summary.
 Dependencies: AGENTS.md, AGENTS/references/20-skill-routing.md, the 24 specialist SKILL.md files.
 Main Functions: Provide the short routing contract, ownership map, and pointers to depth references.
-Side Effects: Changes to this file affect every Claude Code session; keep it tight.
+Side Effects: Changes to this file affect every harness session; keep it tight.
 -->
-# Skill Routing and Escalation (Claude Code CLI)
+# Skill Routing and Escalation (the harness CLI)
 
 This is the short pointer file for skill routing. The detailed doctrine lives in [AGENTS/references/20-skill-routing.md](AGENTS/references/20-skill-routing.md). When this file and a reference disagree, this file wins; open a follow-up to reconcile.
 
 ## Native Command Routing — Must Follow First
 
-Token-saving rule: prevent noisy raw command output from entering Claude Code context. Route through `keel run -- <command>` or the hook-provided `Rerun that as:` wrapper before noisy output is produced.
+Token-saving rule: prevent noisy raw command output from entering the harness context. Route through `keel run -- <command>` or the hook-provided `Rerun that as:` wrapper before noisy output is produced.
 
 - **Noisy shell commands**: prefer `keel run -- <command>` for test, build, lint, log, status, search, container, package-manager, and CI commands. Use `keel rewrite "<command>"` to inspect.
 - **Hook block-and-rerun**: if the managed `PreToolUse` hook returns `Rerun that as: <command>`, run that exact command once and continue from the compacted output. Do not ask the user, do not treat the hook block as a task failure, and do not repeat the raw command first.
@@ -32,7 +32,7 @@ Token-saving rule: prevent noisy raw command output from entering Claude Code co
 8. **Writing Discipline** — all written output (docs, code comments, commit/PR text, review notes, chat) **must** follow: write less, be accurate not impressive, lead with the point, no filler or AI tells, stay on the asked scope. Full rule in `_shared/common-discipline.md` § Writing Discipline.
 9. **Agent teams** — use `designing-agent-teams` when a task needs coordinated multi-agent decomposition. Subagents **must not** spawn subagents — route delegation back to the main thread. Teammates **must** communicate via `SendMessage(to: <agent-id>)`. Resumed subagents retain full history and auto-resume in background on `SendMessage`; `SubagentStop` and `TeammateIdle` events fire on lifecycle. Set `CLAUDE_CODE_FORK_SUBAGENT=1` to fork conversation history into every subagent.
 
-## Skill Ownership Map (Claude Code CLI)
+## Skill Ownership Map (the harness CLI)
 
 ```
 ┌──────────────────────────────────────┐

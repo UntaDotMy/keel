@@ -1,6 +1,6 @@
 //! Purpose: Persist raw and compact command-output artifacts for proxy recovery.
 //! Caller: proxy::run after the real command executes and after adapter compaction.
-//! Dependencies: Claude home resolution, serde metadata, and filesystem writes.
+//! Dependencies: harness home resolution, serde metadata, and filesystem writes.
 //! Main Functions: RawStore::save, RawStore::save_compact, RawStore::generate_id.
 //! Side Effects: Creates raw-output directories and writes stdout/stderr/metadata/compact logs.
 

@@ -18,7 +18,7 @@ pub fn render_system_map(workspace_root: &Path) -> String {
         "# SYSTEM_MAP".to_string(),
         String::new(),
         format!("- workspace_root: {}", display_path(workspace_root)),
-        "- storage: Claude Code-global per-workspace reference lane".to_string(),
+        "- storage: the harness-global per-workspace reference lane".to_string(),
         "- runtime: rust".to_string(),
         "- go_fallback: false".to_string(),
         String::new(),
@@ -240,7 +240,7 @@ fn detect_ownership_hints(workspace_root: &Path) -> Vec<String> {
 const OWNERSHIP_HINT_FILENAMES: &[(&str, &str)] = &[
     ("AGENTS.md", "managed agent routing and repository policy"),
     ("README.md", "user-facing product and install surface"),
-    ("CLAUDE.md", "Claude Code project guide"),
+    ("CLAUDE.md", "the harness project guide"),
     ("CONTRIBUTING.md", "contributor onboarding and workflow"),
     ("SKILL.md", "specialist skill surface"),
     ("CODEOWNERS", "code-ownership routing"),

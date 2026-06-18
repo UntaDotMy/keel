@@ -68,10 +68,10 @@ Load 30-observability-incidents-and-sre.md when the task includes:
 - Confirm which checks require live cloud, CI, or cluster access versus repository-only review.
 - Confirm the operator evidence required before declaring success.
 
-## Claude Code Runtime Boundaries
+## the harness Runtime Boundaries
 
-- Claude Code can synthesize IaC structure, release controls, and operational checklists from repository evidence.
-- Claude Code cannot inspect live providers, policy engines, secret stores, or deployment controllers unless artifacts or access are supplied.
+- the harness can synthesize IaC structure, release controls, and operational checklists from repository evidence.
+- the harness cannot inspect live providers, policy engines, secret stores, or deployment controllers unless artifacts or access are supplied.
 - When external access is unavailable, provide exact plan, apply, rollout, and dashboard checks for a human operator to execute.
 
 ## Related References

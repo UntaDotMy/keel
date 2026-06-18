@@ -2,6 +2,6 @@
   Manager commands sync managed skills, agents, guidance, config, metadata, and the installed Rust binary from the current checkout or release archive.
   Validation runs cargo fmt, cargo test, optional release build, and git diff checks through Rust-owned command surfaces.
   Review and git-workflow commands provide local gates, hosted-review artifacts, generated message text, and professional-message linting in Rust.
-  Run, rewrite, and hook commands stay Rust-native, install Claude Code PreToolUse interception, compact noisy output with command-specific semantic reducers, high-signal error/warning context plus head/tail summaries, record native gain analytics, and preserve raw command output for recovery.
+  Run, rewrite, and hook commands stay Rust-native, install the harness PreToolUse interception, compact noisy output with command-specific semantic reducers, high-signal error/warning context plus head/tail summaries, record native gain analytics, and preserve raw command output for recovery.
   Memory, memoriesv2, orchestration, workflow, code-search, design-intelligence, gain, and bench commands resolve in Rust without shelling out to a legacy runtime.
   Unknown commands fail closed with an explicit Rust-runtime no-fallback error.

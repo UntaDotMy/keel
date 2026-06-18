@@ -41,7 +41,7 @@ See `_shared/common-discipline.md` for the canonical rules. Apply them to all wo
 - Inspect actual research inputs, product constraints, and delivery context before recommending a UX direction.
 - Translate requests into a UX brief with user story, job-to-be-done, primary journey, decision points, friction risks, and measurable success signals before proposing recommendations.
 - Favor production evidence over idealized advice: real user findings, instrumentation, support signals, and experiment limits outrank generic UX heuristics.
-- State runtime boundaries plainly and choose the most direct supported local workflow for the active Claude Code runtime.
+- State runtime boundaries plainly and choose the most direct supported local workflow for the active harness runtime.
 
 ## Operating Stance
 

@@ -4,7 +4,7 @@
 //! Caller: commands.rs `config-audit` dispatch.
 //! Dependencies: std::fs, std::path, serde_json, crate::args, crate::json, crate::runtime.
 //! Main Functions: run_config_audit_command, audit_hooks_doc, audit_settings_doc, audit_manifest_doc.
-//! Side Effects: Reads config files under the repo and/or Claude home; writes a report.
+//! Side Effects: Reads config files under the repo and/or harness home; writes a report.
 //!
 //! Why this exists: the security-and-compliance-auditor skill audits the USER's
 //! code. Nothing audited the agent's own configuration — the hooks, permission

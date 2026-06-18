@@ -46,10 +46,10 @@
 - Skipping rollback planning because the team can just redeploy the last version
 - Treating a passed deployment job as proof that background jobs, queues, and user traffic are healthy
 
-## Claude Code Runtime Boundaries
+## the harness Runtime Boundaries
 
-- Claude Code can review workflow files, deployment scripts, promotion logic, and secret references in repository state.
-- Claude Code cannot confirm OIDC trust, secret-store contents, artifact registry state, rollout-controller health, or external approval settings without runtime evidence.
+- the harness can review workflow files, deployment scripts, promotion logic, and secret references in repository state.
+- the harness cannot confirm OIDC trust, secret-store contents, artifact registry state, rollout-controller health, or external approval settings without runtime evidence.
 - When CI or platform access is unavailable, require workflow runs, deployment event logs, artifact digests, and operator validation before claiming the release path is proven.
 
 ## Related References

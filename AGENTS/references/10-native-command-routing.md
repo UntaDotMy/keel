@@ -11,7 +11,7 @@ Side Effects: None — this file is informational.
 
 When a native `keel` command owns the job, use it instead of recreating the behavior with raw shell, generic search, or ad hoc instructions.
 
-**Token-saving rule:** the goal is to prevent noisy raw command output from entering Claude Code context. Do not run a raw noisy command first and compact afterward; route through `keel run -- <command>` or rely on the hook's transparent rewrite before noisy output is produced.
+**Token-saving rule:** the goal is to prevent noisy raw command output from entering the harness context. Do not run a raw noisy command first and compact afterward; route through `keel run -- <command>` or rely on the hook's transparent rewrite before noisy output is produced.
 
 **Before noisy shell commands:**
 - Prefer `keel run -- <command>` for test, build, lint, log, status, search, Docker, Kubernetes, Terraform, package-manager, and CI-style commands.
@@ -86,14 +86,14 @@ Do not re-run the original raw command unless the wrapper itself fails for a rea
 
 - **Level 1 — Direct native wrapper:** `keel run -- <command>` is the most reliable transparent surface; it owns command execution, shell-aware parser/rewrite support, command-specific semantic reducers, high-signal error/warning extraction, noisy-output head/tail compaction, raw-output recovery, and native savings analytics in one step. Use `keel run --stream -- <command>` only when bounded live progress is needed.
 - **Level 2 — Rewrite helper:** `keel rewrite "<command>"` returns the resolved wrapper for inspection or scripting. It recognizes common shell wrappers, environment prefixes, and pipelines, and routes shell syntax through `bash -lc`.
-- **Level 3 — Hook guidance:** `keel hook install` registers native Claude Code lifecycle hooks for `PreToolUse`, `PermissionRequest`, `PostToolUse`, `PreCompact`, `PostCompact`, `SessionStart`, `UserPromptSubmit`, and `Stop` in `~/.claude/hooks.json`. `PreToolUse` owns token-saving interception because it must run before noisy Bash output exists; the other lifecycle hooks are native no-op/checkpoint surfaces for memory and recovery wiring. The hook may return `permissionDecision: "allow"` with a `toolInputOverride` that transparently wraps the command (not a block-and-rerun).
+- **Level 3 — Hook guidance:** `keel hook install` registers native harness lifecycle hooks for `PreToolUse`, `PermissionRequest`, `PostToolUse`, `PreCompact`, `PostCompact`, `SessionStart`, `UserPromptSubmit`, and `Stop` in `~/.claude/hooks.json`. `PreToolUse` owns token-saving interception because it must run before noisy Bash output exists; the other lifecycle hooks are native no-op/checkpoint surfaces for memory and recovery wiring. The hook may return `permissionDecision: "allow"` with a `toolInputOverride` that transparently wraps the command (not a block-and-rerun).
 - **Level 4 — Native install/update:** Use the installed Rust binary directly (`~/.claude/keel` or `%USERPROFILE%\.claude\keel.exe`) for update, verify, status, hooks, and compaction. Shell and PowerShell wrapper launchers are not supported runtime entrypoints.
 
 For agent-facing instructions, `keel hook instructions` prints the same usage contract in `markdown` (default) or `--format json`. The same contract is also tracked in [`docs/hook-usage.md`](../../docs/hook-usage.md).
 
 ## Token Optimization (Native Command Compaction)
 
-keel includes native command output compaction to reduce wasted CLI-output context on common development commands, benchmarked against external output-reduction and context-efficiency patterns without naming those tools in the managed prompt surface. External tools remain feature benchmarks, not runtime dependencies. The default implementation stays native because it is integrated with Claude Code hooks, flow, review, install/update, repository instructions, raw-output recovery, and persisted `gain` analytics. It can help users fit more useful work into the same Claude Code usage window; it does not increase hard usage limits or bypass rate limits.
+keel includes native command output compaction to reduce wasted CLI-output context on common development commands, benchmarked against external output-reduction and context-efficiency patterns without naming those tools in the managed prompt surface. External tools remain feature benchmarks, not runtime dependencies. The default implementation stays native because it is integrated with the harness hooks, flow, review, install/update, repository instructions, raw-output recovery, and persisted `gain` analytics. It can help users fit more useful work into the same the harness usage window; it does not increase hard usage limits or bypass rate limits.
 
 ### Auto-Install Hook
 
@@ -132,7 +132,7 @@ keel rewrite "cargo test --workspace"
 
 ### Token Savings Analytics
 
-`gain` reads the Rust-native compaction event log from the Claude Code home and reports observed commands, compacted commands, saved bytes, savings percentage, and top commands:
+`gain` reads the Rust-native compaction event log from the harness home and reports observed commands, compacted commands, saved bytes, savings percentage, and top commands:
 
 ```bash
 keel gain              # Show all-time dashboard

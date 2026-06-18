@@ -4,11 +4,11 @@
 //! Main Functions: record_tool_timing.
 //! Side Effects: Creates `<claude_home>/state/tool-timings/<YYYY-MM-DD>.jsonl` and appends one line per call.
 //!
-//! Design note: Claude Code 2.1.119 added `duration_ms` to PostToolUse and
+//! Design note: the harness 2.1.119 added `duration_ms` to PostToolUse and
 //! PostToolUseFailure hook input (tool execution time, excluding permission
 //! prompts and PreToolUse hooks). We persist the field verbatim — no unit
 //! math, no aggregation — so a future analyzer can decide its own buckets.
-//! Claude Code 2.1.133 added an `effort.level` JSON input field and the
+//! the harness 2.1.133 added an `effort.level` JSON input field and the
 //! `$CLAUDE_EFFORT` environment variable. We attach the value to the same
 //! row so an analyzer can correlate slow tools with the active effort.
 //! The file is append-only JSONL with daily rotation by filename so a long
@@ -24,27 +24,27 @@ use serde_json::{json, Value as JsonDocument};
 
 use crate::runtime::resolve_claude_home;
 
-/// JSON key Claude Code uses on PostToolUse / PostToolUseFailure input for
+/// JSON key the harness uses on PostToolUse / PostToolUseFailure input for
 /// the tool execution duration. Documented in the v2.1.119 changelog.
 pub const TIMING_INPUT_FIELD: &str = "duration_ms";
 
-/// Environment variable Claude Code 2.1.133+ exports with the active effort
+/// Environment variable the harness 2.1.133+ exports with the active effort
 /// level. Used as the fallback when the `effort.level` JSON field is absent
 /// (older CC builds, or hook inputs that omit it).
 pub const EFFORT_ENV_VAR: &str = "CLAUDE_EFFORT";
 
 /// Append one JSONL line capturing the tool timing for `event` from `input`.
 ///
-/// `input` is the raw stdin JSON Claude Code delivered to the hook, already
+/// `input` is the raw stdin JSON the harness delivered to the hook, already
 /// parsed by the caller. Returns `Ok(false)` when the field is absent (older
 /// CC builds, or events without timing) so the caller can decide whether to
 /// log a debug note. Returns `Ok(true)` when a line was appended.
 ///
-/// `event` is the canonical PascalCase Claude Code event name, e.g.
+/// `event` is the canonical PascalCase the harness event name, e.g.
 /// `"PostToolUse"` or `"PostToolUseFailure"` — recorded verbatim in the JSONL
 /// row so a single analyzer can split success from failure.
 pub fn record_tool_timing(event: &str, input: &JsonDocument) -> std::io::Result<bool> {
-    // Accept either an integer or a float so we still record if Claude Code
+    // Accept either an integer or a float so we still record if the harness
     // ever emits the field as a JSON number from a JS source (e.g. `1234.0`).
     // `as_u64()` alone would return None on a float and silently drop the
     // sample. The changelog describes the value as "tool execution time in
@@ -83,7 +83,7 @@ pub fn record_tool_timing(event: &str, input: &JsonDocument) -> std::io::Result<
 
 /// Resolve the active effort level for the row.
 ///
-/// Per the Claude Code 2.1.133 changelog, hooks receive the value via the
+/// Per the harness 2.1.133 changelog, hooks receive the value via the
 /// `effort.level` JSON input field AND the `$CLAUDE_EFFORT` environment
 /// variable. We prefer the JSON input because it is per-call and authoritative
 /// at the moment the hook fires; the env var is the documented fallback.
@@ -381,7 +381,7 @@ mod tests {
 
     #[test]
     fn record_tool_timing_accepts_float_duration() {
-        // Claude Code's hook input is JSON; if a value originates from a JS
+        // the harness's hook input is JSON; if a value originates from a JS
         // `number` the serializer can emit `1234.0` instead of `1234`. Make
         // sure we still record the sample (truncated to integer ms) instead
         // of silently dropping it.

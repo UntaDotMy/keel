@@ -2,12 +2,12 @@
 # Purpose: keel statusline. Renders model + context usage, and appends a
 #   compaction-savings badge (caveman/RTK-style ROI surface) sourced from
 #   `keel gain --json` when the binary is reachable.
-# Caller: Claude Code statusLine command
+# Caller: the harness statusLine command
 #   (settings.json: {"type":"command","command":"~/.claude/statusline-keel.sh"}).
-# Input: Claude Code pipes session JSON on stdin (model, context_window, cwd, ...).
+# Input: the harness pipes session JSON on stdin (model, context_window, cwd, ...).
 # Output: one status line on stdout. Degrades gracefully — if the binary or gain
 #   data is unavailable the savings badge is omitted, and the line never errors
-#   (a non-zero exit or empty output blanks the Claude Code statusline).
+#   (a non-zero exit or empty output blanks the harness statusline).
 # Dependencies: POSIX shell + grep/sed only. No python required.
 set -u
 

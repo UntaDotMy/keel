@@ -1,6 +1,6 @@
 //! Purpose: Append token-saving measurement events for the gain/discover surfaces.
 //! Caller: proxy::run after raw output is saved and compact output is rendered.
-//! Dependencies: RunMeta, CompactResult, Claude home resolution, and JSONL file storage.
+//! Dependencies: RunMeta, CompactResult, harness home resolution, and JSONL file storage.
 //! Main Functions: record_compaction_event, rotate_event_log_if_needed.
 //! Side Effects: Appends one JSON object per proxied command to the command compaction event log, rotates when size exceeds 5MB.
 

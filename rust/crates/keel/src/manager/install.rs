@@ -2,7 +2,7 @@
 //! Caller: commands.rs via run_install_command, run_update_command, run_uninstall_command.
 //! Dependencies: std::fs, std::io, std::path, std::process, std::thread, std::time, keel_platform, crate::args, crate::runtime.
 //! Main Functions: install_from_flags, install_from_paths, sync_root_files, sync_skills, sync_shared_resources, sync_agents, sync_subagent_definitions, sync_commands, publish_native_executable, run_update_command, run_uninstall_command.
-//! Side Effects: Copies managed skill-pack files, writes Claude home config/state, publishes the Rust binary, runs git commands, and removes managed files during uninstall.
+//! Side Effects: Copies managed skill-pack files, writes harness home config/state, publishes the Rust binary, runs git commands, and removes managed files during uninstall.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -41,7 +41,7 @@ pub struct InstallSummary {
     /// when registration was skipped (non-standard `--claude-home`) or failed
     /// non-fatally. Registration never blocks an install.
     pub mcp_registration: Option<String>,
-    /// Human-readable outcome of the Claude Code lifecycle hook installation
+    /// Human-readable outcome of the harness lifecycle hook installation
     /// step, or `None` when it was skipped (non-standard `--claude-home`) or
     /// failed non-fatally. Like MCP registration, hook install never blocks an
     /// install — but without it, a manual or plugin-only user gets skills+MCP
@@ -183,7 +183,7 @@ pub fn install_from_paths(
 }
 
 /// Register the `keel` MCP server in `~/.claude.json` during install,
-/// but only when the target Claude home is a real `.claude` directory under a
+/// but only when the target harness home is a real `.claude` directory under a
 /// user home. The integration test suite installs into throwaway
 /// `--claude-home` directories that are NOT named `.claude`; auto-writing a
 /// `.claude.json` beside each of those would (a) be meaningless and (b) race
@@ -211,7 +211,7 @@ fn maybe_register_mcp_server(claude_home: &Path) -> Option<String> {
     }
 }
 
-/// Install the Claude Code lifecycle hooks into `<claude_home>/settings.json`
+/// Install the harness lifecycle hooks into `<claude_home>/settings.json`
 /// during install, pointing them at the just-published binary.
 ///
 /// Guarded on the standard `.claude` home name for the same reason as
@@ -240,7 +240,7 @@ fn maybe_install_hooks(claude_home: &Path) -> Option<String> {
     // the currently-running executable (which during `update` is the freshly
     // built release artifact in the repo target dir, and during a release-bundle
     // install is the extracted temp binary). The published path is the stable
-    // location Claude Code will invoke for the lifetime of the install.
+    // location the harness will invoke for the lifetime of the install.
     let executable = installed_executable_path(claude_home);
     match crate::runner::hook_lifecycle::build_hooks_payload(&hook_path, &executable) {
         Ok(payload) => match write_text(&hook_path, &payload) {
@@ -386,7 +386,7 @@ const MANAGED_CLAUDE_MD_END: &str = "<!-- keel:end -->";
 ///
 /// Why this exists: every other keel surface (the SessionStart bootstrap,
 /// the per-prompt iron law, skill pointers, MCP-tool nudges) is delivered through
-/// Claude Code's hook `additionalContext` channel. When that channel does not
+/// the harness's hook `additionalContext` channel. When that channel does not
 /// reach the model — e.g. a gateway/proxy that drops injected context — the agent
 /// sees none of keel. `~/.claude/CLAUDE.md` is loaded natively into every
 /// session as user memory, the same hook-independent channel that carries the
@@ -394,7 +394,7 @@ const MANAGED_CLAUDE_MD_END: &str = "<!-- keel:end -->";
 /// because it is paid on every session of every project.
 const MANAGED_CLAUDE_MD_BODY: &str = r#"# keel operating contract (always-on)
 
-Installed by keel into `~/.claude/CLAUDE.md` and loaded into **every** Claude Code session as user memory — independent of hooks. Applies to every project you work in, not just keel.
+Installed by keel into `~/.claude/CLAUDE.md` and loaded into **every** harness session as user memory — independent of hooks. Applies to every project you work in, not just keel.
 
 ## Iron Law — for any request that could touch code, config, or architecture
 1. **Read first.** Read the workspace SYSTEM_MAP and the owning file before claiming behavior; never propose changes against an imagined version.
@@ -838,10 +838,10 @@ fn sync_agents(
     Ok(synced_count)
 }
 
-/// Copy Claude Code subagent definitions from `<repo>/.claude/agents/*.md`
+/// Copy the harness subagent definitions from `<repo>/.claude/agents/*.md`
 /// into `<claude_home>/agents/<name>.md` so they load globally for any host
-/// repo. Without this step the subagent `.md` files only resolve when Claude
-/// Code spawns inside the keel checkout itself, because Claude Code
+/// repo. Without this step the subagent `.md` files only resolve when the harness
+/// Code spawns inside the keel checkout itself, because the harness
 /// reads project-scoped `.claude/agents/` only from the active project root.
 ///
 /// Each copied file is recorded via the tracker so the existing per-file
@@ -883,7 +883,7 @@ fn sync_subagent_definitions(
 
 /// Copy custom slash-command definitions from `<repo>/commands/*.md` into
 /// `<claude_home>/commands/<name>.md` so `/keel:<name>` commands resolve
-/// globally for any host repo. Claude Code reads project-scoped
+/// globally for any host repo. The harness reads project-scoped
 /// `.claude/commands/` only from the active project root, so without this step
 /// the commands ship only through the plugin install path, never the native
 /// `keel install`.
@@ -1081,7 +1081,7 @@ fn atomic_copy_executable(source: &Path, target: &Path) -> Result<(), String> {
 /// comment here claimed that always succeeds because the loader opens the
 /// image with `FILE_SHARE_DELETE` — but that only covers the loader's own
 /// handle. When the install is launched *by* the running `keel.exe`
-/// (exactly what Claude Code does when it shells out to `keel
+/// (exactly what the harness does when it shells out to `keel
 /// install`), or when a lifecycle hook holds a handle to the binary, the
 /// delete is refused with `ERROR_ACCESS_DENIED` (os error 5) and the whole
 /// install aborts with a stale binary left on disk.
@@ -1140,7 +1140,7 @@ fn replace_executable_in_place(temp_path: &Path, target: &Path) -> Result<(), St
 
 /// Rename `from` to `to`, retrying a few times to absorb transient locks.
 ///
-/// Claude Code lifecycle hooks fire frequently and each one opens the
+/// the harness lifecycle hooks fire frequently and each one opens the
 /// installed binary; a replace can land in the brief window one of them holds
 /// a handle. Five attempts at 100ms spacing clears those without making a
 /// genuinely stuck replace hang for long. Cleanup of `from` on permanent
@@ -1502,7 +1502,7 @@ pub fn run_uninstall_command(
         }
     }
     // Strip the managed hook stanzas from settings.json. Without this, an
-    // uninstall leaves Claude Code firing hooks at a now-deleted binary every
+    // uninstall leaves the harness firing hooks at a now-deleted binary every
     // session. Reuse the same removal the dedicated `hook uninstall` performs so
     // unrelated user hooks are preserved.
     if let Err(error) =
@@ -1513,7 +1513,7 @@ pub fn run_uninstall_command(
     }
     // Reverse the MCP registration install wrote to ~/.claude.json. Without this,
     // an uninstall leaves a dangling `mcpServers.keel` entry pointing at
-    // the now-deleted binary, which Claude Code tries to spawn every session.
+    // the now-deleted binary, which the harness tries to spawn every session.
     // Preserves sibling servers and unrelated keys.
     match super::mcp_register::unregister_mcp_server(&claude_home) {
         Ok(super::mcp_register::McpUnregistration::Removed) => removed_count += 1,
@@ -2573,7 +2573,7 @@ mod tests {
     #[test]
     fn install_copies_subagent_definitions_into_user_global_agents_directory() {
         // Without this step, the project-scoped `.claude/agents/<name>.md`
-        // subagent definitions only resolve when Claude Code spawns inside the
+        // subagent definitions only resolve when the harness spawns inside the
         // keel checkout. Host repos see no subagents at all. The
         // installer must mirror them under `<claude_home>/agents/<name>.md`
         // so the Agent tool finds them globally. Renamed definitions must be

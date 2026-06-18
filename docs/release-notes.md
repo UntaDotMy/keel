@@ -3,7 +3,7 @@
 `keel` release notes are meant to explain three things clearly:
 
 - what changed in the release
-- why the release matters to operators using Claude Code day to day
+- why the release matters to operators using the harness day to day
 - what proof bar the release passed before it was published
 
 ## What a release note should contain

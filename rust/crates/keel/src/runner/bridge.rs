@@ -1,5 +1,5 @@
 //! Purpose: Host-neutral plain-text bridge CLI surface that reuses the existing
-//!   lifecycle handlers directly, bypassing the Claude Code hook JSON envelope.
+//!   lifecycle handlers directly, bypassing the harness hook JSON envelope.
 //! Caller: `commands.rs` via the top-level `bridge` subcommand.
 //! Dependencies: crate::runner::hook_lifecycle, crate::utility::skill_match,
 //!   crate::runner::observation, crate::runtime.

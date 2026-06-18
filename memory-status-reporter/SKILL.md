@@ -1,6 +1,6 @@
 ---
 name: memory-status-reporter
-description: Produces human-style memory status reports from Claude Code memory artifacts: learning recap, mistake ledger, rewarded patterns, research-cache health, and remembered user needs. Use when the user asks "what did you learn today", "show memory status", "what mistakes happened and are they resolved", "how is memory growing", or "summarize what you understand about my needs".
+description: Produces human-style memory status reports from the harness memory artifacts: learning recap, mistake ledger, rewarded patterns, research-cache health, and remembered user needs. Use when the user asks "what did you learn today", "show memory status", "what mistakes happened and are they resolved", "how is memory growing", or "summarize what you understand about my needs".
 when_to_use: Human-style memory health and learning reports.
 allowed-tools: Read, Grep, Glob, Bash(keel memory:*)
 user-invocable: false
@@ -11,7 +11,7 @@ effort: low
 
 ## Purpose
 
-Turn Claude Code memory artifacts into a human-readable status report that feels like a check-in, not a raw dump.
+Turn the harness memory artifacts into a human-readable status report that feels like a check-in, not a raw dump.
 
 Use this skill only when the user explicitly wants a memory-health report, learning recap, mistake ledger, user-needs summary, or heuristic growth report. Routine durable memory, planning, progress, and closure updates belong to the main lane through the Rust-native `keel memory ...` commands, which should keep the writable global second-layer store under `~/.claude/memoriesv2/` synchronized.
 
@@ -47,7 +47,7 @@ See `_shared/common-discipline.md` for the canonical rules. Apply them to all wo
 
 ## Use This Skill When
 
-- The user asks what Claude Code learned today or recently.
+- The user asks what the harness learned today or recently.
 - The user wants mistakes encountered, whether they were resolved, and what remains open.
 - The user wants heuristic memory-health stats such as learning capture, resolution rate, or brain growth.
 - The user wants tool-use mistakes and tool failure patterns remembered as mistakes too when those corrections are reusable.

@@ -4,7 +4,7 @@
 
 This page provides an evidence-based comparison surface for this repository. It shows relative strengths, areas where it's catching up, and the operator problems it solves.
 
-Comparisons reference native Claude Code primitives, a runtime-shell comparator, and a workflow-teaching comparator. Last re-checked on 2026-05-12.
+Comparisons reference native harness primitives, a runtime-shell comparator, and a workflow-teaching comparator. Last re-checked on 2026-05-12.
 
 ---
 
@@ -18,9 +18,9 @@ Choose keel when you need:
 - Native install/update/status/verify/uninstall flows
 - A branch-closeout path that refuses to call work done while proof is still incomplete
 
-## Versus Raw Claude Code
+## Versus Raw the harness
 
-Raw Claude Code provides powerful primitives. keel adds a stricter operator layer on top.
+Raw the harness provides powerful primitives. keel adds a stricter operator layer on top.
 
 **keel strengths:**
 - Operator-first workflow routing, cockpit, and finish commands
@@ -29,11 +29,11 @@ Raw Claude Code provides powerful primitives. keel adds a stricter operator laye
 - Hosted-check fix-loop guidance with branch-closeout discipline
 - Repo-managed install/status surfaces instead of ad hoc setup
 
-**Choose raw Claude Code when:** you want the thinnest possible layer without extra workflow or proof posture.
+**Choose raw the harness when:** you want the thinnest possible layer without extra workflow or proof posture.
 
 ## Versus Runtime-Shell Comparator
 
-The comparator emphasizes a richer runtime experience around Claude Code including setup, role keywords, and team runtime helpers.
+The comparator emphasizes a richer runtime experience around the harness including setup, role keywords, and team runtime helpers.
 
 **keel advantages:** Stronger deterministic closeout posture around review, verification, and hosted green checks; more explicit branch-to-proof path under one workflow surface; native repo-managed commands; clearer distinction between local proof, hosted proof, and final closure.
 
@@ -55,4 +55,4 @@ The comparator emphasizes skill-driven workflow phases, explicit design gates, T
 
 ## Summary
 
-Use keel when you want a Claude Code-native workflow layer that is harder to fake as finished. Use another layer when you want a friendlier runtime shell, a more guided skill-first teaching surface, or a lighter install footprint.
+Use keel when you want a harness-native workflow layer that is harder to fake as finished. Use another layer when you want a friendlier runtime shell, a more guided skill-first teaching surface, or a lighter install footprint.

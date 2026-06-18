@@ -43,7 +43,7 @@ The native entity, hook-capture, lineage, and demo surfaces shipped on `2026-04-
 
 ## What is still intentionally unclaimed
 
-- no overall "best Claude Code layer" ranking
+- no overall "best the harness layer" ranking
 - no claim that every peer repo already has source-backed runs under the shared harness
 - no claim that benchmark breadth is complete enough yet for universal workflow conclusions
 

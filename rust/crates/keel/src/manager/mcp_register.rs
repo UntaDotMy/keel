@@ -1,4 +1,4 @@
-//! Purpose: Register (and verify) the `keel` MCP server in Claude Code's
+//! Purpose: Register (and verify) the `keel` MCP server in the harness's
 //!   user-scope config so the native installer no longer depends on the
 //!   bootstrap shell script's `claude mcp add` step.
 //! Caller: `manager::install::install_from_paths` (every install/update) and
@@ -9,7 +9,7 @@
 //!   key. Writes only when the `keel` entry is missing or stale, so a
 //!   no-op install does not churn the file.
 //!
-//! Why `~/.claude.json` and not `~/.claude/settings.json`: Claude Code reads
+//! Why `~/.claude.json` and not `~/.claude/settings.json`: the harness reads
 //! user-scope MCP servers from the top-level `mcpServers` key of
 //! `~/.claude.json`. `settings.json` does not support `mcpServers` at all —
 //! writing it there is silently ignored (verified against
@@ -24,7 +24,7 @@ use serde_json::{json, Map, Value};
 
 use crate::runtime::{display_path, installed_executable_path, read_text_if_exists, write_text};
 
-/// MCP server key registered in Claude Code user config. Matches the name the
+/// MCP server key registered in the harness user config. Matches the name the
 /// MCP server reports during `initialize` and the `.claude-plugin/plugin.json`
 /// `mcpServers` key, so the plugin path and the native path agree.
 pub const MCP_SERVER_KEY: &str = "keel";
@@ -40,7 +40,7 @@ pub enum McpRegistration {
     AlreadyCurrent,
 }
 
-/// Resolve `~/.claude.json` from the resolved Claude home. Claude home is
+/// Resolve `~/.claude.json` from the resolved harness home. harness home is
 /// `<user-home>/.claude`, so its parent is the user home where `.claude.json`
 /// lives. Falls back to joining `.claude.json` as a sibling of `claude_home`
 /// when the parent cannot be determined (degenerate paths only).
@@ -53,7 +53,7 @@ pub fn mcp_config_path(claude_home: &Path) -> PathBuf {
 
 /// Build the stdio MCP server entry pointing at the installed binary.
 ///
-/// `alwaysLoad: true` is load-bearing for the keel contract. Claude Code
+/// `alwaysLoad: true` is load-bearing for the keel contract. The harness
 /// defers MCP tools behind a `ToolSearch` step by default — and that deferral is
 /// *forced on* whenever tool search is enabled or `ANTHROPIC_BASE_URL` points at
 /// a non-first-party gateway (a common keel setup). Deferred tools are
@@ -65,7 +65,7 @@ pub fn mcp_config_path(claude_home: &Path) -> PathBuf {
 /// per-server, so it pins every tool this server publishes into context upfront
 /// regardless of the tool-search mode — the per-prompt "prefer the MCP tools"
 /// guidance then points at tools that are actually loaded rather than ones the
-/// model has to discover first. Supported by Claude Code v2.1.121+ (per
+/// model has to discover first. Supported by the harness v2.1.121+ (per
 /// code.claude.com/docs/en/mcp); the tools are tiny, so the upfront context cost
 /// is negligible.
 pub fn mcp_server_entry(claude_home: &Path) -> Value {
@@ -139,7 +139,7 @@ pub fn register_mcp_server(claude_home: &Path) -> Result<McpRegistration, String
 /// True when `claude_home` is a real `~/.claude` directory (its final path
 /// component is literally `.claude`).
 ///
-/// Auto-writing `~/.claude.json` is only meaningful next to a standard Claude
+/// Auto-writing `~/.claude.json` is only meaningful next to a standard the harness
 /// home. The integration suite and several hook tests install into throwaway
 /// `--claude-home` / `CLAUDE_TARGET_OVERRIDE` directories that are NOT named
 /// `.claude`; gating every automatic registration site on this predicate keeps
@@ -194,7 +194,7 @@ pub enum McpUnregistration {
 ///
 /// Why this exists: `register_mcp_server` writes `keel` into `~/.claude.json`
 /// on every install/update/repair. Without the matching removal, an uninstall
-/// leaves a dangling MCP entry pointing at a deleted binary, which Claude Code
+/// leaves a dangling MCP entry pointing at a deleted binary, which the harness
 /// tries to spawn as an MCP server every session. Uninstall must reverse install.
 ///
 /// Idempotent: a missing file, a file with no `mcpServers`, or a file with no

@@ -118,6 +118,16 @@
         "playful novelty colors for critical flows",
         "unclear fee or confirmation copy",
         "missing security reassurance"
+      ],
+      "decision_rules": [
+        {
+          "when": "always",
+          "then": "must_have: explicit security/trust signals (encryption, compliance badges) above the fold."
+        },
+        {
+          "when": "if_crypto",
+          "then": "Add live price/volatility context and clear risk disclosure; avoid hype gradients."
+        }
       ]
     },
     {
@@ -158,6 +168,82 @@
         "neon urgency colors",
         "dense jargon blocks",
         "motion-heavy reassurance patterns"
+      ],
+      "decision_rules": [
+        {
+          "when": "always",
+          "then": "must_have: clear next-step and support/escalation path on every screen."
+        },
+        {
+          "when": "if_telehealth",
+          "then": "Surface appointment join, device check, and privacy assurance prominently."
+        }
+      ]
+    },
+    {
+      "id": "beauty-wellness-spa",
+      "display_name": "Beauty, Spa & Wellness",
+      "keywords": [
+        "beauty",
+        "spa",
+        "salon",
+        "skincare",
+        "massage",
+        "aesthetics",
+        "facial",
+        "makeup",
+        "cosmetics",
+        "luxury",
+        "barber"
+      ],
+      "trust_posture": "calm indulgence and credibility",
+      "content_priorities": [
+        "service or treatment menu",
+        "social proof and reviews",
+        "before/after gallery",
+        "easy booking"
+      ],
+      "recommended_style_families": [
+        "signal-rich-premium",
+        "glassmorphism-depth",
+        "minimal-trust"
+      ],
+      "recommended_color_moods": [
+        "pastel-playful",
+        "luxury-gold",
+        "sage-green-calm"
+      ],
+      "recommended_typography_moods": [
+        "luxury-serif",
+        "editorial-confidence",
+        "humanist-readable"
+      ],
+      "recommended_motion_posture": "soft and smooth (200-400ms)",
+      "recommended_density": "comfortable",
+      "cta_guidance": "Lead with a clear, low-friction booking action; reinforce with reviews and gallery proof.",
+      "anti_patterns": [
+        "bright neon colors",
+        "harsh or aggressive motion",
+        "dense data tables",
+        "cold corporate tone"
+      ],
+      "decision_rules": [
+        {
+          "when": "always",
+          "then": "must_have: online booking with real-time availability."
+        },
+        {
+          "when": "always",
+          "then": "must_have: before/after gallery or treatment showcase with high-quality imagery."
+        },
+        {
+          "when": "if_luxury",
+          "then": "Switch to liquid-glass surfaces, gold/champagne accents, generous whitespace, and slower 400-600ms transitions."
+        },
+        {
+          "when": "if_mobile",
+          "then": "Prioritize one-thumb booking and sticky call/book buttons; most spa traffic is mobile."
+        }
       ]
     },
     {
@@ -438,6 +524,12 @@
         "buried fees",
         "weak trust proof near decisions",
         "crowded search results without prioritization"
+      ],
+      "decision_rules": [
+        {
+          "when": "always",
+          "then": "must_have: fees, availability, and seller credibility visible before checkout."
+        }
       ]
     },
     {

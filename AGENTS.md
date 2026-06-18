@@ -1,6 +1,6 @@
 <!--
-Purpose: Thin entry point and index for the managed Claude Code routing, memory, validation, and delivery doctrine.
-Caller: Claude Code agents using the synced keel native guidance surface.
+Purpose: Thin entry point and index for the managed harness routing, memory, validation, and delivery doctrine.
+Caller: the harness agents using the synced keel native guidance surface.
 Dependencies: AGENTS/references/*.md, the 24 specialist SKILL.md files, keel CLI surface.
 Main Functions: Route to the correct reference file in AGENTS/references/ for the section a reader needs.
 Side Effects: None — this file is informational.
@@ -9,7 +9,7 @@ Side Effects: None — this file is informational.
 
 ## Purpose
 
-This file is the entry point for Claude Code CLI on skill routing, native command usage, memory, validation, and delivery discipline. The detailed doctrine lives under [`AGENTS/references/`](AGENTS/references/) so the entry point stays small and the rules stay searchable.
+This file is the entry point for the harness CLI on skill routing, native command usage, memory, validation, and delivery discipline. The detailed doctrine lives under [`AGENTS/references/`](AGENTS/references/) so the entry point stays small and the rules stay searchable.
 
 ## How To Use This File
 
@@ -49,4 +49,4 @@ These rules **must** be followed on every turn. They are short by design; the re
 
 ## Summary
 
-Keep execution simple and focused. Use specialist skills when they add clear value. Prioritize code quality, security, maintainability, and native Claude Code CLI workflow surfaces. Open the matching reference file for depth.
+Keep execution simple and focused. Use specialist skills when they add clear value. Prioritize code quality, security, maintainability, and native harness CLI workflow surfaces. Open the matching reference file for depth.

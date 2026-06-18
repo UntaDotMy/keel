@@ -4,7 +4,7 @@
 
 Before running raw shell, broad search, or patching existing source, route through the native `keel` surface:
 
-**Token-saving rule:** the goal is to prevent noisy raw command output from entering Claude Code context. Do not run a raw noisy command first and compact afterward; route through `keel run -- <command>` or the hook-provided `Rerun that as:` wrapper before noisy output is produced.
+**Token-saving rule:** the goal is to prevent noisy raw command output from entering the harness context. Do not run a raw noisy command first and compact afterward; route through `keel run -- <command>` or the hook-provided `Rerun that as:` wrapper before noisy output is produced.
 
 - **Noisy shell commands:** prefer `keel run -- <command>` for test, build, lint, log, status, search, Docker, Kubernetes, Terraform, package-manager, and CI-style commands. Use `keel rewrite "<command>"` when unsure whether a command has native compaction.
 - **Hook block-and-rerun:** if the managed `PreToolUse` hook returns `Rerun that as: <command>`, immediately run that exact command. Do not ask the user, do not treat the hook block as a task failure, and do not repeat the raw command first.
@@ -14,7 +14,7 @@ Before running raw shell, broad search, or patching existing source, route throu
 
 ## Hook Retry Handling
 
-The managed `PreToolUse` hook may return a Claude Code denial whose reason begins with `Rerun that as:`. This is expected behavior, not a failure. Copy the suggested command, run it exactly once, preserve the exit code and output, and continue from the compacted output. Only ask the user when the suggested command itself is destructive or outside the requested task.
+The managed `PreToolUse` hook may return a harness denial whose reason begins with `Rerun that as:`. This is expected behavior, not a failure. Copy the suggested command, run it exactly once, preserve the exit code and output, and continue from the compacted output. Only ask the user when the suggested command itself is destructive or outside the requested task.
 
 ## Branch Model
 
@@ -69,7 +69,7 @@ A feature branch must not contain:
   - Example: `wip: RGB: Build light effect mode (multi color)`.
   - **Colon vs slash:** the commit subject uses colons (`add: RGB: sync all`); the branch name uses a slash (`add/RGB`). Same category vocabulary, different separator — never write a commit with a slash or a branch with a colon.
 - When a commit body is needed, keep it professional, non-chatty, and matched to the committed diff. Use a precise title, include only the sections the change genuinely needs, and keep this order when a section is present: `Problem`, `Solution`, `Summary`, `Notes`, `What Changed`, `Test Result`. Omit `Problem` and `Solution` when the commit is additive, preventive, or housekeeping rather than fixing a concrete issue, and keep `Test Result` limited to validation that directly proves the committed change.
-- do not mention Claude Code, keel, or tool-brand validation in commit or PR text unless the change itself is about those surfaces.
+- do not mention the harness, keel, or tool-brand validation in commit or PR text unless the change itself is about those surfaces.
 
 ## Required Preflight
 
@@ -109,7 +109,7 @@ Reject or request a split when:
 7. Review `git diff --cached`.
 8. Commit using the `<category>: <FEATURE>: <short information>` format (categories: `add`, `config`, `refactor`, `wip`, `fix`, `docs`; FEATURE uppercase, e.g. `wip: RGB: Build light effect mode (multi color)`).
    If a commit body is included, keep it professional, make the title and body match the committed diff exactly, include only the sections the change genuinely needs, and keep this order when a section is present: `Problem`, `Solution`, `Summary`, `Notes`, `What Changed`, `Test Result`. Omit `Problem` and `Solution` when the commit is additive, preventive, or housekeeping rather than fixing a concrete issue, and keep `Test Result` limited to validation that directly proves the committed change.
-   do not mention Claude Code, keel, or tool-brand validation in commit or PR text unless the change itself is about those surfaces.
+   do not mention the harness, keel, or tool-brand validation in commit or PR text unless the change itself is about those surfaces.
 9. Run `keel workflow status` or `keel workflow cockpit` when the team needs the current ledger state in one place.
 10. Run `keel git-workflow preflight --base-ref origin/feat`.
 11. Push the work branch and open one merge request into `feat`. Never delete the branch after pushing or merging.

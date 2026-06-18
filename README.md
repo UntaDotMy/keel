@@ -9,7 +9,7 @@ Side Effects: Sets contributor and operator expectations for the repo-managed na
 
 # keel
 
-**Discipline as code for Claude Code.** A single Rust binary that forces the agent to read the codebase before answering, restate the iron law on every prompt, refresh a structural project map across compactions, write a working brief before non-trivial work, and run a reviewer pass before closeout. No Node, no Python, no daemon.
+**Discipline as code for the harness.** A single Rust binary that forces the agent to read the codebase before answering, restate the iron law on every prompt, refresh a structural project map across compactions, write a working brief before non-trivial work, and run a reviewer pass before closeout. No Node, no Python, no daemon.
 
 ## The Iron Law
 
@@ -58,13 +58,13 @@ The cast file ships in this repo. Render to GIF with `agg docs/demos/quickstart.
 | Review gates | Native `.claude/review.json`, `review pre-pr`, and CI-ready artifacts so non-trivial code never self-reviews. |
 | Memory | Working briefs, completion ledgers, scoped `SYSTEM_MAP.md`, and durable recovery state under `~/.claude/memories/`. |
 | Command compaction | `keel run -- <cmd>` produces compact output for noisy test/build/lint/log/search commands without dropping diagnostic signal. |
-| MCP server | `keel mcp serve` is registered through the plugin manifest so Claude Code auto-discovers 12 tools — `recall`, `system_map`, `run_command`, `recall_status`, `skill_route`, `skill_get`, `skill_list`, `memory_status`, `brief_list`, `brief_get`, `brief_create`, `system_map_refresh` — plus the system-map and recall-status resources. The skill, memory, and brief tools mirror what the lifecycle hooks deliver, so the capabilities stay reachable even where hooks are unreliable. |
+| MCP server | `keel mcp serve` is registered through the plugin manifest so the harness auto-discovers 12 tools — `recall`, `system_map`, `run_command`, `recall_status`, `skill_route`, `skill_get`, `skill_list`, `memory_status`, `brief_list`, `brief_get`, `brief_create`, `system_map_refresh` — plus the system-map and recall-status resources. The skill, memory, and brief tools mirror what the lifecycle hooks deliver, so the capabilities stay reachable even where hooks are unreliable. |
 | Slash commands | `/keel:workflow`, `/keel:review`, `/keel:recall`, `/keel:gain` — discoverable `/`-menu wrappers over the implemented CLI surfaces. Shipped via the plugin manifest `commands` key. |
 | Specialist skills | 24 managed specialist profiles synced into `~/.claude/agent-profiles/*.toml`, invokable via the Skill tool. |
 
-## Use as a Claude Code Plugin
+## Use as a harness Plugin
 
-This repo ships a `.claude-plugin/plugin.json` manifest. From inside Claude Code:
+This repo ships a `.claude-plugin/plugin.json` manifest. From inside the harness:
 
 ```text
 /plugin marketplace add UntaDotMy/keel
@@ -79,7 +79,7 @@ That mounts the skills, agents, and hooks without running the native installer. 
 
 When a native `keel` command owns the job, use it instead of recreating the behavior with raw shell, generic search, or ad hoc instructions.
 
-**Token-saving rule:** the goal is to prevent noisy raw command output from entering Claude Code context. Do not run a raw noisy command first and compact afterward; route through `keel run -- <command>` or the hook-provided `Rerun that as:` wrapper before noisy output is produced.
+**Token-saving rule:** the goal is to prevent noisy raw command output from entering the harness context. Do not run a raw noisy command first and compact afterward; route through `keel run -- <command>` or the hook-provided `Rerun that as:` wrapper before noisy output is produced.
 
 - **Noisy shell commands:** prefer `keel run -- <command>` for test, build, lint, log, status, search, Docker, Kubernetes, Terraform, package-manager, and CI-style commands. Use `keel rewrite "<command>"` when unsure whether a command has native compaction.
 - **Hook block-and-rerun:** if the managed `PreToolUse` hook returns `Rerun that as: <command>`, immediately run that exact command. Do not ask the user, do not treat the hook block as a task failure, and do not repeat the raw command first.
@@ -91,7 +91,7 @@ For agent-facing usage in markdown or JSON, run `keel hook instructions` (see al
 
 ## Hook Retry Handling
 
-The managed hook may return a Claude Code denial whose reason begins with `Rerun that as:`. This is expected behavior, not a failure.
+The managed hook may return a harness denial whose reason begins with `Rerun that as:`. This is expected behavior, not a failure.
 
 When that happens:
 1. Copy the command after `Rerun that as:`.
@@ -106,8 +106,8 @@ Example: a raw `cargo test --workspace` may produce `Rerun that as: keel run -- 
 
 | Need | Run | Why |
 | --- | --- | --- |
-| First install, no Rust required | Download a release, extract it, run `./keel install` or `.\keel.exe install` | Installs the native binary and managed skills into Claude Code home. |
-| Check the install | `~/.claude/keel status` or `%USERPROFILE%\.claude\keel.exe status` | Confirms the managed Claude Code-home surface. |
+| First install, no Rust required | Download a release, extract it, run `./keel install` or `.\keel.exe install` | Installs the native binary and managed skills into the harness home. |
+| Check the install | `~/.claude/keel status` or `%USERPROFILE%\.claude\keel.exe status` | Confirms the managed harness-home surface. |
 | Start normal work | `keel workflow start --request "..."` | The lowest-friction first run. |
 | Route a broad request first | `keel workflow route --request "..."` | Picks the recommended preset before starting. |
 | See live state | `keel workflow cockpit` | Shows stage, proof, blockers, and next command. |
@@ -120,7 +120,7 @@ After install, the preferred global CLI path for agents on supported operating s
 - macOS or Linux: `~/.claude/keel`
 - Windows: `~/.claude/keel.exe`
 
-This matters because the install metadata remembers the source bundle or checkout so `status`, `update`, `verify`, `doctor`, and `menu` can still work when the installed binary is called from another project. For AI-agent or shell contexts where PATH resolution is not guaranteed, prefer the explicit installed path in the Claude Code home root. `--repo-root <path>` is an advanced override for CI, unusual layouts, or running the binary from a different folder than the extracted release/source checkout.
+This matters because the install metadata remembers the source bundle or checkout so `status`, `update`, `verify`, `doctor`, and `menu` can still work when the installed binary is called from another project. For AI-agent or shell contexts where PATH resolution is not guaranteed, prefer the explicit installed path in the harness home root. `--repo-root <path>` is an advanced override for CI, unusual layouts, or running the binary from a different folder than the extracted release/source checkout.
 
 ## Install Details
 
@@ -160,7 +160,7 @@ Use `--repo-root <path>` only when you intentionally run `keel install` from out
 & "$env:USERPROFILE\.claude\keel.exe" status
 ```
 
-The Rust manager remembers the source checkout in install metadata, fast-forwards that checkout on `update`, rebuilds the native CLI when needed, delta-syncs changed files, removes stale managed files, and preserves unrelated Claude Code-home files. Shell and PowerShell wrapper launchers are no longer shipped.
+The Rust manager remembers the source checkout in install metadata, fast-forwards that checkout on `update`, rebuilds the native CLI when needed, delta-syncs changed files, removes stale managed files, and preserves unrelated harness-home files. Shell and PowerShell wrapper launchers are no longer shipped.
 
 On Windows, install replaces the running `keel.exe` synchronously via `MoveFileEx(MOVEFILE_REPLACE_EXISTING)` (the same trick rustup uses) instead of a detached `cmd /C copy`. Failures now surface as install errors instead of leaving a stale binary on disk. When the source and the deployed binary are byte-identical, the swap is skipped entirely so a no-op `update` does not touch the executable.
 
@@ -248,7 +248,7 @@ line such as `Opus | ctx 8% | saved 3800 tok`.
 
 ### Cache Hygiene and Token Economy
 
-The hook lifecycle is tuned to preserve Claude Code's prompt cache and minimize per-prompt input tokens.
+The hook lifecycle is tuned to preserve the harness's prompt cache and minimize per-prompt input tokens.
 
 - **What stays cached:** the system prompt, tool definitions, `CLAUDE.md`, and the SessionStart context are read at the cache breakpoint. Reuse costs ~10% of normal input tokens for ~5 minutes after each write.
 - **What gets paid every prompt:** `UserPromptSubmit` injects a short research-first iron-law restatement (~80 tokens) via `additionalContext`. The full bootstrap skill, Red Flags table, and skill catalog ride on `SessionStart` so per-prompt cost stays small while the iron law stays top-of-mind every turn.
@@ -277,7 +277,7 @@ Empty stdout means the hook is intentionally silent for that event.
 | Refresh memory map | `keel memory scope resolve --create-missing --refresh-system-map` |
 | Advanced help | `keel help advanced` |
 
-External output-compaction tools are feature benchmarks for expected output reduction and recoverability, not runtime dependencies. The default path stays the native Rust implementation because it is integrated with Claude Code hooks, Preserve Existing Flow, review gates, install/update, repository instructions, raw-output recovery, and persisted `gain` analytics.
+External output-compaction tools are feature benchmarks for expected output reduction and recoverability, not runtime dependencies. The default path stays the native Rust implementation because it is integrated with the harness hooks, Preserve Existing Flow, review gates, install/update, repository instructions, raw-output recovery, and persisted `gain` analytics.
 
 See [Native Gap Map](docs/native-gap-map.md) for the anonymized comparison between external output reducers, runtime-shell peers, and the current native implementation.
 
@@ -499,9 +499,9 @@ What is implemented today:
 - Built-in adapters cover `tests`, `git`, `search`, `files`, `build`, `lint`, `containers`, `cloud`, `database`, `logs`, and `generic` fallback. Test adapters handle cargo/pytest/go/JS-style failure signals; git/search/files adapters summarize diffs, matches, and large reads; the `containers` adapter compacts docker/kubectl/helm; the `cloud` adapter reduces aws/az/gcloud output (structure-only JSON, secret redaction, failure-first); the `database` adapter reduces psql/mysql/sqlite3/redis-cli/mongosh result sets (header + sampled rows, structure-only JSON, credential redaction).
 - `raw <raw_id>`, `raw --path <raw_id>`, `raw list`, `raw prune --older-than 30d`, and `replay <raw_id>` provide local recovery and retention controls.
 - `rewrite --json "<command>"` returns supported/reason/rewritten-command metadata and understands common shell wrappers, environment prefixes, and pipelines by routing them through `bash -lc` when needed.
-- `hook install` writes the documented global Claude Code lifecycle hook set, with `PreToolUse` handling block-and-rerun command compaction.
+- `hook install` writes the documented global the harness lifecycle hook set, with `PreToolUse` handling block-and-rerun command compaction.
 - `hook instructions` prints the agent-facing rerun contract in markdown or JSON.
-- `gain` reads native compaction events from the Claude Code home and reports observed commands, compacted/passthrough counts, exact tokens before/after/saved, savings percentage, adapter breakdowns, and top commands.
+- `gain` reads native compaction events from the harness home and reports observed commands, compacted/passthrough counts, exact tokens before/after/saved, savings percentage, adapter breakdowns, and top commands.
 - `gain discover` reports missed-savings opportunities: commands that ran through the proxy but were not compacted (passthrough), grouped by command with the estimated uncompacted tokens that entered context. `gain` reports what was saved; `discover` reports what was left on the table.
 - `doctor` checks the binary, raw store, event log, adapter registry, rewrite behavior, and hook/proxy setup with ok/warn/fix-style output.
 - The runtime never shells out to Go for compaction, hooks, or command dispatch.
@@ -538,7 +538,7 @@ Limitations and safety:
 
 ### Hook path
 
-The one-line installer refreshes the managed Claude Code hooks automatically, and `keel hook install` can refresh them manually. The hook set is written to `~/.claude/hooks.json`. `PreToolUse` keeps the `Bash` matcher because command-output wrapping is scoped to shell commands; the other lifecycle events use native lifecycle handlers.
+The one-line installer refreshes the managed harness hooks automatically, and `keel hook install` can refresh them manually. The hook set is written to `~/.claude/hooks.json`. `PreToolUse` keeps the `Bash` matcher because command-output wrapping is scoped to shell commands; the other lifecycle events use native lifecycle handlers.
 
 ```json
 {
@@ -595,7 +595,7 @@ keel git-workflow pr-body --from-diff --test-result "cargo test --workspace pass
 keel git-workflow lint-message .git/COMMIT_EDITMSG
 ```
 
-The linter rejects chatty language, escaped newline PR bodies, unrelated AI/Claude Code wording, unsupported hype wording, and first-person phrasing. `git-workflow preflight --message-file <path>` and `review pre-pr --pr-body <text>` use the same professional text rules.
+The linter rejects chatty language, escaped newline PR bodies, unrelated AI/the harness wording, unsupported hype wording, and first-person phrasing. `git-workflow preflight --message-file <path>` and `review pre-pr --pr-body <text>` use the same professional text rules.
 
 ## Memory and System Map
 
@@ -608,7 +608,7 @@ keel memory scope resolve --create-missing --refresh-system-map
 keel memory system-map refresh
 ```
 
-The project-scoped global `SYSTEM_MAP.md` target lives under Claude Code-managed memory, not inside the user repo. Use `keel memory system-map refresh` when the map is missing, stale, or contradicted by current code. The generated map records visible top-level folders, files, direct child structure, applications, entrypoints, main flows, and key ownership hints. Use trace-by-function or trace-by-flow from the relevant entrypoint, mark unknown facts as `Not found`, respect generated artifact trees, handle a monorepo or multi-app workspace by app, and read the target file plus traced function or flow before editing. Modified files should keep file doc headers in the native comment style when the scoped rules require them.
+The project-scoped global `SYSTEM_MAP.md` target lives under the harness-managed memory, not inside the user repo. Use `keel memory system-map refresh` when the map is missing, stale, or contradicted by current code. The generated map records visible top-level folders, files, direct child structure, applications, entrypoints, main flows, and key ownership hints. Use trace-by-function or trace-by-flow from the relevant entrypoint, mark unknown facts as `Not found`, respect generated artifact trees, handle a monorepo or multi-app workspace by app, and read the target file plus traced function or flow before editing. Modified files should keep file doc headers in the native comment style when the scoped rules require them.
 
 Useful memory commands:
 
@@ -624,7 +624,7 @@ Advanced memory and search surfaces:
 
 - The Rust runtime implements `scope`, `system-map`, `working-brief`, `completion-gate check`, and `recall` for both `memory` and `memoriesv2` command groups, plus the family commands `research-cache` (record/lookup/stale/reward/list), `maintenance` (append-working-buffer/trim/recalibrate), `agent-registry` (register/list), `agent-packets` (build/show/list), `loop-guard` (record/check), `entity` (upsert/list/query), `graph` (add/list/query), `retrieve` (cross-family lexical search), and `status`. Each family persists flat-JSON records under `<claude-home>/<group>/<family>/`, isolated per command group.
 - The `orchestration` group implements `runtime-preflight`, `resume-status`, `task` (begin/progress/complete/list), and `checkpoint`.
-- `memory report` (alias for `status`), `memory index` (rebuilds the recall index), and `instincts` are also implemented. `memory hook` is intentionally not a memory subcommand — it points to `keel hook ...`, which owns Claude Code lifecycle hooks. Still not implemented (return non-zero): `memory working-brief record-summary`, `memory completion-gate record-requirement`, and `consolidate`.
+- `memory report` (alias for `status`), `memory index` (rebuilds the recall index), and `instincts` are also implemented. `memory hook` is intentionally not a memory subcommand — it points to `keel hook ...`, which owns the harness lifecycle hooks. Still not implemented (return non-zero): `memory working-brief record-summary`, `memory completion-gate record-requirement`, and `consolidate`.
 - Code-search demo details live at [./docs/code-search-demo-and-gap-map.md](./docs/code-search-demo-and-gap-map.md).
 
 ## Manager and Operator Surfaces
@@ -652,7 +652,7 @@ Routine work stays in the main lane. Specialist profiles are for the moments whe
 
 ## Legacy Command Compatibility
 
-The native CLI is the primary surface. Most subcommand shapes earlier docs referenced are now implemented: `orchestration task begin|progress|complete|list`, `orchestration checkpoint`, and `memory|memoriesv2 research-cache|maintenance|agent-registry|agent-packets|loop-guard|entity|graph|retrieve|status|instincts` all work today, as do `memory report` (an alias for `status`) and `memory index` (rebuilds the recall index) — see [Memory and System Map](#memory-and-system-map) above. A few remain **not yet implemented in the Rust runtime** and return non-zero with a "not implemented" message instead of silently succeeding: `memory working-brief record-summary`, `memory completion-gate record-requirement`, and `consolidate`. `memory hook` is intentionally not a memory subcommand — it points you to `keel hook ...`, which owns Claude Code lifecycle hooks. The full working surface is listed above and in `keel help advanced`.
+The native CLI is the primary surface. Most subcommand shapes earlier docs referenced are now implemented: `orchestration task begin|progress|complete|list`, `orchestration checkpoint`, and `memory|memoriesv2 research-cache|maintenance|agent-registry|agent-packets|loop-guard|entity|graph|retrieve|status|instincts` all work today, as do `memory report` (an alias for `status`) and `memory index` (rebuilds the recall index) — see [Memory and System Map](#memory-and-system-map) above. A few remain **not yet implemented in the Rust runtime** and return non-zero with a "not implemented" message instead of silently succeeding: `memory working-brief record-summary`, `memory completion-gate record-requirement`, and `consolidate`. `memory hook` is intentionally not a memory subcommand — it points you to `keel hook ...`, which owns the harness lifecycle hooks. The full working surface is listed above and in `keel help advanced`.
 
 ## Documentation Map
 
@@ -662,7 +662,7 @@ The native CLI is the primary surface. Most subcommand shapes earlier docs refer
 | Workflow rules | [./WORKFLOW.md](./WORKFLOW.md) |
 | Agent rules | [./AGENTS.md](./AGENTS.md) |
 | Compatibility matrix | [./docs/compatibility-matrix.md](./docs/compatibility-matrix.md) |
-| Why `keel` over native Claude Code, runtime-shell comparator, and workflow-teaching comparator | [./docs/why-keel.md](./docs/why-keel.md) |
+| Why `keel` over native harness, runtime-shell comparator, and workflow-teaching comparator | [./docs/why-keel.md](./docs/why-keel.md) |
 | Competitive gap closure (named comparators + remaining work) | [./docs/competitive-gap-closure.md](./docs/competitive-gap-closure.md) |
 | Release notes | [./docs/release-notes.md](./docs/release-notes.md) |
 | Release proof bundle | [./docs/release-proof-bundle.md](./docs/release-proof-bundle.md) |
@@ -701,7 +701,7 @@ keel/
 
 ## Summary
 
-Install `keel` when Claude Code needs a clearer path from request to proof:
+Install `keel` when the harness needs a clearer path from request to proof:
 
 - Start work with the workflow shell.
 - Keep state in memory and cockpit surfaces.

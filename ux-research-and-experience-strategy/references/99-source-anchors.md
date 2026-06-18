@@ -43,7 +43,7 @@
 
 ## Skill Build Guidance
 
-- Claude Code hooks docs: https://docs.anthropic.com/en/docs/agents-and-tools/claude-code/hooks
+- the harness hooks docs: https://docs.anthropic.com/en/docs/agents-and-tools/claude-code/hooks
 
 ## Notes
 

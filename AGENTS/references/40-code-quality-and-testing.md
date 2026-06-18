@@ -55,6 +55,9 @@ Side Effects: None — this file is informational.
 **Professional Comments and Documentation:**
 - Keep committed comments and documentation professional, concise, and neutral.
 - Avoid first-person and second-person pronouns in committed comments or documentation unless quoting user-provided text or an external source.
+- Cap each implementation comment (`//`, `#`) at two lines. Longer explanation means the code needs a clearer name or a small refactor, not more prose. Structured file/item doc headers (`///`, `//!`, `<!-- -->`) are exempt from the cap but still follow the wording rules.
+- Never use an em dash or en dash in a comment; it reads as machine-generated. Use a period or comma. Avoid the ` - ` aside and chatty filler ("just", "simply", "now we", "hope this helps").
+- State what the code does, not a narration of the change. The comment-style gate (`keel review comments`) is fail-closed on added lines: an over-length implementation comment or any em/en dash blocks; first-person, chatty, and hype wording warn.
 - Every created or modified file must keep a short doc header in the file's native comment style with `Purpose`, `Caller`, `Dependencies`, `Main Functions`, and `Side Effects`.
 - When files or folders are created, deleted, moved, or renamed, or when the main flow, key file inventory, file layout, folder layout, or ownership map changes, refresh the scoped global `SYSTEM_MAP.md` in the same session so the next prompt starts from current truth.
 - Default `SYSTEM_MAP.md` content to English unless the user explicitly requests another language, and mark missing facts as `Not found` instead of guessing.
@@ -102,7 +105,7 @@ Side Effects: None — this file is informational.
 
 ## Feature Flags
 
-Your Claude Code CLI has these features enabled:
+Your harness CLI has these features enabled:
 - `unified_exec`: Unified execution mode
 - `js_repl`: JavaScript REPL for complex operations
 - `js_repl_tools_only`: Route tools through js_repl

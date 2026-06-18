@@ -7,7 +7,7 @@
 //!   `utility::recall` for the FTS5-backed search/status surface,
 //!   `utility::system_map` for the workspace map, `proxy::run` for the
 //!   capture+compaction pipeline used by the `run_command` tool, and
-//!   `runtime` for the Claude home resolver.
+//!   `runtime` for the harness home resolver.
 //! Main Functions: `run_mcp_command`, `serve_stdio`, `dispatch`.
 //! Side Effects: Reads stdin, writes JSON-RPC responses to stdout, writes
 //!   diagnostics to stderr, opens (and on first call creates) the recall

@@ -50,7 +50,7 @@ Load specialist skills when the task clearly requires domain expertise:
   - **Non-trivial work** (logic changes, multi-file edits, public-API touches, security-sensitive surfaces, brownfield behavior changes, release-impacting work): route through `reviewer` before close.
   - **Trivial work** (docs-only, formatting-only, generated-only, single-line typo or comment fixes, and explicitly throw-away work): skip `reviewer` and rely on native or local validation.
 - Don't route to `reviewer` as reflex triage when a primary domain skill or focused local path already fits and the change is trivial under the rule above
-- Let Claude Code CLI's native capabilities handle basic operations
+- Let the harness CLI's native capabilities handle basic operations
 
 ## Skill-Focused Execution
 
@@ -73,10 +73,10 @@ tool policy. Supported fields: `agent` (default subagent type: `Explore`, `Plan`
 `general-purpose`, etc.), `maxTurns` (maximum agentic turns per session), `effort`
 (default effort: `low`, `medium`, `high`, `xhigh`, `max`), `permissionMode` (tool
 permission mode: `default`, `acceptEdits`, `auto`, `dontAsk`, `bypassPermissions`,
-`plan`). The managed profile is **not** visible to Claude Code itself — it only
+`plan`). The managed profile is **not** visible to the harness itself — it only
 configures how `keel` orchestrates work.
 
-When Claude Code spawns a managed subagent (via `Skill("<name>")` in the main thread),
+When the harness spawns a managed subagent (via `Skill("<name>")` in the main thread),
 it reads the matching subagent definition from `.claude/agents/<name>.md` (repo path)
 or `~/.claude/agents/<name>.md` (install path). Subagent frontmatter supports:
 `name` (required), `description` (required), `tools` (bare tool names, no scoped
@@ -118,7 +118,7 @@ The 24 profiles mirror the 24 specialist skills:
 - **cloud-cost-and-finops**: Cost estimation before deploy, rightsizing, commitment planning, autoscaling and spot strategy, cost allocation and tagging, budget guardrails, and unit economics
 - **internationalization-and-localization**: Message-catalog design and extraction, ICU MessageFormat and plurals, locale-aware number/date/currency formatting, RTL/bidi, translation workflows and fallback chains, and Unicode correctness
 
-The old generic `default`, `explorer`, `worker`, `architect`, and `awaiter` TOMLs are not the repo-managed profile surface anymore. Runtime helper roles may still exist inside Claude Code, but the managed install should mirror these 24 specialist skill profiles instead.
+The old generic `default`, `explorer`, `worker`, `architect`, and `awaiter` TOMLs are not the repo-managed profile surface anymore. Runtime helper roles may still exist inside the harness, but the managed install should mirror these 24 specialist skill profiles instead.
 
 ## Routing Principles (Detailed)
 
@@ -145,7 +145,7 @@ These 53 numbered principles previously lived in `00-skill-routing-and-escalatio
 19. **Refresh The System Map Before Blind Search**: If the scoped `SYSTEM_MAP.md` is missing, stale, contradicted by the code, or files and folders were created, deleted, moved, or renamed, refresh it first with `keel memory system-map refresh` instead of scanning whole large files
 20. **Prefer Map And Doc Headers Over Blind Sweeps**: Use `SYSTEM_MAP.md` and file doc headers as the first navigation layer, then widen to exact path or symbol search only when the map is insufficient
 21. **Keep Workspace Structure In The Map**: Keep `SYSTEM_MAP.md` detailed enough for navigation by recording visible top-level folders, files, direct child structure, applications, entrypoints, main flows, and key ownership hints
-22. **Keep Navigation Global, Not Repo-Dirty**: Store `SYSTEM_MAP.md` under the scoped Claude Code reference directory, not in the user repository or other user-owned workspace files
+22. **Keep Navigation Global, Not Repo-Dirty**: Store `SYSTEM_MAP.md` under the scoped the harness reference directory, not in the user repository or other user-owned workspace files
 23. **Group Monorepos By App**: When `SYSTEM_MAP.md` covers a monorepo or multi-app workspace, group the map by app so unrelated entrypoints and downstream flows stay separated
 24. **Unknown Facts Must Stay Honest**: If the map or current analysis cannot confirm a fact, record `Not found` instead of guessing
 25. **Respect Universal Exclusions**: Keep map-building and early discovery away from dependency, build, IDE, cache, and generated artifact trees unless the user explicitly asks for them
@@ -174,7 +174,7 @@ These 53 numbered principles previously lived in `00-skill-routing-and-escalatio
 48. **Real Solutions Over Plausible Workarounds**: Do not stop at a workaround that merely appears to pass. Confirm the root cause, solve the real problem, and keep scope limited to what the user asked for
 49. **Reproduce Failures Before Fixing**: When facing an error or user-reported problem, reproduce the failure first with the most direct smoke or runtime check, restate expected versus actual behavior, then trace the owner and fix the root cause
 50. **No Hardcoded Runtime Decisions**: Reject hardcoded thresholds, endpoints, environment-specific paths, rollout choices, secrets, or magic values when configuration, derivation, or existing constants are the correct source of truth
-51. **Keep Commit Bodies Professional**: When a task includes Git commit or PR body writing, keep the language professional, keep the text scoped to the actual diff, do not mention Claude Code or keel unless the change itself is about those surfaces, and keep commit bodies in this order when the sections are needed: Problem, Solution, What Changed, Test Result
+51. **Keep Commit Bodies Professional**: When a task includes Git commit or PR body writing, keep the language professional, keep the text scoped to the actual diff, do not mention the harness or keel unless the change itself is about those surfaces, and keep commit bodies in this order when the sections are needed: Problem, Solution, What Changed, Test Result
 52. **Hold Final Synthesis Until Closure Checks Pass**: Before the answer is presented, explicitly confirm that the named task set is done or honestly blocked, tests passed, coverage is adequate for the touched risk surface, and no partial implementation is being mislabeled as complete
 53. **Understand The Request Before Building**: Before writing any code, restate what the request actually asks, confirm the user story, and research what is genuinely needed instead of building against an imagined spec. Do not guess, do not assume. Correct code that solved the wrong problem is the most expensive failure — it passes review and still gets thrown away — so this gates routing itself: there is no point selecting a skill or refreshing memory for the wrong task. This is distinct from #49 (reproduce failures before fixing, a debugging rule) and #15 (clarify when ambiguity remains after review): this principle requires the restate-and-research step up front, before the question of which skill even applies. For a vague or directive feature ask whose user story is not yet confirmed, route through `brainstorming` to restate and confirm before building.
 
@@ -237,7 +237,7 @@ When skills compose work, follow these defaults:
 
 For non-trivial tasks, the final answer should include a compact learning snapshot when memory artifacts are available:
 
-- what Claude Code learned today,
+- what the harness learned today,
 - mistakes and tool-use mistakes encountered,
 - whether they were resolved,
 - heuristic memory-health stats such as growth or momentum.

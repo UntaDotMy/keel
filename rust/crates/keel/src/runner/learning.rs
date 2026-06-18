@@ -386,7 +386,7 @@ fn count_trusted_predicted_signatures(
 /// without adding a blank section.
 ///
 /// This is the lightweight, always-on tier (ECC's key move): generated skills
-/// are loaded on demand by Claude Code's matcher, but a one-line-per-instinct
+/// are loaded on demand by the harness's matcher, but a one-line-per-instinct
 /// digest of what the user reliably does in *this* project is cheap enough to
 /// keep in context every session. Only instincts at or above the skill-trust
 /// confidence are surfaced, so a half-formed pattern never leaks into context.
@@ -1028,7 +1028,7 @@ fn evolve_skill(
 /// Build the synthesis brief for one generated skill: a concrete, ready-to-use
 /// instruction the session agent fulfils to replace the deterministic template
 /// prose with richer, project-specific prose. The binary never calls an LLM —
-/// this is the bridge that lets the *session* model (which Claude Code already
+/// this is the bridge that lets the *session* model (which the harness already
 /// runs) do the authoring, while provenance keeps the result safe from the next
 /// cycle. The brief embeds the observed conventions so the agent has the full
 /// signal without re-reading the instinct store.

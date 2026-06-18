@@ -10,7 +10,7 @@ Side Effects: None — this file is informational.
 ## Windows Environment
 
 When running commands on Windows:
-- Let Claude Code choose the most appropriate supported tool surface for the active runtime.
+- Let the harness choose the most appropriate supported tool surface for the active runtime.
 - Use the most direct supported tool surface for the task. Reach for `js_repl` with
   `claude.tool(...)` only when a persistent Node context helps, when JavaScript-side orchestration is
   clearly better, or when the runtime explicitly requires that path.

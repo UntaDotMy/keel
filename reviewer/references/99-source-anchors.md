@@ -7,13 +7,13 @@ Use these sources to support up-to-date, evidence-backed review feedback.
 - Google Engineering Practices (code review): https://google.github.io/eng-practices/review/reviewer/
 - Scrum Guide (official): https://scrumguides.org/download
 - Agile Alliance YAGNI: https://agilealliance.org/glossary/yagni/
-- Claude Code hooks docs: https://docs.anthropic.com/en/docs/agents-and-tools/claude-code/hooks
-- Claude Code slash commands: https://docs.anthropic.com/en/docs/agents-and-tools/claude-code/cli-usage
-- Claude Code changelog: https://docs.anthropic.com/en/docs/agents-and-tools/claude-code/changelog
+- the harness hooks docs: https://docs.anthropic.com/en/docs/agents-and-tools/claude-code/hooks
+- the harness slash commands: https://docs.anthropic.com/en/docs/agents-and-tools/claude-code/cli-usage
+- the harness changelog: https://docs.anthropic.com/en/docs/agents-and-tools/claude-code/changelog
 
-- (removed: js_repl is not part of Claude Code)
-- (removed: not part of Claude Code)
-- (removed: js_repl is not part of Claude Code)
+- (removed: js_repl is not part of the harness)
+- (removed: not part of the harness)
+- (removed: js_repl is not part of the harness)
 
 ## Requirements and PRD References
 

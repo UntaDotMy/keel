@@ -185,7 +185,7 @@ fn run_gain_reset(standard_output: &mut dyn Write, standard_error: &mut dyn Writ
     let Some(path) = gain_events_path() else {
         let _ = writeln!(
             standard_error,
-            "Unable to resolve Claude home for gain reset"
+            "Unable to resolve harness home for gain reset"
         );
         return 1;
     };
@@ -327,8 +327,21 @@ fn load_missed_opportunities(since_timestamp: Option<u64>) -> MissedOpportunitie
     parse_missed_opportunities(&text, since_timestamp)
 }
 
+/// Read `timestamp` whether serialized as a JSON number or string.
+/// event_log.rs writes it as a string; older/test events use a number.
+fn event_timestamp(event: &serde_json::Value) -> u64 {
+    event
+        .get("timestamp")
+        .and_then(|value| {
+            value
+                .as_u64()
+                .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
+        })
+        .unwrap_or(0)
+}
+
 /// Pure parser over the JSONL event text, split out from `load_missed_opportunities`
-/// so it is testable without touching the filesystem or Claude home.
+/// so it is testable without touching the filesystem or harness home.
 fn parse_missed_opportunities(text: &str, since_timestamp: Option<u64>) -> MissedOpportunities {
     let mut passthrough_commands: u64 = 0;
     let mut uncompacted_tokens: u64 = 0;
@@ -339,10 +352,7 @@ fn parse_missed_opportunities(text: &str, since_timestamp: Option<u64>) -> Misse
             Ok(value) => value,
             Err(_) => continue,
         };
-        let timestamp = event
-            .get("timestamp")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0);
+        let timestamp = event_timestamp(&event);
         if let Some(cutoff) = since_timestamp {
             if timestamp < cutoff {
                 continue;
@@ -405,6 +415,14 @@ fn load_gain_summary(since_timestamp: Option<u64>, adapter_filter: Option<&str>)
         Ok(text) => text,
         Err(_) => return GainSummary::default(),
     };
+    parse_gain_summary(&text, since_timestamp, adapter_filter)
+}
+
+fn parse_gain_summary(
+    text: &str,
+    since_timestamp: Option<u64>,
+    adapter_filter: Option<&str>,
+) -> GainSummary {
     let mut commands_observed: u64 = 0;
     let mut commands_compacted: u64 = 0;
     let mut tokens_before: u64 = 0;
@@ -421,10 +439,7 @@ fn load_gain_summary(since_timestamp: Option<u64>, adapter_filter: Option<&str>)
             Ok(value) => value,
             Err(_) => continue,
         };
-        let timestamp = event
-            .get("timestamp")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0);
+        let timestamp = event_timestamp(&event);
         if let Some(cutoff) = since_timestamp {
             if timestamp < cutoff {
                 continue;
@@ -615,5 +630,29 @@ mod tests {
         let missed = parse_missed_opportunities("", None);
         assert_eq!(missed.passthrough_commands, 0);
         assert!(missed.commands.is_empty());
+    }
+
+    // event_log.rs serializes `timestamp` as a STRING (`"timestamp":"1700"`),
+    // not a number. The since-cutoff parser must coerce it, or every real
+    // event is read as timestamp 0 and filtered out by any cutoff > 0.
+    const STRING_TS_EVENTS: &str = concat!(
+        r#"{"timestamp":"1000","command":"aws s3 ls","compacted":false,"tokens_before":500}"#,
+        "\n",
+        r#"{"timestamp":"1300","command":"terraform plan","compacted":false,"tokens_before":300}"#,
+        "\n",
+    );
+
+    #[test]
+    fn discover_accepts_string_typed_timestamps_under_cutoff() {
+        let missed = parse_missed_opportunities(STRING_TS_EVENTS, Some(1150));
+        assert_eq!(missed.passthrough_commands, 1);
+        assert_eq!(missed.commands[0].command, "terraform plan");
+    }
+
+    #[test]
+    fn summary_counts_string_typed_timestamps_under_cutoff() {
+        let summary = parse_gain_summary(STRING_TS_EVENTS, Some(1150), None);
+        assert_eq!(summary.commands_observed, 1);
+        assert_eq!(summary.tokens_before, 300);
     }
 }

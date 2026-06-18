@@ -5,10 +5,10 @@ Use together with:
 - ../SKILL.md
 - ../../software-development-life-cycle/references/99-source-anchors.md
 
-## Claude Code and Skill Runtime
+## the harness and Skill Runtime
 
-- Claude Code skills docs: https://docs.anthropic.com/en/docs/agents-and-tools/claude-code/skills
-- Claude Code docs: https://docs.anthropic.com/en/docs/agents-and-tools/claude-code
+- the harness skills docs: https://docs.anthropic.com/en/docs/agents-and-tools/claude-code/skills
+- the harness docs: https://docs.anthropic.com/en/docs/agents-and-tools/claude-code
 
 ## Infrastructure as Code and Platform
 

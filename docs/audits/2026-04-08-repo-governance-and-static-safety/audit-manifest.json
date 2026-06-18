@@ -2,7 +2,7 @@
   "repository_slug": "UntaDotMy/keel",
   "audited_revision": "5e0bcb33f20ba626ca3e32657ae6f1c8350b9b2c",
   "generated_at": "2026-04-08",
-  "auditor": "Claude Code CLI repository audit bundle",
+  "auditor": "the harness CLI repository audit bundle",
   "scope": [
     "governance posture",
     "trust-artifact posture",

@@ -59,7 +59,7 @@ fn verify_install(
     let layout = discover_repository_layout(&repository_root)?;
     if !skills_directory(&claude_home).is_dir() {
         return Err(format!(
-            "Claude Code skill pack is not installed in Claude home: {}",
+            "the harness skill pack is not installed in harness home: {}",
             display_path(&claude_home)
         ));
     }
@@ -112,13 +112,13 @@ fn verify_install(
             .is_file()
         {
             return Err(format!(
-                "Agent profile is not installed in Claude home: {agent_name}"
+                "Agent profile is not installed in harness home: {agent_name}"
             ));
         }
     }
     // Subagent `.md` definitions and custom slash commands are synced by install
     // (sync_subagent_definitions / sync_commands) but were historically not
-    // re-verified. Confirm each source `.md` is byte-identical in Claude home so
+    // re-verified. Confirm each source `.md` is byte-identical in harness home so
     // a drifted or partially-synced command/subagent is caught here, not at runtime.
     verify_installed_markdown_dir(
         &repository_root.join(".claude").join("agents"),
@@ -227,7 +227,7 @@ fn verify_installed_markdown_dir(
         let target_path = target_dir.join(file_name);
         if !target_path.is_file() {
             return Err(format!(
-                "{label} is not installed in Claude home: {}",
+                "{label} is not installed in harness home: {}",
                 display_path(&target_path)
             ));
         }
@@ -392,7 +392,7 @@ pub fn run_all_command(
 }
 
 pub fn run_menu_command(standard_output: &mut dyn Write) -> u8 {
-    let _ = writeln!(standard_output, "Claude Code Skill Manager");
+    let _ = writeln!(standard_output, "the harness Skill Manager");
     let _ = writeln!(
         standard_output,
         "  [1] install  - install or refresh managed Rust-native files"

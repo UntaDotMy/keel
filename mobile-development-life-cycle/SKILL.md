@@ -59,7 +59,7 @@ See `_shared/common-discipline.md` for the canonical rules. Apply them to all wo
 
 - Inspect the actual app structure, release path, crash signals, and platform constraints before recommending changes.
 - Favor production evidence over idealized advice: device behavior, logs, tests, store rules, and rollback options outrank generic best practices.
-- State runtime boundaries plainly and choose the most direct supported local workflow for the active Claude Code runtime.
+- State runtime boundaries plainly and choose the most direct supported local workflow for the active harness runtime.
 
 ## When to Clarify First
 

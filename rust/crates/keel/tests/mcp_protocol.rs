@@ -12,7 +12,7 @@
 //!   `mcp_serve_unknown_method_returns_method_not_found`,
 //!   `mcp_serve_parse_error_returns_dash_32700`.
 //! Side Effects: Spawns a child process per test, reads its stdout/stderr,
-//!   isolates Claude home under a per-test temp directory so the recall
+//!   isolates harness home under a per-test temp directory so the recall
 //!   index never collides with a real install or with sibling tests.
 
 use std::env;

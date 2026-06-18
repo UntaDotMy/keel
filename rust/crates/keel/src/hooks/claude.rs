@@ -1,6 +1,6 @@
-//! Purpose: Single source of truth for Claude Code hook event metadata.
+//! Purpose: Single source of truth for the harness hook event metadata.
 //! Caller: hooks module, runner managed-hook payload, doctor checks.
-//! Dependencies: Claude Code settings.json hooks schema.
+//! Dependencies: the harness settings.json hooks schema.
 //! Main Functions: pre_tool_matcher,
 //! settings_file_name, event_by_name, event_by_slug, HOOK_EVENTS.
 //! Side Effects: None.
@@ -12,17 +12,17 @@
 //! from the `PostToolUseFailure` regression where the dispatch arm was added but the
 //! shipped binary still rejected the slug.
 
-/// Claude Code stores hook configuration inside `settings.json` under a top-level `hooks` key.
+/// the harness stores hook configuration inside `settings.json` under a top-level `hooks` key.
 pub const SETTINGS_FILE_NAME: &str = "settings.json";
 
-/// One row per official Claude Code hook event.
+/// One row per official harness hook event.
 ///
 /// `matcher`:
 ///   - `""` for events that aren't tool-scoped (Stop, SessionStart, ...)
 ///   - `"Bash"` for the two we narrow to shell invocations so the rewriter doesn't
 ///     spawn on every tool call
 ///
-/// `supports_hook_specific_output`: events the official Claude Code schema
+/// `supports_hook_specific_output`: events the official harness schema
 /// documents as accepting `hookSpecificOutput.additionalContext`. Per
 /// code.claude.com/docs/en/hooks that set is SessionStart, Setup,
 /// SubagentStart, UserPromptSubmit, UserPromptExpansion, PreToolUse,
@@ -37,7 +37,7 @@ pub const SETTINGS_FILE_NAME: &str = "settings.json";
 /// `keel hook file-changed` work, but a stanza in settings.json
 /// only makes sense when we have a meaningful default. FileChanged is the
 /// known exception — per the official docs the matcher *is* the watch list,
-/// so installing with `matcher: ""` produces a stanza Claude Code never
+/// so installing with `matcher: ""` produces a stanza the harness never
 /// fires. We skip those rows on install rather than ship a dead stanza.
 pub struct HookEvent {
     pub name: &'static str,
@@ -48,7 +48,7 @@ pub struct HookEvent {
     pub installs_in_settings: bool,
 }
 
-/// Canonical Claude Code hook events. Order is stable so rendered settings.json entries
+/// Canonical the harness hook events. Order is stable so rendered settings.json entries
 /// remain deterministic across installs. Matches the spec at code.claude.com/docs/en/hooks.
 pub const HOOK_EVENTS: &[HookEvent] = &[
     HookEvent {
@@ -299,7 +299,7 @@ pub const HOOK_EVENTS: &[HookEvent] = &[
     // FileChanged: per code.claude.com/docs/en/hooks the `matcher` value
     // doubles as the watch list — segments split on `|` are registered as
     // literal filenames in the working directory. With `matcher: ""` no
-    // file is watched, so installing this stanza ships dead config Claude
+    // file is watched, so installing this stanza ships dead config the harness
     // Code never fires. We keep the row so dispatch still works for ad-hoc
     // invocations like `keel hook file-changed`, but skip it on
     // install until a per-repo watch list is meaningful.
@@ -346,7 +346,7 @@ pub const HOOK_EVENTS: &[HookEvent] = &[
     },
 ];
 
-/// Find a row by Claude Code's PascalCase event name (`"PreToolUse"`).
+/// Find a row by the harness's PascalCase event name (`"PreToolUse"`).
 pub fn event_by_name(name: &str) -> Option<&'static HookEvent> {
     HOOK_EVENTS.iter().find(|event| event.name == name)
 }
@@ -373,7 +373,7 @@ pub fn post_tool_matcher() -> &'static str {
         .unwrap_or("")
 }
 
-/// Map a Claude Code hook event name to the `keel hook <subcommand>` kebab-case slug.
+/// Map a harness hook event name to the `keel hook <subcommand>` kebab-case slug.
 /// Kept as a facade over the table for tests and external callers; in-tree code reads
 /// `event_by_name(name)?.slug` directly.
 #[cfg(test)]
@@ -383,7 +383,7 @@ pub fn lifecycle_subcommand(event: &str) -> &'static str {
         .unwrap_or("unknown")
 }
 
-/// Human-readable status message surfaced in Claude Code's hook feedback UI.
+/// Human-readable status message surfaced in the harness's hook feedback UI.
 #[cfg(test)]
 pub fn status_message(event: &str) -> &'static str {
     event_by_name(event)

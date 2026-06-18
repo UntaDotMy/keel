@@ -121,7 +121,7 @@ pub fn run_status_command(
     let target = detect_current_target()
         .map(|value| value.directory_name())
         .unwrap_or_else(|error| format!("unknown ({error})"));
-    let _ = writeln!(standard_output, "Claude Code Skill Pack Status");
+    let _ = writeln!(standard_output, "the harness Skill Pack Status");
     let _ = writeln!(standard_output);
     let _ = writeln!(standard_output, "Summary:");
     let _ = writeln!(standard_output, "  Manager version: {build_version}");
@@ -138,7 +138,7 @@ pub fn run_status_command(
         update_status
     );
     let _ = writeln!(standard_output);
-    let _ = writeln!(standard_output, "Claude Code Skills:");
+    let _ = writeln!(standard_output, "the harness Skills:");
     let _ = writeln!(standard_output, "  Source: {}", source_display);
     let _ = writeln!(
         standard_output,

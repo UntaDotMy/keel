@@ -61,7 +61,7 @@ See `_shared/common-discipline.md` for the canonical rules. Apply them to all wo
 - Inspect current components, tokens, layout constraints, and implementation gaps before recommending a UI strategy.
 - Translate requests into a concrete UI brief: user story, primary action, content priority, constraints, visual tone, success criteria, and required states.
 - Favor production evidence over idealized advice: accessibility findings, browser/device checks, interaction bugs, and release constraints outrank generic design opinions.
-- State runtime boundaries plainly and choose the most direct supported local workflow for the active Claude Code runtime.
+- State runtime boundaries plainly and choose the most direct supported local workflow for the active harness runtime.
 
 ## When to Clarify First
 

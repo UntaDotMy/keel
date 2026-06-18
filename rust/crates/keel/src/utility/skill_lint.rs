@@ -1,5 +1,5 @@
 //! Purpose: Skill eval/lint harness — validates that every `<name>/SKILL.md`
-//!   has the structural properties the Claude Code skill matcher needs to TRIGGER
+//!   has the structural properties the harness skill matcher needs to TRIGGER
 //!   the skill, not merely that the Rust compiles.
 //! Caller: commands.rs `skill-lint` dispatch.
 //! Dependencies: std::fs, std::path, crate::json, crate::runtime::display_path.

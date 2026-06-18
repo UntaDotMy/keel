@@ -1,4 +1,4 @@
-//! Purpose: One-shot recovery command — re-wire Claude Code lifecycle hooks and
+//! Purpose: One-shot recovery command — re-wire the harness lifecycle hooks and
 //!   (re)register the `keel` MCP server, then report the model-compliance
 //!   caveat the user cannot fix in code.
 //! Caller: `commands.rs` `repair` arm (`keel repair`).
@@ -93,7 +93,7 @@ pub fn run_repair_command(
     let _ = writeln!(standard_output, "Next steps:");
     let _ = writeln!(
         standard_output,
-        "  - Restart Claude Code so it reloads settings.json and ~/.claude.json."
+        "  - Restart the harness so it reloads settings.json and ~/.claude.json."
     );
     let _ = writeln!(
         standard_output,
@@ -122,7 +122,7 @@ pub fn run_repair_command(
     );
     let _ = writeln!(
         standard_output,
-        "enough. MCP tools are likewise offered to the model by Claude Code; this"
+        "enough. MCP tools are likewise offered to the model by the harness; this"
     );
     let _ = writeln!(
         standard_output,

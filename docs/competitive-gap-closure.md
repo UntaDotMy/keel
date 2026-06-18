@@ -1,6 +1,6 @@
 <!--
-Purpose: Track the competitive-gap fixes for keel — what shipped in the gap-closing pass and what remains, named against the real comparators and aligned to official Claude Code docs.
-Caller: Contributors closing the gap between keel and peer Claude Code tooling (RTK, caveman, superpowers, ECC) and the native baseline.
+Purpose: Track the competitive-gap fixes for keel — what shipped in the gap-closing pass and what remains, named against the real comparators and aligned to official harness docs.
+Caller: Contributors closing the gap between keel and peer the harness tooling (RTK, caveman, superpowers, ECC) and the native baseline.
 Dependencies: Rust runtime (utility/memory.rs, manager/install.rs, proxy adapters), plugin manifest, command files, statusline scripts.
 Main Functions: Record shipped fixes, the toolchain constraint, and the prioritized remaining work with concrete file targets.
 Side Effects: None — documentation only.
@@ -10,19 +10,19 @@ Side Effects: None — documentation only.
 This page is the named, source-backed companion to the anonymized
 [`native-gap-map.md`](./native-gap-map.md). It records the competitive audit
 against real peers, what the gap-closing pass shipped, and what remains. Aligned
-to the official Claude Code docs at code.claude.com as of the audit date.
+to the official harness docs at code.claude.com as of the audit date.
 
 ## Comparators (verified identities)
 
 | Project | Identity | License | Overlap with keel |
 | --- | --- | --- | --- |
-| Official Claude Code | The host platform (code.claude.com/docs) | Anthropic | The baseline keel extends; ~30 hook events, skills (commands merged in), built-in subagents, checkpointing/rewind, MCP Tool Search, Agent SDK. |
+| Official harness | The host platform (code.claude.com/docs) | Anthropic | The baseline keel extends; ~30 hook events, skills (commands merged in), built-in subagents, checkpointing/rewind, MCP Tool Search, Agent SDK. |
 | RTK ("Rust Token Killer", `rtk-ai/rtk`) | Single-binary Rust command-output compaction proxy | Apache-2.0 | Near-identical to keel's compaction proxy; "100+ supported commands" (mostly subcommand breadth within categories we also cover — 8 git subcmds, 8 aws subcmds, etc.), `gain`/`discover`/`session`, tee recovery. Verified from the upstream README: **no auto-rewrite on native Windows** (falls back to CLAUDE.md injection) and **never intercepts Read/Grep/Glob** (Bash-tool-only hook). |
 | caveman (`JuliusBrussee/caveman`) | Skill that compresses the model's own replies (terse "caveman speak") | MIT | Token economy on the **output** side (keel only compacts command **output**); ships slash commands, statusline, MCP middleware. |
-| superpowers (`obra/superpowers`) | Opinionated TDD methodology as auto-triggering skills | MIT | Skills + workflow doctrine; `writing-skills` meta-skill with a subagent eval harness; two-stage review loop (walked back to inline self-review checklists in v5.0.6 for speed); visual brainstorming. v5.1.0 (May 2026) removed its legacy slash commands and named code-reviewer agent. Cross-harness (Claude/Codex/Cursor/Gemini/Copilot) — the one axis it still leads. After the methodology-completion pass, keel ships named first-class equivalents for **all 14** of its methodology skills (see scorecard). |
-| ECC ("Everything Claude Code", `affaan-m/ECC`) | Multi-harness operator framework | MIT | Whole operator posture at larger scale; **Instincts** (confidence-scored learned behaviors that evolve into skills), **AgentShield** (adversarial config security audit), advisor CLI, cross-harness adapters. |
+| superpowers (`obra/superpowers`) | Opinionated TDD methodology as auto-triggering skills | MIT | Skills + workflow doctrine; `writing-skills` meta-skill with a subagent eval harness; two-stage review loop (walked back to inline self-review checklists in v5.0.6 for speed); visual brainstorming. v5.1.0 (May 2026) removed its legacy slash commands and named code-reviewer agent. Cross-harness (this host/Codex/Cursor/Gemini/Copilot) — the one axis it still leads. After the methodology-completion pass, keel ships named first-class equivalents for **all 14** of its methodology skills (see scorecard). |
+| ECC ("Everything the harness", `affaan-m/ECC`) | Multi-harness operator framework | MIT | Whole operator posture at larger scale; **Instincts** (confidence-scored learned behaviors that evolve into skills), **AgentShield** (adversarial config security audit), advisor CLI, cross-harness adapters. |
 | UI/UX Pro Max (`nextlevelbuilder/ui-ux-pro-max-skill`) | Design-intelligence skill: a knowledge corpus + Python BM25 generator that turns a UI request into a design-system packet (style, palette, typography, anti-patterns, checklist) | MIT | Single-domain overlap with keel's **`design-intelligence` generator** + the `ui-design-systems-and-responsive-interfaces` skill. v2.5.0 **file-verified** corpus: 84 styles, 161 palettes, 73 font pairings, 99 UX rules, 161 reasoning rules/products, 25 charts, 1,923 Google-font table. After keel's **corpus-beat pass**, keel now leads on every comparable array: **170 archetypes, 90 styles, 230 palettes, 140 pairings, 37 charts, 112 UX guidelines** (plus 45 color moods / 30 typography moods / 15 stack profiles — 869 total cross-referenced entries). Both persist to `design-system/MASTER.md`. They are cross-harness (18 platforms); ours ships inside the single hook-wired Rust binary (no Python runtime). Accessibility is checklist guidance, not automated WCAG validation — same posture both sides. No command-output compaction, no review gate, no learning loop, no brownfield gate on their side. |
-| harness (`revfactory/harness`) | A single meta-skill "team-architecture factory": from a one-line domain prompt it generates a coordinated agent team plus the skills those agents use | Apache-2.0 | Niche overlap with keel's orchestration skills. Ships **1 skill + 6 reference docs, zero hooks, zero subagents, zero CLI**; depends entirely on Claude Code's experimental Agent Teams API (`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`). Six orchestration patterns (pipeline, fan-out/fan-in, expert pool, producer-reviewer, supervisor, hierarchical) + a Phase-0 audit / duplicate-review brownfield gate. Claude-Code-only, manual invocation. Closed by keel's `designing-agent-teams` skill (the same pattern catalog + contract discipline, without the experimental-API dependency). |
+| harness (`revfactory/harness`) | A single meta-skill "team-architecture factory": from a one-line domain prompt it generates a coordinated agent team plus the skills those agents use | Apache-2.0 | Niche overlap with keel's orchestration skills. Ships **1 skill + 6 reference docs, zero hooks, zero subagents, zero CLI**; depends entirely on the harness's experimental Agent Teams API (`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`). Six orchestration patterns (pipeline, fan-out/fan-in, expert pool, producer-reviewer, supervisor, hierarchical) + a Phase-0 audit / duplicate-review brownfield gate. harness-only, manual invocation. Closed by keel's `designing-agent-teams` skill (the same pattern catalog + contract discipline, without the experimental-API dependency). |
 | compound-engineering (`EveryInc/compound-engineering-plugin`) | "Compound engineering" plugin: front-load planning/review and codify each solved problem into a reusable knowledge base so future work is easier | MIT | Broadest methodology overlap. **38 skills + 43 subagents** (all markdown), installable to 10 harnesses via a TypeScript converter CLI; **zero hooks** (entirely manual/slash-driven). Signature is `ce-compound`: writes categorized, frontmatter-tagged solution docs to `docs/solutions/` and self-edits AGENTS.md/CLAUDE.md for discoverability. Has `ce-worktree`, multi-lens review fan-out, design + security reviewers. Closed by keel's `compounding-knowledge` skill (the same capture-and-wire-discoverability loop), which complements our automatic, hook-driven `learn` loop they lack. |
 
 Note: published star counts for these repos (caveman/superpowers/ECC/RTK) were
@@ -156,7 +156,7 @@ below was implemented and verified with `cargo build` + `cargo test --workspace`
     `refs/claude-checkpoints/<id>`, lists/shows them, and restores one. Restore is
     the only destructive verb — gated behind `--confirm` and an automatic
     pre-restore safety snapshot so the restore itself is reversible. An external
-    binary cannot hook Claude's edit tool the way native `/rewind` does, but git
+    binary cannot hook the harness's edit tool the way native `/rewind` does, but git
     is the real code-undo; this exposes it as a first-class checkpoint surface.
 14. **Autonomous learning loop (Hermes/ECC headline parity — the biggest gap closed).**
     The prior `memory instincts` CLI (item 4) was the *data model* for instincts,
@@ -185,7 +185,7 @@ below was implemented and verified with `cargo build` + `cargo test --workspace`
       conventions are in context without waiting for a skill match.
     First time keel matches Hermes/ECC on automatic
     skill-creation-from-behavior; superpowers does it as an offline batch, and
-    Claude Code/caveman/RTK/ohmyclaude do not do it at all.
+    the harness/caveman/RTK/ohmyclaude do not do it at all.
 
 Prior non-Rust work (doc/impl drift fixes, the four slash commands, the
 cross-platform statusline savings badge, and hook-count doc accuracy) shipped
@@ -224,7 +224,7 @@ N = absent.
 
 **Where we still lose (honest), updated after the breadth + prose pass:**
 - **Cross-harness reach** — every comparator runs on Codex/Cursor/Gemini; we are
-  Claude-Code-native by deliberate product stance (see strategic note). This is
+  harness-native by deliberate product stance (see strategic note). This is
   the one axis where every peer beats us, and it is a choice, not a defect.
   Explicitly out of scope per product direction.
 - ~~RTK filter breadth~~ **(closed this pass).** Two real defects were found and
@@ -255,7 +255,7 @@ N = absent.
   session model upgrades the prose in the normal course of work. The agent's
   edit is protected by the content-hash no-clobber guard, and the nudge
   self-clears once the skill is refined. The binary still never calls an LLM —
-  the session model that Claude Code already runs does the authoring. `learn run
+  the session model that harness already runs does the authoring. `learn run
   --synthesize` also collects briefs inline for a freshly generated skill.
 - ~~superpowers methodology-skill discoverability~~ **(closed this pass).** A
   focused re-audit against `obra/superpowers` v5.1.0 (read the actual SKILL.md
@@ -493,7 +493,7 @@ tests:
 ## Remaining work (deliberately out of scope)
 
 - **Cross-harness adapters.** Every comparator ships Codex/Cursor/Gemini/Copilot
-  adapters; keel stays Claude-Code-native by design (see the strategic note
+  adapters; keel stays harness-native by design (see the strategic note
   below). Not a defect — a product stance.
 - **Mobile / niche command adapters.** Mobile toolchains (xcodebuild beyond the
   generic build path, gradle device flows) and other niche CLIs still fall through
@@ -502,10 +502,10 @@ tests:
 
 ## Native-parity note (`/rewind`)
 
-Native Claude Code `/rewind` auto-captures the edit tool's changes and can restore
+Native harness `/rewind` auto-captures the edit tool's changes and can restore
 code *and* conversation. `keel checkpoint` is the code half: a git-backed
 working-tree snapshot/restore that an external binary can actually own. It does
-not capture conversation state (only Claude Code itself can), so the two are
+not capture conversation state (only the harness itself can), so the two are
 complementary rather than identical — use `/rewind` for conversation+code inside a
 session, `checkpoint` for durable, named, git-pinned code snapshots that survive
 across sessions and tools.
@@ -513,14 +513,14 @@ across sessions and tools.
 ## Strategic open question
 
 Every comparator (RTK, caveman, superpowers, ECC) ships cross-harness adapters
-(Codex/Cursor/Gemini/Copilot). keel is Claude-Code-only. Whether to go
-multi-harness or keep a deliberately Claude-native stance is a product decision,
+(Codex/Cursor/Gemini/Copilot). keel is harness-only. Whether to go
+multi-harness or keep a deliberately harness-native stance is a product decision,
 not a defect — recorded here so it is chosen, not drifted into.
 
 ## 2026-06-17 audit: top-starred harness / workflow comparators
 
 This section extends the capability-based comparison to the **highest-adoption**
-Claude Code harness/workflow projects, selected by GitHub-API star count (a
+harness and workflow projects, selected by GitHub-API star count (a
 deterministic selection signal, distinct from using stars as a *quality* signal —
 the caution in the Comparators note still holds, and the superpowers anomaly below
 is exactly why). Five of these were absent from the table above. Audit run after
@@ -578,7 +578,7 @@ cannot talk past**. Four differentiators hold against every comparator:
   Carlo certification) is a more sophisticated eval *framework*; ours is real and
   reproducible but narrow (compaction fidelity only).
 - **Cross-harness reach** — the standing by-design loss: every comparator runs on
-  Codex/Cursor/Gemini/Copilot; we are Claude-Code-native. spec-kit (30+ agents) and
+  Codex/Cursor/Gemini/Copilot; we are harness-native. spec-kit (30+ agents) and
   superpowers (10+ harnesses) lead hardest here.
 - **Adoption / validation** — 8k-230k stars of battle-testing vs a private repo.
 
@@ -617,7 +617,7 @@ are shallower than a single-purpose peer.
 
 The audit flagged several capabilities competitors have that keel does
 not. After review these are **deliberate scope boundaries**, not defects — they
-conflict with the "single Rust binary, Claude-Code-native, discipline-over-volume"
+conflict with the "single Rust binary, harness-native, discipline-over-volume"
 positioning. Recorded here so each is a chosen tradeoff:
 
 - **Product-management domain skills (B1).** Product-management skills (roadmaps,
@@ -629,14 +629,14 @@ positioning. Recorded here so each is a chosen tradeoff:
   from a project board and drive it to a merged PR without human checkpoints
   contradict the "human-in-the-loop at every decision point" discipline. keel
   ships orchestration *patterns* (`designing-agent-teams`, `dispatching-parallel-agents`,
-  `subagent-driven-development`) over Claude Code's native subagents/agent-teams/
+  `subagent-driven-development`) over the harness's native subagents/agent-teams/
   background-agents, with explicit human review gates at closeout. Autonomous
   board-to-PR would bypass those gates. **Not pursued.**
 - **Multi-agent swarm runtime** (topologies/consensus, à la claude-flow). keel
   ships orchestration *patterns* (`designing-agent-teams`, `dispatching-parallel-agents`,
-  `subagent-driven-development`) over Claude Code's native subagents/agent-teams/
+  `subagent-driven-development`) over the harness's native subagents/agent-teams/
   background-agents, not a separate swarm engine with consensus. A swarm runtime is
-  outside Claude Code's native execution model and would contradict the single-binary
+  outside the harness's native execution model and would contradict the single-binary
   stance. **Not pursued.**
 - **Recency social research (B3).** Real-time social-media trend research and
   engagement signals are outside the engineering-delivery scope. keel's
@@ -653,13 +653,13 @@ positioning. Recorded here so each is a chosen tradeoff:
   like wshobson). keel is curated-not-exhaustive by design: ~40 skills covering
   delivery domains and methodology, not one-agent-per-language. The matcher quality and
   discipline contract degrade with volume. **Not pursued; curation is the product.**
-- **Passive automatic learning from corrections.** Native Claude Code now ships Auto
+- **Passive automatic learning from corrections.** Native harness now ships Auto
   memory for this; keel's `compounding-knowledge` + `instincts` path is the
   deliberate, human-readable complement (see the native-Auto-memory note in CLAUDE.md and
   the bootstrap skill). We lean on native Auto memory rather than reinvent passive learning.
   **Complemented, not duplicated.**
 - **Cross-harness portability** (Codex/Cursor/Gemini/Copilot adapters). The standing
-  product decision above: deliberately Claude-native. **Open product question, not a defect.**
+  product decision above: deliberately harness-native. **Open product question, not a defect.**
 
 Domain coverage, by contrast, was a *real* gap and is now closed: observability/incident
 response, dependency/supply-chain, data/ML, build-side identity, cloud cost/FinOps, and

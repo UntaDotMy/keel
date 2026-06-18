@@ -19,7 +19,7 @@
 //!     (`recall <query>` and `recall status`) runs `sync_recall_index` first. The
 //!     mtime+size delta scan is sub-millisecond at single-user scale.
 //!   * `recall reindex --force` drops and recreates the FTS5 table to recover from a
-//!     corrupt or stale index without disturbing any other Claude Code home file.
+//!     corrupt or stale index without disturbing any other the harness home file.
 
 use std::fs;
 use std::io::Write;

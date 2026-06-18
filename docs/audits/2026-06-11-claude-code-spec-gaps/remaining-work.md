@@ -1,7 +1,7 @@
-# Claude Code Spec Gaps — Audit Closure
+# the harness Spec Gaps — Audit Closure
 
 **Audit date:** 2026-06-11
-**Source:** Whole-project gap audit against the official Claude Code docs (skills,
+**Source:** Whole-project gap audit against the official harness docs (skills,
 subagents, hooks, plugins) and 13 competitor harness repos.
 
 The audit surfaced 17 findings — features the official spec documents that

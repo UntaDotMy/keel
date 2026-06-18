@@ -2,15 +2,15 @@
 
 Use these references to ground responses in authoritative or canonical sources.
 
-## Claude Code Skill Format
+## the harness Skill Format
 
-- Claude Code hooks docs: https://docs.anthropic.com/en/docs/agents-and-tools/claude-code/hooks
-- Claude Code slash commands: https://docs.anthropic.com/en/docs/agents-and-tools/claude-code/cli-usage
-- Claude Code changelog: https://docs.anthropic.com/en/docs/agents-and-tools/claude-code/changelog
+- the harness hooks docs: https://docs.anthropic.com/en/docs/agents-and-tools/claude-code/hooks
+- the harness slash commands: https://docs.anthropic.com/en/docs/agents-and-tools/claude-code/cli-usage
+- the harness changelog: https://docs.anthropic.com/en/docs/agents-and-tools/claude-code/changelog
 
-- (removed: js_repl is not part of Claude Code)
-- (removed: not part of Claude Code)
-- (removed: js_repl is not part of Claude Code)
+- (removed: js_repl is not part of the harness)
+- (removed: not part of the harness)
+- (removed: js_repl is not part of the harness)
 - OpenAI Skills repository: https://github.com/openai/skills
 - OpenAI curated skill examples: https://github.com/openai/skills/tree/main/skills/.curated
 

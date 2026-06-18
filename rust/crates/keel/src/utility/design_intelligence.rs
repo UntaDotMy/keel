@@ -377,6 +377,7 @@ fn build_packet(request: &str, catalog: &Value, stack_id: &str, component_librar
         "recovery_checks": recovery_checks,
         "verification_checks": verification_checks,
         "anti_patterns": merged_anti_patterns(archetype, style),
+        "decision_rules": active_decision_rules(archetype, &request_lower),
     });
 
     if let Some(stack_entry) = stack {
@@ -758,6 +759,11 @@ fn render_text(packet: &Value, output: &mut dyn Write) {
         "Anti-patterns to avoid",
         &str_array(packet, "anti_patterns"),
     );
+    write_block(
+        output,
+        "Decision rules (context-specific, non-negotiable)",
+        &str_array(packet, "decision_rules"),
+    );
 
     if let Some(guidelines) = packet.get("ux_guidelines").and_then(Value::as_array) {
         if !guidelines.is_empty() {
@@ -851,6 +857,11 @@ fn persist_design_system(
         &mut markdown,
         "Anti-patterns to avoid",
         &str_array(packet, "anti_patterns"),
+    );
+    append_markdown_list(
+        &mut markdown,
+        "Decision rules (context-specific, non-negotiable)",
+        &str_array(packet, "decision_rules"),
     );
 
     fs::write(&path, markdown)
@@ -996,6 +1007,32 @@ fn stem(word: &str) -> String {
     lower
 }
 
+/// Resolve an archetype's `decision_rules` against the request. A rule fires
+/// when its `when` is `always`, or `if_<token>` and the request contains
+/// `<token>`. Returns the `then` guidance strings of the fired rules. This is
+/// the ui-ux-pro-max conditional mechanism: `must_have` and `if_luxury`-style
+/// branches that turn a generic recommendation into a context-specific one.
+fn active_decision_rules(archetype: &Value, request_lower: &str) -> Vec<String> {
+    let mut active = Vec::new();
+    for rule in array_field(archetype, "decision_rules") {
+        let when = str_field(&rule, "when");
+        let fires = if when == "always" {
+            true
+        } else if let Some(token) = when.strip_prefix("if_") {
+            !token.is_empty() && request_lower.contains(&token.to_lowercase())
+        } else {
+            false
+        };
+        if fires {
+            let then = str_field(&rule, "then");
+            if !then.is_empty() {
+                active.push(then);
+            }
+        }
+    }
+    active
+}
+
 fn score_keywords(request_lower: &str, tokens: &HashSet<String>, keywords: &[String]) -> u32 {
     let mut score = 0;
     for keyword in keywords {
@@ -1131,6 +1168,52 @@ mod tests {
         assert!(out.contains("Fintech Product"), "out: {out}");
         assert!(out.contains("Trust Blue"), "out: {out}");
         assert!(out.contains("Confidence: high"), "out: {out}");
+    }
+
+    #[test]
+    fn luxury_beauty_spa_routes_to_beauty_archetype_not_marketplace() {
+        let catalog = repo_catalog_path();
+        let (code, out, err) = run(&[
+            "recommend",
+            "luxury beauty spa booking site",
+            "--format",
+            "json",
+            "--catalog",
+            catalog.to_str().unwrap(),
+        ]);
+        assert_eq!(code, 0, "stderr: {err}");
+        let value: Value = serde_json::from_str(&out).expect("valid json");
+        let id = value["product_archetype"]["id"].as_str().unwrap_or("");
+        assert_ne!(
+            id, "marketplace-platform",
+            "a generic 'booking' keyword hit must not win over the beauty/spa archetype; got {id}"
+        );
+        assert_eq!(
+            id, "beauty-wellness-spa",
+            "luxury beauty spa should route to the beauty/spa archetype; got {id}"
+        );
+    }
+
+    #[test]
+    fn decision_rules_surface_conditional_guidance() {
+        let catalog = repo_catalog_path();
+        let (code, out, err) = run(&[
+            "recommend",
+            "luxury beauty spa booking site",
+            "--format",
+            "json",
+            "--catalog",
+            catalog.to_str().unwrap(),
+        ]);
+        assert_eq!(code, 0, "stderr: {err}");
+        let value: Value = serde_json::from_str(&out).expect("valid json");
+        let rules = value["decision_rules"]
+            .as_array()
+            .expect("decision_rules array");
+        assert!(
+            !rules.is_empty(),
+            "beauty/spa archetype with a 'luxury' request must emit at least one decision rule"
+        );
     }
 
     #[test]

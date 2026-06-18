@@ -346,7 +346,7 @@ pub fn read_text_if_exists(path: &Path) -> Result<String, String> {
 /// empty `~/.claude.json` is a destructive loss of unrelated state.
 ///
 /// The rename retries a few times to absorb the transient locks that frequently
-/// firing Claude Code lifecycle hooks can hold on these files (mirrors the
+/// firing the harness lifecycle hooks can hold on these files (mirrors the
 /// executable-replace path's `rename_with_retry`). If staging into the same
 /// directory fails (e.g. a permission quirk), it falls back to a direct write so
 /// a non-atomic success still beats a hard failure.
@@ -410,7 +410,7 @@ fn atomic_temp_path(target: &Path) -> PathBuf {
 }
 
 /// Rename `from` over `to`, retrying a few times to absorb transient locks from
-/// concurrently-firing Claude Code hooks. `fs::rename` replaces an existing
+/// concurrently-firing the harness hooks. `fs::rename` replaces an existing
 /// target on both Unix (atomic inode swap) and Windows
 /// (`MoveFileExW(MOVEFILE_REPLACE_EXISTING)`).
 fn rename_text_with_retry(from: &Path, to: &Path) -> Result<(), String> {
@@ -473,7 +473,7 @@ pub fn run_command(
 /// rewriting. Stdin/stdout/stderr are inherited so the user sees output exactly
 /// as if they had run the program themselves. Used by the proxy passthrough
 /// gate: when `keel run -- ...` is invoked from a plain shell (not a
-/// Claude Code hook), capturing output and writing recovery artifacts would
+/// the harness hook), capturing output and writing recovery artifacts would
 /// surprise the user — we behave as a transparent forwarder instead.
 pub fn run_command_inherit(
     program: &str,

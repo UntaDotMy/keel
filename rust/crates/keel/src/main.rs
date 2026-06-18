@@ -10,6 +10,7 @@ use std::process::ExitCode;
 pub mod adapters;
 mod args;
 mod commands;
+mod comment_lint;
 mod help;
 mod hooks;
 mod json;

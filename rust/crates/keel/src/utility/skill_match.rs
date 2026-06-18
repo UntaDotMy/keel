@@ -528,7 +528,7 @@ pub fn skill_full_body(
 }
 
 /// One installed skill's catalog row: its directory name (the resolve key for
-/// `skill_get`/`skill_route`) plus the two frontmatter fields the Claude Code
+/// `skill_get`/`skill_route`) plus the two frontmatter fields the harness
 /// matcher reads. Backs the MCP `skill_list` tool.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SkillCatalogEntry {
@@ -700,7 +700,7 @@ pub fn load_skill_terms(skills_dir: &Path) -> Vec<SkillTerms> {
 
 /// Build a [`SkillTerms`] from a directory name and raw SKILL.md text.
 /// Uses the frontmatter `description` + `when_to_use` plus the name as the
-/// matchable surface — exactly the fields the Claude Code matcher reads.
+/// matchable surface — exactly the fields the harness matcher reads.
 ///
 /// The returned `name` is the **directory name**, not the frontmatter `name`.
 /// `name` is the stable resolve key: `match_skill_for_prompt` hands it to

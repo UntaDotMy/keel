@@ -115,7 +115,7 @@ pub fn run_doctor_command(
     probe_mcp_launch(standard_output, &claude_home);
     let _ = writeln!(
         standard_output,
-        "[warn] unified_exec interception incomplete in current Claude Code"
+        "[warn] unified_exec interception incomplete in current the harness"
     );
     let _ = writeln!(
         standard_output,
@@ -125,7 +125,7 @@ pub fn run_doctor_command(
 }
 
 /// Probe the PreToolUse hook with a noisy command and confirm it produces a
-/// transparent rewrite payload. The current contract (Claude Code hook schema)
+/// transparent rewrite payload. The current contract (the harness hook schema)
 /// is `hookSpecificOutput.permissionDecision = "allow"` plus
 /// `hookSpecificOutput.updatedInput.command = "keel run -- ..."` — the
 /// agent never sees a "Rerun that as:" string, so checking for that legacy text
@@ -143,7 +143,7 @@ fn hook_rewrites_raw_command() -> bool {
 }
 
 /// Probe the PreToolUse hook with an already-wrapped command and confirm it
-/// short-circuits — emitting empty stdout (no `hookSpecificOutput`) so Claude
+/// short-circuits — emitting empty stdout (no `hookSpecificOutput`) so the harness
 /// Code runs the command unchanged. If the hook re-rewrote a wrapped command we
 /// would loop on every turn.
 fn hook_accepts_wrapped_command() -> bool {
@@ -190,10 +190,10 @@ fn write_doctor_check(standard_output: &mut dyn Write, ok: bool, message: &str) 
 /// Spawn the MCP command exactly as registered in `~/.claude.json` and confirm it
 /// answers an `initialize` request. This catches the silent failure mode where the
 /// registered `command` (e.g. the plugin manifest's bare `keel`) does not
-/// resolve on the host's PATH — Claude Code would then fail to start the server and
+/// resolve on the host's PATH — the harness would then fail to start the server and
 /// all of its always-on tools would be missing with no in-session signal. Reading the
 /// entry from disk (rather than assuming the installed path) means we probe what
-/// Claude Code will actually launch.
+/// the harness will actually launch.
 ///
 /// Read-only: spawns a short-lived `mcp serve` child, pipes one JSON-RPC line, and
 /// reads the response. No files are mutated.
@@ -222,10 +222,10 @@ fn probe_mcp_launch(standard_output: &mut dyn Write, claude_home: &std::path::Pa
         );
         return;
     }
-    // Probe with EXACTLY the registered args so the result reflects what Claude
+    // Probe with EXACTLY the registered args so the result reflects what the harness
     // Code will actually launch, not an assumed shape. Three cases:
     //   - `args` is a valid array  → use it verbatim.
-    //   - `args` is absent          → Claude Code launches the bare command with
+    //   - `args` is absent          → the harness launches the bare command with
     //                                 no args, so probe that (an MCP server needs
     //                                 `mcp serve`, so a bare command correctly
     //                                 fails the probe and flags the broken entry).
@@ -327,9 +327,9 @@ fn probe_mcp_initialize(command: &str, args: &[String]) -> bool {
 /// `skill_*`/`brief_*` pair, `memory_status`, `system_map_refresh`) appear absent:
 ///
 /// 1. **No entry at all** — the server was never registered, so the tools do not
-///    exist for Claude Code.
+///    exist for the harness.
 /// 2. **Entry present but `alwaysLoad` missing/false** — the tools ARE registered
-///    but Claude Code *defers* them behind `ToolSearch` (forced on whenever tool
+///    but the harness *defers* them behind `ToolSearch` (forced on whenever tool
 ///    search is enabled or `ANTHROPIC_BASE_URL` points at a non-first-party
 ///    gateway). A model that searches for them by bare name (`select:recall`)
 ///    finds nothing and wrongly concludes "MCP not registered". `alwaysLoad: true`

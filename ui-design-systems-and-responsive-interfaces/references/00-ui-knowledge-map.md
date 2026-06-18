@@ -13,7 +13,7 @@ Use this map to choose the right UI reference file quickly.
 | Design systems, component libraries, tokens | `40-design-systems-components-tokens.md` |
 | Handoff, UI quality gates, operational governance | `50-ui-delivery-quality-and-governance.md` |
 | Design intelligence packets, brownfield redesigns, and component verification | `55-design-intelligence-brownfield-and-component-verification.md` |
-| Claude Code-native generator workflow and safe persistence | `57-claude-design-intelligence-generator.md` |
+| the harness-native generator workflow and safe persistence | `57-claude-design-intelligence-generator.md` |
 | Real-world inspiration, authenticity, anti-generic styling | `60-real-world-benchmarking-and-authenticity.md` |
 | Vague prompts, expert defaults, and scope-safe output structure | `70-ui-expertise-playbook.md` |
 | Standards and source links | `99-source-anchors.md` |

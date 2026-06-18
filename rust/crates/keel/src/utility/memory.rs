@@ -111,13 +111,13 @@ pub fn run_memory_command(
             standard_output,
             standard_error,
         ),
-        // `hook` is intentionally not a memory subcommand: Claude Code lifecycle
+        // `hook` is intentionally not a memory subcommand: the harness lifecycle
         // hooks are owned by the top-level `keel hook` surface. Point
         // the caller there rather than shipping a parallel memory-hook concept.
         "hook" => {
             let _ = writeln!(
                 standard_error,
-                "{command_group} hook: not a memory subcommand. Claude Code lifecycle hooks are managed by `keel hook install|list|instructions|diagnose`."
+                "{command_group} hook: not a memory subcommand. The harness lifecycle hooks are managed by `keel hook install|list|instructions|diagnose`."
             );
             1
         }
@@ -2378,7 +2378,7 @@ pub fn run_bench_command(
                         "bounded streaming",
                         "raw-output recovery",
                         "persisted gain analytics",
-                        "Claude Code lifecycle hook integration",
+                        "the harness lifecycle hook integration",
                     ]
                     .iter()
                     .map(|feature| Value::String((*feature).into()))
@@ -2493,7 +2493,7 @@ fn run_scope_resolve(
     let Some(claude_home) = resolve_claude_home(flag_set.string_value("claude-home")).ok() else {
         let _ = writeln!(
             standard_error,
-            "{command_group} scope resolve: unable to resolve Claude home"
+            "{command_group} scope resolve: unable to resolve harness home"
         );
         return 1;
     };
@@ -2707,7 +2707,7 @@ fn run_system_map_refresh(
     let Some(claude_home) = resolve_claude_home(flag_set.string_value("claude-home")).ok() else {
         let _ = writeln!(
             standard_error,
-            "{command_group} system-map refresh: unable to resolve Claude home"
+            "{command_group} system-map refresh: unable to resolve harness home"
         );
         return 1;
     };
@@ -2769,7 +2769,7 @@ fn run_system_map_show(
     let Some(claude_home) = resolve_claude_home(flag_set.string_value("claude-home")).ok() else {
         let _ = writeln!(
             standard_error,
-            "{command_group} system-map show: unable to resolve Claude home"
+            "{command_group} system-map show: unable to resolve harness home"
         );
         return 1;
     };

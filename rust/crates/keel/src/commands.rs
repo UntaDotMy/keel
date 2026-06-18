@@ -148,6 +148,7 @@ impl Application {
             "sprint" => {
                 utility::run_sprint_command(command_arguments, standard_output, standard_error)
             }
+            "work" => utility::run_work_command(command_arguments, standard_output, standard_error),
             "skill-lint" => {
                 utility::run_skill_lint_command(command_arguments, standard_output, standard_error)
             }
@@ -347,7 +348,7 @@ impl Application {
                 Err(resolve_error) => {
                     let _ = writeln!(
                         standard_error,
-                        "Unable to resolve default Claude home: {resolve_error}"
+                        "Unable to resolve default harness home: {resolve_error}"
                     );
                     return 1;
                 }

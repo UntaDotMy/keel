@@ -5,7 +5,7 @@
     "url": "https://github.com/UntaDotMy"
   },
   "metadata": {
-    "description": "Discipline as code for Claude Code — iron-law hooks, workflow rails, review gates, memory, command compaction, and 24 managed specialist skills. Single Rust binary, no Node or Python.",
+    "description": "Discipline as code for the harness — iron-law hooks, workflow rails, review gates, memory, command compaction, and 24 managed specialist skills. Single Rust binary, no Node or Python.",
     "version": "0.1.0"
   },
   "plugins": [

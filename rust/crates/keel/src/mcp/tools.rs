@@ -22,7 +22,7 @@
 //! Design: each tool is a thin wrapper over a function that already backs a CLI
 //! surface, so the MCP channel and the CLI never drift. The skill, memory, and
 //! brief tools exist because the equivalent guidance is otherwise delivered by
-//! Claude Code lifecycle hooks, which are unreliable on some platforms — MCP is
+//! the harness lifecycle hooks, which are unreliable on some platforms — MCP is
 //! a dependable pull channel, so mirroring the capabilities here routes around
 //! the hook layer without rewriting it.
 
@@ -60,7 +60,7 @@ const MAX_RECALL_LIMIT: usize = 100;
 const DEFAULT_MEMORY_GROUP: &str = "memory";
 
 /// The `tools/list` response. Schemas are hand-written JSON so the descriptions
-/// double as the model-facing usage hints Claude Code renders.
+/// double as the model-facing usage hints the harness renders.
 pub(super) fn handle_tools_list() -> Value {
     json!({
         "tools": [
@@ -924,7 +924,7 @@ fn tool_user_story_lint(arguments: &Value) -> Result<String, String> {
     ))
 }
 
-/// Resolve the default Claude home, prefixing any failure with the calling
+/// Resolve the default harness home, prefixing any failure with the calling
 /// tool's name so a resolution error reads `"<tool>: <reason>"` in the
 /// tool-result envelope. Every handler resolves the same way; this keeps the
 /// per-tool error prefix consistent without repeating the `map_err` closure.

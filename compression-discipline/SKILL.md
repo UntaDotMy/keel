@@ -21,7 +21,7 @@ Read the smallest window that still answers the question. Search to locate the a
 
 ### 1. Narrow line ranges with `offset` + `limit`
 
-Default to a ranged read (your host's read tool with `offset` + `limit`) instead of reading the whole file when it is more than a few hundred lines. Once a search tool has named the relevant line, reading `offset=line-20, limit=80` is enough to see the function plus context. (Use whatever your host names these: on Claude Code the `Read`/`Grep`/`Glob` tools, on OpenCode the lowercase `read`/`grep`/`glob` tools or `bash` equivalents.)
+Default to a ranged read (your host's read tool with `offset` + `limit`) instead of reading the whole file when it is more than a few hundred lines. Once a search tool has named the relevant line, reading `offset=line-20, limit=80` is enough to see the function plus context. (Use whatever your host names these: on the harness the `Read`/`Grep`/`Glob` tools, on OpenCode the lowercase `read`/`grep`/`glob` tools or `bash` equivalents.)
 
 The whole-file read is only correct when:
 - the file is genuinely small (under ~200 lines)
@@ -32,7 +32,7 @@ The whole-file read is only correct when:
 
 Use your host's search tool to locate the symbol first, then read only the located range.
 
-Concrete pattern (tool names vary by host — Claude Code capitalizes, OpenCode is lowercase):
+Concrete pattern (tool names vary by host — the harness capitalizes, OpenCode is lowercase):
 ```
 search for "fn user_prompt_submit_context" under rust/   # locate the line
 read that file at offset=<found_line> - 5, limit=60       # read the window

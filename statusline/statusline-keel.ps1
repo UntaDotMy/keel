@@ -3,10 +3,10 @@
   keel statusline (Windows PowerShell). Renders model + context usage and
   appends a compaction-savings badge sourced from `keel gain --json`.
 .DESCRIPTION
-  Caller: Claude Code statusLine command on Windows, e.g. settings.json:
+  Caller: the harness statusLine command on Windows, e.g. settings.json:
     { "type": "command",
       "command": "powershell -NoProfile -ExecutionPolicy Bypass -File %USERPROFILE%\\.claude\\statusline-keel.ps1" }
-  Input : Claude Code pipes session JSON on stdin (model, context_window, ...).
+  Input : the harness pipes session JSON on stdin (model, context_window, ...).
   Output: one status line on stdout. Degrades gracefully — if the binary or gain
           data is unavailable the savings badge is omitted, and the line never
           errors (a non-zero exit or empty output blanks the statusline).

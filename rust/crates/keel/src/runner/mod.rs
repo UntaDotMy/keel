@@ -2,7 +2,7 @@
 //! Caller: commands.rs for `run`, `rewrite`, `hook`, `raw`, and `replay` command groups.
 //! Dependencies: args, json, runtime helpers, proxy, shell_rewrite, hook_lifecycle submodules.
 //! Main Functions: run_run_command, run_rewrite_command, run_hook_command, run_raw_command, run_replay_command.
-//! Side Effects: Spawns requested child commands, writes raw-output recovery logs, and may write or remove Claude Code hook configuration.
+//! Side Effects: Spawns requested child commands, writes raw-output recovery logs, and may write or remove the harness hook configuration.
 
 pub mod bridge;
 pub mod hook_lifecycle;

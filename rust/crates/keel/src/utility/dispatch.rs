@@ -3,7 +3,7 @@
 //!   `keel dispatch`. This is the buildable substrate the
 //!   `dispatching-parallel-agents` and `using-git-worktrees` skills drive: the
 //!   CLI owns the worktree lifecycle and the merge gate; the skill (the main
-//!   Claude thread) drives the agents that fill each worktree. Mirrors how
+//!   the harness thread) drives the agents that fill each worktree. Mirrors how
 //!   `sprint` owns the loop ledger + fail-closed `review` gate while the
 //!   `running-a-sprint` skill drives the loop.
 //! Caller: commands.rs `dispatch` dispatch arm.

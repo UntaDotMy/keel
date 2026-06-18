@@ -83,7 +83,7 @@ Before completing any task, verify ALL of these:
 ## Final Output
 
 For non-trivial tasks, append a compact **Learning Snapshot** when memory artifacts are available:
-1. What Claude Code learned today
+1. What the harness learned today
 2. Mistakes encountered and whether they were resolved
 3. Tool-use mistakes that taught a reusable lesson
 4. Heuristic memory-health stats such as growth or momentum
@@ -99,15 +99,15 @@ Keep reasoning settings explicit while leaving model choice to the workspace def
 - **repo-managed specialist baseline**: Use `reasoning_effort: "high"` for synced skill profiles that perform review, planning, verification, security-sensitive work, architecture decisions, or release gates.
 - **local narrow override**: A user-local override may lower reasoning for bounded status or inventory reporting, such as `memory-status-reporter`, when the task is intentionally cheaper and lower risk.
 
-Do not pin a model to achieve these settings. Preserve reasoning effort in repo-managed profiles and let the active Claude Code workspace choose the model.
+Do not pin a model to achieve these settings. Preserve reasoning effort in repo-managed profiles and let the active harness workspace choose the model.
 
 ## Skill Model Policy
 
-- Do not pin a specific model inside root Claude Code `agents/claude.yaml` files or generated agent-profile TOML. Let the workspace default model handle that choice.
-- Keep root Claude Code skill `reasoning_effort` at the repo-managed specialist baseline (`high`) for deeper review and verification passes.
+- Do not pin a specific model inside root the harness `agents/claude.yaml` files or generated agent-profile TOML. Let the workspace default model handle that choice.
+- Keep root the harness skill `reasoning_effort` at the repo-managed specialist baseline (`high`) for deeper review and verification passes.
 - Sync the 24 skill-owned agent profiles into `~/.claude/agent-profiles/*.toml` with their skill instructions attached, `model_reasoning_effort = "high"`, and no `model = ...` entry.
 - A local `memory-status-reporter` override from `~/.claude/.claude-skill-manager/local-home-agent-overrides.json` may narrow only that profile to `low` reasoning unless the user explicitly changes local policy.
-- When any Claude Code skill executes tools in this runtime, let Claude Code choose the best supported tool
+- When any the harness skill executes tools in this runtime, let the harness choose the best supported tool
   surface for the task.
 - Use `js_repl` with `claude.tool(...)` when it is the clearest fit or when the runtime explicitly
   requires it, but do not hard-require `js_repl` for every tool call.

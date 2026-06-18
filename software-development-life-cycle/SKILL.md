@@ -46,7 +46,7 @@ See `_shared/common-discipline.md` for the canonical rules. Apply them to all wo
 - For tooling, automation, CLI, installer, updater, and workflow changes, run a lifecycle scenario sweep before implementation: first use, repeat use, upgrade path, interrupted or partial state, rollback or recovery, and local-state conflicts.
 - For workflow, release, build-entrypoint, or GitHub Actions changes, treat local green as provisional until referenced paths are proven tracked and not ignored, local proof is rerun uncached, and hosted CI logs are inspected with `gh run view --job --log` or `gh pr checks --watch`.
 - If a non-trivial task clearly belongs to one specialist surface, route the concrete implementation lane to that owning skill instead of keeping all execution inside the planning lane.
-- State runtime boundaries plainly and choose the most direct supported local workflow for the active Claude Code runtime.
+- State runtime boundaries plainly and choose the most direct supported local workflow for the active harness runtime.
 
 ## Context and Structure Defaults
 

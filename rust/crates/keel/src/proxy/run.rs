@@ -25,17 +25,17 @@ use crate::runtime::{display_path, run_command, ProcessResult};
 /// in a developer's plain shell is wrong: it captures their stdout, writes raw
 /// recovery files they didn't ask for, and pollutes gain analytics with their
 /// interactive runs. We detect a hook-launched invocation by checking for env
-/// vars Claude Code reliably sets:
+/// vars the harness reliably sets:
 ///
 ///   - `CLAUDE_SKILLS_HOOK`: our own opt-in marker — set by the install path,
 ///     manually exportable for testing, and immune to upstream rename.
-///   - `CLAUDE_PROJECT_DIR`: documented Claude Code hook variable (see
+///   - `CLAUDE_PROJECT_DIR`: documented the harness hook variable (see
 ///     code.claude.com/docs/en/hooks). Present whenever a hook fires.
 ///   - `CLAUDE_PLUGIN_ROOT`: present for plugin-scoped hooks.
 ///   - `CLAUDE_AGENT` / `CLAUDE_SKILLS_AGENT`: legacy markers some integrations
 ///     set when launching us; preserved so existing automations keep working.
 ///
-/// Any one of those being non-empty signals "this is a Claude Code-driven run."
+/// Any one of those being non-empty signals "this is a harness-driven run."
 /// Absence means "user typed `keel run --` themselves" — passthrough.
 pub fn running_under_claude_code() -> bool {
     const SIGNALS: &[&str] = &[
@@ -90,7 +90,7 @@ pub fn run_proxy(
         return 1;
     }
 
-    // Phase B gate: only run the capture+compaction proxy when Claude Code
+    // Phase B gate: only run the capture+compaction proxy when the harness
     // (or our own opt-in marker) launched us. A developer typing
     // `keel run -- cargo test` in a plain shell expects to see their
     // command's output, not a "[keel] compacted command output" wrapper
@@ -316,7 +316,7 @@ pub fn run_proxy(
     }
 }
 
-/// Transparent passthrough used when the proxy is invoked outside Claude Code.
+/// Transparent passthrough used when the proxy is invoked outside the harness.
 /// Mirrors what the user would see if they had run the program directly: stdio
 /// inherited, no capture, no analytics, exit code propagated. Falls back to a
 /// platform shell wrapper if the arguments contain shell metacharacters that
@@ -630,7 +630,7 @@ mod tests {
 
         assert!(
             !running_under_claude_code(),
-            "with all CLAUDE_* signals cleared, the gate must report 'not under Claude Code'"
+            "with all CLAUDE_* signals cleared, the gate must report 'not under the harness'"
         );
 
         restore_signals(&snapshot);
@@ -647,7 +647,7 @@ mod tests {
 
         assert!(
             running_under_claude_code(),
-            "Claude Code documents CLAUDE_PROJECT_DIR as a hook-execution variable; \
+            "the harness documents CLAUDE_PROJECT_DIR as a hook-execution variable; \
              setting it must satisfy the gate"
         );
 

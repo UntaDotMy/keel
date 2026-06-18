@@ -46,6 +46,7 @@ pub fn run_review_command(
             code
         }
         "policy" => run_review_policy_command(&arguments[1..], standard_output, standard_error),
+        "comments" => run_review_comments_command(&arguments[1..], standard_output, standard_error),
         other => {
             let _ = writeln!(standard_error, "Unknown review command: {other}");
             render_review_help(standard_output);
@@ -936,13 +937,13 @@ fn run_review_hosted_command(
         ("gate".into(), Value::String("pass".into())),
         (
             "summary".into(),
-            Value::String("Claude Code native review gate passed with no findings.".into()),
+            Value::String("the harness native review gate passed with no findings.".into()),
         ),
         ("body".into(), Value::String(body.clone())),
         ("conclusion".into(), Value::String("success".into())),
         (
             "title".into(),
-            Value::String("Claude Code Native Review Report".into()),
+            Value::String("the harness Native Review Report".into()),
         ),
     ]);
     if !flag_set
@@ -1007,7 +1008,12 @@ fn run_review_surface_command(
     };
 
     let include_tests = surface_name == "pre-pr";
-    let gate_results = run_rust_surface_gates(&repository_root, include_tests);
+    let mut gate_results = run_rust_surface_gates(&repository_root, include_tests);
+    gate_results.push(comment_style_gate(
+        &repository_root,
+        flag_set.string_value("base-ref"),
+        surface_name,
+    ));
     let (blocking_findings, warnings) = tally_gate_results(&gate_results);
 
     render_gate_results(
@@ -1122,6 +1128,126 @@ fn run_rust_surface_gates(repository_root: &Path, include_tests: bool) -> Vec<Ga
     gate_results
 }
 
+/// Build the comment-style gate result for a review surface. Lints added comment
+/// lines only (existing comments grandfathered). pre-commit scans the working
+/// diff against HEAD; other surfaces scan against the base ref. Blocking only
+/// when a high-severity finding (over-length impl comment or em/en dash) appears.
+fn comment_style_gate(repository_root: &Path, base_ref: &str, surface_name: &str) -> GateResult {
+    let findings = if surface_name == "pre-commit" {
+        crate::comment_lint::lint_working_comments(repository_root)
+    } else {
+        let base = base_ref.trim();
+        let base = if base.is_empty() { "origin/main" } else { base };
+        crate::comment_lint::lint_added_comments(repository_root, base)
+    };
+    let blocking = crate::comment_lint::has_blocking(&findings);
+    let status = if findings.is_empty() {
+        GateStatus::Pass
+    } else if blocking {
+        GateStatus::Fail
+    } else {
+        GateStatus::Warn
+    };
+    let details = if findings.is_empty() {
+        "no added-comment style issues".to_string()
+    } else {
+        let shown: Vec<String> = findings
+            .iter()
+            .take(5)
+            .map(|f| format!("{}:{} {}", f.file, f.line, f.message))
+            .collect();
+        format!(
+            "{} added-comment issue(s): {}",
+            findings.len(),
+            shown.join("; ")
+        )
+    };
+    GateResult {
+        name: "comment_style".to_string(),
+        status,
+        blocking,
+        details: Some(details),
+    }
+}
+
+/// Run `keel review comments`: lint added-comment style and report findings.
+/// `--all` ignores the diff and scans the whole tracked tree (for cleanup work).
+fn run_review_comments_command(
+    arguments: &[String],
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let mut flag_set = FlagSet::new("review comments");
+    flag_set.string_flag("repo-root", "");
+    flag_set.string_flag("base-ref", "origin/main");
+    flag_set.string_flag("format", "compact");
+    flag_set.bool_flag("all", false);
+    if let Err(parse_error) = flag_set.parse(arguments) {
+        let _ = writeln!(standard_error, "{}", parse_error.message);
+        return 1;
+    }
+    let repository_root = match resolve_repository_root(flag_set.string_value("repo-root")) {
+        Ok(path) => path,
+        Err(error) => {
+            let _ = writeln!(standard_error, "{error}");
+            return 1;
+        }
+    };
+    let findings = if flag_set.bool_value("all") {
+        crate::comment_lint::lint_tracked_tree(&repository_root)
+    } else {
+        crate::comment_lint::lint_added_comments(
+            &repository_root,
+            flag_set.string_value("base-ref").trim(),
+        )
+    };
+    let blocking = crate::comment_lint::has_blocking(&findings);
+    if flag_set.string_value("format") == "json" {
+        let items: Vec<Value> = findings
+            .iter()
+            .map(|f| {
+                Value::Object(vec![
+                    ("file".into(), Value::String(f.file.clone())),
+                    ("line".into(), Value::Number(f.line.to_string())),
+                    ("id".into(), Value::String(f.id.clone())),
+                    ("severity".into(), Value::String(f.severity.clone())),
+                    ("message".into(), Value::String(f.message.clone())),
+                ])
+            })
+            .collect();
+        let payload = Value::Object(vec![
+            ("command".into(), Value::String("review comments".into())),
+            ("passed".into(), Value::Bool(!blocking)),
+            (
+                "findingCount".into(),
+                Value::Number(findings.len().to_string()),
+            ),
+            ("findings".into(), Value::Array(items)),
+        ]);
+        let _ = write_indented(standard_output, &payload);
+        let _ = writeln!(standard_output);
+    } else if findings.is_empty() {
+        let _ = writeln!(standard_output, "comment style: no added-comment issues");
+    } else {
+        let _ = writeln!(
+            standard_output,
+            "{}",
+            crate::comment_lint::format_findings(&findings)
+        );
+        let _ = writeln!(
+            standard_output,
+            "{} issue(s); {} blocking",
+            findings.len(),
+            if blocking { "has" } else { "no" }
+        );
+    }
+    if blocking {
+        1
+    } else {
+        0
+    }
+}
+
 fn run_review_policy_command(
     arguments: &[String],
     standard_output: &mut dyn Write,
@@ -1184,13 +1310,13 @@ fn render_gate_result(
                 ("warningFindings".into(), Value::Number("0".into())),
                 (
                     "summary".into(),
-                    Value::String("Claude Code native review completed.".into()),
+                    Value::String("the harness native review completed.".into()),
                 ),
             ]);
             let _ = write_indented(standard_output, &payload);
         }
         "markdown" => {
-            let _ = writeln!(standard_output, "# Claude Code Native Review Report");
+            let _ = writeln!(standard_output, "# the harness Native Review Report");
             let _ = writeln!(standard_output);
             let _ = writeln!(standard_output, "- gate: {gate}");
             let _ = writeln!(standard_output, "- blocking_findings: {blocking_findings}");
@@ -1592,7 +1718,7 @@ fn git_diff_stat(repo_root: Option<&std::path::Path>) -> Option<String> {
 
 fn hosted_body() -> String {
     [
-        "# Claude Code Native Review Report",
+        "# the harness Native Review Report",
         "",
         "- gate: pass",
         "- blocking_findings: 0",
@@ -1607,7 +1733,7 @@ fn hosted_body() -> String {
 fn render_review_help(standard_output: &mut dyn Write) {
     let _ = writeln!(
         standard_output,
-        "Usage: keel review [pre-commit|pre-pr|diff|gates|hosted|policy] ..."
+        "Usage: keel review [pre-commit|pre-pr|diff|gates|hosted|policy|comments] ..."
     );
 }
 

@@ -1,5 +1,5 @@
 <!--
-Purpose: Record the 2026-06-12 gap audit of keel against nine harness/skill competitor repos not previously covered in competitive-gap-closure.md, aligned to the official Claude Code docs.
+Purpose: Record the 2026-06-12 gap audit of keel against nine harness/skill competitor repos not previously covered in competitive-gap-closure.md, aligned to the official harness docs.
 Caller: Contributors deciding what to build, scope-out, or leave as decided non-goals after the harness-competitor sweep.
 Dependencies: Prior analysis in docs/competitive-gap-closure.md and docs/native-gap-map.md; the installed skill/subagent/hook surface; the Rust CLI.
 Main Functions: Verify each comparator's identity, classify the capability delta (real gap / partial / decided non-goal / already covered), and prioritize.
@@ -11,7 +11,7 @@ Side Effects: None — documentation only.
 [`competitive-gap-closure.md`](../../competitive-gap-closure.md) did **not** yet
 cover. That doc already handles RTK, caveman, superpowers, ECC, UI/UX Pro Max,
 `revfactory/harness`, and compound-engineering. This pass adds the rest and
-aligns each delta to the official Claude Code docs (skills, subagents, hooks,
+aligns each delta to the official harness docs (skills, subagents, hooks,
 plugins) as the baseline.
 
 **Method.** Read the keel surface first (41 SKILL.md, 24 subagents, 30
@@ -93,7 +93,7 @@ recording the decision explicitly (it currently reads as an unexamined gap).
 spawn agents per task unattended, bundle proof-of-work, land the PR. keel
 has the *pieces* (subagents, completion gate, review gate, proof bundles, finish
 flow) but deliberately keeps a human in the loop and is single-binary /
-Claude-native. This conflicts with the same positioning that already made
+harness-native. This conflicts with the same positioning that already made
 "multi-agent swarm runtime" a decided non-goal. Recommend folding it into that
 existing non-goal entry rather than building it.
 

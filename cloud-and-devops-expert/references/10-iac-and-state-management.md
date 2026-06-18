@@ -47,10 +47,10 @@
 - Treating manual console fixes as permanent instead of codifying or intentionally removing them
 - Granting wildcard IAM because module boundaries were never clarified
 
-## Claude Code Runtime Boundaries
+## the harness Runtime Boundaries
 
-- Claude Code can review HCL, manifests, module structure, and plan-safe refactors in repository state.
-- Claude Code cannot confirm actual provider state, drift details, resource replacement behavior, or access-policy enforcement without plan output or live evidence.
+- the harness can review HCL, manifests, module structure, and plan-safe refactors in repository state.
+- the harness cannot confirm actual provider state, drift details, resource replacement behavior, or access-policy enforcement without plan output or live evidence.
 - When provider access is unavailable, require plan files, import logs, state summaries, and operator confirmation before declaring rollout safety.
 
 ## Related References

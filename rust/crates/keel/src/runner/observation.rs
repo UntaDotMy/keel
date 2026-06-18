@@ -59,9 +59,9 @@ pub fn record_observation(input: &JsonDocument) -> std::io::Result<bool> {
     record_observation_with_outcome(input, false)
 }
 
-/// Append one observation from flat parts (no Claude Code hook JSON required).
+/// Append one observation from flat parts (no the harness hook JSON required).
 ///
-/// This is the host-neutral adapter: callers outside the Claude Code hook path
+/// This is the host-neutral adapter: callers outside the harness hook path
 /// (bridge, OpenCode plugin) pass the individual fields directly instead of
 /// synthesizing a fake hook-JSON document. Reuses the same signature-derivation
 /// logic as [`record_observation_with_outcome`] by constructing a minimal

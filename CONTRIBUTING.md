@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This repository is a managed Claude Code skill pack, not a loose prompt collection. Contributions should preserve the same production-readiness standard across code, docs, tests, generated home wiring, and validation behavior.
+This repository is a managed harness skill pack, not a loose prompt collection. Contributions should preserve the same production-readiness standard across code, docs, tests, generated home wiring, and validation behavior.
 
 ## Contribution Workflow
 
@@ -30,7 +30,7 @@ This repository is a managed Claude Code skill pack, not a loose prompt collecti
 
 ## Required Validation
 
-Run this default native loop from the repository root against a temporary Claude Code home target:
+Run this default native loop from the repository root against a temporary harness home target:
 
 ```bash
 temporary_claude_home="$(mktemp -d)"

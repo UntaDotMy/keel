@@ -171,7 +171,7 @@ jobs:
           if [ -d commands ]; then
             cp -R commands "$target_dir/commands"
           fi
-          # Stage Claude Code subagent definitions and the plugin manifest.
+          # Stage the harness subagent definitions and the plugin manifest.
           # sync_subagent_definitions reads .claude/agents/*.md; without it a
           # fresh install registers none of the 24 delegation subagents.
           # .claude-plugin/ carries the plugin + MCP registration manifest so

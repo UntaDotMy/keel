@@ -67,7 +67,7 @@ See `_shared/common-discipline.md` for the canonical rules. Apply them to all wo
 3. **Everything Important Is Reproducible**: Infra, pipelines, policies, and release steps should be encoded, versioned, and reviewable.
 4. **Progressive Delivery Over Heroics**: Favor canaries, feature flags, health gates, and rollback paths over one-shot production cuts.
 5. **Operational Proof Beats Green YAML**: A valid plan file is not the same as healthy runtime behavior.
-6. **State Validation Gaps Explicitly**: If Claude Code cannot reach the live platform, say what still requires human or external verification.
+6. **State Validation Gaps Explicitly**: If the harness cannot reach the live platform, say what still requires human or external verification.
 
 ## Deployment Stage and Adversarial Readiness
 
@@ -159,10 +159,10 @@ For deployment or operations work, name the rollout stage explicitly:
 - Treating a green deployment controller status as proof that users are healthy
 - Alerting without ownership, severity policy, or runbook links
 
-## Claude Code Runtime Boundaries
+## the harness Runtime Boundaries
 
-- Claude Code can review IaC, pipeline definitions, manifests, and static rollout logic in the repository.
-- Claude Code cannot confirm actual cloud state, IAM propagation, DNS cutover, autoscaling behavior, image pulls, or live SLO compliance without runtime access.
+- the harness can review IaC, pipeline definitions, manifests, and static rollout logic in the repository.
+- the harness cannot confirm actual cloud state, IAM propagation, DNS cutover, autoscaling behavior, image pulls, or live SLO compliance without runtime access.
 - When CI, cluster, or cloud-console access is unavailable, require human or external-system validation for plan or apply results, rollout health, secret rotation, and incident readiness.
 - Never claim a production rollout succeeded unless deployment events, health checks, dashboards, or operator confirmation exist.
 

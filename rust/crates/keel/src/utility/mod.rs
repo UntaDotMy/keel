@@ -25,6 +25,7 @@ pub mod skill_match;
 pub mod sprint;
 pub mod system_map;
 pub mod user_story;
+pub mod work_graph;
 pub mod workflow_ledger;
 pub mod working_brief;
 
@@ -45,3 +46,4 @@ pub use skill_eval::run_skill_eval_command;
 pub use skill_lint::run_skill_lint_command;
 pub use sprint::run_sprint_command;
 pub use user_story::run_user_story_command;
+pub use work_graph::run_work_command;
