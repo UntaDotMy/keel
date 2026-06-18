@@ -4,8 +4,8 @@ Rerun these commands from the repository root to verify the competitive audit bu
 
 ```bash
 cargo test --workspace
-cargo build --release --bin claude-skills
-./target/release/claude-skills validate --repo-root . --profile smoke
+cargo build --release --bin keel
+./target/release/keel validate --repo-root . --profile smoke
 ```
 
 Expected result:

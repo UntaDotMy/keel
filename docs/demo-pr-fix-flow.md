@@ -6,7 +6,7 @@ This demo captures a real hosted-check recovery loop from this repository.
 
 ## Scenario
 
-- PR: [#32](https://github.com/UntaDotMy/claude_skills/pull/32)
+- PR: [#32](https://github.com/UntaDotMy/keel/pull/32)
 - Branch: `feat/packaged-release-install-channel`
 - Merge time: `2026-04-06T11:49:46Z`
 - Problem shape: open PR, hosted Windows lane fails, branch must be repaired and returned to green without abandoning the PR
@@ -31,7 +31,7 @@ gh pr checks 32 --watch
 gh run view 24029846531 --job 70076163527 --log
 cargo test --workspace
 cargo test --workspace
-cargo run --bin claude-skills -- review pre-pr --repo-root . --base-ref origin/main --format markdown
+cargo run --bin keel -- review pre-pr --repo-root . --base-ref origin/main --format markdown
 git push origin feat/packaged-release-install-channel
 gh pr checks 32 --watch
 ~~~

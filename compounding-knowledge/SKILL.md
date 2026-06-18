@@ -2,7 +2,7 @@
 name: compounding-knowledge
 description: Capture each solved problem as a durable, discoverable knowledge artifact so future work starts ahead instead of re-deriving it. Use after solving a non-trivial problem, debugging a tricky failure, or making a reusable decision — write a categorized solution note (problem, root cause, solution, evidence) to a durable location, dedupe against existing notes, and wire it into the project's discoverability pointers (CLAUDE.md / AGENTS.md / SYSTEM_MAP) so the next agent actually finds it. Use when the user says "capture this", "remember how we solved this", "write this up", or after a hard-won fix worth keeping. The deliberate counterpart to the automatic learn loop; this is the human-readable, project-local knowledge base.
 when_to_use: After solving a non-trivial problem or making a reusable decision worth keeping. Write a categorized, deduped solution note and make it discoverable from the project's pointer files. Complements the automatic learn loop (which generates skills from behavior) with durable human-readable artifacts.
-allowed-tools: Read, Grep, Glob, Edit, Write, Bash(claude-skills memory:*)
+allowed-tools: Read, Grep, Glob, Edit, Write, Bash(keel memory:*)
 user-invocable: false
 effort: medium
 ---
@@ -16,7 +16,7 @@ is solving something hard, moving on, and having the next agent (or the same one
 after compaction) re-derive the identical solution from scratch — paying the full
 cost again. Compounding means the knowledge lands in a durable, *discoverable* place
 so future work starts from the answer. This skill is the deliberate, human-readable
-counterpart to claude-core's automatic `learn` loop: `learn` promotes recurring
+counterpart to keel's automatic `learn` loop: `learn` promotes recurring
 *behavior* into skills statistically; this captures a *specific solution* on demand
 as a readable artifact and wires it into discovery.
 
@@ -45,7 +45,7 @@ to the cost of re-deriving it.
 
 ### 1. Check for an existing note first
 
-- Before writing, search the knowledge store and memory (`claude-skills memory
+- Before writing, search the knowledge store and memory (`keel memory
   recall <terms>`) for an existing note on this topic. If one exists, **extend or
   correct it** rather than adding a parallel note — duplication is the failure mode
   that makes a knowledge base untrustworthy.
@@ -79,7 +79,7 @@ A note no one finds compounds nothing. Wire it into the project's discovery laye
 
 ## Relationship To The Automatic Learn Loop
 
-`claude-skills learn` observes behavior across sessions and promotes recurring
+`keel learn` observes behavior across sessions and promotes recurring
 patterns into generated skills automatically (statistical thresholds, no manual
 step). This skill is the manual, surgical complement: it captures *one specific
 hard-won solution* as a readable artifact the moment it is worth keeping, and wires
@@ -98,7 +98,7 @@ this when you just solved something you (or a teammate) will clearly need again.
 
 ## Validation
 
-Methodology skill; uses `claude-skills memory` for recall and the working brief.
+Methodology skill; uses `keel memory` for recall and the working brief.
 Self-check before claiming knowledge captured: did you dedupe against existing
 notes, write problem + root cause + solution + evidence, categorize and tag it for
 symptom-based search, and wire a discovery pointer so a cold-start agent would find

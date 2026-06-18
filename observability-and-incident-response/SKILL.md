@@ -2,7 +2,7 @@
 name: observability-and-incident-response
 description: Designs and reviews observability and incident response — metrics, logs, and traces wired through OpenTelemetry, golden signals, dashboards, SLO/SLI definitions with error-budget math, alerting and paging rules linked to runbooks, on-call ergonomics, and blameless postmortems. Use when defining or auditing telemetry, instrumentation, Prometheus/Grafana/Loki/Alertmanager config, alert and recording rules, SLO targets, burn-rate paging, runbooks, or incident and postmortem process.
 when_to_use: Telemetry design, SLO and error-budget definition, alert and paging rules, runbooks, and incident response or postmortem review.
-allowed-tools: Read, Grep, Glob, Edit, Write, Bash(claude-skills memory:*), Bash(git diff:*), Bash(git status), Bash(kubectl:*), Bash(curl:*), Bash(promtool:*), Bash(jq:*)
+allowed-tools: Read, Grep, Glob, Edit, Write, Bash(keel memory:*), Bash(git diff:*), Bash(git status), Bash(kubectl:*), Bash(curl:*), Bash(promtool:*), Bash(jq:*)
 effort: medium
 paths:
   - "**/*.alerts.yaml"

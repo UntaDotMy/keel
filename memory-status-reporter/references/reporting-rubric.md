@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This rubric defines the memory-health metrics used by `claude-skills memory report` so the report stays honest and repeatable.
+This rubric defines the memory-health metrics used by `keel memory report` so the report stays honest and repeatable.
 
 ## Source Priority
 

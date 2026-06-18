@@ -1,19 +1,19 @@
 [workspace]
 resolver = "2"
-members = ["rust/crates/claude-skills", "rust/crates/claude-skills-platform", "rust/crates/claude-skills-releaseassets", "rust/crates/claude-skills-professionaltext", "rust/crates/claude-skills-flow"]
+members = ["rust/crates/keel", "rust/crates/keel-platform", "rust/crates/keel-releaseassets", "rust/crates/keel-professionaltext", "rust/crates/keel-flow"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.80"
 license = "MIT"
-repository = "https://github.com/UntaDotMy/claude_core"
+repository = "https://github.com/UntaDotMy/keel"
 
 [workspace.dependencies]
-claude-skills-platform = { path = "rust/crates/claude-skills-platform" }
-claude-skills-releaseassets = { path = "rust/crates/claude-skills-releaseassets" }
-claude-skills-professionaltext = { path = "rust/crates/claude-skills-professionaltext" }
-claude-skills-flow = { path = "rust/crates/claude-skills-flow" }
+keel-platform = { path = "rust/crates/keel-platform" }
+keel-releaseassets = { path = "rust/crates/keel-releaseassets" }
+keel-professionaltext = { path = "rust/crates/keel-professionaltext" }
+keel-flow = { path = "rust/crates/keel-flow" }
 regex = "1.11"
 rusqlite = { version = "0.32.1", features = ["bundled"] }
 serde = { version = "1.0.219", features = ["derive"] }

@@ -1,6 +1,6 @@
 # Memory Recall Benchmark Bundle
 
-This bundle publishes the current source-backed memory-recall comparison between `claude_skills` and `memory-product comparator`.
+This bundle publishes the current source-backed memory-recall comparison between `keel` and `memory-product comparator`.
 
 Canonical machine-readable source: [docs/memory-recall-benchmark-scorecard.json](./memory-recall-benchmark-scorecard.json)
 Published audit bundle: [docs/audits/2026-04-11-memory-recall-benchmark/audit-summary.md](./audits/2026-04-11-memory-recall-benchmark/audit-summary.md)
@@ -11,10 +11,10 @@ The competitive apples-to-apples audit already scored memory depth separately fr
 
 ## Current honest result
 
-- `claude_skills`: `7/10`
+- `keel`: `7/10`
 - `memory-product comparator`: `9/10`
 
-`claude_skills` already proves scoped durable memory, completion gates, research cache reuse, memory indexing, relation graph records, typed entity memory, explicit hook capture, and deterministic retrieval packets. `memory-product comparator` still leads the memory-specific benchmark because it ships semantic recall, a four-layer memory model, richer hook-driven save and precompact flows, tool-facing integrations, and a public benchmark runner.
+`keel` already proves scoped durable memory, completion gates, research cache reuse, memory indexing, relation graph records, typed entity memory, explicit hook capture, and deterministic retrieval packets. `memory-product comparator` still leads the memory-specific benchmark because it ships semantic recall, a four-layer memory model, richer hook-driven save and precompact flows, tool-facing integrations, and a public benchmark runner.
 
 ## Benchmark dimensions
 

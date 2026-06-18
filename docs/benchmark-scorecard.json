@@ -1,14 +1,14 @@
 {
-  "suite_name": "claude_skills benchmark demo suite",
+  "suite_name": "keel benchmark demo suite",
   "updated_at": "2026-04-07T05:33:54Z",
   "shared_harness": {
     "harness_name": "shared_claude_workflow_benchmark",
     "harness_version": 1,
-    "current_scope": "claude_skills ships source-backed runs for the tracked scenarios here; runtime-shell comparator, workflow-teaching comparator, and swarm-automation comparator now share the same scenario contract and evidence fields through the competitive surface matrix, but the peer repos still need source-backed runs recorded under this harness.",
+    "current_scope": "keel ships source-backed runs for the tracked scenarios here; runtime-shell comparator, workflow-teaching comparator, and swarm-automation comparator now share the same scenario contract and evidence fields through the competitive surface matrix, but the peer repos still need source-backed runs recorded under this harness.",
     "repositories": [
       {
-        "repository_id": "claude_skills",
-        "repository_url": "https://github.com/UntaDotMy/claude_skills",
+        "repository_id": "keel",
+        "repository_url": "https://github.com/UntaDotMy/keel",
         "current_evidence_status": "source_backed_runs_published"
       },
       {
@@ -60,7 +60,7 @@
         "planned"
       ],
       "minimum_proof_expectations": [
-        "Use the same scenario ids across claude_skills, runtime-shell comparator, and workflow-teaching comparator.",
+        "Use the same scenario ids across keel, runtime-shell comparator, and workflow-teaching comparator.",
         "Record one source URL and one proof summary for every scorecard entry.",
         "Keep scorecard claims source-backed instead of relying on prose-only impressions.",
         "Do not claim a peer repo passed a scenario until the shared evidence fields are populated for that repo."
@@ -77,25 +77,25 @@
         "windows_validation_recovery_stable_checkout"
       ],
       "repository_ids": [
-        "claude_skills",
+        "keel",
         "runtime-shell comparator",
         "workflow-teaching comparator",
         "swarm-automation comparator"
       ],
       "evidence_status_by_repository": {
-        "claude_skills": "source_backed",
+        "keel": "source_backed",
         "runtime-shell comparator": "public_surface_only",
         "workflow-teaching comparator": "public_surface_only",
         "swarm-automation comparator": "public_surface_only"
       },
       "source_kind_by_repository": {
-        "claude_skills": "issue_or_audit_bundle",
+        "keel": "issue_or_audit_bundle",
         "runtime-shell comparator": "public_docs",
         "workflow-teaching comparator": "public_docs",
         "swarm-automation comparator": "public_docs"
       },
       "source_url_by_repository": {
-        "claude_skills": "docs/audits/2026-04-09-benchmark-posture/audit-summary.md",
+        "keel": "docs/audits/2026-04-09-benchmark-posture/audit-summary.md",
         "runtime-shell comparator": "external-runtime-shell-source",
         "workflow-teaching comparator": "external-workflow-teaching-source",
         "swarm-automation comparator": "external-swarm-automation-source"
@@ -106,7 +106,7 @@
         "docs/benchmark-comparison-scorecard.md",
         "docs/audits/2026-04-09-benchmark-posture/audit-summary.md"
       ],
-      "proof_summary": "Operator-shell evidence is now normalized across the four repos, with claude_skills source-backed and the peers still public-surface-only.",
+      "proof_summary": "Operator-shell evidence is now normalized across the four repos, with keel source-backed and the peers still public-surface-only.",
       "final_outcome": "comparison_matrix_published"
     },
     {
@@ -118,25 +118,25 @@
         "multi_agent_closure_proof"
       ],
       "repository_ids": [
-        "claude_skills",
+        "keel",
         "runtime-shell comparator",
         "workflow-teaching comparator",
         "swarm-automation comparator"
       ],
       "evidence_status_by_repository": {
-        "claude_skills": "source_backed",
+        "keel": "source_backed",
         "runtime-shell comparator": "public_surface_only",
         "workflow-teaching comparator": "public_surface_only",
         "swarm-automation comparator": "public_surface_only"
       },
       "source_kind_by_repository": {
-        "claude_skills": "issue_or_audit_bundle",
+        "keel": "issue_or_audit_bundle",
         "runtime-shell comparator": "public_docs",
         "workflow-teaching comparator": "public_docs",
         "swarm-automation comparator": "public_docs"
       },
       "source_url_by_repository": {
-        "claude_skills": "docs/audits/2026-04-09-benchmark-posture/audit-summary.md",
+        "keel": "docs/audits/2026-04-09-benchmark-posture/audit-summary.md",
         "runtime-shell comparator": "external-runtime-shell-source",
         "workflow-teaching comparator": "external-workflow-teaching-source",
         "swarm-automation comparator": "external-swarm-automation-source"
@@ -158,25 +158,25 @@
         "pr_fix_windows_hosted_check"
       ],
       "repository_ids": [
-        "claude_skills",
+        "keel",
         "runtime-shell comparator",
         "workflow-teaching comparator",
         "swarm-automation comparator"
       ],
       "evidence_status_by_repository": {
-        "claude_skills": "source_backed",
+        "keel": "source_backed",
         "runtime-shell comparator": "public_surface_only",
         "workflow-teaching comparator": "public_surface_only",
         "swarm-automation comparator": "public_surface_only"
       },
       "source_kind_by_repository": {
-        "claude_skills": "issue_or_audit_bundle",
+        "keel": "issue_or_audit_bundle",
         "runtime-shell comparator": "public_docs",
         "workflow-teaching comparator": "public_docs",
         "swarm-automation comparator": "public_docs"
       },
       "source_url_by_repository": {
-        "claude_skills": "docs/audits/2026-04-09-benchmark-posture/audit-summary.md",
+        "keel": "docs/audits/2026-04-09-benchmark-posture/audit-summary.md",
         "runtime-shell comparator": "external-runtime-shell-source",
         "workflow-teaching comparator": "external-workflow-teaching-source",
         "swarm-automation comparator": "external-swarm-automation-source"
@@ -198,25 +198,25 @@
         "stateful_bug_fix_trace_drift"
       ],
       "repository_ids": [
-        "claude_skills",
+        "keel",
         "runtime-shell comparator",
         "workflow-teaching comparator",
         "swarm-automation comparator"
       ],
       "evidence_status_by_repository": {
-        "claude_skills": "source_backed",
+        "keel": "source_backed",
         "runtime-shell comparator": "public_surface_only",
         "workflow-teaching comparator": "public_surface_only",
         "swarm-automation comparator": "public_surface_only"
       },
       "source_kind_by_repository": {
-        "claude_skills": "issue_or_audit_bundle",
+        "keel": "issue_or_audit_bundle",
         "runtime-shell comparator": "public_docs",
         "workflow-teaching comparator": "public_docs",
         "swarm-automation comparator": "public_docs"
       },
       "source_url_by_repository": {
-        "claude_skills": "docs/audits/2026-04-09-benchmark-posture/audit-summary.md",
+        "keel": "docs/audits/2026-04-09-benchmark-posture/audit-summary.md",
         "runtime-shell comparator": "external-runtime-shell-source",
         "workflow-teaching comparator": "external-workflow-teaching-source",
         "swarm-automation comparator": "external-swarm-automation-source"
@@ -238,7 +238,7 @@
       "style_targets": ["runtime-shell comparator", "workflow-teaching comparator"],
       "category": "greenfield_feature_delivery",
       "source_pr": 41,
-      "source_url": "https://github.com/UntaDotMy/claude_skills/pull/41",
+      "source_url": "https://github.com/UntaDotMy/keel/pull/41",
       "merged_at": "2026-04-07T03:50:41Z",
       "head_branch": "feat/workflow-route-first-run",
       "final_outcome": "merged_green",
@@ -253,8 +253,8 @@
         "cargo test --workspace",
         "cargo test --workspace",
         "cargo test --workspace",
-        "cargo run --bin claude-skills -- review pre-pr --base-ref origin/main --repo-root . --issue-id 40 --pr-title \"feat: improve workflow route first-run UX\"",
-        "cargo run --bin claude-skills -- git-workflow preflight --repo-root . --base-ref origin/main"
+        "cargo run --bin keel -- review pre-pr --base-ref origin/main --repo-root . --issue-id 40 --pr-title \"feat: improve workflow route first-run UX\"",
+        "cargo run --bin keel -- git-workflow preflight --repo-root . --base-ref origin/main"
       ],
       "demo_doc": "docs/demo-greenfield-feature-flow.md"
     },
@@ -264,7 +264,7 @@
       "style_targets": ["runtime-shell comparator", "workflow-teaching comparator"],
       "category": "stateful_bug_fix",
       "source_pr": 27,
-      "source_url": "https://github.com/UntaDotMy/claude_skills/pull/27",
+      "source_url": "https://github.com/UntaDotMy/keel/pull/27",
       "merged_at": "2026-04-06T03:48:40Z",
       "head_branch": "feat/memoriesv2-hardening",
       "final_outcome": "merged_green",
@@ -279,8 +279,8 @@
         "cargo test --workspace",
         "cargo test --workspace",
         "cargo test --workspace",
-        "cargo run --bin claude-skills -- review pre-commit --repo-root . --format markdown",
-        "cargo run --bin claude-skills -- review pre-pr --repo-root . --base-ref origin/main --format markdown"
+        "cargo run --bin keel -- review pre-commit --repo-root . --format markdown",
+        "cargo run --bin keel -- review pre-pr --repo-root . --base-ref origin/main --format markdown"
       ],
       "demo_doc": "docs/demo-stateful-bug-fix-flow.md"
     },
@@ -290,7 +290,7 @@
       "style_targets": ["runtime-shell comparator", "workflow-teaching comparator"],
       "category": "hosted_pr_failure_rescue",
       "source_pr": 32,
-      "source_url": "https://github.com/UntaDotMy/claude_skills/pull/32",
+      "source_url": "https://github.com/UntaDotMy/keel/pull/32",
       "merged_at": "2026-04-06T11:49:46Z",
       "head_branch": "feat/packaged-release-install-channel",
       "final_outcome": "merged_green",
@@ -306,7 +306,7 @@
         "gh run view 24029846531 --job 70076163527 --log",
         "cargo test --workspace",
         "cargo test --workspace",
-        "cargo run --bin claude-skills -- review pre-pr --repo-root . --base-ref origin/main --format markdown"
+        "cargo run --bin keel -- review pre-pr --repo-root . --base-ref origin/main --format markdown"
       ],
       "demo_doc": "docs/demo-pr-fix-flow.md"
     },
@@ -316,7 +316,7 @@
       "style_targets": ["runtime-shell comparator", "workflow-teaching comparator"],
       "category": "branch_closeout",
       "source_pr": 33,
-      "source_url": "https://github.com/UntaDotMy/claude_skills/pull/33",
+      "source_url": "https://github.com/UntaDotMy/keel/pull/33",
       "merged_at": "2026-04-06T13:02:40Z",
       "head_branch": "feat/comparison-and-release-docs",
       "final_outcome": "merged_green",
@@ -332,7 +332,7 @@
         "git pull --ff-only origin main",
         "git checkout -b feat/comparison-and-release-docs",
         "cargo test --workspace",
-        "cargo run --bin claude-skills -- review pre-pr --repo-root . --base-ref origin/main --format markdown",
+        "cargo run --bin keel -- review pre-pr --repo-root . --base-ref origin/main --format markdown",
         "gh pr create --base main --head feat/comparison-and-release-docs --title 'docs(release): add comparison and release note surfaces'",
         "gh pr checks 33 --watch"
       ],
@@ -344,7 +344,7 @@
       "style_targets": ["runtime-shell comparator", "workflow-teaching comparator"],
       "category": "multi_agent_coordination",
       "source_pr": 38,
-      "source_url": "https://github.com/UntaDotMy/claude_skills/pull/38",
+      "source_url": "https://github.com/UntaDotMy/keel/pull/38",
       "merged_at": "2026-04-07T02:14:24Z",
       "head_branch": "fix/reviewer-closure-proof",
       "final_outcome": "merged_green",
@@ -357,9 +357,9 @@
       },
       "required_commands": [
         "cargo test --workspace",
-        "cargo run --bin claude-skills -- memory completion-gate check --workspace-root . --workstream-key feat-workflow-start-defaults --require-closure-ready",
-        "cargo run --bin claude-skills -- review pre-pr --repo-root . --base-ref origin/main --format markdown",
-        "cargo run --bin claude-skills -- git-workflow preflight --repo-root . --base-ref origin/main"
+        "cargo run --bin keel -- memory completion-gate check --workspace-root . --workstream-key feat-workflow-start-defaults --require-closure-ready",
+        "cargo run --bin keel -- review pre-pr --repo-root . --base-ref origin/main --format markdown",
+        "cargo run --bin keel -- git-workflow preflight --repo-root . --base-ref origin/main"
       ],
       "demo_doc": "docs/demo-multi-agent-closure-flow.md"
     },
@@ -369,7 +369,7 @@
       "style_targets": ["runtime-shell comparator", "workflow-teaching comparator"],
       "category": "windows_validation_recovery",
       "source_pr": 36,
-      "source_url": "https://github.com/UntaDotMy/claude_skills/pull/36",
+      "source_url": "https://github.com/UntaDotMy/keel/pull/36",
       "merged_at": "2026-04-07T00:57:25Z",
       "head_branch": "fix/validate-stable-checkout",
       "final_outcome": "merged_green",
@@ -383,8 +383,8 @@
       "required_commands": [
         "cargo test --workspace",
         "cargo test --workspace",
-        "cargo run --bin claude-skills -- review pre-pr --repo-root . --base-ref origin/main --format compact",
-        "cargo run --bin claude-skills -- git-workflow preflight --repo-root . --base-ref origin/main --format compact"
+        "cargo run --bin keel -- review pre-pr --repo-root . --base-ref origin/main --format compact",
+        "cargo run --bin keel -- git-workflow preflight --repo-root . --base-ref origin/main --format compact"
       ],
       "demo_doc": "docs/demo-windows-validation-recovery-flow.md"
     },
@@ -394,7 +394,7 @@
       "style_targets": ["runtime-shell comparator", "workflow-teaching comparator"],
       "category": "docs_governance_change",
       "source_pr": 43,
-      "source_url": "https://github.com/UntaDotMy/claude_skills/pull/43",
+      "source_url": "https://github.com/UntaDotMy/keel/pull/43",
       "merged_at": "2026-04-07T04:13:09Z",
       "head_branch": "feat/workflow-first-success-path",
       "final_outcome": "merged_green",
@@ -408,8 +408,8 @@
       "required_commands": [
         "cargo test --workspace",
         "cargo test --workspace",
-        "cargo run --bin claude-skills -- review pre-pr --base-ref origin/main --repo-root . --issue-id 42 --pr-title \"docs: add workflow first-success path\"",
-        "cargo run --bin claude-skills -- git-workflow preflight --repo-root . --base-ref origin/main"
+        "cargo run --bin keel -- review pre-pr --base-ref origin/main --repo-root . --issue-id 42 --pr-title \"docs: add workflow first-success path\"",
+        "cargo run --bin keel -- git-workflow preflight --repo-root . --base-ref origin/main"
       ],
       "demo_doc": "docs/demo-docs-governance-flow.md"
     },
@@ -419,7 +419,7 @@
       "style_targets": ["runtime-shell comparator", "workflow-teaching comparator"],
       "category": "regression_hardening",
       "source_pr": 45,
-      "source_url": "https://github.com/UntaDotMy/claude_skills/pull/45",
+      "source_url": "https://github.com/UntaDotMy/keel/pull/45",
       "merged_at": "2026-04-07T04:53:36Z",
       "head_branch": "feat/workflow-start-autopilot-defaults",
       "final_outcome": "merged_green",
@@ -433,7 +433,7 @@
       "required_commands": [
         "cargo test --workspace",
         "cargo test --workspace",
-        "cargo run --bin claude-skills -- git-workflow preflight --repo-root . --base-ref origin/main"
+        "cargo run --bin keel -- git-workflow preflight --repo-root . --base-ref origin/main"
       ],
       "demo_doc": "docs/demo-regression-hardening-flow.md"
     }

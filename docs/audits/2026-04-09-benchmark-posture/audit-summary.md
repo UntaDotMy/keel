@@ -1,10 +1,10 @@
 # Benchmark Posture Audit Summary
 
 - Audit date: 2026-04-09
-- Repository: `UntaDotMy/claude_skills`
+- Repository: `UntaDotMy/keel`
 - Audited revision: `f1fdcf71db094e240b94eaa5dc2f9dea46345c18`
 - Scope: benchmark posture, shared benchmark harness posture, scorecard honesty, and trust-artifact publication
-- Evidence sources: `README.md`, `todo.md`, `docs/benchmark-suite.md`, `docs/shared-benchmark-harness.md`, `docs/benchmark-scorecard.json`, `docs/benchmark-comparison-scorecard.md`, `docs/why-claude-skills.md`, `rust/crates/claude-skills/src/commands.rs`, and `cargo test --workspace`
+- Evidence sources: `README.md`, `todo.md`, `docs/benchmark-suite.md`, `docs/shared-benchmark-harness.md`, `docs/benchmark-scorecard.json`, `docs/benchmark-comparison-scorecard.md`, `docs/why-keel.md`, `rust/crates/keel/src/commands.rs`, and `cargo test --workspace`
 
 ## Conclusion
 
@@ -12,8 +12,8 @@ The current repo snapshot closes the remaining trust-artifact gap for benchmark 
 
 This bundle proves a narrow claim:
 
-- `claude_skills` publishes source-backed runs for the tracked eight benchmark scenarios in this repository
-- the shared benchmark harness exists with one scenario contract and one evidence format for `claude_skills`, `runtime-shell comparator`, and `workflow-teaching comparator`
+- `keel` publishes source-backed runs for the tracked eight benchmark scenarios in this repository
+- the shared benchmark harness exists with one scenario contract and one evidence format for `keel`, `runtime-shell comparator`, and `workflow-teaching comparator`
 - the current benchmark posture is now anchored to a durable audit artifact rather than only to scattered comparison docs
 
 This bundle does not claim that every peer repo already has source-backed runs recorded for every shared-harness scenario. It also does not claim universal workflow leadership, wall-clock superiority, or benchmark coverage beyond the tracked scenarios and public surfaces cited here.

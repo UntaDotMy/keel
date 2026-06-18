@@ -2,7 +2,7 @@
 name: writing-user-stories
 description: Turn a user's prompt into strict Agile/Jira user stories before building, then confirm them with the user. Use on EVERY requirement-bearing prompt — not only "build X", but any "add/change/fix/improve/make it do Y" ask — to convert the raw request COMPLETELY into Connextra-format stories ("As a <role>, I want <goal>, so that <benefit>") with Gherkin acceptance criteria (Given/When/Then), validated against INVEST. The stories are the anti-drift spec: every requirement maps to a story, and nothing gets built that no story asked for. Captured in the working brief so reviewer Stage 1 reconciles the diff against them.
 when_to_use: Any prompt that carries a requirement — a feature, change, fix, or behavior request ("build", "add", "make it", "it should", "fix", "change", "I want"). Decompose the prompt into complete strict user stories, confirm correctness and completeness with the user via AskUserQuestion (do not end the turn), then hand the confirmed stories to brainstorming/TDD/the lifecycle skills. Skip only for pure questions, lookups, or already-confirmed trivial mechanical edits.
-allowed-tools: Read, Grep, Glob, Bash(claude-skills memory:*), Bash(claude-skills user-story:*)
+allowed-tools: Read, Grep, Glob, Bash(keel memory:*), Bash(keel user-story:*)
 effort: medium
 ---
 
@@ -107,7 +107,7 @@ If a story fails INVEST, fix or split it before showing the user.
 Run the validator so a malformed story is caught before it reaches the user:
 
 ```
-claude-skills user-story lint --file <stories.md>
+keel user-story lint --file <stories.md>
 ```
 
 It fails when a story is missing any Connextra clause (role/goal/benefit) or has
@@ -133,7 +133,7 @@ the user ratifies them.
 ### 6. Capture the confirmed stories
 
 - Write the confirmed stories into the working brief
-  (`claude-skills memory working-brief write`) as the acceptance criteria, so they
+  (`keel memory working-brief write`) as the acceptance criteria, so they
   survive compaction and a fresh session.
 - The captured stories are exactly what `reviewer` Stage 1 reconciles the
   implementation against. A story that lives only in chat cannot gate the diff.
@@ -163,7 +163,7 @@ delivered, no code that no story asked for.
 
 ## Validation
 
-Run `claude-skills user-story lint --file <stories.md>` to deterministically check
+Run `keel user-story lint --file <stories.md>` to deterministically check
 the strict format. Self-check before hand-off: is there one story per distinct
 requirement, each in Connextra form with Gherkin acceptance criteria, each passing
 INVEST, validated, **confirmed by the user**, and captured in the working brief? If

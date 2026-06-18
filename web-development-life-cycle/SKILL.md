@@ -2,7 +2,7 @@
 name: web-development-life-cycle
 description: Builds and ships production-ready websites and web applications with attention to rendering strategy, performance (Core Web Vitals), accessibility, SEO, security, and cross-browser behavior. Use when planning or hardening a web surface: routes, APIs, deployment, framework choice, or release safety.
 when_to_use: Web architecture, quality, and production delivery.
-allowed-tools: Read, Grep, Glob, Edit, Write, Bash(npm:*), Bash(yarn:*), Bash(pnpm:*), Bash(npx:*), Bash(node:*), Bash(vite:*), Bash(next:*), Bash(claude-skills memory:*)
+allowed-tools: Read, Grep, Glob, Edit, Write, Bash(npm:*), Bash(yarn:*), Bash(pnpm:*), Bash(npx:*), Bash(node:*), Bash(vite:*), Bash(next:*), Bash(keel memory:*)
 effort: medium
 paths:
   - "**/*.html"

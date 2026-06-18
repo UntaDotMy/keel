@@ -35,9 +35,9 @@ Every brownfield investigation must name an anchor (file path, function, or symb
 Record the same evidence in the global per-workspace flow-check artifact:
 
 ```
-claude-skills flow start    # opens the artifact for this change
-claude-skills flow check    # gate before edits — refuses if evidence is thin
-claude-skills flow finish   # gate before final review
+keel flow start    # opens the artifact for this change
+keel flow check    # gate before edits — refuses if evidence is thin
+keel flow finish   # gate before final review
 ```
 
 The artifact must name:

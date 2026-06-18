@@ -4,7 +4,7 @@ This demo captures a real hosted validation hardening pass for cross-platform wo
 
 ## Scenario
 
-- PR: [#36](https://github.com/UntaDotMy/claude_skills/pull/36)
+- PR: [#36](https://github.com/UntaDotMy/keel/pull/36)
 - Branch: `fix/validate-stable-checkout`
 - Merge time: `2026-04-07T00:57:25Z`
 - Problem shape: late-starting hosted matrix lanes could resolve the wrong branch checkout ref, especially in Windows-heavy validation flows where timing differences matter
@@ -26,8 +26,8 @@ The hardening loop stayed tight:
 ~~~bash
 cargo test --workspace
 cargo test --workspace
-cargo run --bin claude-skills -- review pre-pr --repo-root . --base-ref origin/main --format compact
-cargo run --bin claude-skills -- git-workflow preflight --repo-root . --base-ref origin/main --format compact
+cargo run --bin keel -- review pre-pr --repo-root . --base-ref origin/main --format compact
+cargo run --bin keel -- git-workflow preflight --repo-root . --base-ref origin/main --format compact
 ~~~
 
 ## Success metrics

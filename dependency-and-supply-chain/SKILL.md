@@ -2,7 +2,7 @@
 name: dependency-and-supply-chain
 description: Plans and performs dependency management and supply-chain actions — dependency upgrades, lockfile hygiene and dedup, semver risk tiering, major-version migration planning, transitive-dependency triage, Renovate/Dependabot config and triage, pinning strategy, SBOM generation, provenance and signing (SLSA, sigstore/cosign), and typosquatting/confusion checks across npm/pnpm/yarn, cargo, pip/uv, and go modules. Use when upgrading dependencies, resolving lockfile conflicts or duplicates, planning a breaking major-version migration, triaging a vulnerable transitive package, or wiring up automated dependency PRs.
 when_to_use: Dependency upgrades, lockfile hygiene, major-version migrations, transitive triage, and supply-chain provenance.
-allowed-tools: Read, Grep, Glob, Edit, Write, Bash(claude-skills memory:*), Bash(git diff:*), Bash(git status), Bash(npm:*), Bash(pnpm:*), Bash(yarn:*), Bash(cargo:*), Bash(pip:*), Bash(uv:*), Bash(go:*), Bash(npx:*)
+allowed-tools: Read, Grep, Glob, Edit, Write, Bash(keel memory:*), Bash(git diff:*), Bash(git status), Bash(npm:*), Bash(pnpm:*), Bash(yarn:*), Bash(cargo:*), Bash(pip:*), Bash(uv:*), Bash(go:*), Bash(npx:*)
 effort: medium
 paths:
   - "**/package.json"

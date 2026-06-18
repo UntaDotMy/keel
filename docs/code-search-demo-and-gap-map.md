@@ -7,7 +7,7 @@ This page documents the honest native indexing demo surface and the remaining ap
 Use the shared native demo command when the operator needs one proof surface that exercises both index creation and query execution:
 
 ~~~bash
-claude-skills code-search demo --workspace-root "$PWD" --query "incremental lineage proof" --format markdown
+keel code-search demo --workspace-root "$PWD" --query "incremental lineage proof" --format markdown
 ~~~
 
 The demo is intentionally not a second indexing engine. It reuses the same native owners as the shipped search path:

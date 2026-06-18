@@ -1,8 +1,8 @@
-# Purpose: Bootstrap claude-skills from the latest GitHub release without a manual archive download.
+# Purpose: Bootstrap keel from the latest GitHub release without a manual archive download.
 # Caller: Windows PowerShell users running the documented one-line installer.
-# Dependencies: PowerShell, Invoke-WebRequest, Expand-Archive, and claude-skills GitHub release assets.
+# Dependencies: PowerShell, Invoke-WebRequest, Expand-Archive, and keel GitHub release assets.
 # Main Functions: Detect platform, download a release archive to temp, extract it, run install, and verify status.
-# Side Effects: Writes the managed claude-skills surface under $env:USERPROFILE\.claude and removes temporary download files.
+# Side Effects: Writes the managed keel surface under $env:USERPROFILE\.claude and removes temporary download files.
 
 [CmdletBinding()]
 param(
@@ -14,7 +14,7 @@ Set-StrictMode -Version 2.0
 $ErrorActionPreference = "Stop"
 
 if ([string]::IsNullOrWhiteSpace($Repository)) {
-    $Repository = "UntaDotMy/claude_core"
+    $Repository = "UntaDotMy/keel"
 }
 if ([string]::IsNullOrWhiteSpace($Version)) {
     $Version = "latest"
@@ -55,7 +55,7 @@ function Get-LatestReleaseTag {
     param([string]$RepositorySlug)
     $headers = @{
         Accept = "application/vnd.github+json"
-        "User-Agent" = "claude-skills-installer"
+        "User-Agent" = "keel-installer"
     }
     $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$RepositorySlug/releases/latest" -Headers $headers
     return $release.tag_name
@@ -64,7 +64,7 @@ function Get-LatestReleaseTag {
 if ($Version -eq "latest") {
     $ReleaseTag = Get-LatestReleaseTag -RepositorySlug $Repository
     if ([string]::IsNullOrWhiteSpace($ReleaseTag)) {
-        throw "Unable to resolve latest claude-skills release for $Repository"
+        throw "Unable to resolve latest keel release for $Repository"
     }
 } else {
     $ReleaseTag = Normalize-ReleaseTag -RawVersion $Version
@@ -72,9 +72,9 @@ if ($Version -eq "latest") {
 
 $AssetVersion = Get-AssetVersion -ReleaseTag $ReleaseTag
 $Architecture = Get-NormalizedArchitecture
-$ArchiveName = "claude-skills_${AssetVersion}_windows_${Architecture}.zip"
+$ArchiveName = "keel_${AssetVersion}_windows_${Architecture}.zip"
 $DownloadUrl = "https://github.com/$Repository/releases/download/$ReleaseTag/$ArchiveName"
-$TemporaryDirectory = Join-Path ([System.IO.Path]::GetTempPath()) ("claude-skills-install-" + [System.Guid]::NewGuid().ToString("N"))
+$TemporaryDirectory = Join-Path ([System.IO.Path]::GetTempPath()) ("keel-install-" + [System.Guid]::NewGuid().ToString("N"))
 
 try {
     New-Item -ItemType Directory -Path $TemporaryDirectory | Out-Null
@@ -82,54 +82,54 @@ try {
     $ExtractDirectory = Join-Path $TemporaryDirectory "extract"
     New-Item -ItemType Directory -Path $ExtractDirectory | Out-Null
 
-    Write-Host "Downloading claude-skills $ReleaseTag for windows-$Architecture..."
-    Invoke-WebRequest -Uri $DownloadUrl -OutFile $ArchivePath -Headers @{ "User-Agent" = "claude-skills-installer" }
+    Write-Host "Downloading keel $ReleaseTag for windows-$Architecture..."
+    Invoke-WebRequest -Uri $DownloadUrl -OutFile $ArchivePath -Headers @{ "User-Agent" = "keel-installer" }
 
     Expand-Archive -Path $ArchivePath -DestinationPath $ExtractDirectory -Force
 
-    $InstallerBinary = Get-ChildItem -Path $ExtractDirectory -Filter "claude-skills.exe" -File -Recurse | Select-Object -First 1
+    $InstallerBinary = Get-ChildItem -Path $ExtractDirectory -Filter "keel.exe" -File -Recurse | Select-Object -First 1
     if ($null -eq $InstallerBinary) {
-        throw "Release archive did not contain claude-skills.exe."
+        throw "Release archive did not contain keel.exe."
     }
 
     $BundleRoot = $InstallerBinary.Directory.FullName
     & $InstallerBinary.FullName install --repo-root $BundleRoot
     if ($LASTEXITCODE -ne 0) {
-        throw "claude-skills install failed with exit code $LASTEXITCODE"
+        throw "keel install failed with exit code $LASTEXITCODE"
     }
 
-    $InstalledBinary = Join-Path $env:USERPROFILE ".claude\claude-skills.exe"
+    $InstalledBinary = Join-Path $env:USERPROFILE ".claude\keel.exe"
     if (-not (Test-Path $InstalledBinary -PathType Leaf)) {
         throw "Installed binary not found at $InstalledBinary"
     }
 
     & $InstalledBinary status --repo-root $BundleRoot
     if ($LASTEXITCODE -ne 0) {
-        throw "claude-skills status failed with exit code $LASTEXITCODE"
+        throw "keel status failed with exit code $LASTEXITCODE"
     }
 
-    # Native `claude-skills install` (above) already wires the lifecycle hooks
+    # Native `keel install` (above) already wires the lifecycle hooks
     # into settings.json, but does so best-effort (a failure is reported, not
     # fatal). This explicit re-run is the bootstrap's verification gate: it is
     # idempotent, and it turns a hook-wiring failure into a hard install error so
     # a broken engagement surface never ships silently.
     & $InstalledBinary hook install
     if ($LASTEXITCODE -ne 0) {
-        throw "claude-skills hook install failed with exit code $LASTEXITCODE"
+        throw "keel hook install failed with exit code $LASTEXITCODE"
     }
 
-    # MCP registration is handled natively by `claude-skills install` above, which
-    # writes the claude_core entry into ~/.claude.json *with* `alwaysLoad: true`
+    # MCP registration is handled natively by `keel install` above, which
+    # writes the keel entry into ~/.claude.json *with* `alwaysLoad: true`
     # (see rust/.../manager/mcp_register.rs). That flag pins the recall,
     # system_map, run_command, and recall_status tools into context instead of
     # leaving them deferred behind ToolSearch. We deliberately do NOT shell out to
     # `claude mcp add` here: that command cannot set `alwaysLoad`, so it would
     # register the server in a degraded (deferred) state, and it requires the
     # `claude` CLI on PATH. The native path needs neither and is the single source
-    # of truth. Run `claude-skills doctor` to confirm the entry and `alwaysLoad`,
-    # or `claude-skills repair` to re-register if anything looks off.
+    # of truth. Run `keel doctor` to confirm the entry and `alwaysLoad`,
+    # or `keel repair` to re-register if anything looks off.
 
-    Write-Host "claude-skills installed successfully at $InstalledBinary"
+    Write-Host "keel installed successfully at $InstalledBinary"
 } finally {
     if (Test-Path $TemporaryDirectory) {
         Remove-Item -Path $TemporaryDirectory -Recurse -Force

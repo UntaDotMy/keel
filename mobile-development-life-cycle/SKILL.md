@@ -2,7 +2,7 @@
 name: mobile-development-life-cycle
 description: Builds and ships production-ready Android and iOS apps with platform-correct lifecycle, permissions, offline sync, secure storage, and store-readiness. Use when working on mobile-specific risk: device-only failures, OS-version differences, battery and performance, app-store submission, or staged mobile rollouts.
 when_to_use: Mobile architecture, quality, and release.
-allowed-tools: Read, Grep, Glob, Edit, Write, Bash(gradle:*), Bash(./gradlew:*), Bash(xcodebuild:*), Bash(pod:*), Bash(adb:*), Bash(flutter:*), Bash(npx react-native:*), Bash(claude-skills memory:*)
+allowed-tools: Read, Grep, Glob, Edit, Write, Bash(gradle:*), Bash(./gradlew:*), Bash(xcodebuild:*), Bash(pod:*), Bash(adb:*), Bash(flutter:*), Bash(npx react-native:*), Bash(keel memory:*)
 effort: medium
 paths:
   - "**/*.kt"

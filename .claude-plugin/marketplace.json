@@ -1,5 +1,5 @@
 {
-  "name": "claude_core",
+  "name": "keel",
   "owner": {
     "name": "UntaDotMy",
     "url": "https://github.com/UntaDotMy"
@@ -10,9 +10,9 @@
   },
   "plugins": [
     {
-      "name": "claude-core",
+      "name": "keel",
       "source": "./",
-      "description": "Bootstrap skill, 24 specialist skills, subagents, hooks, and the claude-skills CLI. Loads the iron-law contract on every SessionStart and restates it on every UserPromptSubmit.",
+      "description": "Bootstrap skill, 24 specialist skills, subagents, hooks, and the keel CLI. Loads the iron-law contract on every SessionStart and restates it on every UserPromptSubmit.",
       "version": "0.1.0",
       "category": "workflow",
       "tags": [

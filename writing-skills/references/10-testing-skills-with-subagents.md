@@ -62,21 +62,21 @@ correct action is the comfortable one, the scenario tests nothing.
    A skill that only holds for one exact wording has a loophole. Each new failure
    is a fresh RED.
 3. Stop when the skill holds across variants and reads clean. Then run the
-   structural gate: `claude-skills skill-lint`.
+   structural gate: `keel skill-lint`.
 
 ## What a passing skill looks like
 
 - A captured RED transcript: a subagent making the wrong call without the skill.
 - A captured GREEN transcript: the same scenario, skill loaded, right call + cited
   reasoning, under maximum pressure.
-- A clean `claude-skills skill-lint` (triggers, within budget, no dangling links).
+- A clean `keel skill-lint` (triggers, within budget, no dangling links).
 
 If you have only the third, you have proven the skill *loads*, not that it
 *works*. Both gates, in order, before you claim a skill done.
 
 ## Relationship to the autonomous learning loop
 
-claude-core's `learn` loop (`runner/learning.rs`) authors skills automatically
+keel's `learn` loop (`runner/learning.rs`) authors skills automatically
 from observed behavior, gated by statistical thresholds (recurrence, confidence)
 and a content-hash no-clobber guard. That is a different mechanism — it answers
 "did this pattern recur enough to be worth a skill," not "does this prose change

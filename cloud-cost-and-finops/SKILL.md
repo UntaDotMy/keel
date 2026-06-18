@@ -2,7 +2,7 @@
 name: cloud-cost-and-finops
 description: Designs and reviews cloud cost and FinOps work covering cost estimation before deploy, rightsizing compute and storage from real utilization, commitment planning with reserved instances, savings plans, and committed-use discounts, autoscaling and spot instances, cost allocation and tagging, budget guardrails with anomaly detection, and unit economics like cost-per-request and cost-per-tenant, plus egress and storage-tier optimization. Reviews Terraform cost impact with Infracost in CI. Use when estimating, attributing, or cutting cloud spend, or reviewing architecture for cost.
 when_to_use: Cloud cost estimation, rightsizing, commitments, allocation, budgets, and unit economics.
-allowed-tools: Read, Grep, Glob, Edit, Write, Bash(claude-skills memory:*), Bash(git diff:*), Bash(git status), Bash(terraform:*), Bash(infracost:*), Bash(aws:*), Bash(gcloud:*), Bash(az:*), Bash(jq:*)
+allowed-tools: Read, Grep, Glob, Edit, Write, Bash(keel memory:*), Bash(git diff:*), Bash(git status), Bash(terraform:*), Bash(infracost:*), Bash(aws:*), Bash(gcloud:*), Bash(az:*), Bash(jq:*)
 effort: medium
 paths:
   - "**/infracost*.yml"

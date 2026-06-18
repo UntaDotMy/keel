@@ -2,7 +2,7 @@
 name: internationalization-and-localization
 description: Designs and reviews internationalization and localization (i18n, l10n) across message catalogs and extraction, ICU MessageFormat, pluralization and gender rules, locale-aware number/date/currency formatting, RTL/bidi layout, and translation workflows (TMS, fallback chains, pseudo-localization). Covers Unicode/encoding correctness and locale negotiation across gettext, ICU, FormatJS/react-intl, i18next, and Fluent. Use when designing catalogs, extracting strings, wiring locale formatting, handling plurals/gender, or hardening translation pipelines.
 when_to_use: i18n/l10n message catalogs, ICU MessageFormat, locale-aware formatting, RTL/bidi, and translation workflows.
-allowed-tools: Read, Grep, Glob, Edit, Write, Bash(claude-skills memory:*), Bash(git diff:*), Bash(git status), Bash(npx:*), Bash(npm:*), Bash(node:*), Bash(python:*), Bash(jq:*)
+allowed-tools: Read, Grep, Glob, Edit, Write, Bash(keel memory:*), Bash(git diff:*), Bash(git status), Bash(npx:*), Bash(npm:*), Bash(node:*), Bash(python:*), Bash(jq:*)
 effort: medium
 paths:
   - "**/locales/**"

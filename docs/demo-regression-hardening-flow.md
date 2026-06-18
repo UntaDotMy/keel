@@ -6,7 +6,7 @@ This demo captures a real regression-hardening pass for an operator-visible defa
 
 ## Scenario
 
-- PR: [#45](https://github.com/UntaDotMy/claude_skills/pull/45)
+- PR: [#45](https://github.com/UntaDotMy/keel/pull/45)
 - Branch: `feat/workflow-start-autopilot-defaults`
 - Merge time: `2026-04-07T04:53:36Z`
 - Problem shape: make bare `workflow start` feel lower-friction for first-run users while proving the new default with explicit regression coverage
@@ -27,7 +27,7 @@ The branch mattered as a regression-hardening shape because the user-visible def
 ~~~bash
 cargo test --workspace
 cargo test --workspace
-cargo run --bin claude-skills -- git-workflow preflight --repo-root . --base-ref origin/main
+cargo run --bin keel -- git-workflow preflight --repo-root . --base-ref origin/main
 ~~~
 
 ## Success metrics

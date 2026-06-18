@@ -2,7 +2,7 @@
 name: preserve-existing-flow
 description: Traces ownership and current behavior in brownfield code before any edit, so new behavior layers through the existing owner instead of overwriting it. Use proactively before editing any existing source file — handlers, loops, state machines, transport flows, queues, or source-of-truth modules. Returns a working brief with current flow, preserved owner, drift risks, and the safe extension shape.
 when_to_use: Pre-edit ownership trace before changing existing behavior in a brownfield codebase.
-allowed-tools: Read, Grep, Glob, Bash(claude-skills flow:*), Bash(claude-skills memory:*), Bash(git diff:*), Bash(git log:*), Bash(git show:*)
+allowed-tools: Read, Grep, Glob, Bash(keel flow:*), Bash(keel memory:*), Bash(git diff:*), Bash(git log:*), Bash(git show:*)
 effort: high
 ---
 
@@ -54,7 +54,7 @@ Trace the real flow in this order before editing:
 
 Treat the first suspicious line as an entry point, not the root cause.
 
-Record the same evidence in the global per-workspace flow-check artifact with `claude-skills flow start`, then run `claude-skills flow check` before editing and `claude-skills flow finish` before final review. The artifact must name the target file or function, current behavior to preserve, entry point, producer, source of truth, storage/state/queue owner, side-effect owner, consumers, cleanup or recovery path, edit boundary, validation needed, and validation evidence. Use `Not found` only for facts that were actually searched and not found.
+Record the same evidence in the global per-workspace flow-check artifact with `keel flow start`, then run `keel flow check` before editing and `keel flow finish` before final review. The artifact must name the target file or function, current behavior to preserve, entry point, producer, source of truth, storage/state/queue owner, side-effect owner, consumers, cleanup or recovery path, edit boundary, validation needed, and validation evidence. Use `Not found` only for facts that were actually searched and not found.
 
 ## Ownership Rules
 

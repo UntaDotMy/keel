@@ -1,7 +1,7 @@
 <!--
 Purpose: Capture feature delivery rules, best practices, and prohibited shortcuts previously inline in AGENTS.md.
 Caller: AGENTS.md when shaping commits, PRs, or scope discipline.
-Dependencies: claude-skills git-workflow, claude-skills review, request_user_input.
+Dependencies: keel git-workflow, keel review, request_user_input.
 Main Functions: Define one-feature-per-branch discipline, do/don't rules, and the prohibited-shortcut taxonomy.
 Side Effects: None — this file is informational.
 -->
@@ -26,8 +26,8 @@ Promotion flow: `work branch` → `feat` → `dev` → `main`.
 - Use `git add -p` when selective staging is required.
 - Review `git diff --cached` before each commit.
 - Commit subjects strictly follow `<category>: <FEATURE>: <short information>` (colon-separated). Categories (lowercase): `add`, `config`, `refactor`, `wip`, `fix`, `docs`. `<FEATURE>` is the component/area in uppercase (e.g. RGB, LED, ARGB, SENSOR). Example: `wip: RGB: Build light effect mode (multi color)`. The commit uses colons; the branch name uses a slash (`add/RGB`) — never conflate them.
-- When a commit body is needed, keep it professional and non-chatty, make the title and body match the committed diff exactly, and include only the sections the change genuinely needs. Use this order when present: `Problem`, `Solution`, `Summary`, `Notes`, `What Changed`, `Test Result`. Omit `Problem` and `Solution` when the commit is additive, preventive, or housekeeping rather than fixing a concrete issue, keep `Test Result` limited to validation that directly proves the committed change, and do not mention Claude Code, claude-skills, or tool-brand validation in commit or PR text unless the change itself is about those surfaces.
-- Run `claude-skills git-workflow preflight --repo-root . --base-ref origin/feat` before push or merge-request creation (`origin/dev` when promoting `feat` to `dev`; `origin/main` only when promoting `dev` to `main`).
+- When a commit body is needed, keep it professional and non-chatty, make the title and body match the committed diff exactly, and include only the sections the change genuinely needs. Use this order when present: `Problem`, `Solution`, `Summary`, `Notes`, `What Changed`, `Test Result`. Omit `Problem` and `Solution` when the commit is additive, preventive, or housekeeping rather than fixing a concrete issue, keep `Test Result` limited to validation that directly proves the committed change, and do not mention Claude Code, keel, or tool-brand validation in commit or PR text unless the change itself is about those surfaces.
+- Run `keel git-workflow preflight --repo-root . --base-ref origin/feat` before push or merge-request creation (`origin/dev` when promoting `feat` to `dev`; `origin/main` only when promoting `dev` to `main`).
 - When opening a PR or MR from the CLI, never publish bodies with escaped newline sequences such as `\\n`; use a real multiline body or a `--body-file` flow instead.
 - Reject or request a split when the diff cannot be described as one cohesive feature.
 

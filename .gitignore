@@ -6,7 +6,7 @@
 # Side Effects: Hides matching untracked local files from normal Git status and add flows.
 #
 # Local workspace settings
-.claude-skills/*
+.keel/*
 # Ignore everything inside .claude/ by default, then track plugin-shipped
 # subagents and hook config. (settings.local.json and similar stay local.)
 /.claude/*
@@ -22,8 +22,8 @@ bin/
 dist/
 coverage.out
 *.test
-/claude-skills-bin
-/claude-skills-bin.exe
+/keel-bin
+/keel-bin.exe
 
 # Rust build artifacts
 /target/

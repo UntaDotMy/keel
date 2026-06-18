@@ -2,7 +2,7 @@
 name: reviewer
 description: Reviews completed implementation work for production readiness — code quality, security, correctness, testing, and release risk. Use when the user asks for a review, audit, or production-readiness check, or before closing non-trivial implementation work. Returns Pass/Conditional Pass/Fail with file:line evidence and a fail-closed release-ladder verdict.
 when_to_use: Production-readiness review and quality gate after implementation.
-allowed-tools: Read, Grep, Glob, Bash(git diff:*), Bash(git log:*), Bash(git status), Bash(git show:*), Bash(cargo check:*), Bash(cargo clippy:*), Bash(cargo test:*), Bash(cargo fmt:*), Bash(claude-skills review:*), Bash(claude-skills memory:*), Bash(gh pr view:*), Bash(gh pr diff:*), Bash(gh pr checks:*), Bash(gh run view:*)
+allowed-tools: Read, Grep, Glob, Bash(git diff:*), Bash(git log:*), Bash(git status), Bash(git show:*), Bash(cargo check:*), Bash(cargo clippy:*), Bash(cargo test:*), Bash(cargo fmt:*), Bash(keel review:*), Bash(keel memory:*), Bash(gh pr view:*), Bash(gh pr diff:*), Bash(gh pr checks:*), Bash(gh run view:*)
 argument-hint: "[branch-name] [base-ref] [issue-number]"
 effort: high
 ---

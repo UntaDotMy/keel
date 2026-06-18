@@ -2,7 +2,7 @@
 name: ui-design-systems-and-responsive-interfaces
 description: Designs and implements production-ready UI with design-system tokens, responsive layouts, accessibility (WCAG 2.1 AA), and clear visual hierarchy. Use when building or hardening UI: component composition, responsive behavior, theming, interaction states, or brownfield design quality.
 when_to_use: UI systems, responsive design, and accessibility.
-allowed-tools: Read, Grep, Glob, Edit, Write, Bash(npm run:*), Bash(yarn:*), Bash(pnpm:*), Bash(npx storybook:*), Bash(npx playwright:*), Bash(claude-skills design-intelligence:*), Bash(claude-skills memory:*)
+allowed-tools: Read, Grep, Glob, Edit, Write, Bash(npm run:*), Bash(yarn:*), Bash(pnpm:*), Bash(npx storybook:*), Bash(npx playwright:*), Bash(keel design-intelligence:*), Bash(keel memory:*)
 effort: medium
 paths:
   - "**/*.html"
@@ -127,7 +127,7 @@ When producing UI guidance, provide concrete design direction rather than vague 
 When you need a structured starting point instead of freeform design guessing, use:
 
 ```bash
-claude-skills design-intelligence recommend "fintech banking dashboard with secure transfers"
+keel design-intelligence recommend "fintech banking dashboard with secure transfers"
 ```
 
 Variants and persistence flags are documented in `references/57-claude-design-intelligence-generator.md`. Use the generator to produce a first-pass packet, then refine it with repo evidence, brownfield constraints, real validation signals, polish checks, and recovery-state review before implementing.

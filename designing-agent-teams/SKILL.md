@@ -2,7 +2,7 @@
 name: designing-agent-teams
 description: Design a coordinated multi-agent team and the skills its agents need, from a one-line domain description. Use when a task is too big or too multi-disciplinary for a single agent and you need to decide how to split it into specialist agents that hand off cleanly — choose a team-architecture pattern (pipeline, fan-out/fan-in, expert pool, producer-reviewer, supervisor, hierarchical), define each agent's role, inputs, outputs, and verification, and wire the orchestration. Use when the user says "design an agent team", "how should I split this across agents", "set up a multi-agent workflow", or "build a harness for X". Pairs with dispatching-parallel-agents (the execution gate) and subagent-driven-development (the per-agent loop).
 when_to_use: Designing how to decompose a domain or large task into a coordinated team of specialist agents with clean hand-offs. Pick an architecture pattern, define roles and contracts, wire orchestration. Hands execution to dispatching-parallel-agents and subagent-driven-development.
-allowed-tools: Read, Grep, Glob, Bash(claude-skills memory:*)
+allowed-tools: Read, Grep, Glob, Bash(keel memory:*)
 effort: high
 ---
 
@@ -101,7 +101,7 @@ just chat — hand-offs must survive a context window ending.
 
 ## Validation
 
-Methodology skill; captures the design via `claude-skills memory working-brief`.
+Methodology skill; captures the design via `keel memory working-brief`.
 Self-check before executing the team: is a team actually warranted, is there a named
 top-level pattern, does every agent have role + inputs + output + verification, are
 parallel branches genuinely independent, and is there a defined failure path for

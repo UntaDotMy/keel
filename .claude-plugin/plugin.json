@@ -1,15 +1,15 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
-  "name": "claude-core",
-  "displayName": "Claude Core",
+  "name": "keel",
+  "displayName": "Keel",
   "version": "0.1.0",
-  "description": "Native delivery rails for Claude Code — managed specialist skills, subagents, hooks, review gates, and the claude-skills CLI for workflow, memory, and command compaction.",
+  "description": "Native delivery rails for Claude Code — managed specialist skills, subagents, hooks, review gates, and the keel CLI for workflow, memory, and command compaction.",
   "author": {
     "name": "UntaDotMy",
-    "url": "https://github.com/UntaDotMy/claude_core"
+    "url": "https://github.com/UntaDotMy/keel"
   },
-  "homepage": "https://github.com/UntaDotMy/claude_core",
-  "repository": "https://github.com/UntaDotMy/claude_core",
+  "homepage": "https://github.com/UntaDotMy/keel",
+  "repository": "https://github.com/UntaDotMy/keel",
   "license": "MIT",
   "keywords": [
     "claude-code",
@@ -97,8 +97,8 @@
   "outputStyles": "./output-styles/",
   "lspServers": "./.lsp.json",
   "mcpServers": {
-    "claude_core": {
-      "command": "claude-skills",
+    "keel": {
+      "command": "keel",
       "args": ["mcp", "serve"],
       "env": {},
       "alwaysLoad": true
@@ -132,7 +132,7 @@
         "name": "build-watcher",
         "command": "cargo check --message-format short 2>&1 | tail -20",
         "description": "Watches for Rust compilation errors after edits",
-        "when": "on-skill-invoke:claude-core:review"
+        "when": "on-skill-invoke:keel:review"
       }
     ]
   }

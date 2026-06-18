@@ -6,7 +6,7 @@ This demo captures a real greenfield feature delivery path from this repository.
 
 ## Scenario
 
-- PR: [#41](https://github.com/UntaDotMy/claude_skills/pull/41)
+- PR: [#41](https://github.com/UntaDotMy/keel/pull/41)
 - Branch: `feat/workflow-route-first-run`
 - Merge time: `2026-04-07T03:50:41Z`
 - Problem shape: improve the first-run workflow route experience without weakening proof or widening the branch beyond one feature
@@ -28,8 +28,8 @@ The work stayed narrow:
 cargo test --workspace
 cargo test --workspace
 cargo test --workspace
-cargo run --bin claude-skills -- review pre-pr --base-ref origin/main --repo-root . --issue-id 40 --pr-title "feat: improve workflow route first-run UX"
-cargo run --bin claude-skills -- git-workflow preflight --repo-root . --base-ref origin/main
+cargo run --bin keel -- review pre-pr --base-ref origin/main --repo-root . --issue-id 40 --pr-title "feat: improve workflow route first-run UX"
+cargo run --bin keel -- git-workflow preflight --repo-root . --base-ref origin/main
 ~~~
 
 ## Success metrics

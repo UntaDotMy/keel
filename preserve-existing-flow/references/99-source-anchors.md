@@ -38,12 +38,12 @@ These skills hand off to or from preserve-existing-flow. Load them when the work
 
 Commands referenced by this skill, with the command surface that owns them:
 
-- `claude-skills flow start` — open the per-workspace flow-check artifact for a brownfield change.
-- `claude-skills flow check` — gate before edits; refuses when owner-path or validation evidence is thin.
-- `claude-skills flow finish` — gate before final review; ensures the artifact is closed against actual evidence.
-- `claude-skills memory scope resolve --create-missing --refresh-system-map` — refresh the workspace memory before reading existing flows.
+- `keel flow start` — open the per-workspace flow-check artifact for a brownfield change.
+- `keel flow check` — gate before edits; refuses when owner-path or validation evidence is thin.
+- `keel flow finish` — gate before final review; ensures the artifact is closed against actual evidence.
+- `keel memory scope resolve --create-missing --refresh-system-map` — refresh the workspace memory before reading existing flows.
 
-These commands are owned by the `claude-skills` Rust CLI in `rust/crates/claude-skills/`. If the command surface changes, this anchor needs to update with it.
+These commands are owned by the `keel` Rust CLI in `rust/crates/keel/`. If the command surface changes, this anchor needs to update with it.
 
 ## External References
 

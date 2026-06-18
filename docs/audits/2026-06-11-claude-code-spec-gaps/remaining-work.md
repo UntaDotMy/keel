@@ -5,7 +5,7 @@
 subagents, hooks, plugins) and 13 competitor harness repos.
 
 The audit surfaced 17 findings — features the official spec documents that
-claude-core's 41 skills, 24 subagents, and 30 hook events did not yet use.
+keel's 41 skills, 24 subagents, and 30 hook events did not yet use.
 **All 17 are now implemented.** This file records the closure so the next agent
 sees what was done and where.
 
@@ -33,8 +33,8 @@ warned; `config-audit` 0 high / 0 medium / 0 low; `review pre-commit` gate=pass.
 | 13 | Subagent `background` | explicit `background: false` | `.claude/agents/reviewer.md` |
 | 14 | Subagent `isolation: worktree` | applied to a write-capable subagent | `.claude/agents/postgres-migration-safety.md` |
 | 15 | Subagent `memory` | `memory: project` | `.claude/agents/reviewer.md`, `.claude/agents/preserve-existing-flow.md` |
-| 16 | Subagent inline `mcpServers` | `mcpServers: [claude_core]` (string reference to the bundled server) | `.claude/agents/data-and-ml-engineering.md` |
-| 17 | Plugin manifest `outputStyles`, `lspServers` | `outputStyles: ./output-styles/` + `lspServers: ./.lsp.json`; created `.lsp.json` (rust-analyzer with clippy check) and `output-styles/claude-core-delivery.md` | `.claude-plugin/plugin.json`, `.lsp.json`, `output-styles/` |
+| 16 | Subagent inline `mcpServers` | `mcpServers: [keel]` (string reference to the bundled server) | `.claude/agents/data-and-ml-engineering.md` |
+| 17 | Plugin manifest `outputStyles`, `lspServers` | `outputStyles: ./output-styles/` + `lspServers: ./.lsp.json`; created `.lsp.json` (rust-analyzer with clippy check) and `output-styles/keel-delivery.md` | `.claude-plugin/plugin.json`, `.lsp.json`, `output-styles/` |
 
 ---
 
@@ -56,7 +56,7 @@ warned; `config-audit` 0 high / 0 medium / 0 low; `review pre-commit` gate=pass.
   behave identically in bash and PowerShell and degrade to empty output (`2>/dev/null`)
   in a non-git directory, so they are safe to run on every skill load. `shell: bash`
   pins the interpreter for determinism.
-- **Finding 16 scope.** The subagent references the bundled `claude_core` MCP
+- **Finding 16 scope.** The subagent references the bundled `keel` MCP
   server by name rather than inlining a speculative external server, so the field
   is genuinely exercised without inventing infrastructure the repo does not have.
 - **Finding 17 scope.** Shipped the two highest-value, lowest-risk manifest keys
@@ -72,5 +72,5 @@ warned; `config-audit` 0 high / 0 medium / 0 low; `review pre-commit` gate=pass.
   is opt-in and degrades to "executable not found" in `/plugin` Errors if absent.
 - Subagent `memory: project` writes to `.claude/agent-memory/<name>/`. Keep the
   non-duplication rule in mind: native subagent memory is for incidental
-  per-agent learnings; claude-core's `memoriesv2`/working-briefs remain the
+  per-agent learnings; keel's `memoriesv2`/working-briefs remain the
   structured, reconcilable store.

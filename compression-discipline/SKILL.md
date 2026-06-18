@@ -2,7 +2,7 @@
 name: compression-discipline
 description: Per-turn output-compression playbook. Use when the per-prompt UserPromptSubmit hook injects "Output compression is on" — the session has accumulated enough tool calls that context is filling. Three concrete actions: read narrower line ranges, search before reading, summarize logs instead of pasting them.
 when_to_use: Heavy investigation turns where the session has already burned a chunk of the context window through earlier tool calls. The auto compression hint hooks this skill on at the threshold.
-allowed-tools: Read, Grep, Glob, Bash(claude-skills memory:*)
+allowed-tools: Read, Grep, Glob, Bash(keel memory:*)
 user-invocable: false
 effort: low
 ---
@@ -72,10 +72,10 @@ That nudge is the trigger to load this skill and apply the three actions above f
 
 ## Validation
 
-This skill is informational; there is no `claude-skills` subcommand to invoke. The trigger is the auto-compression hint described above. To verify the heuristic is active in a host session, run:
+This skill is informational; there is no `keel` subcommand to invoke. The trigger is the auto-compression hint described above. To verify the heuristic is active in a host session, run:
 
 ```
-claude-skills hook diagnose
+keel hook diagnose
 ```
 
 and inspect that `UserPromptSubmit` is wired through the managed hook entry. To force the hint on for a one-off test run, set `CLAUDE_SKILLS_COMPRESSION_HINT=force` in the session environment.

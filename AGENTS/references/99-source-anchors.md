@@ -1,7 +1,7 @@
 <!--
 Purpose: Authoritative sources for the rules in AGENTS.md so contributors can verify a rule against its origin.
 Caller: AGENTS.md and contributors reconciling drift between AGENTS.md and references.
-Dependencies: AGENTS.md, the 24 specialist SKILL.md files, claude-skills CLI surface.
+Dependencies: AGENTS.md, the 24 specialist SKILL.md files, keel CLI surface.
 Main Functions: Map AGENTS.md sections to reference files, list related skills, list owning commands.
 Side Effects: None — this file is informational.
 -->
@@ -72,16 +72,16 @@ These skills hand off to or from the AGENTS.md doctrine. Load the matching `<nam
 
 Commands referenced by AGENTS.md, with the command surface that owns them:
 
-- `claude-skills run -- <command>` — direct compaction wrapper for noisy shell output.
-- `claude-skills rewrite "<command>"` — inspection helper for the rewrite resolution.
-- `claude-skills code-search search` — repo-local discovery before broad scans.
-- `claude-skills flow start` / `flow check` / `flow finish` — brownfield evidence gates.
-- `claude-skills review pre-commit` / `pre-pr` / `gates check` — local review surfaces.
-- `claude-skills git-workflow commit-message` / `pr-body` / `lint-message` / `preflight` — commit/PR text and preflight.
-- `claude-skills hook install` / `uninstall` / `list` / `show` / `instructions` — managed lifecycle hook wiring.
-- `claude-skills memory scope resolve --create-missing --refresh-system-map` — memory refresh on session start, pre-compact, and session end (hook-driven; agent may also invoke by hand mid-session).
-- `claude-skills memory working-brief` / `system-map refresh` / `completion-gate` — durable memory writes (working brief + system map) and completion probe.
-- `claude-skills orchestration resume-status` / `task begin|progress|complete` / `runtime-preflight` / `checkpoint` — workstream lifecycle.
-- `claude-skills gain` — token-savings analytics.
+- `keel run -- <command>` — direct compaction wrapper for noisy shell output.
+- `keel rewrite "<command>"` — inspection helper for the rewrite resolution.
+- `keel code-search search` — repo-local discovery before broad scans.
+- `keel flow start` / `flow check` / `flow finish` — brownfield evidence gates.
+- `keel review pre-commit` / `pre-pr` / `gates check` — local review surfaces.
+- `keel git-workflow commit-message` / `pr-body` / `lint-message` / `preflight` — commit/PR text and preflight.
+- `keel hook install` / `uninstall` / `list` / `show` / `instructions` — managed lifecycle hook wiring.
+- `keel memory scope resolve --create-missing --refresh-system-map` — memory refresh on session start, pre-compact, and session end (hook-driven; agent may also invoke by hand mid-session).
+- `keel memory working-brief` / `system-map refresh` / `completion-gate` — durable memory writes (working brief + system map) and completion probe.
+- `keel orchestration resume-status` / `task begin|progress|complete` / `runtime-preflight` / `checkpoint` — workstream lifecycle.
+- `keel gain` — token-savings analytics.
 
-These commands are owned by the `claude-skills` Rust CLI in `rust/crates/claude-skills/`. If the command surface changes, this anchor needs to update with it.
+These commands are owned by the `keel` Rust CLI in `rust/crates/keel/`. If the command surface changes, this anchor needs to update with it.

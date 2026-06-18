@@ -24,7 +24,7 @@ This repository is a managed Claude Code skill pack, not a loose prompt collecti
 - Use `git add -p` when selective staging is required.
 - Review `git diff --cached` before each commit.
 - Commit subjects strictly follow `<category>: <FEATURE>: <short information>` (colon-separated; categories lowercase: add, config, refactor, wip, fix, docs; FEATURE uppercase, e.g. `wip: RGB: Build light effect mode (multi color)`). The commit uses colons; the branch name uses a slash (`add/RGB`) — never conflate them.
-- Run `claude-skills git-workflow preflight --repo-root . --base-ref origin/feat` before push or merge-request creation (`origin/dev` when promoting `feat` to `dev`; `origin/main` only when promoting `dev` to `main`).
+- Run `keel git-workflow preflight --repo-root . --base-ref origin/feat` before push or merge-request creation (`origin/dev` when promoting `feat` to `dev`; `origin/main` only when promoting `dev` to `main`).
 - When opening a PR or MR from the CLI, use a real multiline body or `--body-file` instead of embedding escaped newline sequences such as `\\n` in the published text.
 - Follow [WORKFLOW.md](WORKFLOW.md) when the change touches branching, merge-request shape, or reviewer expectations.
 
@@ -34,29 +34,29 @@ Run this default native loop from the repository root against a temporary Claude
 
 ```bash
 temporary_claude_home="$(mktemp -d)"
-CLAUDE_TARGET_OVERRIDE="$temporary_claude_home" cargo run --bin claude-skills -- validate --profile smoke
-CLAUDE_TARGET_OVERRIDE="$temporary_claude_home" cargo run --bin claude-skills -- install --repo-root "$PWD"
-"$temporary_claude_home/claude-skills" verify --repo-root "$PWD"
-"$temporary_claude_home/claude-skills" status --repo-root "$PWD"
+CLAUDE_TARGET_OVERRIDE="$temporary_claude_home" cargo run --bin keel -- validate --profile smoke
+CLAUDE_TARGET_OVERRIDE="$temporary_claude_home" cargo run --bin keel -- install --repo-root "$PWD"
+"$temporary_claude_home/keel" verify --repo-root "$PWD"
+"$temporary_claude_home/keel" status --repo-root "$PWD"
 ```
 
 Windows contributors should run the same Rust CLI shape from PowerShell:
 
 ```powershell
-$temporaryClaudeHome = Join-Path $env:TEMP "claude-skills-test-home"
+$temporaryClaudeHome = Join-Path $env:TEMP "keel-test-home"
 New-Item -ItemType Directory -Force -Path $temporaryClaudeHome | Out-Null
 $env:CLAUDE_TARGET_OVERRIDE = $temporaryClaudeHome
-cargo run --bin claude-skills -- validate --profile smoke
-cargo run --bin claude-skills -- install --repo-root .
-& (Join-Path $temporaryClaudeHome "claude-skills.exe") verify --repo-root .
-& (Join-Path $temporaryClaudeHome "claude-skills.exe") status --repo-root .
+cargo run --bin keel -- validate --profile smoke
+cargo run --bin keel -- install --repo-root .
+& (Join-Path $temporaryClaudeHome "keel.exe") verify --repo-root .
+& (Join-Path $temporaryClaudeHome "keel.exe") status --repo-root .
 ```
 
 Use the live `~/.claude` target only as an intentional final check when the change specifically needs that real-home proof.
 
 Full validate now proves the Rust-native CLI foundation. Install the stable Rust toolchain before running the complete repository loop locally; CI enforces the same Rust workspace proof.
 
-When the change touches a narrower surface, also run the smallest direct proof that covers the edited area, such as `cargo test --workspace`, `cargo test -p <crate>`, or `cargo build --release --bin claude-skills`.
+When the change touches a narrower surface, also run the smallest direct proof that covers the edited area, such as `cargo test --workspace`, `cargo test -p <crate>`, or `cargo build --release --bin keel`.
 
 ## Scope Rules
 

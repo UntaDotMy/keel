@@ -6,7 +6,7 @@ This demo captures a real stateful bug fix where the durable workflow source of 
 
 ## Scenario
 
-- PR: [#27](https://github.com/UntaDotMy/claude_skills/pull/27)
+- PR: [#27](https://github.com/UntaDotMy/keel/pull/27)
 - Branch: `feat/memoriesv2-hardening`
 - Merge time: `2026-04-06T03:48:40Z`
 - Problem shape: canonical execution-trace ownership drifted between memoriesv2 and legacy compatibility files, so closure and resume surfaces could report the wrong state
@@ -29,9 +29,9 @@ The repair loop was source-of-truth focused:
 cargo test --workspace
 cargo test --workspace
 cargo test --workspace
-cargo run --bin claude-skills -- review pre-commit --repo-root . --format markdown
-cargo run --bin claude-skills -- review pre-pr --repo-root . --base-ref origin/main --format markdown
-cargo run --bin claude-skills -- git-workflow preflight --repo-root . --base-ref origin/main --format markdown
+cargo run --bin keel -- review pre-commit --repo-root . --format markdown
+cargo run --bin keel -- review pre-pr --repo-root . --base-ref origin/main --format markdown
+cargo run --bin keel -- git-workflow preflight --repo-root . --base-ref origin/main --format markdown
 ~~~
 
 ## Success metrics

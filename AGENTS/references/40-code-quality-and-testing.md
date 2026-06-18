@@ -1,7 +1,7 @@
 <!--
 Purpose: Capture code quality standards, testing requirements, and feature flags previously inline in AGENTS.md.
 Caller: AGENTS.md when implementation, naming, structure, DRY, simplicity, comments, or test discipline is in scope.
-Dependencies: claude-skills review, .claude/review.json, native review surfaces.
+Dependencies: keel review, .claude/review.json, native review surfaces.
 Main Functions: Define readability rules, scope discipline, structure/modularity, DRY, simplicity, professional comments, and the testing ladder.
 Side Effects: None — this file is informational.
 -->
@@ -72,14 +72,14 @@ Side Effects: None — this file is informational.
 - After each meaningful patch batch, rerun the narrowest validation that proves the batch before stacking more changes on top.
 - Do not trust the first green rerun after a fix as enough proof by itself; rerun the proving check and re-audit the broader impacted system and adjacent recovery paths before final delivery.
 - Keep tests aligned to the module or layer they protect so failures are easy to trace during debugging.
-- When a repo-managed review surface exists, run `claude-skills review pre-commit` for staged local proof, `claude-skills review pre-pr` before opening or updating a PR, and `claude-skills review gates check` when a deterministic merge decision is needed.
-- Treat `claude-skills review github comment` and `claude-skills review github check` as explicit GitHub-only hosted surfaces. Use them only when the user explicitly wants GitHub output or the active workflow is concretely GitHub-hosted; otherwise stay on the local or host-neutral review surfaces.
+- When a repo-managed review surface exists, run `keel review pre-commit` for staged local proof, `keel review pre-pr` before opening or updating a PR, and `keel review gates check` when a deterministic merge decision is needed.
+- Treat `keel review github comment` and `keel review github check` as explicit GitHub-only hosted surfaces. Use them only when the user explicitly wants GitHub output or the active workflow is concretely GitHub-hosted; otherwise stay on the local or host-neutral review surfaces.
 - Prefer the native local review surfaces for deterministic gates. The default flow is: implement, run native review, then perform a focused reviewer-quality pass when guideline verification beyond deterministic rules is still needed.
 - For simple docs-only changes, prefer the native local proof path unless the user explicitly asks for deeper review or the docs change carries release, security, or workflow risk.
 - Reviewer lanes must read the working brief, scoped memory, `SYSTEM_MAP.md`, the changed-surface map, and proving validation evidence before findings or approval.
 - During final code review on this Rust-backed repo, run `cargo test --workspace` and wait for it to finish before passing the gate.
 - After implementation and repo-wide proof on non-trivial work, run a second reviewer-quality pass before the final answer.
-- Use `.claude/review.json` as the tracked rule engine for PR-native automation, use `claude-skills review learn summarize` to inspect repeated accepted feedback, and require `claude-skills review learn apply-promotion` with an explicit approval note before a learned suggestion becomes policy.
+- Use `.claude/review.json` as the tracked rule engine for PR-native automation, use `keel review learn summarize` to inspect repeated accepted feedback, and require `keel review learn apply-promotion` with an explicit approval note before a learned suggestion becomes policy.
 
 **New Features:**
 - Unit tests for business logic

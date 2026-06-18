@@ -1,24 +1,24 @@
-# claude-core OpenCode Plugin
+# keel OpenCode Plugin
 
-Bridges OpenCode lifecycle events to the `claude-skills` Rust CLI for context injection, observation recording, learning checkpoints, and session management.
+Bridges OpenCode lifecycle events to the `keel` Rust CLI for context injection, observation recording, learning checkpoints, and session management.
 
 ## Install
 
 Copy the plugin file into the OpenCode global plugin directory:
 
 ```bash
-cp opencode/claude-core.ts ~/.config/opencode/plugins/
+cp opencode/keel.ts ~/.config/opencode/plugins/
 ```
 
 On Windows:
 
 ```powershell
-Copy-Item opencode\claude-core.ts $env:USERPROFILE\.config\opencode\plugins\
+Copy-Item opencode\keel.ts $env:USERPROFILE\.config\opencode\plugins\
 ```
 
 OpenCode auto-loads `.ts` files from `~/.config/opencode/plugins/` at startup. No build step required — OpenCode runs TypeScript directly via Bun.
 
-Prerequisite: the `claude-skills` binary must be installed at `~/.claude/claude-skills` (unix) or `~/.claude/claude-skills.exe` (win32), or on `PATH`. The plugin resolves the binary once at init, preferring the explicit `~/.claude/` path.
+Prerequisite: the `keel` binary must be installed at `~/.claude/keel` (unix) or `~/.claude/keel.exe` (win32), or on `PATH`. The plugin resolves the binary once at init, preferring the explicit `~/.claude/` path.
 
 ## Event → Bridge Call Mapping
 
@@ -55,7 +55,7 @@ The `session.compacted` event (fire-and-forget) triggers a learning checkpoint v
 
 ### Binary resolution
 
-Prefer the explicit `~/.claude/claude-skills` path (with `.exe` suffix on win32). Fall back to bare command name for PATH lookup by Bun shell. Resolved once at plugin init.
+Prefer the explicit `~/.claude/keel` path (with `.exe` suffix on win32). Fall back to bare command name for PATH lookup by Bun shell. Resolved once at plugin init.
 
 ### 500ms hard timeout
 

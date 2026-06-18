@@ -3,11 +3,11 @@
 ## Closed by Native CLI Compatibility
 
 - `legacy-memory-command-friction`
-  - [rust/crates/claude-skills/src/commands.rs](../../../rust/crates/claude-skills/src/commands.rs)
-  - [rust/crates/claude-skills/src/utility.rs](../../../rust/crates/claude-skills/src/utility.rs)
+  - [rust/crates/keel/src/commands.rs](../../../rust/crates/keel/src/commands.rs)
+  - [rust/crates/keel/src/utility.rs](../../../rust/crates/keel/src/utility.rs)
 - `legacy-task-lifecycle-flag-friction`
-  - [rust/crates/claude-skills/src/commands.rs](../../../rust/crates/claude-skills/src/commands.rs)
-  - [rust/crates/claude-skills/src/utility.rs](../../../rust/crates/claude-skills/src/utility.rs)
+  - [rust/crates/keel/src/commands.rs](../../../rust/crates/keel/src/commands.rs)
+  - [rust/crates/keel/src/utility.rs](../../../rust/crates/keel/src/utility.rs)
 
 ## Closed by Trust Artifact Publication
 
@@ -19,5 +19,5 @@
   - [audit-manifest.json](./audit-manifest.json)
   - [README.md](../../../README.md)
   - [todo.md](../../../todo.md)
-  - [rust/crates/claude-skills/src/commands.rs](../../../rust/crates/claude-skills/src/commands.rs)
+  - [rust/crates/keel/src/commands.rs](../../../rust/crates/keel/src/commands.rs)
   - [Cargo.toml](../../../Cargo.toml)

@@ -2,7 +2,7 @@
 name: memory-status-reporter
 description: Produces human-style memory status reports from Claude Code memory artifacts: learning recap, mistake ledger, rewarded patterns, research-cache health, and remembered user needs. Use when the user asks "what did you learn today", "show memory status", "what mistakes happened and are they resolved", "how is memory growing", or "summarize what you understand about my needs".
 when_to_use: Human-style memory health and learning reports.
-allowed-tools: Read, Grep, Glob, Bash(claude-skills memory:*)
+allowed-tools: Read, Grep, Glob, Bash(keel memory:*)
 user-invocable: false
 effort: low
 ---
@@ -13,7 +13,7 @@ effort: low
 
 Turn Claude Code memory artifacts into a human-readable status report that feels like a check-in, not a raw dump.
 
-Use this skill only when the user explicitly wants a memory-health report, learning recap, mistake ledger, user-needs summary, or heuristic growth report. Routine durable memory, planning, progress, and closure updates belong to the main lane through the Rust-native `claude-skills memory ...` commands, which should keep the writable global second-layer store under `~/.claude/memoriesv2/` synchronized.
+Use this skill only when the user explicitly wants a memory-health report, learning recap, mistake ledger, user-needs summary, or heuristic growth report. Routine durable memory, planning, progress, and closure updates belong to the main lane through the Rust-native `keel memory ...` commands, which should keep the writable global second-layer store under `~/.claude/memoriesv2/` synchronized.
 
 ## Research Reuse Defaults · Completion Discipline · Memory and Security Boundaries · Code Implementation Discipline
 
@@ -24,11 +24,11 @@ See `_shared/common-discipline.md` for the canonical rules. Apply them to all wo
 - Treat corrections, decisions, proper nouns, preferences, and specific values as write-ahead material that must be persisted before you answer.
 - The default scoped files are `SESSION-STATE.md` for the readable state, `session-wal.jsonl` for the append-only recovery log, and `working-buffer.md` for high-context turn breadcrumbs.
 - If the user corrects a spelling, changes an option, supplies a durable preference, or narrows a value, write it to scoped session state first and only then compose the reply.
-- When an explicit memory report is requested, inspect the scoped memory files and native `claude-skills memory ...` outputs as evidence, but keep routine durable writes in the active workstream instead of treating this skill as the default memory writer.
+- When an explicit memory report is requested, inspect the scoped memory files and native `keel memory ...` outputs as evidence, but keep routine durable writes in the active workstream instead of treating this skill as the default memory writer.
 - Use `SESSION-STATE.md` only for durable corrections, decisions, names, preferences, exact values, or confirmed constraints.
 - Use `working-buffer.md` only for long-running or high-context work, not for every turn.
-- Capture reusable external research and freshness notes inside the scoped working brief (`claude-skills memory working-brief write`) so the next task can reread and re-validate them before acting.
-- Use `claude-skills memory completion-gate check` only for non-trivial explicit asks that need tracked closure.
+- Capture reusable external research and freshness notes inside the scoped working brief (`keel memory working-brief write`) so the next task can reread and re-validate them before acting.
+- Use `keel memory completion-gate check` only for non-trivial explicit asks that need tracked closure.
 - When the runtime exposes context usage, start writing the working buffer at roughly 60 percent usage; otherwise switch on the buffer as soon as context pressure is high or a long task is still unfolding so the next turn can reconstruct the work after compaction.
 
 ## Security and Anti-Loop Guardrails
@@ -73,21 +73,21 @@ Always produce these sections unless the user narrows the scope:
 1. Determine the reporting window. Default to today in the local timezone unless the user asks for a different period.
 2. Resolve the workspace scope first so the report can prefer agent-instance, workstream, and workspace files over broad global memory. When the scoped folders do not exist yet, create them on the same call:
    ```bash
-   claude-skills memory scope resolve --workspace-root "$PWD" --create-missing --format json
+   keel memory scope resolve --workspace-root "$PWD" --create-missing --format json
    ```
 3. Refresh the scoped system map when the workspace layout has changed since the last report so the source-priority lookup walks an accurate tree:
    ```bash
-   claude-skills memory system-map refresh --workspace-root "$PWD"
+   keel memory system-map refresh --workspace-root "$PWD"
    ```
-4. Read the scoped artifacts directly with your host's read and search tools, walking the Source Priority list below. The human-readable narrative report is composed from those files. A `claude-skills memory report` command does exist — it is an alias for `memory status`, a compact health summary across the implemented memory families — so use it for the structured family snapshot, but compose the narrative status report from the scoped files rather than expecting `memory report` to write the prose for you.
+4. Read the scoped artifacts directly with your host's read and search tools, walking the Source Priority list below. The human-readable narrative report is composed from those files. A `keel memory report` command does exist — it is an alias for `memory status`, a compact health summary across the implemented memory families — so use it for the structured family snapshot, but compose the narrative status report from the scoped files rather than expecting `memory report` to write the prose for you.
 5. Inspect the latest scoped working brief and any open completion-gate entries to anchor "what is in progress" and "what is unresolved":
    ```bash
-   claude-skills memory working-brief list --json
-   claude-skills memory working-brief show --id <brief-id> --json
+   keel memory working-brief list --json
+   keel memory working-brief show --id <brief-id> --json
    ```
 6. For non-trivial tasks that have a tracked completion gate, surface its current state in the report:
    ```bash
-   claude-skills memory completion-gate check --id <entry-id> --json
+   keel memory completion-gate check --id <entry-id> --json
    ```
 7. Read every command output before responding. Do not paraphrase away uncertainty.
 8. If tool-use mistakes were part of the work, ensure the rollout summary captures the tool name, failure symptom, cause, verified fix, and prevention note so future reports can surface it.
@@ -96,22 +96,22 @@ Always produce these sections unless the user narrows the scope:
 11. If the user wants a broader window, widen the file walk to a trailing seven-day slice ending on the anchor date by filtering scoped files by their dated names or modification times.
 12. When the user supplies a durable correction or decision, the main lane should persist it through the right layer before this skill summarizes the updated memory state. For corrections that must survive a single task (a name spelling, a permanent preference, a confirmed constraint), append to `SESSION-STATE.md` with the `Write` tool. For task-scoped decisions tied to active work, capture them in the scoped working brief instead:
    ```bash
-   claude-skills memory working-brief write \
+   keel memory working-brief write \
      --request "Option B is the confirmed direction." \
      --acceptance-criteria "Subsequent reports reflect Option B."
    ```
 13. For high-context work only, append the newest breadcrumb to the scoped `working-buffer.md` with the `Write` tool before the thread gets noisy. Keep entries terse and dated.
 14. For non-trivial or compaction-prone work, persist the scoped working brief before the thread gets noisy:
    ```bash
-   claude-skills memory working-brief write \
+   keel memory working-brief write \
      --id req-1 \
      --request "Persist the working brief" \
      --acceptance-criteria "working-brief show returns req-1." \
      --constraints "No drift between brief and live work."
    ```
-15. For non-trivial tasks that already have a workflow ledger entry (one created by `claude-skills workflow start` in the active lane), surface the scoped completion gate before delivering the final answer. `completion-gate check` is read-only and exits 1 if the id has no entry, so this step only runs when the main lane has already opened the ledger:
+15. For non-trivial tasks that already have a workflow ledger entry (one created by `keel workflow start` in the active lane), surface the scoped completion gate before delivering the final answer. `completion-gate check` is read-only and exits 1 if the id has no entry, so this step only runs when the main lane has already opened the ledger:
    ```bash
-   claude-skills memory completion-gate check --id <entry-id> --proof "Evidence summary."
+   keel memory completion-gate check --id <entry-id> --proof "Evidence summary."
    ```
 16. When a memory write is requested, report what changed and which scoped files were touched before final delivery.
 17. Archive overflow from L1 memory files instead of letting always-read files grow without bound. Move stale entries into the scoped `archive/` folder with the `Write` tool.

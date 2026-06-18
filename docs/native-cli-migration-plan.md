@@ -1,5 +1,5 @@
 <!--
-Purpose: Document the Rust-native claude-skills CLI migration state and remaining hardening work.
+Purpose: Document the Rust-native keel CLI migration state and remaining hardening work.
 Caller: Contributors, release maintainers, and agents checking whether the runtime may fall back to Go.
 Dependencies: Rust workspace, shell and PowerShell wrappers, release workflow, validate workflow, and managed install surfaces.
 Main Functions: State the canonical implementation language, supported entrypoints, validation gates, and no-Go fallback rule.
@@ -11,10 +11,10 @@ Side Effects: Sets contributor expectations for future runtime work and release 
 
 The canonical public runtime is now Rust.
 
-- `rust/crates/claude-skills` owns top-level CLI dispatch.
+- `rust/crates/keel` owns top-level CLI dispatch.
 - The Rust CLI no longer imports or invokes any legacy fallback binary.
 - Unknown commands fail closed with an explicit Rust-runtime error instead of spawning Go.
-- Source-checkout wrappers build with `cargo build --release --bin claude-skills`.
+- Source-checkout wrappers build with `cargo build --release --bin keel`.
 - Validate and release workflows build and test the Rust workspace rather than running Go commands.
 
 ## Decision Record
@@ -49,9 +49,9 @@ Use Rust proof for this repository:
 ```bash
 cargo fmt --all --check
 cargo test --workspace
-cargo build --release --bin claude-skills
-./target/release/claude-skills validate --repo-root . --profile smoke
-./target/release/claude-skills flow finish --repo-root . --json
+cargo build --release --bin keel
+./target/release/keel validate --repo-root . --profile smoke
+./target/release/keel flow finish --repo-root . --json
 ```
 
 ## Remaining Hardening Work
@@ -62,4 +62,4 @@ The first Rust no-fallback cut preserves the public command names and core lifec
 - Expand Rust command-output compaction policies beyond raw-output recovery.
 - Restore release asset breadth for every target once each runner or cross-linker is proven.
 - Keep deleted Go-era behavior from reappearing by requiring new runtime work to land in Rust crates with Rust validation.
-- Keep docs and examples centered on `cargo run --bin claude-skills -- ...`, wrappers, or installed Rust binaries.
+- Keep docs and examples centered on `cargo run --bin keel -- ...`, wrappers, or installed Rust binaries.

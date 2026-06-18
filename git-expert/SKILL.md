@@ -2,7 +2,7 @@
 name: git-expert
 description: Guides safe Git workflows: branching, commits, pull requests, merges, conflict resolution, and history repair, with explicit risk explanations and reversible defaults. Use when planning non-trivial Git operations, recovering shared history, cleaning up secrets, or coordinating issue-driven worktree, branch, and PR flow.
 when_to_use: Safe Git workflow and version control.
-allowed-tools: Read, Grep, Glob, Bash(git:*), Bash(gh:*), Bash(claude-skills git-workflow:*)
+allowed-tools: Read, Grep, Glob, Bash(git:*), Bash(gh:*), Bash(keel git-workflow:*)
 argument-hint: "[branch-name] [base-ref] [commit-message]"
 shell: bash
 effort: medium
@@ -85,7 +85,7 @@ Discipline:
 - Use patch staging (`git add -p`) when selective staging is required.
 - Review `git diff --cached` before committing.
 - When a commit body is needed, keep it professional, make the subject and body match the committed diff exactly, include only the sections the change genuinely needs, and keep this order when a section is present: `Problem`, `Solution`, `Summary`, `Notes`, `What Changed`, `Test Result`. Omit `Problem` and `Solution` when the commit is additive, preventive, or housekeeping rather than fixing a concrete issue, and keep `Test Result` limited to validation that directly proves the committed change.
-- Run `claude-skills git-workflow preflight --repo-root . --base-ref origin/feat` before push or merge-request creation (`origin/dev` when promoting `feat` to `dev`; `origin/main` only when promoting `dev` to `main`).
+- Run `keel git-workflow preflight --repo-root . --base-ref origin/feat` before push or merge-request creation (`origin/dev` when promoting `feat` to `dev`; `origin/main` only when promoting `dev` to `main`).
 - Request a split when the diff cannot be described as one cohesive feature.
 
 ## Branch Naming and Commit Format
@@ -106,7 +106,7 @@ Discipline:
 
 ## Target Repository Conventions
 
-These apply to any repository created or operated through this toolkit, not to claude_core itself. They are a generic methodology; firmware/SDK is one example, not the only case.
+These apply to any repository created or operated through this toolkit, not to keel itself. They are a generic methodology; firmware/SDK is one example, not the only case.
 
 **Repository naming** — `[Scope]_[Topic]`: a stable scope leads, the topic states what it does. The scope is whatever the most stable axis of the project is — silicon for firmware (`STM32F4_MotorControl`), service for backend (`Auth_TokenRotation`), platform for an app (`iOS_OfflineSync`). Repos then sort by scope.
 

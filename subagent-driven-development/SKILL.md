@@ -90,7 +90,7 @@ them sequentially even if each is isolated.
 
 ## Validation
 
-Methodology skill; uses the Task tool and `claude-skills memory` for progress.
+Methodology skill; uses the Task tool and `keel memory` for progress.
 Self-check before accepting a delegated result: did you read the returned diff, run
 the task's verification check yourself in the main thread, and confirm earlier
 checks still pass? If you accepted the subagent's claim without re-running the

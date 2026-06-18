@@ -6,7 +6,7 @@ This demo captures a real docs-only workflow-governance change that still had to
 
 ## Scenario
 
-- PR: [#43](https://github.com/UntaDotMy/claude_skills/pull/43)
+- PR: [#43](https://github.com/UntaDotMy/keel/pull/43)
 - Branch: `feat/workflow-first-success-path`
 - Merge time: `2026-04-07T04:13:09Z`
 - Problem shape: publish a first-success guide that helps a new operator complete an end-to-end flow, then wire that guide into the main docs surfaces without treating docs as untestable
@@ -28,8 +28,8 @@ The docs lane still followed proof discipline:
 ~~~bash
 cargo test --workspace
 cargo test --workspace
-cargo run --bin claude-skills -- review pre-pr --base-ref origin/main --repo-root . --issue-id 42 --pr-title "docs: add workflow first-success path"
-cargo run --bin claude-skills -- git-workflow preflight --repo-root . --base-ref origin/main
+cargo run --bin keel -- review pre-pr --base-ref origin/main --repo-root . --issue-id 42 --pr-title "docs: add workflow first-success path"
+cargo run --bin keel -- git-workflow preflight --repo-root . --base-ref origin/main
 ~~~
 
 ## Success metrics

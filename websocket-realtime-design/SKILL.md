@@ -2,7 +2,7 @@
 name: websocket-realtime-design
 description: Designs WebSocket and realtime systems (Socket.IO, raw WS, SSE, WebRTC data channels) with explicit reconnection, backpressure, message ordering, presence, and authentication boundaries. Use when adding live features, fixing dropped messages, scaling fan-out, or auditing realtime consumption under unstable networks.
 when_to_use: WebSocket, Server-Sent Events, and realtime fan-out architecture.
-allowed-tools: Read, Grep, Glob, Edit, Write, Bash(claude-skills memory:*), Bash(git diff:*), Bash(git status), Bash(npx:*), Bash(npm:*), Bash(yarn:*), Bash(pnpm:*), Bash(node:*), Bash(redis-cli:*)
+allowed-tools: Read, Grep, Glob, Edit, Write, Bash(keel memory:*), Bash(git diff:*), Bash(git status), Bash(npx:*), Bash(npm:*), Bash(yarn:*), Bash(pnpm:*), Bash(node:*), Bash(redis-cli:*)
 effort: medium
 paths:
   - "**/socket*.ts"

@@ -2,15 +2,15 @@
 
 ## Native Command Routing — Must Follow First
 
-Before running raw shell, broad search, or patching existing source, route through the native `claude-skills` surface:
+Before running raw shell, broad search, or patching existing source, route through the native `keel` surface:
 
-**Token-saving rule:** the goal is to prevent noisy raw command output from entering Claude Code context. Do not run a raw noisy command first and compact afterward; route through `claude-skills run -- <command>` or the hook-provided `Rerun that as:` wrapper before noisy output is produced.
+**Token-saving rule:** the goal is to prevent noisy raw command output from entering Claude Code context. Do not run a raw noisy command first and compact afterward; route through `keel run -- <command>` or the hook-provided `Rerun that as:` wrapper before noisy output is produced.
 
-- **Noisy shell commands:** prefer `claude-skills run -- <command>` for test, build, lint, log, status, search, Docker, Kubernetes, Terraform, package-manager, and CI-style commands. Use `claude-skills rewrite "<command>"` when unsure whether a command has native compaction.
+- **Noisy shell commands:** prefer `keel run -- <command>` for test, build, lint, log, status, search, Docker, Kubernetes, Terraform, package-manager, and CI-style commands. Use `keel rewrite "<command>"` when unsure whether a command has native compaction.
 - **Hook block-and-rerun:** if the managed `PreToolUse` hook returns `Rerun that as: <command>`, immediately run that exact command. Do not ask the user, do not treat the hook block as a task failure, and do not repeat the raw command first.
-- **Repository search:** prefer `claude-skills code-search search --workspace-root "$PWD" --query "<query>"` before raw `rg`/`grep`/`find`/`git grep`.
-- **Existing-source edits:** run or validate Preserve Existing Flow evidence with `claude-skills flow start`, `claude-skills flow check`, and `claude-skills flow finish`, and record the owner path in the global per-workspace flow-check artifact before patching.
-- **Commit/PR/final-response text:** use `claude-skills git-workflow commit-message --from-diff`, `claude-skills git-workflow pr-body --from-diff`, and `claude-skills git-workflow lint-message <file>` before submitting, then `claude-skills git-workflow preflight` and `claude-skills review pre-pr` before merge.
+- **Repository search:** prefer `keel code-search search --workspace-root "$PWD" --query "<query>"` before raw `rg`/`grep`/`find`/`git grep`.
+- **Existing-source edits:** run or validate Preserve Existing Flow evidence with `keel flow start`, `keel flow check`, and `keel flow finish`, and record the owner path in the global per-workspace flow-check artifact before patching.
+- **Commit/PR/final-response text:** use `keel git-workflow commit-message --from-diff`, `keel git-workflow pr-body --from-diff`, and `keel git-workflow lint-message <file>` before submitting, then `keel git-workflow preflight` and `keel review pre-pr` before merge.
 
 ## Hook Retry Handling
 
@@ -69,14 +69,14 @@ A feature branch must not contain:
   - Example: `wip: RGB: Build light effect mode (multi color)`.
   - **Colon vs slash:** the commit subject uses colons (`add: RGB: sync all`); the branch name uses a slash (`add/RGB`). Same category vocabulary, different separator — never write a commit with a slash or a branch with a colon.
 - When a commit body is needed, keep it professional, non-chatty, and matched to the committed diff. Use a precise title, include only the sections the change genuinely needs, and keep this order when a section is present: `Problem`, `Solution`, `Summary`, `Notes`, `What Changed`, `Test Result`. Omit `Problem` and `Solution` when the commit is additive, preventive, or housekeeping rather than fixing a concrete issue, and keep `Test Result` limited to validation that directly proves the committed change.
-- do not mention Claude Code, claude-skills, or tool-brand validation in commit or PR text unless the change itself is about those surfaces.
+- do not mention Claude Code, keel, or tool-brand validation in commit or PR text unless the change itself is about those surfaces.
 
 ## Required Preflight
 
 Run the native Git workflow preflight before push or merge-request creation. Use the integration target as the base ref — `origin/feat` for work branches, `origin/dev` when promoting `feat` to `dev`, and `origin/main` only when promoting `dev` to `main`:
 
 ```bash
-claude-skills git-workflow preflight --repo-root . --base-ref origin/feat
+keel git-workflow preflight --repo-root . --base-ref origin/feat
 ```
 
 The preflight blocks on branch naming, dirty worktrees, empty diffs, and missing committed history against the target base ref. It warns when commit subjects drift from the `<category>: <FEATURE>: <short information>` format or suggest mixed scope.
@@ -101,17 +101,17 @@ Reject or request a split when:
 ## Practical Branch Flow
 
 1. Start from `feat` (the feature-integration branch). Pull it current.
-2. If the request is still broad, run `claude-skills workflow route --request "..."` first so the lane choice is explicit. See [docs/first-success-path.md](docs/first-success-path.md) when an operator wants the named end-to-end path before widening into custom flows.
+2. If the request is still broad, run `keel workflow route --request "..."` first so the lane choice is explicit. See [docs/first-success-path.md](docs/first-success-path.md) when an operator wants the named end-to-end path before widening into custom flows.
 3. Create one new work branch off `feat` with normal Git tooling (e.g. `git switch -c add/RGB`). Use a `<category>/<FEATURE>` name.
 4. Implement only that feature. Fixes and retries for it stay on this same branch — do not branch again for a fix to in-flight work.
-5. Keep `claude-skills workflow cockpit`, `claude-skills workflow status`, or `claude-skills workflow watch` visible while the branch is active so stage, active lane, proof state, blockers, and the next command stay easy to scan.
+5. Keep `keel workflow cockpit`, `keel workflow status`, or `keel workflow watch` visible while the branch is active so stage, active lane, proof state, blockers, and the next command stay easy to scan.
 6. Use `git add -p` when selective staging is required.
 7. Review `git diff --cached`.
 8. Commit using the `<category>: <FEATURE>: <short information>` format (categories: `add`, `config`, `refactor`, `wip`, `fix`, `docs`; FEATURE uppercase, e.g. `wip: RGB: Build light effect mode (multi color)`).
    If a commit body is included, keep it professional, make the title and body match the committed diff exactly, include only the sections the change genuinely needs, and keep this order when a section is present: `Problem`, `Solution`, `Summary`, `Notes`, `What Changed`, `Test Result`. Omit `Problem` and `Solution` when the commit is additive, preventive, or housekeeping rather than fixing a concrete issue, and keep `Test Result` limited to validation that directly proves the committed change.
-   do not mention Claude Code, claude-skills, or tool-brand validation in commit or PR text unless the change itself is about those surfaces.
-9. Run `claude-skills workflow status` or `claude-skills workflow cockpit` when the team needs the current ledger state in one place.
-10. Run `claude-skills git-workflow preflight --base-ref origin/feat`.
+   do not mention Claude Code, keel, or tool-brand validation in commit or PR text unless the change itself is about those surfaces.
+9. Run `keel workflow status` or `keel workflow cockpit` when the team needs the current ledger state in one place.
+10. Run `keel git-workflow preflight --base-ref origin/feat`.
 11. Push the work branch and open one merge request into `feat`. Never delete the branch after pushing or merging.
 12. Once the feature is verified, promote `feat` into `dev` and verify on staging; after staging passes, promote `dev` into `main`. Repeat on a new work branch for the next feature.
 
@@ -133,18 +133,18 @@ Automation cannot prove semantic single-feature scope perfectly. Human review an
 
 ## Completion and Re-Audit Rules
 
-- **Honest-closeout gate** (`CLAUDE_SKILLS_STORY_CLOSEOUT_GATE`): if the workspace has an active sprint with open or blocked stories, the PostToolBatch gate injects a gap report naming each unfinished story. Do not present work as done while stories remain incomplete — loop back, finish them, or document the blocker honestly. Clear the gate by advancing stories (`claude-skills sprint advance --id <id> --state done`) until `claude-skills sprint review` reports COMPLETE.
+- **Honest-closeout gate** (`CLAUDE_SKILLS_STORY_CLOSEOUT_GATE`): if the workspace has an active sprint with open or blocked stories, the PostToolBatch gate injects a gap report naming each unfinished story. Do not present work as done while stories remain incomplete — loop back, finish them, or document the blocker honestly. Clear the gate by advancing stories (`keel sprint advance --id <id> --state done`) until `keel sprint review` reports COMPLETE.
 - Do not call a task done when the implementation is only partially complete.
 - For brownfield work, identify the preserved flow before implementation: target file or function, current behavior to preserve, entry point, producer, source of truth, storage or queue, side-effect owner, consumer, cleanup or recovery, edit boundary, and validation needed. If that ownership path is still unknown, keep reading or report the blocker instead of patching the first suspicious branch.
-- Existing source-file edits need preserve-existing-flow evidence in the global per-workspace flow-check artifact unless the task is docs-only, formatting-only, generated-only, or explicitly greenfield. Use `claude-skills flow start`, `claude-skills flow check`, and `claude-skills flow finish` to create and validate that artifact.
+- Existing source-file edits need preserve-existing-flow evidence in the global per-workspace flow-check artifact unless the task is docs-only, formatting-only, generated-only, or explicitly greenfield. Use `keel flow start`, `keel flow check`, and `keel flow finish` to create and validate that artifact.
 - Before closing any task, re-audit the finished change against the user story, PRD or spec when one exists, explicit task list, active plan items, tracked requirements, required lanes, and closure-ready proof.
 - Do not close the current job scope until it is 100% complete for that scope, not just partially green.
 - If the task is tracked in phases or priorities such as P0, P1, and P2, do not advance to the next layer until the current layer is fully complete and re-audited.
 - If the audit still shows an open task, active plan item, unresolved requirement, non-terminal required lane, or missing proof, the work is not finished.
 - Do not trust the first green rerun after a fix as closure by itself; rerun the narrow proving checks and re-audit the broader impacted system before handoff.
-- Use \`claude-skills workflow route\` when the request is broad and the right lane is not obvious yet; the route surface should explain why the recommended path fits the job before any stateful work begins.
-- Use \`claude-skills workflow cockpit\` for the live operator console with stage, active entries, blockers, and the next command, \`claude-skills workflow status\` and \`claude-skills workflow dashboard\` for the broader ledger state, and \`claude-skills workflow watch\` for ongoing lane health.
-- Use \`claude-skills workflow finish --id <entry-id> --proof "..."\` when the workstream is ready to close so the closure proof lands on the workflow ledger entry. Use \`claude-skills workflow resume --id <entry-id>\` to reopen a tracked workstream.
+- Use \`keel workflow route\` when the request is broad and the right lane is not obvious yet; the route surface should explain why the recommended path fits the job before any stateful work begins.
+- Use \`keel workflow cockpit\` for the live operator console with stage, active entries, blockers, and the next command, \`keel workflow status\` and \`keel workflow dashboard\` for the broader ledger state, and \`keel workflow watch\` for ongoing lane health.
+- Use \`keel workflow finish --id <entry-id> --proof "..."\` when the workstream is ready to close so the closure proof lands on the workflow ledger entry. Use \`keel workflow resume --id <entry-id>\` to reopen a tracked workstream.
 
 ## Spawned Agent Discipline
 
@@ -158,7 +158,7 @@ Automation cannot prove semantic single-feature scope perfectly. Human review an
 
 - Understand the request before building. Restate what the user actually asked, confirm the user story, and identify what is genuinely needed before writing code. Do not guess, do not assume, do not build against an imagined spec. The fact-research bullets below refresh *how* to build (syntax, releases, conventions); this bullet establishes *what* to build. Correct code that solved the wrong problem still gets thrown away, so confirm the target first. If the request is ambiguous in a way that changes what you build, ask before building.
 - Use `preserve-existing-flow` before changing any existing source file, established function, loop, handler, queue, state machine, transport path, firmware path, protocol flow, or source-of-truth ownership. New behavior should layer through the existing owner unless the user explicitly approves replacing that owner.
-- When the job is covered by a native `claude-skills` command, prefer the native executable or source-checkout command path instead of recreating the behavior through ad hoc generic tool calls.
+- When the job is covered by a native `keel` command, prefer the native executable or source-checkout command path instead of recreating the behavior through ad hoc generic tool calls.
 - Before writing non-trivial code, run a targeted research pass for the active language, framework, runtime, and harness so syntax, release changes, tooling behavior, and repository conventions are current instead of assumed from memory.
 - Verify the relevant language, framework, runtime, and tooling release notes, syntax changes, validation behavior, and repository harness conventions before coding.
 - Treat model memory as a starting point, not proof. Refresh the exact parts that affect the code being written.

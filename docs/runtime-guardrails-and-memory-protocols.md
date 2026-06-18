@@ -37,7 +37,7 @@ Use a scoped working buffer when context gets crowded:
 
 ## Project System Map
 
-- Resolve the scoped workspace first with `claude-skills memory scope resolve --create-missing`.
+- Resolve the scoped workspace first with `keel memory scope resolve --create-missing`.
 - Use the workspace-scoped reference lane as the global per-project home for `SYSTEM_MAP.md`; do not write that navigation file into the user workspace by default.
 - Read the scoped `SYSTEM_MAP.md` before broad repository exploration, and refresh it first when it is missing, stale, or contradicted by the current code.
 - Refresh the map one-shot from the most relevant entrypoint with trace-by-function or trace-by-flow instead of copying whole large files.
@@ -46,18 +46,18 @@ Use a scoped working buffer when context gets crowded:
 
 Treat compaction as a normal lifecycle event, not as a surprise failure:
 
-- The model should not wait to "notice" compaction from the chat transcript. On every non-trivial turn, run `claude-skills orchestration resume-status` first.
-- When the runtime tool surface, unified-exec health, or child-agent controls are uncertain, run `claude-skills orchestration runtime-preflight` first and follow its preferred tool routing before opening new long-running work.
+- The model should not wait to "notice" compaction from the chat transcript. On every non-trivial turn, run `keel orchestration resume-status` first.
+- When the runtime tool surface, unified-exec health, or child-agent controls are uncertain, run `keel orchestration runtime-preflight` first and follow its preferred tool routing before opening new long-running work.
 - If the runtime can provide continuity markers such as a runtime session id, conversation id, turn id, or visible-history digest, pass them to `resume-status` and `start-run`. Marker mismatches are the explicit signal that continuity broke.
 - If the runtime cannot provide continuity markers, do not bluff. Exact automatic-versus-manual compaction detection is unavailable, so the workflow must fall back to artifact-first recovery on every long-running turn.
-- Before manual compaction, and whenever automatic compaction risk is rising, run `claude-skills orchestration checkpoint` to persist a snapshot (open tasks, open workflows, working-brief count, and an optional `--note`) and report the current durable state. It composes the implemented surfaces below rather than owning a separate store, so the snapshot is an honest count of what is actually persisted:
+- Before manual compaction, and whenever automatic compaction risk is rising, run `keel orchestration checkpoint` to persist a snapshot (open tasks, open workflows, working-brief count, and an optional `--note`) and report the current durable state. It composes the implemented surfaces below rather than owning a separate store, so the snapshot is an honest count of what is actually persisted:
   - `SESSION-STATE.md` for durable corrections, decisions, names, and exact values
   - the scoped working-brief artifact (for example `working-brief.json` or `working-brief-<agent-instance>.json`) for the user story, acceptance criteria, and plan items
   - `working-buffer.md` for the latest in-flight breadcrumbs
   - `completion-gate.json` for the exact requirement status
   - the scoped execution-trace artifact (for example `execution-trace.json` or `execution-trace-<agent-instance>.json`) for the latest admitted route plan and execution evidence
 - After compaction, resets, or `resume-status` continuity warnings, reload those scoped files before resuming implementation.
-- Reacquire the exact code surface with `claude-skills code-search search` instead of replaying broad transcript history from memory.
+- Reacquire the exact code surface with `keel code-search search` instead of replaying broad transcript history from memory.
 - If the reloaded artifacts and current repo state still leave business intent ambiguous, stop and use `request_user_input` or ask the user directly before continuing.
 - Treat compaction recovery as complete only when the active task list, current requirement states, and next proving validation target are all reconstructed explicitly.
 
@@ -103,8 +103,8 @@ Make closure a checked state instead of a vibe:
 
 - For non-trivial tasks, record the explicit user requirements in the scoped completion ledger at:
   - `~/.claude/memories/workspaces/<workspace-slug>/workstreams/<workstream-key>/memory/completion-gate.json`
-- Use `claude-skills memory completion-gate record-requirement` as the workstream evolves so the ledger reflects the current status of each explicit ask.
-- Run `claude-skills memory completion-gate check` before the final answer and treat `closure_ready: true` as the required close signal for non-trivial tasks.
+- Use `keel memory completion-gate record-requirement` as the workstream evolves so the ledger reflects the current status of each explicit ask.
+- Run `keel memory completion-gate check` before the final answer and treat `closure_ready: true` as the required close signal for non-trivial tasks.
 - If the gate still shows `pending`, `in_progress`, or `blocked` items, loop again for fixable work or surface the real blocker honestly instead of soft-closing.
 
 ## Anti-Loop Rules
@@ -114,7 +114,7 @@ Avoid infinite or low-value retry loops:
 - Do not repeat the same failing tool call or plan shape more than twice without a new hypothesis.
 - If a retry is needed, change something concrete: inputs, scope, tool, search terms, or execution order.
 - If the same failure pattern repeats, write the mistake to rollout memory and pick a different approach.
-- The `claude-skills memory loop-guard record --signature <text>` helper records a failure signature in scoped workstream memory and increments its count; `loop-guard check --signature <text> --budget <n>` reports whether the retry budget is exhausted and exits non-zero (2) when it is, so a caller can branch on it. Use it to enforce the twice-and-change rule mechanically instead of by hand.
+- The `keel memory loop-guard record --signature <text>` helper records a failure signature in scoped workstream memory and increments its count; `loop-guard check --signature <text> --budget <n>` reports whether the retry budget is exhausted and exits non-zero (2) when it is, so a caller can branch on it. Use it to enforce the twice-and-change rule mechanically instead of by hand.
 - While sub-agents are running, the main agent should continue non-conflicting work instead of idling.
 
 ## Live Research Tool Selection
@@ -191,7 +191,7 @@ All repo-managed maintenance tooling should remain portable:
 
 Borrow the structure, not the transport:
 
-- Build Octave-style handoff packets with `claude-skills memory agent-packets build --objective <text> [--constraints a,b] [--files a,b] [--non-goals a,b] [--expected-output <text>]`, then `agent-packets show --id <id>` to reload one. The packets persist under scoped L3 reference memory so reused lanes do not need a full transcript replay, with no MCP dependency.
+- Build Octave-style handoff packets with `keel memory agent-packets build --objective <text> [--constraints a,b] [--files a,b] [--non-goals a,b] [--expected-output <text>]`, then `agent-packets show --id <id>` to reload one. The packets persist under scoped L3 reference memory so reused lanes do not need a full transcript replay, with no MCP dependency.
 - Use concise structured packets for sub-agent work: objective, constraints, current findings, relevant files, validation state, non-goals, and expected output.
 - Keep the main agent as the broker when feedback must pass between agents.
 - Do not depend on MCP-specific runtime features; implement the discipline directly in the skill pack.

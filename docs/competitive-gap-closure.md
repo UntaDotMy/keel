@@ -1,6 +1,6 @@
 <!--
-Purpose: Track the competitive-gap fixes for claude-core — what shipped in the gap-closing pass and what remains, named against the real comparators and aligned to official Claude Code docs.
-Caller: Contributors closing the gap between claude-core and peer Claude Code tooling (RTK, caveman, superpowers, ECC) and the native baseline.
+Purpose: Track the competitive-gap fixes for keel — what shipped in the gap-closing pass and what remains, named against the real comparators and aligned to official Claude Code docs.
+Caller: Contributors closing the gap between keel and peer Claude Code tooling (RTK, caveman, superpowers, ECC) and the native baseline.
 Dependencies: Rust runtime (utility/memory.rs, manager/install.rs, proxy adapters), plugin manifest, command files, statusline scripts.
 Main Functions: Record shipped fixes, the toolchain constraint, and the prioritized remaining work with concrete file targets.
 Side Effects: None — documentation only.
@@ -14,16 +14,16 @@ to the official Claude Code docs at code.claude.com as of the audit date.
 
 ## Comparators (verified identities)
 
-| Project | Identity | License | Overlap with claude-core |
+| Project | Identity | License | Overlap with keel |
 | --- | --- | --- | --- |
-| Official Claude Code | The host platform (code.claude.com/docs) | Anthropic | The baseline claude-core extends; ~30 hook events, skills (commands merged in), built-in subagents, checkpointing/rewind, MCP Tool Search, Agent SDK. |
-| RTK ("Rust Token Killer", `rtk-ai/rtk`) | Single-binary Rust command-output compaction proxy | Apache-2.0 | Near-identical to claude-core's compaction proxy; "100+ supported commands" (mostly subcommand breadth within categories we also cover — 8 git subcmds, 8 aws subcmds, etc.), `gain`/`discover`/`session`, tee recovery. Verified from the upstream README: **no auto-rewrite on native Windows** (falls back to CLAUDE.md injection) and **never intercepts Read/Grep/Glob** (Bash-tool-only hook). |
-| caveman (`JuliusBrussee/caveman`) | Skill that compresses the model's own replies (terse "caveman speak") | MIT | Token economy on the **output** side (claude-core only compacts command **output**); ships slash commands, statusline, MCP middleware. |
-| superpowers (`obra/superpowers`) | Opinionated TDD methodology as auto-triggering skills | MIT | Skills + workflow doctrine; `writing-skills` meta-skill with a subagent eval harness; two-stage review loop (walked back to inline self-review checklists in v5.0.6 for speed); visual brainstorming. v5.1.0 (May 2026) removed its legacy slash commands and named code-reviewer agent. Cross-harness (Claude/Codex/Cursor/Gemini/Copilot) — the one axis it still leads. After the methodology-completion pass, claude-core ships named first-class equivalents for **all 14** of its methodology skills (see scorecard). |
+| Official Claude Code | The host platform (code.claude.com/docs) | Anthropic | The baseline keel extends; ~30 hook events, skills (commands merged in), built-in subagents, checkpointing/rewind, MCP Tool Search, Agent SDK. |
+| RTK ("Rust Token Killer", `rtk-ai/rtk`) | Single-binary Rust command-output compaction proxy | Apache-2.0 | Near-identical to keel's compaction proxy; "100+ supported commands" (mostly subcommand breadth within categories we also cover — 8 git subcmds, 8 aws subcmds, etc.), `gain`/`discover`/`session`, tee recovery. Verified from the upstream README: **no auto-rewrite on native Windows** (falls back to CLAUDE.md injection) and **never intercepts Read/Grep/Glob** (Bash-tool-only hook). |
+| caveman (`JuliusBrussee/caveman`) | Skill that compresses the model's own replies (terse "caveman speak") | MIT | Token economy on the **output** side (keel only compacts command **output**); ships slash commands, statusline, MCP middleware. |
+| superpowers (`obra/superpowers`) | Opinionated TDD methodology as auto-triggering skills | MIT | Skills + workflow doctrine; `writing-skills` meta-skill with a subagent eval harness; two-stage review loop (walked back to inline self-review checklists in v5.0.6 for speed); visual brainstorming. v5.1.0 (May 2026) removed its legacy slash commands and named code-reviewer agent. Cross-harness (Claude/Codex/Cursor/Gemini/Copilot) — the one axis it still leads. After the methodology-completion pass, keel ships named first-class equivalents for **all 14** of its methodology skills (see scorecard). |
 | ECC ("Everything Claude Code", `affaan-m/ECC`) | Multi-harness operator framework | MIT | Whole operator posture at larger scale; **Instincts** (confidence-scored learned behaviors that evolve into skills), **AgentShield** (adversarial config security audit), advisor CLI, cross-harness adapters. |
-| UI/UX Pro Max (`nextlevelbuilder/ui-ux-pro-max-skill`) | Design-intelligence skill: a knowledge corpus + Python BM25 generator that turns a UI request into a design-system packet (style, palette, typography, anti-patterns, checklist) | MIT | Single-domain overlap with claude-core's **`design-intelligence` generator** + the `ui-design-systems-and-responsive-interfaces` skill. v2.5.0 **file-verified** corpus: 84 styles, 161 palettes, 73 font pairings, 99 UX rules, 161 reasoning rules/products, 25 charts, 1,923 Google-font table. After claude-core's **corpus-beat pass**, claude-core now leads on every comparable array: **170 archetypes, 90 styles, 230 palettes, 140 pairings, 37 charts, 112 UX guidelines** (plus 45 color moods / 30 typography moods / 15 stack profiles — 869 total cross-referenced entries). Both persist to `design-system/MASTER.md`. They are cross-harness (18 platforms); ours ships inside the single hook-wired Rust binary (no Python runtime). Accessibility is checklist guidance, not automated WCAG validation — same posture both sides. No command-output compaction, no review gate, no learning loop, no brownfield gate on their side. |
-| harness (`revfactory/harness`) | A single meta-skill "team-architecture factory": from a one-line domain prompt it generates a coordinated agent team plus the skills those agents use | Apache-2.0 | Niche overlap with claude-core's orchestration skills. Ships **1 skill + 6 reference docs, zero hooks, zero subagents, zero CLI**; depends entirely on Claude Code's experimental Agent Teams API (`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`). Six orchestration patterns (pipeline, fan-out/fan-in, expert pool, producer-reviewer, supervisor, hierarchical) + a Phase-0 audit / duplicate-review brownfield gate. Claude-Code-only, manual invocation. Closed by claude-core's `designing-agent-teams` skill (the same pattern catalog + contract discipline, without the experimental-API dependency). |
-| compound-engineering (`EveryInc/compound-engineering-plugin`) | "Compound engineering" plugin: front-load planning/review and codify each solved problem into a reusable knowledge base so future work is easier | MIT | Broadest methodology overlap. **38 skills + 43 subagents** (all markdown), installable to 10 harnesses via a TypeScript converter CLI; **zero hooks** (entirely manual/slash-driven). Signature is `ce-compound`: writes categorized, frontmatter-tagged solution docs to `docs/solutions/` and self-edits AGENTS.md/CLAUDE.md for discoverability. Has `ce-worktree`, multi-lens review fan-out, design + security reviewers. Closed by claude-core's `compounding-knowledge` skill (the same capture-and-wire-discoverability loop), which complements our automatic, hook-driven `learn` loop they lack. |
+| UI/UX Pro Max (`nextlevelbuilder/ui-ux-pro-max-skill`) | Design-intelligence skill: a knowledge corpus + Python BM25 generator that turns a UI request into a design-system packet (style, palette, typography, anti-patterns, checklist) | MIT | Single-domain overlap with keel's **`design-intelligence` generator** + the `ui-design-systems-and-responsive-interfaces` skill. v2.5.0 **file-verified** corpus: 84 styles, 161 palettes, 73 font pairings, 99 UX rules, 161 reasoning rules/products, 25 charts, 1,923 Google-font table. After keel's **corpus-beat pass**, keel now leads on every comparable array: **170 archetypes, 90 styles, 230 palettes, 140 pairings, 37 charts, 112 UX guidelines** (plus 45 color moods / 30 typography moods / 15 stack profiles — 869 total cross-referenced entries). Both persist to `design-system/MASTER.md`. They are cross-harness (18 platforms); ours ships inside the single hook-wired Rust binary (no Python runtime). Accessibility is checklist guidance, not automated WCAG validation — same posture both sides. No command-output compaction, no review gate, no learning loop, no brownfield gate on their side. |
+| harness (`revfactory/harness`) | A single meta-skill "team-architecture factory": from a one-line domain prompt it generates a coordinated agent team plus the skills those agents use | Apache-2.0 | Niche overlap with keel's orchestration skills. Ships **1 skill + 6 reference docs, zero hooks, zero subagents, zero CLI**; depends entirely on Claude Code's experimental Agent Teams API (`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`). Six orchestration patterns (pipeline, fan-out/fan-in, expert pool, producer-reviewer, supervisor, hierarchical) + a Phase-0 audit / duplicate-review brownfield gate. Claude-Code-only, manual invocation. Closed by keel's `designing-agent-teams` skill (the same pattern catalog + contract discipline, without the experimental-API dependency). |
+| compound-engineering (`EveryInc/compound-engineering-plugin`) | "Compound engineering" plugin: front-load planning/review and codify each solved problem into a reusable knowledge base so future work is easier | MIT | Broadest methodology overlap. **38 skills + 43 subagents** (all markdown), installable to 10 harnesses via a TypeScript converter CLI; **zero hooks** (entirely manual/slash-driven). Signature is `ce-compound`: writes categorized, frontmatter-tagged solution docs to `docs/solutions/` and self-edits AGENTS.md/CLAUDE.md for discoverability. Has `ce-worktree`, multi-lens review fan-out, design + security reviewers. Closed by keel's `compounding-knowledge` skill (the same capture-and-wire-discoverability loop), which complements our automatic, hook-driven `learn` loop they lack. |
 
 Note: published star counts for these repos (caveman/superpowers/ECC/RTK) were
 flagged as implausible/unverifiable during research and are deliberately not used
@@ -43,12 +43,12 @@ were validated where executable.
    `docs/runtime-guardrails-and-memory-protocols.md`,
    `docs/context-efficiency-playbook.md`.
 2. **Custom slash commands (discoverability gap vs. the whole field).** Added
-   `/claude-core:workflow`, `/claude-core:review`, `/claude-core:recall`,
-   `/claude-core:gain` at the plugin root `commands/`, registered via the
+   `/keel:workflow`, `/keel:review`, `/keel:recall`,
+   `/keel:gain` at the plugin root `commands/`, registered via the
    manifest `commands` key. Each wraps only implemented CLI surfaces with the
    verified flag names. Frontmatter validated.
 3. **Statusline savings badge (caveman/RTK-style ROI surface).**
-   `statusline/statusline-claude-core.sh` and `.ps1` render model + context + a
+   `statusline/statusline-keel.sh` and `.ps1` render model + context + a
    `gain`-sourced `saved N tok` badge, pinned to the real `tokensSaved` field,
    degrading gracefully (exit 0, badge omitted when unavailable). Opt-in via
    `settings.json`. Test matrix passed on both shells.
@@ -73,14 +73,14 @@ below was implemented and verified with `cargo build` + `cargo test --workspace`
 1. **Installer `sync_commands` arm.** `manager/install.rs` now mirrors
    `<repo>/commands/*.md` to `<claude_home>/commands/` (a new `commands_directory`
    helper in `runtime.rs`), tracked via `managed-files.txt` so the per-file orphan
-   sweep and uninstall reach them. The native `claude-skills install` ships the
+   sweep and uninstall reach them. The native `keel install` ships the
    slash commands, not just the plugin path. Covered by
    `install_copies_slash_commands_into_user_global_commands_directory`.
    A lifecycle audit of install/update/sync/remove-stale/remove-old/uninstall
    confirmed commands flow correctly through all stages and surfaced one gap:
    `verify` did not re-check the installed `commands/*.md` (nor the subagent
    `.claude/agents/*.md` definitions). Added `verify_installed_markdown_dir` so
-   `claude-skills verify` now byte-compares both against source — a drifted
+   `keel verify` now byte-compares both against source — a drifted
    command/subagent fails verify (proven end-to-end) instead of slipping through.
 2. **`MessageDisplay` hook row.** Added to `HOOK_EVENTS` in `hooks/claude.rs` with
    `installs_in_settings: false` (no matcher, fires on every assistant message,
@@ -96,7 +96,7 @@ below was implemented and verified with `cargo build` + `cargo test --workspace`
    - `memory|memoriesv2 research-cache|maintenance|agent-registry|agent-packets|loop-guard|entity|graph|retrieve|status`.
    The two command groups are isolated on disk (`<group>/<family>/`). `memory
    report` now aliases the family status summary, `memory index` rebuilds the
-   FTS5 recall index, and `memory hook` redirects to the real `claude-skills
+   FTS5 recall index, and `memory hook` redirects to the real `keel
    hook` lifecycle surface (it was never a memory concept).
 4. **Learning loop (ECC Instincts-style).** `memory|memoriesv2 instincts
    record|reinforce|penalize|list|promote` in `memory_families.rs`:
@@ -116,7 +116,7 @@ below was implemented and verified with `cargo build` + `cargo test --workspace`
    keep their existing `containers` adapter; `terraform` deliberately stays on the
    logs adapter. Registry routing is regression-tested.
 7. **Skill eval harness (superpowers-style).** New `utility/skill_lint.rs` +
-   `claude-skills skill-lint` command: validates that every `<name>/SKILL.md` has
+   `keel skill-lint` command: validates that every `<name>/SKILL.md` has
    the structural properties the matcher needs to *trigger* (non-empty
    `description`, `name` matching the directory, combined description+when_to_use
    within the 1536-char budget, scoped `allowed-tools` warning, no dangling
@@ -124,7 +124,7 @@ below was implemented and verified with `cargo build` + `cargo test --workspace`
    a skill would silently fail to trigger.
 8. **`memory report|index|hook` resolved.** `report` aliases the family status
    summary, `index` rebuilds the FTS5 recall index (one index, not two), and `hook`
-   redirects to the real `claude-skills hook` lifecycle surface instead of being a
+   redirects to the real `keel hook` lifecycle surface instead of being a
    dead stub.
 9. **Database compaction adapter (RTK parity).** New `adapters/database.rs` + a
    `CommandKind::Database` variant: `psql`/`mysql`/`mariadb`/`sqlite3`/`redis-cli`/
@@ -133,7 +133,7 @@ below was implemented and verified with `cargo build` + `cargo test --workspace`
    failure, connection-string/password redaction). Bulk-export tools
    (`pg_dump`/`mysqldump`) stay on the logs adapter. Registry routing is tested.
 10. **AgentShield-style config security audit.** New `utility/config_audit.rs` +
-    `claude-skills config-audit` command: audits claude-core's OWN config surface
+    `keel config-audit` command: audits keel's OWN config surface
     (hooks, settings/permissions, plugin manifest) for shell-metacharacter
     injection, network-fetching hooks, `bypassPermissions`, unscoped `Bash` allow
     rules, and committed secret literals in MCP env. Fails closed (exit 2) on any
@@ -151,7 +151,7 @@ below was implemented and verified with `cargo build` + `cargo test --workspace`
     undifferentiated pass so a polished implementation of the wrong spec cannot
     pass on code quality alone.
 13. **Git-backed code checkpoints (`/rewind` analog).** New `utility/checkpoint.rs`
-    + `claude-skills checkpoint create|list|show|restore`: snapshots tracked
+    + `keel checkpoint create|list|show|restore`: snapshots tracked
     working-tree changes via `git stash create` pinned under
     `refs/claude-checkpoints/<id>`, lists/shows them, and restores one. Restore is
     the only destructive verb — gated behind `--confirm` and an automatic
@@ -173,7 +173,7 @@ below was implemented and verified with `cargo build` + `cargo test --workspace`
       (>=2 instincts at confidence >=5 across >=2 sessions) into generated
       `SKILL.md` skills plus a paired subagent — deterministic Rust template, no
       inline LLM. Runs automatically on SessionEnd (no slash command);
-      `claude-skills learn [status|dry-run|run]` is the inspection/manual-trigger
+      `keel learn [status|dry-run|run]` is the inspection/manual-trigger
       surface.
     - **Provenance discipline** (the spine): every generated artifact is marked
       `generated`/`provenance=learned` with a content-hash sidecar. The loop never
@@ -183,7 +183,7 @@ below was implemented and verified with `cargo build` + `cargo test --workspace`
     - **Always-on instinct digest** (ECC's lightweight tier): SessionStart injects
       a compact digest of the current project's trusted instincts so learned
       conventions are in context without waiting for a skill match.
-    First time claude-core matches Hermes/ECC on automatic
+    First time keel matches Hermes/ECC on automatic
     skill-creation-from-behavior; superpowers does it as an offline batch, and
     Claude Code/caveman/RTK/ohmyclaude do not do it at all.
 
@@ -197,7 +197,7 @@ reconciled to describe these commands as implemented rather than planned.
 Capability-based, after the autonomous-learning pass. Y = present, ~ = partial,
 N = absent.
 
-| Capability | claude-core | Hermes | ECC | superpowers | RTK | caveman | ohmyclaude |
+| Capability | keel | Hermes | ECC | superpowers | RTK | caveman | ohmyclaude |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Observe behavior -> auto-create skills | Y (SessionEnd, deterministic) | Y (per-turn fork) | Y (hook+observer) | ~ (offline batch) | N | N | N |
 | Confidence-scored instincts w/ decay+prune | Y | ~ (usage counters) | Y | N | N | N | N |
@@ -248,7 +248,7 @@ N = absent.
   RTK has no auto-rewrite at all on native Windows (falls back to CLAUDE.md
   injection) and never touches Read/Grep/Glob — our PostToolUse telemetry +
   PreToolUse rewrite fire on every tool on every platform.
-- ~~Skill-prose polish~~ **(closed this pass).** `claude-skills learn synthesize`
+- ~~Skill-prose polish~~ **(closed this pass).** `keel learn synthesize`
   emits a precise, agent-actionable refinement brief for every template-state
   generated skill (carrying the observed conventions as the source of truth),
   and SessionStart now surfaces that brief autonomously (no manual slash) so the
@@ -262,7 +262,7 @@ N = absent.
   tree, the SessionStart hook, and the marketplace manifest) confirmed parity or
   a win on everything except the by-design cross-harness axis — **with three
   exceptions**: superpowers ships `test-driven-development`, `systematic-debugging`,
-  and `brainstorming` as *first-class, name-triggerable* skills, while claude-core
+  and `brainstorming` as *first-class, name-triggerable* skills, while keel
   carried the same doctrine only embedded inside `_shared/common-discipline.md`
   (Think-Before-Coding / Goal-Driven Execution). Embedded doctrine fires only when
   a broader skill is already loaded; a named skill activates by its own matcher.
@@ -278,16 +278,16 @@ N = absent.
     design and **captures it in the working brief** (so `reviewer` Stage 1 has a
     spec to check against), the generative front half of Think-Before-Coding.
   All three pass `skill-lint`, install + byte-compare-verify cleanly, and are
-  registered in the plugin manifest and the `using-claude-core` bootstrap catalog.
+  registered in the plugin manifest and the `using-keel` bootstrap catalog.
   Note superpowers authors skills by a *manual* TDD-for-prompts method;
-  claude-core's authoring is the autonomous learning loop — different mechanism,
+  keel's authoring is the autonomous learning loop — different mechanism,
   both now cover the methodology surface.
 
 - ~~Remaining superpowers methodology surface (the other 11 skills + the
   writing-skills eval harness)~~ **(closed this pass).** A full capability re-audit
   against `obra/superpowers` v5.1.0 (read all 14 SKILL.md frontmatters, the single
   SessionStart hook, the marketplace manifest, and the `writing-skills` eval method)
-  mapped every one of its skills to claude-core. The prior pass had closed the
+  mapped every one of its skills to keel. The prior pass had closed the
   methodology *trio*; this pass closed the rest, promoting diffuse doctrine and CLI
   surfaces into discrete name-triggerable skills and closing the one genuine
   mechanism gap. Eight new skills:
@@ -295,7 +295,7 @@ N = absent.
     skill *prose*: dispatch a fresh subagent the target situation *without* the skill
     under stacked pressure (time + sunk cost + authority), capture the wrong call and
     its rationalizations, write the minimum prose that flips it, re-test under
-    pressure until the subagent decides right and cites the skill. claude-core had
+    pressure until the subagent decides right and cites the skill. keel had
     only `skill-lint` (structural, explicitly "without invoking the live model") and
     the statistical `learn` loop — nothing tested whether prose changes behavior.
     Now shipped as a skill plus `references/10-testing-skills-with-subagents.md`,
@@ -318,10 +318,10 @@ N = absent.
   - `receiving-code-review` — the author-side counterpart to `reviewer`: judge each
     comment on merit, fix valid ones at root cause with evidence, push back on wrong
     ones with evidence, re-verify (superpowers separates requesting vs receiving;
-    `requesting-code-review` maps to our `reviewer` + `/claude-core:review`).
-  All eight pass `claude-skills skill-lint` (32 skills, 0 failed, 0 warned) and are
-  registered in the plugin manifest and the `using-claude-core` catalog. With this
-  pass, claude-core ships a named first-class equivalent for **all 14** superpowers
+    `requesting-code-review` maps to our `reviewer` + `/keel:review`).
+  All eight pass `keel skill-lint` (32 skills, 0 failed, 0 warned) and are
+  registered in the plugin manifest and the `using-keel` catalog. With this
+  pass, keel ships a named first-class equivalent for **all 14** superpowers
   methodology skills; the only remaining superpowers lead is the by-design
   cross-harness axis.
 
@@ -329,7 +329,7 @@ N = absent.
 
 The repo now ships 40 specialist/methodology skills in the manifest (manifest-driven;
 the binary discovers the count from `plugin.json`, so no hardcoded total drifts), plus
-the `using-claude-core` bootstrap (41 SKILL.md files
+the `using-keel` bootstrap (41 SKILL.md files
 total, all passing `skill-lint`: 41 skills, 0 failed, 0 warned). The methodology trio
 (`test-driven-development`, `systematic-debugging`, `brainstorming`) closed the first
 superpowers gap; the eight skills (`writing-skills`, `writing-plans`, `executing-plans`,
@@ -351,7 +351,7 @@ harness / compound-engineering / ECC audit:
   the red-team / blue-team / adjudicator pass (AgentShield's `--opus` three-agent loop)
   that chains static findings into concrete attacker scenarios and adjudicates each to
   confirmed/refuted/needs-proof with evidence, as the reasoning layer above our
-  deterministic `claude-skills config-audit` static scan.
+  deterministic `keel config-audit` static scan.
 
 The three newest specialists close the operational-domain-coverage gaps the
 roster audit found (observability, supply-chain action, analytical/ML data flow):
@@ -382,7 +382,7 @@ A further three specialists close the last roster-audit domain gaps
   extraction, ICU MessageFormat and plurals, locale-aware formatting, RTL/bidi,
   translation workflows and fallback chains, and Unicode correctness.
 
-`using-claude-core` catalog header (40 skills) and entries updated to match.
+`using-keel` catalog header (40 skills) and entries updated to match.
 
 - ~~UI/UX Pro Max corpus was smaller than theirs~~ **(closed and surpassed this
   pass).** A re-audit with **file-verified** counts (parsing their actual CSVs, not
@@ -400,7 +400,7 @@ A further three specialists close the last roster-audit domain gaps
   catalog; an end-to-end run confirms new entries surface correctly (e.g. a pet-care
   request routes to the new `veterinary-clinic` archetype with the Calm Sage palette at
   15.41:1 contrast and a Quicksand + Nunito Sans pairing). The 869-entry / ~726 KB
-  catalog ships on install and the generator runs against the installed copy. claude-core
+  catalog ships on install and the generator runs against the installed copy. keel
   now exceeds UI/UX Pro Max on corpus volume **and** still leads on architecture
   (single hook-wired binary, no Python runtime), brownfield + WCAG + review-gate
   discipline, and the automatic learning loop.
@@ -408,7 +408,7 @@ A further three specialists close the last roster-audit domain gaps
 - ~~UI/UX Pro Max design-intelligence generator was a stub~~ **(closed this
   pass).** An audit against `nextlevelbuilder/ui-ux-pro-max-skill` (whose headline
   is a knowledge-corpus design generator) exposed a real doc/impl drift on **our**
-  side: `claude-skills design-intelligence recommend` was a three-line stub that
+  side: `keel design-intelligence recommend` was a three-line stub that
   ignored the request, the 47-entry `design_intelligence_catalog.json`, and every
   flag the SKILL.md and reference doc documented (`--stack`, `--component-library`,
   `--format`, `--persist`). The skill *promised* a catalog-driven generator that
@@ -477,23 +477,23 @@ tests:
   that still holds a user-authored hook. Regressions:
   `install_then_uninstall_leaves_no_managed_hook_keys`,
   `uninstall_preserves_user_authored_hook_on_shared_event`.
-- **Stop hook "JSON validation failed"** (diagnosed, not a claude-core defect).
+- **Stop hook "JSON validation failed"** (diagnosed, not a keel defect).
   Transcript evidence shows the failing Stop hook is the `/goal`
   prompt-based session hook (its `command` field is the goal text), exiting 1
-  with `stderr: "JSON validation failed"`. claude-core's own Stop hook
+  with `stderr: "JSON validation failed"`. keel's own Stop hook
   ("Closing native session state") succeeds in 38 ms with empty stdout. The
   `/goal` evaluator routes through the user's model proxy (`ANTHROPIC_BASE_URL=
   http://localhost:8989`, every model slot mapped to `claude-opus-4-8[1M]`),
   which is not returning the structured yes/no JSON `/goal` requires. The fix is
   environmental (point `/goal` at a model that honors the structured-output
-  contract, or set its evaluator model), not a code change in claude-core — our
+  contract, or set its evaluator model), not a code change in keel — our
   hooks already use exec form (`args` array), which is the documented immunity to
   the Windows shell-profile JSON-corruption failure mode.
 
 ## Remaining work (deliberately out of scope)
 
 - **Cross-harness adapters.** Every comparator ships Codex/Cursor/Gemini/Copilot
-  adapters; claude-core stays Claude-Code-native by design (see the strategic note
+  adapters; keel stays Claude-Code-native by design (see the strategic note
   below). Not a defect — a product stance.
 - **Mobile / niche command adapters.** Mobile toolchains (xcodebuild beyond the
   generic build path, gradle device flows) and other niche CLIs still fall through
@@ -503,7 +503,7 @@ tests:
 ## Native-parity note (`/rewind`)
 
 Native Claude Code `/rewind` auto-captures the edit tool's changes and can restore
-code *and* conversation. `claude-skills checkpoint` is the code half: a git-backed
+code *and* conversation. `keel checkpoint` is the code half: a git-backed
 working-tree snapshot/restore that an external binary can actually own. It does
 not capture conversation state (only Claude Code itself can), so the two are
 complementary rather than identical — use `/rewind` for conversation+code inside a
@@ -513,7 +513,7 @@ across sessions and tools.
 ## Strategic open question
 
 Every comparator (RTK, caveman, superpowers, ECC) ships cross-harness adapters
-(Codex/Cursor/Gemini/Copilot). claude-core is Claude-Code-only. Whether to go
+(Codex/Cursor/Gemini/Copilot). keel is Claude-Code-only. Whether to go
 multi-harness or keep a deliberately Claude-native stance is a product decision,
 not a defect — recorded here so it is chosen, not drifted into.
 
@@ -529,7 +529,7 @@ the project's actual README/docs, not marketing copy.
 
 ### New comparators (star counts via GitHub API, 2026-06-17)
 
-| Project | Stars | Category | Overlap with claude-core |
+| Project | Stars | Category | Overlap with keel |
 | --- | --- | --- | --- |
 | `obra/superpowers` | ~230k* | skills framework | Already in the table above. *The API returned 229,888 — **above** `anthropics/claude-code` itself (132,832), which is implausible for a skills plugin. Reported as-returned and flagged; do not quote externally without a manual sanity-check. Confirms the standing "stars are not a trustworthy signal" stance. |
 | `github/spec-kit` | ~113k | spec-driven dev | Spec-as-source-of-truth pipeline (constitution→specify→plan→tasks→implement), agent-agnostic across 30+ agents. Strong gate *taxonomy* (Phase-1 Simplicity/Anti-Abstraction/Integration-First) but every gate is model-self-attested in-prompt; `[P]` parallel markers are annotations, not an executor. No worktree isolation, no recall index. |
@@ -538,12 +538,12 @@ the project's actual README/docs, not marketing copy.
 | `eyaltoledano/claude-task-master` | ~28k | task manager | Dependency-aware PRD→task decomposition over an MCP surface; broad editor/provider reach. **No review/quality gates documented at all**, no worktree isolation, memory is task-state only (no recall). |
 | `automazeio/ccpm` | ~8k | PM workflow (GH Issues) | Closest parallel-dispatch peer: per-epic git worktrees + `conflicts_with`/`depends_on`/`parallel` task metadata. But the merge is LLM-narrated ("agents commit and coordinate via Git"), not a coded fail-closed coordinator; memory is flat markdown + grep-style bash scripts. |
 
-### Where claude-core leads across *all* of them (post-#123)
+### Where keel leads across *all* of them (post-#123)
 
 The decisive axis is **enforcement mechanism**. Every project above enforces
 quality by instructing the model in markdown and trusting compliance (superpowers'
 "mandatory" workflows, spec-kit's Phase-1 gates, BMAD's TEA, ccpm's "No Vibe
-Coding"). claude-core is the only one that puts gates in **compiled Rust the model
+Coding"). keel is the only one that puts gates in **compiled Rust the model
 cannot talk past**. Four differentiators hold against every comparator:
 
 1. **Fail-closed git-worktree merge coordinator** (`utility/dispatch.rs`
@@ -565,10 +565,10 @@ cannot talk past**. Four differentiators hold against every comparator:
    they treat the harness as trusted and don't measure their own token effect.
 4. **Executable requirement-format gate** (`user_story.rs` Connextra+Gherkin+INVEST
    lint + the fail-closed `sprint review`). spec-kit and BMAD have richer gate
-   *prose*; only claude-core validates the spec format in code and refuses closeout
+   *prose*; only keel validates the spec format in code and refuses closeout
    on an incomplete sprint.
 
-### Where claude-core loses (honest)
+### Where keel loses (honest)
 
 - **Semantic memory** — claude-flow's HNSW vector store + knowledge graphs beat our
   lexical FTS5 + trigram-fuzzy cascade for meaning-based recall. Mitigations: their
@@ -605,7 +605,7 @@ introduced — ironic, since finding #4 was itself a doc-parity test:
 All fixes verified: `cargo fmt`/`clippy -D warnings`/`build` clean, doc-parity
 suite green (7 tests, 2 new).
 
-## What claude-core keeps (the moat)
+## What keel keeps (the moat)
 
 Fail-closed closeout discipline (reviewer gate, completion-gate ledger, release
 ladder), the preserve-existing-flow brownfield gate (no comparator has this), and
@@ -615,46 +615,46 @@ are shallower than a single-purpose peer.
 
 ## Decided non-goals (chosen, not drifted)
 
-The audit flagged several capabilities competitors have that claude-core does
+The audit flagged several capabilities competitors have that keel does
 not. After review these are **deliberate scope boundaries**, not defects — they
 conflict with the "single Rust binary, Claude-Code-native, discipline-over-volume"
 positioning. Recorded here so each is a chosen tradeoff:
 
 - **Product-management domain skills (B1).** Product-management skills (roadmaps,
   PRDs, stakeholder alignment, prioritization frameworks) belong to a different
-  tool category. claude-core is engineering-delivery rails, not a product-management
+  tool category. keel is engineering-delivery rails, not a product-management
   platform. Building PM skills would dilute the engineering focus and expand the
   surface beyond the single-binary discipline stance. **Not pursued.**
 - **Autonomous board-to-PR agent (B2).** Full-autonomy agents that take a ticket
   from a project board and drive it to a merged PR without human checkpoints
-  contradict the "human-in-the-loop at every decision point" discipline. claude-core
+  contradict the "human-in-the-loop at every decision point" discipline. keel
   ships orchestration *patterns* (`designing-agent-teams`, `dispatching-parallel-agents`,
   `subagent-driven-development`) over Claude Code's native subagents/agent-teams/
   background-agents, with explicit human review gates at closeout. Autonomous
   board-to-PR would bypass those gates. **Not pursued.**
-- **Multi-agent swarm runtime** (topologies/consensus, à la claude-flow). claude-core
+- **Multi-agent swarm runtime** (topologies/consensus, à la claude-flow). keel
   ships orchestration *patterns* (`designing-agent-teams`, `dispatching-parallel-agents`,
   `subagent-driven-development`) over Claude Code's native subagents/agent-teams/
   background-agents, not a separate swarm engine with consensus. A swarm runtime is
   outside Claude Code's native execution model and would contradict the single-binary
   stance. **Not pursued.**
 - **Recency social research (B3).** Real-time social-media trend research and
-  engagement signals are outside the engineering-delivery scope. claude-core's
+  engagement signals are outside the engineering-delivery scope. keel's
   memory surfaces (`compounding-knowledge`, `instincts`, `working-briefs`) capture
   durable project knowledge, not ephemeral social signals. Niche capability with
   no clear integration into the delivery workflow. **Not pursued.**
 - **Benchmark game harness (B4).** Public benchmark leaderboards and competitive
   scoring against other AI coding tools are marketing artifacts, not engineering
-  value. claude-core's head-to-head scorecard (`docs/competitive-gap-closure.md`)
+  value. keel's head-to-head scorecard (`docs/competitive-gap-closure.md`)
   is capability-based and honest about gaps, not a gamified leaderboard. The
   discipline-over-volume stance means we don't optimize for benchmark scores
   that diverge from real delivery value. **Not pursued.**
 - **Exhaustive per-language / niche-vertical library breadth** (191-agent megalibraries
-  like wshobson). claude-core is curated-not-exhaustive by design: ~40 skills covering
+  like wshobson). keel is curated-not-exhaustive by design: ~40 skills covering
   delivery domains and methodology, not one-agent-per-language. The matcher quality and
   discipline contract degrade with volume. **Not pursued; curation is the product.**
 - **Passive automatic learning from corrections.** Native Claude Code now ships Auto
-  memory for this; claude-core's `compounding-knowledge` + `instincts` path is the
+  memory for this; keel's `compounding-knowledge` + `instincts` path is the
   deliberate, human-readable complement (see the native-Auto-memory note in CLAUDE.md and
   the bootstrap skill). We lean on native Auto memory rather than reinvent passive learning.
   **Complemented, not duplicated.**
