@@ -3,14 +3,14 @@
     "id": "memory-benchmark-gap-semantic-recall",
     "severity": "medium",
     "surface": "memory",
-    "finding": "claude_skills has deterministic scoped recall but still lacks the semantic recall layer that the memory-product comparator class ships through vector-backed retrieval.",
+    "finding": "keel has deterministic scoped recall but still lacks the semantic recall layer that the memory-product comparator class ships through vector-backed retrieval.",
     "comparator": "memory-product comparator"
   },
   {
     "id": "memory-benchmark-gap-public-benchmark-runner",
     "severity": "medium",
     "surface": "memory",
-    "finding": "claude_skills now ships a source-backed benchmark bundle, but memory-product comparator still exposes the more memory-specific public benchmark runner and hook-driven runtime posture.",
+    "finding": "keel now ships a source-backed benchmark bundle, but memory-product comparator still exposes the more memory-specific public benchmark runner and hook-driven runtime posture.",
     "comparator": "memory-product comparator"
   }
 ]

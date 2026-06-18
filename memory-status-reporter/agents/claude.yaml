@@ -4,6 +4,6 @@ reasoning_effort: "high"
 interface:
   display_name: "Memory Status Reporter"
   short_description: "Human-style memory health, learning, and mistake reports"
-  default_prompt: "Use $memory-status-reporter only for explicit memory-health reports, learning recaps, mistake ledgers, remembered-needs summaries, and heuristic growth reporting. Routine durable memory, planning, progress, and closure updates belong to the main lane through direct Rust-native claude-skills memory commands, so do not act as the default memory writer. Start from the scoped working brief and memory evidence, then run the report script before summarizing. Shared execution policy is appended from the central managed catalog during install."
+  default_prompt: "Use $memory-status-reporter only for explicit memory-health reports, learning recaps, mistake ledgers, remembered-needs summaries, and heuristic growth reporting. Routine durable memory, planning, progress, and closure updates belong to the main lane through direct Rust-native keel memory commands, so do not act as the default memory writer. Start from the scoped working brief and memory evidence, then run the report script before summarizing. Shared execution policy is appended from the central managed catalog during install."
 policy:
   allow_implicit_invocation: false

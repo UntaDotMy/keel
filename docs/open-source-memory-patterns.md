@@ -1,6 +1,6 @@
 # Open-Source Memory Patterns Applied Here
 
-This note records the live design patterns that informed the current `claude_skills` memory layout so future edits do not drift back to a flat replay-everything model.
+This note records the live design patterns that informed the current `keel` memory layout so future edits do not drift back to a flat replay-everything model.
 
 ## Source Patterns
 

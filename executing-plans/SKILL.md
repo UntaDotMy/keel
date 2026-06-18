@@ -50,7 +50,7 @@ For each step, in plan order:
 ### 4. Record progress, then advance
 
 - Update the working brief / ledger so the completed step survives compaction
-  (`claude-skills memory working-brief write`, or the workflow ledger if one is
+  (`keel memory working-brief write`, or the workflow ledger if one is
   open). Then move to the next step.
 
 ## When A Step Fails Its Check
@@ -78,7 +78,7 @@ For each step, in plan order:
 When the last step's check passes:
 
 - Run the full relevant suite, not just the last step's check.
-- Run `claude-skills memory completion-gate check` to reconcile the result against
+- Run `keel memory completion-gate check` to reconcile the result against
   the plan's success criteria — it points at any requirement with no evidence yet.
 - Route a non-trivial result through `reviewer`, then `finishing-a-development-branch`
   for the merge/PR closeout.
@@ -96,7 +96,7 @@ When the last step's check passes:
 
 ## Validation
 
-Methodology skill; calls into `claude-skills memory` for progress and the
+Methodology skill; calls into `keel memory` for progress and the
 completion gate. Self-check before claiming the plan complete: did every step pass
 its own verification check in order, does the full suite pass, and does the
 completion gate reconcile against the plan's success criteria? If any step was

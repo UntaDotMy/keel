@@ -1,8 +1,8 @@
 ---
 name: adversarial-security-review
-description: Stress-test code and configuration from an attacker's perspective using a structured red-team / blue-team / adjudicator pass, beyond a checklist scan. Use when a change touches auth, secrets, input handling, agent/hook config, permissions, or anything an attacker would target — first think like the attacker (enumerate concrete exploit paths), then like the defender (existing mitigations), then adjudicate each claimed finding to a confirmed/refuted verdict with evidence so false positives do not drown the real risk. Use when the user says "security review", "threat model this", "can this be exploited", or before shipping security-sensitive code. Complements claude-skills config-audit (the deterministic static scan) and security-and-compliance-auditor (the standards/compliance lens).
+description: Stress-test code and configuration from an attacker's perspective using a structured red-team / blue-team / adjudicator pass, beyond a checklist scan. Use when a change touches auth, secrets, input handling, agent/hook config, permissions, or anything an attacker would target — first think like the attacker (enumerate concrete exploit paths), then like the defender (existing mitigations), then adjudicate each claimed finding to a confirmed/refuted verdict with evidence so false positives do not drown the real risk. Use when the user says "security review", "threat model this", "can this be exploited", or before shipping security-sensitive code. Complements keel config-audit (the deterministic static scan) and security-and-compliance-auditor (the standards/compliance lens).
 when_to_use: Security-sensitive changes — auth, secrets, input validation, agent/hook/MCP config, permissions, data handling. Run the red-team/blue-team/adjudicator loop to confirm exploitability with evidence. Complements config-audit (static scan) and security-and-compliance-auditor (compliance).
-allowed-tools: Read, Grep, Glob, Bash(claude-skills config-audit:*)
+allowed-tools: Read, Grep, Glob, Bash(keel config-audit:*)
 context: fork
 agent: general-purpose
 model: opus
@@ -20,7 +20,7 @@ because no one thought like an attacker, and burning trust on a flood of
 theoretical "findings" that are not actually reachable. This skill runs a
 structured three-role pass — red team, blue team, adjudicator — so the output is a
 short list of *confirmed* risks with evidence, not a wall of maybes. It complements
-`claude-skills config-audit` (deterministic static scan of claude-core's own config)
+`keel config-audit` (deterministic static scan of keel's own config)
 and `security-and-compliance-auditor` (the standards/compliance lens).
 
 ## Code Implementation Discipline
@@ -85,7 +85,7 @@ review trustworthy instead of a false-positive flood.
 
 ## Pair With The Deterministic Scan
 
-Run `claude-skills config-audit` first when the change touches claude-core's own
+Run `keel config-audit` first when the change touches keel's own
 hook/settings/manifest surface — it deterministically flags the mechanical issues
 (shell-metacharacter injection, network hooks, `bypassPermissions`, unscoped Bash,
 committed secret literals) and fails closed on high findings. This skill is the
@@ -117,7 +117,7 @@ the relevant role to confirm the path is now closed:
 
 ## Validation
 
-Methodology skill; pairs with `claude-skills config-audit`. Self-check before
+Methodology skill; pairs with `keel config-audit`. Self-check before
 claiming a security review done: did you enumerate concrete attacker scenarios (red),
 map the actual mitigations with file:line (blue), and adjudicate each to
 confirmed/refuted/needs-proof with evidence — and does every Confirmed finding name

@@ -1,6 +1,6 @@
 # Release Proof Bundle
 
-Each notable `claude_skills` release should publish a durable release-proof bundle alongside the native platform archives.
+Each notable `keel` release should publish a durable release-proof bundle alongside the native platform archives.
 
 The bundle exists to keep release trust claims source-backed. It gives operators, reviewers, and AI agents one artifact that explains what proof was run, what review posture applied, what hosted release workflow completed, and what benchmark snapshot was current when the release was published.
 
@@ -16,7 +16,7 @@ Every release-proof bundle should include these files:
 
 ## Published asset shape
 
-The release workflow should upload one proof archive named `claude-skills_release-proof_<build_version>.tar.gz`.
+The release workflow should upload one proof archive named `keel_release-proof_<build_version>.tar.gz`.
 
 That proof archive is intentionally plain markdown plus JSON so a human operator or an AI agent can inspect it directly after download without needing the source checkout.
 

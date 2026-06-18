@@ -14,6 +14,6 @@
   - [README.md](../../../README.md)
   - [docs/benchmark-suite.md](../../benchmark-suite.md)
   - [docs/shared-benchmark-harness.md](../../shared-benchmark-harness.md)
-  - [rust/crates/claude-skills/src/commands.rs](../../../rust/crates/claude-skills/src/commands.rs)
+  - [rust/crates/keel/src/commands.rs](../../../rust/crates/keel/src/commands.rs)
   - [Cargo.toml](../../../Cargo.toml)
   - [todo.md](../../../todo.md)

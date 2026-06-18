@@ -30,7 +30,7 @@ A short working brief with these sections:
 
 - Never edit code in this subagent — only investigate and report.
 - Treat the first suspicious line as an entry point, not the root cause.
-- Run `claude-skills flow start/check` to record the brief in the global flow-check artifact.
+- Run `keel flow start/check` to record the brief in the global flow-check artifact.
 - If the user said "do not change anything", stay strictly read-only.
 
 Load the full skill at `~/.claude/skills/preserve-existing-flow/SKILL.md` for the complete checklist. Return your brief under 500 words.

@@ -1,6 +1,6 @@
 <!--
 Purpose: Keep the native implementation gap comparison useful without hardcoding third-party project names.
-Caller: Contributors and agents comparing native claude-skills surfaces against external output reducers, runtime shells, and memory systems.
+Caller: Contributors and agents comparing native keel surfaces against external output reducers, runtime shells, and memory systems.
 Dependencies: None; documentation only.
 Main Functions: Document output compaction, runtime-shell, and memory/retrieval gap tables plus current native priorities.
 Side Effects: None.

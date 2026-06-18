@@ -6,8 +6,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "claude-skills hook pre-tool-use",
-            "statusMessage": "Transparently rewriting noisy commands via claude-skills run"
+            "command": "keel hook pre-tool-use",
+            "statusMessage": "Transparently rewriting noisy commands via keel run"
           }
         ]
       }
@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "claude-skills hook user-prompt-submit",
+            "command": "keel hook user-prompt-submit",
             "statusMessage": "Routing prompt to the right skill"
           }
         ]
@@ -30,7 +30,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "claude-skills hook post-tool-use",
+            "command": "keel hook post-tool-use",
             "statusMessage": "Recording post-tool lifecycle",
             "async": true
           }
@@ -43,7 +43,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "claude-skills hook post-tool-use-failure",
+            "command": "keel hook post-tool-use-failure",
             "statusMessage": "Recording tool failure for routing and recovery",
             "async": true
           }
@@ -56,7 +56,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "claude-skills hook post-tool-batch",
+            "command": "keel hook post-tool-batch",
             "statusMessage": "Injecting reviewer-on-close reminder"
           }
         ]
@@ -68,7 +68,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "claude-skills hook task-created",
+            "command": "keel hook task-created",
             "statusMessage": "Task lifecycle hook (reserved; dispatch is currently a no-op)"
           }
         ]
@@ -80,7 +80,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "claude-skills hook task-completed",
+            "command": "keel hook task-completed",
             "statusMessage": "Task lifecycle hook (reserved; dispatch is currently a no-op)"
           }
         ]
@@ -92,7 +92,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "claude-skills hook teammate-idle",
+            "command": "keel hook teammate-idle",
             "statusMessage": "Teammate-idle hook (reserved; dispatch is currently a no-op)"
           }
         ]
@@ -104,7 +104,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "claude-skills hook worktree-create",
+            "command": "keel hook worktree-create",
             "statusMessage": "Worktree lifecycle hook (reserved; dispatch is currently a no-op)"
           }
         ]
@@ -116,7 +116,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "claude-skills hook worktree-remove",
+            "command": "keel hook worktree-remove",
             "statusMessage": "Worktree lifecycle hook (reserved; dispatch is currently a no-op)"
           }
         ]
@@ -128,7 +128,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "claude-skills hook cwd-changed",
+            "command": "keel hook cwd-changed",
             "statusMessage": "Refreshing system map for new working directory"
           }
         ]
@@ -140,8 +140,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "claude-skills hook permission-request",
-            "statusMessage": "Auto-approving claude-skills commands"
+            "command": "keel hook permission-request",
+            "statusMessage": "Auto-approving keel commands"
           }
         ]
       }
@@ -152,7 +152,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "claude-skills hook notification",
+            "command": "keel hook notification",
             "statusMessage": "Emitting terminal bell on notification"
           }
         ]
@@ -164,7 +164,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "claude-skills hook subagent-stop",
+            "command": "keel hook subagent-stop",
             "statusMessage": "Closing subagent lifecycle"
           }
         ]
@@ -176,7 +176,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "claude-skills hook pre-compact",
+            "command": "keel hook pre-compact",
             "statusMessage": "Checkpointing before compaction"
           }
         ]
@@ -188,7 +188,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "claude-skills hook post-compact",
+            "command": "keel hook post-compact",
             "statusMessage": "Resuming after compaction"
           }
         ]
@@ -200,7 +200,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "claude-skills hook session-start",
+            "command": "keel hook session-start",
             "statusMessage": "Preparing native session state"
           }
         ]
@@ -212,7 +212,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "claude-skills hook session-end",
+            "command": "keel hook session-end",
             "statusMessage": "Recording session end"
           }
         ]
@@ -224,7 +224,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "claude-skills hook stop",
+            "command": "keel hook stop",
             "statusMessage": "Injecting closeout context"
           }
         ]
@@ -236,7 +236,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "claude-skills hook stop-failure",
+            "command": "keel hook stop-failure",
             "statusMessage": "Stop-failure hook (reserved; dispatch is currently a no-op)"
           }
         ]
@@ -248,7 +248,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "claude-skills hook setup",
+            "command": "keel hook setup",
             "statusMessage": "Setup hook (reserved; dispatch is currently a no-op)"
           }
         ]
@@ -260,7 +260,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "claude-skills hook user-prompt-expansion",
+            "command": "keel hook user-prompt-expansion",
             "statusMessage": "Prompt-expansion hook (reserved)"
           }
         ]
@@ -272,7 +272,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "claude-skills hook permission-denied",
+            "command": "keel hook permission-denied",
             "statusMessage": "Signaling retry on transient permission denial"
           }
         ]
@@ -284,7 +284,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "claude-skills hook subagent-start",
+            "command": "keel hook subagent-start",
             "statusMessage": "Injecting iron law context into spawned subagent"
           }
         ]
@@ -296,7 +296,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "claude-skills hook instructions-loaded",
+            "command": "keel hook instructions-loaded",
             "statusMessage": "Instructions-loaded hook (reserved; dispatch is currently a no-op)"
           }
         ]
@@ -308,7 +308,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "claude-skills hook config-change",
+            "command": "keel hook config-change",
             "statusMessage": "Config-change hook (reserved; dispatch is currently a no-op)"
           }
         ]
@@ -320,7 +320,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "claude-skills hook elicitation",
+            "command": "keel hook elicitation",
             "statusMessage": "Elicitation-prompt hook (reserved; dispatch is currently a no-op)"
           }
         ]
@@ -332,7 +332,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "claude-skills hook elicitation-result",
+            "command": "keel hook elicitation-result",
             "statusMessage": "Elicitation-result hook (reserved; dispatch is currently a no-op)"
           }
         ]

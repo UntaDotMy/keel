@@ -94,7 +94,7 @@ downstream symptoms").
 
 ## Validation
 
-Methodology skill; no `claude-skills` subcommand. Self-check before claiming a
+Methodology skill; no `keel` subcommand. Self-check before claiming a
 defect fixed: can you reproduce the original symptom, name the cause with
 `file:line`, point at the source-of-truth change, and show a regression test that
 fails without the fix? If any of those is missing, the bug is diagnosed at best,

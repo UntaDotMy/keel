@@ -1,7 +1,7 @@
 <!--
 Purpose: Document the native preserve-existing-flow evidence artifact schema.
 Caller: Agents, reviewers, and native review gates that need machine-checkable brownfield evidence.
-Dependencies: claude-skills-flow schema validation and claude-skills flow commands.
+Dependencies: keel-flow schema validation and keel flow commands.
 Main Functions: Defines ~/.claude/memories/workspaces/<workspace-slug>/flow/flow-check.json fields, exemptions, and validation rules.
 Side Effects: None.
 -->
@@ -10,7 +10,7 @@ Side Effects: None.
 Existing source-file edits need a flow-check artifact before review gates pass. The default path is `~/.claude/memories/workspaces/<workspace-slug>/flow/flow-check.json`, created with:
 
 ```bash
-claude-skills flow start --target-file rust/crates/claude-skills/src/commands.rs --target-function Application::run
+keel flow start --target-file rust/crates/keel/src/commands.rs --target-function Application::run
 ```
 
 The default artifact lives in Claude Code-global per-workspace storage, not in the repository checkout. CI review gates should read that same global path or an explicit `--artifact <path>` override; do not commit the default runtime artifact into the user workspace. It records the evidence that must exist before editing established code.
@@ -21,7 +21,7 @@ The default artifact lives in Claude Code-global per-workspace storage, not in t
 {
   "version": 1,
   "task": "short task label",
-  "target_file": "rust/crates/claude-skills/src/commands.rs",
+  "target_file": "rust/crates/keel/src/commands.rs",
   "target_function": "runExample",
   "current_behavior_to_preserve": "What currently works and must stay working.",
   "entry_point": "Where the input, command, event, request, or timer enters.",
@@ -45,7 +45,7 @@ The default artifact lives in Claude Code-global per-workspace storage, not in t
 
 ## Validation Rules
 
-`claude-skills flow check` and native review gates require `version`, `target_file`, the owner path fields, at least one consumer, at least one validation target, and at least one validation evidence item for existing-source edits.
+`keel flow check` and native review gates require `version`, `target_file`, the owner path fields, at least one consumer, at least one validation target, and at least one validation evidence item for existing-source edits.
 
 Docs-only, formatting-only, generated-only, and greenfield changes are explicit exemptions. Review gates do not require a flow check when all changed source files are newly added, and they do not require it for docs-only changes.
 

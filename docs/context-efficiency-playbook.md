@@ -39,7 +39,7 @@ Use the cheapest useful retrieval layer first:
 5. **Hybrid retrieval for large corpora**
 6. **Compression before generation**
 
-Use `claude-skills code-search search` at the top of the ladder when the question is about the current repository. It provides a native, workspace-scoped search index so the agent can find likely files, snippets, and symbol-adjacent hits before spending tokens on broad file reads.
+Use `keel code-search search` at the top of the ladder when the question is about the current repository. It provides a native, workspace-scoped search index so the agent can find likely files, snippets, and symbol-adjacent hits before spending tokens on broad file reads.
 
 ## Techniques That Save Tokens
 
@@ -138,9 +138,9 @@ When context is long:
 - carry forward decisions, not raw transcript dumps
 - use compact memory snapshots in final answers when the user wants learning visibility
 
-For long-running production work, summarize before compaction instead of after it: checkpoint the working brief, working buffer, completion gate, and execution trace while the intent is still fresh, then reload those artifacts and reacquire the code surface with `claude-skills code-search search` after compaction.
+For long-running production work, summarize before compaction instead of after it: checkpoint the working brief, working buffer, completion gate, and execution trace while the intent is still fresh, then reload those artifacts and reacquire the code surface with `keel code-search search` after compaction.
 
-Do not depend on the model to infer that compaction happened. The safer native pattern is to run `claude-skills orchestration resume-status` at the start of each non-trivial turn so the active workstream is reconstructed from durable artifacts even when the runtime summary is short or continuity breaks silently.
+Do not depend on the model to infer that compaction happened. The safer native pattern is to run `keel orchestration resume-status` at the start of each non-trivial turn so the active workstream is reconstructed from durable artifacts even when the runtime summary is short or continuity breaks silently.
 
 ### Small-Model and Narrow-Task Routing
 
@@ -150,13 +150,13 @@ Use the smallest acceptable step for classification, routing, candidate filterin
 
 - `AGENTS.md` requires a working brief before research or coding
 - `AGENTS.md` requires a context retrieval ladder before broad context loading
-- The Rust-native `claude-skills install` command injects the shared execution-policy lines, including the cache-first research reuse gate, into `~/.claude/config.toml`
-- The Rust-native `claude-skills install` command scaffolds workspace, workstream, role, agent-instance, research-cache, archive, and report directories under `~/.claude/memories/`
-- `claude-skills code-search status|index|search|demo|reset` provides a native local retrieval surface with incremental lineage and an honest shared demo path so agents can search the repo before widening to full-file reads
-- `claude-skills memory scope resolve` resolves scoped search order and write targets for the active workspace
-- `claude-skills memoriesv2 scope resolve` proves where the mirrored second-layer workspace, workstream, lane, graph, and hook artifacts live
-- `claude-skills memory research-cache record|lookup|stale|reward|list` provides shared record, freshness-aware lookup, stale/reward marking, and listing for reusable research (scoped per command group on disk)
-- `claude-skills memory report` is implemented as an alias for `claude-skills memory status` — a compact per-family record-count summary. The `memory-status-reporter` skill produces the richer human-readable narrative status report on top of the scoped files; use `memory report`/`status` for the structured family snapshot.
+- The Rust-native `keel install` command injects the shared execution-policy lines, including the cache-first research reuse gate, into `~/.claude/config.toml`
+- The Rust-native `keel install` command scaffolds workspace, workstream, role, agent-instance, research-cache, archive, and report directories under `~/.claude/memories/`
+- `keel code-search status|index|search|demo|reset` provides a native local retrieval surface with incremental lineage and an honest shared demo path so agents can search the repo before widening to full-file reads
+- `keel memory scope resolve` resolves scoped search order and write targets for the active workspace
+- `keel memoriesv2 scope resolve` proves where the mirrored second-layer workspace, workstream, lane, graph, and hook artifacts live
+- `keel memory research-cache record|lookup|stale|reward|list` provides shared record, freshness-aware lookup, stale/reward marking, and listing for reusable research (scoped per command group on disk)
+- `keel memory report` is implemented as an alias for `keel memory status` — a compact per-family record-count summary. The `memory-status-reporter` skill produces the richer human-readable narrative status report on top of the scoped files; use `memory report`/`status` for the structured family snapshot.
 - `README.md` documents the setup and operational workflow
 
 ## Sources

@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
-# Purpose: Bootstrap claude-skills from the latest GitHub release without a manual archive download.
+# Purpose: Bootstrap keel from the latest GitHub release without a manual archive download.
 # Caller: macOS, Linux, and WSL users running the documented one-line installer.
-# Dependencies: curl, tar, uname, mktemp, and the claude-skills GitHub release assets.
+# Dependencies: curl, tar, uname, mktemp, and the keel GitHub release assets.
 # Main Functions: Detect platform, download a release archive to temp, extract it, run install, and verify status.
-# Side Effects: Writes the managed claude-skills surface under ~/.claude and removes temporary download files.
+# Side Effects: Writes the managed keel surface under ~/.claude and removes temporary download files.
 
 set -euo pipefail
 
-repository="${CLAUDE_SKILLS_REPOSITORY:-UntaDotMy/claude_core}"
+repository="${CLAUDE_SKILLS_REPOSITORY:-UntaDotMy/keel}"
 version="${CLAUDE_SKILLS_VERSION:-latest}"
 
 need_command() {
   if ! command -v "$1" >/dev/null 2>&1; then
-    printf 'claude-skills installer requires %s\n' "$1" >&2
+    printf 'keel installer requires %s\n' "$1" >&2
     exit 1
   fi
 }
@@ -51,7 +51,7 @@ detect_arch() {
 latest_release_tag() {
   curl -fsSL \
     -H 'Accept: application/vnd.github+json' \
-    -H 'User-Agent: claude-skills-installer' \
+    -H 'User-Agent: keel-installer' \
     "https://api.github.com/repos/${repository}/releases/latest" |
     sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' |
     head -n 1
@@ -67,7 +67,7 @@ arch="$(detect_arch)"
 if [ "$version" = "latest" ]; then
   release_tag="$(latest_release_tag)"
   if [ -z "$release_tag" ]; then
-    printf 'Unable to resolve latest claude-skills release for %s\n' "$repository" >&2
+    printf 'Unable to resolve latest keel release for %s\n' "$repository" >&2
     exit 1
   fi
 else
@@ -75,9 +75,9 @@ else
 fi
 
 asset_version="$(asset_version_from_tag "$release_tag")"
-archive_name="claude-skills_${asset_version}_${os}_${arch}.tar.gz"
+archive_name="keel_${asset_version}_${os}_${arch}.tar.gz"
 download_url="https://github.com/${repository}/releases/download/${release_tag}/${archive_name}"
-temporary_directory="$(mktemp -d "${TMPDIR:-/tmp}/claude-skills-install.XXXXXX")"
+temporary_directory="$(mktemp -d "${TMPDIR:-/tmp}/keel-install.XXXXXX")"
 
 cleanup() {
   rm -rf "$temporary_directory"
@@ -88,46 +88,46 @@ archive_path="${temporary_directory}/${archive_name}"
 extract_directory="${temporary_directory}/extract"
 mkdir -p "$extract_directory"
 
-printf 'Downloading claude-skills %s for %s-%s...\n' "$release_tag" "$os" "$arch"
+printf 'Downloading keel %s for %s-%s...\n' "$release_tag" "$os" "$arch"
 curl -fL --retry 3 --retry-delay 2 -o "$archive_path" "$download_url"
 
 tar -xzf "$archive_path" -C "$extract_directory"
 
-installer_binary="${extract_directory}/claude-skills"
+installer_binary="${extract_directory}/keel"
 if [ ! -x "$installer_binary" ]; then
-  installer_binary="$(find "$extract_directory" -type f -name claude-skills -perm /111 | head -n 1)"
+  installer_binary="$(find "$extract_directory" -type f -name keel -perm /111 | head -n 1)"
 fi
 if [ -z "$installer_binary" ] || [ ! -x "$installer_binary" ]; then
-  printf 'Release archive did not contain an executable claude-skills binary.\n' >&2
+  printf 'Release archive did not contain an executable keel binary.\n' >&2
   exit 1
 fi
 
 bundle_root="$(cd "$(dirname "$installer_binary")" && pwd)"
 "$installer_binary" install --repo-root "$bundle_root"
 
-installed_binary="${HOME}/.claude/claude-skills"
+installed_binary="${HOME}/.claude/keel"
 if [ ! -x "$installed_binary" ]; then
   printf 'Installed binary not found at %s\n' "$installed_binary" >&2
   exit 1
 fi
 
 "$installed_binary" status --repo-root "$bundle_root"
-# Native `claude-skills install` (above) already wires the lifecycle hooks into
+# Native `keel install` (above) already wires the lifecycle hooks into
 # settings.json, but does so best-effort (a failure is reported, not fatal). This
 # explicit re-run is the bootstrap's verification gate: it is idempotent, and it
 # turns a hook-wiring failure into a hard install error (set -e) so a broken
 # engagement surface never ships silently.
 "$installed_binary" hook install
 
-# MCP registration is handled natively by `claude-skills install` above, which
-# writes the claude_core entry into ~/.claude.json *with* `alwaysLoad: true`
+# MCP registration is handled natively by `keel install` above, which
+# writes the keel entry into ~/.claude.json *with* `alwaysLoad: true`
 # (see rust/.../manager/mcp_register.rs). That flag pins the recall, system_map,
 # run_command, and recall_status tools into context instead of leaving them
 # deferred behind ToolSearch. We deliberately do NOT shell out to `claude mcp
 # add` here: that command cannot set `alwaysLoad`, so it would register the
 # server in a degraded (deferred) state, and it requires the `claude` CLI on
 # PATH. The native path needs neither and is the single source of truth. Run
-# `claude-skills doctor` to confirm the entry and `alwaysLoad`, or
-# `claude-skills repair` to re-register if anything looks off.
+# `keel doctor` to confirm the entry and `alwaysLoad`, or
+# `keel repair` to re-register if anything looks off.
 
-printf 'claude-skills installed successfully at %s\n' "$installed_binary"
+printf 'keel installed successfully at %s\n' "$installed_binary"

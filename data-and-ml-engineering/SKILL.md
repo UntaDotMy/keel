@@ -2,7 +2,7 @@
 name: data-and-ml-engineering
 description: Designs and reviews data engineering and ML/MLOps systems: ETL/ELT data pipelines, batch and streaming ingestion (Kafka, Spark), warehouse and lakehouse modeling (dbt, dimensional models, partitioning), data quality and data contracts, orchestration (Airflow, Dagster, Prefect), and the ML lifecycle — feature engineering, training pipelines, experiment tracking (MLflow), model registry and serving, evaluation, and drift monitoring. Use when building or reviewing data pipelines, dbt models, warehouse or lakehouse schemas, streaming ingestion, feature stores, training pipelines, or model serving and drift monitoring.
 when_to_use: Data pipelines, ETL/ELT, dbt, orchestration, warehouse and lakehouse modeling, and the ML lifecycle from feature engineering to model serving and drift monitoring.
-allowed-tools: Read, Grep, Glob, Edit, Write, Bash(claude-skills memory:*), Bash(git diff:*), Bash(git status), Bash(python:*), Bash(uv:*), Bash(dbt:*), Bash(pytest:*), Bash(jq:*)
+allowed-tools: Read, Grep, Glob, Edit, Write, Bash(keel memory:*), Bash(git diff:*), Bash(git status), Bash(python:*), Bash(uv:*), Bash(dbt:*), Bash(pytest:*), Bash(jq:*)
 effort: medium
 paths:
   - "**/dbt_project.yml"

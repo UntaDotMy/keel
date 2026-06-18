@@ -87,32 +87,32 @@ jobs:
             os: ubuntu-latest
             os_name: linux
             arch: amd64
-            executable: claude-skills
+            executable: keel
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
             os_name: linux
             arch: arm64
-            executable: claude-skills
+            executable: keel
           - target: x86_64-apple-darwin
             os: macos-latest
             os_name: darwin
             arch: amd64
-            executable: claude-skills
+            executable: keel
           - target: aarch64-apple-darwin
             os: macos-latest
             os_name: darwin
             arch: arm64
-            executable: claude-skills
+            executable: keel
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             os_name: windows
             arch: amd64
-            executable: claude-skills.exe
+            executable: keel.exe
           - target: aarch64-pc-windows-msvc
             os: windows-latest
             os_name: windows
             arch: arm64
-            executable: claude-skills.exe
+            executable: keel.exe
 
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
@@ -166,7 +166,7 @@ jobs:
           # Stage custom slash commands so the native installer's
           # sync_commands step (manager/install.rs) finds a source directory.
           # Without this the release archive carries no commands/ dir, so a
-          # fresh `claude-skills install` registers zero /claude-core:*
+          # fresh `keel install` registers zero /keel:*
           # commands — they would otherwise ship only via the plugin path.
           if [ -d commands ]; then
             cp -R commands "$target_dir/commands"
@@ -182,13 +182,13 @@ jobs:
           if [ -d .claude-plugin ]; then
             cp -R .claude-plugin "$target_dir/.claude-plugin"
           fi
-          cat > "$target_dir/claude-skills-release-manifest.json" <<EOF
+          cat > "$target_dir/keel-release-manifest.json" <<EOF
           {
             "package_kind": "packaged_release_bundle",
             "repository_slug": "${{ github.repository }}",
             "release_tag": "${{ needs.release-preflight.outputs.release_tag }}",
             "build_version": "${build_version}",
-            "archive_file_name": "claude-skills_${build_version}_${{ matrix.os_name }}_${{ matrix.arch }}.${{ matrix.os_name == 'windows' && 'zip' || 'tar.gz' }}"
+            "archive_file_name": "keel_${build_version}_${{ matrix.os_name }}_${{ matrix.arch }}.${{ matrix.os_name == 'windows' && 'zip' || 'tar.gz' }}"
           }
           EOF
       - name: Package (Unix)
@@ -196,18 +196,18 @@ jobs:
         run: |
           build_version="${{ needs.release-preflight.outputs.build_version }}"
           cd "dist/${{ matrix.os_name }}-${{ matrix.arch }}"
-          tar czf "../claude-skills_${build_version}_${{ matrix.os_name }}_${{ matrix.arch }}.tar.gz" .
+          tar czf "../keel_${build_version}_${{ matrix.os_name }}_${{ matrix.arch }}.tar.gz" .
       - name: Package (Windows)
         if: runner.os == 'Windows'
         run: |
           $build_version = "${{ needs.release-preflight.outputs.build_version }}"
           $source = "dist/${{ matrix.os_name }}-${{ matrix.arch }}"
-          $dest = "dist/claude-skills_${build_version}_${{ matrix.os_name }}_${{ matrix.arch }}.zip"
+          $dest = "dist/keel_${build_version}_${{ matrix.os_name }}_${{ matrix.arch }}.zip"
           Compress-Archive -Path "$source\*" -DestinationPath "$dest" -Force
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-${{ matrix.os_name }}-${{ matrix.arch }}
-          path: dist/claude-skills_${{ needs.release-preflight.outputs.build_version }}_${{ matrix.os_name }}_${{ matrix.arch }}.*
+          path: dist/keel_${{ needs.release-preflight.outputs.build_version }}_${{ matrix.os_name }}_${{ matrix.arch }}.*
           if-no-files-found: error
 
   publish:

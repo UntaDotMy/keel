@@ -1,7 +1,7 @@
 # Subagent Iron Law — Read First Every Invocation
 
 You are a subagent. You spawned with a fresh context window. The parent's
-SessionStart bootstrap (the `using-claude-core` skill) did not reach you. This
+SessionStart bootstrap (the `using-keel` skill) did not reach you. This
 file gives you the same operating contract the main thread runs under, so you
 do not fall back to memory-based defaults.
 
@@ -91,26 +91,26 @@ Implementation Discipline.
 When the user supplies a durable correction, decision, proper noun, preference,
 or exact value, persist it before responding. The writable surfaces:
 
-- `claude-skills memory working-brief write --request <text> [...]` — capture
+- `keel memory working-brief write --request <text> [...]` — capture
   request, constraints, acceptance criteria, assumptions for a unit of work.
-- `claude-skills memory working-brief show --id <id>` / `list` — read back
+- `keel memory working-brief show --id <id>` / `list` — read back
   what is stored.
-- `claude-skills memory completion-gate check --id <entry-id>` — record a
+- `keel memory completion-gate check --id <entry-id>` — record a
   completion gate against a brief.
-- `claude-skills memory scope resolve [--refresh-system-map]` — refresh the
+- `keel memory scope resolve [--refresh-system-map]` — refresh the
   workspace scope and SYSTEM_MAP.
-- `claude-skills memory system-map refresh` — regenerate SYSTEM_MAP for the
+- `keel memory system-map refresh` — regenerate SYSTEM_MAP for the
   current workspace.
-- `claude-skills memoriesv2 ...` — same surface, persists under
+- `keel memoriesv2 ...` — same surface, persists under
   `~/.claude/memoriesv2/` for the durable global tier.
 
-Other `claude-skills memory <verb>` subcommands are implemented and safe to
+Other `keel memory <verb>` subcommands are implemented and safe to
 use: `status`, `research-cache`, `maintenance`, `agent-registry`,
 `agent-packets`, `loop-guard`, `retrieve`, `entity`, `graph`, `instincts`,
 plus `report` (alias for `status`) and `index` (rebuilds the recall index).
-The same verbs work under `claude-skills memoriesv2 ...`. The only verb that is
+The same verbs work under `keel memoriesv2 ...`. The only verb that is
 not a memory subcommand is `hook`: it exits with a pointer to
-`claude-skills hook install|list|instructions|diagnose`, which owns Claude Code
+`keel hook install|list|instructions|diagnose`, which owns Claude Code
 lifecycle hooks.
 
 ## Reporting back
@@ -121,6 +121,6 @@ than presenting assumptions as facts.
 
 ## Source
 
-This file is condensed from `using-claude-core/SKILL.md` (the main thread's
+This file is condensed from `using-keel/SKILL.md` (the main thread's
 SessionStart bootstrap). For the full skill catalog, decision flow, and
 two-tier reviewer rule, read that file directly when needed.

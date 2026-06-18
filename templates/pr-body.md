@@ -1,6 +1,6 @@
 <!--
 Purpose: Provide a professional pull-request body template for scoped repository changes.
-Caller: claude-skills git-workflow pr-body and contributors preparing PRs.
+Caller: keel git-workflow pr-body and contributors preparing PRs.
 Dependencies: Professional text linting rules, changed-file inventory, and validation evidence.
 Main Functions: Offers optional sections for diff-scoped PR descriptions.
 Side Effects: None.

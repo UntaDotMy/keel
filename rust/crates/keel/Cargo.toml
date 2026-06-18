@@ -1,0 +1,25 @@
+[package]
+name = "keel"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Native keel CLI — Rust port."
+
+[dependencies]
+keel-flow = { workspace = true }
+keel-platform = { workspace = true }
+keel-releaseassets = { workspace = true }
+keel-professionaltext = { workspace = true }
+rusqlite = { workspace = true }
+serde_json = { workspace = true }
+serde = { workspace = true }
+tiktoken-rs = { workspace = true }
+chrono = "0.4"
+rand = "0.8"
+regex = { workspace = true }
+toml = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

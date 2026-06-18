@@ -2,7 +2,7 @@
 name: writing-plans
 description: Turn an agreed design into a granular, verifiable implementation plan before touching code. Use when you have a spec or agreed design and the work is more than a trivial single edit — break it into ordered steps, each with its own verification check and the files it touches, so execution can proceed without re-deciding the approach mid-stream. Use when the user says "write a plan", "break this down", "what are the steps", or before starting multi-file or multi-session work. Hands the plan to executing-plans and captures it in the working brief. The front half of execution; brainstorming decides WHAT, this decides the ORDER.
 when_to_use: After a design is agreed (often via brainstorming) and before implementation, for any work spanning multiple files, steps, or sessions. Produces an ordered, per-step-verifiable plan captured in the working brief. Hand the plan to executing-plans.
-allowed-tools: Read, Grep, Glob, Bash(claude-skills memory:*)
+allowed-tools: Read, Grep, Glob, Bash(keel memory:*)
 effort: medium
 ---
 
@@ -73,7 +73,7 @@ Each step is independently verifiable and names its blast radius:
 
 ### 4. Capture the plan in the working brief
 
-- Write the plan to the working brief (`claude-skills memory working-brief write`)
+- Write the plan to the working brief (`keel memory working-brief write`)
   so it survives compaction and a fresh session. A plan that lives only in chat is
   lost at the next compaction and cannot be executed across sessions.
 
@@ -97,7 +97,7 @@ by `reviewer` Stage 1.
 
 ## Validation
 
-Methodology skill; the only `claude-skills` call is the working-brief write.
+Methodology skill; the only `keel` call is the working-brief write.
 Self-check before handing off to execution: does every step have a verification
 check and named files, are the steps ordered by real dependency, and is the plan
 captured in the working brief? If any step cannot be verified, it is not yet a

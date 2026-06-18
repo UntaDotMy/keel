@@ -2,7 +2,7 @@
 name: software-development-life-cycle
 description: Plans and coordinates end-to-end software delivery — architecture choices, work sequencing, cross-domain feature breakdowns, and release framing. Use when a request spans multiple domains (backend + frontend + infra), needs a working brief and phased plan, or is mainly about how to structure the work end-to-end before specialists start coding.
 when_to_use: Cross-domain planning, architecture framing, and multi-phase delivery sequencing.
-allowed-tools: Read, Grep, Glob, Edit, Write, Bash(claude-skills:*), Bash(git diff:*), Bash(git log:*), Bash(git status), Bash(cargo:*), Bash(npm:*), Bash(yarn:*), Bash(pnpm:*), Bash(go:*), Bash(python:*), Bash(uv:*)
+allowed-tools: Read, Grep, Glob, Edit, Write, Bash(keel:*), Bash(git diff:*), Bash(git log:*), Bash(git status), Bash(cargo:*), Bash(npm:*), Bash(yarn:*), Bash(pnpm:*), Bash(go:*), Bash(python:*), Bash(uv:*)
 effort: high
 ---
 

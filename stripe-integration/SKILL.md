@@ -2,7 +2,7 @@
 name: stripe-integration
 description: Designs and audits Stripe integrations: Checkout, Payment Intents, Subscriptions, Webhooks, Connect, refunds, disputes, and 3DS/SCA flows. Use when adding payments, fixing webhook drift, reconciling failed charges, handling disputes, or migrating between Stripe APIs.
 when_to_use: Stripe payment integration, webhook reconciliation, and PCI-scope decisions.
-allowed-tools: Read, Grep, Glob, Edit, Write, Bash(claude-skills memory:*), Bash(git diff:*), Bash(git status), Bash(stripe:*), Bash(npx:*), Bash(npm:*), Bash(curl:*), Bash(jq:*)
+allowed-tools: Read, Grep, Glob, Edit, Write, Bash(keel memory:*), Bash(git diff:*), Bash(git status), Bash(stripe:*), Bash(npx:*), Bash(npm:*), Bash(curl:*), Bash(jq:*)
 effort: medium
 paths:
   - "**/*stripe*.ts"

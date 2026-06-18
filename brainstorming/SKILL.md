@@ -2,7 +2,7 @@
 name: brainstorming
 description: Socratic design exploration and requirement-understanding before implementation. Use when a request is open-ended OR vague/under-specified, the approach is not obvious, multiple designs are plausible, or the user gives a directive feature ask whose details are not yet pinned down — "how should we", "what are the options", "help me think through", "design", or imperative asks like "add X", "build Y", "make Z work" where the user story is not yet confirmed. Restates the request, confirms the user story, and refines a vague idea into a concrete, agreed design through questions and trade-off comparison before any code is written — and captures the decision so it survives compaction. The generative counterpart to Think-Before-Coding (which guards against guessing); this skill produces the design to commit to.
 when_to_use: Open-ended, ambiguous, OR vague-but-directive work where the request is not yet pinned to a confirmed user story — new features, architecture choices, "how should we approach X", or "build/add/make X" asks whose requirements are not yet sharp. Stop before coding, restate the request, and confirm what is actually wanted. Hand the agreed design to the implementation skills (TDD, the lifecycle skills).
-allowed-tools: Read, Grep, Glob, Bash(claude-skills memory:*)
+allowed-tools: Read, Grep, Glob, Bash(keel memory:*)
 effort: medium
 ---
 
@@ -74,7 +74,7 @@ understanding step before any code.
 ### 4. Capture the design
 
 - Write the decision down so it survives compaction and a fresh session. Use the
-  working brief (`claude-skills memory working-brief write`) to record the agreed
+  working brief (`keel memory working-brief write`) to record the agreed
   approach, the success criteria, and the files expected to change — *before*
   implementation starts.
 - The captured design is what `reviewer` later checks the implementation against
@@ -104,7 +104,7 @@ When the design is agreed and captured, brainstorming is done. Hand to:
 
 ## Validation
 
-Methodology skill; no `claude-skills` subcommand beyond the working-brief write.
+Methodology skill; no `keel` subcommand beyond the working-brief write.
 Self-check before moving to implementation: is there a single agreed design, with
 explicit success criteria, captured in the working brief? If the design lives only
 in the conversation, capture it first — otherwise the implementation has nothing

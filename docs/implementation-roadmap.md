@@ -35,10 +35,10 @@ Goal:
 
 Primary targets:
 
-- `rust/crates/claude-skills/src/utility.rs`
-- `rust/crates/claude-skills/src/runtime.rs`
-- `rust/crates/claude-skills/src/help_operator.txt`
-- Rust command tests under `rust/crates/claude-skills/src/commands.rs`
+- `rust/crates/keel/src/utility.rs`
+- `rust/crates/keel/src/runtime.rs`
+- `rust/crates/keel/src/help_operator.txt`
+- Rust command tests under `rust/crates/keel/src/commands.rs`
 
 Acceptance criteria:
 
@@ -56,7 +56,7 @@ Primary targets:
 
 - `AGENTS.md`
 - `00-skill-routing-and-escalation.md`
-- `rust/crates/claude-skills/src/help_operator.txt`
+- `rust/crates/keel/src/help_operator.txt`
 - `docs/runtime-guardrails-and-memory-protocols.md`
 
 Acceptance criteria:

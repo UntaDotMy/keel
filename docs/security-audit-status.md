@@ -11,7 +11,7 @@ The tracked bundle format now lives in [docs/audit-bundle-format.md](./audit-bun
 The current workspace evidence for this repo includes:
 
 - Native Rust coverage passed with `cargo test --workspace`.
-- Native manager validation passed with `claude-skills validate --profile smoke`.
+- Native manager validation passed with `keel validate --profile smoke`.
 - Windows routing is smoke-verified through the Rust CLI so the ordinary path stays on the native CLI without a Git Bash dependency.
 - Static grep found no current uses of `shell=True`, `os.system(...)`, or `Invoke-Expression`. The public installer docs intentionally include optional pipe-to-shell bootstrap one-liners, with manual download alternatives for users who want to inspect scripts first.
 

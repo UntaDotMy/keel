@@ -1,5 +1,5 @@
 <!--
-Purpose: Record the honest memory-product-comparator-inspired adoption order for claude_skills.
+Purpose: Record the honest memory-product-comparator-inspired adoption order for keel.
 Caller: Contributors and agents checking which memory-product-comparator-style features were adopted and why.
 Dependencies: memoriesv2 retrieve, graph query, entity, and hook capture surfaces.
 Main Functions: Document adoption order, rationale, and shipped status.
@@ -9,7 +9,7 @@ Side Effects: None.
 
 ## Scope
 
-This note records the honest memory-product-comparator-inspired adoption order for `claude_skills` and the current shipped status after the semantic-recall work landed on `memoriesv2 retrieve`.
+This note records the honest memory-product-comparator-inspired adoption order for `keel` and the current shipped status after the semantic-recall work landed on `memoriesv2 retrieve`.
 
 Comparison date: `2026-04-13`
 
@@ -33,13 +33,13 @@ The next memory-product-comparator-style features were adopted in this order:
 
 ### 1. Relationship queries first
 
-`claude_skills` already stores normalized graph edges and already uses those edges for graph-backed semantic recall. The missing product surface is queryability. Before this change, operators could only `graph add` and `graph list`, which meant the graph existed but was not yet a first-class retrieval surface.
+`keel` already stores normalized graph edges and already uses those edges for graph-backed semantic recall. The missing product surface is queryability. Before this change, operators could only `graph add` and `graph list`, which meant the graph existed but was not yet a first-class retrieval surface.
 
 memory-product comparator already exposes richer graph querying through its local knowledge-graph layer, including entity-focused traversal and relationship-focused access. The closest honest gap in this repository was therefore not raw storage, but the lack of a native query command over the graph it already maintains.
 
 ### 2. Hook-driven save loops second
 
-memory-product comparator's hook posture is still stronger than `claude_skills` on automatic save triggers and precompact interception. That remains important, but it is a riskier fit here because this repository deliberately prefers explicit, proof-first native commands over hidden prompt-only automation or fragile shell interception.
+memory-product comparator's hook posture is still stronger than `keel` on automatic save triggers and precompact interception. That remains important, but it is a riskier fit here because this repository deliberately prefers explicit, proof-first native commands over hidden prompt-only automation or fragile shell interception.
 
 The shipped hook pass therefore became an explicit native surface instead of a rushed interception copy:
 

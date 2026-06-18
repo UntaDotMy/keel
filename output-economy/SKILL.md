@@ -76,6 +76,6 @@ what enters context, the other shrinks what leaves it.
 
 ## Validation
 
-This skill is informational; there is no `claude-skills` subcommand to invoke. It
+This skill is informational; there is no `keel` subcommand to invoke. It
 is matched by the description above when a turn is output-heavy. To self-check a
 drafted response: if removing a sentence loses no technical signal, remove it.

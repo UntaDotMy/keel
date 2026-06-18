@@ -2,7 +2,7 @@
 name: api-contract-design
 description: Designs and evolves API contracts (REST, GraphQL, gRPC, OpenAPI, JSON Schema) with explicit versioning, idempotency, error taxonomies, pagination semantics, and backwards-compatibility rules. Use when adding a new endpoint, breaking an existing one, generating client SDKs, or reconciling drift between server, schema, and client.
 when_to_use: API contract design, schema evolution, and breaking-change review.
-allowed-tools: Read, Grep, Glob, Edit, Write, Bash(claude-skills memory:*), Bash(git diff:*), Bash(git status), Bash(git log:*), Bash(npx:*), Bash(npm:*), Bash(yarn:*), Bash(pnpm:*), Bash(curl:*), Bash(jq:*)
+allowed-tools: Read, Grep, Glob, Edit, Write, Bash(keel memory:*), Bash(git diff:*), Bash(git status), Bash(git log:*), Bash(npx:*), Bash(npm:*), Bash(yarn:*), Bash(pnpm:*), Bash(curl:*), Bash(jq:*)
 effort: medium
 paths:
   - "**/openapi.yaml"

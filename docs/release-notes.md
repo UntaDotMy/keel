@@ -1,6 +1,6 @@
 # Release Notes
 
-`claude_skills` release notes are meant to explain three things clearly:
+`keel` release notes are meant to explain three things clearly:
 
 - what changed in the release
 - why the release matters to operators using Claude Code day to day
@@ -25,17 +25,17 @@ Every published GitHub release should include:
 
 ## Current release-note posture
 
-The release workflow now prepends a tracked `claude_skills` release-note preamble and then lets GitHub generate the detailed PR and commit notes for the actual release range.
+The release workflow now prepends a tracked `keel` release-note preamble and then lets GitHub generate the detailed PR and commit notes for the actual release range.
 
 That means each published release note has:
 
-- a stable explanation of what `claude_skills` is shipping
+- a stable explanation of what `keel` is shipping
 - narrow comparison and documentation links
 - the real GitHub-generated diff summary for that release
 
 ## Related docs
 
-- [Why `claude_skills`](./why-claude-skills.md)
+- [Why `keel`](./why-keel.md)
 - [Release proof bundle](./release-proof-bundle.md)
 - [Compatibility matrix](./compatibility-matrix.md)
 - [Benchmark and demo suite](./benchmark-suite.md)

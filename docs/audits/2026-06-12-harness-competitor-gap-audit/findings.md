@@ -1,5 +1,5 @@
 <!--
-Purpose: Record the 2026-06-12 gap audit of claude-core against nine harness/skill competitor repos not previously covered in competitive-gap-closure.md, aligned to the official Claude Code docs.
+Purpose: Record the 2026-06-12 gap audit of keel against nine harness/skill competitor repos not previously covered in competitive-gap-closure.md, aligned to the official Claude Code docs.
 Caller: Contributors deciding what to build, scope-out, or leave as decided non-goals after the harness-competitor sweep.
 Dependencies: Prior analysis in docs/competitive-gap-closure.md and docs/native-gap-map.md; the installed skill/subagent/hook surface; the Rust CLI.
 Main Functions: Verify each comparator's identity, classify the capability delta (real gap / partial / decided non-goal / already covered), and prioritize.
@@ -7,14 +7,14 @@ Side Effects: None — documentation only.
 -->
 # Harness-Competitor Gap Audit — 2026-06-12
 
-**Scope.** Audit claude-core against nine repos the user named that the existing
+**Scope.** Audit keel against nine repos the user named that the existing
 [`competitive-gap-closure.md`](../../competitive-gap-closure.md) did **not** yet
 cover. That doc already handles RTK, caveman, superpowers, ECC, UI/UX Pro Max,
 `revfactory/harness`, and compound-engineering. This pass adds the rest and
 aligns each delta to the official Claude Code docs (skills, subagents, hooks,
 plugins) as the baseline.
 
-**Method.** Read the claude-core surface first (41 SKILL.md, 24 subagents, 30
+**Method.** Read the keel surface first (41 SKILL.md, 24 subagents, 30
 hook events, ~41k LOC Rust CLI, the bootstrap skill, routing doctrine, execution
 strategy). Then fetched each comparator's README/skill listing directly. Claims
 below are evidence-based from those sources; star counts were ignored as a signal
@@ -22,7 +22,7 @@ below are evidence-based from those sources; star counts were ignored as a signa
 
 **Headline.** Most named repos are either already covered at parity or are
 deliberate scope boundaries. **Two surface genuine, buildable capability gaps**
-that touch claude-core's own iron law ("understand before building"):
+that touch keel's own iron law ("understand before building"):
 codebase-understanding depth and harness self-evaluation.
 
 ---
@@ -47,7 +47,7 @@ codebase-understanding depth and harness self-evaluation.
 ### A. Real, buildable gaps (recommend acting)
 
 **A1 — Deterministic codebase-understanding graph (`Understand-Anything`).**
-This is the strongest finding because it strikes claude-core's own foundation.
+This is the strongest finding because it strikes keel's own foundation.
 The iron law is "Read first / understand before building," and the artifact that
 serves it today is `SYSTEM_MAP.md` — a flat, textual, top-level folder/entrypoint
 map auto-refreshed by a hook — plus `code-search` (lexical) and the
@@ -61,20 +61,20 @@ produces:
 - **diff-impact analysis** over that graph (`/understand-diff`);
 - a semantic layer (LLM) on top of the deterministic skeleton.
 
-claude-core's SYSTEM_MAP is shallower on every axis: no AST edges, no call graph,
+keel's SYSTEM_MAP is shallower on every axis: no AST edges, no call graph,
 no committable graph artifact, no graph-based diff impact. The `preserve-existing-flow`
 gate asks the model to *manually* trace owner/producer/consumer — exactly the
 edges a Tree-sitter graph would supply deterministically. **Gap is real and
 on-mission.** Recommendation below.
 
 **A2 — Falsifiable harness self-evaluation (`AHE`).**
-claude-core has a learning loop (`runner/observation.rs` + `runner/learning.rs`:
+keel has a learning loop (`runner/observation.rs` + `runner/learning.rs`:
 observe behavior → confidence-scored instincts → promote to generated skills).
 But it is *observation-clustering*, not *evaluation-driven*. AHE's loop is
 fundamentally different and stronger on one axis: it **evaluates the harness
 against tasks, analyzes failure traces to root cause, makes a predicted-impact
 edit, then empirically falsifies that prediction on the next iteration and
-auto-rolls-back if wrong.** claude-core never benchmarks its own skills/prompts
+auto-rolls-back if wrong.** keel never benchmarks its own skills/prompts
 or rolls back a skill edit that made behavior worse. The `writing-skills` skill
 (pressure-test prose with a subagent) is the closest analog but is manual,
 per-skill, and not tied to a task-pass-rate signal with rollback. **Partial gap
@@ -82,7 +82,7 @@ with a clear, bounded improvement** (see rec A2).
 
 ### B. Genuine gaps that are likely (but not yet formally) decided non-goals
 
-**B1 — Product-management domain (`pm-skills`, 68 skills).** claude-core has zero
+**B1 — Product-management domain (`pm-skills`, 68 skills).** keel has zero
 PM skills (discovery, strategy canvas, pricing, TAM/SAM/SOM, OKRs, GTM,
 positioning). This is adjacent to but outside "software delivery." It fits the
 existing "curated-not-exhaustive, delivery-focused" stance, but the *boundary*
@@ -90,7 +90,7 @@ between delivery and product is not recorded as a decided non-goal. Recommend
 recording the decision explicitly (it currently reads as an unexamined gap).
 
 **B2 — Autonomous board-to-PR pipeline (`symphony`).** Watch an external tracker,
-spawn agents per task unattended, bundle proof-of-work, land the PR. claude-core
+spawn agents per task unattended, bundle proof-of-work, land the PR. keel
 has the *pieces* (subagents, completion gate, review gate, proof bundles, finish
 flow) but deliberately keeps a human in the loop and is single-binary /
 Claude-native. This conflicts with the same positioning that already made
@@ -98,7 +98,7 @@ Claude-native. This conflicts with the same positioning that already made
 existing non-goal entry rather than building it.
 
 **B3 — Recency/social research (`last30days`).** Dedicated last-30-days
-multi-platform social search with engagement-weighted ranking. claude-core has a
+multi-platform social search with engagement-weighted ranking. keel has a
 3-round research-escalation doctrine but no recency-specialized retrieval and no
 social-engagement signal. Niche; runtime-backed (external APIs). Likely non-goal
 for a delivery toolkit, but the research doctrine could *cite* recency as a
@@ -113,16 +113,16 @@ of scope. Record and move on.
 
 **C1 — `andrej-karpathy-skills`.** Its four principles (Think Before Coding,
 Simplicity First, Surgical Changes, Goal-Driven Execution) are **already the
-verbatim four pillars** of claude-core's `_shared/common-discipline.md` §
-Code Implementation Discipline, surfaced in the `using-claude-core` bootstrap and
+verbatim four pillars** of keel's `_shared/common-discipline.md` §
+Code Implementation Discipline, surfaced in the `using-keel` bootstrap and
 restated in the routing doctrine. Full parity; nothing to do. (Worth noting both
 trace to the same Karpathy source.)
 
 **C2 — `addyosmani/agent-skills` (mostly).** Its lifecycle skills map onto
-claude-core's existing surface: `test-driven-development`, `git-workflow-and-versioning`,
+keel's existing surface: `test-driven-development`, `git-workflow-and-versioning`,
 `security-and-hardening`, `performance-optimization`, `code-review-and-quality`,
 `observability-and-instrumentation`, `planning-and-task-breakdown`,
-`debugging-and-error-recovery` all have claude-core equivalents
+`debugging-and-error-recovery` all have keel equivalents
 (`test-driven-development`, `git-expert`, `security-and-compliance-auditor` +
 `adversarial-security-review`, `react-performance-audit` + perf doctrine,
 `reviewer`, `observability-and-incident-response`, `writing-plans`/`executing-plans`,
@@ -133,7 +133,7 @@ A-tier-adjacent recs C2a–C2c.
 
 ## Partial-coverage items from `addyosmani/agent-skills`
 
-| Their skill | claude-core today | Delta |
+| Their skill | keel today | Delta |
 |---|---|---|
 | `spec-driven-development` | `brainstorming` (capture design in brief) + `writing-plans` | No single "spec is the source of truth, generate from it" skill; the intent is split across two skills. Minor. |
 | `browser-testing-with-devtools` (Chrome DevTools MCP) | `qa-and-automation-engineer` mentions Playwright/Cypress | No DevTools-MCP-based browser-inspection skill. The execution-strategy doc *does* call for Playwright for web bug repro. Minor gap; MCP-specific. |
@@ -141,7 +141,7 @@ A-tier-adjacent recs C2a–C2c.
 | `doubt-driven-development` (adversarial fresh-context review) | `adversarial-security-review` + `reviewer` two-stage gate | Covered for security; the general "fresh-context doubt review of any change" is close but security-scoped. Minor. |
 
 Note: `addyosmani/agent-skills` lists **Kiro** as a supported host (`.kiro/skills/`).
-Relevant to this environment but not a claude-core capability gap.
+Relevant to this environment but not a keel capability gap.
 
 ---
 
@@ -189,7 +189,7 @@ Both real gaps are now shipped in the Rust CLI under working brief
 clean; `clippy -D warnings` clean.
 
 **A1 — `code-graph` (new `utility/code_graph.rs`, ~700 LOC + 7 tests).**
-`claude-skills code-graph build` writes a deterministic, committable
+`keel code-graph build` writes a deterministic, committable
 `.understand/code-graph.json` (nodes = files + top-level symbol defs + import
 specifiers; edges = resolved in-repo `imports`). `code-graph impact --changed`
 returns the transitive reverse-dependency closure for review scoping. Line-based

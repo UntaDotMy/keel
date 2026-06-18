@@ -118,50 +118,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "claude-skills"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "claude-skills-flow",
- "claude-skills-platform",
- "claude-skills-professionaltext",
- "claude-skills-releaseassets",
- "rand",
- "regex",
- "rusqlite",
- "serde",
- "serde_json",
- "tiktoken-rs",
- "toml",
-]
-
-[[package]]
-name = "claude-skills-flow"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "claude-skills-platform"
-version = "0.1.0"
-
-[[package]]
-name = "claude-skills-professionaltext"
-version = "0.1.0"
-dependencies = [
- "regex",
-]
-
-[[package]]
-name = "claude-skills-releaseassets"
-version = "0.1.0"
-dependencies = [
- "claude-skills-platform",
-]
-
-[[package]]
 name = "core-foundation-sys"
 version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -311,6 +267,50 @@ dependencies = [
  "futures-util",
  "once_cell",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "keel"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "keel-flow",
+ "keel-platform",
+ "keel-professionaltext",
+ "keel-releaseassets",
+ "rand",
+ "regex",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tiktoken-rs",
+ "toml",
+]
+
+[[package]]
+name = "keel-flow"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "keel-platform"
+version = "0.1.0"
+
+[[package]]
+name = "keel-professionaltext"
+version = "0.1.0"
+dependencies = [
+ "regex",
+]
+
+[[package]]
+name = "keel-releaseassets"
+version = "0.1.0"
+dependencies = [
+ "keel-platform",
 ]
 
 [[package]]

@@ -1,16 +1,16 @@
 ---
-description: Run the claude-core native review gates (pre-commit, pre-pr, gate check) on the current diff before closing work. Use to get a deterministic local quality gate with fail-closed verdicts.
+description: Run the keel native review gates (pre-commit, pre-pr, gate check) on the current diff before closing work. Use to get a deterministic local quality gate with fail-closed verdicts.
 argument-hint: "[pre-commit|pre-pr|gates] [base-ref]"
-allowed-tools: Read, Bash(claude-skills review:*), Bash(git diff:*), Bash(git status)
+allowed-tools: Read, Bash(keel review:*), Bash(git diff:*), Bash(git status)
 ---
 
-# /claude-core:review
+# /keel:review
 
-Run a claude-core native review surface. Arguments: **$ARGUMENTS**
+Run a keel native review surface. Arguments: **$ARGUMENTS**
 
-Use the installed binary path (bare `claude-skills` is not guaranteed on PATH):
-`~/.claude/claude-skills` (macOS/Linux), `%USERPROFILE%\.claude\claude-skills.exe`
-(Windows), or `cargo run --bin claude-skills --` from a source checkout.
+Use the installed binary path (bare `keel` is not guaranteed on PATH):
+`~/.claude/keel` (macOS/Linux), `%USERPROFILE%\.claude\keel.exe`
+(Windows), or `cargo run --bin keel --` from a source checkout.
 
 Map the surface in `$0` to the matching native subcommand:
 

@@ -1,16 +1,16 @@
 ---
 description: Lint user stories against strict Agile/Jira format (Connextra "As a/I want/so that" + Gherkin Given/When/Then, validated against INVEST). Use before building to confirm the requirement spec is well-formed.
 argument-hint: "[lint] [file-path]"
-allowed-tools: Read, Bash(claude-skills user-story:*)
+allowed-tools: Read, Bash(keel user-story:*)
 ---
 
-# /claude-core:user-story
+# /keel:user-story
 
 Validate user story format. Arguments: **$ARGUMENTS**
 
-Use the installed binary path (bare `claude-skills` is not guaranteed on PATH):
-`~/.claude/claude-skills` (macOS/Linux), `%USERPROFILE%\.claude\claude-skills.exe`
-(Windows), or `cargo run --bin claude-skills --` from a source checkout.
+Use the installed binary path (bare `keel` is not guaranteed on PATH):
+`~/.claude/keel` (macOS/Linux), `%USERPROFILE%\.claude\keel.exe`
+(Windows), or `cargo run --bin keel --` from a source checkout.
 
 Map the action in `$0` to the matching native subcommand:
 

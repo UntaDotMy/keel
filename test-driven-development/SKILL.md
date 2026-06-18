@@ -95,7 +95,7 @@ unit test for every line."
 
 ## Validation
 
-This skill is methodology; there is no `claude-skills` subcommand. Self-check
+This skill is methodology; there is no `keel` subcommand. Self-check
 before claiming a TDD change complete: did you watch the test fail first, watch
 it pass after the minimum change, and re-run the full relevant suite after
 refactoring? If you cannot say yes to all three, the loop was not followed.

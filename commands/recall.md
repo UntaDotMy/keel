@@ -1,25 +1,25 @@
 ---
-description: Search durable claude-core memory (working briefs, system maps, memoriesv2) by keyword via the native FTS5 recall index. Use to recover prior decisions, traces, and context before re-researching.
+description: Search durable keel memory (working briefs, system maps, memoriesv2) by keyword via the native FTS5 recall index. Use to recover prior decisions, traces, and context before re-researching.
 argument-hint: "[search terms]"
-allowed-tools: Read, Bash(claude-skills memory recall:*)
+allowed-tools: Read, Bash(keel memory recall:*)
 ---
 
-# /claude-core:recall
+# /keel:recall
 
-Search the claude-core durable memory index for: **$ARGUMENTS**
+Search the keel durable memory index for: **$ARGUMENTS**
 
-Run the native recall search using the installed binary (the bare name `claude-skills`
+Run the native recall search using the installed binary (the bare name `keel`
 is not guaranteed on PATH — prefer the explicit installed path). The query is a
 positional argument, not a flag:
 
-- macOS / Linux: `~/.claude/claude-skills memory recall "$ARGUMENTS"`
-- Windows: `%USERPROFILE%\.claude\claude-skills.exe memory recall "$ARGUMENTS"`
-- Source checkout: `cargo run --bin claude-skills -- memory recall "$ARGUMENTS"`
+- macOS / Linux: `~/.claude/keel memory recall "$ARGUMENTS"`
+- Windows: `%USERPROFILE%\.claude\keel.exe memory recall "$ARGUMENTS"`
+- Source checkout: `cargo run --bin keel -- memory recall "$ARGUMENTS"`
 
 Add `--limit N` to cap results and `--json` for structured output.
 
 If no arguments were supplied, ask what to search for, or run
-`claude-skills memory recall status` first to report index health (document
+`keel memory recall status` first to report index health (document
 count, schema version, last-sync timestamp) so the user knows whether the index
 is populated. The index refreshes automatically on every call.
 

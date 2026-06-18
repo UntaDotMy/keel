@@ -22,7 +22,7 @@ Use this map to load only the references needed for the brownfield change at han
 
 1. Read the request twice. Mark which behavior is requested versus which behavior must stay intact.
 2. Walk the flow once before touching code: entry point, producer, source of truth, storage or queue, transport or side-effect owner, consumer, cleanup and recovery.
-3. Record the working brief in the global per-workspace flow-check artifact (`claude-skills flow start`). Use `Not found` only for facts actually searched and not located.
+3. Record the working brief in the global per-workspace flow-check artifact (`keel flow start`). Use `Not found` only for facts actually searched and not located.
 4. Identify ownership boundaries. Producer code creates intent. Transport owner code performs side effects. State owner code decides current mode. Queue owner code defines push and pop rules.
 5. Choose the safe extension shape: layer the new path beside the original, route through the existing owner, and keep producers side-effect-light.
 6. Answer the implementation gate. If the gate cannot be answered, stay in read-only mode and report the gap.

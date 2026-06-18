@@ -23,6 +23,6 @@ Produce a human-style narrative covering:
 - Memory growth trend (file count, total size, active vs stale)
 - Summary of what is understood about the user's needs and working style
 
-Source from `~/.claude/memories/` files and the `claude-skills memory` CLI. Keep the report conversational, under 400 words, and avoid raw file dumps.
+Source from `~/.claude/memories/` files and the `keel memory` CLI. Keep the report conversational, under 400 words, and avoid raw file dumps.
 
 Load the full skill at `~/.claude/skills/memory-status-reporter/SKILL.md` for the report template.

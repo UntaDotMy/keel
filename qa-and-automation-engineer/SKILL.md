@@ -2,7 +2,7 @@
 name: qa-and-automation-engineer
 description: Designs test strategy, builds automated coverage, and validates release readiness across unit, integration, contract, end-to-end, and performance layers. Use when adding tests, investigating regressions or flake, defining release gates, or running the mandatory ladder (Smoke → Functional → Integration → UI → Load → Stress → Security).
 when_to_use: QA, automated testing, and release reliability.
-allowed-tools: Read, Grep, Glob, Edit, Write, Bash(pytest:*), Bash(cargo test:*), Bash(npm test:*), Bash(npm run test:*), Bash(yarn test:*), Bash(pnpm test:*), Bash(go test:*), Bash(jest:*), Bash(vitest:*), Bash(playwright:*), Bash(cypress:*), Bash(claude-skills memory:*)
+allowed-tools: Read, Grep, Glob, Edit, Write, Bash(pytest:*), Bash(cargo test:*), Bash(npm test:*), Bash(npm run test:*), Bash(yarn test:*), Bash(pnpm test:*), Bash(go test:*), Bash(jest:*), Bash(vitest:*), Bash(playwright:*), Bash(cypress:*), Bash(keel memory:*)
 effort: medium
 ---
 

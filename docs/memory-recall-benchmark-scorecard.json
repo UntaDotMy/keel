@@ -1,10 +1,10 @@
 {
   "bundle_name": "memory-recall-benchmark",
   "bundle_version": 1,
-  "current_scope": "source-backed memory recall comparison between claude_skills and memory-product comparator with separated dimensions and explicit evidence links",
+  "current_scope": "source-backed memory recall comparison between keel and memory-product comparator with separated dimensions and explicit evidence links",
   "repositories": [
     {
-      "repository_id": "claude_skills",
+      "repository_id": "keel",
       "score": "7/10",
       "evidence_status": "source_backed"
     },

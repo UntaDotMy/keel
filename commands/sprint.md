@@ -1,16 +1,16 @@
 ---
 description: Drive a Scrum-style sprint loop over confirmed user stories (backlog → implement → verify → review → LOOP until Done). Use when multi-story work must finish completely, not partially.
 argument-hint: "[plan|status|advance|review|list] [story-id]"
-allowed-tools: Read, Bash(claude-skills sprint:*)
+allowed-tools: Read, Bash(keel sprint:*)
 ---
 
-# /claude-core:sprint
+# /keel:sprint
 
-Drive a claude-core sprint. Arguments: **$ARGUMENTS**
+Drive a keel sprint. Arguments: **$ARGUMENTS**
 
-Use the installed binary path (bare `claude-skills` is not guaranteed on PATH):
-`~/.claude/claude-skills` (macOS/Linux), `%USERPROFILE%\.claude\claude-skills.exe`
-(Windows), or `cargo run --bin claude-skills --` from a source checkout.
+Use the installed binary path (bare `keel` is not guaranteed on PATH):
+`~/.claude/keel` (macOS/Linux), `%USERPROFILE%\.claude\keel.exe`
+(Windows), or `cargo run --bin keel --` from a source checkout.
 
 Map the action in `$0` to the matching native subcommand:
 

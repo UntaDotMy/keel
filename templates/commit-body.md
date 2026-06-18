@@ -1,6 +1,6 @@
 <!--
 Purpose: Provide a professional commit-body template for scoped repository changes.
-Caller: claude-skills git-workflow commit-message and contributors preparing commits.
+Caller: keel git-workflow commit-message and contributors preparing commits.
 Dependencies: Professional text linting rules and changed-file/test evidence.
 Main Functions: Offers optional sections for diff-scoped commit bodies.
 Side Effects: None.

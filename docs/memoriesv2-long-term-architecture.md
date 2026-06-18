@@ -1,11 +1,11 @@
 # MemoriesV2 Long-Term Architecture
 
-This document defines the repo-native direction for long-term memory in `claude_skills`.
+This document defines the repo-native direction for long-term memory in `keel`.
 
 ## Goal
 
 - Make `memoriesv2` the canonical durable second-layer memory store.
-- Keep the native `claude-skills memory ...` and `claude-skills orchestration ...` commands as the write path during migration.
+- Keep the native `keel memory ...` and `keel orchestration ...` commands as the write path during migration.
 - Add repo-native retrieval, consolidation, and indexing so the system behaves like a long-term memory runtime instead of a collection of files.
 - Maximize practical prompt-cache reuse with deterministic packet assembly. Do not promise a literal 100 percent cache hit rate.
 

@@ -2,7 +2,7 @@
 name: backend-and-data-architecture
 description: Designs backend systems and data models: API contracts, microservice boundaries, database schemas, caching, messaging, and event-driven patterns. Use when changing APIs, evolving schemas, planning migrations, deciding service boundaries, or hardening retries, idempotency, and operational readiness.
 when_to_use: Backend systems, API design, and data engineering.
-allowed-tools: Read, Grep, Glob, Edit, Write, Bash(claude-skills memory:*), Bash(git diff:*), Bash(git status), Bash(git log:*), Bash(cargo:*), Bash(npm:*), Bash(yarn:*), Bash(pnpm:*), Bash(go:*), Bash(python:*), Bash(uv:*), Bash(pytest:*)
+allowed-tools: Read, Grep, Glob, Edit, Write, Bash(keel memory:*), Bash(git diff:*), Bash(git status), Bash(git log:*), Bash(cargo:*), Bash(npm:*), Bash(yarn:*), Bash(pnpm:*), Bash(go:*), Bash(python:*), Bash(uv:*), Bash(pytest:*)
 effort: medium
 paths:
   - "**/*.go"

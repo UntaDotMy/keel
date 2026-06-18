@@ -2,7 +2,7 @@
 name: ux-research-and-experience-strategy
 description: Validates user needs, runs research, and shapes experience strategy with evidence-based recommendations. Use when framing journey friction, decision architecture, funnel drop-off, usability issues, experiment design, or brownfield familiarity constraints before visual implementation choices.
 when_to_use: UX research and evidence-based experience design.
-allowed-tools: Read, Grep, Glob, Bash(claude-skills design-intelligence:*), Bash(claude-skills memory:*)
+allowed-tools: Read, Grep, Glob, Bash(keel design-intelligence:*), Bash(keel memory:*)
 effort: medium
 ---
 

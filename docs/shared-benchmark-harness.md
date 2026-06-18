@@ -1,18 +1,18 @@
 # Shared Benchmark Harness
 
-This page publishes the shared benchmark harness contract for `claude_skills`, `runtime-shell comparator`, `workflow-teaching comparator`, and `swarm-automation comparator`.
+This page publishes the shared benchmark harness contract for `keel`, `runtime-shell comparator`, `workflow-teaching comparator`, and `swarm-automation comparator`.
 
 Canonical machine-readable source: [docs/benchmark-scorecard.json](./benchmark-scorecard.json)
 
 ## Why this exists
 
-The benchmark suite in this repository already proves eight realistic workflow scenarios for `claude_skills`.
+The benchmark suite in this repository already proves eight realistic workflow scenarios for `keel`.
 
 The remaining gap was cross-repo comparability: one shared scenario contract, one shared scorecard shape, and one shared evidence format that can be reused without changing the rules per repository.
 
 ## Shared repositories
 
-- `claude_skills`
+- `keel`
 - `runtime-shell comparator`
 - `workflow-teaching comparator`
 - `swarm-automation comparator` for the public automation and swarm-workflow comparator; source-backed shared-harness runs are still pending
@@ -57,14 +57,14 @@ The machine-readable scorecard now groups the benchmark work into four competiti
 - `branch_closeout_and_hosted_repair`
 - `swarm_automation_and_team_coordination`
 
-For each surface, the scorecard keeps the repo ids, source kinds, source urls, evidence status values, proof summaries, and outcomes visible for `claude_skills`, `runtime-shell comparator`, `workflow-teaching comparator`, and `swarm-automation comparator`.
+For each surface, the scorecard keeps the repo ids, source kinds, source urls, evidence status values, proof summaries, and outcomes visible for `keel`, `runtime-shell comparator`, `workflow-teaching comparator`, and `swarm-automation comparator`.
 
-`claude_skills` stays source-backed on the repo-local benchmark suite. The peer repos stay public-surface-only until source-backed shared-harness runs are published for them.
+`keel` stays source-backed on the repo-local benchmark suite. The peer repos stay public-surface-only until source-backed shared-harness runs are published for them.
 
 ## Current honest state
 
-- `claude_skills` already publishes source-backed runs for the tracked eight scenarios in this repository.
-- `runtime-shell comparator`, `workflow-teaching comparator`, and `swarm-automation comparator` now share the same scenario ids and evidence fields through this harness contract, while only `claude_skills` has source-backed runs for the full tracked suite today.
+- `keel` already publishes source-backed runs for the tracked eight scenarios in this repository.
+- `runtime-shell comparator`, `workflow-teaching comparator`, and `swarm-automation comparator` now share the same scenario ids and evidence fields through this harness contract, while only `keel` has source-backed runs for the full tracked suite today.
 - The current benchmark posture audit bundle is published in [docs/audits/2026-04-09-benchmark-posture/audit-summary.md](./audits/2026-04-09-benchmark-posture/audit-summary.md) so the benchmark posture claim is bundled, not only described in prose.
 - This repository does not yet claim that every peer repo has completed every shared-harness scenario with source-backed proof.
 
@@ -72,7 +72,7 @@ For each surface, the scorecard keeps the repo ids, source kinds, source urls, e
 
 swarm-automation comparator's public automation surface is a useful comparator for swarm-style coordination, but its harness model stays public-surface-only here until source-backed shared-harness runs exist.
 
-| swarm-automation comparator primitive | Public swarm-automation comparator surface | Nearest `claude_skills` surface | Where it belongs |
+| swarm-automation comparator primitive | Public swarm-automation comparator surface | Nearest `keel` surface | Where it belongs |
 | --- | --- | --- | --- |
 | `PhaseRunner` | `spawn`, `task`, `board`, `lifecycle` | `workflow route`, `workflow start`, `workflow cockpit`, `workflow finish` | benchmark harness |
 | `ArtifactStore` | JSON outputs, snapshots, board exports, plan and task files | benchmark scorecard JSON, audit bundles, release-proof bundles | benchmark harness |
@@ -99,5 +99,5 @@ What belongs where:
 
 ```bash
 cargo test --workspace
-cargo build --release --bin claude-skills
+cargo build --release --bin keel
 ```

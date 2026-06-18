@@ -2,7 +2,7 @@
 name: react-performance-audit
 description: Audits and fixes React performance regressions: render storms, missing memoization, oversized bundles, hydration mismatches, suspense waterfalls, and slow list virtualization. Use when a React or Next.js app is janky, TTI is high, profiler flames are wide, or Core Web Vitals (LCP, INP, CLS) are off-target.
 when_to_use: React/Next.js performance regressions, render audits, and bundle-size triage.
-allowed-tools: Read, Grep, Glob, Edit, Write, Bash(claude-skills memory:*), Bash(git diff:*), Bash(git status), Bash(npm:*), Bash(yarn:*), Bash(pnpm:*), Bash(npx:*), Bash(node:*)
+allowed-tools: Read, Grep, Glob, Edit, Write, Bash(keel memory:*), Bash(git diff:*), Bash(git status), Bash(npm:*), Bash(yarn:*), Bash(pnpm:*), Bash(npx:*), Bash(node:*)
 effort: medium
 paths:
   - "**/*.tsx"

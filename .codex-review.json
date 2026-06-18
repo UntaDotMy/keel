@@ -83,7 +83,7 @@
         "software-development-life-cycle/**",
         "stripe-integration/**",
         "ui-design-systems-and-responsive-interfaces/**",
-        "using-claude-core/**",
+        "using-keel/**",
         "ux-research-and-experience-strategy/**",
         "web-development-life-cycle/**",
         "websocket-realtime-design/**"
@@ -103,7 +103,7 @@
       "severity": "high",
       "match_paths": [
         ".github/workflows/**",
-        "rust/crates/claude-skills/src/manager.rs"
+        "rust/crates/keel/src/manager.rs"
       ],
       "required_changed_path_patterns": [
         "rust/**/*.rs",

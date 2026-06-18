@@ -4,7 +4,7 @@ Use this reference when you want a structured UI recommendation packet generated
 
 ## Native Command
 
-`claude-skills design-intelligence recommend`
+`keel design-intelligence recommend`
 
 ## Backing Catalog
 
@@ -23,11 +23,11 @@ Use this reference when you want a structured UI recommendation packet generated
 ## Example Commands
 
 ```bash
-claude-skills design-intelligence recommend "saas dashboard for incident response"
-claude-skills design-intelligence recommend "portfolio redesign for a creative agency" --format json
-claude-skills design-intelligence recommend "AI workspace for research copilots" --stack nextjs --component-library shadcn --format json
-claude-skills design-intelligence recommend "direct messaging mobile app with unread states and voice notes" --stack flutter --format json
-claude-skills design-intelligence recommend "checkout recovery improvements" --persist --project-name "Storefront Revamp" --page "Checkout Flow"
+keel design-intelligence recommend "saas dashboard for incident response"
+keel design-intelligence recommend "portfolio redesign for a creative agency" --format json
+keel design-intelligence recommend "AI workspace for research copilots" --stack nextjs --component-library shadcn --format json
+keel design-intelligence recommend "direct messaging mobile app with unread states and voice notes" --stack flutter --format json
+keel design-intelligence recommend "checkout recovery improvements" --persist --project-name "Storefront Revamp" --page "Checkout Flow"
 ```
 
 ## Output Shape Highlights
