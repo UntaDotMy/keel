@@ -1,0 +1,11 @@
+{
+  "name": "claude-core-opencode-plugin",
+  "version": "1.0.0",
+  "description": "OpenCode plugin bridging lifecycle events to the claude-skills Rust CLI",
+  "private": true,
+  "type": "module",
+  "main": "claude-core.ts",
+  "devDependencies": {
+    "@opencode-ai/plugin": "^1.0.0"
+  }
+}

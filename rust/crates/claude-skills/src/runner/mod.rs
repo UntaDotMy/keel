@@ -4,6 +4,7 @@
 //! Main Functions: run_run_command, run_rewrite_command, run_hook_command, run_raw_command, run_replay_command.
 //! Side Effects: Spawns requested child commands, writes raw-output recovery logs, and may write or remove Claude Code hook configuration.
 
+pub mod bridge;
 pub mod hook_lifecycle;
 pub mod learning;
 pub mod observation;
@@ -19,6 +20,7 @@ use crate::json::{write_indented, Value};
 use crate::runtime::{display_path, run_command};
 
 // Re-export the public API callers depend on
+pub use bridge::run_bridge_command;
 pub use hook_lifecycle::run_hook_command;
 pub use learning::run_learn_command;
 pub use shell_rewrite::rewrite_for_doctor;

@@ -59,6 +59,66 @@ pub fn record_observation(input: &JsonDocument) -> std::io::Result<bool> {
     record_observation_with_outcome(input, false)
 }
 
+/// Append one observation from flat parts (no Claude Code hook JSON required).
+///
+/// This is the host-neutral adapter: callers outside the Claude Code hook path
+/// (bridge, OpenCode plugin) pass the individual fields directly instead of
+/// synthesizing a fake hook-JSON document. Reuses the same signature-derivation
+/// logic as [`record_observation_with_outcome`] by constructing a minimal
+/// JSON-like lookup keyed on `tool_input`.
+pub fn record_observation_from_parts(
+    claude_home: &std::path::Path,
+    tool_name: &str,
+    tool_input_json: &str,
+    cwd: &str,
+    session_id: &str,
+    failed: bool,
+) -> std::io::Result<bool> {
+    let tool_name = tool_name.trim();
+    if tool_name.is_empty() {
+        return Ok(false);
+    }
+    let tool_input: JsonDocument = if tool_input_json.trim().is_empty() {
+        JsonDocument::Null
+    } else {
+        match serde_json::from_str(tool_input_json) {
+            Ok(value) => value,
+            Err(_) => JsonDocument::Null,
+        }
+    };
+
+    // Build a minimal document shaped enough for derive_signature to resolve
+    // tool_input correctly. The shared handler only reads `tool_name` and
+    // `tool_input`; the other keys (session_id, cwd) are injected directly.
+    let Some((mut signature, detail)) = derive_signature(tool_name, &tool_input) else {
+        return Ok(false);
+    };
+    if failed {
+        signature.push_str(FAILURE_SIGNATURE_SUFFIX);
+    }
+
+    let observations_path = claude_home.join("state").join("observations");
+    std::fs::create_dir_all(&observations_path)?;
+    let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let path = observations_path.join(format!("{date}.jsonl"));
+
+    let line = serde_json::json!({
+        "recorded_at_ms": now_ms(),
+        "session_id": session_id,
+        "cwd": cwd,
+        "tool_name": tool_name,
+        "signature": signature,
+        "detail": detail,
+    });
+
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)?;
+    writeln!(file, "{line}")?;
+    Ok(true)
+}
+
 /// Append a FAILURE observation derived from a PostToolUseFailure hook `input`.
 ///
 /// Identical capture to [`record_observation`] except the derived signature is

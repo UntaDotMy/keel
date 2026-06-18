@@ -126,6 +126,9 @@ impl Application {
                 runner::run_rewrite_command(command_arguments, standard_output, standard_error)
             }
             "hook" => runner::run_hook_command(command_arguments, standard_output, standard_error),
+            "bridge" => {
+                runner::run_bridge_command(command_arguments, standard_output, standard_error)
+            }
             "learn" => {
                 runner::run_learn_command(command_arguments, standard_output, standard_error)
             }
