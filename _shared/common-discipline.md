@@ -2,6 +2,19 @@
 
 This file factors out instructions that previously repeated verbatim across the specialist SKILL.md files. Each skill now references this file instead of duplicating the text. Loaded on demand by the active skill — saves tokens on every skill activation.
 
+## Data and Scope Preservation (highest priority — overrides the action/autonomy bias)
+
+Never remove or replace existing data, fields, columns, outputs, or records to fit a new format — ADD alongside, and ASK before dropping anything. This rule outranks "decide the small stuff yourself" and "default to action": when a wrong guess would destroy data or waste work, asking is the correct move, not a failure of nerve.
+
+- **ADD, never silently REPLACE.** When asked to add a value, field, column, or output, add it alongside what exists. Do not delete, overwrite, or restructure existing data unless the user explicitly named the thing to remove.
+- **Derived never displaces source.** A computed or derived value (a deviation, a total, a percentage) is always additive. It must never remove the measured or source value it was derived from.
+- **"Match this format/template/example" authorizes copying STYLE only** — never deleting fields the reference happens to omit. Format is not the data set; adopting a layout does not authorize adopting its omissions.
+- **Removal needs an explicit current instruction naming the target.** "Remove the X column" or "replace X with Y" authorizes it. "Proceed", "make it like theirs", "same as them", "looks good", or silence do not.
+- **Data loss is destructive even with no dangerous shell command.** Dropping a field, column, output, or record in a code or doc edit deserves the same caution as `DROP TABLE` or `rm -rf`. The destructive-action radar is not only for shell and infra.
+- **Flag-After tripwire.** If you are about to write "note: I removed/changed X" *after* acting, that disclosure is proof you should have ASKED *before* acting. Stop and ask instead — flagging-after is permission you never got.
+- **Scope-diff before finishing.** Before declaring done, state what was asked and what you changed, and confirm the change is a strict superset of the existing data unless the user asked to remove something. Anything you did that the user did not ask for is a scope violation — surface it or do not do it.
+- **Ambiguity with a destructive branch = ASK.** If a request could mean "add" or "replace", you may not pick the destructive reading to keep moving. Ask one question — "add alongside, or replace?" — then wait.
+
 ## Research Reuse Defaults
 
 - Check indexed memory and any recorded research-cache entry before starting a fresh live research loop.
@@ -57,6 +70,9 @@ The block is split into two layers: four **behavioral pillars** that govern how 
 - If something is unclear, stop. Name what is confusing. Ask.
 - "I'll just code this and see" is the failure mode this pillar exists to prevent.
 - "I get the gist" is not understanding. The gist is a summary; building needs the spec. Research the gap before coding, not after a reviewer or the user finds it.
+- **The codebase is what IS, not what is CORRECT.** Reading code shows current behavior — never whether it is right, complete, or matches the real spec. Never treat existing code as the source of truth for correctness. For formulas, units, standards, and domain conventions, verify against an authoritative external source before implementing, and cite what you checked.
+- **Confirm a deduced rule against ALL evidence, not one sample.** One matching example is a hypothesis; all available examples matching is proof. Memory is also a hypothesis — anything you recall about a value, a formula, or a prior step is re-confirmed by reading the file or running the tool before you act on it.
+- **Separate confirmed from assumed.** Say "I verified X" versus "I am assuming Y". Never present an assumption as a fact.
 
 **Deep dive before declaring a target.** When you suspect a function, module, or branch is the cause:
 

@@ -7,6 +7,16 @@ Side Effects: None — this file is informational.
 -->
 # Feature Delivery Rules, Best Practices, and Prohibited Shortcuts
 
+## Data and Scope Preservation (read first — overrides the action/autonomy bias)
+
+Never remove or replace existing data, fields, columns, outputs, or records to fit a new format. ADD alongside, and ASK before dropping anything the user did not explicitly name. When a wrong guess would destroy data or waste work, asking is correct, not a failure of decisiveness.
+
+- **Destructive means data loss too, not only dangerous shell.** Removing or replacing a field, column, output, or record in a code or doc edit deserves the same caution as `DROP TABLE`, `rm -rf`, or `git push --force`. The destructive-action radar is not only for shell and infra.
+- **Autonomy is for reversible, low-stakes choices only** — naming, formatting, equivalent implementations. It never covers deleting or replacing data, changing a data contract, schema, or report shape, or any choice where two readings differ in what is kept versus discarded. For those, ASK.
+- **Ambiguity with a destructive branch = ASK.** If a request could mean "add" or "replace", do not pick the destructive reading to keep moving. Ask "add alongside, or replace?" and wait.
+- **Flag-After tripwire.** If you are about to write "note: I removed/changed X" after acting, that disclosure proves you should have asked before acting. Ask first.
+- **Scope-diff before finishing.** Before declaring done, state what was asked and what you changed, and confirm the change is a strict superset of existing data unless removal was requested. Surface anything extra.
+
 ## Feature Delivery Rules
 
 ### Branch model
@@ -73,6 +83,13 @@ Promotion flow: `work branch` → `feat` → `dev` → `main`.
 - **Keeping Dead Code**: Keeping old code "just in case" instead of deleting it
 - **Defensive Programming**: Adding error handling for scenarios that can't happen
 - **Speculative Features**: Adding features "for future use"
+
+### Data Loss Shortcuts (CRITICAL)
+- **Silent Field Removal**: Deleting a field, column, output, or record the user did not name, to fit a new format
+- **Derived Displacing Source**: Replacing a measured or source value with a value computed from it instead of adding alongside
+- **Template Omission Copying**: Dropping fields a reference format happens to omit when told to "match" it
+- **Destructive Reading of Ambiguity**: Picking "replace" over "add" when the request supports both, to keep moving
+- **Flag-After Instead of Ask-Before**: Disclosing a removal after acting instead of asking before
 
 ### Testing Shortcuts
 - **Test Skipping**: Using `.skip()`, `.only()`, or commenting out failing tests

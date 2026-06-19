@@ -22,6 +22,17 @@ Layer new behavior beside the current path, or route it through the same owner p
 
 This is a universal pre-edit gate for existing source files. Run a Preserve Existing Flow check before editing any existing source file unless the task is docs-only, formatting-only, generated-only, or explicitly greenfield.
 
+## Data and Output Preservation
+
+The same no-overwrite rule applies to data, not just control flow. When editing any output, record, report, schema, config, or data structure:
+
+- **ADD, never silently REPLACE.** Adding a field, column, value, or output means adding it alongside what exists. Do not delete, overwrite, or restructure existing data unless the user explicitly named the thing to remove.
+- **Derived never displaces source.** A computed value (deviation, total, percentage) is additive — it never removes the measured value it was derived from.
+- **"Match this format/template/example" copies STYLE only**, never the reference's omissions. Adopting a layout does not authorize dropping fields the reference happens to lack.
+- **Removal needs an explicit current instruction naming the target.** "Remove the X column" authorizes it; "make it like theirs", "proceed", or silence do not.
+- **Flag-After tripwire.** If you are about to write "note: I removed/changed X" after acting, that is proof you should have asked before acting. Ask first.
+- **Will the new behavior change the meaning of existing data?** If yes, that is an ownership change — get explicit approval before proceeding (see the Implementation Gate below).
+
 ## Code Implementation Discipline
 
 See `_shared/common-discipline.md` § Code Implementation Discipline for the canonical rules — four behavioral pillars (Think Before Coding, Simplicity First, Surgical Changes, Goal-Driven Execution) plus tactical rules (YAGNI, no shortforms, no silent fallbacks, no duplication, less comments + structured doc tags). They reinforce this skill's core rule: routing through the existing owner is the no-duplication / no-parallel-path principle expressed at the architecture layer. Surgical Changes maps directly to "do not refactor adjacent code while extending the owner". Reject extensions that copy the owner's logic into a new file or wrap it in a "compat shim" instead of extending the owner directly.
@@ -79,6 +90,7 @@ Reject these shortcuts:
 - Do not patch only one consumer branch if the source of truth is somewhere else.
 - Do not add speculative fallback behavior to hide an untraced root cause.
 - Do not refactor unrelated code while adding the requested behavior.
+- Do not remove or replace an existing field, column, output, or record to fit a new format — add alongside and ask before dropping anything the user did not name.
 
 ## Reference Comparison Rule
 
