@@ -43,6 +43,7 @@ Side Effects: None — this file is informational.
 - For bug reproduction and validation, reproduce the user-facing failure first, then choose the inspection tool that can observe the real surface: browser automation such as Playwright for web flows, desktop-runtime inspection with screenshots or equivalent visual evidence for desktop flows, and the most direct runtime-native inspection tool for CLI, service, workflow, or device issues.
 - Strengthen vague prompts from repository evidence, runtime evidence, and prior memory before acting.
 - If business logic is still ambiguous after that pass, clarify with the user instead of drifting into guesses.
+- Autonomy applies to reversible, low-stakes choices only (naming, formatting, equivalent implementations). It never covers removing or replacing existing data, changing a data contract, schema, or output shape, or any ambiguity whose two readings differ in what is kept versus discarded. When a request could mean "add" or "replace", ask "add alongside, or replace?" and wait — do not pick the destructive reading to keep moving.
 - For non-trivial product, workflow, or architecture work, add a front-loaded alignment checkpoint before implementation: if repo inspection still leaves multiple plausible interpretations, acceptance-criterion gaps, or non-obvious tradeoffs, use `request_user_input` when available or ask the user directly before coding.
 - When another skill contributes, include the working brief so the contribution stays aligned and specific.
 
@@ -378,6 +379,7 @@ REPEAT UNTIL CLEAN:
 - Enumerate every explicit user requirement, complaint, acceptance criterion, and correction that appeared in the turn.
 - For non-trivial tasks, record those explicit requirements in the scoped completion ledger with `keel memory completion-gate`, keep the ledger current as work progresses, and rerun `check` before closing.
 - Map each one to concrete code, docs, validation, or a verified blocker.
+- **Scope-diff and data-preservation check (fail-closed).** Before the final answer, confirm the change is a strict superset of the existing data unless the user explicitly asked to remove something: no existing field, column, output, or record was removed or replaced unless the user named it. State what was asked and what changed; anything beyond the request is a scope violation to surface or revert. A removal you cannot trace to an explicit current instruction blocks closure the same way a failing build does.
 - Re-audit the finished change against the working brief user story, PRD or spec when one exists, explicit tasks, active plan items, tracked requirements, required lanes, and closure proof before calling the scoped job done.
 - Hold the final output until the closing check is explicit: every requested task is done or honestly blocked, tests and validation targets passed, coverage is adequate for the touched risk surface, and no partial implementation is being presented as complete.
 - Do not close the current job scope until it is 100% complete for that scope; for phased delivery such as P0, P1, and P2, the active layer must be complete and re-audited before advancing.

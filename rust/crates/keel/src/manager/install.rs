@@ -401,6 +401,7 @@ Installed by keel into `~/.claude/CLAUDE.md` and loaded into **every** harness s
 2. **Understand before building.** Restate what the request asks and research what is genuinely needed before writing code. No guessing, no building against an imagined spec.
 3. **Invoke relevant skills.** If there is even a 1% chance a keel skill applies, use the Skill tool BEFORE writing code or giving a final answer.
 4. **Find the root cause.** Trace the symptom end-to-end with file:line evidence and confirm the suspect is on that path before changing anything.
+5. **Preserve existing data.** Never remove or replace an existing field, column, output, or record to fit a new format — ADD alongside, and ASK before dropping anything the user did not name. Data loss in an edit is destructive like `DROP TABLE`; if you would flag a removal *after* acting, ask *before* instead. Autonomy covers reversible choices, never data deletion.
 
 ## keel MCP tools — always available, prefer over guessing
 - `system_map` — call before any claim about a repository's structure or layout ("what is this project", "where does X live") instead of reading files blind.
