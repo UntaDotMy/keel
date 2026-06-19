@@ -2154,6 +2154,207 @@ fn brief_gate_message(decision: GateDecision) -> String {
     }
 }
 
+// ---- Memory-save gate (PostToolBatch) ----
+//
+// A session that changed code but saved nothing durable to memory gets nudged to
+// record what it learned before it forgets mid-task — the symptom the user
+// reported. Mirrors the brief gate's "happened this session" mtime shape, scoped
+// to the surfaces a `keel memory ...` write lands in. Default-on as Escalate;
+// bounded per session; fail-open.
+const MEMORY_GATE_ENV_VAR: &str = "CLAUDE_SKILLS_MEMORY_GATE";
+const MEMORY_GATE_MAX_BLOCKS_ENV_VAR: &str = "CLAUDE_SKILLS_MEMORY_GATE_MAX_BLOCKS";
+
+fn memory_gate_mode() -> GateMode {
+    gate_mode(MEMORY_GATE_ENV_VAR)
+}
+
+fn memory_gate_max_blocks() -> u64 {
+    std::env::var(MEMORY_GATE_MAX_BLOCKS_ENV_VAR)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or_else(|| default_max_blocks_for(memory_gate_mode()))
+}
+
+fn memory_gate_blocks_path(claude_home: &Path, session_id: &str) -> PathBuf {
+    let key = if session_id.trim().is_empty() {
+        "no-session".to_string()
+    } else {
+        sanitize_memory_key(session_id)
+    };
+    claude_home
+        .join("state")
+        .join("memory-gate-blocks")
+        .join(key)
+}
+
+/// Memory-save gate message, keyed on the emitted decision. Both variants name
+/// the clearing action (research-cache record or maintenance working-buffer),
+/// the bound, and the off-switch.
+fn memory_gate_message(decision: GateDecision) -> String {
+    match decision {
+        GateDecision::Block => "Memory-save gate (CLAUDE_SKILLS_MEMORY_GATE): this session changed code but saved nothing durable to memory, and the earlier reminder went unaddressed — so this is now a hard stop. Record what you learned so it survives compaction: `keel memory research-cache record --question \"...\" --answer \"...\"` for a reusable finding, or `keel memory maintenance append-working-buffer --note \"...\"` for in-progress context (either clears the gate). This gate is bounded per session and then lets the turn through, so it cannot loop. Set CLAUDE_SKILLS_MEMORY_GATE=nudge to keep it advisory-only, or =off to disable entirely.".to_string(),
+        // Nudge / Advisory both render the non-blocking phrasing; Advisory never reaches here.
+        _ => "Memory-save reminder (CLAUDE_SKILLS_MEMORY_GATE, on by default): this session changed code but saved nothing durable to memory. Record what you learned so it survives compaction: `keel memory research-cache record --question \"...\" --answer \"...\"` for a reusable finding, or `keel memory maintenance append-working-buffer --note \"...\"` for in-progress context (either clears the gate). This first reminder does not stop the turn, but if nothing is saved by the next end-of-turn the gate will escalate to a hard stop. It is bounded per session. Set CLAUDE_SKILLS_MEMORY_GATE=nudge to keep it advisory-only, =block to stop immediately, or =off to disable entirely.".to_string(),
+    }
+}
+
+// ---- Sprint-start gate (PostToolBatch) ----
+//
+// Multi-story scope (a working brief with >=2 acceptance criteria) that has no
+// sprint started yet gets nudged to plan one so each story is tracked to Done.
+// Default-on as Escalate; bounded per session; fail-open.
+const SPRINT_START_GATE_ENV_VAR: &str = "CLAUDE_SKILLS_SPRINT_START_GATE";
+const SPRINT_START_GATE_MAX_BLOCKS_ENV_VAR: &str = "CLAUDE_SKILLS_SPRINT_START_GATE_MAX_BLOCKS";
+
+fn sprint_start_gate_mode() -> GateMode {
+    gate_mode(SPRINT_START_GATE_ENV_VAR)
+}
+
+fn sprint_start_gate_max_blocks() -> u64 {
+    std::env::var(SPRINT_START_GATE_MAX_BLOCKS_ENV_VAR)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or_else(|| default_max_blocks_for(sprint_start_gate_mode()))
+}
+
+fn sprint_start_gate_blocks_path(claude_home: &Path, session_id: &str) -> PathBuf {
+    let key = if session_id.trim().is_empty() {
+        "no-session".to_string()
+    } else {
+        sanitize_memory_key(session_id)
+    };
+    claude_home
+        .join("state")
+        .join("sprint-start-gate-blocks")
+        .join(key)
+}
+
+/// Sprint-start gate message, keyed on the emitted decision. Both variants name
+/// the clearing action (`keel sprint plan`), the working-a-sprint skill, the
+/// bound, and the off-switch.
+fn sprint_start_gate_message(decision: GateDecision) -> String {
+    match decision {
+        GateDecision::Block => "Sprint-start gate (CLAUDE_SKILLS_SPRINT_START_GATE): this workspace's working brief describes multi-story scope but no sprint has been started, and the earlier reminder went unaddressed — so this is now a hard stop. Start the sprint with `keel sprint plan` so each story is tracked to Done, and run the loop with the working-a-sprint skill (this clears the gate). This gate is bounded per session and then lets the turn through, so it cannot loop. Set CLAUDE_SKILLS_SPRINT_START_GATE=nudge to keep it advisory-only, or =off to disable entirely.".to_string(),
+        // Nudge / Advisory both render the non-blocking phrasing; Advisory never reaches here.
+        _ => "Sprint-start reminder (CLAUDE_SKILLS_SPRINT_START_GATE, on by default): this workspace's working brief describes multi-story scope but no sprint has been started. Start one with `keel sprint plan` so each story is tracked to Done, and run the loop with the working-a-sprint skill (this clears the gate). This first reminder does not stop the turn, but if no sprint exists at the next end-of-turn the gate will escalate to a hard stop. It is bounded per session. Set CLAUDE_SKILLS_SPRINT_START_GATE=nudge to keep it advisory-only, =block to stop immediately, or =off to disable entirely.".to_string(),
+    }
+}
+
+// ---- Learned-skill reminder gate (PostToolBatch) ----
+//
+// The learning loop generates template-state `learned-<project>` skills the agent
+// has not loaded or refined. This reminder surfaces them so the captured
+// conventions actually get applied. Default-on as Escalate for consistency, but
+// the message stays advisory (load the skill, not "you must"); independent of edit
+// count like the closeout gate. Bounded per session; fail-open.
+const LEARNED_SKILL_GATE_ENV_VAR: &str = "CLAUDE_SKILLS_LEARNED_SKILL_GATE";
+const LEARNED_SKILL_GATE_MAX_BLOCKS_ENV_VAR: &str = "CLAUDE_SKILLS_LEARNED_SKILL_GATE_MAX_BLOCKS";
+
+fn learned_skill_gate_mode() -> GateMode {
+    gate_mode(LEARNED_SKILL_GATE_ENV_VAR)
+}
+
+fn learned_skill_gate_max_blocks() -> u64 {
+    std::env::var(LEARNED_SKILL_GATE_MAX_BLOCKS_ENV_VAR)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or_else(|| default_max_blocks_for(learned_skill_gate_mode()))
+}
+
+fn learned_skill_gate_blocks_path(claude_home: &Path, session_id: &str) -> PathBuf {
+    let key = if session_id.trim().is_empty() {
+        "no-session".to_string()
+    } else {
+        sanitize_memory_key(session_id)
+    };
+    claude_home
+        .join("state")
+        .join("learned-skill-gate-blocks")
+        .join(key)
+}
+
+/// Learned-skill reminder message listing each pending learned skill as a
+/// `Skill("...")` load action. Advisory in both variants (a reminder, not
+/// enforcement); names the gate, the action, the bound, and the off-switch.
+fn learned_skill_gate_message(
+    decision: GateDecision,
+    briefs: &[crate::runner::learning::SynthesisBrief],
+) -> String {
+    let mut actions = String::new();
+    for brief in briefs {
+        actions.push_str(&format!("\n  - Skill(\"{}\")", brief.skill_name));
+    }
+    let preamble = match decision {
+        GateDecision::Block => "Learned-skill reminder (CLAUDE_SKILLS_LEARNED_SKILL_GATE): the learning loop generated skill(s) capturing this project's observed conventions that you have not loaded or refined yet, and the earlier reminder went unaddressed.",
+        _ => "Learned-skill reminder (CLAUDE_SKILLS_LEARNED_SKILL_GATE, on by default): the learning loop generated skill(s) capturing this project's observed conventions that you have not loaded or refined yet.",
+    };
+    format!("{preamble} Load one to apply and refine its guidance:{actions}\nThis is advisory feed-forward, bounded per session, and never halts the turn. Set CLAUDE_SKILLS_LEARNED_SKILL_GATE=nudge to keep it advisory-only, or =off to disable entirely.")
+}
+
+/// Newest mtime (ms) across the memory surfaces a session can write to, or `None`
+/// when none exist. Scans research-cache records, working-brief files, and the
+/// maintenance working buffer — the targets the gate's clearing actions write to.
+fn newest_memory_write_ms(claude_home: &Path) -> Option<u64> {
+    let candidates = [
+        newest_file_mtime_in_dir(&claude_home.join("memory").join("research-cache")),
+        newest_file_mtime_in_dir(&crate::utility::working_brief::brief_directory(claude_home)),
+        file_mtime_ms(&claude_home.join("memory").join("working-buffer.md")),
+    ];
+    candidates.into_iter().flatten().max()
+}
+
+/// Newest file mtime (ms) directly under `directory`, or `None` when it is
+/// missing/unreadable or has no files. Non-recursive: the record stores write
+/// flat `<id>.json` files.
+fn newest_file_mtime_in_dir(directory: &Path) -> Option<u64> {
+    let entries = fs::read_dir(directory).ok()?;
+    let mut newest: Option<u64> = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        if let Some(ms) = file_mtime_ms(&path) {
+            newest = Some(newest.map_or(ms, |current| current.max(ms)));
+        }
+    }
+    newest
+}
+
+/// Whether durable memory was written for this session. Mirrors
+/// [`brief_written_this_session`]: an unknown session start reports satisfied
+/// (never block a session we cannot time); otherwise satisfied iff the newest
+/// memory write is at or after `session_start_ms` minus the shared grace. A
+/// missing/unreadable surface counts as "no write" so the gate still fires.
+fn memory_written_this_session(claude_home: &Path, session_start_ms: Option<u64>) -> bool {
+    let Some(start) = session_start_ms else {
+        return true;
+    };
+    match newest_memory_write_ms(claude_home) {
+        Some(write_ms) => write_ms.saturating_add(BRIEF_GATE_SESSION_GRACE_MS) >= start,
+        None => false,
+    }
+}
+
+/// Whether the most recent working brief applying to `workspace_cwd` describes
+/// multi-story scope (>=2 acceptance criteria). Uses the same workspace-match
+/// rule as [`newest_brief_mtime_ms`] (empty workspace applies anywhere). Fail-open:
+/// an unreadable brief store yields `false` (not multi-story → silent).
+fn workspace_brief_is_multi_story(claude_home: &Path, workspace_cwd: &str) -> bool {
+    let Ok(briefs) = crate::utility::working_brief::list_briefs(claude_home) else {
+        return false;
+    };
+    let current_key = sanitize_memory_key(workspace_cwd);
+    // list_briefs is sorted oldest-first, so the last applicable brief is newest.
+    let newest = briefs.into_iter().rev().find(|brief| {
+        brief.workspace.trim().is_empty() || sanitize_memory_key(&brief.workspace) == current_key
+    });
+    match newest {
+        Some(brief) => brief.acceptance_criteria.len() >= 2,
+        None => false,
+    }
+}
+
 /// Unix-ms modification time of `path`, or `None` on any error. Fail-open: an
 /// unreadable mtime is treated by callers as "no usable timestamp" rather than
 /// surfacing an error into the hook.
@@ -2614,13 +2815,19 @@ fn run_hook_post_tool_batch(
     let review_mode = review_gate_mode();
     let brief_mode = brief_gate_mode();
     let closeout_mode = story_closeout_gate_mode();
+    let memory_mode = memory_gate_mode();
+    let sprint_mode = sprint_start_gate_mode();
+    let learned_mode = learned_skill_gate_mode();
     let review_on = review_mode != GateMode::Off && review_gate_max_blocks() > 0;
     let brief_on = brief_mode != GateMode::Off && brief_gate_max_blocks() > 0;
     let closeout_on = closeout_mode != GateMode::Off && story_closeout_gate_max_blocks() > 0;
+    let memory_on = memory_mode != GateMode::Off && memory_gate_max_blocks() > 0;
+    let sprint_on = sprint_mode != GateMode::Off && sprint_start_gate_max_blocks() > 0;
+    let learned_on = learned_mode != GateMode::Off && learned_skill_gate_max_blocks() > 0;
 
     // All gates off: skip stdin entirely and emit the advisory reminder. This
     // keeps the fully-disabled path cheap and side-effect-free.
-    if !review_on && !brief_on && !closeout_on {
+    if !review_on && !brief_on && !closeout_on && !memory_on && !sprint_on && !learned_on {
         return emit_post_tool_batch_advisory(standard_output, standard_error);
     }
 
@@ -2701,6 +2908,63 @@ fn run_hook_post_tool_batch(
                 );
             }
         }
+
+        // Memory-save gate THIRD (record what you learned before forgetting it).
+        if memory_on {
+            let start = session_start_ms(&claude_home, session_id);
+            let satisfied = memory_written_this_session(&claude_home, start);
+            let blocks_path = memory_gate_blocks_path(&claude_home, session_id);
+            let blocks_issued = read_counter_value(&blocks_path);
+            let decision = decide_gate(
+                memory_mode,
+                memory_gate_max_blocks(),
+                blocks_issued,
+                stats.count,
+                satisfied,
+            );
+            if decision != GateDecision::Advisory {
+                let _ = increment_counter_file(&blocks_path);
+                return emit_gate_decision(
+                    decision,
+                    memory_gate_message(decision),
+                    standard_output,
+                    standard_error,
+                );
+            }
+        }
+
+        // Sprint-start gate FOURTH (track multi-story scope as a sprint).
+        if sprint_on {
+            let multi_story = workspace_brief_is_multi_story(&claude_home, &stats.last_cwd);
+            // Satisfied when a sprint EXISTS for the workspace (Some, whether open
+            // or done). No sprint (Ok(None)) → unsatisfied → fire. Err → fail-open
+            // (treat as satisfied so an unreadable store never blocks).
+            let sprint_exists = matches!(
+                crate::utility::sprint::open_stories_for_workspace(&claude_home, &stats.last_cwd),
+                Ok(Some(_)) | Err(_)
+            );
+            // Only applicable to multi-story scope: a single-story (or no) brief
+            // never needs a sprint, so report satisfied to keep the gate silent.
+            let satisfied = !multi_story || sprint_exists;
+            let blocks_path = sprint_start_gate_blocks_path(&claude_home, session_id);
+            let blocks_issued = read_counter_value(&blocks_path);
+            let decision = decide_gate(
+                sprint_mode,
+                sprint_start_gate_max_blocks(),
+                blocks_issued,
+                stats.count,
+                satisfied,
+            );
+            if decision != GateDecision::Advisory {
+                let _ = increment_counter_file(&blocks_path);
+                return emit_gate_decision(
+                    decision,
+                    sprint_start_gate_message(decision),
+                    standard_output,
+                    standard_error,
+                );
+            }
+        }
     }
 
     // Honest-closeout gate (final honesty: do not present an incomplete sprint as
@@ -2710,6 +2974,19 @@ fn run_hook_post_tool_batch(
     if closeout_on {
         if let Some(decision_and_message) =
             evaluate_story_closeout_gate(&claude_home, session_id, &stats, closeout_mode)
+        {
+            let (decision, message, blocks_path) = decision_and_message;
+            let _ = increment_counter_file(&blocks_path);
+            return emit_gate_decision(decision, message, standard_output, standard_error);
+        }
+    }
+
+    // Learned-skill reminder (apply the loop's captured conventions). Independent
+    // of edit count like the closeout gate: a pending learned skill matters even on
+    // a no-edit turn. Silent when nothing is pending.
+    if learned_on {
+        if let Some(decision_and_message) =
+            evaluate_learned_skill_gate(&claude_home, session_id, learned_mode)
         {
             let (decision, message, blocks_path) = decision_and_message;
             let _ = increment_counter_file(&blocks_path);
@@ -2779,6 +3056,39 @@ fn evaluate_story_closeout_gate(
     Some((
         decision,
         story_closeout_gate_message(decision, &open),
+        blocks_path,
+    ))
+}
+
+/// Decide whether the learned-skill reminder fires this turn, returning the
+/// `(decision, message, counter_path)` when it does or `None` to fall through.
+/// Independent of edit count (passes 1 to `decide_gate`): applicability is the
+/// existence of a pending template-state learned skill, like the closeout gate.
+/// Fail-open: an empty brief set (nothing pending) yields `None`.
+fn evaluate_learned_skill_gate(
+    claude_home: &Path,
+    session_id: &str,
+    mode: GateMode,
+) -> Option<(GateDecision, String, PathBuf)> {
+    let briefs = crate::runner::learning::collect_synthesis_briefs(claude_home);
+    if briefs.is_empty() {
+        return None;
+    }
+    let blocks_path = learned_skill_gate_blocks_path(claude_home, session_id);
+    let blocks_issued = read_counter_value(&blocks_path);
+    let decision = decide_gate(
+        mode,
+        learned_skill_gate_max_blocks(),
+        blocks_issued,
+        1,
+        false,
+    );
+    if decision == GateDecision::Advisory {
+        return None;
+    }
+    Some((
+        decision,
+        learned_skill_gate_message(decision, &briefs),
         blocks_path,
     ))
 }
@@ -5238,6 +5548,7 @@ mod tests {
         let _guard = crate::test_support::ENV_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _silenced = NewGatesSilenced::new();
         let previous_review = std::env::var(REVIEW_GATE_ENV_VAR).ok();
         let previous_brief = std::env::var(BRIEF_GATE_ENV_VAR).ok();
         std::env::set_var(REVIEW_GATE_ENV_VAR, "off");
@@ -5561,6 +5872,40 @@ mod tests {
         let _ = std::fs::remove_dir_all(&stale_home);
     }
 
+    struct NewGatesSilenced {
+        previous: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl NewGatesSilenced {
+        fn new() -> Self {
+            let vars = [
+                MEMORY_GATE_ENV_VAR,
+                SPRINT_START_GATE_ENV_VAR,
+                LEARNED_SKILL_GATE_ENV_VAR,
+            ];
+            let previous = vars
+                .iter()
+                .map(|&var| {
+                    let prior = std::env::var(var).ok();
+                    std::env::set_var(var, "off");
+                    (var, prior)
+                })
+                .collect();
+            Self { previous }
+        }
+    }
+
+    impl Drop for NewGatesSilenced {
+        fn drop(&mut self) {
+            for (var, prior) in &self.previous {
+                match prior {
+                    Some(value) => std::env::set_var(var, value),
+                    None => std::env::remove_var(var),
+                }
+            }
+        }
+    }
+
     fn temp_brief_gate_home(label: &str) -> std::path::PathBuf {
         let unique: u128 = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -5592,6 +5937,7 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         let claude_home = temp_brief_gate_home("e2e-nudge");
+        let _silenced = NewGatesSilenced::new();
         let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
         let previous_review = std::env::var(REVIEW_GATE_ENV_VAR).ok();
         let previous_brief = std::env::var(BRIEF_GATE_ENV_VAR).ok();
@@ -5722,6 +6068,7 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         let claude_home = temp_brief_gate_home("e2e-escalate");
+        let _silenced = NewGatesSilenced::new();
         let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
         let previous_review = std::env::var(REVIEW_GATE_ENV_VAR).ok();
         let previous_brief = std::env::var(BRIEF_GATE_ENV_VAR).ok();
@@ -5826,6 +6173,7 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         let claude_home = temp_brief_gate_home("e2e-review-nudge");
+        let _silenced = NewGatesSilenced::new();
         let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
         let previous_review = std::env::var(REVIEW_GATE_ENV_VAR).ok();
         let previous_brief = std::env::var(BRIEF_GATE_ENV_VAR).ok();
@@ -5999,6 +6347,7 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         let claude_home = temp_brief_gate_home("e2e-closeout");
+        let _silenced = NewGatesSilenced::new();
         let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
         let previous_review = std::env::var(REVIEW_GATE_ENV_VAR).ok();
         let previous_brief = std::env::var(BRIEF_GATE_ENV_VAR).ok();
@@ -6091,6 +6440,7 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         let claude_home = temp_brief_gate_home("e2e-closeout-block");
+        let _silenced = NewGatesSilenced::new();
         let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
         let previous_review = std::env::var(REVIEW_GATE_ENV_VAR).ok();
         let previous_brief = std::env::var(BRIEF_GATE_ENV_VAR).ok();
@@ -6159,6 +6509,519 @@ mod tests {
             None => std::env::remove_var(STORY_CLOSEOUT_GATE_ENV_VAR),
         }
         let _ = std::fs::remove_dir_all(&claude_home);
+    }
+
+    /// Seed a research-cache record file with a fresh mtime so the memory gate
+    /// sees a durable write this session. Mirrors the `memory/research-cache`
+    /// layout `keel memory research-cache record` writes to.
+    fn seed_memory_write(claude_home: &std::path::Path) {
+        let dir = claude_home.join("memory").join("research-cache");
+        std::fs::create_dir_all(&dir).expect("create research-cache dir");
+        std::fs::write(dir.join("rc-1.json"), "{\"id\":\"rc-1\"}").expect("write research record");
+    }
+
+    /// Seed the newest working brief for `workspace_cwd` with `criteria_count`
+    /// acceptance criteria so the sprint-start gate's multi-story check resolves.
+    fn seed_brief_with_criteria(
+        claude_home: &std::path::Path,
+        workspace_cwd: &str,
+        criteria_count: usize,
+    ) {
+        let criteria: Vec<String> = (0..criteria_count)
+            .map(|index| format!("Given X, When Y{index}, Then Z{index}."))
+            .collect();
+        let brief = crate::utility::working_brief::create_brief(
+            format!("wb-sprint-{criteria_count}"),
+            "multi-story request".into(),
+            Vec::new(),
+            criteria,
+            Vec::new(),
+            workspace_cwd.into(),
+            "2026-06-06T00:00:00Z".into(),
+        );
+        crate::utility::working_brief::write_brief(claude_home, &brief).expect("write brief");
+    }
+
+    /// Seed a template-state generated learned skill plus the trusted instincts it
+    /// was built from, so `collect_synthesis_briefs` reports one pending brief. The
+    /// fnv1a-64 here matches the learning loop's marker hash so the skill reads as
+    /// unrefined (template state). Returns the skill name.
+    fn seed_pending_learned_skill(claude_home: &std::path::Path, project: &str) -> String {
+        fn fnv1a_64(bytes: &[u8]) -> u64 {
+            let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+            for byte in bytes {
+                hash ^= *byte as u64;
+                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+            hash
+        }
+        let skill_name = format!("learned-{project}");
+        let skill_dir = claude_home.join("skills").join(&skill_name);
+        std::fs::create_dir_all(&skill_dir).expect("mkdir skill");
+        let content =
+            format!("---\nname: {skill_name}\ngenerated: true\nprovenance: learned\n---\nbody\n");
+        std::fs::write(skill_dir.join("SKILL.md"), &content).expect("write skill");
+        let marker = serde_json::json!({
+            "generator": "keel-learning",
+            "generatedHash": fnv1a_64(content.as_bytes()).to_string(),
+            "signatureSet": "cargo test\ngit commit",
+            "project": project,
+            "predictedSignatures": ["cargo test", "git commit"],
+        });
+        std::fs::write(
+            skill_dir.join(".learning-meta.json"),
+            serde_json::to_string_pretty(&marker).unwrap(),
+        )
+        .expect("write marker");
+        let store = crate::utility::record_store::RecordStore::new(claude_home, "memory/instincts");
+        for (index, trigger) in ["cargo test", "git commit"].iter().enumerate() {
+            let id = format!("inst-{index}");
+            let record: crate::utility::record_store::Record = vec![
+                ("id".into(), id.clone()),
+                ("trigger".into(), (*trigger).into()),
+                ("guidance".into(), format!("always run {trigger}")),
+                ("confidence".into(), "8".into()),
+                ("observations".into(), "8".into()),
+                ("sessions".into(), "2".into()),
+                ("project".into(), project.into()),
+                ("source".into(), "observed".into()),
+            ];
+            store.write_record(&id, &record).expect("seed instinct");
+        }
+        skill_name
+    }
+
+    #[test]
+    fn memory_gate_messages_name_the_switches_and_action() {
+        // The memory-gate message must name the clearing action (a memory write)
+        // and how to change/disable it, keyed on the emitted decision.
+        let nudge = memory_gate_message(GateDecision::Nudge);
+        assert!(nudge.contains("CLAUDE_SKILLS_MEMORY_GATE"));
+        assert!(nudge.contains("=block"));
+        assert!(nudge.contains("=off"));
+        assert!(
+            nudge.contains("research-cache record")
+                && nudge.contains("maintenance append-working-buffer"),
+            "nudge message must name the memory-write surfaces that clear the gate"
+        );
+        assert!(nudge.contains("does not stop the turn"));
+        assert!(nudge.contains("escalate"));
+
+        let block = memory_gate_message(GateDecision::Block);
+        assert!(block.contains("CLAUDE_SKILLS_MEMORY_GATE"));
+        assert!(block.contains("=off"));
+        assert!(block.contains("research-cache record"));
+        assert!(block.contains("cannot loop") || block.contains("bounded"));
+        assert!(block.contains("hard stop"));
+    }
+
+    #[test]
+    fn sprint_start_gate_messages_name_the_switches_and_action() {
+        let nudge = sprint_start_gate_message(GateDecision::Nudge);
+        assert!(nudge.contains("CLAUDE_SKILLS_SPRINT_START_GATE"));
+        assert!(nudge.contains("=block"));
+        assert!(nudge.contains("=off"));
+        assert!(
+            nudge.contains("keel sprint plan") && nudge.contains("working-a-sprint"),
+            "nudge message must name the sprint-plan action and the sprint skill"
+        );
+        assert!(nudge.contains("does not stop the turn"));
+        assert!(nudge.contains("escalate"));
+
+        let block = sprint_start_gate_message(GateDecision::Block);
+        assert!(block.contains("CLAUDE_SKILLS_SPRINT_START_GATE"));
+        assert!(block.contains("=off"));
+        assert!(block.contains("keel sprint plan"));
+        assert!(block.contains("cannot loop") || block.contains("bounded"));
+        assert!(block.contains("hard stop"));
+    }
+
+    #[test]
+    fn learned_skill_gate_message_names_switch_and_skill() {
+        let briefs = vec![crate::runner::learning::SynthesisBrief {
+            skill_name: "learned-demo".into(),
+            skill_path: "/skills/learned-demo/SKILL.md".into(),
+            project: "demo".into(),
+            prompt: "...".into(),
+        }];
+        let nudge = learned_skill_gate_message(GateDecision::Nudge, &briefs);
+        assert!(nudge.contains("CLAUDE_SKILLS_LEARNED_SKILL_GATE"));
+        assert!(nudge.contains("=off"));
+        assert!(
+            nudge.contains("Skill(\"learned-demo\")"),
+            "message must name the learned skill as a load action: {nudge}"
+        );
+        assert!(
+            nudge.contains("never halts the turn"),
+            "learned-skill reminder is advisory, never a hard stop"
+        );
+    }
+
+    #[test]
+    fn memory_gate_nudges_when_no_memory_saved_then_satisfied_off_and_capped() {
+        // END-TO-END for the memory-save gate. Isolates it by disabling the other
+        // gates. Proves: fires when code changed but nothing saved; silent once a
+        // memory write exists; silent when off; bounded per session.
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let claude_home = temp_brief_gate_home("e2e-memory");
+        let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
+        let previous_review = std::env::var(REVIEW_GATE_ENV_VAR).ok();
+        let previous_brief = std::env::var(BRIEF_GATE_ENV_VAR).ok();
+        let previous_closeout = std::env::var(STORY_CLOSEOUT_GATE_ENV_VAR).ok();
+        let previous_sprint = std::env::var(SPRINT_START_GATE_ENV_VAR).ok();
+        let previous_learned = std::env::var(LEARNED_SKILL_GATE_ENV_VAR).ok();
+        let previous_memory = std::env::var(MEMORY_GATE_ENV_VAR).ok();
+        std::env::set_var("CLAUDE_TARGET_OVERRIDE", &claude_home);
+        std::env::set_var(REVIEW_GATE_ENV_VAR, "off");
+        std::env::set_var(BRIEF_GATE_ENV_VAR, "off");
+        std::env::set_var(STORY_CLOSEOUT_GATE_ENV_VAR, "off");
+        std::env::set_var(SPRINT_START_GATE_ENV_VAR, "off");
+        std::env::set_var(LEARNED_SKILL_GATE_ENV_VAR, "off");
+        std::env::set_var(MEMORY_GATE_ENV_VAR, "nudge");
+
+        let session_id = "sess-memory";
+        let cwd = "D:/Nasri/Project/memory-e2e";
+        seed_edit_row(&claude_home, session_id, cwd);
+        let stdin_json = format!("{{\"session_id\":\"{session_id}\"}}");
+
+        // Fires: edited code, no memory write → non-blocking nudge naming the gate.
+        let mut out1 = Vec::new();
+        let mut err1 = Vec::new();
+        let code1 = run_hook_post_tool_batch(&mut stdin_json.as_bytes(), &mut out1, &mut err1);
+        let out1_text = String::from_utf8_lossy(&out1);
+        assert_eq!(code1, 0, "stderr: {}", String::from_utf8_lossy(&err1));
+        assert!(
+            !out1_text.contains("\"decision\""),
+            "default memory gate must NOT block: {out1_text}"
+        );
+        assert!(
+            out1_text.contains("additionalContext")
+                && out1_text.contains("CLAUDE_SKILLS_MEMORY_GATE"),
+            "memory gate must emit a non-blocking nudge naming the gate: {out1_text}"
+        );
+        let blocks_path = memory_gate_blocks_path(&claude_home, session_id);
+        assert_eq!(
+            read_counter_value(&blocks_path),
+            1,
+            "memory-gate counter must advance to 1 after the nudge"
+        );
+
+        // Cap reached (still no write): falls through to the generic advisory.
+        let mut out2 = Vec::new();
+        let mut err2 = Vec::new();
+        let code2 = run_hook_post_tool_batch(&mut stdin_json.as_bytes(), &mut out2, &mut err2);
+        let out2_text = String::from_utf8_lossy(&out2);
+        assert_eq!(code2, 0, "stderr: {}", String::from_utf8_lossy(&err2));
+        assert!(
+            out2_text.contains("Closeout check")
+                && !out2_text.contains("CLAUDE_SKILLS_MEMORY_GATE"),
+            "second call must fall through to the generic advisory (cap reached): {out2_text}"
+        );
+
+        // Satisfied: a fresh session with a memory write present → silent.
+        let saved_session = "sess-memory-saved";
+        seed_edit_row(&claude_home, saved_session, cwd);
+        seed_memory_write(&claude_home);
+        let saved_stdin = format!("{{\"session_id\":\"{saved_session}\"}}");
+        let mut out3 = Vec::new();
+        let mut err3 = Vec::new();
+        let code3 = run_hook_post_tool_batch(&mut saved_stdin.as_bytes(), &mut out3, &mut err3);
+        let out3_text = String::from_utf8_lossy(&out3);
+        assert_eq!(code3, 0, "stderr: {}", String::from_utf8_lossy(&err3));
+        assert!(
+            !out3_text.contains("CLAUDE_SKILLS_MEMORY_GATE"),
+            "a memory write this session must satisfy the gate (silent): {out3_text}"
+        );
+
+        // Off: a fresh session with no write but MEMORY_GATE=off → silent.
+        std::env::set_var(MEMORY_GATE_ENV_VAR, "off");
+        let off_session = "sess-memory-off";
+        seed_edit_row(&claude_home, off_session, cwd);
+        let off_stdin = format!("{{\"session_id\":\"{off_session}\"}}");
+        let mut out4 = Vec::new();
+        let mut err4 = Vec::new();
+        let code4 = run_hook_post_tool_batch(&mut off_stdin.as_bytes(), &mut out4, &mut err4);
+        let out4_text = String::from_utf8_lossy(&out4);
+        assert_eq!(code4, 0, "stderr: {}", String::from_utf8_lossy(&err4));
+        assert!(
+            !out4_text.contains("CLAUDE_SKILLS_MEMORY_GATE"),
+            "MEMORY_GATE=off must keep the gate silent: {out4_text}"
+        );
+
+        match previous_home {
+            Some(value) => std::env::set_var("CLAUDE_TARGET_OVERRIDE", value),
+            None => std::env::remove_var("CLAUDE_TARGET_OVERRIDE"),
+        }
+        for (var, prior) in [
+            (REVIEW_GATE_ENV_VAR, previous_review),
+            (BRIEF_GATE_ENV_VAR, previous_brief),
+            (STORY_CLOSEOUT_GATE_ENV_VAR, previous_closeout),
+            (SPRINT_START_GATE_ENV_VAR, previous_sprint),
+            (LEARNED_SKILL_GATE_ENV_VAR, previous_learned),
+            (MEMORY_GATE_ENV_VAR, previous_memory),
+        ] {
+            match prior {
+                Some(value) => std::env::set_var(var, value),
+                None => std::env::remove_var(var),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&claude_home);
+    }
+
+    #[test]
+    fn sprint_start_gate_nudges_for_multi_story_without_sprint_then_satisfied_off_and_capped() {
+        // END-TO-END for the sprint-start gate. Isolates it by disabling the other
+        // gates. Proves: fires on multi-story scope with no sprint; silent once a
+        // sprint exists; silent for single-story scope; silent when off; bounded.
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let claude_home = temp_brief_gate_home("e2e-sprint-start");
+        let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
+        let previous_review = std::env::var(REVIEW_GATE_ENV_VAR).ok();
+        let previous_brief = std::env::var(BRIEF_GATE_ENV_VAR).ok();
+        let previous_closeout = std::env::var(STORY_CLOSEOUT_GATE_ENV_VAR).ok();
+        let previous_memory = std::env::var(MEMORY_GATE_ENV_VAR).ok();
+        let previous_learned = std::env::var(LEARNED_SKILL_GATE_ENV_VAR).ok();
+        let previous_sprint = std::env::var(SPRINT_START_GATE_ENV_VAR).ok();
+        std::env::set_var("CLAUDE_TARGET_OVERRIDE", &claude_home);
+        std::env::set_var(REVIEW_GATE_ENV_VAR, "off");
+        std::env::set_var(BRIEF_GATE_ENV_VAR, "off");
+        std::env::set_var(STORY_CLOSEOUT_GATE_ENV_VAR, "off");
+        std::env::set_var(MEMORY_GATE_ENV_VAR, "off");
+        std::env::set_var(LEARNED_SKILL_GATE_ENV_VAR, "off");
+        std::env::set_var(SPRINT_START_GATE_ENV_VAR, "nudge");
+
+        // Multi-story scope, no sprint → fire.
+        let cwd = "D:/Nasri/Project/sprint-start-e2e";
+        let session_id = "sess-sprint-start";
+        seed_edit_row(&claude_home, session_id, cwd);
+        seed_brief_with_criteria(&claude_home, cwd, 2);
+        let stdin_json = format!("{{\"session_id\":\"{session_id}\"}}");
+
+        let mut out1 = Vec::new();
+        let mut err1 = Vec::new();
+        let code1 = run_hook_post_tool_batch(&mut stdin_json.as_bytes(), &mut out1, &mut err1);
+        let out1_text = String::from_utf8_lossy(&out1);
+        assert_eq!(code1, 0, "stderr: {}", String::from_utf8_lossy(&err1));
+        assert!(
+            !out1_text.contains("\"decision\""),
+            "default sprint-start gate must NOT block: {out1_text}"
+        );
+        assert!(
+            out1_text.contains("additionalContext")
+                && out1_text.contains("CLAUDE_SKILLS_SPRINT_START_GATE"),
+            "sprint-start gate must nudge on multi-story scope with no sprint: {out1_text}"
+        );
+        let blocks_path = sprint_start_gate_blocks_path(&claude_home, session_id);
+        assert_eq!(
+            read_counter_value(&blocks_path),
+            1,
+            "sprint-start counter must advance to 1 after the nudge"
+        );
+
+        // Cap reached: falls through to the generic advisory.
+        let mut out2 = Vec::new();
+        let mut err2 = Vec::new();
+        let code2 = run_hook_post_tool_batch(&mut stdin_json.as_bytes(), &mut out2, &mut err2);
+        let out2_text = String::from_utf8_lossy(&out2);
+        assert_eq!(code2, 0, "stderr: {}", String::from_utf8_lossy(&err2));
+        assert!(
+            out2_text.contains("Closeout check")
+                && !out2_text.contains("CLAUDE_SKILLS_SPRINT_START_GATE"),
+            "second call must fall through to the generic advisory (cap reached): {out2_text}"
+        );
+
+        // Satisfied: a multi-story workspace that already has a sprint → silent.
+        let with_sprint_cwd = "D:/Nasri/Project/sprint-start-has-sprint";
+        let with_sprint_session = "sess-sprint-has";
+        seed_edit_row(&claude_home, with_sprint_session, with_sprint_cwd);
+        seed_brief_with_criteria(&claude_home, with_sprint_cwd, 2);
+        seed_sprint(
+            &claude_home,
+            with_sprint_cwd,
+            &[("As a dev, I want A, so that X.", "todo")],
+        );
+        let with_sprint_stdin = format!("{{\"session_id\":\"{with_sprint_session}\"}}");
+        let mut out3 = Vec::new();
+        let mut err3 = Vec::new();
+        let code3 =
+            run_hook_post_tool_batch(&mut with_sprint_stdin.as_bytes(), &mut out3, &mut err3);
+        let out3_text = String::from_utf8_lossy(&out3);
+        assert_eq!(code3, 0, "stderr: {}", String::from_utf8_lossy(&err3));
+        assert!(
+            !out3_text.contains("CLAUDE_SKILLS_SPRINT_START_GATE"),
+            "an existing sprint must satisfy the gate (silent): {out3_text}"
+        );
+
+        // Single-story scope (one acceptance criterion) → not multi-story → silent.
+        let single_cwd = "D:/Nasri/Project/sprint-start-single";
+        let single_session = "sess-sprint-single";
+        seed_edit_row(&claude_home, single_session, single_cwd);
+        seed_brief_with_criteria(&claude_home, single_cwd, 1);
+        let single_stdin = format!("{{\"session_id\":\"{single_session}\"}}");
+        let mut out4 = Vec::new();
+        let mut err4 = Vec::new();
+        let code4 = run_hook_post_tool_batch(&mut single_stdin.as_bytes(), &mut out4, &mut err4);
+        let out4_text = String::from_utf8_lossy(&out4);
+        assert_eq!(code4, 0, "stderr: {}", String::from_utf8_lossy(&err4));
+        assert!(
+            !out4_text.contains("CLAUDE_SKILLS_SPRINT_START_GATE"),
+            "single-story scope must keep the gate silent: {out4_text}"
+        );
+
+        // Off: a fresh multi-story session but SPRINT_START_GATE=off → silent.
+        std::env::set_var(SPRINT_START_GATE_ENV_VAR, "off");
+        let off_session = "sess-sprint-off";
+        seed_edit_row(&claude_home, off_session, cwd);
+        let off_stdin = format!("{{\"session_id\":\"{off_session}\"}}");
+        let mut out5 = Vec::new();
+        let mut err5 = Vec::new();
+        let code5 = run_hook_post_tool_batch(&mut off_stdin.as_bytes(), &mut out5, &mut err5);
+        let out5_text = String::from_utf8_lossy(&out5);
+        assert_eq!(code5, 0, "stderr: {}", String::from_utf8_lossy(&err5));
+        assert!(
+            !out5_text.contains("CLAUDE_SKILLS_SPRINT_START_GATE"),
+            "SPRINT_START_GATE=off must keep the gate silent: {out5_text}"
+        );
+
+        match previous_home {
+            Some(value) => std::env::set_var("CLAUDE_TARGET_OVERRIDE", value),
+            None => std::env::remove_var("CLAUDE_TARGET_OVERRIDE"),
+        }
+        for (var, prior) in [
+            (REVIEW_GATE_ENV_VAR, previous_review),
+            (BRIEF_GATE_ENV_VAR, previous_brief),
+            (STORY_CLOSEOUT_GATE_ENV_VAR, previous_closeout),
+            (MEMORY_GATE_ENV_VAR, previous_memory),
+            (LEARNED_SKILL_GATE_ENV_VAR, previous_learned),
+            (SPRINT_START_GATE_ENV_VAR, previous_sprint),
+        ] {
+            match prior {
+                Some(value) => std::env::set_var(var, value),
+                None => std::env::remove_var(var),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&claude_home);
+    }
+
+    #[test]
+    fn learned_skill_gate_nudges_when_pending_then_silent_off_and_capped() {
+        // END-TO-END for the learned-skill reminder. Isolates it by disabling the
+        // other gates. Proves: fires when a template-state learned skill is pending
+        // (independent of edits); silent when none pending; silent when off; bounded.
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let claude_home = temp_brief_gate_home("e2e-learned");
+        let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
+        let previous_review = std::env::var(REVIEW_GATE_ENV_VAR).ok();
+        let previous_brief = std::env::var(BRIEF_GATE_ENV_VAR).ok();
+        let previous_closeout = std::env::var(STORY_CLOSEOUT_GATE_ENV_VAR).ok();
+        let previous_memory = std::env::var(MEMORY_GATE_ENV_VAR).ok();
+        let previous_sprint = std::env::var(SPRINT_START_GATE_ENV_VAR).ok();
+        let previous_learned = std::env::var(LEARNED_SKILL_GATE_ENV_VAR).ok();
+        std::env::set_var("CLAUDE_TARGET_OVERRIDE", &claude_home);
+        std::env::set_var(REVIEW_GATE_ENV_VAR, "off");
+        std::env::set_var(BRIEF_GATE_ENV_VAR, "off");
+        std::env::set_var(STORY_CLOSEOUT_GATE_ENV_VAR, "off");
+        std::env::set_var(MEMORY_GATE_ENV_VAR, "off");
+        std::env::set_var(SPRINT_START_GATE_ENV_VAR, "off");
+        std::env::set_var(LEARNED_SKILL_GATE_ENV_VAR, "nudge");
+
+        // Pending learned skill (no edit row needed — the gate is edit-independent).
+        let skill_name = seed_pending_learned_skill(&claude_home, "learnedgate");
+        let session_id = "sess-learned";
+        let stdin_json = format!("{{\"session_id\":\"{session_id}\"}}");
+
+        let mut out1 = Vec::new();
+        let mut err1 = Vec::new();
+        let code1 = run_hook_post_tool_batch(&mut stdin_json.as_bytes(), &mut out1, &mut err1);
+        let out1_text = String::from_utf8_lossy(&out1);
+        assert_eq!(code1, 0, "stderr: {}", String::from_utf8_lossy(&err1));
+        assert!(
+            !out1_text.contains("\"decision\""),
+            "default learned-skill gate must NOT block: {out1_text}"
+        );
+        assert!(
+            out1_text.contains("additionalContext")
+                && out1_text.contains("CLAUDE_SKILLS_LEARNED_SKILL_GATE")
+                && out1_text.contains(&format!("Skill(\\\"{skill_name}\\\")")),
+            "learned-skill gate must name the pending skill as a load action: {out1_text}"
+        );
+        let blocks_path = learned_skill_gate_blocks_path(&claude_home, session_id);
+        assert_eq!(
+            read_counter_value(&blocks_path),
+            1,
+            "learned-skill counter must advance to 1 after the nudge"
+        );
+
+        // Cap reached (skill still pending): falls through to the generic advisory.
+        let mut out2 = Vec::new();
+        let mut err2 = Vec::new();
+        let code2 = run_hook_post_tool_batch(&mut stdin_json.as_bytes(), &mut out2, &mut err2);
+        let out2_text = String::from_utf8_lossy(&out2);
+        assert_eq!(code2, 0, "stderr: {}", String::from_utf8_lossy(&err2));
+        assert!(
+            out2_text.contains("Closeout check")
+                && !out2_text.contains("CLAUDE_SKILLS_LEARNED_SKILL_GATE"),
+            "second call must fall through to the generic advisory (cap reached): {out2_text}"
+        );
+
+        // Satisfied: a fresh home with no learned skills pending → silent.
+        let empty_home = temp_brief_gate_home("e2e-learned-empty");
+        std::env::set_var("CLAUDE_TARGET_OVERRIDE", &empty_home);
+        let empty_session = "sess-learned-empty";
+        let empty_stdin = format!("{{\"session_id\":\"{empty_session}\"}}");
+        let mut out3 = Vec::new();
+        let mut err3 = Vec::new();
+        let code3 = run_hook_post_tool_batch(&mut empty_stdin.as_bytes(), &mut out3, &mut err3);
+        let out3_text = String::from_utf8_lossy(&out3);
+        assert_eq!(code3, 0, "stderr: {}", String::from_utf8_lossy(&err3));
+        assert!(
+            !out3_text.contains("CLAUDE_SKILLS_LEARNED_SKILL_GATE"),
+            "no pending learned skill must keep the gate silent: {out3_text}"
+        );
+
+        // Off: pending skill present but LEARNED_SKILL_GATE=off → silent.
+        std::env::set_var("CLAUDE_TARGET_OVERRIDE", &claude_home);
+        std::env::set_var(LEARNED_SKILL_GATE_ENV_VAR, "off");
+        let off_session = "sess-learned-off";
+        let off_stdin = format!("{{\"session_id\":\"{off_session}\"}}");
+        let mut out4 = Vec::new();
+        let mut err4 = Vec::new();
+        let code4 = run_hook_post_tool_batch(&mut off_stdin.as_bytes(), &mut out4, &mut err4);
+        let out4_text = String::from_utf8_lossy(&out4);
+        assert_eq!(code4, 0, "stderr: {}", String::from_utf8_lossy(&err4));
+        assert!(
+            !out4_text.contains("CLAUDE_SKILLS_LEARNED_SKILL_GATE"),
+            "LEARNED_SKILL_GATE=off must keep the gate silent: {out4_text}"
+        );
+
+        match previous_home {
+            Some(value) => std::env::set_var("CLAUDE_TARGET_OVERRIDE", value),
+            None => std::env::remove_var("CLAUDE_TARGET_OVERRIDE"),
+        }
+        for (var, prior) in [
+            (REVIEW_GATE_ENV_VAR, previous_review),
+            (BRIEF_GATE_ENV_VAR, previous_brief),
+            (STORY_CLOSEOUT_GATE_ENV_VAR, previous_closeout),
+            (MEMORY_GATE_ENV_VAR, previous_memory),
+            (SPRINT_START_GATE_ENV_VAR, previous_sprint),
+            (LEARNED_SKILL_GATE_ENV_VAR, previous_learned),
+        ] {
+            match prior {
+                Some(value) => std::env::set_var(var, value),
+                None => std::env::remove_var(var),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&claude_home);
+        let _ = std::fs::remove_dir_all(&empty_home);
     }
 
     #[test]
