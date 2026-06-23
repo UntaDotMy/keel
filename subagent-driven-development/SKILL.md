@@ -64,6 +64,35 @@ Stay in the main thread when:
 - If the result is wrong or incomplete, re-dispatch with the specific correction,
   or pull the task back in-thread. Do not paper over a bad result.
 
+### Subagent Verification Checklist
+
+Before marking ANY subagent task as complete, the main thread MUST verify ALL of
+the following. A subagent's claim of "done" is a HYPOTHESIS until this checklist
+passes.
+
+1. **Compiles/Passes** — The subagent's output compiles (or equivalent type-check
+   passes) and its own verification check passes when re-run in the main thread.
+   Do not trust the subagent's report — re-run the check yourself.
+2. **Scope Match** — The output matches the requested scope. Nothing extra was
+   added (scope creep), nothing requested was missed (incomplete delivery). Compare
+   the diff against the task description line by line.
+3. **Pattern Match** — The code follows existing codebase patterns. It uses the
+   same naming conventions, error handling style, module structure, and
+   idiomatic patterns as the surrounding code. A subagent that writes correct but
+   stylistically alien code creates a maintenance burden.
+4. **No Regression** — The change does not break existing functionality. Run the
+   project's existing test suite (or the narrowest relevant subset) and confirm
+   all previously-passing tests still pass.
+5. **One-to-One Communication** — If ANY ambiguity exists about scope, correctness,
+   or intent, re-invoke the subagent with a follow-up question using the task
+   continuation `session_id`. Do not guess what the subagent meant. Do not assume
+   and fill in gaps yourself. The subagent has the context; use it.
+
+Never trust a subagent's claim of "done" without verification. The subagent's
+output is a HYPOTHESIS until the main thread verifies it. A returned result that
+passes this checklist is verified done; one that fails any item goes back to the
+subagent with a specific correction.
+
 ### 4. Record progress
 
 - Update the working brief / ledger with the integrated step so it survives

@@ -53,6 +53,28 @@ asks into one vague story — that is exactly how requirements get dropped.
 
 ## The Practice
 
+### 0. Mandatory summary before stories
+
+Before writing ANY user stories, the agent MUST produce a scope summary and get
+user confirmation. This catches drift before stories are written — if the summary
+is wrong, it is far cheaper to fix here than after six stories are drafted.
+
+1. **Restate the request** — one sentence capturing what the user asked for.
+2. **List what IS in scope** — explicitly derived from the user's words. If the
+   user said "add dark mode toggle to settings", list exactly that: the toggle,
+   the settings page, the persistence mechanism. Nothing more.
+3. **List what is OUT of scope** — things the user did NOT ask for but that the
+   agent might be tempted to add. "User did NOT ask for: system-wide theme
+   switching, transition animations, per-component theming, migration of existing
+   styles."
+4. **Present and confirm** — show this summary to the user and get explicit
+   confirmation before proceeding to stories. Use `AskUserQuestion` to present
+   the summary with options: *Correct, write stories*, *Something is missing*,
+  *Scope is wrong*.
+
+This step is mandatory on every requirement-bearing prompt. "I understood the
+request" is not confirmation — the user confirming the scope summary is.
+
 ### 1. Analyze the prompt into discrete requirements
 
 - Read the user's prompt literally. List every distinct thing it asks for —

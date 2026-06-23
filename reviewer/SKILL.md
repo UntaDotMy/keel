@@ -59,17 +59,30 @@ Beyond the Google rubric, this skill also enforces:
 - **Batch Validation Discipline** — prefer small, reviewable patch batches with re-read and proving validation between batches over one oversized rewrite ([Google — Small CLs](https://google.github.io/eng-practices/review/developer/small-cls.html)).
 - **Fail-Fast Over Hidden Fallbacks** — reject silent `try/catch` swallowing, default-on-failure, and parallel "just-in-case" code paths. Errors must surface; root causes must be fixed.
 
-## Two-Stage Review Gate (run in order, re-review after fixes)
+## Three-Stage Review Gate (run in order, re-review after fixes)
 
-Run the review as two distinct stages with a hard ordering, not one undifferentiated pass. Stage 2 does not start until Stage 1 is clean. This separates "did it build the right thing" from "did it build the thing right" so a polished implementation of the wrong spec cannot pass on code quality alone.
+Run the review as three distinct stages with a hard ordering, not one undifferentiated pass. Stage 2 does not start until Stage 0 and Stage 1 are clean. This separates "understand the surface" from "did it build the right thing" from "did it build the thing right" so a polished implementation of the wrong spec cannot pass on code quality alone.
+
+**Stage 0 — Deep Function Trace (understand the surface before reviewing it).**
+
+Before reviewing ANY code change, trace the affected surface end-to-end:
+
+1. **Read the function being modified** — its full implementation, not just the changed lines. Understand what it does, what it returns, and what invariants it maintains.
+2. **Read all callers** — every function that calls the modified function. Understand what they pass in and what they expect back. A change that alters return behavior silently breaks every caller.
+3. **Read all callees** — every function the modified function calls. Understand what side effects they have and whether the modified function depends on their behavior.
+4. **Check for side effects** — state mutations, file I/O, network calls, global state changes, cache writes, queue publishes. A function that looks pure may not be.
+5. **Trace the data flow** — where does input come from (user, API, file, env var, another function), where does output go (return value, file, database, another function's input), and what transformations happen in between.
+6. **Record the trace** — note the entry point, the call chain, the side effects, and the data flow. This becomes the review context.
+
+Only AFTER this trace is complete, proceed to Stage 1. This prevents the most common review failure: reviewing from stale impressions of how the code works.
 
 **Stage 1 — Spec compliance (does it do what was asked?).** Reconcile the diff against the working brief, PRD/spec, explicit task list, acceptance criteria, and active plan items. When the request was captured as user stories (the `writing-user-stories` skill), those confirmed stories are the spec: verify every story is delivered (each Gherkin Given/When/Then acceptance scenario is satisfied) and that no code implements behavior no story asked for — story-to-diff in both directions. Confirm every requested item is implemented, no unrequested feature was added, and edge cases named in the brief are handled. If any requirement is unmet, partially implemented, or drifted, **stop here and return Stage-1 findings** — do not spend the turn on code-quality nits for code that solves the wrong problem.
 
 **Stage 2 — Code quality (is the implementation sound?).** Only once Stage 1 is clean: apply the code-quality, security, performance, testing, language-gate, and hygiene checks (sequence steps 5-10 below).
 
-**Mandatory re-review after fixes.** When findings from either stage are fixed, re-run the stage that produced them against the *new* diff — do not assume a fix is correct or that it introduced no regression. A fix to a Stage-1 gap re-enters at Stage 1; a fix to a Stage-2 issue re-enters at Stage 2. Keep looping until the active stage is clean, then advance. The verdict is final only when both stages are clean on the current diff.
+**Mandatory re-review after fixes.** When findings from any stage are fixed, re-run the stage that produced them against the *new* diff — do not assume a fix is correct or that it introduced no regression. A fix to a Stage-0 gap re-enters at Stage 0; a fix to a Stage-1 gap re-enters at Stage 1; a fix to a Stage-2 issue re-enters at Stage 2. Keep looping until the active stage is clean, then advance. The verdict is final only when all three stages are clean on the current diff.
 
-This is a sequencing discipline layered on the detailed Review Sequence below: Stage 1 ≈ steps 1-4 (diff map, impact, requirements, stateful ownership), Stage 2 ≈ steps 5-10 (quality, security, performance, testing, language gates, hygiene).
+This is a sequencing discipline layered on the detailed Review Sequence below: Stage 0 = deep function trace (understand the surface), Stage 1 ≈ steps 1-4 (diff map, impact, requirements, stateful ownership), Stage 2 ≈ steps 5-10 (quality, security, performance, testing, language gates, hygiene).
 
 ## Review Sequence
 

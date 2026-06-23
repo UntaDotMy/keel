@@ -64,7 +64,9 @@
     "./writing-plans",
     "./writing-skills",
     "./writing-user-stories",
-    "./requesting-code-review"
+    "./requesting-code-review",
+    "./deliberation",
+    "./research-enforcement"
   ],
   "agents": [
     "./.claude/agents/api-contract-design.md",

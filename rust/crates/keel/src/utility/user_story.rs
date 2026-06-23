@@ -188,6 +188,7 @@ fn run_lint(
     }
 
     if failed == 0 {
+        crate::runner::hook_lifecycle::maybe_record_story_confirmed();
         0
     } else {
         1
