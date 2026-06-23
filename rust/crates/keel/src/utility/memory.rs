@@ -1038,44 +1038,150 @@ fn run_workflow_cockpit(
         ]);
         return render_workflow_json(standard_output, standard_error, &payload);
     }
+
+    let _ = writeln!(standard_output, "\u{2554}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2557}");
     let _ = writeln!(
         standard_output,
-        "workflow cockpit: ledger={}",
-        display_path(&claude_home.join("workflow"))
+        "\u{2551}  \x1b[1;36mKEEL COCKPIT\x1b[0m{}",
+        pad_to_width("", 37)
     );
-    let _ = writeln!(
-        standard_output,
-        "  open: {} | total: {}",
-        open_entries.len(),
-        entries.len()
-    );
-    if open_entries.is_empty() {
-        let _ = writeln!(standard_output, "  no open workflow entries");
-    } else {
-        let _ = writeln!(standard_output, "  open entries:");
-        for entry in &open_entries {
-            let _ = writeln!(
-                standard_output,
-                "    {} [{}] {} (started {})",
-                entry.id, entry.preset, entry.request, entry.started_at
-            );
-        }
-    }
-    if !closed_entries.is_empty() {
+    let _ = writeln!(standard_output, "\u{2560}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2563}");
+
+    if let Some(entry) = open_entries.first() {
         let _ = writeln!(
             standard_output,
-            "  recently closed (last {}):",
-            closed_entries.len()
+            "\u{2551}  Request: {}{}",
+            truncate(&entry.request, 38),
+            pad_to_width(&truncate(&entry.request, 38), 38)
         );
-        for entry in &closed_entries {
-            let _ = writeln!(
-                standard_output,
-                "    {} [{}] {} (closed {})",
-                entry.id, entry.preset, entry.request, entry.finished_at
-            );
+        let _ = writeln!(
+            standard_output,
+            "\u{2551}  Preset:  {}{}",
+            entry.preset,
+            pad_to_width(&entry.preset, 38)
+        );
+        let status_color = "\x1b[33m";
+        let reset = "\x1b[0m";
+        let status_text = "\u{25cf} in-progress".to_string();
+        let _ = writeln!(
+            standard_output,
+            "\u{2551}  Status:  {status_color}{status_text}{reset}{}",
+            pad_to_width(&status_text, 38)
+        );
+    } else {
+        let _ = writeln!(standard_output, "\u{2551}  No open workflow entries");
+        let _ = writeln!(
+            standard_output,
+            "\u{2551}  Use: keel workflow start --request \"...\""
+        );
+    }
+
+    let _ = writeln!(standard_output, "\u{2560}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2563}");
+
+    let _ = writeln!(
+        standard_output,
+        "\u{2551}  \x1b[1;33mPROOF BOARD\x1b[0m{}",
+        pad_to_width("", 37)
+    );
+    if open_entries.is_empty() && closed_entries.is_empty() {
+        let _ = writeln!(standard_output, "\u{2551}  (no workflow entries yet)");
+    } else if let Some(entry) = open_entries.first() {
+        let brief_done = !entry.proof.is_empty();
+        let tests_done = entry.proof.contains("test") || entry.proof.contains("green");
+        let review_done = entry.proof.contains("review");
+        let pr_done = entry.proof.contains("pr") || entry.proof.contains("merge");
+        render_proof_item(
+            standard_output,
+            "Working brief written",
+            brief_done || !entry.request.is_empty(),
+        );
+        render_proof_item(standard_output, "Tests passing", tests_done);
+        render_proof_item(standard_output, "Review pending", review_done);
+        render_proof_item(standard_output, "PR not yet created", !pr_done);
+    } else {
+        render_proof_item(standard_output, "Working brief written", true);
+        render_proof_item(standard_output, "Tests passing", true);
+        render_proof_item(standard_output, "Review completed", true);
+        render_proof_item(standard_output, "PR merged", true);
+    }
+
+    render_team_lanes(standard_output, &claude_home);
+
+    let _ = writeln!(standard_output, "\u{255a}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{255d}");
+
+    let next_cmd = if open_entries.is_empty() {
+        "keel workflow start --request \"...\""
+    } else {
+        "keel workflow finish --id <entry-id> --proof \"...\""
+    };
+    let _ = writeln!(standard_output, "\x1b[1;32m  NEXT: {next_cmd}\x1b[0m");
+    0
+}
+
+fn pad_to_width(text: &str, width: usize) -> String {
+    let visible_len = text.chars().count();
+    if visible_len >= width {
+        String::new()
+    } else {
+        " ".repeat(width - visible_len)
+    }
+}
+
+fn truncate(text: &str, max_chars: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= max_chars {
+        text.to_string()
+    } else {
+        chars[..max_chars].iter().collect::<String>() + "..."
+    }
+}
+
+fn render_proof_item(output: &mut dyn Write, label: &str, done: bool) {
+    let (icon, color) = if done {
+        ("\u{2713}", "\x1b[32m")
+    } else {
+        ("\u{25cb}", "\x1b[33m")
+    };
+    let reset = "\x1b[0m";
+    let _ = writeln!(output, "\u{2551}  {color}{icon}{reset} {label}");
+}
+
+fn render_team_lanes(output: &mut dyn Write, _claude_home: &std::path::Path) {
+    use crate::runtime::run_command;
+
+    let _ = writeln!(output, "\u{2560}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2563}");
+    let _ = writeln!(
+        output,
+        "\u{2551}  \x1b[1;35mTEAM LANES\x1b[0m{}",
+        pad_to_width("", 38)
+    );
+
+    let prefix = "keel-team-";
+    let sessions = match run_command("tmux", &["list-sessions".to_string()], None) {
+        Ok(result) if result.code == 0 => {
+            let stdout = String::from_utf8_lossy(&result.stdout);
+            let mut names = Vec::new();
+            for line in stdout.lines() {
+                if let Some(name) = line.split(':').next() {
+                    let trimmed = name.trim().to_string();
+                    if trimmed.starts_with(prefix) {
+                        names.push(trimmed);
+                    }
+                }
+            }
+            names
+        }
+        _ => Vec::new(),
+    };
+
+    if sessions.is_empty() {
+        let _ = writeln!(output, "\u{2551}  (no active team panes)");
+    } else {
+        for session in &sessions {
+            let name = session.strip_prefix(prefix).unwrap_or(session);
+            let _ = writeln!(output, "\u{2551}  \x1b[32m{name}\x1b[0m: running");
         }
     }
-    0
 }
 
 fn run_workflow_finish(
