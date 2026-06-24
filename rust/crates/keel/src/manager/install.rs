@@ -380,10 +380,7 @@ fn maybe_wire_pi(repository_root: &Path, claude_home: &Path) -> Option<String> {
             copied += 1;
         }
     }
-    Some(format!(
-        "{copied} files -> {}",
-        display_path(&project_root)
-    ))
+    Some(format!("{copied} files -> {}", display_path(&project_root)))
 }
 
 fn maybe_wire_codex(repository_root: &Path, claude_home: &Path) -> Option<String> {
@@ -810,7 +807,11 @@ fn remove_wired_adapters(claude_home: &Path) -> usize {
         None => return 0,
     };
 
-    let plugin_file = home.join(".config").join("opencode").join("plugins").join("keel.ts");
+    let plugin_file = home
+        .join(".config")
+        .join("opencode")
+        .join("plugins")
+        .join("keel.ts");
     removed += remove_path_if_exists_counted(&plugin_file).unwrap_or(0);
 
     let codex_dir = home.join(".codex").join("plugins").join("keel");
@@ -2901,15 +2902,10 @@ mod tests {
         let repo = create_minimal_layout("wire-pi-nonstd");
         let _ = fs::create_dir_all(repo.join("pi"));
         let _ = fs::write(repo.join("pi").join("AGENTS.md"), "# Pi Agent\n");
-        let _ = fs::write(
-            repo.join("pi").join(".mcp.json"),
-            r#"{"mcpServers":{}}"#,
-        );
+        let _ = fs::write(repo.join("pi").join(".mcp.json"), r#"{"mcpServers":{}}"#);
 
-        let claude_home = std::env::temp_dir().join(format!(
-            "ulw-wire-pi-nonstd-{}",
-            std::process::id()
-        ));
+        let claude_home =
+            std::env::temp_dir().join(format!("ulw-wire-pi-nonstd-{}", std::process::id()));
         let _ = fs::create_dir_all(&claude_home);
         let result = maybe_wire_pi(&repo, &claude_home);
         assert!(
