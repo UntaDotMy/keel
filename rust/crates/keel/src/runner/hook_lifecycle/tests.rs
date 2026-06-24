@@ -934,7 +934,7 @@ fn post_tool_batch_emits_reviewer_on_close_reminder() {
             "PostToolBatch reminder must not cite a repo-specific section name; the rule is stated inline so it works across host repos"
         );
     assert!(
-        context.contains("decide deliberately") || context.contains("deliberately before skipping"),
+        context.contains("clearable nudge") || context.contains("decide deliberately") || context.contains("rules take precedence"),
         "PostToolBatch reminder must encourage deliberate consideration before skipping"
     );
 
@@ -2225,7 +2225,7 @@ fn sprint_start_gate_messages_name_the_switches_and_action() {
     assert!(nudge.contains("=block"));
     assert!(nudge.contains("=off"));
     assert!(
-        nudge.contains("keel sprint plan") && nudge.contains("working-a-sprint"),
+        nudge.contains("keel sprint plan") && nudge.contains("running-a-sprint"),
         "nudge message must name the sprint-plan action and the sprint skill"
     );
     assert!(nudge.contains("does not stop the turn"));

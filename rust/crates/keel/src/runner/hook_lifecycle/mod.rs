@@ -1868,7 +1868,7 @@ fn count_session_tool_timing_rows(claude_home: &Path, session_id: &str) -> usize
 /// because models that pattern-match generic reminders as noise have
 /// rationalized past prior versions of this text.
 fn post_tool_batch_context() -> String {
-    "Closeout check: if this batch changed code with logic edits, multi-file changes, or public-API touches, route the diff through a reviewer pass before closing. Trivial work (docs, formatting, single-line fixes) skips this. Non-trivial code does not self-review. If this reminder feels redundant — re-read the diff and decide deliberately before skipping.".to_string()
+    "Closeout check: non-trivial code changes (logic, multi-file, public API, security) need a reviewer pass before closeout. Trivial work (docs, formatting, typos) skips this. The brief/review gates are blunt — any code-changing session may get one bounded, clearable nudge (does not stop the turn); follow it to satisfy or disable (`=off`), or set `=block` for hard-stop. Project-level CLAUDE.md/AGENTS.md rules take precedence.".to_string()
 }
 
 /// SubagentStart context — injected into every spawned subagent so it starts
@@ -2096,11 +2096,11 @@ fn story_closeout_gate_message(
     }
     let preamble = match decision {
         GateDecision::Block => "Honest-closeout gate (CLAUDE_SKILLS_STORY_CLOSEOUT_GATE): sprint NOT complete — now a hard stop.",
-        _ => "Honest-closeout reminder (CLAUDE_SKILLS_STORY_CLOSEOUT_GATE): sprint NOT complete.",
+        _ => "Closeout reminder (CLAUDE_SKILLS_STORY_CLOSEOUT_GATE): sprint NOT complete.",
     };
     let tail = match decision {
         GateDecision::Block => "Do NOT present this work as done. Mark each open story with `keel sprint advance --id <id> --state done` after review; `keel sprint review` clears this gate when every story is Done. Bounded per session, then lets the turn through so it cannot loop. Set CLAUDE_SKILLS_STORY_CLOSEOUT_GATE=nudge, =off.",
-        _ => "State each open story as an honest gap before claiming done. Mark with `keel sprint advance --id <id> --state done` after review; `keel sprint review` clears when all Done. This first reminder does not stop the turn, but will escalate. Set CLAUDE_SKILLS_STORY_CLOSEOUT_GATE=nudge, =block, =off.",
+        _ => "Mark each open story as not done and loop back. Use `keel sprint advance --id <id> --state done` after review; `keel sprint review` clears when all Done. This first reminder does not stop the turn, but will escalate. Set CLAUDE_SKILLS_STORY_CLOSEOUT_GATE=nudge, =block, =off.",
     };
     format!("{preamble} Open stories (Definition of Done not met):{gaps}\n{tail}")
 }
@@ -2183,8 +2183,8 @@ fn session_has_research_tool(claude_home: &Path, session_id: &str) -> bool {
 
 fn research_gate_message(decision: GateDecision) -> String {
     match decision {
-        GateDecision::Block => "Research gate (CLAUDE_SKILLS_RESEARCH_GATE): code changed without web search or recall evidence — now a hard stop. Use websearch, context7, or recall before implementing. Bounded per session, then lets the turn through so it cannot loop. Set CLAUDE_SKILLS_RESEARCH_GATE=nudge, =block, =off.".to_string(),
-        _ => "Research gate (CLAUDE_SKILLS_RESEARCH_GATE): code changed without web search or recall evidence. Use websearch, context7, or recall before implementing. This first reminder does not stop the turn, but will escalate. Set CLAUDE_SKILLS_RESEARCH_GATE=nudge, =block, =off.".to_string(),
+        GateDecision::Block => "Research gate (CLAUDE_SKILLS_RESEARCH_GATE): code changed without web search or recall evidence — now a hard stop. Run `keel run -- recall` or use websearch/context7 before implementing. Bounded per session, then lets the turn through so it cannot loop. Set CLAUDE_SKILLS_RESEARCH_GATE=nudge, =block, =off.".to_string(),
+        _ => "Research gate (CLAUDE_SKILLS_RESEARCH_GATE): code changed without web search or recall evidence. Run `keel run -- recall` or use websearch/context7 before implementing. This first reminder does not stop the turn, but will escalate. Set CLAUDE_SKILLS_RESEARCH_GATE=nudge, =block, =off.".to_string(),
     }
 }
 
@@ -2282,8 +2282,8 @@ pub fn maybe_record_story_confirmed() {
 
 fn story_first_gate_message(decision: GateDecision) -> String {
     match decision {
-        GateDecision::Block => "Story-first gate (CLAUDE_SKILLS_STORY_FIRST_GATE): code changed without confirmed user stories — now a hard stop. Write stories with `keel user-story lint`, confirm with user, then implement. Bounded per session. Set CLAUDE_SKILLS_STORY_FIRST_GATE=nudge, =off.".to_string(),
-        _ => "Story-first gate (CLAUDE_SKILLS_STORY_FIRST_GATE): code changed without confirmed user stories. Write stories with `keel user-story lint`, confirm with user, then implement. This first reminder does not stop the turn, but will escalate. Set CLAUDE_SKILLS_STORY_FIRST_GATE=nudge, =block, =off.".to_string(),
+        GateDecision::Block => "Story-first gate (CLAUDE_SKILLS_STORY_FIRST_GATE): code changed without confirmed user stories — now a hard stop. Run `keel user-story lint` to confirm stories, then implement. Bounded per session. Set CLAUDE_SKILLS_STORY_FIRST_GATE=nudge, =off.".to_string(),
+        _ => "Story-first gate (CLAUDE_SKILLS_STORY_FIRST_GATE): code changed without confirmed user stories. Run `keel user-story lint` to confirm stories, then implement. This first reminder does not stop the turn, but will escalate. Set CLAUDE_SKILLS_STORY_FIRST_GATE=nudge, =block, =off.".to_string(),
     }
 }
 
@@ -2374,9 +2374,8 @@ fn memory_gate_blocks_path(claude_home: &Path, session_id: &str) -> PathBuf {
 /// the bound, and the off-switch.
 fn memory_gate_message(decision: GateDecision) -> String {
     match decision {
-        GateDecision::Block => "Memory-save gate (CLAUDE_SKILLS_MEMORY_GATE): code changed without saving to memory — now a hard stop. Record findings: `keel memory research-cache record --question \"...\" --answer \"...\"` or `keel memory maintenance append-working-buffer --note \"...\"`. Bounded per session, then lets the turn through so it cannot loop. Set CLAUDE_SKILLS_MEMORY_GATE=nudge, =off.".to_string(),
-        // Nudge / Advisory both render the non-blocking phrasing; Advisory never reaches here.
-        _ => "Memory-save reminder (CLAUDE_SKILLS_MEMORY_GATE): code changed without saving to memory. Record findings: `keel memory research-cache record --question \"...\" --answer \"...\"` or `keel memory maintenance append-working-buffer --note \"...\"`. This first reminder does not stop the turn, but will escalate. Set CLAUDE_SKILLS_MEMORY_GATE=nudge, =block, =off.".to_string(),
+        GateDecision::Block => "Memory-save gate (CLAUDE_SKILLS_MEMORY_GATE): code changed without saving to memory — now a hard stop. Use `keel memory research-cache record` for research findings, or `keel memory maintenance append-working-buffer` for working notes. Either clears the gate. Bounded per session, then lets the turn through so it cannot loop. Set CLAUDE_SKILLS_MEMORY_GATE=nudge, =off.".to_string(),
+        _ => "Memory-save reminder (CLAUDE_SKILLS_MEMORY_GATE): code changed without saving to memory. Use `keel memory research-cache record` for research findings, or `keel memory maintenance append-working-buffer` for working notes. Either clears the gate. This first reminder does not stop the turn, but will escalate. Set CLAUDE_SKILLS_MEMORY_GATE=nudge, =block, =off.".to_string(),
     }
 }
 
@@ -2416,9 +2415,8 @@ fn sprint_start_gate_blocks_path(claude_home: &Path, session_id: &str) -> PathBu
 /// bound, and the off-switch.
 fn sprint_start_gate_message(decision: GateDecision) -> String {
     match decision {
-        GateDecision::Block => "Sprint-start gate (CLAUDE_SKILLS_SPRINT_START_GATE): brief describes multi-story scope but no sprint started — now a hard stop. Run `keel sprint plan` to start the sprint, then use the working-a-sprint skill. Bounded per session, then lets the turn through so it cannot loop. Set CLAUDE_SKILLS_SPRINT_START_GATE=nudge, =off.".to_string(),
-        // Nudge / Advisory both render the non-blocking phrasing; Advisory never reaches here.
-        _ => "Sprint-start reminder (CLAUDE_SKILLS_SPRINT_START_GATE): brief describes multi-story scope but no sprint started. Run `keel sprint plan` to start, then use the working-a-sprint skill. This first reminder does not stop the turn, but will escalate. Set CLAUDE_SKILLS_SPRINT_START_GATE=nudge, =block, =off.".to_string(),
+        GateDecision::Block => "Sprint-start gate (CLAUDE_SKILLS_SPRINT_START_GATE): brief describes multi-story scope but no sprint started — now a hard stop. Run `keel sprint plan` to start the sprint, then use the `running-a-sprint` skill. Bounded per session, then lets the turn through so it cannot loop. Set CLAUDE_SKILLS_SPRINT_START_GATE=nudge, =off.".to_string(),
+        _ => "Sprint-start reminder (CLAUDE_SKILLS_SPRINT_START_GATE): brief describes multi-story scope but no sprint started. Run `keel sprint plan` to start, then use the `running-a-sprint` skill. This first reminder does not stop the turn, but will escalate. Set CLAUDE_SKILLS_SPRINT_START_GATE=nudge, =block, =off.".to_string(),
     }
 }
 
