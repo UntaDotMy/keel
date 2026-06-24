@@ -882,9 +882,7 @@ pub fn is_supported_noisy_command(fields: &[String]) -> bool {
 }
 
 pub fn detect_destructive_command(fields: &[String]) -> Option<DestructiveFinding> {
-    let Some(command) = fields.first().map(|value| command_base_name(value)) else {
-        return None;
-    };
+    let command = fields.first().map(|value| command_base_name(value))?;
 
     match command.as_str() {
         "rm" => {

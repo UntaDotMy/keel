@@ -31,6 +31,7 @@ fn colorize(text: &str, color_prefix: &str, mode: ColorMode) -> String {
     }
 }
 
+#[allow(dead_code)]
 fn status_color_prefix(status: &str, mode: ColorMode) -> &'static str {
     if mode == ColorMode::Off {
         return "";

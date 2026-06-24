@@ -206,13 +206,12 @@ impl CommandAdapter for ProjectFilterAdapter {
                 continue;
             }
 
-            if self.filter.keep.is_empty() {
-                kept.push(line.trim().to_string());
-            } else if self
-                .filter
-                .keep
-                .iter()
-                .any(|needle| normalized.contains(&needle.to_ascii_lowercase()))
+            if self.filter.keep.is_empty()
+                || self
+                    .filter
+                    .keep
+                    .iter()
+                    .any(|needle| normalized.contains(&needle.to_ascii_lowercase()))
             {
                 kept.push(line.trim().to_string());
             }
