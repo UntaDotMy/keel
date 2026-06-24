@@ -11,6 +11,7 @@ pub mod adapters;
 mod args;
 mod commands;
 mod comment_lint;
+pub mod error;
 mod help;
 mod hooks;
 mod json;

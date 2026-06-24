@@ -14,6 +14,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::error::KeelError;
 use crate::json::{write_indented, Value};
 use crate::runtime::{display_path, safe_path_segment, write_text};
 use crate::utility::workflow_ledger::parse_object_of_strings;
@@ -49,12 +50,12 @@ pub fn brief_path(claude_home: &Path, id: &str) -> PathBuf {
 /// this guard `../../foo` or an absolute id would steer the `{id}.json` join
 /// outside the working-briefs directory (arbitrary `.json` read/write). Guarding
 /// inside write_brief/read_brief covers every caller by construction.
-fn validated_brief_path(claude_home: &Path, id: &str) -> Result<PathBuf, String> {
+fn validated_brief_path(claude_home: &Path, id: &str) -> Result<PathBuf, KeelError> {
     match safe_path_segment(id) {
         Some(segment) => Ok(brief_path(claude_home, &segment)),
-        None => Err(format!(
+        None => Err(KeelError::Custom(format!(
             "invalid brief id {id:?}: must be a single safe path segment"
-        )),
+        ))),
     }
 }
 
@@ -139,7 +140,7 @@ fn brief_to_storage_value(brief: &Brief) -> Value {
     ])
 }
 
-pub fn write_brief(claude_home: &Path, brief: &Brief) -> Result<PathBuf, String> {
+pub fn write_brief(claude_home: &Path, brief: &Brief) -> Result<PathBuf, KeelError> {
     let path = validated_brief_path(claude_home, &brief.id)?;
     let directory = brief_directory(claude_home);
     fs::create_dir_all(&directory)
@@ -155,19 +156,19 @@ pub fn write_brief(claude_home: &Path, brief: &Brief) -> Result<PathBuf, String>
     Ok(path)
 }
 
-pub fn read_brief(claude_home: &Path, id: &str) -> Result<Option<Brief>, String> {
+pub fn read_brief(claude_home: &Path, id: &str) -> Result<Option<Brief>, KeelError> {
     let path = validated_brief_path(claude_home, id)?;
     let text = match fs::read_to_string(&path) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(format!("read {}: {error}", display_path(&path))),
+        Err(error) => return Err(format!("read {}: {error}", display_path(&path)).into()),
     };
     let brief = parse_brief_text(&text)
         .map_err(|error| format!("parse {}: {error}", display_path(&path)))?;
     Ok(Some(brief))
 }
 
-pub fn list_briefs(claude_home: &Path) -> Result<Vec<Brief>, String> {
+pub fn list_briefs(claude_home: &Path) -> Result<Vec<Brief>, KeelError> {
     let directory = brief_directory(claude_home);
     if !directory.is_dir() {
         return Ok(Vec::new());
@@ -207,7 +208,7 @@ pub fn list_briefs(claude_home: &Path) -> Result<Vec<Brief>, String> {
     Ok(briefs)
 }
 
-pub fn parse_brief_text(text: &str) -> Result<Brief, String> {
+pub fn parse_brief_text(text: &str) -> Result<Brief, KeelError> {
     let fields = parse_object_of_strings(text)?;
     let mut brief = Brief {
         id: String::new(),
