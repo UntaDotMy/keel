@@ -628,7 +628,6 @@ fn render_workflow_help(standard_output: &mut dyn Write) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::ENV_LOCK;
     use crate::utility::workflow_ledger::{
         close_entry, create_entry, format_timestamp_iso8601, write_entry,
     };
