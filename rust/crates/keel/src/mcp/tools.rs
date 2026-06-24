@@ -229,6 +229,183 @@ pub(super) fn handle_tools_list() -> Value {
                         "stdin": { "type": "string", "description": "Story text to validate (alternative to file)." }
                     }
                 }
+            },
+            {
+                "name": "review",
+                "description": "Run keel review gates (pre-commit, pre-pr, gates check). Use to get a deterministic local quality gate with fail-closed verdicts on the current diff.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["pre-commit", "pre-pr", "gates"], "description": "Review action to perform." },
+                        "base_ref": { "type": "string", "description": "Base ref for diff comparison (e.g. \"origin/feat\")." },
+                        "format": { "type": "string", "description": "Output format: json, markdown, or compact." },
+                        "repo_root": { "type": "string", "description": "Repository root path. Defaults to cwd." }
+                    },
+                    "required": ["action"]
+                }
+            },
+            {
+                "name": "workflow",
+                "description": "Drive workflow state (route, start, cockpit, finish, status). Use to manage a proof-first workstream with tracked proof and closeout discipline.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["route", "start", "cockpit", "finish", "status"], "description": "Workflow operation to perform." },
+                        "request": { "type": "string", "description": "The work request or description." },
+                        "id": { "type": "string", "description": "Workflow entry id." },
+                        "proof": { "type": "string", "description": "Proof evidence for finish." }
+                    },
+                    "required": ["action"]
+                }
+            },
+            {
+                "name": "git_workflow",
+                "description": "Git workflow operations (preflight, commit-message, pr-body, lint-message). Use for professional commit/PR text generation and linting.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["preflight", "commit-message", "pr-body", "lint-message"], "description": "Git workflow operation." },
+                        "args": { "type": "array", "items": { "type": "string" }, "description": "Additional CLI arguments (e.g. [\"--base-ref\",\"origin/feat\"])." }
+                    },
+                    "required": ["action"]
+                }
+            },
+            {
+                "name": "memory",
+                "description": "Memory operations (scope resolve, system-map show, recall, instincts, status). Use to manage durable memory under ~/.claude/memories/.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["scope", "system-map", "recall", "instincts", "status"], "description": "Memory operation to perform." },
+                        "args": { "type": "array", "items": { "type": "string" }, "description": "Additional CLI arguments." }
+                    },
+                    "required": ["action"]
+                }
+            },
+            {
+                "name": "gain",
+                "description": "Report command-output compaction savings (exact o200k_base tokens saved, adapter breakdown, top commands) from the native event log. Use to quantify token ROI from the compaction proxy.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "since": { "type": "string", "description": "Time window: today, 7d, 30d, or all. Default: today." },
+                        "json": { "type": "boolean", "description": "Output as JSON." }
+                    }
+                }
+            },
+            {
+                "name": "raw",
+                "description": "View raw output from compacted commands. Use to recover full stdout/stderr when the compacted view is insufficient.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "raw_id": { "type": "string", "description": "The raw output id to view." },
+                        "action": { "type": "string", "enum": ["list", "prune"], "description": "List available raw outputs or prune old ones." },
+                        "older_than": { "type": "string", "description": "Prune raw outputs older than this duration (e.g. \"30d\")." }
+                    }
+                }
+            },
+            {
+                "name": "config_audit",
+                "description": "Audit hook configuration for security. Checks installed hooks, settings.json, and managed files for drift or misconfiguration.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "repo_root": { "type": "string", "description": "Repository root path. Defaults to cwd." }
+                    }
+                }
+            },
+            {
+                "name": "skill_lint",
+                "description": "Lint skill files for quality. Checks SKILL.md files against structural and content rules.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "repo_root": { "type": "string", "description": "Repository root path. Defaults to cwd." },
+                        "json": { "type": "boolean", "description": "Output as JSON." }
+                    }
+                }
+            },
+            {
+                "name": "telemetry",
+                "description": "View compaction telemetry. Shows command-output compaction stats, adapter breakdowns, and top commands over a time window.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "days": { "type": "integer", "description": "Number of days to look back." },
+                        "top": { "type": "integer", "description": "Number of top commands to show." },
+                        "json": { "type": "boolean", "description": "Output as JSON." }
+                    }
+                }
+            },
+            {
+                "name": "orchestration",
+                "description": "Orchestration operations (runtime-preflight, resume-status, task, checkpoint). Use for multi-agent or multi-step workflow coordination.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["runtime-preflight", "resume-status", "task", "checkpoint"], "description": "Orchestration operation." },
+                        "args": { "type": "array", "items": { "type": "string" }, "description": "Additional CLI arguments." }
+                    },
+                    "required": ["action"]
+                }
+            },
+            {
+                "name": "checkpoint",
+                "description": "Create/restore checkpoints for workflow state. Use to snapshot progress or recover from interruption.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["create", "list", "show", "restore"], "description": "Checkpoint operation." },
+                        "id": { "type": "string", "description": "Checkpoint id." },
+                        "confirm": { "type": "boolean", "description": "Required true for restore (destructive). Default false." }
+                    },
+                    "required": ["action"]
+                }
+            },
+            {
+                "name": "session",
+                "description": "View session history. Shows recent sessions with message counts, date ranges, and agents used.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "since": { "type": "string", "description": "Filter sessions since this window: today, 7d, 30d, or all." },
+                        "json": { "type": "boolean", "description": "Output as JSON." }
+                    }
+                }
+            },
+            {
+                "name": "doctor",
+                "description": "Run diagnostic health check. Probes binary, raw store, event log, adapter registry, rewrite behavior, and hook/proxy setup with ok/warn/fix-style output.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "repo_root": { "type": "string", "description": "Repository root path. Defaults to cwd." }
+                    }
+                }
+            },
+            {
+                "name": "code_search",
+                "description": "Search codebase semantically via keel's native code-search. Returns matching files and snippets with relevance scores.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string", "description": "Search query text." },
+                        "format": { "type": "string", "description": "Output format: json or compact." }
+                    },
+                    "required": ["query"]
+                }
+            },
+            {
+                "name": "user_story",
+                "description": "Lint user stories against strict Agile/Jira format (Connextra \"As a/I want/so that\" + Gherkin Given/When/Then, validated against INVEST). Use before building to confirm the requirement spec is well-formed.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "file": { "type": "string", "description": "Path to markdown file containing the stories." },
+                        "stdin": { "type": "string", "description": "Story text to validate (alternative to file)." }
+                    }
+                }
             }
         ]
     })
@@ -265,6 +442,21 @@ pub(super) fn handle_tools_call(params: &Value) -> Result<Value, MethodError> {
         "cli" => tool_cli(&arguments),
         "sprint" => tool_sprint(&arguments),
         "user_story_lint" => tool_user_story_lint(&arguments),
+        "review" => tool_review(&arguments),
+        "workflow" => tool_workflow(&arguments),
+        "git_workflow" => tool_git_workflow(&arguments),
+        "memory" => tool_memory(&arguments),
+        "gain" => tool_gain(&arguments),
+        "raw" => tool_raw(&arguments),
+        "config_audit" => tool_config_audit(&arguments),
+        "skill_lint" => tool_skill_lint(&arguments),
+        "telemetry" => tool_telemetry(&arguments),
+        "orchestration" => tool_orchestration(&arguments),
+        "checkpoint" => tool_checkpoint(&arguments),
+        "session" => tool_session(&arguments),
+        "doctor" => tool_doctor(&arguments),
+        "code_search" => tool_code_search(&arguments),
+        "user_story" => tool_user_story(&arguments),
         other => {
             return Err(MethodError {
                 code: JSON_RPC_INVALID_PARAMS,
@@ -924,6 +1116,334 @@ fn tool_user_story_lint(arguments: &Value) -> Result<String, String> {
     ))
 }
 
+/// Generic passthrough helper: shell out to the keel binary with the given
+/// subcommand and args. Returns the compacted report text.
+fn run_keel_subcommand(subcommand: &str, extra_args: &[&str]) -> Result<String, String> {
+    let executable =
+        env::current_exe().map_err(|error| format!("{subcommand}: locate self: {error}"))?;
+    let mut child = Command::new(&executable);
+    child.arg(subcommand);
+    for arg in extra_args {
+        child.arg(arg);
+    }
+    child.env("CLAUDE_SKILLS_HOOK", "mcp");
+    child.stdin(Stdio::null());
+    child.stdout(Stdio::piped());
+    child.stderr(Stdio::piped());
+    let output = child
+        .output()
+        .map_err(|error| format!("{subcommand}: spawn: {error}"))?;
+    let stdout_text = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr_text = String::from_utf8_lossy(&output.stderr).to_string();
+    let label = format!("keel {subcommand} {}", extra_args.join(" "));
+    Ok(render_run_command_report(
+        &label,
+        output.status.code().unwrap_or(-1),
+        &stdout_text,
+        &stderr_text,
+    ))
+}
+
+fn optional_string_arg<'a>(arguments: &'a Value, key: &str) -> Option<&'a str> {
+    arguments
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+}
+
+fn optional_bool_arg(arguments: &Value, key: &str) -> Option<bool> {
+    arguments.get(key).and_then(Value::as_bool)
+}
+
+fn optional_int_arg(arguments: &Value, key: &str) -> Option<i64> {
+    arguments.get(key).and_then(Value::as_i64)
+}
+
+fn collect_extra_args(arguments: &Value) -> Vec<String> {
+    match arguments.get("args") {
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn tool_review(arguments: &Value) -> Result<String, String> {
+    let action = arguments
+        .get("action")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "review: missing action (pre-commit|pre-pr|gates)".to_string())?;
+    let mut owned: Vec<String> = Vec::new();
+    if let Some(r) = optional_string_arg(arguments, "base_ref") {
+        owned.push(format!("--base-ref={r}"));
+    }
+    if let Some(f) = optional_string_arg(arguments, "format") {
+        owned.push(format!("--format={f}"));
+    }
+    if let Some(root) = optional_string_arg(arguments, "repo_root") {
+        owned.push(format!("--repo-root={root}"));
+    }
+    let mut all_args: Vec<&str> = vec!["review", action];
+    for s in &owned {
+        all_args.push(s);
+    }
+    run_keel_subcommand("review", &all_args)
+}
+
+fn tool_workflow(arguments: &Value) -> Result<String, String> {
+    let action = arguments
+        .get("action")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            "workflow: missing action (route|start|cockpit|finish|status)".to_string()
+        })?;
+    let mut owned: Vec<String> = Vec::new();
+    if let Some(r) = optional_string_arg(arguments, "request") {
+        owned.push(format!("--request={r}"));
+    }
+    if let Some(i) = optional_string_arg(arguments, "id") {
+        owned.push(format!("--id={i}"));
+    }
+    if let Some(p) = optional_string_arg(arguments, "proof") {
+        owned.push(format!("--proof={p}"));
+    }
+    let mut all_args: Vec<&str> = vec!["workflow", action];
+    for s in &owned {
+        all_args.push(s);
+    }
+    run_keel_subcommand("workflow", &all_args)
+}
+
+fn tool_git_workflow(arguments: &Value) -> Result<String, String> {
+    let action = arguments
+        .get("action")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            "git_workflow: missing action (preflight|commit-message|pr-body|lint-message)"
+                .to_string()
+        })?;
+    let extras = collect_extra_args(arguments);
+    let mut all_args: Vec<&str> = vec!["git-workflow", action];
+    let mut owned: Vec<String> = Vec::new();
+    for e in &extras {
+        owned.push(e.clone());
+    }
+    for s in &owned {
+        all_args.push(s);
+    }
+    run_keel_subcommand("git-workflow", &all_args)
+}
+
+fn tool_memory(arguments: &Value) -> Result<String, String> {
+    let action = arguments
+        .get("action")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            "memory: missing action (scope|system-map|recall|instincts|status)".to_string()
+        })?;
+    let extras = collect_extra_args(arguments);
+    let mut all_args: Vec<&str> = vec!["memory", action];
+    let mut owned: Vec<String> = Vec::new();
+    for e in &extras {
+        owned.push(e.clone());
+    }
+    for s in &owned {
+        all_args.push(s);
+    }
+    run_keel_subcommand("memory", &all_args)
+}
+
+fn tool_gain(arguments: &Value) -> Result<String, String> {
+    let since = optional_string_arg(arguments, "since").unwrap_or("today");
+    let mut all_args: Vec<&str> = vec!["gain", "--since", since];
+    let mut owned: Vec<String> = Vec::new();
+    if Some(true) == optional_bool_arg(arguments, "json") {
+        owned.push("--json".to_string());
+    }
+    for s in &owned {
+        all_args.push(s);
+    }
+    run_keel_subcommand("gain", &all_args)
+}
+
+fn tool_raw(arguments: &Value) -> Result<String, String> {
+    let action = optional_string_arg(arguments, "action");
+    let raw_id = optional_string_arg(arguments, "raw_id");
+    let older_than = optional_string_arg(arguments, "older_than");
+    let mut all_args: Vec<&str> = vec!["raw"];
+    let mut owned: Vec<String> = Vec::new();
+    match action {
+        Some("list") => {
+            all_args.push("list");
+        }
+        Some("prune") => {
+            all_args.push("prune");
+            if let Some(ot) = older_than {
+                owned.push(format!("--older-than={ot}"));
+            }
+        }
+        _ => {}
+    }
+    if let Some(id) = raw_id {
+        owned.push(id.to_string());
+    }
+    for s in &owned {
+        all_args.push(s);
+    }
+    if action.is_none() && raw_id.is_none() {
+        all_args = vec!["raw", "list"];
+    }
+    run_keel_subcommand("raw", &all_args)
+}
+
+fn tool_config_audit(arguments: &Value) -> Result<String, String> {
+    let mut all_args: Vec<&str> = vec!["config-audit"];
+    let mut owned: Vec<String> = Vec::new();
+    if let Some(root) = optional_string_arg(arguments, "repo_root") {
+        owned.push(format!("--repo-root={root}"));
+    }
+    for s in &owned {
+        all_args.push(s);
+    }
+    run_keel_subcommand("config-audit", &all_args)
+}
+
+fn tool_skill_lint(arguments: &Value) -> Result<String, String> {
+    let mut all_args: Vec<&str> = vec!["skill-lint"];
+    let mut owned: Vec<String> = Vec::new();
+    if let Some(root) = optional_string_arg(arguments, "repo_root") {
+        owned.push(format!("--repo-root={root}"));
+    }
+    if Some(true) == optional_bool_arg(arguments, "json") {
+        owned.push("--json".to_string());
+    }
+    for s in &owned {
+        all_args.push(s);
+    }
+    run_keel_subcommand("skill-lint", &all_args)
+}
+
+fn tool_telemetry(arguments: &Value) -> Result<String, String> {
+    let mut all_args: Vec<&str> = vec!["telemetry", "summary"];
+    let mut owned: Vec<String> = Vec::new();
+    if let Some(d) = optional_int_arg(arguments, "days") {
+        owned.push(format!("--days={d}"));
+    }
+    if let Some(t) = optional_int_arg(arguments, "top") {
+        owned.push(format!("--top={t}"));
+    }
+    if Some(true) == optional_bool_arg(arguments, "json") {
+        owned.push("--json".to_string());
+    }
+    for s in &owned {
+        all_args.push(s);
+    }
+    run_keel_subcommand("telemetry", &all_args)
+}
+
+fn tool_orchestration(arguments: &Value) -> Result<String, String> {
+    let action = arguments
+        .get("action")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            "orchestration: missing action (runtime-preflight|resume-status|task|checkpoint)"
+                .to_string()
+        })?;
+    let extras = collect_extra_args(arguments);
+    let mut all_args: Vec<&str> = vec!["orchestration", action];
+    let mut owned: Vec<String> = Vec::new();
+    for e in &extras {
+        owned.push(e.clone());
+    }
+    for s in &owned {
+        all_args.push(s);
+    }
+    run_keel_subcommand("orchestration", &all_args)
+}
+
+fn tool_checkpoint(arguments: &Value) -> Result<String, String> {
+    let action = arguments
+        .get("action")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "checkpoint: missing action (create|list|show|restore)".to_string())?;
+    if action == "restore" && !optional_bool_arg(arguments, "confirm").unwrap_or(false) {
+        return Err(
+            "checkpoint: restore is destructive — re-call with confirm:true to run it".to_string(),
+        );
+    }
+    let mut all_args: Vec<&str> = vec!["checkpoint", action];
+    let mut owned: Vec<String> = Vec::new();
+    if let Some(i) = optional_string_arg(arguments, "id") {
+        owned.push(format!("--id={i}"));
+    }
+    if Some(true) == optional_bool_arg(arguments, "confirm") {
+        owned.push("--confirm".to_string());
+    }
+    for s in &owned {
+        all_args.push(s);
+    }
+    run_keel_subcommand("checkpoint", &all_args)
+}
+
+fn tool_session(arguments: &Value) -> Result<String, String> {
+    let mut all_args: Vec<&str> = vec!["session"];
+    let mut owned: Vec<String> = Vec::new();
+    if let Some(s) = optional_string_arg(arguments, "since") {
+        owned.push(format!("--since={s}"));
+    }
+    if Some(true) == optional_bool_arg(arguments, "json") {
+        owned.push("--json".to_string());
+    }
+    for s in &owned {
+        all_args.push(s);
+    }
+    run_keel_subcommand("session", &all_args)
+}
+
+fn tool_doctor(arguments: &Value) -> Result<String, String> {
+    let mut all_args: Vec<&str> = vec!["doctor"];
+    let mut owned: Vec<String> = Vec::new();
+    if let Some(root) = optional_string_arg(arguments, "repo_root") {
+        owned.push(format!("--repo-root={root}"));
+    }
+    for s in &owned {
+        all_args.push(s);
+    }
+    run_keel_subcommand("doctor", &all_args)
+}
+
+fn tool_code_search(arguments: &Value) -> Result<String, String> {
+    let query = arguments
+        .get("query")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if query.is_empty() {
+        return Err("code_search: missing query".to_string());
+    }
+    let mut all_args: Vec<&str> = vec!["code-search", "search"];
+    let mut owned: Vec<String> = Vec::new();
+    owned.push(format!("--query={query}"));
+    if let Ok(cwd) = env::current_dir() {
+        owned.push(format!("--workspace-root={}", display_path(&cwd)));
+    }
+    if let Some(f) = optional_string_arg(arguments, "format") {
+        owned.push(format!("--format={f}"));
+    }
+    for s in &owned {
+        all_args.push(s);
+    }
+    run_keel_subcommand("code-search", &all_args)
+}
+
+fn tool_user_story(arguments: &Value) -> Result<String, String> {
+    tool_user_story_lint(arguments)
+}
+
 /// Resolve the default harness home, prefixing any failure with the calling
 /// tool's name so a resolution error reads `"<tool>: <reason>"` in the
 /// tool-result envelope. Every handler resolves the same way; this keeps the
@@ -1009,10 +1529,25 @@ mod tests {
             "cli",
             "sprint",
             "user_story_lint",
+            "review",
+            "workflow",
+            "git_workflow",
+            "memory",
+            "gain",
+            "raw",
+            "config_audit",
+            "skill_lint",
+            "telemetry",
+            "orchestration",
+            "checkpoint",
+            "session",
+            "doctor",
+            "code_search",
+            "user_story",
         ] {
             assert!(names.contains(&expected), "missing {expected}: {names:?}");
         }
-        assert_eq!(names.len(), 16, "names: {names:?}");
+        assert_eq!(names.len(), 31, "names: {names:?}");
     }
 
     #[test]
@@ -1241,23 +1776,129 @@ mod tests {
     }
 
     #[test]
-    fn tools_list_includes_sprint_and_user_story_lint() {
+    fn tools_list_includes_new_cli_passthrough_tools() {
         let response = handle_tools_list();
         let tools = response["tools"].as_array().expect("tools array");
         let tool_names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
 
+        for name in [
+            "review",
+            "workflow",
+            "git_workflow",
+            "memory",
+            "gain",
+            "raw",
+            "config_audit",
+            "skill_lint",
+            "telemetry",
+            "orchestration",
+            "checkpoint",
+            "session",
+            "doctor",
+            "code_search",
+            "user_story",
+        ] {
+            assert!(
+                tool_names.contains(&name),
+                "{name} tool not in tools list: {tool_names:?}"
+            );
+        }
+        assert_eq!(tools.len(), 31, "expected 31 tools total");
+    }
+
+    #[test]
+    fn review_requires_action() {
+        let params = json!({ "name": "review", "arguments": {} });
+        let result = handle_tools_call(&params).expect("envelope present");
+        assert_eq!(result["isError"], json!(true));
+        let text = result["content"][0]["text"].as_str().unwrap_or("");
+        assert!(text.contains("missing action"), "text: {text}");
+    }
+
+    #[test]
+    fn workflow_requires_action() {
+        let params = json!({ "name": "workflow", "arguments": {} });
+        let result = handle_tools_call(&params).expect("envelope present");
+        assert_eq!(result["isError"], json!(true));
+        let text = result["content"][0]["text"].as_str().unwrap_or("");
+        assert!(text.contains("missing action"), "text: {text}");
+    }
+
+    #[test]
+    fn git_workflow_requires_action() {
+        let params = json!({ "name": "git_workflow", "arguments": {} });
+        let result = handle_tools_call(&params).expect("envelope present");
+        assert_eq!(result["isError"], json!(true));
+        let text = result["content"][0]["text"].as_str().unwrap_or("");
+        assert!(text.contains("missing action"), "text: {text}");
+    }
+
+    #[test]
+    fn memory_requires_action() {
+        let params = json!({ "name": "memory", "arguments": {} });
+        let result = handle_tools_call(&params).expect("envelope present");
+        assert_eq!(result["isError"], json!(true));
+        let text = result["content"][0]["text"].as_str().unwrap_or("");
+        assert!(text.contains("missing action"), "text: {text}");
+    }
+
+    #[test]
+    fn checkpoint_requires_action() {
+        let params = json!({ "name": "checkpoint", "arguments": {} });
+        let result = handle_tools_call(&params).expect("envelope present");
+        assert_eq!(result["isError"], json!(true));
+        let text = result["content"][0]["text"].as_str().unwrap_or("");
+        assert!(text.contains("missing action"), "text: {text}");
+    }
+
+    #[test]
+    fn checkpoint_restore_requires_confirm() {
+        let params =
+            json!({ "name": "checkpoint", "arguments": { "action": "restore", "id": "cp-1" } });
+        let result = handle_tools_call(&params).expect("envelope present");
+        assert_eq!(result["isError"], json!(true));
+        let text = result["content"][0]["text"].as_str().unwrap_or("");
+        assert!(text.contains("confirm:true"), "text: {text}");
+    }
+
+    #[test]
+    fn orchestration_requires_action() {
+        let params = json!({ "name": "orchestration", "arguments": {} });
+        let result = handle_tools_call(&params).expect("envelope present");
+        assert_eq!(result["isError"], json!(true));
+        let text = result["content"][0]["text"].as_str().unwrap_or("");
+        assert!(text.contains("missing action"), "text: {text}");
+    }
+
+    #[test]
+    fn code_search_requires_query() {
+        let params = json!({ "name": "code_search", "arguments": {} });
+        let result = handle_tools_call(&params).expect("envelope present");
+        assert_eq!(result["isError"], json!(true));
+        let text = result["content"][0]["text"].as_str().unwrap_or("");
+        assert!(text.contains("missing query"), "text: {text}");
+    }
+
+    #[test]
+    fn user_story_delegates_to_user_story_lint() {
+        let params = json!({ "name": "user_story", "arguments": {} });
+        let result = handle_tools_call(&params).expect("envelope present");
+        assert_eq!(result["isError"], json!(true));
+        let text = result["content"][0]["text"].as_str().unwrap_or("");
         assert!(
-            tool_names.contains(&"sprint"),
-            "sprint tool not in tools list"
+            text.contains("must provide"),
+            "user_story should delegate to user_story_lint: {text}"
         );
-        assert!(
-            tool_names.contains(&"user_story_lint"),
-            "user_story_lint tool not in tools list"
-        );
-        assert_eq!(
-            tools.len(),
-            16,
-            "expected 16 tools (added sprint and user_story_lint)"
-        );
+    }
+
+    #[test]
+    fn all_new_tools_have_schemas() {
+        let listed = handle_tools_list();
+        let tools = listed["tools"].as_array().expect("tools array");
+        let names: Vec<&str> = tools
+            .iter()
+            .filter_map(|entry| entry.get("name").and_then(Value::as_str))
+            .collect();
+        assert_eq!(names.len(), 31, "expected 31 tools, got: {names:?}");
     }
 }

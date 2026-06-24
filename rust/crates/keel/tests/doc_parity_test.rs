@@ -247,8 +247,8 @@ fn mcp_tool_count_matches_documentation() {
     // Each tool definition in `handle_tools_list` has exactly one inputSchema.
     let tool_count = tools_src.matches("\"inputSchema\":").count();
     assert_eq!(
-        tool_count, 16,
-        "expected 16 MCP tool definitions in mcp/tools.rs (one `\"inputSchema\":` each); got {tool_count}. \
+        tool_count, 31,
+        "expected 31 MCP tool definitions in mcp/tools.rs (one `\"inputSchema\":` each); got {tool_count}. \
          If this changed intentionally, update the MCP server tool count in CLAUDE.md and this test together."
     );
 

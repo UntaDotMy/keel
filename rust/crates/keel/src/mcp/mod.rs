@@ -566,10 +566,25 @@ mod tests {
             "cli",
             "sprint",
             "user_story_lint",
+            "review",
+            "workflow",
+            "git_workflow",
+            "memory",
+            "gain",
+            "raw",
+            "config_audit",
+            "skill_lint",
+            "telemetry",
+            "orchestration",
+            "checkpoint",
+            "session",
+            "doctor",
+            "code_search",
+            "user_story",
         ] {
             assert!(names.contains(&expected), "missing {expected}: {names:?}");
         }
-        assert_eq!(names.len(), 16, "names: {names:?}");
+        assert_eq!(names.len(), 31, "names: {names:?}");
     }
 
     #[test]

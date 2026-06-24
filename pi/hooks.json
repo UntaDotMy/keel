@@ -1,0 +1,73 @@
+{
+  "_comment": "keel hooks reference for Pi Agent. Pi Agent's core does not expose a hook lifecycle comparable to Claude Code or Codex, but supports hook-like behavior through extensions (pi-autohooks, pi-shepherd). This file documents what keel hooks provide and how to trigger equivalent behavior via the keel CLI, MCP tools, or pi-autohooks.",
+  "hooks": {
+    "SessionStart": {
+      "description": "Loads the keel bootstrap skill, injects workspace digest, and resolves memory scope at session start.",
+      "keelCommand": "keel memory scope resolve --create-missing --refresh-system-map",
+      "mcpEquivalent": "system_map (tool call)",
+      "manualTrigger": "Run the keel memory command at the start of your first prompt in a session.",
+      "timing": "Once per session, before first prompt"
+    },
+    "UserPromptSubmit": {
+      "description": "Restates the iron law research-first rules on every prompt. Injects a short context brief.",
+      "keelCommand": null,
+      "mcpEquivalent": "context_brief (tool call)",
+      "manualTrigger": "The AGENTS.md file loaded at startup serves the same purpose -- the iron law is always present in context.",
+      "timing": "Every prompt (handled statically via AGENTS.md)"
+    },
+    "PreToolUse": {
+      "description": "Intercepts noisy shell commands and reruns them through the keel compaction proxy to prevent raw output from filling context.",
+      "keelCommand": "keel run -- <command>",
+      "mcpEquivalent": "run_command (tool call)",
+      "manualTrigger": "Instead of running raw shell commands, use keel run -- <command> or the MCP run_command tool.",
+      "timing": "Before every Bash/shell tool invocation"
+    },
+    "PostToolUse": {
+      "description": "Records tool execution observations for memory and learning.",
+      "keelCommand": null,
+      "mcpEquivalent": null,
+      "manualTrigger": "No manual trigger needed. Observations are recorded when using MCP tools.",
+      "timing": "After every tool invocation"
+    },
+    "PreCompact": {
+      "description": "Refreshes the workspace SYSTEM_MAP before context compaction to preserve structural awareness.",
+      "keelCommand": "keel memory system-map refresh",
+      "mcpEquivalent": "system_map_refresh (tool call)",
+      "manualTrigger": "When Pi Agent compacts context, manually refresh the system map: keel memory system-map refresh",
+      "timing": "Before context compaction"
+    },
+    "PostCompact": {
+      "description": "Records a learning checkpoint after compaction to capture state for recovery.",
+      "keelCommand": "keel memory recall <current-topic>",
+      "mcpEquivalent": "recall (tool call)",
+      "manualTrigger": "After compaction, search memory for context: keel memory recall <topic>",
+      "timing": "After context compaction"
+    },
+    "Stop": {
+      "description": "Turn-end checkpoint that records completion state and learning.",
+      "keelCommand": "keel memory recall status",
+      "mcpEquivalent": "memory_status (tool call)",
+      "manualTrigger": "At the end of a work session, check memory status: keel memory status",
+      "timing": "On turn end"
+    },
+    "PostToolBatch": {
+      "description": "Injects a reviewer-on-close reminder before the next model turn.",
+      "keelCommand": "keel review pre-commit --format compact",
+      "mcpEquivalent": "cli (tool call with review pre-commit)",
+      "manualTrigger": "Before finishing a code change, run: keel review pre-commit --format compact",
+      "timing": "Before each next model turn after tool use"
+    }
+  },
+  "workflowCommands": {
+    "description": "keel workflow commands that Pi Agent users can run directly via bash or the MCP cli tool.",
+    "commands": {
+      "route": "keel workflow route --request \"...\"",
+      "start": "keel workflow start --preset <preset> --request \"...\"",
+      "cockpit": "keel workflow cockpit",
+      "finish": "keel workflow finish --id <entry-id> --proof \"tests green\"",
+      "review": "keel review pre-pr --base-ref origin/feat --format compact",
+      "memory": "keel memory scope resolve --create-missing --refresh-system-map",
+      "search": "keel code-search search --workspace-root \"$PWD\" --query \"<query>\""
+    }
+  }
+}

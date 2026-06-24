@@ -1,0 +1,13 @@
+{
+  "settings": {
+    "idleTimeout": 60
+  },
+  "mcpServers": {
+    "keel": {
+      "command": "~/.claude/keel",
+      "args": ["mcp", "serve"],
+      "lifecycle": "lazy",
+      "directTools": true
+    }
+  }
+}
