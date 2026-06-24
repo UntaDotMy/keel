@@ -128,8 +128,8 @@ fn requesting_code_review_is_a_real_manifest_directory() {
     );
 }
 
-/// The documented counts: 43 matcher-invocable skills in the manifest, 44
-/// first-party SKILL.md directories on disk (the 43 + the bootstrap), and the
+/// The documented counts: 45 matcher-invocable skills in the manifest, 46
+/// first-party SKILL.md directories on disk (the 45 + the bootstrap), and the
 /// bootstrap is the only first-party skill NOT in the manifest. If a skill is
 /// added or removed, this assertion fails until CLAUDE.md / using-keel
 /// and this test are updated together — that is the anti-drift mechanism.
@@ -141,15 +141,15 @@ fn documented_skill_counts_match_disk_and_manifest() {
 
     assert_eq!(
         manifest.len(),
-        43,
-        "expected 43 manifest skills (24 specialists + 18 technique + requesting-code-review); \
+        45,
+        "expected 45 manifest skills; \
          got {}. If this changed intentionally, update CLAUDE.md and using-keel/SKILL.md.",
         manifest.len()
     );
     assert_eq!(
         on_disk.len(),
-        44,
-        "expected 44 first-party SKILL.md dirs (43 manifest skills + using-keel bootstrap); \
+        46,
+        "expected 46 first-party SKILL.md dirs (45 manifest skills + using-keel bootstrap); \
          got {}. Update the docs and this test together.",
         on_disk.len()
     );

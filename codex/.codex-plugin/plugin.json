@@ -1,0 +1,11 @@
+{
+  "name": "keel",
+  "version": "1.0.0",
+  "description": "Bridges Codex lifecycle events to the keel Rust CLI for context injection, observation recording, learning checkpoints, and session management.",
+  "author": {
+    "name": "UntaDotMy",
+    "url": "https://github.com/UntaDotMy/keel"
+  },
+  "skills": "./skills/",
+  "hooks": "./hooks/hooks.json"
+}

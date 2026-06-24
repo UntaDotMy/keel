@@ -3,7 +3,7 @@
   platform [--json]
   bootstrap-info [--json] [--claude-home <path>] [--repository-slug <owner/repo>] [--repo-root <path>] [--version <build-version>]
   all [--repo-root <path>] [--claude-home <path>] [--profile full|smoke]
-  install [--repo-root <path>] [--claude-home <path>]
+  install [--repo-root <path>] [--claude-home <path>] [--interactive]
   update [--repo-root <path>] [--claude-home <path>]
   status [--repo-root <path>] [--claude-home <path>]
   doctor [--repo-root <path>] [--claude-home <path>]
@@ -54,4 +54,5 @@
   flow start --target-file <path> [--target-function <name>] [--repo-root <path>] [--output <path>] [--json]
   flow check [--repo-root <path>] [--artifact <path>] [--json]
   flow finish [--repo-root <path>] [--artifact <path>] [--json]
+  team spawn|status|kill|list [--json]
   mcp serve

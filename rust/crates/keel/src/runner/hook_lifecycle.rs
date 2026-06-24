@@ -2105,6 +2105,188 @@ fn story_closeout_gate_message(
     format!("{preamble} Open stories (Definition of Done not met):{gaps}\n{tail}")
 }
 
+// ---- Research gate (PostToolBatch) ----
+//
+// Fires when a session edited code but used no web search or recall tool. The
+// Iron Law demands "read first" and "understand before building" — editing
+// without any research evidence means the model assumed from stale knowledge.
+// Detection: scan tool_timings JSONL for the session and check whether any tool
+// name contains "websearch", "web_fetch", "context7", or "recall".
+
+const RESEARCH_GATE_ENV_VAR: &str = "CLAUDE_SKILLS_RESEARCH_GATE";
+const RESEARCH_GATE_MAX_BLOCKS_ENV_VAR: &str = "CLAUDE_SKILLS_RESEARCH_GATE_MAX_BLOCKS";
+
+/// Research-gate behavior. Default `Escalate` (nudge first, block if ignored);
+/// `CLAUDE_SKILLS_RESEARCH_GATE=nudge` keeps it advisory-only; `=off` disables.
+fn research_gate_mode() -> GateMode {
+    gate_mode(RESEARCH_GATE_ENV_VAR)
+}
+
+fn research_gate_max_blocks() -> u64 {
+    std::env::var(RESEARCH_GATE_MAX_BLOCKS_ENV_VAR)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or_else(|| default_max_blocks_for(research_gate_mode()))
+}
+
+fn research_gate_blocks_path(claude_home: &Path, session_id: &str) -> PathBuf {
+    let key = if session_id.trim().is_empty() {
+        "no-session".to_string()
+    } else {
+        sanitize_memory_key(session_id)
+    };
+    claude_home
+        .join("state")
+        .join("research-gate-blocks")
+        .join(key)
+}
+
+/// Whether any research tool was called this session. Scans the tool_timings
+/// JSONL for `session_id` and checks whether any record's tool_name contains
+/// one of the research-tool substrings: "websearch", "web_fetch", "context7",
+/// or "recall". Fail-open: any read/parse problem returns `true` so the gate
+/// degrades to advisory.
+fn session_has_research_tool(claude_home: &Path, session_id: &str) -> bool {
+    let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let path = claude_home
+        .join("state")
+        .join("tool-timings")
+        .join(format!("{date}.jsonl"));
+    let Ok(body) = fs::read_to_string(&path) else {
+        return true;
+    };
+    for line in body.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(row) = serde_json::from_str::<JsonDocument>(line) else {
+            continue;
+        };
+        if row.get("session_id").and_then(JsonDocument::as_str) != Some(session_id) {
+            continue;
+        }
+        let tool = row
+            .get("tool_name")
+            .and_then(JsonDocument::as_str)
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if tool.contains("websearch")
+            || tool.contains("web_fetch")
+            || tool.contains("context7")
+            || tool.contains("recall")
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn research_gate_message(decision: GateDecision) -> String {
+    match decision {
+        GateDecision::Block => "Research gate (CLAUDE_SKILLS_RESEARCH_GATE): this session changed code but no web search or recall evidence was found, and the earlier reminder went unaddressed — so this is now a hard stop. Research is the #1 priority — use websearch, context7, or recall to verify current information before implementing. Do not assume from stale knowledge. This gate is bounded per session and then lets the turn through, so it cannot loop. Set CLAUDE_SKILLS_RESEARCH_GATE=nudge to keep it advisory-only, or =off to disable.".to_string(),
+        _ => "Research gate (CLAUDE_SKILLS_RESEARCH_GATE): this session changed code but no web search or recall evidence was found. Research is the #1 priority — use websearch, context7, or recall to verify current information before implementing. Do not assume from stale knowledge. This first reminder does not stop the turn, but will escalate. Set CLAUDE_SKILLS_RESEARCH_GATE=nudge to keep it advisory-only, =off to disable.".to_string(),
+    }
+}
+
+// ---- Story-first gate (PostToolBatch) ----
+//
+// Fires when a session edited code but no user stories were confirmed (no
+// `user-story-confirmed` marker file exists for this session). The Iron Law
+// demands understanding before building — editing without confirmed user stories
+// means implementation may drift from what was requested. Detection: check for
+// the marker file at <claude_home>/state/story-first/<session_id>.confirmed.
+
+const STORY_FIRST_GATE_ENV_VAR: &str = "CLAUDE_SKILLS_STORY_FIRST_GATE";
+const STORY_FIRST_GATE_MAX_BLOCKS_ENV_VAR: &str = "CLAUDE_SKILLS_STORY_FIRST_GATE_MAX_BLOCKS";
+
+/// Story-first gate behavior. Default `Escalate` (nudge first, block if
+/// ignored); `CLAUDE_SKILLS_STORY_FIRST_GATE=nudge` keeps it advisory-only;
+/// `=off` disables.
+fn story_first_gate_mode() -> GateMode {
+    gate_mode(STORY_FIRST_GATE_ENV_VAR)
+}
+
+fn story_first_gate_max_blocks() -> u64 {
+    std::env::var(STORY_FIRST_GATE_MAX_BLOCKS_ENV_VAR)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or_else(|| default_max_blocks_for(story_first_gate_mode()))
+}
+
+fn story_first_gate_blocks_path(claude_home: &Path, session_id: &str) -> PathBuf {
+    let key = if session_id.trim().is_empty() {
+        "no-session".to_string()
+    } else {
+        sanitize_memory_key(session_id)
+    };
+    claude_home
+        .join("state")
+        .join("story-first-gate-blocks")
+        .join(key)
+}
+
+/// Path to the story-confirmed marker file for a session. When this file exists,
+/// user stories were confirmed via `keel user-story lint` before implementation.
+fn story_confirmed_marker_path(claude_home: &Path, session_id: &str) -> PathBuf {
+    let key = if session_id.trim().is_empty() {
+        "no-session".to_string()
+    } else {
+        sanitize_memory_key(session_id)
+    };
+    claude_home
+        .join("state")
+        .join("story-first")
+        .join(format!("{key}.confirmed"))
+}
+
+/// Create the story-confirmed marker file indicating user stories were confirmed
+/// for this session. Called from the user-story lint success path. Best-effort:
+/// any failure is silently ignored — a missing marker only means the gate may
+/// fire once more, which the per-session cap still bounds.
+pub fn maybe_record_story_confirmed() {
+    let Ok(claude_home) = resolve_claude_home("") else {
+        return;
+    };
+    // We need a session_id but this is called from the user-story lint surface
+    // which may not have one in context. Use a sentinel that will be checked by
+    // the marker path. For now, read from the most recent tool-timings to find
+    // the active session.
+    let session_id = std::env::var("CLAUDE_SESSION_ID")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| {
+            // Best-effort: read the most recent tool-timings row for any session.
+            let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+            let path = claude_home
+                .join("state")
+                .join("tool-timings")
+                .join(format!("{date}.jsonl"));
+            fs::read_to_string(&path)
+                .ok()
+                .and_then(|body| {
+                    body.lines().rev().find_map(|line| {
+                        let row = serde_json::from_str::<JsonDocument>(line).ok()?;
+                        row.get("session_id")
+                            .and_then(JsonDocument::as_str)
+                            .map(String::from)
+                    })
+                })
+                .unwrap_or_else(|| "no-session".to_string())
+        });
+    let marker = story_confirmed_marker_path(&claude_home, &session_id);
+    if let Some(parent) = marker.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(&marker, now_ms().to_string());
+}
+
+fn story_first_gate_message(decision: GateDecision) -> String {
+    match decision {
+        GateDecision::Block => "Story-first gate (CLAUDE_SKILLS_STORY_FIRST_GATE): this session changed code but no user stories were confirmed, and the earlier reminder went unaddressed — so this is now a hard stop. Every requirement-bearing request must be decomposed into user stories (Connextra + Gherkin + INVEST) and confirmed with the user before implementation begins. This prevents drift and ensures nothing is built that was never requested. Write stories with `keel user-story lint`, confirm with the user, then implement. This gate is bounded per session and then lets the turn through, so it cannot loop. Set CLAUDE_SKILLS_STORY_FIRST_GATE=nudge to keep it advisory-only, or =off to disable.".to_string(),
+        _ => "Story-first gate (CLAUDE_SKILLS_STORY_FIRST_GATE): this session changed code but no user stories were confirmed. Every requirement-bearing request must be decomposed into user stories (Connextra + Gherkin + INVEST) and confirmed with the user before implementation begins. This prevents drift and ensures nothing is built that was never requested. Write stories with `keel user-story lint`, confirm with the user, then implement. This first reminder does not stop the turn, but will escalate. Set CLAUDE_SKILLS_STORY_FIRST_GATE=nudge to keep it advisory-only, =off to disable.".to_string(),
+    }
+}
+
 const BRIEF_GATE_ENV_VAR: &str = "CLAUDE_SKILLS_BRIEF_GATE";
 const BRIEF_GATE_MAX_BLOCKS_ENV_VAR: &str = "CLAUDE_SKILLS_BRIEF_GATE_MAX_BLOCKS";
 
@@ -2818,16 +3000,28 @@ fn run_hook_post_tool_batch(
     let memory_mode = memory_gate_mode();
     let sprint_mode = sprint_start_gate_mode();
     let learned_mode = learned_skill_gate_mode();
+    let research_mode = research_gate_mode();
+    let story_first_mode = story_first_gate_mode();
     let review_on = review_mode != GateMode::Off && review_gate_max_blocks() > 0;
     let brief_on = brief_mode != GateMode::Off && brief_gate_max_blocks() > 0;
     let closeout_on = closeout_mode != GateMode::Off && story_closeout_gate_max_blocks() > 0;
     let memory_on = memory_mode != GateMode::Off && memory_gate_max_blocks() > 0;
     let sprint_on = sprint_mode != GateMode::Off && sprint_start_gate_max_blocks() > 0;
     let learned_on = learned_mode != GateMode::Off && learned_skill_gate_max_blocks() > 0;
+    let research_on = research_mode != GateMode::Off && research_gate_max_blocks() > 0;
+    let story_first_on = story_first_mode != GateMode::Off && story_first_gate_max_blocks() > 0;
 
     // All gates off: skip stdin entirely and emit the advisory reminder. This
     // keeps the fully-disabled path cheap and side-effect-free.
-    if !review_on && !brief_on && !closeout_on && !memory_on && !sprint_on && !learned_on {
+    if !review_on
+        && !brief_on
+        && !closeout_on
+        && !memory_on
+        && !sprint_on
+        && !learned_on
+        && !research_on
+        && !story_first_on
+    {
         return emit_post_tool_batch_advisory(standard_output, standard_error);
     }
 
@@ -2884,7 +3078,7 @@ fn run_hook_post_tool_batch(
             }
         }
 
-        // Review gate SECOND (back of the law: review before close).
+        // Review gate (back of the law: review before close).
         if review_on {
             let reviewed = review_marker_ms(&claude_home, &stats.last_cwd)
                 .map(|marker_ms| marker_ms >= stats.last_edit_ms)
@@ -2933,6 +3127,30 @@ fn run_hook_post_tool_batch(
             }
         }
 
+        // Research gate: fires when code changed but no web search or recall
+        // tool was used this session. Satisfied when any research tool fired.
+        if research_on {
+            let satisfied = session_has_research_tool(&claude_home, session_id);
+            let blocks_path = research_gate_blocks_path(&claude_home, session_id);
+            let blocks_issued = read_counter_value(&blocks_path);
+            let decision = decide_gate(
+                research_mode,
+                research_gate_max_blocks(),
+                blocks_issued,
+                stats.count,
+                satisfied,
+            );
+            if decision != GateDecision::Advisory {
+                let _ = increment_counter_file(&blocks_path);
+                return emit_gate_decision(
+                    decision,
+                    research_gate_message(decision),
+                    standard_output,
+                    standard_error,
+                );
+            }
+        }
+
         // Sprint-start gate FOURTH (track multi-story scope as a sprint).
         if sprint_on {
             let multi_story = workspace_brief_is_multi_story(&claude_home, &stats.last_cwd);
@@ -2960,6 +3178,31 @@ fn run_hook_post_tool_batch(
                 return emit_gate_decision(
                     decision,
                     sprint_start_gate_message(decision),
+                    standard_output,
+                    standard_error,
+                );
+            }
+        }
+
+        // Story-first gate: fires when code changed but no user stories were
+        // confirmed for this session. Satisfied when the confirmed marker exists.
+        if story_first_on {
+            let marker = story_confirmed_marker_path(&claude_home, session_id);
+            let satisfied = marker.exists();
+            let blocks_path = story_first_gate_blocks_path(&claude_home, session_id);
+            let blocks_issued = read_counter_value(&blocks_path);
+            let decision = decide_gate(
+                story_first_mode,
+                story_first_gate_max_blocks(),
+                blocks_issued,
+                stats.count,
+                satisfied,
+            );
+            if decision != GateDecision::Advisory {
+                let _ = increment_counter_file(&blocks_path);
+                return emit_gate_decision(
+                    decision,
+                    story_first_gate_message(decision),
                     standard_output,
                     standard_error,
                 );
@@ -5540,19 +5783,20 @@ mod tests {
 
     #[test]
     fn run_hook_post_tool_batch_both_gates_off_matches_advisory_path() {
-        // End-to-end: with BOTH gates explicitly disabled, the stdin-reading
-        // dispatcher emits byte-identical output to the lifecycle advisory path.
-        // This is the "off-switch fully restores advisory" guarantee. The gates
-        // are default-on now, so the test must set both to off rather than rely
-        // on an unset env var.
         let _guard = crate::test_support::ENV_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _silenced = NewGatesSilenced::new();
         let previous_review = std::env::var(REVIEW_GATE_ENV_VAR).ok();
         let previous_brief = std::env::var(BRIEF_GATE_ENV_VAR).ok();
+        let previous_research = std::env::var(RESEARCH_GATE_ENV_VAR).ok();
+        let previous_story_first = std::env::var(STORY_FIRST_GATE_ENV_VAR).ok();
+        let previous_closeout = std::env::var(STORY_CLOSEOUT_GATE_ENV_VAR).ok();
         std::env::set_var(REVIEW_GATE_ENV_VAR, "off");
         std::env::set_var(BRIEF_GATE_ENV_VAR, "off");
+        std::env::set_var(RESEARCH_GATE_ENV_VAR, "off");
+        std::env::set_var(STORY_FIRST_GATE_ENV_VAR, "off");
+        std::env::set_var(STORY_CLOSEOUT_GATE_ENV_VAR, "off");
 
         let mut gate_stdin = std::io::empty();
         let mut gate_out = Vec::new();
@@ -5571,15 +5815,26 @@ mod tests {
             Some(value) => std::env::set_var(BRIEF_GATE_ENV_VAR, value),
             None => std::env::remove_var(BRIEF_GATE_ENV_VAR),
         }
+        match previous_research {
+            Some(value) => std::env::set_var(RESEARCH_GATE_ENV_VAR, value),
+            None => std::env::remove_var(RESEARCH_GATE_ENV_VAR),
+        }
+        match previous_story_first {
+            Some(value) => std::env::set_var(STORY_FIRST_GATE_ENV_VAR, value),
+            None => std::env::remove_var(STORY_FIRST_GATE_ENV_VAR),
+        }
+        match previous_closeout {
+            Some(value) => std::env::set_var(STORY_CLOSEOUT_GATE_ENV_VAR, value),
+            None => std::env::remove_var(STORY_CLOSEOUT_GATE_ENV_VAR),
+        }
 
         assert_eq!(gate_code, 0);
         assert_eq!(adv_code, 0);
         assert_eq!(
             String::from_utf8_lossy(&gate_out),
             String::from_utf8_lossy(&adv_out),
-            "both-gates-off dispatcher output must match the advisory lifecycle path exactly"
+            "all-gates-off dispatcher output must match the advisory lifecycle path exactly"
         );
-        // And it must NOT be a block.
         assert!(
             !String::from_utf8_lossy(&gate_out).contains("\"decision\""),
             "disabled gates must never emit a decision field"
@@ -5941,9 +6196,15 @@ mod tests {
         let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
         let previous_review = std::env::var(REVIEW_GATE_ENV_VAR).ok();
         let previous_brief = std::env::var(BRIEF_GATE_ENV_VAR).ok();
+        let previous_closeout = std::env::var(STORY_CLOSEOUT_GATE_ENV_VAR).ok();
+        let previous_research = std::env::var(RESEARCH_GATE_ENV_VAR).ok();
+        let previous_story_first = std::env::var(STORY_FIRST_GATE_ENV_VAR).ok();
         std::env::set_var("CLAUDE_TARGET_OVERRIDE", &claude_home);
-        std::env::set_var(REVIEW_GATE_ENV_VAR, "off"); // isolate the brief gate
-        std::env::set_var(BRIEF_GATE_ENV_VAR, "nudge"); // explicit advisory-only mode
+        std::env::set_var(REVIEW_GATE_ENV_VAR, "off");
+        std::env::set_var(BRIEF_GATE_ENV_VAR, "nudge");
+        std::env::set_var(RESEARCH_GATE_ENV_VAR, "off");
+        std::env::set_var(STORY_FIRST_GATE_ENV_VAR, "off");
+        std::env::set_var(STORY_CLOSEOUT_GATE_ENV_VAR, "off");
 
         // Seed one edit-class timing row for this session so stats.count > 0 and
         // session_start_ms resolves. No brief is written → gate must fire.
@@ -6052,6 +6313,18 @@ mod tests {
             Some(value) => std::env::set_var(BRIEF_GATE_ENV_VAR, value),
             None => std::env::remove_var(BRIEF_GATE_ENV_VAR),
         }
+        match previous_research {
+            Some(value) => std::env::set_var(RESEARCH_GATE_ENV_VAR, value),
+            None => std::env::remove_var(RESEARCH_GATE_ENV_VAR),
+        }
+        match previous_story_first {
+            Some(value) => std::env::set_var(STORY_FIRST_GATE_ENV_VAR, value),
+            None => std::env::remove_var(STORY_FIRST_GATE_ENV_VAR),
+        }
+        match previous_closeout {
+            Some(value) => std::env::set_var(STORY_CLOSEOUT_GATE_ENV_VAR, value),
+            None => std::env::remove_var(STORY_CLOSEOUT_GATE_ENV_VAR),
+        }
         let _ = std::fs::remove_dir_all(&claude_home);
     }
 
@@ -6072,9 +6345,20 @@ mod tests {
         let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
         let previous_review = std::env::var(REVIEW_GATE_ENV_VAR).ok();
         let previous_brief = std::env::var(BRIEF_GATE_ENV_VAR).ok();
+        let previous_research = std::env::var(RESEARCH_GATE_ENV_VAR).ok();
+        let previous_story_first = std::env::var(STORY_FIRST_GATE_ENV_VAR).ok();
+        let previous_closeout = std::env::var(STORY_CLOSEOUT_GATE_ENV_VAR).ok();
+        std::env::set_var("CLAUDE_TARGET_OVERRIDE", &claude_home);
+        std::env::set_var(REVIEW_GATE_ENV_VAR, "off");
+        std::env::set_var(RESEARCH_GATE_ENV_VAR, "off");
+        std::env::set_var(STORY_FIRST_GATE_ENV_VAR, "off");
+        std::env::set_var(STORY_CLOSEOUT_GATE_ENV_VAR, "off");
         std::env::set_var("CLAUDE_TARGET_OVERRIDE", &claude_home);
         std::env::set_var(REVIEW_GATE_ENV_VAR, "off"); // isolate the brief gate
         std::env::remove_var(BRIEF_GATE_ENV_VAR); // default → escalate
+        std::env::set_var(RESEARCH_GATE_ENV_VAR, "off");
+        std::env::set_var(STORY_FIRST_GATE_ENV_VAR, "off");
+        std::env::set_var(STORY_CLOSEOUT_GATE_ENV_VAR, "off");
 
         let session_id = "sess-e2e-escalate";
         let date = chrono::Local::now().format("%Y-%m-%d").to_string();
@@ -6151,6 +6435,18 @@ mod tests {
             Some(value) => std::env::set_var(BRIEF_GATE_ENV_VAR, value),
             None => std::env::remove_var(BRIEF_GATE_ENV_VAR),
         }
+        match previous_research {
+            Some(value) => std::env::set_var(RESEARCH_GATE_ENV_VAR, value),
+            None => std::env::remove_var(RESEARCH_GATE_ENV_VAR),
+        }
+        match previous_story_first {
+            Some(value) => std::env::set_var(STORY_FIRST_GATE_ENV_VAR, value),
+            None => std::env::remove_var(STORY_FIRST_GATE_ENV_VAR),
+        }
+        match previous_closeout {
+            Some(value) => std::env::set_var(STORY_CLOSEOUT_GATE_ENV_VAR, value),
+            None => std::env::remove_var(STORY_CLOSEOUT_GATE_ENV_VAR),
+        }
         let _ = std::fs::remove_dir_all(&claude_home);
     }
 
@@ -6177,9 +6473,15 @@ mod tests {
         let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
         let previous_review = std::env::var(REVIEW_GATE_ENV_VAR).ok();
         let previous_brief = std::env::var(BRIEF_GATE_ENV_VAR).ok();
+        let previous_research = std::env::var(RESEARCH_GATE_ENV_VAR).ok();
+        let previous_story_first = std::env::var(STORY_FIRST_GATE_ENV_VAR).ok();
+        let previous_closeout = std::env::var(STORY_CLOSEOUT_GATE_ENV_VAR).ok();
         std::env::set_var("CLAUDE_TARGET_OVERRIDE", &claude_home);
         std::env::set_var(BRIEF_GATE_ENV_VAR, "off"); // isolate the review gate
         std::env::set_var(REVIEW_GATE_ENV_VAR, "nudge"); // explicit advisory-only mode
+        std::env::set_var(RESEARCH_GATE_ENV_VAR, "off");
+        std::env::set_var(STORY_FIRST_GATE_ENV_VAR, "off");
+        std::env::set_var(STORY_CLOSEOUT_GATE_ENV_VAR, "off");
 
         // Seed one edit-class timing row. No `.reviewed` marker is written → the
         // review gate sees an unreviewed edit and must fire.
@@ -6288,6 +6590,18 @@ mod tests {
             Some(value) => std::env::set_var(BRIEF_GATE_ENV_VAR, value),
             None => std::env::remove_var(BRIEF_GATE_ENV_VAR),
         }
+        match previous_research {
+            Some(value) => std::env::set_var(RESEARCH_GATE_ENV_VAR, value),
+            None => std::env::remove_var(RESEARCH_GATE_ENV_VAR),
+        }
+        match previous_story_first {
+            Some(value) => std::env::set_var(STORY_FIRST_GATE_ENV_VAR, value),
+            None => std::env::remove_var(STORY_FIRST_GATE_ENV_VAR),
+        }
+        match previous_closeout {
+            Some(value) => std::env::set_var(STORY_CLOSEOUT_GATE_ENV_VAR, value),
+            None => std::env::remove_var(STORY_CLOSEOUT_GATE_ENV_VAR),
+        }
         let _ = std::fs::remove_dir_all(&claude_home);
     }
 
@@ -6351,10 +6665,14 @@ mod tests {
         let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
         let previous_review = std::env::var(REVIEW_GATE_ENV_VAR).ok();
         let previous_brief = std::env::var(BRIEF_GATE_ENV_VAR).ok();
+        let previous_research = std::env::var(RESEARCH_GATE_ENV_VAR).ok();
+        let previous_story_first = std::env::var(STORY_FIRST_GATE_ENV_VAR).ok();
         let previous_closeout = std::env::var(STORY_CLOSEOUT_GATE_ENV_VAR).ok();
         std::env::set_var("CLAUDE_TARGET_OVERRIDE", &claude_home);
         std::env::set_var(REVIEW_GATE_ENV_VAR, "off");
         std::env::set_var(BRIEF_GATE_ENV_VAR, "off");
+        std::env::set_var(RESEARCH_GATE_ENV_VAR, "off");
+        std::env::set_var(STORY_FIRST_GATE_ENV_VAR, "off");
         std::env::remove_var(STORY_CLOSEOUT_GATE_ENV_VAR); // default → escalate (first fire nudges)
 
         // Workspace WITH an incomplete sprint.
@@ -6424,6 +6742,14 @@ mod tests {
             Some(value) => std::env::set_var(BRIEF_GATE_ENV_VAR, value),
             None => std::env::remove_var(BRIEF_GATE_ENV_VAR),
         }
+        match previous_research {
+            Some(value) => std::env::set_var(RESEARCH_GATE_ENV_VAR, value),
+            None => std::env::remove_var(RESEARCH_GATE_ENV_VAR),
+        }
+        match previous_story_first {
+            Some(value) => std::env::set_var(STORY_FIRST_GATE_ENV_VAR, value),
+            None => std::env::remove_var(STORY_FIRST_GATE_ENV_VAR),
+        }
         match previous_closeout {
             Some(value) => std::env::set_var(STORY_CLOSEOUT_GATE_ENV_VAR, value),
             None => std::env::remove_var(STORY_CLOSEOUT_GATE_ENV_VAR),
@@ -6444,10 +6770,14 @@ mod tests {
         let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
         let previous_review = std::env::var(REVIEW_GATE_ENV_VAR).ok();
         let previous_brief = std::env::var(BRIEF_GATE_ENV_VAR).ok();
+        let previous_research = std::env::var(RESEARCH_GATE_ENV_VAR).ok();
+        let previous_story_first = std::env::var(STORY_FIRST_GATE_ENV_VAR).ok();
         let previous_closeout = std::env::var(STORY_CLOSEOUT_GATE_ENV_VAR).ok();
         std::env::set_var("CLAUDE_TARGET_OVERRIDE", &claude_home);
         std::env::set_var(REVIEW_GATE_ENV_VAR, "off");
         std::env::set_var(BRIEF_GATE_ENV_VAR, "off");
+        std::env::set_var(RESEARCH_GATE_ENV_VAR, "off");
+        std::env::set_var(STORY_FIRST_GATE_ENV_VAR, "off");
         std::env::set_var(STORY_CLOSEOUT_GATE_ENV_VAR, "block");
 
         // Incomplete sprint -> decision:block.
@@ -6503,6 +6833,14 @@ mod tests {
         match previous_brief {
             Some(value) => std::env::set_var(BRIEF_GATE_ENV_VAR, value),
             None => std::env::remove_var(BRIEF_GATE_ENV_VAR),
+        }
+        match previous_research {
+            Some(value) => std::env::set_var(RESEARCH_GATE_ENV_VAR, value),
+            None => std::env::remove_var(RESEARCH_GATE_ENV_VAR),
+        }
+        match previous_story_first {
+            Some(value) => std::env::set_var(STORY_FIRST_GATE_ENV_VAR, value),
+            None => std::env::remove_var(STORY_FIRST_GATE_ENV_VAR),
         }
         match previous_closeout {
             Some(value) => std::env::set_var(STORY_CLOSEOUT_GATE_ENV_VAR, value),
@@ -6674,6 +7012,8 @@ mod tests {
         let previous_sprint = std::env::var(SPRINT_START_GATE_ENV_VAR).ok();
         let previous_learned = std::env::var(LEARNED_SKILL_GATE_ENV_VAR).ok();
         let previous_memory = std::env::var(MEMORY_GATE_ENV_VAR).ok();
+        let previous_research = std::env::var(RESEARCH_GATE_ENV_VAR).ok();
+        let previous_story_first = std::env::var(STORY_FIRST_GATE_ENV_VAR).ok();
         std::env::set_var("CLAUDE_TARGET_OVERRIDE", &claude_home);
         std::env::set_var(REVIEW_GATE_ENV_VAR, "off");
         std::env::set_var(BRIEF_GATE_ENV_VAR, "off");
@@ -6681,6 +7021,8 @@ mod tests {
         std::env::set_var(SPRINT_START_GATE_ENV_VAR, "off");
         std::env::set_var(LEARNED_SKILL_GATE_ENV_VAR, "off");
         std::env::set_var(MEMORY_GATE_ENV_VAR, "nudge");
+        std::env::set_var(RESEARCH_GATE_ENV_VAR, "off");
+        std::env::set_var(STORY_FIRST_GATE_ENV_VAR, "off");
 
         let session_id = "sess-memory";
         let cwd = "D:/Nasri/Project/memory-e2e";
@@ -6762,6 +7104,8 @@ mod tests {
             (SPRINT_START_GATE_ENV_VAR, previous_sprint),
             (LEARNED_SKILL_GATE_ENV_VAR, previous_learned),
             (MEMORY_GATE_ENV_VAR, previous_memory),
+            (RESEARCH_GATE_ENV_VAR, previous_research),
+            (STORY_FIRST_GATE_ENV_VAR, previous_story_first),
         ] {
             match prior {
                 Some(value) => std::env::set_var(var, value),
@@ -6784,6 +7128,8 @@ mod tests {
         let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
         let previous_review = std::env::var(REVIEW_GATE_ENV_VAR).ok();
         let previous_brief = std::env::var(BRIEF_GATE_ENV_VAR).ok();
+        let previous_research = std::env::var(RESEARCH_GATE_ENV_VAR).ok();
+        let previous_story_first = std::env::var(STORY_FIRST_GATE_ENV_VAR).ok();
         let previous_closeout = std::env::var(STORY_CLOSEOUT_GATE_ENV_VAR).ok();
         let previous_memory = std::env::var(MEMORY_GATE_ENV_VAR).ok();
         let previous_learned = std::env::var(LEARNED_SKILL_GATE_ENV_VAR).ok();
@@ -6791,6 +7137,8 @@ mod tests {
         std::env::set_var("CLAUDE_TARGET_OVERRIDE", &claude_home);
         std::env::set_var(REVIEW_GATE_ENV_VAR, "off");
         std::env::set_var(BRIEF_GATE_ENV_VAR, "off");
+        std::env::set_var(RESEARCH_GATE_ENV_VAR, "off");
+        std::env::set_var(STORY_FIRST_GATE_ENV_VAR, "off");
         std::env::set_var(STORY_CLOSEOUT_GATE_ENV_VAR, "off");
         std::env::set_var(MEMORY_GATE_ENV_VAR, "off");
         std::env::set_var(LEARNED_SKILL_GATE_ENV_VAR, "off");
@@ -6896,6 +7244,8 @@ mod tests {
         for (var, prior) in [
             (REVIEW_GATE_ENV_VAR, previous_review),
             (BRIEF_GATE_ENV_VAR, previous_brief),
+            (RESEARCH_GATE_ENV_VAR, previous_research),
+            (STORY_FIRST_GATE_ENV_VAR, previous_story_first),
             (STORY_CLOSEOUT_GATE_ENV_VAR, previous_closeout),
             (MEMORY_GATE_ENV_VAR, previous_memory),
             (LEARNED_SKILL_GATE_ENV_VAR, previous_learned),
@@ -8623,5 +8973,199 @@ mod tests {
             result.is_empty(),
             "lifecycle_additional_context must not handle user-prompt-submit; got: {result:?}"
         );
+    }
+
+    #[test]
+    fn research_gate_nudges_when_no_research_before_edit() {
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous_research = std::env::var(RESEARCH_GATE_ENV_VAR).ok();
+        let previous_brief = std::env::var(BRIEF_GATE_ENV_VAR).ok();
+        let previous_review = std::env::var(REVIEW_GATE_ENV_VAR).ok();
+        let previous_story_first = std::env::var(STORY_FIRST_GATE_ENV_VAR).ok();
+        let previous_closeout = std::env::var(STORY_CLOSEOUT_GATE_ENV_VAR).ok();
+        std::env::set_var(RESEARCH_GATE_ENV_VAR, "nudge");
+        std::env::set_var(BRIEF_GATE_ENV_VAR, "off");
+        std::env::set_var(REVIEW_GATE_ENV_VAR, "off");
+        std::env::set_var(STORY_FIRST_GATE_ENV_VAR, "off");
+        std::env::set_var(STORY_CLOSEOUT_GATE_ENV_VAR, "off");
+
+        let temp = std::env::temp_dir().join("keel-research-gate-test");
+        let claude_home = temp.join("claude-home");
+        let _ = std::fs::create_dir_all(claude_home.join("state").join("tool-timings"));
+        let _ = std::fs::create_dir_all(claude_home.join("state").join("research-gate-blocks"));
+
+        let session_id = "test-research-gate-session";
+        let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let timings_path = claude_home
+            .join("state")
+            .join("tool-timings")
+            .join(format!("{date}.jsonl"));
+        let _ = std::fs::write(
+            &timings_path,
+            format!(
+                "{{\"session_id\":\"{session_id}\",\"tool_name\":\"Write\",\"recorded_at_ms\":1000,\"cwd\":\"/tmp\"}}\n"
+            ),
+        );
+
+        let decision = decide_gate(
+            research_gate_mode(),
+            research_gate_max_blocks(),
+            0,
+            1,
+            session_has_research_tool(&claude_home, session_id),
+        );
+        assert_eq!(
+            decision,
+            GateDecision::Nudge,
+            "research gate must nudge when code edited but no research tool found"
+        );
+
+        let nudge_msg = research_gate_message(GateDecision::Nudge);
+        assert!(nudge_msg.contains("CLAUDE_SKILLS_RESEARCH_GATE"));
+        assert!(nudge_msg.contains("does not stop the turn"));
+        assert!(nudge_msg.contains("=off"));
+
+        match previous_research {
+            Some(value) => std::env::set_var(RESEARCH_GATE_ENV_VAR, value),
+            None => std::env::remove_var(RESEARCH_GATE_ENV_VAR),
+        }
+        match previous_brief {
+            Some(value) => std::env::set_var(BRIEF_GATE_ENV_VAR, value),
+            None => std::env::remove_var(BRIEF_GATE_ENV_VAR),
+        }
+        match previous_review {
+            Some(value) => std::env::set_var(REVIEW_GATE_ENV_VAR, value),
+            None => std::env::remove_var(REVIEW_GATE_ENV_VAR),
+        }
+        match previous_story_first {
+            Some(value) => std::env::set_var(STORY_FIRST_GATE_ENV_VAR, value),
+            None => std::env::remove_var(STORY_FIRST_GATE_ENV_VAR),
+        }
+        match previous_closeout {
+            Some(value) => std::env::set_var(STORY_CLOSEOUT_GATE_ENV_VAR, value),
+            None => std::env::remove_var(STORY_CLOSEOUT_GATE_ENV_VAR),
+        }
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn research_gate_off_matches_advisory_path() {
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous_research = std::env::var(RESEARCH_GATE_ENV_VAR).ok();
+        std::env::set_var(RESEARCH_GATE_ENV_VAR, "off");
+
+        assert_eq!(
+            decide_gate(GateMode::Off, 1, 0, 5, false),
+            GateDecision::Advisory,
+            "research gate off must always be Advisory"
+        );
+
+        let block_msg = research_gate_message(GateDecision::Block);
+        assert!(block_msg.contains("hard stop"));
+        let nudge_msg = research_gate_message(GateDecision::Nudge);
+        assert!(nudge_msg.contains("does not stop the turn"));
+
+        match previous_research {
+            Some(value) => std::env::set_var(RESEARCH_GATE_ENV_VAR, value),
+            None => std::env::remove_var(RESEARCH_GATE_ENV_VAR),
+        }
+    }
+
+    #[test]
+    fn story_first_gate_nudges_when_no_stories_before_edit() {
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous_story_first = std::env::var(STORY_FIRST_GATE_ENV_VAR).ok();
+        let previous_brief = std::env::var(BRIEF_GATE_ENV_VAR).ok();
+        let previous_review = std::env::var(REVIEW_GATE_ENV_VAR).ok();
+        let previous_research = std::env::var(RESEARCH_GATE_ENV_VAR).ok();
+        let previous_closeout = std::env::var(STORY_CLOSEOUT_GATE_ENV_VAR).ok();
+        std::env::set_var(STORY_FIRST_GATE_ENV_VAR, "nudge");
+        std::env::set_var(BRIEF_GATE_ENV_VAR, "off");
+        std::env::set_var(REVIEW_GATE_ENV_VAR, "off");
+        std::env::set_var(RESEARCH_GATE_ENV_VAR, "off");
+        std::env::set_var(STORY_CLOSEOUT_GATE_ENV_VAR, "off");
+
+        let temp = std::env::temp_dir().join("keel-story-first-gate-test");
+        let claude_home = temp.join("claude-home");
+        let _ = std::fs::create_dir_all(claude_home.join("state").join("story-first"));
+        let _ = std::fs::create_dir_all(claude_home.join("state").join("story-first-gate-blocks"));
+
+        let session_id = "test-story-first-gate-session";
+        let marker = story_confirmed_marker_path(&claude_home, session_id);
+        assert!(
+            !marker.exists(),
+            "marker must not exist before being created"
+        );
+
+        let decision = decide_gate(
+            story_first_gate_mode(),
+            story_first_gate_max_blocks(),
+            0,
+            1,
+            marker.exists(),
+        );
+        assert_eq!(
+            decision,
+            GateDecision::Nudge,
+            "story-first gate must nudge when code edited but no stories confirmed"
+        );
+
+        let nudge_msg = story_first_gate_message(GateDecision::Nudge);
+        assert!(nudge_msg.contains("CLAUDE_SKILLS_STORY_FIRST_GATE"));
+        assert!(nudge_msg.contains("does not stop the turn"));
+        assert!(nudge_msg.contains("=off"));
+
+        match previous_story_first {
+            Some(value) => std::env::set_var(STORY_FIRST_GATE_ENV_VAR, value),
+            None => std::env::remove_var(STORY_FIRST_GATE_ENV_VAR),
+        }
+        match previous_brief {
+            Some(value) => std::env::set_var(BRIEF_GATE_ENV_VAR, value),
+            None => std::env::remove_var(BRIEF_GATE_ENV_VAR),
+        }
+        match previous_review {
+            Some(value) => std::env::set_var(REVIEW_GATE_ENV_VAR, value),
+            None => std::env::remove_var(REVIEW_GATE_ENV_VAR),
+        }
+        match previous_research {
+            Some(value) => std::env::set_var(RESEARCH_GATE_ENV_VAR, value),
+            None => std::env::remove_var(RESEARCH_GATE_ENV_VAR),
+        }
+        match previous_closeout {
+            Some(value) => std::env::set_var(STORY_CLOSEOUT_GATE_ENV_VAR, value),
+            None => std::env::remove_var(STORY_CLOSEOUT_GATE_ENV_VAR),
+        }
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn story_first_gate_off_matches_advisory_path() {
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous_story_first = std::env::var(STORY_FIRST_GATE_ENV_VAR).ok();
+        std::env::set_var(STORY_FIRST_GATE_ENV_VAR, "off");
+
+        assert_eq!(
+            decide_gate(GateMode::Off, 1, 0, 5, false),
+            GateDecision::Advisory,
+            "story-first gate off must always be Advisory"
+        );
+
+        let block_msg = story_first_gate_message(GateDecision::Block);
+        assert!(block_msg.contains("hard stop"));
+        let nudge_msg = story_first_gate_message(GateDecision::Nudge);
+        assert!(nudge_msg.contains("does not stop the turn"));
+
+        match previous_story_first {
+            Some(value) => std::env::set_var(STORY_FIRST_GATE_ENV_VAR, value),
+            None => std::env::remove_var(STORY_FIRST_GATE_ENV_VAR),
+        }
     }
 }

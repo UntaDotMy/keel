@@ -60,6 +60,12 @@ pub struct InstallSummary {
     /// step, or `None` when skipped (non-standard `--claude-home`). Best-effort:
     /// a failure is reported in the summary but never fails the install.
     pub opencode_wiring: Option<String>,
+    /// Human-readable outcome of copying the `.cursorrules` file into the
+    /// project root during install, or `None` when skipped. Best-effort.
+    pub cursor_wiring: Option<String>,
+    /// Human-readable outcome of copying the Codex adapter files into the
+    /// project during install, or `None` when skipped. Best-effort.
+    pub codex_wiring: Option<String>,
 }
 
 struct FileTracker<'a> {
@@ -165,6 +171,8 @@ pub fn install_from_paths(
     let hooks_installation = maybe_install_hooks(claude_home);
     let user_claude_md = maybe_sync_user_claude_md(claude_home);
     let opencode_wiring = maybe_wire_opencode(repository_root, claude_home);
+    let cursor_wiring = maybe_wire_cursor(repository_root, claude_home);
+    let codex_wiring = maybe_wire_codex(repository_root, claude_home);
     Ok(InstallSummary {
         synced_skills,
         synced_agents,
@@ -179,6 +187,8 @@ pub fn install_from_paths(
         hooks_installation,
         user_claude_md,
         opencode_wiring,
+        cursor_wiring,
+        codex_wiring,
     })
 }
 
@@ -314,6 +324,72 @@ fn maybe_wire_opencode(repository_root: &Path, claude_home: &Path) -> Option<Str
     };
 
     Some(format!("{plugin_status}; {mcp_status}"))
+}
+
+fn maybe_wire_cursor(repository_root: &Path, claude_home: &Path) -> Option<String> {
+    let is_standard_home = claude_home
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name == ".claude")
+        .unwrap_or(false);
+    if !is_standard_home {
+        return None;
+    }
+    let cursorrules_source = repository_root.join("cursor").join(".cursorrules");
+    if !cursorrules_source.is_file() {
+        return Some("source absent".to_string());
+    }
+    let project_root = match repository_root.parent() {
+        Some(path) => path.to_path_buf(),
+        None => return Some("no project root".to_string()),
+    };
+    let cursorrules_target = project_root.join(".cursorrules");
+    match std::fs::copy(&cursorrules_source, &cursorrules_target) {
+        Ok(_) => Some(format!("copied to {}", display_path(&cursorrules_target))),
+        Err(error) => Some(format!("copy failed ({error})")),
+    }
+}
+
+fn maybe_wire_codex(repository_root: &Path, claude_home: &Path) -> Option<String> {
+    let is_standard_home = claude_home
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name == ".claude")
+        .unwrap_or(false);
+    if !is_standard_home {
+        return None;
+    }
+    let codex_source_dir = repository_root.join("codex");
+    if !codex_source_dir.is_dir() {
+        return Some("source absent".to_string());
+    }
+    let home: PathBuf = match claude_home.parent() {
+        Some(path) => path.to_path_buf(),
+        None => return Some("no home directory".to_string()),
+    };
+    let plugin_target = home.join(".codex").join("plugins").join("keel");
+    if let Err(error) = std::fs::create_dir_all(&plugin_target) {
+        return Some(format!("plugin dir failed ({error})"));
+    }
+    let mut copied = 0;
+    for entry in [
+        "hooks/hooks.json",
+        "keel-codex.ts",
+        ".codex-plugin/plugin.json",
+    ] {
+        let source = codex_source_dir.join(entry);
+        let target = plugin_target.join(entry);
+        if let Some(parent) = target.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if source.is_file() && std::fs::copy(&source, &target).is_ok() {
+            copied += 1;
+        }
+    }
+    Some(format!(
+        "{copied} files -> {}",
+        display_path(&plugin_target)
+    ))
 }
 
 #[derive(Debug)]
@@ -607,6 +683,12 @@ pub fn write_install_summary(summary: &InstallSummary, output: &mut dyn Write) {
     }
     if let Some(opencode_status) = &summary.opencode_wiring {
         let _ = writeln!(output, "  OpenCode wiring: {opencode_status}");
+    }
+    if let Some(cursor_status) = &summary.cursor_wiring {
+        let _ = writeln!(output, "  Cursor wiring: {cursor_status}");
+    }
+    if let Some(codex_status) = &summary.codex_wiring {
+        let _ = writeln!(output, "  Codex wiring: {codex_status}");
     }
 }
 

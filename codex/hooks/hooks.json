@@ -1,0 +1,83 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "npx tsx \"$PLUGIN_ROOT/keel-codex.ts\"",
+            "statusMessage": "Preparing keel session state"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "npx tsx \"$PLUGIN_ROOT/keel-codex.ts\"",
+            "statusMessage": "Injecting keel context"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "npx tsx \"$PLUGIN_ROOT/keel-codex.ts\"",
+            "statusMessage": "Recording tool observation"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "npx tsx \"$PLUGIN_ROOT/keel-codex.ts\"",
+            "statusMessage": "Recording tool observation"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "npx tsx \"$PLUGIN_ROOT/keel-codex.ts\"",
+            "statusMessage": "Running keel learning checkpoint"
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "npx tsx \"$PLUGIN_ROOT/keel-codex.ts\"",
+            "statusMessage": "Recording keel post-compact state"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "npx tsx \"$PLUGIN_ROOT/keel-codex.ts\"",
+            "statusMessage": "Running keel turn-end checkpoint"
+          }
+        ]
+      }
+    ]
+  }
+}

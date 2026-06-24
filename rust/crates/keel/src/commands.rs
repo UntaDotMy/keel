@@ -202,6 +202,7 @@ impl Application {
             "dispatch" => {
                 utility::run_dispatch_command(command_arguments, standard_output, standard_error)
             }
+            "team" => utility::run_team_command(command_arguments, standard_output, standard_error),
             "flow" => self.run_flow_command(command_arguments, standard_output, standard_error),
             "telemetry" => {
                 runner::run_telemetry_command(command_arguments, standard_output, standard_error)
