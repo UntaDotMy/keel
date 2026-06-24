@@ -58,7 +58,7 @@ The cast file ships in this repo. Render to GIF with `agg docs/demos/quickstart.
 | Review gates | Native `.claude/review.json`, `review pre-pr`, and CI-ready artifacts so non-trivial code never self-reviews. |
 | Memory | Working briefs, completion ledgers, scoped `SYSTEM_MAP.md`, and durable recovery state under `~/.claude/memories/`. |
 | Command compaction | `keel run -- <cmd>` produces compact output for noisy test/build/lint/log/search commands without dropping diagnostic signal. |
-| MCP server | `keel mcp serve` is registered through the plugin manifest so the harness auto-discovers 12 tools — `recall`, `system_map`, `run_command`, `recall_status`, `skill_route`, `skill_get`, `skill_list`, `memory_status`, `brief_list`, `brief_get`, `brief_create`, `system_map_refresh` — plus the system-map and recall-status resources. The skill, memory, and brief tools mirror what the lifecycle hooks deliver, so the capabilities stay reachable even where hooks are unreliable. |
+| MCP server | `keel mcp serve` is registered through the plugin manifest so the harness auto-discovers 31 tools — `recall`, `system_map`, `run_command`, `recall_status`, `skill_route`, `skill_get`, `skill_list`, `memory_status`, `brief_list`, `brief_get`, `brief_create`, `system_map_refresh`, `context_brief`, `cli`, `sprint`, `user_story_lint`, `review`, `workflow`, `git_workflow`, `memory`, `gain`, `raw`, `config_audit`, `skill_lint`, `telemetry`, `orchestration`, `checkpoint`, `session`, `doctor`, `code_search`, `user_story` — plus the system-map and recall-status resources. |
 | Slash commands | `/keel:workflow`, `/keel:review`, `/keel:recall`, `/keel:gain` — discoverable `/`-menu wrappers over the implemented CLI surfaces. Shipped via the plugin manifest `commands` key. |
 | Specialist skills | 24 managed specialist profiles synced into `~/.claude/agent-profiles/*.toml`, invokable via the Skill tool. |
 
@@ -642,6 +642,22 @@ Release download overrides are available for controlled environments:
 - CLAUDE_NATIVE_CLI_RELEASE_METADATA_URL
 - CLAUDE_NATIVE_CLI_RELEASE_BASE_URL
 
+## Cross-Agent Adapters
+
+keel works with multiple AI coding agents through dedicated adapters. Each adapter injects keel's iron law, skill catalog, and operating instructions into the target agent.
+
+| Agent | Adapter Type | Mechanism | Files |
+| --- | --- | --- | --- |
+| **Claude Code** (native) | Plugin manifest + hooks | `.claude-plugin/plugin.json` + `~/.claude/settings.json` hooks — automatic via `keel install` | `.claude-plugin/` |
+| **OpenCode** | TypeScript plugin | `opencode/keel.ts` — lifecycle bridge with `bridge` subcommands per event | `opencode/` |
+| **Codex CLI** | Plugin + hooks + script | `codex/.codex-plugin/plugin.json` + `hooks/hooks.json` + `keel-codex.ts` | `codex/` |
+| **Cursor IDE** | Static rules file | `cursor/.cursorrules` — iron law + skill catalog injected via Cursor's rules system | `cursor/` |
+| **Pi Agent** | Static rules + MCP config | `pi/AGENTS.md` + `pi/.mcp.json` — loaded at startup, MCP server for direct tool access | `pi/` |
+
+Claude Code is the primary target (hooks, full lifecycle). OpenCode and Codex have runtime bridges that auto-inject context on every session and prompt. Cursor and Pi Agent use static instruction files — simpler but no automatic observation recording.
+
+Install adapters by copying files per the README in each adapter directory (`opencode/README.md`, `codex/README.md`, `cursor/README.md`, `pi/README.md`).
+
 ## Managed Agent Profiles
 
 The managed install mirrors these 24 specialist lanes into `~/.claude/agent-profiles/*.toml`:
@@ -691,12 +707,17 @@ The benchmark docs track real scenario evidence across 8 flows, including greenf
 
 ```text
 keel/
-|- rust/crates/keel     Native install, update, hook, review, flow, and compaction surfaces
-|- rust/crates/keel-*   Rust support crates for flow, platform, release assets, and text linting
-|- .github/workflows/           native Rust CI and release pipelines
-|- .claude/review.json          native review rules
-|- AGENTS.md                    agent operating doctrine
-|- WORKFLOW.md                  branch and completion rules
+|- rust/crates/keel          Native install, update, hook, review, flow, and compaction surfaces
+|- rust/crates/keel-*        Rust support crates for flow, platform, release assets, and text linting
+|- opencode/                 OpenCode adapter (TypeScript plugin with lifecycle bridge)
+|- codex/                    Codex CLI adapter (plugin + hooks + TypeScript bridge)
+|- cursor/                   Cursor IDE adapter (static .cursorrules)
+|- pi/                       Pi Agent adapter (static AGENTS.md + MCP config)
+|- .claude-plugin/           Native Claude Code plugin manifest
+|- .github/workflows/        Native Rust CI and release pipelines
+|- .claude/review.json       Native review rules
+|- AGENTS.md                 Agent operating doctrine
+|- WORKFLOW.md               Branch and completion rules
 ```
 
 ## Summary
