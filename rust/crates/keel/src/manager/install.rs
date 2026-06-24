@@ -66,6 +66,9 @@ pub struct InstallSummary {
     /// Human-readable outcome of copying the Codex adapter files into the
     /// project during install, or `None` when skipped. Best-effort.
     pub codex_wiring: Option<String>,
+    /// Human-readable outcome of copying the Pi Agent adapter files into the
+    /// project root during install, or `None` when skipped. Best-effort.
+    pub pi_wiring: Option<String>,
 }
 
 struct FileTracker<'a> {
@@ -173,6 +176,7 @@ pub fn install_from_paths(
     let opencode_wiring = maybe_wire_opencode(repository_root, claude_home);
     let cursor_wiring = maybe_wire_cursor(repository_root, claude_home);
     let codex_wiring = maybe_wire_codex(repository_root, claude_home);
+    let pi_wiring = maybe_wire_pi(repository_root, claude_home);
     Ok(InstallSummary {
         synced_skills,
         synced_agents,
@@ -189,6 +193,7 @@ pub fn install_from_paths(
         opencode_wiring,
         cursor_wiring,
         codex_wiring,
+        pi_wiring,
     })
 }
 
@@ -348,6 +353,37 @@ fn maybe_wire_cursor(repository_root: &Path, claude_home: &Path) -> Option<Strin
         Ok(_) => Some(format!("copied to {}", display_path(&cursorrules_target))),
         Err(error) => Some(format!("copy failed ({error})")),
     }
+}
+
+fn maybe_wire_pi(repository_root: &Path, claude_home: &Path) -> Option<String> {
+    let is_standard_home = claude_home
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name == ".claude")
+        .unwrap_or(false);
+    if !is_standard_home {
+        return None;
+    }
+    let project_root = match repository_root.parent() {
+        Some(path) => path.to_path_buf(),
+        None => return Some("no project root".to_string()),
+    };
+    let agents_source = repository_root.join("pi").join("AGENTS.md");
+    let mcp_source = repository_root.join("pi").join(".mcp.json");
+    if !agents_source.is_file() && !mcp_source.is_file() {
+        return Some("source absent".to_string());
+    }
+    let mut copied = 0;
+    for (source, name) in [(&agents_source, "AGENTS.md"), (&mcp_source, ".mcp.json")] {
+        let target = project_root.join(name);
+        if source.is_file() && std::fs::copy(source, &target).is_ok() {
+            copied += 1;
+        }
+    }
+    Some(format!(
+        "{copied} files -> {}",
+        display_path(&project_root)
+    ))
 }
 
 fn maybe_wire_codex(repository_root: &Path, claude_home: &Path) -> Option<String> {
@@ -690,6 +726,9 @@ pub fn write_install_summary(summary: &InstallSummary, output: &mut dyn Write) {
     if let Some(codex_status) = &summary.codex_wiring {
         let _ = writeln!(output, "  Codex wiring: {codex_status}");
     }
+    if let Some(pi_status) = &summary.pi_wiring {
+        let _ = writeln!(output, "  Pi Agent wiring: {pi_status}");
+    }
 }
 
 fn ensure_claude_home_directories(claude_home: &Path) -> Result<(), String> {
@@ -762,6 +801,24 @@ fn remove_deprecated_config_keys(claude_home: &Path) -> Result<(), String> {
         write_text(&config_file, &updated_text)?;
     }
     Ok(())
+}
+
+fn remove_wired_adapters(claude_home: &Path) -> usize {
+    let mut removed = 0;
+    let home = match claude_home.parent() {
+        Some(path) => path.to_path_buf(),
+        None => return 0,
+    };
+
+    let plugin_file = home.join(".config").join("opencode").join("plugins").join("keel.ts");
+    removed += remove_path_if_exists_counted(&plugin_file).unwrap_or(0);
+
+    let codex_dir = home.join(".codex").join("plugins").join("keel");
+    if codex_dir.is_dir() {
+        removed += remove_path_if_exists_counted(&codex_dir).unwrap_or(0);
+    }
+
+    removed
 }
 
 fn copy_file_if_changed(source: &Path, target: &Path) -> Result<bool, String> {
@@ -1613,6 +1670,7 @@ pub fn run_uninstall_command(
         );
         return 1;
     }
+    removed_count += remove_wired_adapters(&claude_home);
     let _ = writeln!(standard_output, "Uninstall complete");
     let _ = writeln!(standard_output, "  Removed files: {removed_count}");
     0
@@ -2796,5 +2854,70 @@ mod tests {
         );
         let _ = fs::remove_dir_all(&repo);
         let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn wire_pi_copies_agents_and_mcp_to_project_root() {
+        let base = std::env::temp_dir().join(format!("ulw-wire-pi-{}", std::process::id()));
+        let claude_home = base.join("owner-home").join(".claude");
+        let _ = fs::create_dir_all(&claude_home);
+        let repo = create_minimal_layout("wire-pi-repo");
+        let _ = fs::create_dir_all(repo.join("pi"));
+        let _ = fs::write(repo.join("pi").join("AGENTS.md"), "# Pi Agent\n");
+        let _ = fs::write(
+            repo.join("pi").join(".mcp.json"),
+            r#"{"mcpServers":{"keel":{"command":"keel","args":["mcp","serve"]}}}"#,
+        );
+
+        let summary = maybe_wire_pi(&repo, &claude_home);
+        assert!(
+            summary.is_some(),
+            "standard .claude home must wire Pi Agent"
+        );
+        let status = summary.unwrap();
+        assert!(
+            status.contains("2 files"),
+            "must report 2 files copied, got: {status}"
+        );
+
+        let project_root = repo.parent().unwrap();
+        assert!(
+            project_root.join("AGENTS.md").is_file(),
+            "Pi AGENTS.md must land in project root"
+        );
+        assert!(
+            project_root.join(".mcp.json").is_file(),
+            "Pi .mcp.json must land in project root"
+        );
+
+        let _ = fs::remove_file(project_root.join("AGENTS.md"));
+        let _ = fs::remove_file(project_root.join(".mcp.json"));
+        let _ = fs::remove_dir_all(&base);
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn wire_pi_returns_none_for_non_standard_home() {
+        let repo = create_minimal_layout("wire-pi-nonstd");
+        let _ = fs::create_dir_all(repo.join("pi"));
+        let _ = fs::write(repo.join("pi").join("AGENTS.md"), "# Pi Agent\n");
+        let _ = fs::write(
+            repo.join("pi").join(".mcp.json"),
+            r#"{"mcpServers":{}}"#,
+        );
+
+        let claude_home = std::env::temp_dir().join(format!(
+            "ulw-wire-pi-nonstd-{}",
+            std::process::id()
+        ));
+        let _ = fs::create_dir_all(&claude_home);
+        let result = maybe_wire_pi(&repo, &claude_home);
+        assert!(
+            result.is_none(),
+            "non-standard .claude home must return None"
+        );
+
+        let _ = fs::remove_dir_all(&claude_home);
+        let _ = fs::remove_dir_all(&repo);
     }
 }
