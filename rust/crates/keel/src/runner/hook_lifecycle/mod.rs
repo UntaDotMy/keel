@@ -85,6 +85,8 @@ pub fn run_hook_command(
     match slug {
         "install" => run_hook_install(&arguments[1..], standard_output, standard_error),
 
+        "git-hooks" => run_hook_git_hooks(&arguments[1..], standard_output, standard_error),
+
         "uninstall" => run_hook_uninstall(&arguments[1..], standard_output, standard_error),
 
         "list" | "show" => run_hook_list(&arguments[1..], standard_output, standard_error),
@@ -297,6 +299,128 @@ fn run_hook_install(
             1
         }
     }
+}
+
+fn run_hook_git_hooks(
+    arguments: &[String],
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let mut flag_set = FlagSet::new("hook git-hooks");
+    flag_set.string_flag("repo-root", "");
+
+    let mut args = arguments.to_vec();
+    if args.first().map(|s| s.as_str()) == Some("install") {
+        args.remove(0);
+    }
+
+    if let Err(parse_error) = flag_set.parse(&args) {
+        let _ = writeln!(standard_error, "{}", parse_error.message);
+        return 1;
+    }
+
+    let repo_root = match resolve_repository_root(flag_set.string_value("repo-root")) {
+        Ok(path) => path,
+        Err(error) => {
+            let _ = writeln!(standard_error, "{error}");
+            return 1;
+        }
+    };
+
+    let githooks_dir = repo_root.join(".githooks");
+
+    if !githooks_dir.exists() {
+        let _ = writeln!(
+            standard_error,
+            "No .githooks directory found in {}",
+            display_path(&repo_root)
+        );
+        return 1;
+    }
+
+    let hooks = ["pre-commit", "pre-push"];
+
+    for hook_name in &hooks {
+        let hook_path = githooks_dir.join(hook_name);
+        if !hook_path.exists() {
+            let _ = writeln!(standard_error, "Hook file not found: {}", hook_name);
+            continue;
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = match fs::metadata(&hook_path) {
+                Ok(metadata) => metadata.permissions(),
+                Err(e) => {
+                    let _ = writeln!(
+                        standard_error,
+                        "Failed to read permissions for {}: {}",
+                        hook_name, e
+                    );
+                    continue;
+                }
+            };
+            perms.set_mode(0o755);
+            if let Err(e) = fs::set_permissions(&hook_path, perms) {
+                let _ = writeln!(
+                    standard_error,
+                    "Failed to make {} executable: {}",
+                    hook_name, e
+                );
+                continue;
+            }
+        }
+
+        let _ = writeln!(
+            standard_output,
+            "  {}",
+            hook_path
+                .strip_prefix(&repo_root)
+                .unwrap_or(&hook_path)
+                .display()
+        );
+    }
+
+    let git_config_path = repo_root.join(".git").join("config");
+    let hooks_path_value = ".githooks";
+
+    if git_config_path.exists() {
+        let mut git_config = fs::read_to_string(&git_config_path).unwrap_or_default();
+
+        if git_config.contains("core.hooksPath") {
+            git_config = git_config
+                .lines()
+                .filter(|line| !line.contains("core.hooksPath"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let _ = fs::write(&git_config_path, &git_config);
+        }
+
+        git_config.push_str(&format!("\thooksPath = {}\n", hooks_path_value));
+        if let Err(e) = fs::write(&git_config_path, &git_config) {
+            let _ = writeln!(standard_error, "Failed to update .git/config: {}", e);
+            return 1;
+        }
+    } else {
+        let _ = writeln!(
+            standard_error,
+            "Warning: .git/config not found. Git hooks may not work."
+        );
+    }
+
+    let _ = writeln!(
+        standard_output,
+        "Installed git hooks: {}",
+        hooks
+            .iter()
+            .filter(|h| githooks_dir.join(h).exists())
+            .copied()
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+
+    0
 }
 
 fn run_hook_uninstall(
@@ -626,6 +750,42 @@ fn run_hook_pre_tool_use(standard_output: &mut dyn Write, standard_error: &mut d
         .and_then(|tool_input| tool_input.get("command"))
         .and_then(JsonDocument::as_str)
         .unwrap_or_default();
+
+    let analysis = crate::runner::shell_rewrite::analyze_command_text(command);
+    if let Some(finding) =
+        crate::runner::shell_rewrite::detect_destructive_command(&analysis.effective_fields)
+    {
+        let reason = match finding.severity {
+            crate::runner::shell_rewrite::DestructiveSeverity::Block => format!(
+                "[keel] Destructive command blocked: {}. This command is almost certainly unsafe. \
+                 Use a safer alternative.",
+                finding.pattern
+            ),
+            crate::runner::shell_rewrite::DestructiveSeverity::Warn => format!(
+                "[keel] Destructive command detected: {}. Confirm this is intentional before proceeding.",
+                finding.pattern
+            ),
+        };
+        let deny_payload = serde_json::json!({
+            "hookSpecificOutput": {
+                "hookEventName": MANAGED_PRE_TOOL_USE_EVENT,
+                "permissionDecision": "deny",
+                "permissionDecisionReason": reason,
+            }
+        });
+        match serde_json::to_string_pretty(&deny_payload) {
+            Ok(rendered) => {
+                let _ = writeln!(standard_output, "{rendered}");
+            }
+            Err(error) => {
+                let _ = writeln!(
+                    standard_error,
+                    "Unable to render destructive-command deny payload: {error}"
+                );
+            }
+        }
+        return 0;
+    }
 
     let rewrite = rewrite_command_text_for_shell(command, RewriteShell::Bash);
 
@@ -3998,6 +4158,7 @@ fn render_hook_help(standard_output: &mut dyn Write) {
         "show",
         "instructions",
         "diagnose",
+        "git-hooks",
     ];
     let event_slugs: Vec<&'static str> = HOOK_EVENTS.iter().map(|event| event.slug).collect();
     let joined = admin_verbs

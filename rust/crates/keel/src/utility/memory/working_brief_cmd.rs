@@ -24,7 +24,7 @@ pub(super) fn run_working_brief_command(
     if arguments.is_empty() || is_help_argument(&arguments[0]) {
         let _ = writeln!(
             standard_output,
-            "Usage: keel {command_group} working-brief [write|show|list] ..."
+            "Usage: keel {command_group} working-brief [write|show|list|record-summary] ..."
         );
         return if arguments.is_empty() { 1 } else { 0 };
     }
@@ -47,10 +47,16 @@ pub(super) fn run_working_brief_command(
             standard_output,
             standard_error,
         ),
+        "record-summary" => run_working_brief_record_summary(
+            command_group,
+            &arguments[1..],
+            standard_output,
+            standard_error,
+        ),
         other => {
             let _ = writeln!(
                 standard_error,
-                "Unknown {command_group} working-brief action: {other} (expected write|show|list)"
+                "Unknown {command_group} working-brief action: {other} (expected write|show|list|record-summary)"
             );
             1
         }
@@ -294,6 +300,104 @@ fn run_working_brief_list(
         );
     }
     0
+}
+
+fn run_working_brief_record_summary(
+    command_group: &str,
+    arguments: &[String],
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let label = format!("{command_group} working-brief record-summary");
+    let mut flag_set = FlagSet::new(label.clone());
+    flag_set.string_flag("id", "");
+    flag_set.string_flag("summary", "");
+    flag_set.string_flag("claude-home", "");
+    flag_set.bool_flag("json", false);
+    if let Err(parse_error) = flag_set.parse(arguments) {
+        let _ = writeln!(standard_error, "{}", parse_error.message);
+        return 1;
+    }
+    let entry_id = flag_set.string_value("id").trim().to_string();
+    if entry_id.is_empty() {
+        let _ = writeln!(
+            standard_error,
+            "{label}: --id is required (the brief id to summarize)"
+        );
+        return 1;
+    }
+    let summary = flag_set.string_value("summary").trim().to_string();
+    if summary.is_empty() {
+        let _ = writeln!(
+            standard_error,
+            "{label}: --summary is required"
+        );
+        return 1;
+    }
+    let claude_home = match resolve_claude_home(flag_set.string_value("claude-home")) {
+        Ok(path) => path,
+        Err(error) => {
+            let _ = writeln!(standard_error, "{label}: {error}");
+            return 1;
+        }
+    };
+    let brief = match read_brief(&claude_home, &entry_id) {
+        Ok(Some(brief)) => brief,
+        Ok(None) => {
+            let _ = writeln!(
+                standard_error,
+                "{label}: no brief with id {entry_id}"
+            );
+            return 1;
+        }
+        Err(error) => {
+            let _ = writeln!(standard_error, "{label}: {error}");
+            return 1;
+        }
+    };
+    let now_millis = crate::utility::workflow_ledger::current_timestamp_millis();
+    let summary_id = format!("wbs-{now_millis:x}");
+    let created_at = crate::utility::workflow_ledger::format_timestamp_iso8601(now_millis);
+    let store = crate::utility::record_store::RecordStore::new(
+        &claude_home,
+        &format!("{command_group}/working-brief-summaries"),
+    );
+    let record: crate::utility::record_store::Record = vec![
+        ("id".into(), summary_id.clone()),
+        ("briefId".into(), entry_id.clone()),
+        ("briefRequest".into(), brief.request.clone()),
+        ("summary".into(), summary.clone()),
+        ("createdAt".into(), created_at.clone()),
+    ];
+    match store.write_record(&summary_id, &record) {
+        Ok(path) => {
+            if flag_set.bool_value("json") {
+                let payload = Value::Object(vec![
+                    ("recorded".into(), Value::Bool(true)),
+                    ("summaryId".into(), Value::String(summary_id)),
+                    ("briefId".into(), Value::String(entry_id)),
+                    ("path".into(), Value::String(display_path(&path))),
+                    ("createdAt".into(), Value::String(created_at)),
+                ]);
+                return render_workflow_json(standard_output, standard_error, &payload);
+            }
+            let _ = writeln!(
+                standard_output,
+                "{label}: summary_id={summary_id} brief_id={entry_id}"
+            );
+            let _ = writeln!(standard_output, "  summary: {summary}");
+            let _ = writeln!(
+                standard_output,
+                "  path: {}",
+                display_path(&path)
+            );
+            0
+        }
+        Err(error) => {
+            let _ = writeln!(standard_error, "{label}: {error}");
+            1
+        }
+    }
 }
 
 fn render_brief_text(standard_output: &mut dyn Write, brief: &Brief) {

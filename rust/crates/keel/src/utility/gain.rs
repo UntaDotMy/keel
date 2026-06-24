@@ -418,6 +418,40 @@ fn load_gain_summary(since_timestamp: Option<u64>, adapter_filter: Option<&str>)
     parse_gain_summary(&text, since_timestamp, adapter_filter)
 }
 
+pub struct CompactionLossSummary {
+    pub commands_observed: u64,
+    pub commands_compacted: u64,
+    pub tokens_before: u64,
+    pub tokens_after: u64,
+    pub tokens_saved: u64,
+}
+
+impl CompactionLossSummary {
+    pub fn savings_percent(&self) -> f64 {
+        if self.tokens_before == 0 {
+            0.0
+        } else {
+            (self.tokens_saved as f64 / self.tokens_before as f64) * 100.0
+        }
+    }
+}
+
+pub fn load_compaction_loss_today() -> CompactionLossSummary {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let cutoff = now.saturating_sub(24 * 3600);
+    let summary = load_gain_summary(Some(cutoff), None);
+    CompactionLossSummary {
+        commands_observed: summary.commands_observed,
+        commands_compacted: summary.commands_compacted,
+        tokens_before: summary.tokens_before,
+        tokens_after: summary.tokens_after,
+        tokens_saved: summary.tokens_saved,
+    }
+}
+
 fn parse_gain_summary(
     text: &str,
     since_timestamp: Option<u64>,
@@ -654,5 +688,46 @@ mod tests {
         let summary = parse_gain_summary(STRING_TS_EVENTS, Some(1150), None);
         assert_eq!(summary.commands_observed, 1);
         assert_eq!(summary.tokens_before, 300);
+    }
+
+    #[test]
+    fn compaction_loss_summary_savings_percent_zero_when_no_tokens() {
+        let loss = CompactionLossSummary {
+            commands_observed: 0,
+            commands_compacted: 0,
+            tokens_before: 0,
+            tokens_after: 0,
+            tokens_saved: 0,
+        };
+        assert_eq!(loss.savings_percent(), 0.0);
+    }
+
+    #[test]
+    fn compaction_loss_summary_savings_percent_calculates_correctly() {
+        let loss = CompactionLossSummary {
+            commands_observed: 10,
+            commands_compacted: 5,
+            tokens_before: 1000,
+            tokens_after: 200,
+            tokens_saved: 800,
+        };
+        assert_eq!(loss.savings_percent(), 80.0);
+    }
+
+    #[test]
+    fn compaction_loss_summary_from_real_events() {
+        let summary = parse_gain_summary(EVENTS, None, None);
+        let loss = CompactionLossSummary {
+            commands_observed: summary.commands_observed,
+            commands_compacted: summary.commands_compacted,
+            tokens_before: summary.tokens_before,
+            tokens_after: summary.tokens_after,
+            tokens_saved: summary.tokens_saved,
+        };
+        assert_eq!(loss.commands_observed, 4);
+        assert_eq!(loss.commands_compacted, 1);
+        assert_eq!(loss.tokens_before, 500 + 700 + 900 + 300);
+        assert_eq!(loss.tokens_after, 100);
+        assert_eq!(loss.tokens_saved, (500 + 700 + 900 + 300) - 100);
     }
 }

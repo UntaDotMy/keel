@@ -18,6 +18,31 @@ use crate::utility::workflow_ledger::{
 use super::routing::{first_matching_keyword, match_routing_rule};
 use super::shared::is_help_argument;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ColorMode {
+    On,
+    Off,
+}
+
+fn colorize(text: &str, color_prefix: &str, mode: ColorMode) -> String {
+    match mode {
+        ColorMode::On => format!("{color_prefix}{text}\x1b[0m"),
+        ColorMode::Off => text.to_string(),
+    }
+}
+
+fn status_color_prefix(status: &str, mode: ColorMode) -> &'static str {
+    if mode == ColorMode::Off {
+        return "";
+    }
+    match status {
+        "done" | "closed" => "\x1b[32m",
+        "in-progress" | "open" => "\x1b[33m",
+        "blocked" => "\x1b[31m",
+        _ => "",
+    }
+}
+
 pub(super) fn run_workflow_command(
     arguments: &[String],
     standard_output: &mut dyn Write,
@@ -123,10 +148,20 @@ fn run_workflow_cockpit(
     flag_set.string_flag("claude-home", "");
     flag_set.string_flag("closed-tail", "5");
     flag_set.bool_flag("json", false);
+    flag_set.bool_flag("color", false);
+    flag_set.bool_flag("no-color", false);
     if let Err(parse_error) = flag_set.parse(arguments) {
         let _ = writeln!(standard_error, "{}", parse_error.message);
         return 1;
     }
+    let is_json = flag_set.bool_value("json");
+    let color_mode = if is_json || flag_set.bool_value("no-color") {
+        ColorMode::Off
+    } else if flag_set.bool_value("color") {
+        ColorMode::On
+    } else {
+        ColorMode::Off
+    };
     let claude_home = match resolve_claude_home(flag_set.string_value("claude-home")) {
         Ok(path) => path,
         Err(error) => {
@@ -194,7 +229,8 @@ fn run_workflow_cockpit(
     let _ = writeln!(standard_output, "\u{2554}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2557}");
     let _ = writeln!(
         standard_output,
-        "\u{2551}  \x1b[1;36mKEEL COCKPIT\x1b[0m{}",
+        "\u{2551}  {}{}",
+        colorize("KEEL COCKPIT", "\x1b[1;36m", color_mode),
         pad_to_width("", 37)
     );
     let _ = writeln!(standard_output, "\u{2560}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2563}");
@@ -212,12 +248,11 @@ fn run_workflow_cockpit(
             entry.preset,
             pad_to_width(&entry.preset, 38)
         );
-        let status_color = "\x1b[33m";
-        let reset = "\x1b[0m";
         let status_text = "\u{25cf} in-progress".to_string();
+        let colored_status = colorize(&status_text, "\x1b[33m", color_mode);
         let _ = writeln!(
             standard_output,
-            "\u{2551}  Status:  {status_color}{status_text}{reset}{}",
+            "\u{2551}  Status:  {colored_status}{}",
             pad_to_width(&status_text, 38)
         );
     } else {
@@ -232,7 +267,8 @@ fn run_workflow_cockpit(
 
     let _ = writeln!(
         standard_output,
-        "\u{2551}  \x1b[1;33mPROOF BOARD\x1b[0m{}",
+        "\u{2551}  {}{}",
+        colorize("PROOF BOARD", "\x1b[1;33m", color_mode),
         pad_to_width("", 37)
     );
     if open_entries.is_empty() && closed_entries.is_empty() {
@@ -246,27 +282,30 @@ fn run_workflow_cockpit(
             standard_output,
             "Working brief written",
             brief_done || !entry.request.is_empty(),
+            color_mode,
         );
-        render_proof_item(standard_output, "Tests passing", tests_done);
-        render_proof_item(standard_output, "Review pending", review_done);
-        render_proof_item(standard_output, "PR not yet created", !pr_done);
+        render_proof_item(standard_output, "Tests passing", tests_done, color_mode);
+        render_proof_item(standard_output, "Review pending", review_done, color_mode);
+        render_proof_item(standard_output, "PR not yet created", !pr_done, color_mode);
     } else {
-        render_proof_item(standard_output, "Working brief written", true);
-        render_proof_item(standard_output, "Tests passing", true);
-        render_proof_item(standard_output, "Review completed", true);
-        render_proof_item(standard_output, "PR merged", true);
+        render_proof_item(standard_output, "Working brief written", true, color_mode);
+        render_proof_item(standard_output, "Tests passing", true, color_mode);
+        render_proof_item(standard_output, "Review completed", true, color_mode);
+        render_proof_item(standard_output, "PR merged", true, color_mode);
     }
 
-    render_team_lanes(standard_output, &claude_home);
+    render_team_lanes(standard_output, &claude_home, color_mode);
+    render_compaction_loss(standard_output, color_mode);
 
-    let _ = writeln!(standard_output, "\u{255a}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{255d}");
+    let _ = writeln!(standard_output, "\u{255a}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{255d}");
 
     let next_cmd = if open_entries.is_empty() {
         "keel workflow start --request \"...\""
     } else {
         "keel workflow finish --id <entry-id> --proof \"...\""
     };
-    let _ = writeln!(standard_output, "\x1b[1;32m  NEXT: {next_cmd}\x1b[0m");
+    let next_line = format!("  NEXT: {next_cmd}");
+    let _ = writeln!(standard_output, "{}", colorize(&next_line, "\x1b[1;32m", color_mode));
     0
 }
 
@@ -288,23 +327,52 @@ fn truncate(text: &str, max_chars: usize) -> String {
     }
 }
 
-fn render_proof_item(output: &mut dyn Write, label: &str, done: bool) {
+fn render_proof_item(output: &mut dyn Write, label: &str, done: bool, mode: ColorMode) {
     let (icon, color) = if done {
         ("\u{2713}", "\x1b[32m")
     } else {
         ("\u{25cb}", "\x1b[33m")
     };
-    let reset = "\x1b[0m";
-    let _ = writeln!(output, "\u{2551}  {color}{icon}{reset} {label}");
+    let colored_icon = colorize(icon, color, mode);
+    let _ = writeln!(output, "\u{2551}  {colored_icon} {label}");
 }
 
-fn render_team_lanes(output: &mut dyn Write, _claude_home: &std::path::Path) {
+fn render_compaction_loss(output: &mut dyn Write, mode: ColorMode) {
+    use crate::utility::gain::load_compaction_loss_today;
+
+    let loss = load_compaction_loss_today();
+
+    let _ = writeln!(output, "\u{2551}  {}{}",
+        colorize("COMPACTION LOSS", "\x1b[1;36m", mode),
+        pad_to_width("", 36)
+    );
+
+    if loss.commands_observed == 0 {
+        let _ = writeln!(output, "\u{2551}  (no compaction events today)");
+        return;
+    }
+
+    let pct = loss.savings_percent();
+    let line = format!(
+        "{} cmds observed, {} compacted | {} -> {} tokens (saved {}, {:.1}%)",
+        loss.commands_observed,
+        loss.commands_compacted,
+        loss.tokens_before,
+        loss.tokens_after,
+        loss.tokens_saved,
+        pct,
+    );
+    let _ = writeln!(output, "\u{2551}  {}", line);
+}
+
+fn render_team_lanes(output: &mut dyn Write, _claude_home: &std::path::Path, mode: ColorMode) {
     use crate::runtime::run_command;
 
     let _ = writeln!(output, "\u{2560}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2563}");
     let _ = writeln!(
         output,
-        "\u{2551}  \x1b[1;35mTEAM LANES\x1b[0m{}",
+        "\u{2551}  {}{}",
+        colorize("TEAM LANES", "\x1b[1;35m", mode),
         pad_to_width("", 38)
     );
 
@@ -331,7 +399,8 @@ fn render_team_lanes(output: &mut dyn Write, _claude_home: &std::path::Path) {
     } else {
         for session in &sessions {
             let name = session.strip_prefix(prefix).unwrap_or(session);
-            let _ = writeln!(output, "\u{2551}  \x1b[32m{name}\x1b[0m: running");
+            let colored_name = colorize(name, "\x1b[32m", mode);
+            let _ = writeln!(output, "\u{2551}  {colored_name}: running");
         }
     }
 }
@@ -1152,6 +1221,194 @@ mod tests {
         assert!(output.contains("\"openCount\": 1"), "stdout: {output}");
         assert!(output.contains("\"id\": \"wf-dddd\""), "stdout: {output}");
         assert!(output.contains("\"ledgerDirectory\""), "stdout: {output}");
+
+        let _ = fs::remove_dir_all(&temporary_directory);
+    }
+
+    #[test]
+    fn colorize_on_wraps_text_with_ansi_codes() {
+        let result = colorize("hello", "\x1b[32m", ColorMode::On);
+        assert_eq!(result, "\x1b[32mhello\x1b[0m");
+    }
+
+    #[test]
+    fn colorize_off_returns_plain_text() {
+        let result = colorize("hello", "\x1b[32m", ColorMode::Off);
+        assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn status_color_prefix_green_for_done() {
+        let result = status_color_prefix("done", ColorMode::On);
+        assert_eq!(result, "\x1b[32m");
+    }
+
+    #[test]
+    fn status_color_prefix_yellow_for_in_progress() {
+        let result = status_color_prefix("in-progress", ColorMode::On);
+        assert_eq!(result, "\x1b[33m");
+    }
+
+    #[test]
+    fn status_color_prefix_red_for_blocked() {
+        let result = status_color_prefix("blocked", ColorMode::On);
+        assert_eq!(result, "\x1b[31m");
+    }
+
+    #[test]
+    fn status_color_prefix_empty_when_off() {
+        let result = status_color_prefix("done", ColorMode::Off);
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn cockpit_with_no_color_flag_has_no_ansi_codes() {
+        let temporary_directory = tempdir_under("keel-workflow-cockpit-nocolor");
+        let claude_home = temporary_directory.join("claude-home");
+        fs::create_dir_all(&claude_home).expect("create claude home");
+        seeded_open_entry(&claude_home, "wf-nc", "ship feature");
+
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let exit_code = run_workflow_command(
+            &[
+                "cockpit".to_string(),
+                "--claude-home".to_string(),
+                claude_home.to_string_lossy().to_string(),
+                "--no-color".to_string(),
+            ],
+            &mut stdout,
+            &mut stderr,
+        );
+        assert_eq!(exit_code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
+        let output = String::from_utf8_lossy(&stdout).to_string();
+        assert!(
+            !output.contains('\x1b'),
+            "cockpit with --no-color should not contain escape codes: {output}"
+        );
+        assert!(output.contains("KEEL COCKPIT"), "stdout: {output}");
+        assert!(output.contains("NEXT:"), "stdout: {output}");
+
+        let _ = fs::remove_dir_all(&temporary_directory);
+    }
+
+    #[test]
+    fn cockpit_with_color_flag_has_ansi_codes() {
+        let temporary_directory = tempdir_under("keel-workflow-cockpit-color");
+        let claude_home = temporary_directory.join("claude-home");
+        fs::create_dir_all(&claude_home).expect("create claude home");
+        seeded_open_entry(&claude_home, "wf-c", "ship feature");
+
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let exit_code = run_workflow_command(
+            &[
+                "cockpit".to_string(),
+                "--claude-home".to_string(),
+                claude_home.to_string_lossy().to_string(),
+                "--color".to_string(),
+            ],
+            &mut stdout,
+            &mut stderr,
+        );
+        assert_eq!(exit_code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
+        let output = String::from_utf8_lossy(&stdout).to_string();
+        assert!(
+            output.contains('\x1b'),
+            "cockpit with --color should contain escape codes: {output}"
+        );
+        assert!(output.contains("\x1b[1;36m"), "expected cyan header: {output}");
+        assert!(output.contains("\x1b[33m"), "expected yellow in-progress: {output}");
+        assert!(output.contains("\x1b[1;32m"), "expected green NEXT: {output}");
+
+        let _ = fs::remove_dir_all(&temporary_directory);
+    }
+
+    #[test]
+    fn cockpit_json_has_no_color_codes() {
+        let temporary_directory = tempdir_under("keel-workflow-cockpit-json");
+        let claude_home = temporary_directory.join("claude-home");
+        fs::create_dir_all(&claude_home).expect("create claude home");
+        seeded_open_entry(&claude_home, "wf-json", "audit stuff");
+
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let exit_code = run_workflow_command(
+            &[
+                "cockpit".to_string(),
+                "--claude-home".to_string(),
+                claude_home.to_string_lossy().to_string(),
+                "--json".to_string(),
+                "--color".to_string(),
+            ],
+            &mut stdout,
+            &mut stderr,
+        );
+        assert_eq!(exit_code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
+        let output = String::from_utf8_lossy(&stdout).to_string();
+        assert!(
+            !output.contains('\x1b'),
+            "JSON output should never contain escape codes even with --color: {output}"
+        );
+
+        let _ = fs::remove_dir_all(&temporary_directory);
+    }
+
+    #[test]
+    fn cockpit_shows_compaction_loss_section() {
+        let temporary_directory = tempdir_under("keel-workflow-cockpit-compaction");
+        let claude_home = temporary_directory.join("claude-home");
+        fs::create_dir_all(&claude_home).expect("create claude home");
+        seeded_open_entry(&claude_home, "wf-cl", "ship feature");
+
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let exit_code = run_workflow_command(
+            &[
+                "cockpit".to_string(),
+                "--claude-home".to_string(),
+                claude_home.to_string_lossy().to_string(),
+                "--no-color".to_string(),
+            ],
+            &mut stdout,
+            &mut stderr,
+        );
+        assert_eq!(exit_code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
+        let output = String::from_utf8_lossy(&stdout).to_string();
+        assert!(
+            output.contains("COMPACTION LOSS"),
+            "cockpit should contain COMPACTION LOSS section: {output}"
+        );
+
+        let _ = fs::remove_dir_all(&temporary_directory);
+    }
+
+    #[test]
+    fn cockpit_compaction_loss_no_color_has_no_ansi() {
+        let temporary_directory = tempdir_under("keel-workflow-compaction-nocolor");
+        let claude_home = temporary_directory.join("claude-home");
+        fs::create_dir_all(&claude_home).expect("create claude home");
+        seeded_open_entry(&claude_home, "wf-cln", "ship feature");
+
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let exit_code = run_workflow_command(
+            &[
+                "cockpit".to_string(),
+                "--claude-home".to_string(),
+                claude_home.to_string_lossy().to_string(),
+                "--no-color".to_string(),
+            ],
+            &mut stdout,
+            &mut stderr,
+        );
+        assert_eq!(exit_code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
+        let output = String::from_utf8_lossy(&stdout).to_string();
+        assert!(output.contains("COMPACTION LOSS"));
+        assert!(
+            !output.contains('\x1b'),
+            "compaction loss section with --no-color should not contain escape codes"
+        );
 
         let _ = fs::remove_dir_all(&temporary_directory);
     }

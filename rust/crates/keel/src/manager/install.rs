@@ -810,7 +810,11 @@ fn remove_wired_adapters(claude_home: &Path) -> usize {
         None => return 0,
     };
 
-    let plugin_file = home.join(".config").join("opencode").join("plugins").join("keel.ts");
+    let plugin_file = home
+        .join(".config")
+        .join("opencode")
+        .join("plugins")
+        .join("keel.ts");
     removed += remove_path_if_exists_counted(&plugin_file).unwrap_or(0);
 
     let codex_dir = home.join(".codex").join("plugins").join("keel");

@@ -23,7 +23,15 @@ pub(super) fn run_completion_gate_command(
     if arguments.is_empty() || is_help_argument(&arguments[0]) {
         let _ = writeln!(
             standard_output,
-            "Usage: keel {command_group} completion-gate check --id <entry-id> [--brief-id <id>] [--proof <text>] [--claude-home <path>] [--json]"
+            "Usage: keel {command_group} completion-gate [check|record-requirement] ..."
+        );
+        let _ = writeln!(
+            standard_output,
+            "  check --id <entry-id> [--brief-id <id>] [--proof <text>] [--claude-home <path>] [--json]"
+        );
+        let _ = writeln!(
+            standard_output,
+            "  record-requirement --id <entry-id> --requirement <text> [--status <pending|met|failed>] [--claude-home <path>] [--json]"
         );
         return if arguments.is_empty() { 1 } else { 0 };
     }
@@ -34,10 +42,16 @@ pub(super) fn run_completion_gate_command(
             standard_output,
             standard_error,
         ),
+        "record-requirement" => run_completion_gate_record_requirement(
+            command_group,
+            &arguments[1..],
+            standard_output,
+            standard_error,
+        ),
         other => {
             let _ = writeln!(
                 standard_error,
-                "Unknown {command_group} completion-gate action: {other} (expected check)"
+                "Unknown {command_group} completion-gate action: {other} (expected check|record-requirement)"
             );
             1
         }
@@ -194,5 +208,127 @@ fn run_completion_gate_check(
         standard_output,
         "  hint: ready to close with keel workflow finish --id {entry_id} --proof \"...\""
     );
+    0
+}
+
+fn run_completion_gate_record_requirement(
+    command_group: &str,
+    arguments: &[String],
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let mut flag_set = FlagSet::new("completion-gate record-requirement");
+    flag_set.string_flag("id", "");
+    flag_set.string_flag("requirement", "");
+    flag_set.string_flag("status", "pending");
+    flag_set.string_flag("claude-home", "");
+    flag_set.bool_flag("json", false);
+    if let Err(parse_error) = flag_set.parse(arguments) {
+        let _ = writeln!(standard_error, "{}", parse_error.message);
+        return 1;
+    }
+    let entry_id = flag_set.string_value("id").trim().to_string();
+    if entry_id.is_empty() {
+        let _ = writeln!(
+            standard_error,
+            "{command_group} completion-gate record-requirement: --id is required"
+        );
+        return 1;
+    }
+    let requirement = flag_set.string_value("requirement").trim().to_string();
+    if requirement.is_empty() {
+        let _ = writeln!(
+            standard_error,
+            "{command_group} completion-gate record-requirement: --requirement is required"
+        );
+        return 1;
+    }
+    let status = flag_set.string_value("status").trim().to_string();
+    let claude_home = match resolve_claude_home(flag_set.string_value("claude-home")) {
+        Ok(path) => path,
+        Err(error) => {
+            let _ = writeln!(
+                standard_error,
+                "{command_group} completion-gate record-requirement: {error}"
+            );
+            return 1;
+        }
+    };
+
+    match read_entry(&claude_home, &entry_id) {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            let _ = writeln!(
+                standard_error,
+                "{command_group} completion-gate record-requirement: no ledger entry with id {entry_id}"
+            );
+            return 1;
+        }
+        Err(error) => {
+            let _ = writeln!(
+                standard_error,
+                "{command_group} completion-gate record-requirement: {error}"
+            );
+            return 1;
+        }
+    }
+
+    let now_millis = crate::utility::workflow_ledger::current_timestamp_millis();
+    let requirement_id = format!("cgr-{now_millis:x}");
+    let dir = claude_home
+        .join(command_group)
+        .join("completion-gate-requirements");
+    if let Err(error) = std::fs::create_dir_all(&dir) {
+        let _ = writeln!(
+            standard_error,
+            "{command_group} completion-gate record-requirement: create {}: {error}",
+            crate::runtime::display_path(&dir)
+        );
+        return 1;
+    }
+    let file_path = dir.join(format!("{requirement_id}.json"));
+    let payload = Value::Object(vec![
+        ("requirementId".into(), Value::String(requirement_id.clone())),
+        ("entryId".into(), Value::String(entry_id.clone())),
+        ("requirement".into(), Value::String(requirement.clone())),
+        ("status".into(), Value::String(status.clone())),
+        ("createdAt".into(), Value::String(
+            crate::utility::workflow_ledger::format_timestamp_iso8601(now_millis),
+        )),
+    ]);
+    let mut serialized = Vec::<u8>::new();
+    if let Err(error) = crate::json::write_indented(&mut serialized, &payload) {
+        let _ = writeln!(
+            standard_error,
+            "{command_group} completion-gate record-requirement: serialize: {error}"
+        );
+        return 1;
+    }
+    if let Err(error) = std::fs::write(&file_path, &serialized) {
+        let _ = writeln!(
+            standard_error,
+            "{command_group} completion-gate record-requirement: write {}: {error}",
+            crate::runtime::display_path(&file_path)
+        );
+        return 1;
+    }
+
+    if flag_set.bool_value("json") {
+        let json_payload = Value::Object(vec![
+            ("recorded".into(), Value::Bool(true)),
+            ("requirementId".into(), Value::String(requirement_id.clone())),
+            ("entryId".into(), Value::String(entry_id.clone())),
+            ("requirement".into(), Value::String(requirement.clone())),
+            ("status".into(), Value::String(status.clone())),
+        ]);
+        return render_workflow_json(standard_output, standard_error, &json_payload);
+    }
+
+    let _ = writeln!(
+        standard_output,
+        "{command_group} completion-gate record-requirement: requirement_id={requirement_id} entry_id={entry_id}"
+    );
+    let _ = writeln!(standard_output, "  requirement: {requirement}");
+    let _ = writeln!(standard_output, "  status: {status}");
     0
 }

@@ -34,7 +34,7 @@ pub fn run_memory_command(
     if arguments.is_empty() || is_help_argument(&arguments[0]) {
         let _ = writeln!(
             standard_output,
-            "Usage: keel {command_group} [scope|system-map|working-brief|completion-gate] ..."
+            "Usage: keel {command_group} [scope|system-map|working-brief|completion-gate|consolidate] ..."
         );
         return if arguments.is_empty() { 1 } else { 0 };
     }
@@ -58,6 +58,12 @@ pub fn run_memory_command(
             standard_error,
         ),
         "completion-gate" => completion_gate::run_completion_gate_command(
+            command_group,
+            &arguments[1..],
+            standard_output,
+            standard_error,
+        ),
+        "consolidate" => run_consolidate_command(
             command_group,
             &arguments[1..],
             standard_output,
@@ -237,4 +243,123 @@ pub fn run_bench_command(
     standard_error: &mut dyn Write,
 ) -> u8 {
     bench::run_bench_command(arguments, standard_output, standard_error)
+}
+
+fn run_consolidate_command(
+    command_group: &str,
+    arguments: &[String],
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let label = format!("{command_group} consolidate");
+    let mut flags = crate::args::FlagSet::new(label.clone());
+    flags.string_flag("claude-home", "");
+    flags.bool_flag("json", false);
+    if let Err(parse_error) = flags.parse(arguments) {
+        let _ = writeln!(standard_error, "{}", parse_error.message);
+        return 1;
+    }
+    let claude_home = match crate::runtime::resolve_claude_home(
+        flags.string_value("claude-home"),
+    ) {
+        Ok(path) => path,
+        Err(error) => {
+            let _ = writeln!(standard_error, "{label}: {error}");
+            return 1;
+        }
+    };
+    let group_dir = claude_home.join(command_group);
+    let families = [
+        "research-cache",
+        "entity",
+        "graph",
+        "loop-guard",
+        "instincts",
+        "working-brief-summaries",
+        "completion-gate-requirements",
+    ];
+    let mut total_consolidated: usize = 0;
+    let mut family_summaries: Vec<(String, usize, String)> = Vec::new();
+    for family in families {
+        let family_dir = group_dir.join(family);
+        if !family_dir.is_dir() {
+            continue;
+        }
+        let entries: Vec<String> = match std::fs::read_dir(&family_dir) {
+            Ok(rd) => rd
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    e.path()
+                        .extension()
+                        .and_then(|ext| ext.to_str())
+                        == Some("json")
+                })
+                .filter_map(|e| std::fs::read_to_string(e.path()).ok())
+                .collect(),
+            Err(_) => continue,
+        };
+        if entries.is_empty() {
+            continue;
+        }
+        let count = entries.len();
+        let preview = entries
+            .iter()
+            .take(3)
+            .filter_map(|text| {
+                let fields = crate::utility::workflow_ledger::parse_object_of_strings(text).ok()?;
+                let title = fields
+                    .iter()
+                    .find(|(k, _)| k == "question" || k == "trigger" || k == "name" || k == "summary" || k == "requirement")
+                    .map(|(_, v)| v.as_str())
+                    .unwrap_or("?");
+                Some(title.to_string())
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        total_consolidated += count;
+        family_summaries.push((family.to_string(), count, preview));
+    }
+    if flags.bool_value("json") {
+        let payload = crate::json::Value::Object(vec![
+            (
+                "families".into(),
+                crate::json::Value::Array(
+                    family_summaries
+                        .iter()
+                        .map(|(family, count, preview)| {
+                            crate::json::Value::Object(vec![
+                                ("family".into(), crate::json::Value::String(family.clone())),
+                                ("count".into(), crate::json::Value::Number(count.to_string())),
+                                ("preview".into(), crate::json::Value::String(preview.clone())),
+                            ])
+                        })
+                        .collect(),
+                ),
+            ),
+            (
+                "totalRecords".into(),
+                crate::json::Value::Number(total_consolidated.to_string()),
+            ),
+        ]);
+        return shared::render_workflow_json(standard_output, standard_error, &payload);
+    }
+    let _ = writeln!(
+        standard_output,
+        "{label}: scanned {} family directories, {} total records",
+        family_summaries.len(),
+        total_consolidated
+    );
+    for (family, count, preview) in &family_summaries {
+        let _ = writeln!(
+            standard_output,
+            "  {family}: {count} records — {preview}"
+        );
+    }
+    if total_consolidated == 0 {
+        let _ = writeln!(
+            standard_output,
+            "  no records to consolidate"
+        );
+    }
+    0
 }

@@ -1,0 +1,70 @@
+#!/bin/sh
+# Pre-push hook: Block direct pushes to protected branches.
+# Language-agnostic: works with any project (Rust, Go, Python, JS, C++, etc.).
+# Agent-agnostic: works with any AI agent tool or IDE (native git hook).
+#
+# Branch policy:
+#   main ← dev ← feat ← <category>/<FEATURE> work branch
+#
+# Protected branches: main, dev
+# - NEVER commit directly to these branches
+# - NEVER push directly to these branches
+# - All work must go through the branch hierarchy
+#
+# This hook enforces:
+# 1. Blocks pushes to main (except merges from dev via PR)
+# 2. Blocks pushes to dev (except merges from feat via PR)
+# 3. Blocks force pushes to any protected branch
+#
+# To bypass (emergency only): git push --no-verify
+# But note: CI will reject it if branch protection is enabled.
+
+set -e
+
+# Get the current branch
+CURRENT_BRANCH=$(git symbolic-ref --short HEAD 2>/dev/null || echo "")
+
+# If not on a branch (detached HEAD), allow push
+if [ -z "$CURRENT_BRANCH" ]; then
+    echo "Detached HEAD — allowing push."
+    exit 0
+fi
+
+# Check if we're pushing to a protected branch
+PROTECTED_BRANCHES="main dev"
+
+for PROTECTED in $PROTECTED_BRANCHES; do
+    if [ "$CURRENT_BRANCH" = "$PROTECTED" ]; then
+        echo ""
+        echo "❌ BLOCKED: Direct push to '$PROTECTED' is not allowed."
+        echo ""
+        echo "   Branch policy requires:"
+        echo "   work branch → feat → dev → main"
+        echo ""
+        echo "   Create a work branch instead:"
+        echo "     git checkout -b <category>/<FEATURE>"
+        echo ""
+        echo "   Then push your work branch and create a PR."
+        echo ""
+        echo "   If this is an emergency merge from the correct branch,"
+        echo "   use: git push --no-verify"
+        echo ""
+        exit 1
+    fi
+done
+
+# Check for force push attempts
+for ARG in "$@"; do
+    if echo "$ARG" | grep -qE "refs/heads/(main|dev)"; then
+        # Check if force push flag is present
+        if echo "$@" | grep -q "\+\|--force\|--force-with-lease"; then
+            echo ""
+            echo "❌ BLOCKED: Force push to protected branch is not allowed."
+            echo ""
+            exit 1
+        fi
+    fi
+done
+
+echo "✅ Pre-push checks passed."
+exit 0

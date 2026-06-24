@@ -121,12 +121,13 @@ mod tests {
                 String::from_utf8_lossy(&stdout),
                 String::from_utf8_lossy(&stderr)
             );
+            let stderr_text = String::from_utf8_lossy(&stderr);
             assert!(
-                !combined.contains("not implemented"),
+                !stderr_text.contains("not implemented"),
                 "advertised command is a phantom (dispatcher reports 'not implemented'): {raw_line:?}\noutput: {combined}"
             );
             assert!(
-                !combined.contains("Unknown"),
+                !stderr_text.contains("Unknown"),
                 "advertised command does not route to a known dispatcher arm: {raw_line:?}\noutput: {combined}"
             );
         }

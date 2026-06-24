@@ -1,0 +1,159 @@
+#!/bin/sh
+# Pre-commit hook: Auto-detect project language and run format + lint checks.
+# Works across any project type — Rust, Go, Python, JavaScript, C++, and more.
+#
+# Agent-agnostic: Works with any AI agent tool (Claude, Cursor, OpenCode, Codex,
+# Pi Agent, vim, VSCode terminal, etc.) because it is a native git hook.
+#
+# To bypass (emergency only): git commit --no-verify
+
+set -e
+
+echo "Running pre-commit quality checks..."
+
+FOUND_ANY=0
+ERRORS=0
+
+# ----- Rust -----
+if [ -f "Cargo.toml" ]; then
+    FOUND_ANY=1
+    echo "[rust] Checking..."
+    if command -v cargo >/dev/null 2>&1; then
+        if ! cargo fmt -- --check 2>/dev/null; then
+            echo "  ✗ cargo fmt failed — run: cargo fmt"
+            ERRORS=$((ERRORS + 1))
+        else
+            echo "  ✓ cargo fmt passed"
+        fi
+        if cargo clippy --version >/dev/null 2>&1; then
+            if ! cargo clippy -- -D warnings 2>/dev/null; then
+                echo "  ✗ cargo clippy failed"
+                ERRORS=$((ERRORS + 1))
+            else
+                echo "  ✓ cargo clippy passed"
+            fi
+        fi
+    else
+        echo "  [skip] cargo not on PATH"
+    fi
+fi
+
+# ----- Go -----
+if [ -f "go.mod" ]; then
+    FOUND_ANY=1
+    echo "[go] Checking..."
+    if command -v go >/dev/null 2>&1; then
+        UNFORMATTED=$(gofmt -l . 2>/dev/null)
+        if [ -n "$UNFORMATTED" ]; then
+            echo "  ✗ gofmt failed — run: gofmt -w ."
+            echo "    Unformatted files:"
+            echo "$UNFORMATTED" | sed 's/^/      /'
+            ERRORS=$((ERRORS + 1))
+        else
+            echo "  ✓ gofmt passed"
+        fi
+        if ! go vet ./... 2>/dev/null; then
+            echo "  ✗ go vet failed"
+            ERRORS=$((ERRORS + 1))
+        else
+            echo "  ✓ go vet passed"
+        fi
+    else
+        echo "  [skip] go not on PATH"
+    fi
+fi
+
+# ----- Python -----
+if [ -f "pyproject.toml" ] || [ -f "setup.py" ] || [ -f "setup.cfg" ]; then
+    FOUND_ANY=1
+    echo "[python] Checking..."
+    if command -v ruff >/dev/null 2>&1; then
+        if ! ruff check --quiet 2>/dev/null; then
+            echo "  ✗ ruff check failed — run: ruff check --fix"
+            ERRORS=$((ERRORS + 1))
+        else
+            echo "  ✓ ruff check passed"
+        fi
+        if ! ruff format --check --quiet 2>/dev/null; then
+            echo "  ✗ ruff format failed — run: ruff format"
+            ERRORS=$((ERRORS + 1))
+        else
+            echo "  ✓ ruff format passed"
+        fi
+    elif command -v black >/dev/null 2>&1; then
+        if ! black --check --quiet . 2>/dev/null; then
+            echo "  ✗ black failed — run: black ."
+            ERRORS=$((ERRORS + 1))
+        else
+            echo "  ✓ black passed"
+        fi
+    else
+        echo "  [skip] No Python formatter found (ruff or black)"
+    fi
+fi
+
+# ----- JavaScript / TypeScript -----
+if [ -f "package.json" ]; then
+    FOUND_ANY=1
+    echo "[js/ts] Checking..."
+    if command -v biome >/dev/null 2>&1; then
+        if ! biome check --quiet --no-errors-on-unmatched 2>/dev/null; then
+            echo "  ✗ biome check failed — run: biome check --fix"
+            ERRORS=$((ERRORS + 1))
+        else
+            echo "  ✓ biome check passed"
+        fi
+    elif command -v prettier >/dev/null 2>&1; then
+        if ! prettier --check "**/*.{js,ts,jsx,tsx,json,md}" 2>/dev/null; then
+            echo "  ✗ prettier failed — run: prettier --write"
+            ERRORS=$((ERRORS + 1))
+        else
+            echo "  ✓ prettier passed"
+        fi
+    elif command -v npx >/dev/null 2>&1; then
+        if npx eslint --quiet . 2>/dev/null; then :; else
+            echo "  ✗ eslint failed"
+            ERRORS=$((ERRORS + 1))
+        fi
+    else
+        echo "  [skip] No JS/TS formatter found (biome, prettier, eslint)"
+    fi
+fi
+
+# ----- C / C++ -----
+if [ -f "CMakeLists.txt" ] || ls *.c >/dev/null 2>&1 || ls *.cpp >/dev/null 2>&1 || ls *.h >/dev/null 2>&1; then
+    FOUND_ANY=1
+    echo "[c/c++] Checking..."
+    if command -v clang-format >/dev/null 2>&1; then
+        UNFORMATTED=$(find . -name '*.c' -o -name '*.cpp' -o -name '*.h' -o -name '*.hpp' 2>/dev/null | head -50 | xargs clang-format --dry-run --Werror 2>&1 || true)
+        if echo "$UNFORMATTED" | grep -q "warning\|error"; then
+            echo "  ✗ clang-format failed — run: clang-format -i"
+            ERRORS=$((ERRORS + 1))
+        else
+            echo "  ✓ clang-format passed"
+        fi
+    else
+        echo "  [skip] clang-format not on PATH"
+    fi
+fi
+
+# ----- Result -----
+if [ "$FOUND_ANY" -eq 0 ]; then
+    echo ""
+    echo "[keel] No recognized project type detected."
+    echo "  Supported: Rust (Cargo.toml), Go (go.mod), Python (pyproject.toml),"
+    echo "  JS/TS (package.json), C/C++ (CMakeLists.txt / source files)."
+    echo "  Commit allowed — edit .githooks/pre-commit to add your own checks."
+    exit 0
+fi
+
+if [ "$ERRORS" -gt 0 ]; then
+    echo ""
+    echo "✗ Pre-commit checks failed ($ERRORS error(s))."
+    echo "  Fix the issues above and try your commit again."
+    exit 1
+fi
+
+echo ""
+echo "✓ All pre-commit checks passed."
+exit 0

@@ -14,7 +14,7 @@ cover. That doc already handles RTK, caveman, superpowers, ECC, UI/UX Pro Max,
 aligns each delta to the official harness docs (skills, subagents, hooks,
 plugins) as the baseline.
 
-**Method.** Read the keel surface first (41 SKILL.md, 24 subagents, 30
+**Method.** Read the keel surface first (46 SKILL.md on disk per 2026-06-24 audit, 24 subagents, 30
 hook events, ~41k LOC Rust CLI, the bootstrap skill, routing doctrine, execution
 strategy). Then fetched each comparator's README/skill listing directly. Claims
 below are evidence-based from those sources; star counts were ignored as a signal
