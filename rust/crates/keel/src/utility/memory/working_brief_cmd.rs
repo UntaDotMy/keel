@@ -328,10 +328,7 @@ fn run_working_brief_record_summary(
     }
     let summary = flag_set.string_value("summary").trim().to_string();
     if summary.is_empty() {
-        let _ = writeln!(
-            standard_error,
-            "{label}: --summary is required"
-        );
+        let _ = writeln!(standard_error, "{label}: --summary is required");
         return 1;
     }
     let claude_home = match resolve_claude_home(flag_set.string_value("claude-home")) {
@@ -344,10 +341,7 @@ fn run_working_brief_record_summary(
     let brief = match read_brief(&claude_home, &entry_id) {
         Ok(Some(brief)) => brief,
         Ok(None) => {
-            let _ = writeln!(
-                standard_error,
-                "{label}: no brief with id {entry_id}"
-            );
+            let _ = writeln!(standard_error, "{label}: no brief with id {entry_id}");
             return 1;
         }
         Err(error) => {
@@ -386,11 +380,7 @@ fn run_working_brief_record_summary(
                 "{label}: summary_id={summary_id} brief_id={entry_id}"
             );
             let _ = writeln!(standard_output, "  summary: {summary}");
-            let _ = writeln!(
-                standard_output,
-                "  path: {}",
-                display_path(&path)
-            );
+            let _ = writeln!(standard_output, "  path: {}", display_path(&path));
             0
         }
         Err(error) => {

@@ -1243,11 +1243,7 @@ fn slop_gate(repository_root: &Path, base_ref: &str, surface_name: &str) -> Gate
             .take(5)
             .map(|f| format!("{}:{} [{}] {}", f.file, f.line, f.pattern, f.message))
             .collect();
-        format!(
-            "{} slop finding(s): {}",
-            findings.len(),
-            shown.join("; ")
-        )
+        format!("{} slop finding(s): {}", findings.len(), shown.join("; "))
     };
     GateResult {
         name: "slop_detector".to_string(),

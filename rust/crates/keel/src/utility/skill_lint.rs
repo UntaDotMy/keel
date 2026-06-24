@@ -947,25 +947,33 @@ mod tests {
         );
         assert_eq!(exit_all, 0);
         let rendered_all = String::from_utf8_lossy(&out_all);
-        assert!(rendered_all.contains("2 skill(s)"), "should show 2 skills: {rendered_all}");
+        assert!(
+            rendered_all.contains("2 skill(s)"),
+            "should show 2 skills: {rendered_all}"
+        );
 
         // With --core: shows only reviewer
         let mut out_core = Vec::new();
         let mut err_core = Vec::new();
         let exit_core = run_skill_lint_command(
-            &[
-                "--repo-root".to_string(),
-                repo_root,
-                "--core".to_string(),
-            ],
+            &["--repo-root".to_string(), repo_root, "--core".to_string()],
             &mut out_core,
             &mut err_core,
         );
         assert_eq!(exit_core, 0);
         let rendered_core = String::from_utf8_lossy(&out_core);
-        assert!(rendered_core.contains("reviewer"), "core should include reviewer: {rendered_core}");
-        assert!(!rendered_core.contains("some-obscure-skill"), "core should NOT include obscure skill: {rendered_core}");
-        assert!(rendered_core.contains("1 skill(s)"), "core should show 1 skill: {rendered_core}");
+        assert!(
+            rendered_core.contains("reviewer"),
+            "core should include reviewer: {rendered_core}"
+        );
+        assert!(
+            !rendered_core.contains("some-obscure-skill"),
+            "core should NOT include obscure skill: {rendered_core}"
+        );
+        assert!(
+            rendered_core.contains("1 skill(s)"),
+            "core should show 1 skill: {rendered_core}"
+        );
 
         let _ = fs::remove_dir_all(&root);
     }

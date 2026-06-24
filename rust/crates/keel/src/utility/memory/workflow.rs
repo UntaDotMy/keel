@@ -305,7 +305,11 @@ fn run_workflow_cockpit(
         "keel workflow finish --id <entry-id> --proof \"...\""
     };
     let next_line = format!("  NEXT: {next_cmd}");
-    let _ = writeln!(standard_output, "{}", colorize(&next_line, "\x1b[1;32m", color_mode));
+    let _ = writeln!(
+        standard_output,
+        "{}",
+        colorize(&next_line, "\x1b[1;32m", color_mode)
+    );
     0
 }
 
@@ -342,7 +346,9 @@ fn render_compaction_loss(output: &mut dyn Write, mode: ColorMode) {
 
     let loss = load_compaction_loss_today();
 
-    let _ = writeln!(output, "\u{2551}  {}{}",
+    let _ = writeln!(
+        output,
+        "\u{2551}  {}{}",
         colorize("COMPACTION LOSS", "\x1b[1;36m", mode),
         pad_to_width("", 36)
     );
@@ -1317,9 +1323,18 @@ mod tests {
             output.contains('\x1b'),
             "cockpit with --color should contain escape codes: {output}"
         );
-        assert!(output.contains("\x1b[1;36m"), "expected cyan header: {output}");
-        assert!(output.contains("\x1b[33m"), "expected yellow in-progress: {output}");
-        assert!(output.contains("\x1b[1;32m"), "expected green NEXT: {output}");
+        assert!(
+            output.contains("\x1b[1;36m"),
+            "expected cyan header: {output}"
+        );
+        assert!(
+            output.contains("\x1b[33m"),
+            "expected yellow in-progress: {output}"
+        );
+        assert!(
+            output.contains("\x1b[1;32m"),
+            "expected green NEXT: {output}"
+        );
 
         let _ = fs::remove_dir_all(&temporary_directory);
     }

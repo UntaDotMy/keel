@@ -61,23 +61,18 @@ pub fn scan_unified_diff_for_slop(diff: &str) -> Vec<SlopFinding> {
     let mut new_line_cursor = 0usize;
     let mut added_lines: Vec<(usize, String)> = Vec::new();
 
-    let flush = |added_lines: &mut Vec<(usize, String)>,
-                 file: &str,
-                 findings: &mut Vec<SlopFinding>| {
-        if added_lines.is_empty() || file.is_empty() {
-            return;
-        }
-        detect_slop_patterns(file, added_lines, findings);
-        added_lines.clear();
-    };
+    let flush =
+        |added_lines: &mut Vec<(usize, String)>, file: &str, findings: &mut Vec<SlopFinding>| {
+            if added_lines.is_empty() || file.is_empty() {
+                return;
+            }
+            detect_slop_patterns(file, added_lines, findings);
+            added_lines.clear();
+        };
 
     for line in diff.lines() {
         if let Some(path) = line.strip_prefix("+++ b/") {
-            flush(
-                &mut added_lines,
-                &current_file,
-                &mut findings,
-            );
+            flush(&mut added_lines, &current_file, &mut findings);
             current_file = path.trim().to_string();
             continue;
         }
@@ -85,11 +80,7 @@ pub fn scan_unified_diff_for_slop(diff: &str) -> Vec<SlopFinding> {
             continue;
         }
         if let Some(rest) = line.strip_prefix("@@") {
-            flush(
-                &mut added_lines,
-                &current_file,
-                &mut findings,
-            );
+            flush(&mut added_lines, &current_file, &mut findings);
             new_line_cursor = parse_hunk_new_start(rest).unwrap_or(0);
             continue;
         }
@@ -254,7 +245,9 @@ fn detect_hallucinated_apis(
                 line: *line_no,
                 pattern: "hallucinated-api",
                 severity: "warn",
-                message: "`.fetch_all()` is not a standard method on most types — verify this API exists".to_string(),
+                message:
+                    "`.fetch_all()` is not a standard method on most types — verify this API exists"
+                        .to_string(),
             });
         }
         // `dotenv().unwrap()` — panics on missing .env, should use `dotenv().ok()` or handle
@@ -279,7 +272,9 @@ fn detect_hallucinated_apis(
                 line: *line_no,
                 pattern: "hallucinated-api",
                 severity: "warn",
-                message: "`serde_json::from_str` result not handled — use `?` or match on the Result".to_string(),
+                message:
+                    "`serde_json::from_str` result not handled — use `?` or match on the Result"
+                        .to_string(),
             });
         }
     }
@@ -375,21 +370,31 @@ mod tests {
     fn dead_defensive_let_underscore_is_flagged() {
         let diff = "+++ b/src/x.rs\n@@ -0,0 +1,1 @@\n+let _ = do_something();\n";
         let findings = scan_unified_diff_for_slop(diff);
-        assert!(findings.iter().any(|f| f.pattern == "dead-defensive-code"), "expected dead-defensive-code finding: {findings:?}");
+        assert!(
+            findings.iter().any(|f| f.pattern == "dead-defensive-code"),
+            "expected dead-defensive-code finding: {findings:?}"
+        );
     }
 
     #[test]
     fn dead_defensive_let_underscore_with_comment_is_exempt() {
-        let diff = "+++ b/src/x.rs\n@@ -0,0 +1,1 @@\n+let _ = do_something(); // intentionally ignored\n";
+        let diff =
+            "+++ b/src/x.rs\n@@ -0,0 +1,1 @@\n+let _ = do_something(); // intentionally ignored\n";
         let findings = scan_unified_diff_for_slop(diff);
-        assert!(!findings.iter().any(|f| f.pattern == "dead-defensive-code"), "commented discard should be exempt: {findings:?}");
+        assert!(
+            !findings.iter().any(|f| f.pattern == "dead-defensive-code"),
+            "commented discard should be exempt: {findings:?}"
+        );
     }
 
     #[test]
     fn dead_defensive_empty_if_let_is_flagged() {
         let diff = "+++ b/src/x.rs\n@@ -0,0 +1,1 @@\n+if let Ok(_) = result {}\n";
         let findings = scan_unified_diff_for_slop(diff);
-        assert!(findings.iter().any(|f| f.pattern == "dead-defensive-code"), "expected empty if-let finding: {findings:?}");
+        assert!(
+            findings.iter().any(|f| f.pattern == "dead-defensive-code"),
+            "expected empty if-let finding: {findings:?}"
+        );
     }
 
     // --- Pattern 2: Over-commenting ---
@@ -398,14 +403,20 @@ mod tests {
     fn over_commenting_four_comments_one_code_is_flagged() {
         let diff = "+++ b/src/x.rs\n@@ -0,0 +1,6 @@\n+// This function does\n+// something very important\n+// and we need to explain\n+// it in great detail\n+// before the actual code\n+let x = 1;\n";
         let findings = scan_unified_diff_for_slop(diff);
-        assert!(findings.iter().any(|f| f.pattern == "over-commenting"), "expected over-commenting finding: {findings:?}");
+        assert!(
+            findings.iter().any(|f| f.pattern == "over-commenting"),
+            "expected over-commenting finding: {findings:?}"
+        );
     }
 
     #[test]
     fn over_commenting_two_comments_is_not_flagged() {
         let diff = "+++ b/src/x.rs\n@@ -0,0 +1,3 @@\n+// validate input\n+// before processing\n+let x = validate(data);\n";
         let findings = scan_unified_diff_for_slop(diff);
-        assert!(!findings.iter().any(|f| f.pattern == "over-commenting"), "2 comments is not slop: {findings:?}");
+        assert!(
+            !findings.iter().any(|f| f.pattern == "over-commenting"),
+            "2 comments is not slop: {findings:?}"
+        );
     }
 
     // --- Pattern 3: Phantom flags ---
@@ -414,14 +425,20 @@ mod tests {
     fn phantom_flag_underscore_param_is_flagged() {
         let diff = "+++ b/src/x.rs\n@@ -0,0 +1,1 @@\n+pub fn process(data: Vec<u8>, _verbose: bool) -> Result<(), Error> {\n";
         let findings = scan_unified_diff_for_slop(diff);
-        assert!(findings.iter().any(|f| f.pattern == "phantom-flag"), "expected phantom-flag finding: {findings:?}");
+        assert!(
+            findings.iter().any(|f| f.pattern == "phantom-flag"),
+            "expected phantom-flag finding: {findings:?}"
+        );
     }
 
     #[test]
     fn phantom_flag_normal_params_are_not_flagged() {
         let diff = "+++ b/src/x.rs\n@@ -0,0 +1,1 @@\n+pub fn process(data: Vec<u8>, verbose: bool) -> Result<(), Error> {\n";
         let findings = scan_unified_diff_for_slop(diff);
-        assert!(!findings.iter().any(|f| f.pattern == "phantom-flag"), "used param should not be flagged: {findings:?}");
+        assert!(
+            !findings.iter().any(|f| f.pattern == "phantom-flag"),
+            "used param should not be flagged: {findings:?}"
+        );
     }
 
     // --- Pattern 4: Hallucinated APIs ---
@@ -430,28 +447,48 @@ mod tests {
     fn hallucinated_fetch_all_is_flagged() {
         let diff = "+++ b/src/x.rs\n@@ -0,0 +1,1 @@\n+let items = db.fetch_all();\n";
         let findings = scan_unified_diff_for_slop(diff);
-        assert!(findings.iter().any(|f| f.pattern == "hallucinated-api" && f.message.contains("fetch_all")), "expected fetch_all finding: {findings:?}");
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.pattern == "hallucinated-api" && f.message.contains("fetch_all")),
+            "expected fetch_all finding: {findings:?}"
+        );
     }
 
     #[test]
     fn hallucinated_dotenv_unwrap_is_flagged() {
         let diff = "+++ b/src/x.rs\n@@ -0,0 +1,1 @@\n+dotenv().unwrap();\n";
         let findings = scan_unified_diff_for_slop(diff);
-        assert!(findings.iter().any(|f| f.pattern == "hallucinated-api" && f.message.contains("dotenv")), "expected dotenv finding: {findings:?}");
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.pattern == "hallucinated-api" && f.message.contains("dotenv")),
+            "expected dotenv finding: {findings:?}"
+        );
     }
 
     #[test]
     fn hallucinated_serde_from_str_without_handling_is_flagged() {
         let diff = "+++ b/src/x.rs\n@@ -0,0 +1,1 @@\n+let parsed = serde_json::from_str(&raw);\n";
         let findings = scan_unified_diff_for_slop(diff);
-        assert!(findings.iter().any(|f| f.pattern == "hallucinated-api" && f.message.contains("serde_json")), "expected serde_json finding: {findings:?}");
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.pattern == "hallucinated-api" && f.message.contains("serde_json")),
+            "expected serde_json finding: {findings:?}"
+        );
     }
 
     #[test]
     fn hallucinated_serde_from_str_with_question_mark_is_exempt() {
         let diff = "+++ b/src/x.rs\n@@ -0,0 +1,1 @@\n+let parsed: MyStruct = serde_json::from_str(&raw)?;\n";
         let findings = scan_unified_diff_for_slop(diff);
-        assert!(!findings.iter().any(|f| f.pattern == "hallucinated-api" && f.message.contains("serde_json")), "handled serde should be exempt: {findings:?}");
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.pattern == "hallucinated-api" && f.message.contains("serde_json")),
+            "handled serde should be exempt: {findings:?}"
+        );
     }
 
     // --- Pattern 5: N+1 queries ---
@@ -460,14 +497,20 @@ mod tests {
     fn n_plus_one_find_in_loop_is_flagged() {
         let diff = "+++ b/src/x.rs\n@@ -0,0 +1,5 @@\n+let items = vec![1, 2, 3];\n+for key in keys {\n+    if let Some(item) = items.iter().find(|&&i| i == key) {\n+        process(item);\n+    }\n+}\n";
         let findings = scan_unified_diff_for_slop(diff);
-        assert!(findings.iter().any(|f| f.pattern == "n-plus-one-query"), "expected N+1 finding: {findings:?}");
+        assert!(
+            findings.iter().any(|f| f.pattern == "n-plus-one-query"),
+            "expected N+1 finding: {findings:?}"
+        );
     }
 
     #[test]
     fn n_plus_one_contains_in_loop_is_flagged() {
         let diff = "+++ b/src/x.rs\n@@ -0,0 +1,4 @@\n+let allowed = vec![\"a\", \"b\"];\n+for item in input {\n+    if allowed.contains(item) {\n+        process(item);\n+    }\n+}\n";
         let findings = scan_unified_diff_for_slop(diff);
-        assert!(findings.iter().any(|f| f.pattern == "n-plus-one-query"), "expected N+1 finding for .contains(): {findings:?}");
+        assert!(
+            findings.iter().any(|f| f.pattern == "n-plus-one-query"),
+            "expected N+1 finding for .contains(): {findings:?}"
+        );
     }
 
     // --- Clean code ---
@@ -476,7 +519,10 @@ mod tests {
     fn clean_code_produces_no_findings() {
         let diff = "+++ b/src/clean.rs\n@@ -0,0 +1,3 @@\n+pub fn add(a: i32, b: i32) -> i32 {\n+    a + b\n+}\n";
         let findings = scan_unified_diff_for_slop(diff);
-        assert!(findings.is_empty(), "clean code should produce no findings: {findings:?}");
+        assert!(
+            findings.is_empty(),
+            "clean code should produce no findings: {findings:?}"
+        );
     }
 
     #[test]
@@ -484,8 +530,15 @@ mod tests {
         let diff = "+++ b/src/z.rs\n@@ -1,3 +1,3 @@\n // let _ = old();\n+let _ = new();\n // if let Ok(_) = x {}\n";
         let findings = scan_unified_diff_for_slop(diff);
         // Only the `+let _ = new()` line should trigger, not the context lines
-        let dead_findings: Vec<_> = findings.iter().filter(|f| f.pattern == "dead-defensive-code").collect();
-        assert_eq!(dead_findings.len(), 1, "only the added line should trigger: {findings:?}");
+        let dead_findings: Vec<_> = findings
+            .iter()
+            .filter(|f| f.pattern == "dead-defensive-code")
+            .collect();
+        assert_eq!(
+            dead_findings.len(),
+            1,
+            "only the added line should trigger: {findings:?}"
+        );
         assert_eq!(dead_findings[0].line, 2);
     }
 }

@@ -259,9 +259,7 @@ fn run_consolidate_command(
         let _ = writeln!(standard_error, "{}", parse_error.message);
         return 1;
     }
-    let claude_home = match crate::runtime::resolve_claude_home(
-        flags.string_value("claude-home"),
-    ) {
+    let claude_home = match crate::runtime::resolve_claude_home(flags.string_value("claude-home")) {
         Ok(path) => path,
         Err(error) => {
             let _ = writeln!(standard_error, "{label}: {error}");
@@ -288,12 +286,7 @@ fn run_consolidate_command(
         let entries: Vec<String> = match std::fs::read_dir(&family_dir) {
             Ok(rd) => rd
                 .filter_map(|e| e.ok())
-                .filter(|e| {
-                    e.path()
-                        .extension()
-                        .and_then(|ext| ext.to_str())
-                        == Some("json")
-                })
+                .filter(|e| e.path().extension().and_then(|ext| ext.to_str()) == Some("json"))
                 .filter_map(|e| std::fs::read_to_string(e.path()).ok())
                 .collect(),
             Err(_) => continue,
@@ -309,7 +302,13 @@ fn run_consolidate_command(
                 let fields = crate::utility::workflow_ledger::parse_object_of_strings(text).ok()?;
                 let title = fields
                     .iter()
-                    .find(|(k, _)| k == "question" || k == "trigger" || k == "name" || k == "summary" || k == "requirement")
+                    .find(|(k, _)| {
+                        k == "question"
+                            || k == "trigger"
+                            || k == "name"
+                            || k == "summary"
+                            || k == "requirement"
+                    })
                     .map(|(_, v)| v.as_str())
                     .unwrap_or("?");
                 Some(title.to_string())
@@ -329,8 +328,14 @@ fn run_consolidate_command(
                         .map(|(family, count, preview)| {
                             crate::json::Value::Object(vec![
                                 ("family".into(), crate::json::Value::String(family.clone())),
-                                ("count".into(), crate::json::Value::Number(count.to_string())),
-                                ("preview".into(), crate::json::Value::String(preview.clone())),
+                                (
+                                    "count".into(),
+                                    crate::json::Value::Number(count.to_string()),
+                                ),
+                                (
+                                    "preview".into(),
+                                    crate::json::Value::String(preview.clone()),
+                                ),
                             ])
                         })
                         .collect(),
@@ -350,16 +355,10 @@ fn run_consolidate_command(
         total_consolidated
     );
     for (family, count, preview) in &family_summaries {
-        let _ = writeln!(
-            standard_output,
-            "  {family}: {count} records — {preview}"
-        );
+        let _ = writeln!(standard_output, "  {family}: {count} records — {preview}");
     }
     if total_consolidated == 0 {
-        let _ = writeln!(
-            standard_output,
-            "  no records to consolidate"
-        );
+        let _ = writeln!(standard_output, "  no records to consolidate");
     }
     0
 }

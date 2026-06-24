@@ -180,7 +180,11 @@ impl CommandAdapter for ProjectFilterAdapter {
             let rendered = apply_stages(&merged, &self.filter.stages);
             return make_result(
                 self.name(),
-                format!("filter {} (staged: {})", self.filter.name, self.filter.stages.len()),
+                format!(
+                    "filter {} (staged: {})",
+                    self.filter.name,
+                    self.filter.stages.len()
+                ),
                 rendered,
                 String::new(),
                 exit_code,
@@ -317,10 +321,24 @@ fn signal_lines(text: &str, max_lines: usize) -> Vec<String> {
         }
         let normalized = trimmed.to_ascii_lowercase();
         let is_signal = [
-            "error", "failed", "failure", "fatal", "panic", "exception",
-            "traceback", "assert", "warning", "denied", "not found",
-            "cannot", "undefined", "mismatched", "expected", "actual",
-            "timeout", "timed out",
+            "error",
+            "failed",
+            "failure",
+            "fatal",
+            "panic",
+            "exception",
+            "traceback",
+            "assert",
+            "warning",
+            "denied",
+            "not found",
+            "cannot",
+            "undefined",
+            "mismatched",
+            "expected",
+            "actual",
+            "timeout",
+            "timed out",
         ]
         .iter()
         .any(|needle| normalized.contains(needle));
@@ -594,10 +612,7 @@ tail = 5
             remove: vec![],
             max_lines: 40,
             enabled: true,
-            stages: vec![FilterStage::HeadTail {
-                head: 2,
-                tail: 2,
-            }],
+            stages: vec![FilterStage::HeadTail { head: 2, tail: 2 }],
         };
         let adapter = ProjectFilterAdapter::new(filter);
         let meta = RunMeta {

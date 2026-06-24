@@ -888,9 +888,33 @@ pub fn detect_destructive_command(fields: &[String]) -> Option<DestructiveFindin
 
     match command.as_str() {
         "rm" => {
-            let has_recursive = fields.iter().any(|arg| arg == "-r" || arg == "-rf" || arg == "-fr" || arg == "-R" || arg == "--recursive" || (arg.starts_with('-') && arg.len() > 1 && arg.contains('r') && arg.contains('f')));
-            let has_force = fields.iter().any(|arg| arg == "-f" || arg == "--force" || (arg.starts_with('-') && arg.len() > 1 && !arg.starts_with("--") && arg.contains('f')));
-            let targets_root = fields.iter().any(|arg| arg == "/" || arg == "/*" || arg.starts_with("/home") || arg.starts_with("/usr") || arg == "~" || arg.starts_with("~/"));
+            let has_recursive = fields.iter().any(|arg| {
+                arg == "-r"
+                    || arg == "-rf"
+                    || arg == "-fr"
+                    || arg == "-R"
+                    || arg == "--recursive"
+                    || (arg.starts_with('-')
+                        && arg.len() > 1
+                        && arg.contains('r')
+                        && arg.contains('f'))
+            });
+            let has_force = fields.iter().any(|arg| {
+                arg == "-f"
+                    || arg == "--force"
+                    || (arg.starts_with('-')
+                        && arg.len() > 1
+                        && !arg.starts_with("--")
+                        && arg.contains('f'))
+            });
+            let targets_root = fields.iter().any(|arg| {
+                arg == "/"
+                    || arg == "/*"
+                    || arg.starts_with("/home")
+                    || arg.starts_with("/usr")
+                    || arg == "~"
+                    || arg.starts_with("~/")
+            });
             let targets_many = fields.iter().filter(|arg| !arg.starts_with('-')).count() > 5;
 
             if has_recursive && has_force && targets_root {
@@ -907,8 +931,12 @@ pub fn detect_destructive_command(fields: &[String]) -> Option<DestructiveFindin
             }
         }
         "git" if fields.get(1).map(String::as_str) == Some("push") => {
-            let has_force = fields.iter().any(|arg| arg == "-f" || arg == "--force" || arg == "--force-with-lease");
-            let targets_protected = fields.iter().any(|arg| arg == "main" || arg == "master" || arg == "develop" || arg == "dev");
+            let has_force = fields
+                .iter()
+                .any(|arg| arg == "-f" || arg == "--force" || arg == "--force-with-lease");
+            let targets_protected = fields
+                .iter()
+                .any(|arg| arg == "main" || arg == "master" || arg == "develop" || arg == "dev");
 
             if has_force && targets_protected {
                 return Some(DestructiveFinding {
@@ -925,8 +953,12 @@ pub fn detect_destructive_command(fields: &[String]) -> Option<DestructiveFindin
         }
         "chmod" | "chown" | "chgrp" => {
             let has_recursive = fields.iter().any(|arg| arg == "-R" || arg == "--recursive");
-            let targets_root = fields.iter().any(|arg| arg == "/" || arg.starts_with("/home") || arg.starts_with("/usr") || arg == "~");
-            let wide_permissions = fields.iter().any(|arg| arg == "777" || arg == "a+rwx" || arg == "+x" || arg.contains("777"));
+            let targets_root = fields.iter().any(|arg| {
+                arg == "/" || arg.starts_with("/home") || arg.starts_with("/usr") || arg == "~"
+            });
+            let wide_permissions = fields
+                .iter()
+                .any(|arg| arg == "777" || arg == "a+rwx" || arg == "+x" || arg.contains("777"));
 
             if has_recursive && (targets_root || wide_permissions) {
                 return Some(DestructiveFinding {
@@ -936,7 +968,11 @@ pub fn detect_destructive_command(fields: &[String]) -> Option<DestructiveFindin
             }
         }
         "dd" => {
-            let writes_device = fields.iter().any(|arg| arg.starts_with("of=/dev/") || arg.starts_with("of=/dev/sd") || arg.starts_with("of=/dev/nvme"));
+            let writes_device = fields.iter().any(|arg| {
+                arg.starts_with("of=/dev/")
+                    || arg.starts_with("of=/dev/sd")
+                    || arg.starts_with("of=/dev/nvme")
+            });
             if writes_device {
                 return Some(DestructiveFinding {
                     pattern: "dd writing to block device",
@@ -968,7 +1004,9 @@ pub fn detect_destructive_command(fields: &[String]) -> Option<DestructiveFindin
             severity: DestructiveSeverity::Block,
         });
     }
-    if joined_lower.contains("truncate table") || joined_lower.contains("delete from") && !joined_lower.contains("where") {
+    if joined_lower.contains("truncate table")
+        || joined_lower.contains("delete from") && !joined_lower.contains("where")
+    {
         return Some(DestructiveFinding {
             pattern: "TRUNCATE or unqualified DELETE",
             severity: DestructiveSeverity::Warn,
@@ -1422,7 +1460,8 @@ mod tests {
 
     #[test]
     fn destructive_rm_recursive_on_broad_target_is_warned() {
-        let finding = detect_destructive_command(&fields(&["rm", "-r", "a", "b", "c", "d", "e", "f"]));
+        let finding =
+            detect_destructive_command(&fields(&["rm", "-r", "a", "b", "c", "d", "e", "f"]));
         assert!(finding.is_some());
         assert_eq!(finding.unwrap().severity, DestructiveSeverity::Warn);
     }
@@ -1435,14 +1474,16 @@ mod tests {
 
     #[test]
     fn destructive_git_push_force_to_main_is_blocked() {
-        let finding = detect_destructive_command(&fields(&["git", "push", "--force", "origin", "main"]));
+        let finding =
+            detect_destructive_command(&fields(&["git", "push", "--force", "origin", "main"]));
         assert!(finding.is_some());
         assert_eq!(finding.unwrap().severity, DestructiveSeverity::Block);
     }
 
     #[test]
     fn destructive_git_push_force_to_feature_is_warned() {
-        let finding = detect_destructive_command(&fields(&["git", "push", "-f", "origin", "feature/x"]));
+        let finding =
+            detect_destructive_command(&fields(&["git", "push", "-f", "origin", "feature/x"]));
         assert!(finding.is_some());
         assert_eq!(finding.unwrap().severity, DestructiveSeverity::Warn);
     }
@@ -1462,7 +1503,8 @@ mod tests {
 
     #[test]
     fn destructive_dd_to_block_device_is_blocked() {
-        let finding = detect_destructive_command(&fields(&["dd", "if=/dev/zero", "of=/dev/sda", "bs=1M"]));
+        let finding =
+            detect_destructive_command(&fields(&["dd", "if=/dev/zero", "of=/dev/sda", "bs=1M"]));
         assert!(finding.is_some());
         assert_eq!(finding.unwrap().severity, DestructiveSeverity::Block);
     }
@@ -1476,7 +1518,8 @@ mod tests {
 
     #[test]
     fn destructive_sql_drop_database_is_blocked() {
-        let finding = detect_destructive_command(&fields(&["psql", "-c", "DROP DATABASE production"]));
+        let finding =
+            detect_destructive_command(&fields(&["psql", "-c", "DROP DATABASE production"]));
         assert!(finding.is_some());
         assert_eq!(finding.unwrap().severity, DestructiveSeverity::Block);
     }
@@ -1504,7 +1547,8 @@ mod tests {
 
     #[test]
     fn destructive_sql_delete_with_where_is_not_flagged() {
-        let finding = detect_destructive_command(&fields(&["psql", "-c", "DELETE FROM logs WHERE id = 1"]));
+        let finding =
+            detect_destructive_command(&fields(&["psql", "-c", "DELETE FROM logs WHERE id = 1"]));
         assert!(finding.is_none());
     }
 
@@ -1519,7 +1563,10 @@ mod tests {
             &["kubectl", "get", "pods"],
         ] {
             let finding = detect_destructive_command(&fields(safe));
-            assert!(finding.is_none(), "safe command {safe:?} should not be flagged");
+            assert!(
+                finding.is_none(),
+                "safe command {safe:?} should not be flagged"
+            );
         }
     }
 
@@ -1529,4 +1576,3 @@ mod tests {
         assert!(finding.is_none());
     }
 }
-

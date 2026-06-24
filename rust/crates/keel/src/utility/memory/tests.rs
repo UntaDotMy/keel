@@ -1369,18 +1369,9 @@ fn working_brief_record_summary_round_trips() {
         String::from_utf8_lossy(&summary_stderr)
     );
     let output = String::from_utf8_lossy(&summary_stdout).to_string();
-    assert!(
-        output.contains("summary_id=wbs-"),
-        "stdout: {output}"
-    );
-    assert!(
-        output.contains("brief_id=wb-sum-1"),
-        "stdout: {output}"
-    );
-    assert!(
-        output.contains("JWT + refresh token"),
-        "stdout: {output}"
-    );
+    assert!(output.contains("summary_id=wbs-"), "stdout: {output}");
+    assert!(output.contains("brief_id=wb-sum-1"), "stdout: {output}");
+    assert!(output.contains("JWT + refresh token"), "stdout: {output}");
 
     let _ = fs::remove_dir_all(&temporary_directory);
 }
@@ -1544,25 +1535,11 @@ fn completion_gate_record_requirement_round_trips() {
         &mut stdout,
         &mut stderr,
     );
-    assert_eq!(
-        exit_code,
-        0,
-        "stderr: {}",
-        String::from_utf8_lossy(&stderr)
-    );
+    assert_eq!(exit_code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
     let output = String::from_utf8_lossy(&stdout).to_string();
-    assert!(
-        output.contains("requirement_id=cgr-"),
-        "stdout: {output}"
-    );
-    assert!(
-        output.contains("entry_id=wf-req"),
-        "stdout: {output}"
-    );
-    assert!(
-        output.contains("JWT refresh flow"),
-        "stdout: {output}"
-    );
+    assert!(output.contains("requirement_id=cgr-"), "stdout: {output}");
+    assert!(output.contains("entry_id=wf-req"), "stdout: {output}");
+    assert!(output.contains("JWT refresh flow"), "stdout: {output}");
     assert!(output.contains("status: pending"), "stdout: {output}");
 
     let _ = fs::remove_dir_all(&temporary_directory);
@@ -1751,10 +1728,7 @@ fn consolidate_counts_family_records() {
     );
     assert_eq!(exit_code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
     let output = String::from_utf8_lossy(&stdout).to_string();
-    assert!(
-        output.contains("total records"),
-        "stdout: {output}"
-    );
+    assert!(output.contains("total records"), "stdout: {output}");
 
     let _ = fs::remove_dir_all(&temporary_directory);
 }
@@ -1842,12 +1816,7 @@ fn completion_gate_help_lists_record_requirement() {
 fn memory_help_lists_consolidate() {
     let mut stdout: Vec<u8> = Vec::new();
     let mut stderr: Vec<u8> = Vec::new();
-    let exit_code = run_memory_command(
-        "memory",
-        &["--help".to_string()],
-        &mut stdout,
-        &mut stderr,
-    );
+    let exit_code = run_memory_command("memory", &["--help".to_string()], &mut stdout, &mut stderr);
     assert_eq!(exit_code, 0);
     let output = String::from_utf8_lossy(&stdout).to_string();
     assert!(

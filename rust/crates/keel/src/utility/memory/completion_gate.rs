@@ -288,13 +288,19 @@ fn run_completion_gate_record_requirement(
     }
     let file_path = dir.join(format!("{requirement_id}.json"));
     let payload = Value::Object(vec![
-        ("requirementId".into(), Value::String(requirement_id.clone())),
+        (
+            "requirementId".into(),
+            Value::String(requirement_id.clone()),
+        ),
         ("entryId".into(), Value::String(entry_id.clone())),
         ("requirement".into(), Value::String(requirement.clone())),
         ("status".into(), Value::String(status.clone())),
-        ("createdAt".into(), Value::String(
-            crate::utility::workflow_ledger::format_timestamp_iso8601(now_millis),
-        )),
+        (
+            "createdAt".into(),
+            Value::String(crate::utility::workflow_ledger::format_timestamp_iso8601(
+                now_millis,
+            )),
+        ),
     ]);
     let mut serialized = Vec::<u8>::new();
     if let Err(error) = crate::json::write_indented(&mut serialized, &payload) {
@@ -316,7 +322,10 @@ fn run_completion_gate_record_requirement(
     if flag_set.bool_value("json") {
         let json_payload = Value::Object(vec![
             ("recorded".into(), Value::Bool(true)),
-            ("requirementId".into(), Value::String(requirement_id.clone())),
+            (
+                "requirementId".into(),
+                Value::String(requirement_id.clone()),
+            ),
             ("entryId".into(), Value::String(entry_id.clone())),
             ("requirement".into(), Value::String(requirement.clone())),
             ("status".into(), Value::String(status.clone())),
