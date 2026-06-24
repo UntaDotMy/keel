@@ -346,3 +346,98 @@ struct SessionSummary {
     tokens_saved: u64,
     failed: u64,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compute_since_timestamp_today() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let result = compute_since_timestamp("today");
+        assert!(
+            result <= now,
+            "today result {result} should be <= now {now}"
+        );
+        assert!(
+            result >= now.saturating_sub(24 * 3600 + 1),
+            "today result {result} should be within last 24h of now {now}"
+        );
+    }
+
+    #[test]
+    fn compute_since_timestamp_all() {
+        let result = compute_since_timestamp("0");
+        assert_eq!(result, 0);
+    }
+
+    #[test]
+    fn compute_since_timestamp_week() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let result = compute_since_timestamp("week");
+        assert!(result <= now);
+        assert!(result >= now.saturating_sub(7 * 24 * 3600 + 1));
+    }
+
+    #[test]
+    fn compute_since_timestamp_month() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let result = compute_since_timestamp("month");
+        assert!(result <= now);
+        assert!(result >= now.saturating_sub(30 * 24 * 3600 + 1));
+    }
+
+    #[test]
+    fn compute_since_timestamp_unknown_returns_zero() {
+        let result = compute_since_timestamp("garbage");
+        assert_eq!(result, 0);
+    }
+
+    #[test]
+    fn gain_events_path_returns_option() {
+        let result = gain_events_path();
+        match result {
+            Some(path) => assert!(path.to_string_lossy().contains("events")),
+            None => {}
+        }
+    }
+
+    #[test]
+    fn format_timestamp_time_formats_correctly() {
+        assert_eq!(format_timestamp_time(3661), "01:01");
+        assert_eq!(format_timestamp_time(0), "00:00");
+        assert_eq!(format_timestamp_time(86399), "23:59");
+    }
+
+    #[test]
+    fn format_count_small_number() {
+        assert_eq!(format_count(42), "42");
+    }
+
+    #[test]
+    fn format_count_thousands() {
+        assert_eq!(format_count(1500), "1.5K");
+        assert_eq!(format_count(999_900), "999.9K");
+    }
+
+    #[test]
+    fn format_count_millions() {
+        assert_eq!(format_count(2_500_000), "2.5M");
+    }
+
+    #[test]
+    fn format_count_boundary() {
+        assert_eq!(format_count(999), "999");
+        assert_eq!(format_count(1000), "1.0K");
+        assert_eq!(format_count(1_000_000), "1.0M");
+    }
+}

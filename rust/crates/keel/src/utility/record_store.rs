@@ -17,6 +17,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::error::KeelError;
 use crate::json::{write_indented, Value};
 use crate::runtime::{display_path, safe_path_segment, write_text};
 use crate::utility::workflow_ledger::parse_object_of_strings;
@@ -62,12 +63,12 @@ impl RecordStore {
     /// the store directory (arbitrary `.json` read/write/delete). Centralizing
     /// the check here means every id-addressed method is guarded by construction,
     /// rather than relying on each caller to sanitize first.
-    fn validated_record_path(&self, id: &str) -> Result<PathBuf, String> {
+    fn validated_record_path(&self, id: &str) -> Result<PathBuf, KeelError> {
         match safe_path_segment(id) {
             Some(segment) => Ok(self.record_path(&segment)),
-            None => Err(format!(
+            None => Err(KeelError::Custom(format!(
                 "invalid record id {id:?}: must be a single safe path segment"
-            )),
+            ))),
         }
     }
 
@@ -81,7 +82,7 @@ impl RecordStore {
         }
     }
 
-    pub fn write_record(&self, id: &str, fields: &Record) -> Result<PathBuf, String> {
+    pub fn write_record(&self, id: &str, fields: &Record) -> Result<PathBuf, KeelError> {
         let path = self.validated_record_path(id)?;
         fs::create_dir_all(&self.directory)
             .map_err(|error| format!("create {}: {error}", display_path(&self.directory)))?;
@@ -97,12 +98,12 @@ impl RecordStore {
         Ok(path)
     }
 
-    pub fn read_record(&self, id: &str) -> Result<Option<Record>, String> {
+    pub fn read_record(&self, id: &str) -> Result<Option<Record>, KeelError> {
         let path = self.validated_record_path(id)?;
         let text = match fs::read_to_string(&path) {
             Ok(text) => text,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(format!("read {}: {error}", display_path(&path))),
+            Err(error) => return Err(format!("read {}: {error}", display_path(&path)).into()),
         };
         let fields = parse_object_of_strings(&text)
             .map_err(|error| format!("parse {}: {error}", display_path(&path)))?;
@@ -118,7 +119,7 @@ impl RecordStore {
     /// rather than aborting the whole listing: a crash mid-write or a hand-edited
     /// bad file must not make `list`/cockpit/completion-gate fail wholesale until
     /// the user manually deletes it.
-    pub fn list_records(&self) -> Result<Vec<(String, Record)>, String> {
+    pub fn list_records(&self) -> Result<Vec<(String, Record)>, KeelError> {
         if !self.directory.is_dir() {
             return Ok(Vec::new());
         }
@@ -158,12 +159,12 @@ impl RecordStore {
     /// Remove a record, returning whether it existed. Used by the learning
     /// loop's decay/prune step to drop auto-learned instincts whose pattern has
     /// aged out, and by family `forget`/`remove` actions.
-    pub fn delete_record(&self, id: &str) -> Result<bool, String> {
+    pub fn delete_record(&self, id: &str) -> Result<bool, KeelError> {
         let path = self.validated_record_path(id)?;
         match fs::remove_file(&path) {
             Ok(()) => Ok(true),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-            Err(error) => Err(format!("remove {}: {error}", display_path(&path))),
+            Err(error) => Err(format!("remove {}: {error}", display_path(&path)).into()),
         }
     }
 }

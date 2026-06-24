@@ -337,3 +337,85 @@ impl CommandAst {
             .to_ascii_lowercase()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cwd() -> PathBuf {
+        PathBuf::from("test")
+    }
+
+    #[test]
+    fn cargo_test_classifies_as_test() {
+        let ast = CommandAst::new("cargo".into(), vec!["test".into()], cwd());
+        assert_eq!(ast.detected_kind, CommandKind::Test);
+    }
+
+    #[test]
+    fn cargo_build_classifies_as_build() {
+        let ast = CommandAst::new("cargo".into(), vec!["build".into()], cwd());
+        assert_eq!(ast.detected_kind, CommandKind::Build);
+    }
+
+    #[test]
+    fn cargo_clippy_classifies_as_lint() {
+        let ast = CommandAst::new("cargo".into(), vec!["clippy".into()], cwd());
+        assert_eq!(ast.detected_kind, CommandKind::Lint);
+    }
+
+    #[test]
+    fn pytest_classifies_as_test() {
+        let ast = CommandAst::new("pytest".into(), vec!["-q".into()], cwd());
+        assert_eq!(ast.detected_kind, CommandKind::Test);
+    }
+
+    #[test]
+    fn git_classifies_as_git() {
+        let ast = CommandAst::new("git".into(), vec!["status".into()], cwd());
+        assert_eq!(ast.detected_kind, CommandKind::Git);
+    }
+
+    #[test]
+    fn rg_classifies_as_search() {
+        let ast = CommandAst::new("rg".into(), vec!["pattern".into()], cwd());
+        assert_eq!(ast.detected_kind, CommandKind::Search);
+    }
+
+    #[test]
+    fn cat_classifies_as_file_read() {
+        let ast = CommandAst::new("cat".into(), vec!["file.txt".into()], cwd());
+        assert_eq!(ast.detected_kind, CommandKind::FileRead);
+    }
+
+    #[test]
+    fn docker_classifies_as_container() {
+        let ast = CommandAst::new("docker".into(), vec!["ps".into()], cwd());
+        assert_eq!(ast.detected_kind, CommandKind::Container);
+    }
+
+    #[test]
+    fn aws_classifies_as_cloud() {
+        let ast = CommandAst::new("aws".into(), vec!["s3".into(), "ls".into()], cwd());
+        assert_eq!(ast.detected_kind, CommandKind::Cloud);
+    }
+
+    #[test]
+    fn psql_classifies_as_database() {
+        let ast = CommandAst::new("psql".into(), vec!["-c".into(), "SELECT 1".into()], cwd());
+        assert_eq!(ast.detected_kind, CommandKind::Database);
+    }
+
+    #[test]
+    fn from_command_text_parses_correctly() {
+        let ast = CommandAst::from_command_text("cargo test --workspace", cwd());
+        assert_eq!(ast.program, "cargo");
+        assert_eq!(ast.args, vec!["test", "--workspace"]);
+    }
+
+    #[test]
+    fn unknown_program_classifies_as_unknown() {
+        let ast = CommandAst::new("randomtool".into(), vec![], cwd());
+        assert_eq!(ast.detected_kind, CommandKind::Unknown);
+    }
+}

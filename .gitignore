@@ -63,3 +63,4 @@ verify_*.ps1
 
 # Third-party comparison directories
 karpathy-skills-cmp/
+split.py

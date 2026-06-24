@@ -107,20 +107,43 @@ pub fn signal_lines(text: &str, max_lines: usize) -> Vec<String> {
 
 pub fn redact_possible_secret(line: &str) -> String {
     let upper = line.to_ascii_uppercase();
-    let named_secret = ["API_KEY=", "SECRET=", "TOKEN=", "PASSWORD=", "PRIVATE KEY"]
-        .iter()
-        .any(|needle| upper.contains(needle));
+    let named_secret = [
+        "API_KEY=",
+        "SECRET=",
+        "TOKEN=",
+        "PASSWORD=",
+        "PRIVATE KEY",
+        "AUTH=",
+        "CREDENTIAL=",
+        "ACCESS_KEY=",
+        "AWS_",
+        "GCP_",
+        "AZURE_",
+        "PRIVATE_KEY=",
+        "DATABASE_URL=",
+        "REDIS_URL=",
+        "MONGO_",
+        "STRIPE_",
+        "OPENAI_",
+        "ANTHROPIC_",
+        "GITHUB_TOKEN=",
+        "GH_TOKEN=",
+        "NPM_TOKEN=",
+        "DOCKER_",
+    ]
+    .iter()
+    .any(|needle| upper.contains(needle));
     let long_token = line
         .split(|character: char| {
             !character.is_ascii_alphanumeric() && character != '_' && character != '-'
         })
         .any(|part| {
-            part.len() >= 40
+            part.len() >= 32
                 && part
                     .chars()
                     .filter(|character| character.is_ascii_alphanumeric())
                     .count()
-                    >= 36
+                    >= 28
         });
     if named_secret || long_token {
         "[redacted possible secret; see raw output locally]".to_string()
@@ -301,5 +324,42 @@ fn describe_value(value: &serde_json::Value, depth: usize) -> serde_json::Value 
         serde_json::Value::Number(_) => serde_json::Value::String("<num>".to_string()),
         serde_json::Value::Bool(_) => serde_json::Value::String("<bool>".to_string()),
         serde_json::Value::Null => serde_json::Value::String("<null>".to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::redact_possible_secret;
+
+    const REDACTED: &str = "[redacted possible secret; see raw output locally]";
+
+    #[test]
+    fn redacts_database_url() {
+        let line = "DATABASE_URL=postgres://user:pass@host/db";
+        assert_eq!(redact_possible_secret(line), REDACTED);
+    }
+
+    #[test]
+    fn redacts_openai_key() {
+        let line = "OPENAI_KEY=sk-abc123def456ghi789jkl012mno345pqr";
+        assert_eq!(redact_possible_secret(line), REDACTED);
+    }
+
+    #[test]
+    fn redacts_github_token() {
+        let line = "GITHUB_TOKEN=ghp_1234567890abcdef";
+        assert_eq!(redact_possible_secret(line), REDACTED);
+    }
+
+    #[test]
+    fn does_not_redact_normal_output() {
+        let line = "normal log output with no secrets";
+        assert_eq!(redact_possible_secret(line), line);
+    }
+
+    #[test]
+    fn redacts_35_char_alphanumeric_token() {
+        let line = "token: abcdefghijklmnopqrstuvwxyz12345678";
+        assert_eq!(redact_possible_secret(line), REDACTED);
     }
 }

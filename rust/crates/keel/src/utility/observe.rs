@@ -91,11 +91,13 @@ fn collect_observation(claude_home: &std::path::Path, workspace_root: &str) -> O
     let recall = recall_status_snapshot(claude_home)
         .map(|snapshot| (snapshot.document_count, snapshot.last_indexed_at_millis));
 
-    let briefs = list_briefs(claude_home).map(|briefs| {
-        // Briefs are listed oldest-first, so the most recent is the last entry.
-        let most_recent = briefs.last().map(|brief| brief.request.clone());
-        (briefs.len(), most_recent)
-    });
+    let briefs = list_briefs(claude_home)
+        .map_err(|error| error.to_string())
+        .map(|briefs| {
+            // Briefs are listed oldest-first, so the most recent is the last entry.
+            let most_recent = briefs.last().map(|brief| brief.request.clone());
+            (briefs.len(), most_recent)
+        });
 
     // open_stories returns None for "no active sprint"; Some(open) lists the
     // not-done stories. We report the open count — the honest signal the gate
