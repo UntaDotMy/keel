@@ -24,7 +24,6 @@ use crate::runtime::{
 };
 use crate::utility;
 
-
 const RAW_OUTPUT_DEFAULT_RETENTION_DAYS: u64 = 14;
 
 /// Tool-timings JSONL rows are tiny (one short line per tool call) compared
@@ -4719,7 +4718,5 @@ fn decode_powershell_encoded_command(command: &str) -> Option<String> {
     None
 }
 
-
 #[cfg(test)]
 mod tests;
-
