@@ -6196,12 +6196,9 @@ mod tests {
         let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
         let previous_review = std::env::var(REVIEW_GATE_ENV_VAR).ok();
         let previous_brief = std::env::var(BRIEF_GATE_ENV_VAR).ok();
-        let previous_research = std::env::var(RESEARCH_GATE_ENV_VAR).ok();
-        let previous_story_first = std::env::var(STORY_FIRST_GATE_ENV_VAR).ok();
         let previous_closeout = std::env::var(STORY_CLOSEOUT_GATE_ENV_VAR).ok();
         let previous_research = std::env::var(RESEARCH_GATE_ENV_VAR).ok();
         let previous_story_first = std::env::var(STORY_FIRST_GATE_ENV_VAR).ok();
-        let previous_closeout = std::env::var(STORY_CLOSEOUT_GATE_ENV_VAR).ok();
         std::env::set_var("CLAUDE_TARGET_OVERRIDE", &claude_home);
         std::env::set_var(REVIEW_GATE_ENV_VAR, "off");
         std::env::set_var(BRIEF_GATE_ENV_VAR, "nudge");
@@ -6351,17 +6348,11 @@ mod tests {
         let previous_research = std::env::var(RESEARCH_GATE_ENV_VAR).ok();
         let previous_story_first = std::env::var(STORY_FIRST_GATE_ENV_VAR).ok();
         let previous_closeout = std::env::var(STORY_CLOSEOUT_GATE_ENV_VAR).ok();
-        let previous_research = std::env::var(RESEARCH_GATE_ENV_VAR).ok();
-        let previous_story_first = std::env::var(STORY_FIRST_GATE_ENV_VAR).ok();
-        let previous_closeout = std::env::var(STORY_CLOSEOUT_GATE_ENV_VAR).ok();
         std::env::set_var("CLAUDE_TARGET_OVERRIDE", &claude_home);
         std::env::set_var(REVIEW_GATE_ENV_VAR, "off");
         std::env::set_var(RESEARCH_GATE_ENV_VAR, "off");
         std::env::set_var(STORY_FIRST_GATE_ENV_VAR, "off");
         std::env::set_var(STORY_CLOSEOUT_GATE_ENV_VAR, "off");
-        let previous_research = std::env::var(RESEARCH_GATE_ENV_VAR).ok();
-        let previous_story_first = std::env::var(STORY_FIRST_GATE_ENV_VAR).ok();
-        let previous_closeout = std::env::var(STORY_CLOSEOUT_GATE_ENV_VAR).ok();
         std::env::set_var("CLAUDE_TARGET_OVERRIDE", &claude_home);
         std::env::set_var(REVIEW_GATE_ENV_VAR, "off"); // isolate the brief gate
         std::env::remove_var(BRIEF_GATE_ENV_VAR); // default → escalate
@@ -6482,9 +6473,6 @@ mod tests {
         let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
         let previous_review = std::env::var(REVIEW_GATE_ENV_VAR).ok();
         let previous_brief = std::env::var(BRIEF_GATE_ENV_VAR).ok();
-        let previous_research = std::env::var(RESEARCH_GATE_ENV_VAR).ok();
-        let previous_story_first = std::env::var(STORY_FIRST_GATE_ENV_VAR).ok();
-        let previous_closeout = std::env::var(STORY_CLOSEOUT_GATE_ENV_VAR).ok();
         let previous_research = std::env::var(RESEARCH_GATE_ENV_VAR).ok();
         let previous_story_first = std::env::var(STORY_FIRST_GATE_ENV_VAR).ok();
         let previous_closeout = std::env::var(STORY_CLOSEOUT_GATE_ENV_VAR).ok();
@@ -6680,10 +6668,11 @@ mod tests {
         let previous_research = std::env::var(RESEARCH_GATE_ENV_VAR).ok();
         let previous_story_first = std::env::var(STORY_FIRST_GATE_ENV_VAR).ok();
         let previous_closeout = std::env::var(STORY_CLOSEOUT_GATE_ENV_VAR).ok();
-        let previous_closeout = std::env::var(STORY_CLOSEOUT_GATE_ENV_VAR).ok();
         std::env::set_var("CLAUDE_TARGET_OVERRIDE", &claude_home);
         std::env::set_var(REVIEW_GATE_ENV_VAR, "off");
         std::env::set_var(BRIEF_GATE_ENV_VAR, "off");
+        std::env::set_var(RESEARCH_GATE_ENV_VAR, "off");
+        std::env::set_var(STORY_FIRST_GATE_ENV_VAR, "off");
         std::env::remove_var(STORY_CLOSEOUT_GATE_ENV_VAR); // default → escalate (first fire nudges)
 
         // Workspace WITH an incomplete sprint.
@@ -6781,9 +6770,6 @@ mod tests {
         let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
         let previous_review = std::env::var(REVIEW_GATE_ENV_VAR).ok();
         let previous_brief = std::env::var(BRIEF_GATE_ENV_VAR).ok();
-        let previous_research = std::env::var(RESEARCH_GATE_ENV_VAR).ok();
-        let previous_story_first = std::env::var(STORY_FIRST_GATE_ENV_VAR).ok();
-        let previous_closeout = std::env::var(STORY_CLOSEOUT_GATE_ENV_VAR).ok();
         let previous_research = std::env::var(RESEARCH_GATE_ENV_VAR).ok();
         let previous_story_first = std::env::var(STORY_FIRST_GATE_ENV_VAR).ok();
         let previous_closeout = std::env::var(STORY_CLOSEOUT_GATE_ENV_VAR).ok();
@@ -7142,6 +7128,8 @@ mod tests {
         let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
         let previous_review = std::env::var(REVIEW_GATE_ENV_VAR).ok();
         let previous_brief = std::env::var(BRIEF_GATE_ENV_VAR).ok();
+        let previous_research = std::env::var(RESEARCH_GATE_ENV_VAR).ok();
+        let previous_story_first = std::env::var(STORY_FIRST_GATE_ENV_VAR).ok();
         let previous_closeout = std::env::var(STORY_CLOSEOUT_GATE_ENV_VAR).ok();
         let previous_memory = std::env::var(MEMORY_GATE_ENV_VAR).ok();
         let previous_learned = std::env::var(LEARNED_SKILL_GATE_ENV_VAR).ok();
@@ -7149,6 +7137,8 @@ mod tests {
         std::env::set_var("CLAUDE_TARGET_OVERRIDE", &claude_home);
         std::env::set_var(REVIEW_GATE_ENV_VAR, "off");
         std::env::set_var(BRIEF_GATE_ENV_VAR, "off");
+        std::env::set_var(RESEARCH_GATE_ENV_VAR, "off");
+        std::env::set_var(STORY_FIRST_GATE_ENV_VAR, "off");
         std::env::set_var(STORY_CLOSEOUT_GATE_ENV_VAR, "off");
         std::env::set_var(MEMORY_GATE_ENV_VAR, "off");
         std::env::set_var(LEARNED_SKILL_GATE_ENV_VAR, "off");
@@ -7254,6 +7244,8 @@ mod tests {
         for (var, prior) in [
             (REVIEW_GATE_ENV_VAR, previous_review),
             (BRIEF_GATE_ENV_VAR, previous_brief),
+            (RESEARCH_GATE_ENV_VAR, previous_research),
+            (STORY_FIRST_GATE_ENV_VAR, previous_story_first),
             (STORY_CLOSEOUT_GATE_ENV_VAR, previous_closeout),
             (MEMORY_GATE_ENV_VAR, previous_memory),
             (LEARNED_SKILL_GATE_ENV_VAR, previous_learned),
