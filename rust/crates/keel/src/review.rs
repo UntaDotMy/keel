@@ -438,6 +438,11 @@ fn run_review_gates_command(
         }
     }
 
+    // E2E verification awareness (informational, non-blocking)
+    if let Some(e2e_result) = check_e2e_config(&repository_root) {
+        gate_results.push(e2e_result);
+    }
+
     let (blocking_findings, warnings) = tally_gate_results(&gate_results);
 
     render_gate_results(
@@ -718,6 +723,47 @@ sys.exit(0)
             details: Some("import safety check not available".to_string()),
         },
     }
+}
+
+/// E2E config filenames to detect. When found at the repository root, the review
+/// gate reports their presence as an informational (non-blocking) note so the
+/// operator knows E2E verification is available.
+const E2E_CONFIG_FILENAMES: &[&str] = &[
+    "playwright.config.ts",
+    "playwright.config.js",
+    "playwright.config.mjs",
+    "cypress.config.ts",
+    "cypress.config.js",
+];
+
+/// Detect E2E test configuration at the repository root. Returns an
+/// informational (non-blocking) `GateResult` when a known config file exists,
+/// or `None` to skip silently when no E2E config is found.
+fn check_e2e_config(repository_root: &Path) -> Option<GateResult> {
+    for name in E2E_CONFIG_FILENAMES {
+        let path = repository_root.join(name);
+        if path.exists() {
+            let kind = if name.starts_with("playwright") {
+                "Playwright"
+            } else {
+                "Cypress"
+            };
+            let run_cmd = if kind == "Playwright" {
+                "npx playwright test"
+            } else {
+                "npx cypress run"
+            };
+            return Some(GateResult {
+                name: "e2e_verification".to_string(),
+                status: GateStatus::Pass,
+                blocking: false,
+                details: Some(format!(
+                    "E2E: {kind} config detected at {name}. Run `{run_cmd}` before merge."
+                )),
+            });
+        }
+    }
+    None
 }
 
 fn check_prettier(repository_root: &Path) -> GateResult {
@@ -1014,6 +1060,14 @@ fn run_review_surface_command(
         flag_set.string_value("base-ref"),
         surface_name,
     ));
+    gate_results.push(slop_gate(
+        &repository_root,
+        flag_set.string_value("base-ref"),
+        surface_name,
+    ));
+    if let Some(e2e_result) = check_e2e_config(&repository_root) {
+        gate_results.push(e2e_result);
+    }
     let (blocking_findings, warnings) = tally_gate_results(&gate_results);
 
     render_gate_results(
@@ -1166,6 +1220,35 @@ fn comment_style_gate(repository_root: &Path, base_ref: &str, surface_name: &str
         name: "comment_style".to_string(),
         status,
         blocking,
+        details: Some(details),
+    }
+}
+
+fn slop_gate(repository_root: &Path, base_ref: &str, surface_name: &str) -> GateResult {
+    let findings = if surface_name == "pre-commit" {
+        crate::slop_detector::lint_working_slop(repository_root)
+    } else {
+        crate::slop_detector::lint_added_slop(repository_root, base_ref)
+    };
+    let status = if findings.is_empty() {
+        GateStatus::Pass
+    } else {
+        GateStatus::Warn
+    };
+    let details = if findings.is_empty() {
+        "no AI-slop patterns detected".to_string()
+    } else {
+        let shown: Vec<String> = findings
+            .iter()
+            .take(5)
+            .map(|f| format!("{}:{} [{}] {}", f.file, f.line, f.pattern, f.message))
+            .collect();
+        format!("{} slop finding(s): {}", findings.len(), shown.join("; "))
+    };
+    GateResult {
+        name: "slop_detector".to_string(),
+        status,
+        blocking: false,
         details: Some(details),
     }
 }
@@ -2311,5 +2394,95 @@ mod tests {
         assert!(text.contains("\"blocking\""), "stdout: {text}");
         assert!(text.contains("\"branch\""), "stdout: {text}");
         let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn e2e_config_detected_when_playwright_exists() {
+        let temp = std::env::temp_dir().join(format!(
+            "keel-e2e-pw-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&temp).unwrap();
+        std::fs::write(temp.join("playwright.config.ts"), "export default {}").unwrap();
+
+        let result = check_e2e_config(&temp);
+        assert!(result.is_some(), "should detect playwright.config.ts");
+        let gate = result.unwrap();
+        assert_eq!(gate.name, "e2e_verification");
+        assert_eq!(gate.status, GateStatus::Pass);
+        assert!(!gate.blocking);
+        let details = gate.details.unwrap();
+        assert!(details.contains("Playwright"));
+        assert!(details.contains("npx playwright test"));
+
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn e2e_config_detected_when_cypress_exists() {
+        let temp = std::env::temp_dir().join(format!(
+            "keel-e2e-cy-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&temp).unwrap();
+        std::fs::write(temp.join("cypress.config.js"), "module.exports={}").unwrap();
+
+        let result = check_e2e_config(&temp);
+        assert!(result.is_some(), "should detect cypress.config.js");
+        let gate = result.unwrap();
+        assert_eq!(gate.name, "e2e_verification");
+        let details = gate.details.unwrap();
+        assert!(details.contains("Cypress"));
+        assert!(details.contains("npx cypress run"));
+
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn e2e_config_absent_returns_none() {
+        let temp = std::env::temp_dir().join(format!(
+            "keel-e2e-none-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&temp).unwrap();
+
+        let result = check_e2e_config(&temp);
+        assert!(result.is_none(), "no E2E config means no gate result");
+
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn e2e_config_not_blocking_in_tally() {
+        let e2e_gate = GateResult {
+            name: "e2e_verification".to_string(),
+            status: GateStatus::Pass,
+            blocking: false,
+            details: Some("Playwright detected".to_string()),
+        };
+        let results = vec![
+            GateResult {
+                name: "rust_tests".to_string(),
+                status: GateStatus::Fail,
+                blocking: true,
+                details: None,
+            },
+            e2e_gate,
+        ];
+        let (blocking, warnings) = tally_gate_results(&results);
+        assert_eq!(blocking, 1, "E2E should not add blocking findings");
+        assert_eq!(warnings, 0);
     }
 }

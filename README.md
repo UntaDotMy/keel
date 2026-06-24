@@ -53,6 +53,7 @@ The cast file ships in this repo. Render to GIF with `agg docs/demos/quickstart.
 
 | Surface | What it gives you |
 | --- | --- |
+| Brownfield gate (unique) | `preserve-existing-flow` forces owner-path evidence before editing established source. Review gates block edits when the flow-check artifact is missing. No other harness has this. |
 | Iron-law hooks | SessionStart loads the bootstrap skill, UserPromptSubmit restates the four rules, PostToolBatch nudges a reviewer pass, PreCompact refreshes SYSTEM_MAP. |
 | Workflow CLI | `workflow start`, `workflow route`, `workflow cockpit`, `workflow finish` — proof-first delivery rails. |
 | Review gates | Native `.claude/review.json`, `review pre-pr`, and CI-ready artifacts so non-trivial code never self-reviews. |
@@ -60,7 +61,7 @@ The cast file ships in this repo. Render to GIF with `agg docs/demos/quickstart.
 | Command compaction | `keel run -- <cmd>` produces compact output for noisy test/build/lint/log/search commands without dropping diagnostic signal. |
 | MCP server | `keel mcp serve` is registered through the plugin manifest so the harness auto-discovers 31 tools — `recall`, `system_map`, `run_command`, `recall_status`, `skill_route`, `skill_get`, `skill_list`, `memory_status`, `brief_list`, `brief_get`, `brief_create`, `system_map_refresh`, `context_brief`, `cli`, `sprint`, `user_story_lint`, `review`, `workflow`, `git_workflow`, `memory`, `gain`, `raw`, `config_audit`, `skill_lint`, `telemetry`, `orchestration`, `checkpoint`, `session`, `doctor`, `code_search`, `user_story` — plus the system-map and recall-status resources. |
 | Slash commands | `/keel:workflow`, `/keel:review`, `/keel:recall`, `/keel:gain` — discoverable `/`-menu wrappers over the implemented CLI surfaces. Shipped via the plugin manifest `commands` key. |
-| Specialist skills | 24 managed specialist profiles synced into `~/.claude/agent-profiles/*.toml`, invokable via the Skill tool. |
+| Specialist skills | Manifest-driven specialist profiles synced into `~/.claude/agent-profiles/*.toml`, invokable via the Skill tool. Run `keel skill-lint` for the live verified count. |
 
 ## Use as a harness Plugin
 
@@ -573,9 +574,11 @@ The one-line installer refreshes the managed harness hooks automatically, and `k
 
 The hook contract is explicit rerun guidance rather than hidden command mutation. The Rust hook installer manages 28 of the 30 lifecycle events in the `HOOK_EVENTS` table (`rust/crates/keel/src/hooks/claude.rs`), writing them to `~/.claude/settings.json`: `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PostToolBatch`, `PermissionRequest`, `PermissionDenied`, `Notification`, `UserPromptSubmit`, `UserPromptExpansion`, `Stop`, `StopFailure`, `SubagentStart`, `SubagentStop`, `TaskCreated`, `TaskCompleted`, `TeammateIdle`, `WorktreeCreate`, `WorktreeRemove`, `CwdChanged`, `PreCompact`, `PostCompact`, `SessionStart`, `SessionEnd`, `Setup`, `InstructionsLoaded`, `ConfigChange`, `Elicitation`, and `ElicitationResult`. `PreToolUse` owns command compaction before noisy output exists. `SessionStart` delivers the bootstrap skill once per session, `UserPromptSubmit` injects a short research-first iron-law restatement per prompt, and `PostToolBatch` injects the reviewer-on-close reminder before each next turn. The remaining lifecycle hooks are silent checkpoint surfaces reserved for memory and recovery wiring without shell-profile wrappers. Two events are defined in the dispatch table but skipped on install: `FileChanged` (its `matcher` doubles as a per-repo file watch list, so an empty matcher would ship dead config) and `MessageDisplay` (no matcher, fires on every assistant message, and emits `hookSpecificOutput.displayContent` — auto-installing would be a no-op or would silently rewrite on-screen text, so it stays opt-in). Ad-hoc invocations like `keel hook file-changed` and `keel hook message-display` still work.
 
-## Preserve Existing Flow Evidence
+## Preserve Existing Flow — The Brownfield Gate (Unique to keel)
 
-Existing source-file edits use a native preserve-flow gate before implementation. Docs-only, formatting-only, generated-only, and explicitly greenfield work are exempt; established source behavior needs owner-path evidence before review gates pass.
+This is keel's headline differentiator: **no other harness in the market forces owner-path evidence before editing established source code.** When an agent touches an existing file, `preserve-existing-flow` requires tracing who owns the current behavior, what the source of truth is, and what consumers depend on it — before any edit is made. Review gates block the edit when the flow-check artifact is missing or incomplete.
+
+Docs-only, formatting-only, generated-only, and explicitly greenfield work are exempt; established source behavior needs owner-path evidence before review gates pass.
 
 ```bash
 keel flow start --target-file rust/crates/keel/src/commands.rs --target-function Application::run

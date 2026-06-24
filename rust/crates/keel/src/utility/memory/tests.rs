@@ -1319,3 +1319,508 @@ fn memory_hook_redirects_to_lifecycle_hook_surface() {
         "stderr must point at the real hook surface: {stderr_text}"
     );
 }
+
+#[test]
+fn working_brief_record_summary_round_trips() {
+    let temporary_directory = tempdir_under("keel-wb-record-summary");
+    let claude_home = temporary_directory.join("claude-home");
+    fs::create_dir_all(&claude_home).expect("create claude home");
+
+    let mut stdout: Vec<u8> = Vec::new();
+    let mut stderr: Vec<u8> = Vec::new();
+    let exit_code = run_memory_command(
+        "memory",
+        &[
+            "working-brief".to_string(),
+            "write".to_string(),
+            "--id".to_string(),
+            "wb-sum-1".to_string(),
+            "--request".to_string(),
+            "ship auth".to_string(),
+            "--claude-home".to_string(),
+            claude_home.to_string_lossy().to_string(),
+        ],
+        &mut stdout,
+        &mut stderr,
+    );
+    assert_eq!(exit_code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
+
+    let mut summary_stdout: Vec<u8> = Vec::new();
+    let mut summary_stderr: Vec<u8> = Vec::new();
+    let exit_code = run_memory_command(
+        "memory",
+        &[
+            "working-brief".to_string(),
+            "record-summary".to_string(),
+            "--id".to_string(),
+            "wb-sum-1".to_string(),
+            "--summary".to_string(),
+            "Auth shipped: JWT + refresh token flow".to_string(),
+            "--claude-home".to_string(),
+            claude_home.to_string_lossy().to_string(),
+        ],
+        &mut summary_stdout,
+        &mut summary_stderr,
+    );
+    assert_eq!(
+        exit_code,
+        0,
+        "stderr: {}",
+        String::from_utf8_lossy(&summary_stderr)
+    );
+    let output = String::from_utf8_lossy(&summary_stdout).to_string();
+    assert!(output.contains("summary_id=wbs-"), "stdout: {output}");
+    assert!(output.contains("brief_id=wb-sum-1"), "stdout: {output}");
+    assert!(output.contains("JWT + refresh token"), "stdout: {output}");
+
+    let _ = fs::remove_dir_all(&temporary_directory);
+}
+
+#[test]
+fn working_brief_record_summary_requires_id_and_summary() {
+    let temporary_directory = tempdir_under("keel-wb-record-summary-required");
+    let claude_home = temporary_directory.join("claude-home");
+    fs::create_dir_all(&claude_home).expect("create claude home");
+
+    let mut stdout: Vec<u8> = Vec::new();
+    let mut stderr: Vec<u8> = Vec::new();
+    let exit_code = run_memory_command(
+        "memory",
+        &[
+            "working-brief".to_string(),
+            "record-summary".to_string(),
+            "--claude-home".to_string(),
+            claude_home.to_string_lossy().to_string(),
+        ],
+        &mut stdout,
+        &mut stderr,
+    );
+    assert_eq!(exit_code, 1);
+    let stderr_text = String::from_utf8_lossy(&stderr).to_string();
+    assert!(
+        stderr_text.contains("--id is required"),
+        "stderr: {stderr_text}"
+    );
+
+    let mut stdout2: Vec<u8> = Vec::new();
+    let mut stderr2: Vec<u8> = Vec::new();
+    let exit_code = run_memory_command(
+        "memory",
+        &[
+            "working-brief".to_string(),
+            "record-summary".to_string(),
+            "--id".to_string(),
+            "wb-x".to_string(),
+            "--claude-home".to_string(),
+            claude_home.to_string_lossy().to_string(),
+        ],
+        &mut stdout2,
+        &mut stderr2,
+    );
+    assert_eq!(exit_code, 1);
+    let stderr_text = String::from_utf8_lossy(&stderr2).to_string();
+    assert!(
+        stderr_text.contains("--summary is required"),
+        "stderr: {stderr_text}"
+    );
+
+    let _ = fs::remove_dir_all(&temporary_directory);
+}
+
+#[test]
+fn working_brief_record_summary_unknown_brief_returns_error() {
+    let temporary_directory = tempdir_under("keel-wb-record-summary-missing");
+    let claude_home = temporary_directory.join("claude-home");
+    fs::create_dir_all(&claude_home).expect("create claude home");
+
+    let mut stdout: Vec<u8> = Vec::new();
+    let mut stderr: Vec<u8> = Vec::new();
+    let exit_code = run_memory_command(
+        "memory",
+        &[
+            "working-brief".to_string(),
+            "record-summary".to_string(),
+            "--id".to_string(),
+            "wb-nonexistent".to_string(),
+            "--summary".to_string(),
+            "test".to_string(),
+            "--claude-home".to_string(),
+            claude_home.to_string_lossy().to_string(),
+        ],
+        &mut stdout,
+        &mut stderr,
+    );
+    assert_eq!(exit_code, 1);
+    let stderr_text = String::from_utf8_lossy(&stderr).to_string();
+    assert!(
+        stderr_text.contains("no brief with id wb-nonexistent"),
+        "stderr: {stderr_text}"
+    );
+
+    let _ = fs::remove_dir_all(&temporary_directory);
+}
+
+#[test]
+fn working_brief_record_summary_json_emits_structured_payload() {
+    let temporary_directory = tempdir_under("keel-wb-record-summary-json");
+    let claude_home = temporary_directory.join("claude-home");
+    fs::create_dir_all(&claude_home).expect("create claude home");
+
+    run_memory_command(
+        "memory",
+        &[
+            "working-brief".to_string(),
+            "write".to_string(),
+            "--id".to_string(),
+            "wb-sj".to_string(),
+            "--request".to_string(),
+            "test".to_string(),
+            "--claude-home".to_string(),
+            claude_home.to_string_lossy().to_string(),
+        ],
+        &mut Vec::new(),
+        &mut Vec::new(),
+    );
+
+    let mut stdout: Vec<u8> = Vec::new();
+    let mut stderr: Vec<u8> = Vec::new();
+    let exit_code = run_memory_command(
+        "memory",
+        &[
+            "working-brief".to_string(),
+            "record-summary".to_string(),
+            "--id".to_string(),
+            "wb-sj".to_string(),
+            "--summary".to_string(),
+            "done".to_string(),
+            "--claude-home".to_string(),
+            claude_home.to_string_lossy().to_string(),
+            "--json".to_string(),
+        ],
+        &mut stdout,
+        &mut stderr,
+    );
+    assert_eq!(exit_code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
+    let output = String::from_utf8_lossy(&stdout).to_string();
+    assert!(output.contains("\"recorded\": true"), "stdout: {output}");
+    assert!(output.contains("\"briefId\""), "stdout: {output}");
+    assert!(output.contains("\"summaryId\""), "stdout: {output}");
+
+    let _ = fs::remove_dir_all(&temporary_directory);
+}
+
+#[test]
+fn completion_gate_record_requirement_round_trips() {
+    let temporary_directory = tempdir_under("keel-cg-record-req");
+    let claude_home = temporary_directory.join("claude-home");
+    fs::create_dir_all(&claude_home).expect("create claude home");
+    seeded_open_entry(&claude_home, "wf-req", "wire auth");
+
+    let mut stdout: Vec<u8> = Vec::new();
+    let mut stderr: Vec<u8> = Vec::new();
+    let exit_code = run_memory_command(
+        "memory",
+        &[
+            "completion-gate".to_string(),
+            "record-requirement".to_string(),
+            "--id".to_string(),
+            "wf-req".to_string(),
+            "--requirement".to_string(),
+            "JWT refresh flow must be implemented".to_string(),
+            "--status".to_string(),
+            "pending".to_string(),
+            "--claude-home".to_string(),
+            claude_home.to_string_lossy().to_string(),
+        ],
+        &mut stdout,
+        &mut stderr,
+    );
+    assert_eq!(exit_code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
+    let output = String::from_utf8_lossy(&stdout).to_string();
+    assert!(output.contains("requirement_id=cgr-"), "stdout: {output}");
+    assert!(output.contains("entry_id=wf-req"), "stdout: {output}");
+    assert!(output.contains("JWT refresh flow"), "stdout: {output}");
+    assert!(output.contains("status: pending"), "stdout: {output}");
+
+    let _ = fs::remove_dir_all(&temporary_directory);
+}
+
+#[test]
+fn completion_gate_record_requirement_requires_id_and_requirement() {
+    let temporary_directory = tempdir_under("keel-cg-record-req-required");
+    let claude_home = temporary_directory.join("claude-home");
+    fs::create_dir_all(&claude_home).expect("create claude home");
+
+    let mut stdout: Vec<u8> = Vec::new();
+    let mut stderr: Vec<u8> = Vec::new();
+    let exit_code = run_memory_command(
+        "memory",
+        &[
+            "completion-gate".to_string(),
+            "record-requirement".to_string(),
+            "--claude-home".to_string(),
+            claude_home.to_string_lossy().to_string(),
+        ],
+        &mut stdout,
+        &mut stderr,
+    );
+    assert_eq!(exit_code, 1);
+    let stderr_text = String::from_utf8_lossy(&stderr).to_string();
+    assert!(
+        stderr_text.contains("--id is required"),
+        "stderr: {stderr_text}"
+    );
+
+    let mut stdout2: Vec<u8> = Vec::new();
+    let mut stderr2: Vec<u8> = Vec::new();
+    let exit_code = run_memory_command(
+        "memory",
+        &[
+            "completion-gate".to_string(),
+            "record-requirement".to_string(),
+            "--id".to_string(),
+            "wf-x".to_string(),
+            "--claude-home".to_string(),
+            claude_home.to_string_lossy().to_string(),
+        ],
+        &mut stdout2,
+        &mut stderr2,
+    );
+    assert_eq!(exit_code, 1);
+    let stderr_text = String::from_utf8_lossy(&stderr2).to_string();
+    assert!(
+        stderr_text.contains("--requirement is required"),
+        "stderr: {stderr_text}"
+    );
+
+    let _ = fs::remove_dir_all(&temporary_directory);
+}
+
+#[test]
+fn completion_gate_record_requirement_unknown_entry_returns_error() {
+    let temporary_directory = tempdir_under("keel-cg-record-req-missing");
+    let claude_home = temporary_directory.join("claude-home");
+    fs::create_dir_all(&claude_home).expect("create claude home");
+
+    let mut stdout: Vec<u8> = Vec::new();
+    let mut stderr: Vec<u8> = Vec::new();
+    let exit_code = run_memory_command(
+        "memory",
+        &[
+            "completion-gate".to_string(),
+            "record-requirement".to_string(),
+            "--id".to_string(),
+            "wf-nope".to_string(),
+            "--requirement".to_string(),
+            "test".to_string(),
+            "--claude-home".to_string(),
+            claude_home.to_string_lossy().to_string(),
+        ],
+        &mut stdout,
+        &mut stderr,
+    );
+    assert_eq!(exit_code, 1);
+    let stderr_text = String::from_utf8_lossy(&stderr).to_string();
+    assert!(
+        stderr_text.contains("no ledger entry with id wf-nope"),
+        "stderr: {stderr_text}"
+    );
+
+    let _ = fs::remove_dir_all(&temporary_directory);
+}
+
+#[test]
+fn completion_gate_record_requirement_json_emits_structured_payload() {
+    let temporary_directory = tempdir_under("keel-cg-record-req-json");
+    let claude_home = temporary_directory.join("claude-home");
+    fs::create_dir_all(&claude_home).expect("create claude home");
+    seeded_open_entry(&claude_home, "wf-rj", "structured");
+
+    let mut stdout: Vec<u8> = Vec::new();
+    let mut stderr: Vec<u8> = Vec::new();
+    let exit_code = run_memory_command(
+        "memory",
+        &[
+            "completion-gate".to_string(),
+            "record-requirement".to_string(),
+            "--id".to_string(),
+            "wf-rj".to_string(),
+            "--requirement".to_string(),
+            "must work".to_string(),
+            "--claude-home".to_string(),
+            claude_home.to_string_lossy().to_string(),
+            "--json".to_string(),
+        ],
+        &mut stdout,
+        &mut stderr,
+    );
+    assert_eq!(exit_code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
+    let output = String::from_utf8_lossy(&stdout).to_string();
+    assert!(output.contains("\"recorded\": true"), "stdout: {output}");
+    assert!(output.contains("\"requirementId\""), "stdout: {output}");
+    assert!(output.contains("\"entryId\""), "stdout: {output}");
+    assert!(output.contains("\"requirement\""), "stdout: {output}");
+
+    let _ = fs::remove_dir_all(&temporary_directory);
+}
+
+#[test]
+fn consolidate_empty_home_reports_no_records() {
+    let temporary_directory = tempdir_under("keel-consolidate-empty");
+    let claude_home = temporary_directory.join("claude-home");
+    fs::create_dir_all(&claude_home).expect("create claude home");
+
+    let mut stdout: Vec<u8> = Vec::new();
+    let mut stderr: Vec<u8> = Vec::new();
+    let exit_code = run_memory_command(
+        "memory",
+        &[
+            "consolidate".to_string(),
+            "--claude-home".to_string(),
+            claude_home.to_string_lossy().to_string(),
+        ],
+        &mut stdout,
+        &mut stderr,
+    );
+    assert_eq!(exit_code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
+    let output = String::from_utf8_lossy(&stdout).to_string();
+    assert!(
+        output.contains("no records to consolidate"),
+        "stdout: {output}"
+    );
+
+    let _ = fs::remove_dir_all(&temporary_directory);
+}
+
+#[test]
+fn consolidate_counts_family_records() {
+    let temporary_directory = tempdir_under("keel-consolidate-counts");
+    let claude_home = temporary_directory.join("claude-home");
+    fs::create_dir_all(&claude_home).expect("create claude home");
+
+    run_memory_command(
+        "memory",
+        &[
+            "working-brief".to_string(),
+            "write".to_string(),
+            "--id".to_string(),
+            "wb-con1".to_string(),
+            "--request".to_string(),
+            "first".to_string(),
+            "--claude-home".to_string(),
+            claude_home.to_string_lossy().to_string(),
+        ],
+        &mut Vec::new(),
+        &mut Vec::new(),
+    );
+
+    let mut stdout: Vec<u8> = Vec::new();
+    let mut stderr: Vec<u8> = Vec::new();
+    let exit_code = run_memory_command(
+        "memory",
+        &[
+            "consolidate".to_string(),
+            "--claude-home".to_string(),
+            claude_home.to_string_lossy().to_string(),
+        ],
+        &mut stdout,
+        &mut stderr,
+    );
+    assert_eq!(exit_code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
+    let output = String::from_utf8_lossy(&stdout).to_string();
+    assert!(output.contains("total records"), "stdout: {output}");
+
+    let _ = fs::remove_dir_all(&temporary_directory);
+}
+
+#[test]
+fn consolidate_json_emits_structured_payload() {
+    let temporary_directory = tempdir_under("keel-consolidate-json");
+    let claude_home = temporary_directory.join("claude-home");
+    fs::create_dir_all(&claude_home).expect("create claude home");
+
+    run_memory_command(
+        "memory",
+        &[
+            "working-brief".to_string(),
+            "write".to_string(),
+            "--id".to_string(),
+            "wb-cj".to_string(),
+            "--request".to_string(),
+            "json test".to_string(),
+            "--claude-home".to_string(),
+            claude_home.to_string_lossy().to_string(),
+        ],
+        &mut Vec::new(),
+        &mut Vec::new(),
+    );
+
+    let mut stdout: Vec<u8> = Vec::new();
+    let mut stderr: Vec<u8> = Vec::new();
+    let exit_code = run_memory_command(
+        "memory",
+        &[
+            "consolidate".to_string(),
+            "--claude-home".to_string(),
+            claude_home.to_string_lossy().to_string(),
+            "--json".to_string(),
+        ],
+        &mut stdout,
+        &mut stderr,
+    );
+    assert_eq!(exit_code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
+    let output = String::from_utf8_lossy(&stdout).to_string();
+    assert!(output.contains("\"families\""), "stdout: {output}");
+    assert!(output.contains("\"totalRecords\""), "stdout: {output}");
+
+    let _ = fs::remove_dir_all(&temporary_directory);
+}
+
+#[test]
+fn working_brief_help_lists_record_summary() {
+    let mut stdout: Vec<u8> = Vec::new();
+    let mut stderr: Vec<u8> = Vec::new();
+    let exit_code = run_memory_command(
+        "memory",
+        &["working-brief".to_string(), "--help".to_string()],
+        &mut stdout,
+        &mut stderr,
+    );
+    assert_eq!(exit_code, 0);
+    let output = String::from_utf8_lossy(&stdout).to_string();
+    assert!(
+        output.contains("record-summary"),
+        "help should list record-summary: {output}"
+    );
+}
+
+#[test]
+fn completion_gate_help_lists_record_requirement() {
+    let mut stdout: Vec<u8> = Vec::new();
+    let mut stderr: Vec<u8> = Vec::new();
+    let exit_code = run_memory_command(
+        "memory",
+        &["completion-gate".to_string(), "--help".to_string()],
+        &mut stdout,
+        &mut stderr,
+    );
+    assert_eq!(exit_code, 0);
+    let output = String::from_utf8_lossy(&stdout).to_string();
+    assert!(
+        output.contains("record-requirement"),
+        "help should list record-requirement: {output}"
+    );
+}
+
+#[test]
+fn memory_help_lists_consolidate() {
+    let mut stdout: Vec<u8> = Vec::new();
+    let mut stderr: Vec<u8> = Vec::new();
+    let exit_code = run_memory_command("memory", &["--help".to_string()], &mut stdout, &mut stderr);
+    assert_eq!(exit_code, 0);
+    let output = String::from_utf8_lossy(&stdout).to_string();
+    assert!(
+        output.contains("consolidate"),
+        "help should list consolidate: {output}"
+    );
+}

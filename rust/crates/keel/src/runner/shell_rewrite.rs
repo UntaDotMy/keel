@@ -14,6 +14,26 @@ pub struct RewriteDecision {
     pub reason: String,
 }
 
+/// A destructive-command finding returned by [`detect_destructive_command`].
+///
+/// The PreToolUse hook turns this into a `permissionDecision: "deny"` payload so
+/// the harness asks the user explicitly before the command runs, instead of
+/// transparently rewriting it into `keel run --` and silently allowing it.
+/// `pattern` is the human-readable rule that matched (for the deny reason);
+/// `severity` lets the hook distinguish "always block" from "warn and ask".
+pub struct DestructiveFinding {
+    pub pattern: &'static str,
+    pub severity: DestructiveSeverity,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DestructiveSeverity {
+    /// Block by default — the command is almost certainly wrong as written.
+    Block,
+    /// Ask the user — the command may be intentional but carries real risk.
+    Warn,
+}
+
 pub enum RewriteShell {
     Bash,
     PlatformDefault,
@@ -861,6 +881,139 @@ pub fn is_supported_noisy_command(fields: &[String]) -> bool {
         && fields.get(2).map(String::as_str) == Some("pytest")
 }
 
+pub fn detect_destructive_command(fields: &[String]) -> Option<DestructiveFinding> {
+    let command = fields.first().map(|value| command_base_name(value))?;
+
+    match command.as_str() {
+        "rm" => {
+            let has_recursive = fields.iter().any(|arg| {
+                arg == "-r"
+                    || arg == "-rf"
+                    || arg == "-fr"
+                    || arg == "-R"
+                    || arg == "--recursive"
+                    || (arg.starts_with('-')
+                        && arg.len() > 1
+                        && arg.contains('r')
+                        && arg.contains('f'))
+            });
+            let has_force = fields.iter().any(|arg| {
+                arg == "-f"
+                    || arg == "--force"
+                    || (arg.starts_with('-')
+                        && arg.len() > 1
+                        && !arg.starts_with("--")
+                        && arg.contains('f'))
+            });
+            let targets_root = fields.iter().any(|arg| {
+                arg == "/"
+                    || arg == "/*"
+                    || arg.starts_with("/home")
+                    || arg.starts_with("/usr")
+                    || arg == "~"
+                    || arg.starts_with("~/")
+            });
+            let targets_many = fields.iter().filter(|arg| !arg.starts_with('-')).count() > 5;
+
+            if has_recursive && has_force && targets_root {
+                return Some(DestructiveFinding {
+                    pattern: "rm -rf on system root",
+                    severity: DestructiveSeverity::Block,
+                });
+            }
+            if has_recursive && (targets_root || targets_many) {
+                return Some(DestructiveFinding {
+                    pattern: "rm -r on broad target",
+                    severity: DestructiveSeverity::Warn,
+                });
+            }
+        }
+        "git" if fields.get(1).map(String::as_str) == Some("push") => {
+            let has_force = fields
+                .iter()
+                .any(|arg| arg == "-f" || arg == "--force" || arg == "--force-with-lease");
+            let targets_protected = fields
+                .iter()
+                .any(|arg| arg == "main" || arg == "master" || arg == "develop" || arg == "dev");
+
+            if has_force && targets_protected {
+                return Some(DestructiveFinding {
+                    pattern: "git push --force to protected branch",
+                    severity: DestructiveSeverity::Block,
+                });
+            }
+            if has_force {
+                return Some(DestructiveFinding {
+                    pattern: "git push --force",
+                    severity: DestructiveSeverity::Warn,
+                });
+            }
+        }
+        "chmod" | "chown" | "chgrp" => {
+            let has_recursive = fields.iter().any(|arg| arg == "-R" || arg == "--recursive");
+            let targets_root = fields.iter().any(|arg| {
+                arg == "/" || arg.starts_with("/home") || arg.starts_with("/usr") || arg == "~"
+            });
+            let wide_permissions = fields
+                .iter()
+                .any(|arg| arg == "777" || arg == "a+rwx" || arg == "+x" || arg.contains("777"));
+
+            if has_recursive && (targets_root || wide_permissions) {
+                return Some(DestructiveFinding {
+                    pattern: "recursive permission change on broad target",
+                    severity: DestructiveSeverity::Warn,
+                });
+            }
+        }
+        "dd" => {
+            let writes_device = fields.iter().any(|arg| {
+                arg.starts_with("of=/dev/")
+                    || arg.starts_with("of=/dev/sd")
+                    || arg.starts_with("of=/dev/nvme")
+            });
+            if writes_device {
+                return Some(DestructiveFinding {
+                    pattern: "dd writing to block device",
+                    severity: DestructiveSeverity::Block,
+                });
+            }
+        }
+        "fdisk" | "parted" | "gdisk" => {
+            return Some(DestructiveFinding {
+                pattern: "disk formatting/partitioning tool",
+                severity: DestructiveSeverity::Block,
+            });
+        }
+        _ if command.starts_with("mkfs") => {
+            return Some(DestructiveFinding {
+                pattern: "disk formatting/partitioning tool",
+                severity: DestructiveSeverity::Block,
+            });
+        }
+        _ => {}
+    }
+
+    let joined = fields.join(" ");
+    let joined_lower = joined.to_ascii_lowercase();
+
+    if joined_lower.contains("drop database") || joined_lower.contains("drop table") {
+        return Some(DestructiveFinding {
+            pattern: "DROP DATABASE or DROP TABLE statement",
+            severity: DestructiveSeverity::Block,
+        });
+    }
+    if joined_lower.contains("truncate table")
+        || joined_lower.contains("delete from") && !joined_lower.contains("where")
+    {
+        return Some(DestructiveFinding {
+            pattern: "TRUNCATE or unqualified DELETE",
+            severity: DestructiveSeverity::Warn,
+        });
+    }
+
+    None
+}
+
 pub fn command_base_name(command: &str) -> String {
     let normalized = command.replace('\\', "/");
 
@@ -1283,5 +1436,141 @@ mod tests {
                 rewrite.rewritten_command
             );
         }
+    }
+
+    fn fields(args: &[&str]) -> Vec<String> {
+        args.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn destructive_rm_rf_on_root_is_blocked() {
+        let finding = detect_destructive_command(&fields(&["rm", "-rf", "/"]));
+        assert!(finding.is_some());
+        assert_eq!(finding.unwrap().severity, DestructiveSeverity::Block);
+    }
+
+    #[test]
+    fn destructive_rm_rf_on_home_is_blocked() {
+        let finding = detect_destructive_command(&fields(&["rm", "-rf", "/home"]));
+        assert!(finding.is_some());
+        assert_eq!(finding.unwrap().severity, DestructiveSeverity::Block);
+    }
+
+    #[test]
+    fn destructive_rm_recursive_on_broad_target_is_warned() {
+        let finding =
+            detect_destructive_command(&fields(&["rm", "-r", "a", "b", "c", "d", "e", "f"]));
+        assert!(finding.is_some());
+        assert_eq!(finding.unwrap().severity, DestructiveSeverity::Warn);
+    }
+
+    #[test]
+    fn destructive_rm_single_file_is_not_flagged() {
+        let finding = detect_destructive_command(&fields(&["rm", "file.txt"]));
+        assert!(finding.is_none());
+    }
+
+    #[test]
+    fn destructive_git_push_force_to_main_is_blocked() {
+        let finding =
+            detect_destructive_command(&fields(&["git", "push", "--force", "origin", "main"]));
+        assert!(finding.is_some());
+        assert_eq!(finding.unwrap().severity, DestructiveSeverity::Block);
+    }
+
+    #[test]
+    fn destructive_git_push_force_to_feature_is_warned() {
+        let finding =
+            detect_destructive_command(&fields(&["git", "push", "-f", "origin", "feature/x"]));
+        assert!(finding.is_some());
+        assert_eq!(finding.unwrap().severity, DestructiveSeverity::Warn);
+    }
+
+    #[test]
+    fn destructive_git_push_normal_is_not_flagged() {
+        let finding = detect_destructive_command(&fields(&["git", "push", "origin", "main"]));
+        assert!(finding.is_none());
+    }
+
+    #[test]
+    fn destructive_chmod_recursive_777_is_warned() {
+        let finding = detect_destructive_command(&fields(&["chmod", "-R", "777", "/var/www"]));
+        assert!(finding.is_some());
+        assert_eq!(finding.unwrap().severity, DestructiveSeverity::Warn);
+    }
+
+    #[test]
+    fn destructive_dd_to_block_device_is_blocked() {
+        let finding =
+            detect_destructive_command(&fields(&["dd", "if=/dev/zero", "of=/dev/sda", "bs=1M"]));
+        assert!(finding.is_some());
+        assert_eq!(finding.unwrap().severity, DestructiveSeverity::Block);
+    }
+
+    #[test]
+    fn destructive_mkfs_is_blocked() {
+        let finding = detect_destructive_command(&fields(&["mkfs.ext4", "/dev/sda1"]));
+        assert!(finding.is_some());
+        assert_eq!(finding.unwrap().severity, DestructiveSeverity::Block);
+    }
+
+    #[test]
+    fn destructive_sql_drop_database_is_blocked() {
+        let finding =
+            detect_destructive_command(&fields(&["psql", "-c", "DROP DATABASE production"]));
+        assert!(finding.is_some());
+        assert_eq!(finding.unwrap().severity, DestructiveSeverity::Block);
+    }
+
+    #[test]
+    fn destructive_sql_drop_table_is_blocked() {
+        let finding = detect_destructive_command(&fields(&["mysql", "-e", "DROP TABLE users"]));
+        assert!(finding.is_some());
+        assert_eq!(finding.unwrap().severity, DestructiveSeverity::Block);
+    }
+
+    #[test]
+    fn destructive_sql_truncate_is_warned() {
+        let finding = detect_destructive_command(&fields(&["psql", "-c", "TRUNCATE TABLE logs"]));
+        assert!(finding.is_some());
+        assert_eq!(finding.unwrap().severity, DestructiveSeverity::Warn);
+    }
+
+    #[test]
+    fn destructive_sql_delete_without_where_is_warned() {
+        let finding = detect_destructive_command(&fields(&["mysql", "-e", "DELETE FROM logs"]));
+        assert!(finding.is_some());
+        assert_eq!(finding.unwrap().severity, DestructiveSeverity::Warn);
+    }
+
+    #[test]
+    fn destructive_sql_delete_with_where_is_not_flagged() {
+        let finding =
+            detect_destructive_command(&fields(&["psql", "-c", "DELETE FROM logs WHERE id = 1"]));
+        assert!(finding.is_none());
+    }
+
+    #[test]
+    fn destructive_safe_commands_are_not_flagged() {
+        for safe in &[
+            &["ls", "-la"][..],
+            &["git", "status"],
+            &["cargo", "test"],
+            &["npm", "install"],
+            &["docker", "ps"],
+            &["kubectl", "get", "pods"],
+        ] {
+            let finding = detect_destructive_command(&fields(safe));
+            assert!(
+                finding.is_none(),
+                "safe command {safe:?} should not be flagged"
+            );
+        }
+    }
+
+    #[test]
+    fn destructive_empty_command_is_not_flagged() {
+        let finding = detect_destructive_command(&fields(&[]));
+        assert!(finding.is_none());
     }
 }

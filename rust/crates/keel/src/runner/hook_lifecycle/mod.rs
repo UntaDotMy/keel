@@ -751,6 +751,42 @@ fn run_hook_pre_tool_use(standard_output: &mut dyn Write, standard_error: &mut d
         .and_then(JsonDocument::as_str)
         .unwrap_or_default();
 
+    let analysis = crate::runner::shell_rewrite::analyze_command_text(command);
+    if let Some(finding) =
+        crate::runner::shell_rewrite::detect_destructive_command(&analysis.effective_fields)
+    {
+        let reason = match finding.severity {
+            crate::runner::shell_rewrite::DestructiveSeverity::Block => format!(
+                "[keel] Destructive command blocked: {}. This command is almost certainly unsafe. \
+                 Use a safer alternative.",
+                finding.pattern
+            ),
+            crate::runner::shell_rewrite::DestructiveSeverity::Warn => format!(
+                "[keel] Destructive command detected: {}. Confirm this is intentional before proceeding.",
+                finding.pattern
+            ),
+        };
+        let deny_payload = serde_json::json!({
+            "hookSpecificOutput": {
+                "hookEventName": MANAGED_PRE_TOOL_USE_EVENT,
+                "permissionDecision": "deny",
+                "permissionDecisionReason": reason,
+            }
+        });
+        match serde_json::to_string_pretty(&deny_payload) {
+            Ok(rendered) => {
+                let _ = writeln!(standard_output, "{rendered}");
+            }
+            Err(error) => {
+                let _ = writeln!(
+                    standard_error,
+                    "Unable to render destructive-command deny payload: {error}"
+                );
+            }
+        }
+        return 0;
+    }
+
     let rewrite = rewrite_command_text_for_shell(command, RewriteShell::Bash);
 
     if !rewrite.supported {

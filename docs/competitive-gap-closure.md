@@ -17,7 +17,7 @@ to the official harness docs at code.claude.com as of the audit date.
 | Project | Identity | License | Overlap with keel |
 | --- | --- | --- | --- |
 | Official harness | The host platform (code.claude.com/docs) | Anthropic | The baseline keel extends; ~30 hook events, skills (commands merged in), built-in subagents, checkpointing/rewind, MCP Tool Search, Agent SDK. |
-| RTK ("Rust Token Killer", `rtk-ai/rtk`) | Single-binary Rust command-output compaction proxy | Apache-2.0 | Near-identical to keel's compaction proxy; "100+ supported commands" (mostly subcommand breadth within categories we also cover — 8 git subcmds, 8 aws subcmds, etc.), `gain`/`discover`/`session`, tee recovery. Verified from the upstream README: **no auto-rewrite on native Windows** (falls back to CLAUDE.md injection) and **never intercepts Read/Grep/Glob** (Bash-tool-only hook). |
+| RTK ("Rust Token Killer", `rtk-ai/rtk`) | Single-binary Rust command-output compaction proxy | Apache-2.0 | Near-identical to keel's compaction proxy; "100+ supported commands" (mostly subcommand breadth within categories we also cover — 8 git subcmds, 8 aws subcmds, etc.), `gain`/`discover`/`session`, tee recovery, TOML filter DSL (8-stage declarative user-extensible pipeline — keel lacks this), 14 agent integrations. Verified from the upstream README (as of earlier audit): **no auto-rewrite on native Windows** (falls back to CLAUDE.md injection) and **never intercepts Read/Grep/Glob** (Bash-tool-only hook). *Staleness note: this Windows claim was verified against an earlier RTK version. RTK v0.42.4 (current as of 2026-06) should be re-verified — the project has shipped 141+ releases and may have added Windows hook support since the original audit.* |
 | caveman (`JuliusBrussee/caveman`) | Skill that compresses the model's own replies (terse "caveman speak") | MIT | Token economy on the **output** side (keel only compacts command **output**); ships slash commands, statusline, MCP middleware. |
 | superpowers (`obra/superpowers`) | Opinionated TDD methodology as auto-triggering skills | MIT | Skills + workflow doctrine; `writing-skills` meta-skill with a subagent eval harness; two-stage review loop (walked back to inline self-review checklists in v5.0.6 for speed); visual brainstorming. v5.1.0 (May 2026) removed its legacy slash commands and named code-reviewer agent. Cross-harness (this host/Codex/Cursor/Gemini/Copilot) — the one axis it still leads. After the methodology-completion pass, keel ships named first-class equivalents for **all 14** of its methodology skills (see scorecard). |
 | ECC ("Everything the harness", `affaan-m/ECC`) | Multi-harness operator framework | MIT | Whole operator posture at larger scale; **Instincts** (confidence-scored learned behaviors that evolve into skills), **AgentShield** (adversarial config security audit), advisor CLI, cross-harness adapters. |
@@ -192,6 +192,155 @@ cross-platform statusline savings badge, and hook-count doc accuracy) shipped
 earlier in the same pass and remains in place; the doctrine docs were then
 reconciled to describe these commands as implemented rather than planned.
 
+## Phase 2: Runtime guardrails (in progress)
+
+Five Rust-runtime features closing the remaining operational gaps against RTK
+and the native baseline. Implemented one at a time, each verified with unit
+tests before moving to the next.
+
+### G1: Destructive-command guard — shipped
+
+**What:** `detect_destructive_command()` in `runner/shell_rewrite.rs`
+pattern-matches irreversible shell commands before they execute and emits a
+harness `permissionDecision: "deny"` payload that blocks the tool call.
+
+**Patterns blocked (severity = Block):**
+- `rm -rf /`, `rm -rf ~`, `rm -rf $HOME` — recursive delete on root/home
+- `rm -rf /*` — root-glob recursive delete
+- `git push --force` / `git push -f` to `main`, `master`, or `dev` — protected-branch force push
+- `dd of=/dev/sdX` — raw write to block device
+- `mkfs.ext4` / `mkfs.*` — filesystem format
+- `DROP DATABASE`, `DROP TABLE` — SQL schema destruction
+
+**Patterns warned (severity = Warn):**
+- `rm -r` on broad targets (`/`, `~`, `*`, `.`, `..`) — recursive delete on broad scope
+- `git push --force` to non-protected branches — force push (not blocked, but flagged)
+- `chmod -R 777` — world-writable recursive permission change
+- `DELETE FROM` without `WHERE` clause — unconditional table wipe
+- `TRUNCATE TABLE` — table wipe
+
+**Wiring:** Called from `run_hook_pre_tool_use()` in `hook_lifecycle/mod.rs`
+before the rewrite step. `analyze_command_text` → `detect_destructive_command`
+→ if a Block finding is returned, emit deny payload with the finding as the
+reason; if only Warn findings, emit the warning in the allow payload so the
+agent sees the caution but the command proceeds.
+
+**Tests:** 17 unit tests in `shell_rewrite.rs` covering each pattern class,
+safe-command false positives (normal `rm`, `git push`, `chmod`, `DELETE` with
+`WHERE`), and the Block/Warn severity split. All pass.
+
+**Cockpit color fix (collateral):** The cockpit rendering in `workflow.rs`
+had four hardcoded ANSI escape sequences (`\x1b[1;36m`, `\x1b[33m`,
+`\x1b[1;33m`, `\x1b[1;32m`) that bypassed the `colorize()` function and
+respected neither `--color` nor `--no-color`. Routed all four through
+`colorize()` so `ColorMode::Off` strips them and `ColorMode::On` emits them.
+The two cockpit color tests (`cockpit_with_no_color_flag_has_no_ansi_codes`,
+`cockpit_with_color_flag_has_ansi_codes`) now pass.
+
+### G2: AI-slop detector — shipped
+
+**What:** `slop_detector.rs` module scans added diff lines for the 5 most common
+AI-generated code smells. Wired into `review pre-commit` and `review pre-pr` as
+a Warn-level (advisory, non-blocking) gate alongside the existing
+`comment_style` gate.
+
+**Patterns detected:**
+1. **Dead defensive code** — `let _ = expr;` discarding a Result without
+   explanation, empty `if let Ok(_) =` / `if let Some(_) =` arms that discard
+   the matched value
+2. **Over-commenting** — 4+ consecutive comment lines for a single code line
+   (the model over-explaining trivial code)
+3. **Phantom flags** — function parameters prefixed with `_` (e.g.
+   `fn process(data, _verbose: bool)`) indicating an unused parameter the model
+   added "just in case"
+4. **Hallucinated APIs** — `.fetch_all()` on non-ORM types, `dotenv().unwrap()`
+   (panics on missing .env), `serde_json::from_str()` without `?` or `match`
+5. **N+1 queries** — `.find()`, `.filter()`, `.position()`, `.contains()` called
+   on a collection declared outside a loop, inside that loop body (O(n*m) bug)
+
+**Wiring:** `slop_gate()` in `review.rs` calls `lint_working_slop()` (pre-commit)
+or `lint_added_slop()` (pre-pr), returns a `GateResult` with `blocking: false`
+and `GateStatus::Warn` when findings exist. The gate appears in the review
+output as `slop_detector` alongside `comment_style`, `cargo_fmt`, `cargo_clippy`,
+etc.
+
+**Tests:** 15 unit tests in `slop_detector.rs` covering each pattern class,
+exemptions (commented discards, handled serde, 2-comment blocks), context-line
+exclusion, and clean-code no-findings. All pass.
+
+### G3: shipped — Compaction loss visibility
+
+**What**: Added `CompactionLossSummary` struct and `load_compaction_loss_today()`
+public function to `gain.rs`. Added `render_compaction_loss()` to `workflow.rs`
+that renders a COMPACTION LOSS panel in the cockpit between TEAM LANES and the
+bottom border. The panel shows today's commands observed, commands compacted,
+tokens before → after, tokens saved, and savings percentage. When no compaction
+events exist for today, it displays "(no compaction events today)".
+
+**Where**:
+- `rust/crates/keel/src/utility/gain.rs` — `CompactionLossSummary` struct,
+  `load_compaction_loss_today()` function (reuses `load_gain_summary` with 24h
+  cutoff)
+- `rust/crates/keel/src/utility/memory/workflow.rs` — `render_compaction_loss()`
+  function, wired into cockpit rendering after `render_team_lanes`
+
+**Tests**: 3 unit tests in `gain.rs` (savings_percent zero case, savings_percent
+calculation, from real events), 2 cockpit tests in `workflow.rs` (section
+presence, no-color no-ANSI). All 5 pass.
+
+### G4–G5: planned
+
+- **G4: PM tool integration** — sync working briefs to Linear/Jira so the
+  workflow ledger stays in sync with external PM tools.
+
+### G5: shipped — TOML filter DSL
+
+**What**: Extended the existing `DeclarativeFilter` in `proxy/filters.rs` with a
+`stages` field that accepts an ordered pipeline of transformation stages. Each
+stage is a TOML table with `type` tag selecting the transformation:
+
+- `strip_ansi` — remove ANSI escape sequences
+- `strip` — remove lines matching any pattern
+- `keep` — keep only lines matching any pattern
+- `dedup` — collapse consecutive identical lines with `(Nx)` count
+- `head_tail` — keep first N + last N lines with omission marker
+- `signal` — keep only error/warning/failure signal lines
+- `json_structure` — compact JSON to type placeholders (`<str>`, `<num>`, etc.)
+- `redact` — mask lines containing secret-like patterns
+
+Stages run in declared order. When `stages` is empty, the legacy `keep`/`remove`
+behavior is preserved for backwards compatibility.
+
+**TOML example**:
+```toml
+[[filter]]
+name = "cargo-test-staged"
+command = "cargo test"
+match_mode = "starts_with"
+
+[[filter.stages]]
+type = "strip_ansi"
+
+[[filter.stages]]
+type = "strip"
+patterns = ["warning", "deprecated"]
+
+[[filter.stages]]
+type = "signal"
+max_lines = 20
+
+[[filter.stages]]
+type = "head_tail"
+head = 5
+tail = 5
+```
+
+**Where**: `rust/crates/keel/src/proxy/filters.rs` — `FilterStage` enum,
+`apply_stages()` function, `signal_lines()` helper, updated `compact()` method.
+
+**Tests**: 6 new tests (staged TOML parsing, strip+keep pipeline, head_tail,
+dedup, redact, json_structure). All 15 filter tests pass.
+
 ## Head-to-head scorecard (post-pass)
 
 Capability-based, after the autonomous-learning pass. Y = present, ~ = partial,
@@ -219,14 +368,16 @@ N = absent.
 | Brownfield preserve-existing-flow gate | Y (unique) | N | N | N | N | N | N |
 | Auto-refreshed system map + recall index | Y | ~ (memory) | ~ | N | N | N | N |
 | Git-backed code checkpoints | Y | N | ~ | N | N | N | N |
-| Cross-harness adapters (Codex/Cursor/Gemini) | N (by design) | Y | Y | Y | Y | Y | ~ |
+| Cross-harness adapters (Codex/Cursor/Gemini) | ~ (adapters exist, shallow depth) | Y | Y | Y | Y | Y | ~ |
 | Zero-manual automation (all hook-driven) | Y | ~ (CLI agent) | ~ (opt-in) | ~ | Y (hook, POSIX only) | ~ | N |
 
 **Where we still lose (honest), updated after the breadth + prose pass:**
-- **Cross-harness reach** — every comparator runs on Codex/Cursor/Gemini; we are
-  harness-native by deliberate product stance (see strategic note). This is
-  the one axis where every peer beats us, and it is a choice, not a defect.
-  Explicitly out of scope per product direction.
+- **Cross-harness depth** — every comparator runs deeply on Codex/Cursor/Gemini
+  as first-class targets. keel is Claude Code-primary with lighter adapter
+  support for OpenCode, Codex CLI, Cursor (static rules), and Pi Agent (static
+  rules + MCP). The adapters exist (see README § Cross-Agent Adapters) but are
+  shallower than the Claude Code integration — no full lifecycle hooks on the
+  non-primary targets. This is a depth gap, not a presence gap.
 - ~~RTK filter breadth~~ **(closed this pass).** Two real defects were found and
   fixed, not just breadth added:
   1. The PreToolUse auto-rewrite gate (`is_supported_noisy_command`) had drifted
@@ -325,12 +476,13 @@ N = absent.
   methodology skills; the only remaining superpowers lead is the by-design
   cross-harness axis.
 
-### Skill count: 20 → 23 → 31 → 33 → 37 → 40 (methodology parity + cross-comparator + domain-coverage gap closure)
+### Skill count: manifest-driven (methodology parity + cross-comparator + domain-coverage gap closure)
 
-The repo now ships 40 specialist/methodology skills in the manifest (manifest-driven;
-the binary discovers the count from `plugin.json`, so no hardcoded total drifts), plus
-the `using-keel` bootstrap (41 SKILL.md files
-total, all passing `skill-lint`: 41 skills, 0 failed, 0 warned). The methodology trio
+The repo ships a manifest-driven skill count discovered from `.claude-plugin/plugin.json`
+at install time (the binary never hardcodes a total, so no number drifts). As of the
+2026-06-24 audit, the manifest lists 45 skills plus the `using-keel` bootstrap
+(46 SKILL.md files on disk). Run `keel skill-lint` for the live verified count.
+The methodology trio
 (`test-driven-development`, `systematic-debugging`, `brainstorming`) closed the first
 superpowers gap; the eight skills (`writing-skills`, `writing-plans`, `executing-plans`,
 `subagent-driven-development`, `dispatching-parallel-agents`, `using-git-worktrees`,
@@ -382,7 +534,7 @@ A further three specialists close the last roster-audit domain gaps
   extraction, ICU MessageFormat and plurals, locale-aware formatting, RTL/bidi,
   translation workflows and fallback chains, and Unicode correctness.
 
-`using-keel` catalog header (40 skills) and entries updated to match.
+`using-keel` catalog header and entries updated to match the manifest (count is manifest-driven; run `keel skill-lint` for the live verified total).
 
 - ~~UI/UX Pro Max corpus was smaller than theirs~~ **(closed and surpassed this
   pass).** A re-audit with **file-verified** counts (parsing their actual CSVs, not
@@ -492,9 +644,12 @@ tests:
 
 ## Remaining work (deliberately out of scope)
 
-- **Cross-harness adapters.** Every comparator ships Codex/Cursor/Gemini/Copilot
-  adapters; keel stays harness-native by design (see the strategic note
-  below). Not a defect — a product stance.
+- **Cross-harness adapter depth.** keel ships adapters for OpenCode, Codex CLI,
+  Cursor (static rules), and Pi Agent (static rules + MCP), but Claude Code is
+  the only target with full lifecycle hooks and deep integration. Every
+  comparator ships deeper integration across more providers. Closing the
+  depth gap on existing adapters (or adding new ones) is a distribution
+  strategy question, not a defect.
 - **Mobile / niche command adapters.** Mobile toolchains (xcodebuild beyond the
   generic build path, gradle device flows) and other niche CLIs still fall through
   to the generic adapter. Reasonable future additions, not audited gaps. The
@@ -512,31 +667,36 @@ across sessions and tools.
 
 ## Strategic open question
 
-Every comparator (RTK, caveman, superpowers, ECC) ships cross-harness adapters
-(Codex/Cursor/Gemini/Copilot). keel is harness-only. Whether to go
-multi-harness or keep a deliberately harness-native stance is a product decision,
-not a defect — recorded here so it is chosen, not drifted into.
+Every comparator (RTK, caveman, superpowers, ECC) ships deep cross-harness
+adapters (Codex/Cursor/Gemini/Copilot). keel is Claude Code-primary with
+lighter adapters for OpenCode, Codex CLI, Cursor, and Pi Agent (see
+README § Cross-Agent Adapters). Whether to deepen the existing adapters to
+full lifecycle parity or add more provider targets is a product decision —
+recorded here so the depth-vs-breadth tradeoff is chosen, not drifted into.
 
-## 2026-06-17 audit: top-starred harness / workflow comparators
+## 2026-06-17 audit: high-visibility harness / workflow comparators
 
-This section extends the capability-based comparison to the **highest-adoption**
-harness and workflow projects, selected by GitHub-API star count (a
-deterministic selection signal, distinct from using stars as a *quality* signal —
-the caution in the Comparators note still holds, and the superpowers anomaly below
-is exactly why). Five of these were absent from the table above. Audit run after
-the findings #1-5 merge (PR #123, `f694519`); each profile was built by reading
-the project's actual README/docs, not marketing copy.
+This section extends the capability-based comparison to **high-visibility**
+harness and workflow projects, selected by ecosystem presence (community
+discussion frequency, cross-references in other projects, and capability
+overlap with keel's surface). Star counts are deliberately excluded as a
+selection or comparison signal — multiple repos in this space show
+anomalous star-to-commit ratios (e.g. `obra/superpowers` returned 229,888
+stars via GitHub API, exceeding `anthropics/claude-code` at 132,832, which
+is implausible for a skills plugin). Comparisons below are capability-based
+only. Audit run after the findings #1-5 merge (PR #123, `f694519`); each
+profile was built by reading the project's actual README/docs, not marketing copy.
 
-### New comparators (star counts via GitHub API, 2026-06-17)
+### New comparators (selected by ecosystem visibility, 2026-06-17)
 
-| Project | Stars | Category | Overlap with keel |
-| --- | --- | --- | --- |
-| `obra/superpowers` | ~230k* | skills framework | Already in the table above. *The API returned 229,888 — **above** `anthropics/claude-code` itself (132,832), which is implausible for a skills plugin. Reported as-returned and flagged; do not quote externally without a manual sanity-check. Confirms the standing "stars are not a trustworthy signal" stance. |
-| `github/spec-kit` | ~113k | spec-driven dev | Spec-as-source-of-truth pipeline (constitution→specify→plan→tasks→implement), agent-agnostic across 30+ agents. Strong gate *taxonomy* (Phase-1 Simplicity/Anti-Abstraction/Integration-First) but every gate is model-self-attested in-prompt; `[P]` parallel markers are annotations, not an executor. No worktree isolation, no recall index. |
-| `ruvnet/claude-flow` | ~60k | swarm orchestrator | The one comparator **ahead on memory**: HNSW vector store + knowledge graphs + neural self-learning (semantic recall we lack). Also broad: consensus topologies, GOAP A* planner, security gates (CVE/PII/injection). But benchmarks are self-reported, the lightweight plugin path is hollow (no MCP/memory tools — only the heavy npx+Docker+MongoDB path has them), and there is no worktree-isolated fail-closed merge. |
-| `bmad-code-org/BMAD-METHOD` | ~49k | agentic-agile personas | Role-persona pipeline (Analyst/PM/Architect/SM/Dev/QA) with "context-engineered" story files; mature methodology, multi-IDE. Orchestration is human-in-the-loop persona-switching — no parallel execution, no merge coordinator, no indexed memory, no self-eval. |
-| `eyaltoledano/claude-task-master` | ~28k | task manager | Dependency-aware PRD→task decomposition over an MCP surface; broad editor/provider reach. **No review/quality gates documented at all**, no worktree isolation, memory is task-state only (no recall). |
-| `automazeio/ccpm` | ~8k | PM workflow (GH Issues) | Closest parallel-dispatch peer: per-epic git worktrees + `conflicts_with`/`depends_on`/`parallel` task metadata. But the merge is LLM-narrated ("agents commit and coordinate via Git"), not a coded fail-closed coordinator; memory is flat markdown + grep-style bash scripts. |
+| Project | Category | Overlap with keel |
+| --- | --- | --- |
+| `obra/superpowers` | skills framework | Already in the table above. |
+| `github/spec-kit` | spec-driven dev | Spec-as-source-of-truth pipeline (constitution→specify→plan→tasks→implement), agent-agnostic across 30+ agents. Strong gate *taxonomy* (Phase-1 Simplicity/Anti-Abstraction/Integration-First) but every gate is model-self-attested in-prompt; `[P]` parallel markers are annotations, not an executor. No worktree isolation, no recall index. |
+| `ruvnet/claude-flow` | swarm orchestrator | The one comparator **ahead on memory**: HNSW vector store + knowledge graphs + neural self-learning (semantic recall we lack). Also broad: consensus topologies, GOAP A* planner, security gates (CVE/PII/injection). But benchmarks are self-reported, the lightweight plugin path is hollow (no MCP/memory tools — only the heavy npx+Docker+MongoDB path has them), and there is no worktree-isolated fail-closed merge. |
+| `bmad-code-org/BMAD-METHOD` | agentic-agile personas | Role-persona pipeline (Analyst/PM/Architect/SM/Dev/QA) with "context-engineered" story files; mature methodology, multi-IDE. Orchestration is human-in-the-loop persona-switching — no parallel execution, no merge coordinator, no indexed memory, no self-eval. |
+| `eyaltoledano/claude-task-master` | task manager | Dependency-aware PRD→task decomposition over an MCP surface; broad editor/provider reach. **No review/quality gates documented at all**, no worktree isolation, memory is task-state only (no recall). |
+| `automazeio/ccpm` | PM workflow (GH Issues) | Closest parallel-dispatch peer: per-epic git worktrees + `conflicts_with`/`depends_on`/`parallel` task metadata. But the merge is LLM-narrated ("agents commit and coordinate via Git"), not a coded fail-closed coordinator; memory is flat markdown + grep-style bash scripts. |
 
 ### Where keel leads across *all* of them (post-#123)
 
@@ -650,7 +810,7 @@ positioning. Recorded here so each is a chosen tradeoff:
   discipline-over-volume stance means we don't optimize for benchmark scores
   that diverge from real delivery value. **Not pursued.**
 - **Exhaustive per-language / niche-vertical library breadth** (191-agent megalibraries
-  like wshobson). keel is curated-not-exhaustive by design: ~40 skills covering
+  like wshobson). keel is curated-not-exhaustive by design: manifest-driven skill count covering
   delivery domains and methodology, not one-agent-per-language. The matcher quality and
   discipline contract degrade with volume. **Not pursued; curation is the product.**
 - **Passive automatic learning from corrections.** Native harness now ships Auto

@@ -67,6 +67,20 @@ const SCORE_REFERENCES: u32 = 10;
 /// the band earns full points; a too-short one earns a proportional share.
 const HEALTHY_DESCRIPTION_MIN: usize = 60;
 
+/// The 8 essential skills every user needs. Shown when `--core` is set.
+/// These are the skills that appear in daily workflow — brownfield safety,
+/// debugging, planning, testing, review, sprints, and bootstrap.
+const CORE_SKILLS: &[&str] = &[
+    "reviewer",
+    "preserve-existing-flow",
+    "test-driven-development",
+    "systematic-debugging",
+    "writing-plans",
+    "executing-plans",
+    "running-a-sprint",
+    "using-keel",
+];
+
 pub fn run_skill_lint_command(
     arguments: &[String],
     standard_output: &mut dyn Write,
@@ -75,6 +89,8 @@ pub fn run_skill_lint_command(
     let mut flag_set = FlagSet::new("skill-lint");
     flag_set.string_flag("repo-root", "");
     flag_set.bool_flag("json", false);
+    flag_set.bool_flag("core", false);
+    flag_set.bool_flag("list-core", false);
     // --min-score <0-100>: fail closed when ANY skill scores below the floor,
     // turning the graded eval into a release gate (the analog of wshobson's
     // certify threshold). Default 0 keeps lint backward-compatible — scoring is
@@ -94,6 +110,13 @@ pub fn run_skill_lint_command(
             return 1;
         }
     };
+
+    if flag_set.bool_value("list-core") {
+        for name in CORE_SKILLS {
+            let _ = writeln!(standard_output, "{name}");
+        }
+        return 0;
+    }
     let repository_root = match resolve_repository_root(flag_set.string_value("repo-root")) {
         Ok(path) => path,
         Err(error) => {
@@ -118,7 +141,15 @@ pub fn run_skill_lint_command(
         return 1;
     }
 
-    let reports: Vec<SkillReport> = skill_files.iter().map(|path| lint_skill(path)).collect();
+    let all_reports: Vec<SkillReport> = skill_files.iter().map(|path| lint_skill(path)).collect();
+    let reports: Vec<SkillReport> = if flag_set.bool_value("core") {
+        all_reports
+            .into_iter()
+            .filter(|report| CORE_SKILLS.contains(&report.name.as_str()))
+            .collect()
+    } else {
+        all_reports
+    };
     let failed = reports.iter().filter(|report| !report.ok()).count();
     let warned = reports
         .iter()
@@ -863,5 +894,139 @@ mod tests {
             "A backend and data specialist for APIs and databases.",
             "Backend tasks."
         ));
+    }
+
+    #[test]
+    fn list_core_prints_core_skill_names() {
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let exit = run_skill_lint_command(&["--list-core".to_string()], &mut out, &mut err);
+        assert_eq!(exit, 0);
+        let rendered = String::from_utf8_lossy(&out);
+        for name in CORE_SKILLS {
+            assert!(
+                rendered.contains(name),
+                "expected {name} in --list-core output"
+            );
+        }
+        assert_eq!(rendered.lines().count(), CORE_SKILLS.len());
+    }
+
+    #[test]
+    fn core_flag_filters_to_core_skills_only() {
+        let root = std::env::temp_dir().join(format!(
+            "keel-skilllint-core-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        ));
+        let core_skill = root.join("reviewer");
+        let other_skill = root.join("some-obscure-skill");
+        fs::create_dir_all(&core_skill).unwrap();
+        fs::create_dir_all(&other_skill).unwrap();
+        fs::write(
+            core_skill.join("SKILL.md"),
+            "---\nname: reviewer\ndescription: Reviews code. Use when reviewing.\nallowed-tools: Read\n---\n# Reviewer\n",
+        )
+        .unwrap();
+        fs::write(
+            other_skill.join("SKILL.md"),
+            "---\nname: some-obscure-skill\ndescription: Obscure skill for obscure tasks.\nallowed-tools: Read\n---\n# Obscure\n",
+        )
+        .unwrap();
+        let repo_root = root.to_string_lossy().to_string();
+
+        let mut out_all = Vec::new();
+        let mut err_all = Vec::new();
+        let exit_all = run_skill_lint_command(
+            &["--repo-root".to_string(), repo_root.clone()],
+            &mut out_all,
+            &mut err_all,
+        );
+        assert_eq!(exit_all, 0);
+        let rendered_all = String::from_utf8_lossy(&out_all);
+        assert!(
+            rendered_all.contains("2 skill(s)"),
+            "should show 2 skills: {rendered_all}"
+        );
+
+        // With --core: shows only reviewer
+        let mut out_core = Vec::new();
+        let mut err_core = Vec::new();
+        let exit_core = run_skill_lint_command(
+            &["--repo-root".to_string(), repo_root, "--core".to_string()],
+            &mut out_core,
+            &mut err_core,
+        );
+        assert_eq!(exit_core, 0);
+        let rendered_core = String::from_utf8_lossy(&out_core);
+        assert!(
+            rendered_core.contains("reviewer"),
+            "core should include reviewer: {rendered_core}"
+        );
+        assert!(
+            !rendered_core.contains("some-obscure-skill"),
+            "core should NOT include obscure skill: {rendered_core}"
+        );
+        assert!(
+            rendered_core.contains("1 skill(s)"),
+            "core should show 1 skill: {rendered_core}"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn core_flag_json_output_filters_correctly() {
+        let root = std::env::temp_dir().join(format!(
+            "keel-skilllint-corejson-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        ));
+        let core_skill = root.join("test-driven-development");
+        let other_skill = root.join("unrelated");
+        fs::create_dir_all(&core_skill).unwrap();
+        fs::create_dir_all(&other_skill).unwrap();
+        fs::write(
+            core_skill.join("SKILL.md"),
+            "---\nname: test-driven-development\ndescription: TDD loop. Use when writing tests.\nallowed-tools: Read\n---\n# TDD\n",
+        )
+        .unwrap();
+        fs::write(
+            other_skill.join("SKILL.md"),
+            "---\nname: unrelated\ndescription: Unrelated skill. Use when doing unrelated things.\nallowed-tools: Read\n---\n# Unrelated\n",
+        )
+        .unwrap();
+        let repo_root = root.to_string_lossy().to_string();
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let exit = run_skill_lint_command(
+            &[
+                "--repo-root".to_string(),
+                repo_root,
+                "--core".to_string(),
+                "--json".to_string(),
+            ],
+            &mut out,
+            &mut err,
+        );
+        assert_eq!(exit, 0);
+        let rendered = String::from_utf8_lossy(&out);
+        assert!(
+            rendered.contains("test-driven-development"),
+            "JSON core should include tdd: {rendered}"
+        );
+        assert!(
+            !rendered.contains("unrelated"),
+            "JSON core should NOT include unrelated: {rendered}"
+        );
+
+        let _ = fs::remove_dir_all(&root);
     }
 }

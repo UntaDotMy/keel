@@ -21,6 +21,7 @@ pub mod proxy;
 mod review;
 mod runner;
 mod runtime;
+mod slop_detector;
 #[cfg(test)]
 mod test_support;
 mod utility;
