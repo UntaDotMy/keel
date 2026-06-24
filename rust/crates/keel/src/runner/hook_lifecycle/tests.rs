@@ -934,7 +934,9 @@ fn post_tool_batch_emits_reviewer_on_close_reminder() {
             "PostToolBatch reminder must not cite a repo-specific section name; the rule is stated inline so it works across host repos"
         );
     assert!(
-        context.contains("clearable nudge") || context.contains("decide deliberately") || context.contains("rules take precedence"),
+        context.contains("clearable nudge")
+            || context.contains("decide deliberately")
+            || context.contains("rules take precedence"),
         "PostToolBatch reminder must encourage deliberate consideration before skipping"
     );
 
@@ -4428,4 +4430,98 @@ fn story_first_gate_off_matches_advisory_path() {
         Some(value) => std::env::set_var(STORY_FIRST_GATE_ENV_VAR, value),
         None => std::env::remove_var(STORY_FIRST_GATE_ENV_VAR),
     }
+}
+
+#[test]
+fn git_hooks_install_sets_core_hookspath_in_repo_config() {
+    let _guard = crate::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let unique = format!("git-hooks-test-{}", std::process::id());
+    let temp = std::env::temp_dir().join(unique);
+    let repo_root = temp.join("repo");
+    let githooks_dir = repo_root.join(".githooks");
+    let git_dir = repo_root.join(".git");
+    let git_config = git_dir.join("config");
+
+    std::fs::create_dir_all(&githooks_dir).unwrap();
+    std::fs::create_dir_all(&git_dir).unwrap();
+    std::fs::write(
+        &githooks_dir.join("pre-commit"),
+        "#!/bin/sh\necho pre-commit",
+    )
+    .unwrap();
+    std::fs::write(&githooks_dir.join("pre-push"), "#!/bin/sh\necho pre-push").unwrap();
+    std::fs::write(&git_config, "[core]\n\tbare = false\n").unwrap();
+
+    let mut stdout: Vec<u8> = Vec::new();
+    let mut stderr: Vec<u8> = Vec::new();
+    let code = run_hook_command(
+        &[
+            "git-hooks".to_string(),
+            "install".to_string(),
+            "--repo-root".to_string(),
+            repo_root.to_string_lossy().to_string(),
+        ],
+        &mut stdout,
+        &mut stderr,
+    );
+
+    assert_eq!(code, 0, "git-hooks install should succeed");
+    let stdout_str = String::from_utf8_lossy(&stdout);
+    assert!(
+        stdout_str.contains("pre-commit"),
+        "output should list pre-commit hook: {stdout_str}"
+    );
+    assert!(
+        stdout_str.contains("pre-push"),
+        "output should list pre-push hook: {stdout_str}"
+    );
+
+    let config_content = std::fs::read_to_string(&git_config).unwrap();
+    assert!(
+        config_content.contains("hooksPath"),
+        ".git/config should have hooksPath set: {config_content}"
+    );
+    assert!(
+        config_content.contains(".githooks"),
+        ".git/config hooksPath should point to .githooks: {config_content}"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
+#[test]
+fn git_hooks_install_fails_when_githooks_dir_missing() {
+    let _guard = crate::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let unique = format!("git-hooks-missing-{}", std::process::id());
+    let temp = std::env::temp_dir().join(unique);
+    let repo_root = temp.join("repo");
+    std::fs::create_dir_all(&repo_root).unwrap();
+
+    let mut stdout: Vec<u8> = Vec::new();
+    let mut stderr: Vec<u8> = Vec::new();
+    let code = run_hook_command(
+        &[
+            "git-hooks".to_string(),
+            "install".to_string(),
+            "--repo-root".to_string(),
+            repo_root.to_string_lossy().to_string(),
+        ],
+        &mut stdout,
+        &mut stderr,
+    );
+
+    assert_eq!(code, 1, "should fail when .githooks dir is missing");
+    let stderr_str = String::from_utf8_lossy(&stderr);
+    assert!(
+        stderr_str.contains(".githooks"),
+        "stderr should mention missing .githooks: {stderr_str}"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp);
 }

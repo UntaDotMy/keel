@@ -47,6 +47,27 @@ These rules **must** be followed on every turn. They are short by design; the re
 8. **Writing Discipline.** All written output (docs, code comments, commit/PR text, review notes, chat) **must** follow: write less, be accurate not impressive, lead with the point, no filler or AI tells, stay on the asked scope. Full rule in `_shared/common-discipline.md` § Writing Discipline.
 9. **Agent teams.** Use `designing-agent-teams` when a task needs coordinated multi-agent decomposition. Subagents **must not** spawn subagents — route delegation back to the main thread. Teammates **must** communicate via `SendMessage(to: <agent-id>)`. Resumed subagents retain full history and auto-resume in background on `SendMessage`.
 
+## Git Hooks (Mandatory Enforcement)
+
+Git hooks are **mandatory** and must be installed before making any commits or pushes. They work with **any language** (auto-detect) and **any AI agent tool** (native git hooks).
+
+### Installation
+
+```bash
+keel hook git-hooks install
+```
+
+### What the Hooks Enforce
+
+| Hook | What It Checks | Consequence |
+|------|----------------|-------------|
+| **pre-commit** | Auto-detects project language (Rust/Go/Python/JS/C++) and runs format + lint | Commit is **blocked** if checks fail |
+| **pre-push** | Branch policy (blocks direct pushes to `main` or `dev`) | Push is **blocked** |
+
+### Bypassing Hooks
+
+**Do not bypass hooks** (`git commit --no-verify` or `git push --no-verify`) unless genuine emergency. Document the bypass in the commit message and follow up with a cleanup commit.
+
 ## Summary
 
 Keep execution simple and focused. Use specialist skills when they add clear value. Prioritize code quality, security, maintainability, and native harness CLI workflow surfaces. Open the matching reference file for depth.
