@@ -294,3 +294,36 @@ fn audit_flagged_commands_are_documented() {
         );
     }
 }
+
+/// The release bundle must stage the cross-agent adapter source directories
+/// (opencode/codex/pi/cursor) so `keel install` run from a release-bundle
+/// extract can wire non-Claude-Code targets. `maybe_wire_opencode` /
+/// `maybe_wire_codex` / `maybe_wire_pi` / `maybe_wire_cursor` in
+/// `manager/install.rs` read these dirs from `repository_root`; if the release
+/// staging omits them, install silently reports "plugin source absent" /
+/// "source absent" for every adapter — the exact bug that shipped. This test
+/// pins the staging so the gap cannot recur: remove the staging and CI fails.
+#[test]
+fn release_bundle_stages_adapter_source_dirs() {
+    let repo_root = repository_root();
+    let release_yml = fs::read_to_string(
+        repo_root
+            .join(".github")
+            .join("workflows")
+            .join("release.yml"),
+    )
+    .expect("read .github/workflows/release.yml");
+
+    for adapter in ["opencode", "codex", "pi", "cursor"] {
+        let staged_explicit = release_yml.contains(&format!("cp -R \"{adapter}\""))
+            || release_yml.contains(&format!("cp -R {adapter} "));
+        let staged_loop = release_yml.contains("for adapter in opencode codex pi cursor");
+        assert!(
+            staged_explicit || staged_loop,
+            "release.yml must stage the `{adapter}` adapter dir into the release bundle; \
+             without it `keel install` reports \"plugin source absent\" / \"source absent\" \
+             for the {adapter} adapter when run from a release-bundle extract. \
+             Add the adapter to the staging loop or as an explicit `cp -R`."
+        );
+    }
+}
