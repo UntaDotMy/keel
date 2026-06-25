@@ -98,6 +98,34 @@ subagent with a specific correction.
 - Update the working brief / ledger with the integrated step so it survives
   compaction, the same as any executing-plans step.
 
+## Worktree Isolation — Mandatory For File-Editing Subagents
+
+Every subagent that edits files MUST work in its own isolated git worktree. No exceptions. Two subagents sharing a working tree is a collision waiting to happen — the last write wins, the other's work vanishes, and the orchestrator cannot tell which diff belongs to whom.
+
+### Before Dispatching
+
+1. **Create a worktree per subagent.** `git worktree add ../wt-<task-name> -b subagent/<task-name>` creates an isolated checkout on its own branch. The subagent works there and only there.
+2. **Pass the worktree path to the subagent.** The subagent's prompt must state the worktree path as its working directory. The subagent does NOT touch the main tree.
+3. **One worktree per task.** If two tasks are independent enough to parallelize, they get two worktrees. If they are not independent enough for separate worktrees, they are not independent enough to parallelize — sequence them.
+
+### After Subagent Returns
+
+4. **Orchestrator reviews the diff.** `git -C ../wt-<task-name> diff main` shows the subagent's work. The orchestrator reads it, runs the verification check, and confirms it matches the task scope. The subagent's claim of "done" is a hypothesis until the orchestrator verifies the diff.
+5. **Merge only after review passes.** If the diff is correct, merge the subagent's branch: `git merge subagent/<task-name>`. If it is wrong, re-dispatch with the correction or fix in-thread.
+6. **Clean up the worktree.** `git worktree remove ../wt-<task-name>` after merge. Keep the branch — this repo never deletes branches.
+
+### When Worktrees Are Not Needed
+
+- Read-only subagents (explore, search, research) do not need worktrees — they don't write files.
+- Subagents that only return text (analysis, plan, decision) do not need worktrees.
+- The test: if the subagent calls Edit, Write, or Bash with a write command, it needs a worktree.
+
+### Anti-Patterns
+
+- Letting two subagents work in the same tree because "they touch different files" — the index is shared, and a `git add` from one clobbers the other's staging.
+- Merging a subagent's branch without reading the diff — the subagent may have added scope creep or broken a pattern.
+- Skipping worktree cleanup — stale worktrees accumulate and confuse future sessions.
+
 ## Relationship To Parallelism
 
 Delegation is about *context isolation*; parallelism is about *concurrency*. A task

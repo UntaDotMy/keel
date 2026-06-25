@@ -709,6 +709,69 @@ fn run_hook_instructions(
     0
 }
 
+const IRON_LAW_GATE_ENV_VAR: &str = "KEEL_IRON_LAW_GATE";
+
+fn run_iron_law_gate(
+    input: &JsonDocument,
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    if std::env::var(IRON_LAW_GATE_ENV_VAR)
+        .map(|v| v.eq_ignore_ascii_case("off"))
+        .unwrap_or(false)
+    {
+        return 0;
+    }
+
+    let session_id = input
+        .get("session_id")
+        .and_then(JsonDocument::as_str)
+        .unwrap_or("default");
+
+    let claude_home = match crate::runtime::resolve_claude_home("") {
+        Ok(path) => path,
+        Err(_) => return 0,
+    };
+
+    let gate_dir = claude_home.join("state").join("iron-law-gate");
+    let gate_file = gate_dir.join(session_id);
+
+    if gate_file.exists() {
+        return 0;
+    }
+
+    let _ = std::fs::create_dir_all(&gate_dir);
+    let _ = std::fs::write(&gate_file, "acknowledged");
+
+    let reason = "[keel] Iron Law gate: This is your first code edit this session. \
+        The Iron Law is NOT optional — it is a hard gate. Before retrying this edit, you MUST:\n\
+        1. Call keel_context_brief (or keel system_map) to read the workspace structure.\n\
+        2. Load any relevant skill via skill_route / skill_get.\n\
+        3. If editing existing code, trace ownership first (preserve-existing-flow).\n\
+        If you skip these steps, you are violating the Iron Law. Retry your edit after complying.";
+
+    let deny_payload = serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": MANAGED_PRE_TOOL_USE_EVENT,
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        }
+    });
+
+    match serde_json::to_string_pretty(&deny_payload) {
+        Ok(rendered) => {
+            let _ = writeln!(standard_output, "{rendered}");
+        }
+        Err(error) => {
+            let _ = writeln!(
+                standard_error,
+                "Unable to render Iron Law gate payload: {error}"
+            );
+        }
+    }
+    0
+}
+
 fn run_hook_pre_tool_use(standard_output: &mut dyn Write, standard_error: &mut dyn Write) -> u8 {
     let input_text = match std::io::read_to_string(std::io::stdin()) {
         Ok(text) => text,
@@ -736,12 +799,16 @@ fn run_hook_pre_tool_use(standard_output: &mut dyn Write, standard_error: &mut d
         }
     };
 
-    if input
+    let tool_name = input
         .get("tool_name")
         .and_then(JsonDocument::as_str)
-        .unwrap_or_default()
-        != crate::hooks::claude::pre_tool_matcher()
-    {
+        .unwrap_or_default();
+
+    if is_edit_class_tool(tool_name) {
+        return run_iron_law_gate(&input, standard_output, standard_error);
+    }
+
+    if tool_name != "Bash" {
         return 0;
     }
 

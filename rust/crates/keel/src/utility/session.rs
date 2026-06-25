@@ -405,9 +405,8 @@ mod tests {
     #[test]
     fn gain_events_path_returns_option() {
         let result = gain_events_path();
-        match result {
-            Some(path) => assert!(path.to_string_lossy().contains("events")),
-            None => {}
+        if let Some(path) = result {
+            assert!(path.to_string_lossy().contains("events"));
         }
     }
 

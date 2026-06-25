@@ -54,8 +54,8 @@ pub const HOOK_EVENTS: &[HookEvent] = &[
     HookEvent {
         name: "PreToolUse",
         slug: "pre-tool-use",
-        matcher: "Bash",
-        status: "Transparently rewriting noisy commands via keel run",
+        matcher: "",
+        status: "Iron Law gate + transparent command rewriting",
         supports_hook_specific_output: true,
         installs_in_settings: true,
     },
@@ -356,11 +356,12 @@ pub fn event_by_slug(slug: &str) -> Option<&'static HookEvent> {
     HOOK_EVENTS.iter().find(|event| event.slug == slug)
 }
 
-/// PreToolUse matcher (`Bash`) so rewrites only fire on shell invocations.
+/// PreToolUse matcher (`""`) so the Iron Law gate fires on all edit-class tools
+/// and the command rewriter fires on Bash, filtered internally by the handler.
 pub fn pre_tool_matcher() -> &'static str {
     event_by_name("PreToolUse")
         .map(|event| event.matcher)
-        .unwrap_or("Bash")
+        .unwrap_or("")
 }
 
 /// PostToolUse matcher (`""`) so the post-tool hook fires for every tool, not
@@ -502,7 +503,7 @@ mod tests {
                 other => panic!("{} has unexpected matcher `{}`", event.name, other),
             }
         }
-        assert_eq!(event_by_name("PreToolUse").unwrap().matcher, "Bash");
+        assert_eq!(event_by_name("PreToolUse").unwrap().matcher, "");
         assert_eq!(event_by_name("PostToolUse").unwrap().matcher, "");
         assert_eq!(event_by_name("Stop").unwrap().matcher, "");
     }
@@ -576,7 +577,7 @@ mod tests {
         assert_eq!(lifecycle_subcommand("ZZZ"), "unknown");
         assert_eq!(status_message("Stop"), "Closing native session state");
         assert_eq!(status_message("ZZZ"), "Native lifecycle hook");
-        assert_eq!(pre_tool_matcher(), "Bash");
+        assert_eq!(pre_tool_matcher(), "");
         assert_eq!(post_tool_matcher(), "");
     }
 
