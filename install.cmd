@@ -22,7 +22,7 @@ if not exist "%TEMP_SCRIPT%" (
   exit /b 1
 )
 
-powershell -NoProfile -ExecutionPolicy Bypass -File "%TEMP_SCRIPT%"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%TEMP_SCRIPT%" %*
 set "INSTALL_EXIT=%ERRORLEVEL%"
 del "%TEMP_SCRIPT%" >nul 2>nul
 exit /b %INSTALL_EXIT%
