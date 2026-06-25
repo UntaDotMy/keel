@@ -659,7 +659,7 @@ keel works with multiple AI coding agents through dedicated adapters. Each adapt
 
 Claude Code is the primary target (hooks, full lifecycle). OpenCode and Codex have runtime bridges that auto-inject context on every session and prompt. Cursor and Pi Agent use static instruction files — simpler but no automatic observation recording.
 
-Install adapters by copying files per the README in each adapter directory (`opencode/README.md`, `codex/README.md`, `cursor/README.md`, `pi/README.md`).
+`keel install` auto-detects which AI CLIs are installed (via config dirs, env vars, and binary-on-PATH) and wires only the matching adapters. Use `--with <name>` to force an adapter even when not detected (e.g. `--with cursor`), and `--without <name>` to skip a detected adapter (e.g. `--without opencode`). Names: `opencode`, `codex`, `pi`, `cursor`. Manual file copying is no longer required.
 
 ## Managed Agent Profiles
 

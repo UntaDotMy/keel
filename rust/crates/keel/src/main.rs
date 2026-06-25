@@ -7,26 +7,7 @@
 use std::io::{self, Write};
 use std::process::ExitCode;
 
-pub mod adapters;
-mod args;
-mod commands;
-mod comment_lint;
-pub mod error;
-mod help;
-mod hooks;
-mod json;
-mod manager;
-mod mcp;
-pub mod proxy;
-mod review;
-mod runner;
-mod runtime;
-mod slop_detector;
-#[cfg(test)]
-mod test_support;
-mod utility;
-
-pub use commands::Application;
+use keel::Application;
 
 fn main() -> ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();

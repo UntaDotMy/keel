@@ -8,6 +8,7 @@ pub mod agent_config;
 pub mod doctor;
 pub mod install;
 pub mod mcp_register;
+pub mod platform_detect;
 pub mod repair;
 pub mod verify;
 
@@ -41,6 +42,8 @@ pub fn run_install_command(
     let mut flag_set = FlagSet::new("install");
     flag_set.string_flag("repo-root", "");
     flag_set.string_flag("claude-home", "");
+    flag_set.string_flag("with", "");
+    flag_set.string_flag("without", "");
     flag_set.bool_flag("interactive", false);
     if let Err(parse_error) = flag_set.parse(arguments) {
         let _ = writeln!(standard_error, "{}", parse_error.message);

@@ -15,6 +15,10 @@ Unlike the OpenCode and Codex adapters, this is a **static rules file**, not a h
 
 ## Install
 
+`keel install` does NOT auto-detect Cursor (it's a desktop IDE with no reliable cross-platform detection). Use `--with cursor` to force wiring to `~/.cursorrules`. Use `--without cursor` to skip.
+
+Manual install:
+
 ### Option A: Project-scoped (recommended)
 
 Copy `.cursorrules` into your project root:
