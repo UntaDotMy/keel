@@ -182,6 +182,16 @@ jobs:
           if [ -d .claude-plugin ]; then
             cp -R .claude-plugin "$target_dir/.claude-plugin"
           fi
+          # Stage cross-agent adapter sources so `keel install` can wire
+          # non-Claude-Code targets from a release-bundle extract, not just a
+          # source checkout. maybe_wire_opencode/codex/pi/cursor in
+          # manager/install.rs read these dirs from repository_root; without
+          # them install reports "plugin source absent" / "source absent".
+          for adapter in opencode codex pi cursor; do
+            if [ -d "$adapter" ]; then
+              cp -R "$adapter" "$target_dir/$adapter"
+            fi
+          done
           cat > "$target_dir/keel-release-manifest.json" <<EOF
           {
             "package_kind": "packaged_release_bundle",
