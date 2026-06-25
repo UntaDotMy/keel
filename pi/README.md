@@ -19,6 +19,10 @@ Unlike the Codex adapter, this is a **static rules file plus MCP configuration**
 
 ## Install
 
+`keel install` auto-detects Pi Agent (via `~/.pi/agent/` dir, `PI_CODING_AGENT_DIR` env var, or `pi` binary on PATH) and wires this adapter automatically. Use `--without pi` to skip, `--with pi` to force.
+
+Manual install options:
+
 ### Option A: Project-scoped (recommended)
 
 Copy the instruction file into your project root:

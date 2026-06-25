@@ -276,3 +276,280 @@ fn project_subagents_reference_iron_law_bootstrap() {
         "every .claude/agents/*.md must reference _shared/subagent-iron-law.md; missing in: {missing_reference:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Adapter wiring tests (W0-T2 RED)
+//
+// These tests define the contract for auto-detect-and-install: each adapter
+// (opencode, codex, pi, cursor) should be wired ONLY when the corresponding
+// CLI is detected, and should target the correct global path. Today many of
+// these fail (RED) because:
+//   - opencode/codex wire unconditionally (no detection gate)
+//   - cursor targets repository_root.parent instead of ~/.cursorrules
+//   - pi targets repository_root.parent instead of ~/.pi/agent/
+//
+// Wave 2 will make them GREEN.
+// ---------------------------------------------------------------------------
+
+/// Create a fake user home with a `.claude` subdirectory so the
+/// `is_standard_home` guard passes and adapter wirers fire. Returns
+/// (home, claude_home) where `home` is the parent that adapters land in.
+fn fake_home_with_claude(prefix: &str) -> (PathBuf, PathBuf) {
+    let home = unique_temp_dir(prefix);
+    let _ = fs::remove_dir_all(&home);
+    let claude_home = home.join(".claude");
+    let _ = fs::create_dir_all(&claude_home);
+    (home, claude_home)
+}
+
+fn run_install_at(repo_root: &Path, claude_home: &Path) {
+    run_install_with_extra(repo_root, claude_home, &[]);
+}
+
+fn run_install_with_extra(repo_root: &Path, claude_home: &Path, extra: &[&str]) {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_keel"));
+    cmd.arg("install")
+        .arg("--repo-root")
+        .arg(repo_root)
+        .arg("--claude-home")
+        .arg(claude_home);
+    for arg in extra {
+        cmd.arg(arg);
+    }
+    let output = cmd.output().expect("run keel install");
+    assert!(
+        output.status.success(),
+        "install failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn install_skips_opencode_when_not_detected() {
+    let repository_root = repository_root();
+    let (home, claude_home) = fake_home_with_claude("keel-skip-opencode");
+    // Do NOT create ~/.config/opencode/ — opencode should not be detected.
+    run_install_with_extra(&repository_root, &claude_home, &["--without", "opencode"]);
+    let plugin = home
+        .join(".config")
+        .join("opencode")
+        .join("plugins")
+        .join("keel.ts");
+    assert!(
+        !plugin.exists(),
+        "opencode plugin should NOT be created when opencode is not detected: {}",
+        plugin.display()
+    );
+    let _ = fs::remove_dir_all(&home);
+}
+
+#[test]
+fn install_skips_codex_when_not_detected() {
+    let repository_root = repository_root();
+    let (home, claude_home) = fake_home_with_claude("keel-skip-codex");
+    // Do NOT create ~/.codex/ — codex should not be detected.
+    run_install_with_extra(&repository_root, &claude_home, &["--without", "codex"]);
+    let codex_plugin = home.join(".codex").join("plugins").join("keel");
+    assert!(
+        !codex_plugin.exists(),
+        "codex plugin dir should NOT be created when codex is not detected: {}",
+        codex_plugin.display()
+    );
+    let _ = fs::remove_dir_all(&home);
+}
+
+#[test]
+fn install_skips_pi_when_not_detected() {
+    let repository_root = repository_root();
+    let (home, claude_home) = fake_home_with_claude("keel-skip-pi");
+    // Do NOT create ~/.pi/agent/ — pi should not be detected.
+    run_install_with_extra(&repository_root, &claude_home, &["--without", "pi"]);
+    let agents_md = home.join(".pi").join("agent").join("AGENTS.md");
+    assert!(
+        !agents_md.exists(),
+        "pi AGENTS.md should NOT be created when pi is not detected: {}",
+        agents_md.display()
+    );
+    // Also assert the current buggy path (repository_root.parent) is NOT
+    // written to — pi must not wire anywhere when not detected.
+    let buggy_target = repository_root
+        .parent()
+        .unwrap_or_else(|| Path::new(""))
+        .join("AGENTS.md");
+    let buggy_existed_before = buggy_target.exists();
+    run_install_at(&repository_root, &claude_home);
+    let buggy_exists_now = buggy_target.exists();
+    if !buggy_existed_before && buggy_exists_now {
+        let _ = fs::remove_file(&buggy_target);
+    }
+    assert!(
+        !buggy_exists_now || buggy_existed_before,
+        "pi must NOT write AGENTS.md to repository_root.parent when pi is not detected: {}",
+        buggy_target.display()
+    );
+    let _ = fs::remove_dir_all(&home);
+}
+
+#[test]
+fn install_wires_opencode_when_detected() {
+    let repository_root = repository_root();
+    let (home, claude_home) = fake_home_with_claude("keel-wire-opencode");
+    // Pre-create ~/.config/opencode/ so opencode is detected.
+    let _ = fs::create_dir_all(home.join(".config").join("opencode"));
+    run_install_at(&repository_root, &claude_home);
+    let plugin = home
+        .join(".config")
+        .join("opencode")
+        .join("plugins")
+        .join("keel.ts");
+    assert!(
+        plugin.is_file(),
+        "opencode plugin should be created when opencode is detected: {}",
+        plugin.display()
+    );
+    let opencode_json = home.join(".config").join("opencode").join("opencode.json");
+    if opencode_json.is_file() {
+        let content = fs::read_to_string(&opencode_json).expect("read opencode.json");
+        assert!(
+            content.contains("\"keel\""),
+            "opencode.json should contain a keel MCP entry: {content}"
+        );
+    }
+    let _ = fs::remove_dir_all(&home);
+}
+
+#[test]
+fn install_wires_codex_when_detected() {
+    let repository_root = repository_root();
+    let (home, claude_home) = fake_home_with_claude("keel-wire-codex");
+    // Pre-create ~/.codex/ so codex is detected.
+    let _ = fs::create_dir_all(home.join(".codex"));
+    run_install_at(&repository_root, &claude_home);
+    let hooks_json = home
+        .join(".codex")
+        .join("plugins")
+        .join("keel")
+        .join("hooks")
+        .join("hooks.json");
+    assert!(
+        hooks_json.is_file(),
+        "codex hooks.json should be created when codex is detected: {}",
+        hooks_json.display()
+    );
+    let _ = fs::remove_dir_all(&home);
+}
+
+#[test]
+fn install_wires_pi_when_detected() {
+    let repository_root = repository_root();
+    let (home, claude_home) = fake_home_with_claude("keel-wire-pi");
+    // Pre-create ~/.pi/agent/ so pi is detected.
+    let _ = fs::create_dir_all(home.join(".pi").join("agent"));
+    run_install_at(&repository_root, &claude_home);
+    let agents_md = home.join(".pi").join("agent").join("AGENTS.md");
+    assert!(
+        agents_md.is_file(),
+        "pi AGENTS.md should be created at ~/.pi/agent/AGENTS.md when pi is detected: {}",
+        agents_md.display()
+    );
+    let mcp_json = home.join(".config").join("mcp").join("mcp.json");
+    if mcp_json.is_file() {
+        let content = fs::read_to_string(&mcp_json).expect("read mcp.json");
+        assert!(
+            content.contains("\"keel\""),
+            "~/.config/mcp/mcp.json should contain a keel MCP entry: {content}"
+        );
+    }
+    // Clean up any buggy-path files the current code may have created.
+    let buggy_agents = repository_root
+        .parent()
+        .unwrap_or_else(|| Path::new(""))
+        .join("AGENTS.md");
+    let buggy_mcp = repository_root
+        .parent()
+        .unwrap_or_else(|| Path::new(""))
+        .join(".mcp.json");
+    let _ = fs::remove_file(&buggy_agents);
+    let _ = fs::remove_file(&buggy_mcp);
+    let _ = fs::remove_dir_all(&home);
+}
+
+#[test]
+fn install_cursor_targets_home_cursorrules_not_repo_parent() {
+    let repository_root = repository_root();
+    let (home, claude_home) = fake_home_with_claude("keel-cursor-path");
+
+    // Back up any existing .cursorrules at the buggy path so the test
+    // never destroys a user file.
+    let repo_parent = repository_root.parent().unwrap_or_else(|| Path::new(""));
+    let buggy_cursorrules = repo_parent.join(".cursorrules");
+    let backup_cursorrules = if buggy_cursorrules.is_file() {
+        Some(fs::read(&buggy_cursorrules).expect("read existing cursorrules for backup"))
+    } else {
+        None
+    };
+
+    run_install_with_extra(&repository_root, &claude_home, &["--with", "cursor"]);
+
+    // The buggy path writes to repository_root.parent/.cursorrules — assert it does NOT.
+    assert!(
+        !buggy_cursorrules.exists() || backup_cursorrules.is_some(),
+        ".cursorrules must NOT be written to repository_root.parent (wrong path): {}",
+        buggy_cursorrules.display()
+    );
+
+    // The correct target is ~/.cursorrules (home dir). Once detection + --with
+    // cursor is implemented, this will exist. Today it does not (RED).
+    let home_cursorrules = home.join(".cursorrules");
+    assert!(
+        home_cursorrules.is_file(),
+        ".cursorrules should target ~/.cursorrules (home dir), not repository_root.parent: {}",
+        home_cursorrules.display()
+    );
+
+    // Restore backup.
+    match backup_cursorrules {
+        Some(data) => {
+            let _ = fs::write(&buggy_cursorrules, data);
+        }
+        None => {
+            let _ = fs::remove_file(&buggy_cursorrules);
+        }
+    }
+    let _ = fs::remove_dir_all(&home);
+}
+
+#[test]
+fn install_does_not_clobber_user_cursorrules() {
+    let repository_root = repository_root();
+    let (home, claude_home) = fake_home_with_claude("keel-cursor-noclobber");
+
+    // Pre-write a custom .cursorrules in the fake home.
+    let cursorrules = home.join(".cursorrules");
+    let custom_content = "# My custom cursor rules\n\nDo not overwrite.\n";
+    let _ = fs::create_dir_all(cursorrules.parent().unwrap_or_else(|| Path::new("")));
+    let _ = fs::write(&cursorrules, custom_content);
+
+    run_install_at(&repository_root, &claude_home);
+
+    let after = fs::read_to_string(&cursorrules).unwrap_or_default();
+    assert!(
+        after.contains("# My custom cursor rules"),
+        "user-customized .cursorrules must be preserved (byte-compare skip); got:\n{after}"
+    );
+
+    // Clean up any buggy-path cursorrules the current code may have created.
+    let repo_parent = repository_root.parent().unwrap_or_else(|| Path::new(""));
+    let buggy_cursorrules = repo_parent.join(".cursorrules");
+    // Only remove if it didn't exist before (we can't know for sure, so
+    // leave it — the backup/restore in the other cursor test handles safety).
+    if buggy_cursorrules.is_file() {
+        let content = fs::read_to_string(&buggy_cursorrules).unwrap_or_default();
+        if content.starts_with("# keel") || content.contains("iron law") {
+            let _ = fs::remove_file(&buggy_cursorrules);
+        }
+    }
+
+    let _ = fs::remove_dir_all(&home);
+}

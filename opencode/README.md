@@ -4,6 +4,10 @@ Bridges OpenCode lifecycle events to the `keel` Rust CLI for context injection, 
 
 ## Install
 
+`keel install` auto-detects OpenCode (via `~/.config/opencode/` dir, `OPENCODE` env var, or `opencode` binary on PATH) and wires this adapter automatically. Use `--without opencode` to skip, `--with opencode` to force.
+
+Manual install (if needed):
+
 Copy the plugin file into the OpenCode global plugin directory:
 
 ```bash

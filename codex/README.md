@@ -10,6 +10,10 @@ Bridges Codex CLI lifecycle events to the `keel` Rust CLI for context injection,
 
 ## Install
 
+`keel install` auto-detects Codex CLI (via `~/.codex/` dir, `CODEX` env var, or `codex` binary on PATH) and wires this adapter automatically. Use `--without codex` to skip, `--with codex` to force.
+
+Manual install options:
+
 ### Option A: Local marketplace (recommended)
 
 1. Copy the plugin folder into your personal plugins directory:

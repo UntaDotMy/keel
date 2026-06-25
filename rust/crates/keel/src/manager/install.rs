@@ -26,6 +26,78 @@ use crate::runtime::{
 
 use super::agent_config::{parse_agent_config, render_agent_toml, unix_timestamp};
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PlatformName {
+    Opencode,
+    Codex,
+    Pi,
+    Cursor,
+}
+
+impl PlatformName {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "opencode" => Some(Self::Opencode),
+            "codex" => Some(Self::Codex),
+            "pi" => Some(Self::Pi),
+            "cursor" => Some(Self::Cursor),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct InstallOverrides {
+    pub force: BTreeSet<PlatformName>,
+    pub skip: BTreeSet<PlatformName>,
+}
+
+fn parse_overrides(with: &str, without: &str) -> InstallOverrides {
+    let mut overrides = InstallOverrides::default();
+    for name in with.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(p) = PlatformName::parse(name) {
+            overrides.force.insert(p);
+        }
+    }
+    for name in without.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(p) = PlatformName::parse(name) {
+            overrides.skip.insert(p);
+        }
+    }
+    overrides
+}
+
+fn apply_overrides(
+    mut detected: super::platform_detect::DetectedPlatforms,
+    overrides: &InstallOverrides,
+) -> super::platform_detect::DetectedPlatforms {
+    if overrides.force.contains(&PlatformName::Opencode) {
+        detected.opencode = true;
+    }
+    if overrides.force.contains(&PlatformName::Codex) {
+        detected.codex = true;
+    }
+    if overrides.force.contains(&PlatformName::Pi) {
+        detected.pi = true;
+    }
+    if overrides.force.contains(&PlatformName::Cursor) {
+        detected.cursor = true;
+    }
+    if overrides.skip.contains(&PlatformName::Opencode) {
+        detected.opencode = false;
+    }
+    if overrides.skip.contains(&PlatformName::Codex) {
+        detected.codex = false;
+    }
+    if overrides.skip.contains(&PlatformName::Pi) {
+        detected.pi = false;
+    }
+    if overrides.skip.contains(&PlatformName::Cursor) {
+        detected.cursor = false;
+    }
+    detected
+}
+
 #[derive(Default)]
 pub struct InstallSummary {
     pub synced_skills: usize,
@@ -106,7 +178,11 @@ pub fn install_from_flags(
 ) -> Result<InstallSummary, String> {
     let repository_root = resolve_install_repository_root(flag_set.string_value("repo-root"))?;
     let claude_home = resolve_claude_home(flag_set.string_value("claude-home"))?;
-    install_from_paths(build_version, &repository_root, &claude_home)
+    let overrides = parse_overrides(
+        flag_set.string_value("with"),
+        flag_set.string_value("without"),
+    );
+    install_from_paths(build_version, &repository_root, &claude_home, &overrides)
 }
 
 pub fn resolve_install_repository_root(flag_value: &str) -> Result<PathBuf, String> {
@@ -137,6 +213,7 @@ pub fn install_from_paths(
     build_version: &str,
     repository_root: &Path,
     claude_home: &Path,
+    overrides: &InstallOverrides,
 ) -> Result<InstallSummary, String> {
     let layout = discover_repository_layout(repository_root)?;
     ensure_claude_home_directories(claude_home)?;
@@ -173,10 +250,13 @@ pub fn install_from_paths(
     let mcp_registration = maybe_register_mcp_server(claude_home);
     let hooks_installation = maybe_install_hooks(claude_home);
     let user_claude_md = maybe_sync_user_claude_md(claude_home);
-    let opencode_wiring = maybe_wire_opencode(repository_root, claude_home);
-    let cursor_wiring = maybe_wire_cursor(repository_root, claude_home);
-    let codex_wiring = maybe_wire_codex(repository_root, claude_home);
-    let pi_wiring = maybe_wire_pi(repository_root, claude_home);
+    let detection_home = claude_home.parent().unwrap_or(claude_home);
+    let detected = super::platform_detect::PlatformDetector::new(detection_home).detect();
+    let detected = apply_overrides(detected, overrides);
+    let opencode_wiring = maybe_wire_opencode(repository_root, claude_home, detected.opencode);
+    let cursor_wiring = maybe_wire_cursor(repository_root, claude_home, detected.cursor);
+    let codex_wiring = maybe_wire_codex(repository_root, claude_home, detected.codex);
+    let pi_wiring = maybe_wire_pi(repository_root, claude_home, detected.pi);
     Ok(InstallSummary {
         synced_skills,
         synced_agents,
@@ -271,7 +351,11 @@ fn maybe_install_hooks(claude_home: &Path) -> Option<String> {
 /// loads, per opencode.ai/docs/plugins) and merge a `keel` MCP server
 /// into `opencode.json` (merge, never clobber). Guarded on standard `.claude`
 /// home; best-effort — a failure is reported in the summary, never fails install.
-fn maybe_wire_opencode(repository_root: &Path, claude_home: &Path) -> Option<String> {
+fn maybe_wire_opencode(
+    repository_root: &Path,
+    claude_home: &Path,
+    detected: bool,
+) -> Option<String> {
     let is_standard_home = claude_home
         .file_name()
         .and_then(|name| name.to_str())
@@ -279,6 +363,9 @@ fn maybe_wire_opencode(repository_root: &Path, claude_home: &Path) -> Option<Str
         .unwrap_or(false);
     if !is_standard_home {
         return None;
+    }
+    if !detected {
+        return Some("skipped (not detected)".to_string());
     }
 
     // Derive the home that owns THIS .claude from claude_home's parent, not from
@@ -331,7 +418,7 @@ fn maybe_wire_opencode(repository_root: &Path, claude_home: &Path) -> Option<Str
     Some(format!("{plugin_status}; {mcp_status}"))
 }
 
-fn maybe_wire_cursor(repository_root: &Path, claude_home: &Path) -> Option<String> {
+fn maybe_wire_cursor(repository_root: &Path, claude_home: &Path, detected: bool) -> Option<String> {
     let is_standard_home = claude_home
         .file_name()
         .and_then(|name| name.to_str())
@@ -340,22 +427,33 @@ fn maybe_wire_cursor(repository_root: &Path, claude_home: &Path) -> Option<Strin
     if !is_standard_home {
         return None;
     }
+    if !detected {
+        return Some("skipped (not detected)".to_string());
+    }
     let cursorrules_source = repository_root.join("cursor").join(".cursorrules");
     if !cursorrules_source.is_file() {
         return Some("source absent".to_string());
     }
-    let project_root = match repository_root.parent() {
+    let home = match claude_home.parent() {
         Some(path) => path.to_path_buf(),
-        None => return Some("no project root".to_string()),
+        None => return Some("no home directory".to_string()),
     };
-    let cursorrules_target = project_root.join(".cursorrules");
+    let cursorrules_target = home.join(".cursorrules");
+    if cursorrules_target.is_file() {
+        let source_bytes = std::fs::read(&cursorrules_source).unwrap_or_default();
+        let target_bytes = std::fs::read(&cursorrules_target).unwrap_or_default();
+        if source_bytes != target_bytes {
+            return Some("skipped (user-customized)".to_string());
+        }
+        return Some("already current".to_string());
+    }
     match std::fs::copy(&cursorrules_source, &cursorrules_target) {
         Ok(_) => Some(format!("copied to {}", display_path(&cursorrules_target))),
         Err(error) => Some(format!("copy failed ({error})")),
     }
 }
 
-fn maybe_wire_pi(repository_root: &Path, claude_home: &Path) -> Option<String> {
+fn maybe_wire_pi(repository_root: &Path, claude_home: &Path, detected: bool) -> Option<String> {
     let is_standard_home = claude_home
         .file_name()
         .and_then(|name| name.to_str())
@@ -364,26 +462,83 @@ fn maybe_wire_pi(repository_root: &Path, claude_home: &Path) -> Option<String> {
     if !is_standard_home {
         return None;
     }
-    let project_root = match repository_root.parent() {
-        Some(path) => path.to_path_buf(),
-        None => return Some("no project root".to_string()),
-    };
+    if !detected {
+        return Some("skipped (not detected)".to_string());
+    }
     let agents_source = repository_root.join("pi").join("AGENTS.md");
     let mcp_source = repository_root.join("pi").join(".mcp.json");
     if !agents_source.is_file() && !mcp_source.is_file() {
         return Some("source absent".to_string());
     }
-    let mut copied = 0;
-    for (source, name) in [(&agents_source, "AGENTS.md"), (&mcp_source, ".mcp.json")] {
-        let target = project_root.join(name);
-        if source.is_file() && std::fs::copy(source, &target).is_ok() {
-            copied += 1;
+    let home = match claude_home.parent() {
+        Some(path) => path.to_path_buf(),
+        None => return Some("no home directory".to_string()),
+    };
+    let mut status_parts: Vec<String> = Vec::new();
+    if agents_source.is_file() {
+        let agents_target = home.join(".pi").join("agent").join("AGENTS.md");
+        if let Some(parent) = agents_target.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if agents_target.is_file() {
+            let source_bytes = std::fs::read(&agents_source).unwrap_or_default();
+            let target_bytes = std::fs::read(&agents_target).unwrap_or_default();
+            if source_bytes == target_bytes {
+                status_parts.push("AGENTS.md already current".to_string());
+            } else {
+                status_parts.push("AGENTS.md skipped (user-customized)".to_string());
+            }
+        } else {
+            match std::fs::copy(&agents_source, &agents_target) {
+                Ok(_) => {
+                    status_parts.push(format!("AGENTS.md -> {}", display_path(&agents_target)))
+                }
+                Err(error) => status_parts.push(format!("AGENTS.md copy failed ({error})")),
+            }
         }
     }
-    Some(format!("{copied} files -> {}", display_path(&project_root)))
+    if mcp_source.is_file() {
+        let mcp_target = home.join(".config").join("mcp").join("mcp.json");
+        if let Some(parent) = mcp_target.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let mcp_entry = match std::fs::read_to_string(&mcp_source) {
+            Ok(text) => {
+                let parsed: serde_json::Value =
+                    serde_json::from_str(&text).unwrap_or(serde_json::json!({}));
+                parsed
+                    .get("mcpServers")
+                    .and_then(|s| s.get("keel"))
+                    .cloned()
+                    .unwrap_or(serde_json::json!({}))
+            }
+            Err(_) => serde_json::json!({}),
+        };
+        let binary = installed_executable_path(claude_home);
+        let mcp_entry = if mcp_entry.is_null() {
+            serde_json::json!({
+                "type": "local",
+                "command": [display_path(&binary), "mcp", "serve"],
+                "enabled": true,
+            })
+        } else {
+            mcp_entry
+        };
+        match merge_pi_mcp(&mcp_target, "keel", &mcp_entry) {
+            Ok(PiMcpResult::Added) => {
+                status_parts.push(format!("MCP registered in {}", display_path(&mcp_target)))
+            }
+            Ok(PiMcpResult::AlreadyCurrent) => status_parts.push("MCP already current".to_string()),
+            Ok(PiMcpResult::Updated) => {
+                status_parts.push(format!("MCP updated in {}", display_path(&mcp_target)))
+            }
+            Err(error) => status_parts.push(format!("MCP skipped ({error})")),
+        }
+    }
+    Some(status_parts.join("; "))
 }
 
-fn maybe_wire_codex(repository_root: &Path, claude_home: &Path) -> Option<String> {
+fn maybe_wire_codex(repository_root: &Path, claude_home: &Path, detected: bool) -> Option<String> {
     let is_standard_home = claude_home
         .file_name()
         .and_then(|name| name.to_str())
@@ -391,6 +546,9 @@ fn maybe_wire_codex(repository_root: &Path, claude_home: &Path) -> Option<String
         .unwrap_or(false);
     if !is_standard_home {
         return None;
+    }
+    if !detected {
+        return Some("skipped (not detected)".to_string());
     }
     let codex_source_dir = repository_root.join("codex");
     if !codex_source_dir.is_dir() {
@@ -430,6 +588,62 @@ enum OpencodeMcpResult {
     Added,
     AlreadyCurrent,
     Updated,
+}
+
+#[derive(Debug)]
+enum PiMcpResult {
+    Added,
+    AlreadyCurrent,
+    Updated,
+}
+
+fn merge_pi_mcp(
+    config_path: &std::path::Path,
+    server_key: &str,
+    entry: &serde_json::Value,
+) -> Result<PiMcpResult, String> {
+    let existing_text = crate::runtime::read_text_if_exists(config_path).unwrap_or_default();
+    let existing_text = existing_text
+        .strip_prefix('\u{feff}')
+        .unwrap_or(&existing_text);
+    let mut document: serde_json::Value = if existing_text.trim().is_empty() {
+        serde_json::json!({})
+    } else {
+        serde_json::from_str(existing_text).map_err(|error| format!("parse error: {error}"))?
+    };
+
+    if document.get("mcpServers").is_none() {
+        document["mcpServers"] = serde_json::json!({});
+    }
+    let current = document["mcpServers"]
+        .as_object_mut()
+        .ok_or("mcpServers is not an object")?;
+
+    let desired =
+        serde_json::to_string_pretty(entry).map_err(|error| format!("serialize error: {error}"))?;
+
+    if let Some(existing) = current.get(server_key) {
+        let existing_str = serde_json::to_string_pretty(existing)
+            .map_err(|error| format!("serialize error: {error}"))?;
+        if existing_str == desired {
+            return Ok(PiMcpResult::AlreadyCurrent);
+        }
+        current.insert(server_key.to_string(), entry.clone());
+        write_text(
+            config_path,
+            &serde_json::to_string_pretty(&document)
+                .map_err(|error| format!("serialize error: {error}"))?,
+        )?;
+        return Ok(PiMcpResult::Updated);
+    }
+
+    current.insert(server_key.to_string(), entry.clone());
+    write_text(
+        config_path,
+        &serde_json::to_string_pretty(&document)
+            .map_err(|error| format!("serialize error: {error}"))?,
+    )?;
+    Ok(PiMcpResult::Added)
 }
 
 fn merge_opencode_mcp(
@@ -819,6 +1033,41 @@ fn remove_wired_adapters(claude_home: &Path) -> usize {
     let codex_dir = home.join(".codex").join("plugins").join("keel");
     if codex_dir.is_dir() {
         removed += remove_path_if_exists_counted(&codex_dir).unwrap_or(0);
+    }
+
+    let cursorrules = home.join(".cursorrules");
+    if cursorrules.is_file() {
+        if let Ok(content) = std::fs::read_to_string(&cursorrules) {
+            if content.starts_with("# keel Iron Law for Cursor") {
+                removed += remove_path_if_exists_counted(&cursorrules).unwrap_or(0);
+            }
+        }
+    }
+
+    let agents_md = home.join(".pi").join("agent").join("AGENTS.md");
+    if agents_md.is_file() {
+        if let Ok(content) = std::fs::read_to_string(&agents_md) {
+            if content.starts_with("# keel Iron Law for Pi Agent") {
+                removed += remove_path_if_exists_counted(&agents_md).unwrap_or(0);
+            }
+        }
+    }
+
+    let mcp_json = home.join(".config").join("mcp").join("mcp.json");
+    if mcp_json.is_file() {
+        if let Ok(text) = crate::runtime::read_text_if_exists(&mcp_json) {
+            if let Ok(mut doc) = serde_json::from_str::<serde_json::Value>(&text) {
+                if let Some(servers) = doc.get_mut("mcpServers").and_then(|v| v.as_object_mut()) {
+                    if servers.remove("keel").is_some() {
+                        let _ = write_text(
+                            &mcp_json,
+                            &serde_json::to_string_pretty(&doc).unwrap_or(text.clone()),
+                        );
+                        removed += 1;
+                    }
+                }
+            }
+        }
     }
 
     removed
@@ -1534,7 +1783,12 @@ pub fn run_update_command(
         return 1;
     }
     let _ = writeln!(standard_output, "Installing updated skill pack");
-    match install_from_paths(build_version, &repository_root, &claude_home) {
+    match install_from_paths(
+        build_version,
+        &repository_root,
+        &claude_home,
+        &InstallOverrides::default(),
+    ) {
         Ok(summary) => {
             write_install_summary(&summary, standard_output);
             0
@@ -1791,7 +2045,7 @@ mod tests {
             "export default async () => ({});\n",
         );
 
-        let summary = maybe_wire_opencode(&repo, &claude_home);
+        let summary = maybe_wire_opencode(&repo, &claude_home, true);
         assert!(
             summary.is_some(),
             "standard .claude home must wire OpenCode"
@@ -2151,7 +2405,7 @@ mod tests {
         let (repo, home) = unique_paths("rename");
         seed_repo(&repo);
         write_skill_with_reference(&repo, "reviewer", "10-old.md");
-        install_from_paths("dev", &repo, &home).unwrap();
+        install_from_paths("dev", &repo, &home, &InstallOverrides::default()).unwrap();
         let old_file = home.join("skills/reviewer/references/10-old.md");
         assert!(
             old_file.is_file(),
@@ -2164,7 +2418,7 @@ mod tests {
             "reference body\n",
         )
         .unwrap();
-        install_from_paths("dev", &repo, &home).unwrap();
+        install_from_paths("dev", &repo, &home, &InstallOverrides::default()).unwrap();
 
         assert!(
             !old_file.is_file(),
@@ -2184,12 +2438,12 @@ mod tests {
         seed_repo(&repo);
         write_skill_with_reference(&repo, "reviewer", "10-r.md");
         write_skill_with_reference(&repo, "git-expert", "10-g.md");
-        install_from_paths("dev", &repo, &home).unwrap();
+        install_from_paths("dev", &repo, &home, &InstallOverrides::default()).unwrap();
         let orphan_dir = home.join("skills/git-expert");
         assert!(orphan_dir.is_dir(), "second skill must install");
 
         fs::remove_dir_all(repo.join("git-expert")).unwrap();
-        install_from_paths("dev", &repo, &home).unwrap();
+        install_from_paths("dev", &repo, &home, &InstallOverrides::default()).unwrap();
 
         assert!(
             !orphan_dir.exists(),
@@ -2208,12 +2462,13 @@ mod tests {
         let (repo, home) = unique_paths("unchanged");
         seed_repo(&repo);
         write_skill_with_reference(&repo, "reviewer", "10-r.md");
-        install_from_paths("dev", &repo, &home).unwrap();
+        install_from_paths("dev", &repo, &home, &InstallOverrides::default()).unwrap();
 
         let target = home.join("skills/reviewer/references/10-r.md");
         let mtime_before = fs::metadata(&target).unwrap().modified().unwrap();
         std::thread::sleep(std::time::Duration::from_millis(50));
-        let summary = install_from_paths("dev", &repo, &home).unwrap();
+        let summary =
+            install_from_paths("dev", &repo, &home, &InstallOverrides::default()).unwrap();
         let mtime_after = fs::metadata(&target).unwrap().modified().unwrap();
 
         assert_eq!(
@@ -2230,7 +2485,8 @@ mod tests {
         let (repo, home) = unique_paths("first-install");
         seed_repo(&repo);
         write_skill_with_reference(&repo, "reviewer", "10-r.md");
-        let summary = install_from_paths("dev", &repo, &home).unwrap();
+        let summary =
+            install_from_paths("dev", &repo, &home, &InstallOverrides::default()).unwrap();
 
         assert_eq!(
             summary.removed_stale_files, 0,
@@ -2269,7 +2525,8 @@ mod tests {
         seed_repo(&repo);
         write_skill_with_reference(&repo, "reviewer", "10-r.md");
 
-        let summary = install_from_paths("dev", &repo, &home).unwrap();
+        let summary =
+            install_from_paths("dev", &repo, &home, &InstallOverrides::default()).unwrap();
 
         // Summary reports the install, not a skip.
         let status = summary
@@ -2310,7 +2567,7 @@ mod tests {
             serde_json::to_string_pretty(&reparsed).unwrap(),
         )
         .unwrap();
-        install_from_paths("dev", &repo, &home).unwrap();
+        install_from_paths("dev", &repo, &home, &InstallOverrides::default()).unwrap();
         let after: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&settings_path).unwrap()).unwrap();
         assert_eq!(
@@ -2434,7 +2691,8 @@ mod tests {
         )
         .unwrap();
 
-        let summary = install_from_paths("dev", &repo, &home).unwrap();
+        let summary =
+            install_from_paths("dev", &repo, &home, &InstallOverrides::default()).unwrap();
         let status = summary
             .user_claude_md
             .expect("standard home must write user CLAUDE.md");
@@ -2456,7 +2714,8 @@ mod tests {
         );
 
         // Re-install is idempotent.
-        let resummary = install_from_paths("dev", &repo, &home).unwrap();
+        let resummary =
+            install_from_paths("dev", &repo, &home, &InstallOverrides::default()).unwrap();
         assert_eq!(
             resummary.user_claude_md.as_deref(),
             Some("already current"),
@@ -2510,7 +2769,7 @@ mod tests {
         fs::write(shared_dir.join("common-discipline.md"), "discipline body\n").unwrap();
         fs::write(shared_dir.join("nested/extra.md"), "nested body\n").unwrap();
 
-        install_from_paths("dev", &repo, &home).unwrap();
+        install_from_paths("dev", &repo, &home, &InstallOverrides::default()).unwrap();
 
         let installed_shared = home.join("skills/_shared");
         assert!(
@@ -2530,7 +2789,7 @@ mod tests {
             "discipline body\n",
         )
         .unwrap();
-        install_from_paths("dev", &repo, &home).unwrap();
+        install_from_paths("dev", &repo, &home, &InstallOverrides::default()).unwrap();
 
         assert!(
             !installed_shared.join("common-discipline.md").is_file(),
@@ -2558,13 +2817,13 @@ mod tests {
         fs::create_dir_all(&shared_dir).unwrap();
         fs::write(shared_dir.join("common-discipline.md"), "discipline body\n").unwrap();
 
-        let first = install_from_paths("dev", &repo, &home).unwrap();
+        let first = install_from_paths("dev", &repo, &home, &InstallOverrides::default()).unwrap();
         assert!(
             first.synced_shared_resources >= 1,
             "first install must actually write the shared resource"
         );
 
-        let second = install_from_paths("dev", &repo, &home).unwrap();
+        let second = install_from_paths("dev", &repo, &home, &InstallOverrides::default()).unwrap();
         assert_eq!(second.synced_skills, 0, "no skill churn on no-op reinstall");
         assert_eq!(second.synced_agents, 0, "no agent churn on no-op reinstall");
         assert_eq!(
@@ -2605,13 +2864,13 @@ mod tests {
         fs::create_dir_all(&shared_dir).unwrap();
         fs::write(shared_dir.join("common-discipline.md"), "discipline body\n").unwrap();
 
-        install_from_paths("dev", &repo, &home).unwrap();
+        install_from_paths("dev", &repo, &home, &InstallOverrides::default()).unwrap();
         let installed_shared = home.join("skills/_shared");
         assert!(installed_shared.is_dir(), "first install seeds shared dir");
 
         // Drop the whole _shared directory from the repo and reinstall.
         fs::remove_dir_all(&shared_dir).unwrap();
-        install_from_paths("dev", &repo, &home).unwrap();
+        install_from_paths("dev", &repo, &home, &InstallOverrides::default()).unwrap();
 
         assert!(
             !installed_shared.exists(),
@@ -2738,7 +2997,8 @@ mod tests {
         )
         .unwrap();
 
-        let summary = install_from_paths("dev", &repo, &home).unwrap();
+        let summary =
+            install_from_paths("dev", &repo, &home, &InstallOverrides::default()).unwrap();
         assert_eq!(
             summary.synced_subagent_definitions, 2,
             "first install must report two newly written subagent definitions"
@@ -2756,7 +3016,8 @@ mod tests {
         );
 
         // Reinstall with no source change must report zero writes.
-        let summary = install_from_paths("dev", &repo, &home).unwrap();
+        let summary =
+            install_from_paths("dev", &repo, &home, &InstallOverrides::default()).unwrap();
         assert_eq!(
             summary.synced_subagent_definitions, 0,
             "no-op reinstall must not rewrite unchanged subagent definitions"
@@ -2770,7 +3031,7 @@ mod tests {
             "---\nname: git-helper\n---\nbody\n",
         )
         .unwrap();
-        install_from_paths("dev", &repo, &home).unwrap();
+        install_from_paths("dev", &repo, &home, &InstallOverrides::default()).unwrap();
 
         assert!(
             !installed_git.is_file(),
@@ -2809,7 +3070,8 @@ mod tests {
         // A non-markdown sibling must be ignored, matching the .md-only filter.
         fs::write(commands_source.join("notes.txt"), "ignore me\n").unwrap();
 
-        let summary = install_from_paths("dev", &repo, &home).unwrap();
+        let summary =
+            install_from_paths("dev", &repo, &home, &InstallOverrides::default()).unwrap();
         assert_eq!(
             summary.synced_commands, 2,
             "first install must report two newly written command definitions"
@@ -2831,7 +3093,8 @@ mod tests {
         );
 
         // Reinstall with no source change must report zero writes.
-        let summary = install_from_paths("dev", &repo, &home).unwrap();
+        let summary =
+            install_from_paths("dev", &repo, &home, &InstallOverrides::default()).unwrap();
         assert_eq!(
             summary.synced_commands, 0,
             "no-op reinstall must not rewrite unchanged command definitions"
@@ -2845,7 +3108,7 @@ mod tests {
             "---\ndescription: report savings\n---\nbody\n",
         )
         .unwrap();
-        install_from_paths("dev", &repo, &home).unwrap();
+        install_from_paths("dev", &repo, &home, &InstallOverrides::default()).unwrap();
 
         assert!(
             !installed_recall.is_file(),
@@ -2872,29 +3135,31 @@ mod tests {
             r#"{"mcpServers":{"keel":{"command":"keel","args":["mcp","serve"]}}}"#,
         );
 
-        let summary = maybe_wire_pi(&repo, &claude_home);
+        let summary = maybe_wire_pi(&repo, &claude_home, true);
         assert!(
             summary.is_some(),
             "standard .claude home must wire Pi Agent"
         );
         let status = summary.unwrap();
         assert!(
-            status.contains("2 files"),
-            "must report 2 files copied, got: {status}"
-        );
-
-        let project_root = repo.parent().unwrap();
-        assert!(
-            project_root.join("AGENTS.md").is_file(),
-            "Pi AGENTS.md must land in project root"
+            status.contains("AGENTS.md"),
+            "must report AGENTS.md wired, got: {status}"
         );
         assert!(
-            project_root.join(".mcp.json").is_file(),
-            "Pi .mcp.json must land in project root"
+            status.contains("MCP"),
+            "must report MCP registered, got: {status}"
         );
 
-        let _ = fs::remove_file(project_root.join("AGENTS.md"));
-        let _ = fs::remove_file(project_root.join(".mcp.json"));
+        let home = claude_home.parent().unwrap();
+        assert!(
+            home.join(".pi").join("agent").join("AGENTS.md").is_file(),
+            "Pi AGENTS.md must land in ~/.pi/agent/"
+        );
+        assert!(
+            home.join(".config").join("mcp").join("mcp.json").is_file(),
+            "Pi MCP config must land in ~/.config/mcp/mcp.json"
+        );
+
         let _ = fs::remove_dir_all(&base);
         let _ = fs::remove_dir_all(&repo);
     }
@@ -2909,7 +3174,7 @@ mod tests {
         let claude_home =
             std::env::temp_dir().join(format!("ulw-wire-pi-nonstd-{}", std::process::id()));
         let _ = fs::create_dir_all(&claude_home);
-        let result = maybe_wire_pi(&repo, &claude_home);
+        let result = maybe_wire_pi(&repo, &claude_home, true);
         assert!(
             result.is_none(),
             "non-standard .claude home must return None"
