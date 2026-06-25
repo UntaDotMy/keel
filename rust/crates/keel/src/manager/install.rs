@@ -513,9 +513,11 @@ Installed by keel into `~/.claude/CLAUDE.md` and loaded into **every** harness s
 5. **Preserve existing data.** Never remove or replace an existing field, column, output, or record to fit a new format — ADD alongside, and ASK before dropping anything the user did not name. Data loss in an edit is destructive like `DROP TABLE`; if you would flag a removal *after* acting, ask *before* instead. Autonomy covers reversible choices, never data deletion.
 
 ## keel MCP tools — always available, prefer over guessing
-- `system_map` — call before any claim about a repository's structure or layout ("what is this project", "where does X live") instead of reading files blind.
-- `recall` — call before claiming what you remember or previously learned; full-text search over your durable memory and working briefs.
+- `system_map` — call when you lack the workspace structural map this turn (e.g. "what is this project", "where does X live") instead of reading files blind. **Call it at most once per turn** — if you already called it this turn, the result is in your context; reuse it and read the owning files it points you at. Call it again only if you have since created, moved, or deleted files and the in-context map is now stale.
+- `recall` — call when you need to surface a prior decision, working brief, or learning from durable memory instead of claiming from conversation. **Call it at most once per turn** — if you already called it this turn, reuse the result. Call it again only if you have since written new memory this turn and need to confirm it landed.
 - `run_command` — run noisy shell commands (test, build, lint, logs, search) through it so compacted output enters context instead of the raw stream.
+
+**No tool-call loops.** These tools answer "what is the structure" and "what do I remember". They do not change between calls within a single turn unless *you* changed something. Re-calling them with no intervening change is a loop — re-read the result already in your context instead.
 
 ## Skills
 keel installs specialist skills under `~/.claude/skills/` (lifecycle, backend, cloud, security, reviewer, UI/UX, debugging, TDD, migrations, and more). Invoke by bare name with the Skill tool, e.g. `Skill("reviewer")`. The `using-keel` skill carries the full catalog and routing rules."#;

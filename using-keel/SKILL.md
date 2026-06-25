@@ -49,6 +49,7 @@ checking. The cost of skipping a skill that did apply is shipping a regression.
 | Thought | Reality |
 |---|---|
 | "I remember this codebase" | Memories drift. Read SYSTEM_MAP and the owning file before claiming behavior. |
+| "I already called `system_map`/`recall` but I'll call it again to be safe" | That is the loop. These tools return the same data within a turn unless *you* changed something. Re-read the result already in your context; call again only after you have created, moved, deleted files or written new memory this turn. |
 | "The user story is clear" | Stories are summaries, not specs. Find the root cause. |
 | "I get the gist, I'll start building" | The gist is not the spec. Restate the request, confirm the user story, research what's needed. Building on a guess is how you ship the wrong thing. |
 | "I'll assume they meant X and proceed" | Assuming is guessing with confidence. If the assumption changes what you build, confirm it first — do not build then apologize. |
