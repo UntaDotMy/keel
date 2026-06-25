@@ -32,8 +32,18 @@ use crate::args::FlagSet;
 use crate::json::{write_indented, Value};
 use crate::runtime::{display_path, resolve_claude_home};
 
+#[cfg(feature = "semantic")]
+use keel_sqlite_vec::sqlite3_vec_init;
+
 /// Schema version stamped into the `meta` table. Bump when the FTS5 column layout
 /// or tokenizer chain changes so existing indexes get rebuilt automatically.
+/// Schema version stamped into the `meta` table. The semantic feature bumps
+/// to "2" so a vec_items table is created alongside FTS5; non-semantic builds
+/// stay at "1" to avoid a pointless FTS5 reindex for users who never enable
+/// vector recall.
+#[cfg(feature = "semantic")]
+const SCHEMA_VERSION: &str = "2";
+#[cfg(not(feature = "semantic"))]
 const SCHEMA_VERSION: &str = "1";
 
 /// Top-level subdirectories under `<claude-home>` that recall indexes by default.
@@ -739,6 +749,8 @@ fn open_recall_connection(database_path: &Path) -> Result<Connection, String> {
         fs::create_dir_all(parent_directory)
             .map_err(|io_error| format!("create {}: {io_error}", display_path(parent_directory)))?;
     }
+    #[cfg(feature = "semantic")]
+    ensure_vec_extension_registered();
     let connection = Connection::open(database_path).map_err(|database_error| {
         recall_open_error_hint(database_path, &format!("open sqlite: {database_error}"))
     })?;
@@ -841,6 +853,10 @@ fn ensure_recall_schema(connection: &Connection) -> Result<(), String> {
                 )
                 .map_err(|database_error| format!("stamp schema_version: {database_error}"))?;
         }
+    }
+    #[cfg(feature = "semantic")]
+    {
+        ensure_vec_schema(connection)?;
     }
     Ok(())
 }
@@ -945,6 +961,11 @@ pub fn sync_recall_index(
                 ],
             )
             .map_err(|database_error| format!("insert document: {database_error}"))?;
+        #[cfg(feature = "semantic")]
+        {
+            let zero = vec![0.0f32; EMBEDDING_DIM];
+            let _ = upsert_doc_vector(&transaction, &document.absolute_path, &zero);
+        }
         if existing_rows.contains_key(&document.absolute_path) {
             report.updated += 1;
         } else {
@@ -962,6 +983,10 @@ pub fn sync_recall_index(
         transaction
             .execute("DELETE FROM documents WHERE path = ?1", params![path])
             .map_err(|database_error| format!("delete vanished: {database_error}"))?;
+        #[cfg(feature = "semantic")]
+        {
+            let _ = delete_doc_vector(&transaction, path);
+        }
         report.removed += 1;
     }
 
@@ -1689,6 +1714,134 @@ fn relativize(claude_home: &Path, absolute_path: &Path) -> String {
     }
 }
 
+/// Embedding dimension for all-MiniLM-L6-v2. Stored alongside the schema so
+/// the vec0 column width and any embedding producer stay in lockstep.
+#[cfg(feature = "semantic")]
+pub const EMBEDDING_DIM: usize = 384;
+
+#[cfg(feature = "semantic")]
+static VEC_EXTENSION_REGISTERED: std::sync::Once = std::sync::Once::new();
+
+/// Register the sqlite-vec extension with rusqlite's bundled SQLite exactly
+/// once per process. Must run before any `CREATE VIRTUAL TABLE ... USING vec0`
+/// statement. The transmute mirrors the upstream sqlite-vec test pattern: the
+/// C entry point is declared with no args in the FFI binding but the
+/// auto-extension slot expects the standard `fn(*mut c_void) -> c_int` shape.
+#[cfg(feature = "semantic")]
+pub fn ensure_vec_extension_registered() {
+    type ExtensionInit = unsafe extern "C" fn(
+        *mut rusqlite::ffi::sqlite3,
+        *mut *mut std::os::raw::c_char,
+        *const rusqlite::ffi::sqlite3_api_routines,
+    ) -> std::os::raw::c_int;
+    VEC_EXTENSION_REGISTERED.call_once(|| unsafe {
+        rusqlite::ffi::sqlite3_auto_extension(Some(
+            std::mem::transmute::<*const (), ExtensionInit>(sqlite3_vec_init as *const ()),
+        ));
+    });
+}
+
+/// Create the `vec_items` virtual table if absent. Idempotent. The vec0 table
+/// stores one 384-dim float vector per indexed memory path, keyed by the same
+/// absolute path string the FTS5 `documents` table uses.
+#[cfg(feature = "semantic")]
+pub fn ensure_vec_schema(connection: &Connection) -> Result<(), String> {
+    ensure_vec_extension_registered();
+    connection
+        .execute_batch(&format!(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS vec_items USING vec0(
+                 path TEXT PRIMARY KEY,
+                 embedding float[{EMBEDDING_DIM}]
+             );"
+        ))
+        .map_err(|database_error| format!("ensure vec_items: {database_error}"))
+}
+
+/// Serialize an f32 slice as the little-endian byte blob sqlite-vec expects
+/// for a `float[]` MATCH argument.
+#[cfg(feature = "semantic")]
+fn serialize_f32_blob(vector: &[f32]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(vector.len() * 4);
+    for value in vector {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    bytes
+}
+
+/// Upsert a document's vector. Placeholder Phase 1 callers pass a zero vector;
+/// Phase 2 replaces it with a real candle embedding.
+#[cfg(feature = "semantic")]
+pub fn upsert_doc_vector(
+    connection: &Connection,
+    path: &str,
+    vector: &[f32],
+) -> Result<(), String> {
+    connection
+        .execute(
+            "INSERT OR REPLACE INTO vec_items(path, embedding) VALUES (?1, ?2)",
+            params![path, serialize_f32_blob(vector)],
+        )
+        .map_err(|database_error| format!("upsert vec_items: {database_error}"))?;
+    Ok(())
+}
+
+/// Drop a document's vector when the file vanishes from disk.
+#[cfg(feature = "semantic")]
+pub fn delete_doc_vector(connection: &Connection, path: &str) -> Result<(), String> {
+    connection
+        .execute("DELETE FROM vec_items WHERE path = ?1", params![path])
+        .map_err(|database_error| format!("delete vec_items: {database_error}"))?;
+    Ok(())
+}
+
+/// KNN query over the vector store. Returns (path, distance) pairs ordered
+/// nearest-first. `distance` is sqlite-vec's L2 distance (lower is nearer).
+/// Wired into the recall cascade in Phase 3; declared now so the store API is
+/// complete and testable in isolation.
+#[cfg(feature = "semantic")]
+#[allow(dead_code)]
+pub fn query_vector_index(
+    connection: &Connection,
+    query_vector: &[f32],
+    limit: usize,
+) -> Result<Vec<(String, f64)>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT path, distance FROM vec_items
+             WHERE embedding MATCH ?1
+             ORDER BY distance
+             LIMIT ?2",
+        )
+        .map_err(|database_error| format!("prepare vec knn: {database_error}"))?;
+    let rows = statement
+        .query_map(
+            params![serialize_f32_blob(query_vector), limit as i64],
+            |row| {
+                let path: String = row.get(0)?;
+                let distance: f64 = row.get(1)?;
+                Ok((path, distance))
+            },
+        )
+        .map_err(|database_error| format!("query vec knn: {database_error}"))?;
+    let mut results = Vec::new();
+    for row in rows {
+        results.push(row.map_err(|database_error| format!("read vec row: {database_error}"))?);
+    }
+    Ok(results)
+}
+
+/// Count of vectors currently stored. Surfaced by `recall status` in Phase 4.
+#[cfg(feature = "semantic")]
+#[allow(dead_code)]
+pub fn vector_count(connection: &Connection) -> Result<u64, String> {
+    connection
+        .query_row("SELECT COUNT(*) FROM vec_items", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .map(|count| count.max(0) as u64)
+        .map_err(|database_error| format!("count vec_items: {database_error}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2023,7 +2176,7 @@ mod tests {
                 "rendered: {rendered}"
             );
             assert!(
-                rendered.contains("\"schemaVersion\": \"1\""),
+                rendered.contains("\"schemaVersion\":"),
                 "rendered: {rendered}"
             );
         });
@@ -2468,5 +2621,132 @@ mod tests {
                 "rendered: {rendered}"
             );
         });
+    }
+}
+
+#[cfg(all(test, feature = "semantic"))]
+mod vector_tests {
+    use super::*;
+    use crate::test_support::ENV_LOCK;
+
+    fn temp_home(label: &str) -> PathBuf {
+        ensure_vec_extension_registered();
+        let unique_suffix: u128 = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        let candidate = std::env::temp_dir().join(format!("{label}-{unique_suffix}"));
+        fs::create_dir_all(&candidate).expect("create tempdir");
+        candidate
+    }
+
+    #[test]
+    fn vec_schema_creates_vec_items_and_stamps_version_2() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let home = temp_home("keel-vec-schema");
+        let db_path = recall_database_path(&home);
+        let conn = Connection::open(&db_path).expect("open db");
+        ensure_recall_schema(&conn).expect("ensure schema");
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM vec_items", [], |row| row.get(0))
+            .expect("count vec_items");
+        assert_eq!(
+            count, 0,
+            "vec_items must exist and be empty on a fresh schema"
+        );
+        let version: String = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read schema_version");
+        assert_eq!(version, "2", "schema_version must be stamped to 2");
+    }
+
+    #[test]
+    fn v1_index_migrates_to_v2_without_losing_vec_items_availability() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let home = temp_home("keel-vec-migrate");
+        let db_path = recall_database_path(&home);
+        {
+            let conn = Connection::open(&db_path).expect("open db");
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                 CREATE VIRTUAL TABLE IF NOT EXISTS documents USING fts5(
+                     path UNINDEXED, modified_at UNINDEXED, size UNINDEXED, content,
+                     tokenize = 'porter unicode61 remove_diacritics 2'
+                 );
+                 INSERT INTO documents(path, modified_at, size, content)
+                 VALUES ('/x.md', '1', '1', 'webhook');
+                 INSERT INTO meta(key, value) VALUES ('schema_version', '1');",
+            )
+            .expect("seed v1 index");
+        }
+        let conn = Connection::open(&db_path).expect("reopen db");
+        ensure_recall_schema(&conn).expect("migrate to v2");
+        let version: String = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read schema_version");
+        assert_eq!(version, "2");
+        let _: i64 = conn
+            .query_row("SELECT COUNT(*) FROM vec_items", [], |row| row.get(0))
+            .expect("vec_items exists after migration");
+    }
+
+    #[test]
+    fn sync_inserts_a_vec_items_row_for_a_new_document() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let home = temp_home("keel-vec-sync");
+        let mem_dir = home.join("memory").join("notes");
+        fs::create_dir_all(&mem_dir).expect("create memory dir");
+        fs::write(
+            mem_dir.join("alpha.md"),
+            "# Alpha\n\nsemantic recall test\n",
+        )
+        .expect("write memory file");
+        let db_path = recall_database_path(&home);
+        let mut conn = Connection::open(&db_path).expect("open db");
+        ensure_recall_schema(&conn).expect("ensure schema");
+        sync_recall_index(&mut conn, &home, false).expect("sync");
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM vec_items", [], |row| row.get(0))
+            .expect("count vec_items");
+        assert!(
+            count >= 1,
+            "sync must insert at least one vec_items row for the new document; got {count}"
+        );
+    }
+
+    #[test]
+    fn query_vector_index_returns_nearest_first() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let home = temp_home("keel-vec-knn");
+        let db_path = recall_database_path(&home);
+        let conn = Connection::open(&db_path).expect("open db");
+        ensure_recall_schema(&conn).expect("ensure schema");
+        let mut a = vec![0.0f32; EMBEDDING_DIM];
+        a[0] = 1.0;
+        let mut b = vec![0.0f32; EMBEDDING_DIM];
+        b[1] = 1.0;
+        let mut c = vec![0.0f32; EMBEDDING_DIM];
+        c[2] = 1.0;
+        upsert_doc_vector(&conn, "/a.md", &a).expect("insert a");
+        upsert_doc_vector(&conn, "/b.md", &b).expect("insert b");
+        upsert_doc_vector(&conn, "/c.md", &c).expect("insert c");
+        let results = query_vector_index(&conn, &a, 3).expect("knn query");
+        assert!(!results.is_empty(), "KNN must return results");
+        assert_eq!(results[0].0, "/a.md", "nearest neighbor must be /a.md");
+        let distances: Vec<f64> = results.iter().map(|(_, d)| *d).collect();
+        let mut sorted = distances.clone();
+        sorted.sort_by(|x, y| x.partial_cmp(y).unwrap());
+        assert_eq!(
+            distances, sorted,
+            "results must be ordered nearest-first by distance"
+        );
     }
 }

@@ -337,6 +337,7 @@ dependencies = [
  "keel-platform",
  "keel-professionaltext",
  "keel-releaseassets",
+ "keel-sqlite-vec",
  "predicates",
  "rand",
  "regex",
@@ -373,6 +374,13 @@ name = "keel-releaseassets"
 version = "0.1.0"
 dependencies = [
  "keel-platform",
+]
+
+[[package]]
+name = "keel-sqlite-vec"
+version = "0.1.10-alpha.4"
+dependencies = [
+ "cc",
 ]
 
 [[package]]

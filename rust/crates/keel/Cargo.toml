@@ -22,6 +22,10 @@ regex = { workspace = true }
 thiserror = "2"
 toml = { workspace = true }
 which = "7"
+keel-sqlite-vec = { path = "../keel-sqlite-vec", optional = true }
+
+[features]
+semantic = ["dep:keel-sqlite-vec"]
 
 [dev-dependencies]
 assert_cmd = "2.1.2"
