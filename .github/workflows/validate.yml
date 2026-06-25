@@ -67,6 +67,8 @@ jobs:
         run: cargo build --release
       - name: Run tests
         run: cargo test --release
+      - name: Run tests (semantic feature)
+        run: cargo test --workspace --features semantic
 
   validate-macos:
     runs-on: macos-latest
@@ -83,6 +85,8 @@ jobs:
         run: cargo build --release
       - name: Run tests
         run: cargo test --release
+      - name: Run tests (semantic feature)
+        run: cargo test --workspace --features semantic
 
   security-audit:
     runs-on: ubuntu-latest
