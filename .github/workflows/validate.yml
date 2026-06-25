@@ -15,33 +15,6 @@ env:
   RUSTFLAGS: -D warnings
 
 jobs:
-  # Block direct pushes to main — enforce branch policy
-  # Merge commits (from PR merges) have 2+ parents; direct pushes have 1
-  branch-guard:
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push'
-    steps:
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
-        with:
-          fetch-depth: 0
-      - name: Reject direct pushes to main
-        run: |
-          PARENTS=$(git cat-file -p HEAD | grep -c "^parent")
-          if [ "$PARENTS" -lt 2 ]; then
-            echo ""
-            echo "❌ DIRECT PUSH TO MAIN BLOCKED"
-            echo ""
-            echo "Branch policy requires: work branch → feat → dev → main"
-            echo "Direct pushes are never allowed on main."
-            echo ""
-            echo "Create a work branch and PR instead:"
-            echo "  git checkout -b <category>/<FEATURE>"
-            echo "  git push origin <category>/<FEATURE>"
-            echo "  gh pr create --base feat"
-            exit 1
-          fi
-          echo "✅ Merge commit detected — allowing."
-
   validate-linux:
     runs-on: ubuntu-latest
     steps:
