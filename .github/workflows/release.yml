@@ -163,7 +163,7 @@ jobs:
         env:
           RUSTFLAGS: -D warnings
           CLAUDE_SKILLS_BUILD_VERSION: ${{ needs.release-preflight.outputs.build_version }}
-          run: cargo build --release --target ${{ matrix.target }} ${{ matrix.extra_features }}
+        run: cargo build --release --target ${{ matrix.target }} ${{ matrix.extra_features }}
       - name: Stage release bundle
         shell: bash
         run: |
