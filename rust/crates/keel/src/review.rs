@@ -618,30 +618,99 @@ fn check_mypy(repository_root: &Path) -> GateResult {
 }
 
 fn check_circular_imports(repository_root: &Path) -> GateResult {
-    // Try to find circular imports using Python's ast module
+    // Detect real circular imports: build a local-module import graph and run
+    // DFS cycle detection. Replaces a prior stub that iterated files with `pass`
+    // and could never report a cycle.
     let check_script = r#"
 import ast
 import sys
+from collections import defaultdict
 from pathlib import Path
-
-def check_module(path):
-    try:
-        with open(path) as f:
-            ast.parse(f.read())
-        return True
-    except:
-        return False
 
 def find_python_files(directory):
     for path in Path(directory).rglob("*.py"):
-        if "__pycache__" not in str(path) and "venv" not in str(path):
+        s = str(path)
+        if "__pycache__" not in s and "venv" not in s and ".tox" not in s and "site-packages" not in s:
             yield path
 
-circular_found = False
-for pyfile in find_python_files("."):
-    pass
+def module_name_for(path):
+    rel = Path(path).with_suffix("")
+    parts = [p for p in rel.parts if p not in (".", "..")]
+    if parts and parts[-1] == "__init__":
+        parts = parts[:-1]
+    return ".".join(parts)
 
-sys.exit(0 if not circular_found else 1)
+def imports_of(path):
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            tree = ast.parse(f.read(), filename=str(path))
+    except Exception:
+        return []
+    names = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                names.append(alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            if node.module:
+                names.append(node.module)
+    return names
+
+files = list(find_python_files("."))
+
+# Pass 1: collect local module names so we only track local edges.
+local_modules = set()
+for pyfile in files:
+    mod = module_name_for(pyfile)
+    if mod:
+        local_modules.add(mod)
+
+# Pass 2: build graph of local-module -> local-module edges.
+graph = defaultdict(set)
+for pyfile in files:
+    mod = module_name_for(pyfile)
+    if not mod:
+        continue
+    for imp in imports_of(pyfile):
+        top = imp.split(".")[0]
+        target = imp if imp in local_modules else (top if top in local_modules else None)
+        if target and target != mod:
+            graph[mod].add(target)
+
+# DFS cycle detection with a recursion stack (GRAY = on current path).
+WHITE, GRAY, BLACK = 0, 1, 2
+color = {m: WHITE for m in local_modules}
+cycles = []
+sys.setrecursionlimit(10000)
+
+def dfs(node, stack):
+    color[node] = GRAY
+    stack.append(node)
+    for neighbor in graph.get(node, set()):
+        c = color.get(neighbor, WHITE)
+        if c == GRAY:
+            if neighbor in stack:
+                idx = stack.index(neighbor)
+                cycles.append(stack[idx:] + [neighbor])
+        elif c == WHITE:
+            dfs(neighbor, stack)
+    stack.pop()
+    color[node] = BLACK
+
+for mod in list(graph.keys()):
+    if color.get(mod, WHITE) == WHITE:
+        dfs(mod, [])
+
+if cycles:
+    seen = set()
+    for c in cycles:
+        key = tuple(sorted(set(c[:-1])))
+        if key in seen:
+            continue
+        seen.add(key)
+        print("circular import: " + " -> ".join(c))
+    sys.exit(1)
+sys.exit(0)
 "#;
     let result = run_command(
         "python",
@@ -673,7 +742,9 @@ sys.exit(0 if not circular_found else 1)
 }
 
 fn check_import_safety(repository_root: &Path) -> GateResult {
-    // Basic import safety check - verify no dangerous imports
+    // Scan every .py for dangerous top-level imports (eval/exec/__import__/compile)
+    // and exit non-zero when any are found. Replaces a prior stub that defined
+    // check_file but never called it and exited 0 unconditionally.
     let check_script = r#"
 import ast
 import sys
@@ -681,19 +752,40 @@ from pathlib import Path
 
 DANGEROUS_IMPORTS = {"eval", "exec", "__import__", "compile"}
 
+def find_python_files(directory):
+    for path in Path(directory).rglob("*.py"):
+        s = str(path)
+        if "__pycache__" not in s and "venv" not in s and ".tox" not in s and "site-packages" not in s:
+            yield path
+
 def check_file(path):
-    with open(path) as f:
-        tree = ast.parse(f.read())
+    findings = []
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            tree = ast.parse(f.read(), filename=str(path))
+    except Exception:
+        return findings
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                if alias.name in DANGEROUS_IMPORTS:
-                    return False
+                top = alias.name.split(".")[0]
+                if top in DANGEROUS_IMPORTS:
+                    findings.append((str(path), node.lineno, top))
         elif isinstance(node, ast.ImportFrom):
-            if node.module in DANGEROUS_IMPORTS:
-                return False
-    return True
+            if node.module:
+                top = node.module.split(".")[0]
+                if top in DANGEROUS_IMPORTS:
+                    findings.append((str(path), node.lineno, top))
+    return findings
 
+all_findings = []
+for pyfile in find_python_files("."):
+    all_findings.extend(check_file(pyfile))
+
+if all_findings:
+    for path, line, name in all_findings[:20]:
+        print(f"{path}:{line}: dangerous import '{name}'")
+    sys.exit(1)
 sys.exit(0)
 "#;
     let result = run_command(
@@ -975,18 +1067,26 @@ fn run_review_hosted_command(
             return 1;
         }
     }
+    // Hosted review is not wired to a real provider API: emit an honest
+    // `skipped`/`action_required` verdict instead of a false `pass`. The local
+    // gate `keel review pre-pr` is the source of truth; this surface only
+    // renders the report payload/body for CI consumption.
     let payload = Value::Object(vec![
         (
             "provider".into(),
             Value::String(flag_set.string_value("provider").to_string()),
         ),
-        ("gate".into(), Value::String("pass".into())),
+        ("gate".into(), Value::String("skipped".into())),
         (
             "summary".into(),
-            Value::String("the harness native review gate passed with no findings.".into()),
+            Value::String(
+                "hosted review is not configured \
+                 -- run `keel review pre-pr` for the local verdict."
+                    .into(),
+            ),
         ),
         ("body".into(), Value::String(body.clone())),
-        ("conclusion".into(), Value::String("success".into())),
+        ("conclusion".into(), Value::String("action_required".into())),
         (
             "title".into(),
             Value::String("the harness Native Review Report".into()),
@@ -1018,7 +1118,7 @@ fn run_review_hosted_command(
         "compact" => {
             let _ = writeln!(
                 standard_output,
-                "gate=pass blocking=0 warnings=0 findings=0"
+                "gate=skipped blocking=0 warnings=0 findings=0 note=hosted-review-not-configured"
             );
         }
         _ => {
