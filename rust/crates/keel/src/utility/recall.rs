@@ -33,7 +33,15 @@ use crate::json::{write_indented, Value};
 use crate::runtime::{display_path, resolve_claude_home};
 
 #[cfg(feature = "semantic")]
+use candle_core::{DType, Device, Tensor};
+#[cfg(feature = "semantic")]
+use candle_nn::VarBuilder;
+#[cfg(feature = "semantic")]
+use candle_transformers::models::bert::{BertModel, Config};
+#[cfg(feature = "semantic")]
 use keel_sqlite_vec::sqlite3_vec_init;
+#[cfg(feature = "semantic")]
+use std::sync::OnceLock;
 
 /// Schema version stamped into the `meta` table. Bump when the FTS5 column layout
 /// or tokenizer chain changes so existing indexes get rebuilt automatically.
@@ -963,8 +971,12 @@ pub fn sync_recall_index(
             .map_err(|database_error| format!("insert document: {database_error}"))?;
         #[cfg(feature = "semantic")]
         {
-            let zero = vec![0.0f32; EMBEDDING_DIM];
-            let _ = upsert_doc_vector(&transaction, &document.absolute_path, &zero);
+            // Best-effort: if embedding fails, skip this document's vector
+            // without failing the whole sync. A missing vec_items row is
+            // preferable to aborting a reindex over a single embed error.
+            if let Ok(vector) = embed_text(&content) {
+                let _ = upsert_doc_vector(&transaction, &document.absolute_path, &vector);
+            }
         }
         if existing_rows.contains_key(&document.absolute_path) {
             report.updated += 1;
@@ -1840,6 +1852,126 @@ pub fn vector_count(connection: &Connection) -> Result<u64, String> {
         })
         .map(|count| count.max(0) as u64)
         .map_err(|database_error| format!("count vec_items: {database_error}"))
+}
+
+// ---------------------------------------------------------------------------
+// Candle BERT sentence embedder (TaylorAI/bge-micro-v2, 384-dim, 3 layers)
+// ---------------------------------------------------------------------------
+
+/// Model artifacts embedded at compile time by build.rs when the `semantic`
+/// feature is on. build.rs downloads config.json, tokenizer.json, and
+/// model.safetensors from TaylorAI/bge-micro-v2 into OUT_DIR; these
+/// `include_bytes!` calls pull the bytes into the binary so the embedder is
+/// self-contained with no runtime file I/O or network dependency.
+#[cfg(feature = "semantic")]
+static TOKENIZER_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/tokenizer.json"));
+#[cfg(feature = "semantic")]
+static CONFIG_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/config.json"));
+#[cfg(feature = "semantic")]
+static MODEL_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/model.safetensors"));
+
+/// Lazily-initialized BERT model + tokenizer. Loaded once per process via
+/// [`OnceLock`] so the ~33 MB safetensors parse happens exactly once.
+#[cfg(feature = "semantic")]
+struct CachedEmbedder {
+    model: BertModel,
+    tokenizer: tokenizers::Tokenizer,
+}
+
+/// Stores the init result (Ok or Err) so a deterministic failure is cached
+/// rather than retried on every call. MSRV 1.80 predates `get_or_try_init`
+/// (1.82), so we store `Result` and pattern-match on the `&Result` returned
+/// by `get_or_init`.
+#[cfg(feature = "semantic")]
+static EMBEDDER: OnceLock<Result<CachedEmbedder, String>> = OnceLock::new();
+
+#[cfg(feature = "semantic")]
+fn init_embedder() -> Result<CachedEmbedder, String> {
+    let config: Config = serde_json::from_slice(CONFIG_BYTES)
+        .map_err(|error| format!("parse bert config: {error}"))?;
+    let tokenizer = tokenizers::Tokenizer::from_bytes(TOKENIZER_BYTES)
+        .map_err(|error| format!("load tokenizer: {error}"))?;
+    let device = Device::Cpu;
+    let var_builder =
+        VarBuilder::from_buffered_safetensors(MODEL_BYTES.to_vec(), DType::F32, &device)
+            .map_err(|error| format!("load safetensors: {error}"))?;
+    let model = BertModel::load(var_builder, &config)
+        .map_err(|error| format!("load bert model: {error}"))?;
+    Ok(CachedEmbedder { model, tokenizer })
+}
+
+/// Return the process-wide cached embedder, initializing on first call.
+/// A failed init is cached: model loading is deterministic, so a second
+/// attempt would fail identically.
+#[cfg(feature = "semantic")]
+fn cached_embedder() -> Result<&'static CachedEmbedder, String> {
+    match EMBEDDER.get_or_init(init_embedder) {
+        Ok(embedder) => Ok(embedder),
+        Err(error) => Err(error.clone()),
+    }
+}
+
+/// Run BertModel forward + attention-masked mean-pool + L2-normalize.
+/// Returns a `candle::Result` so the call site maps the error once.
+#[cfg(feature = "semantic")]
+fn bert_embed(
+    model: &BertModel,
+    tokenizer: &tokenizers::Tokenizer,
+    text: &str,
+) -> candle_core::Result<Vec<f32>> {
+    let encoding = tokenizer
+        .encode(text, true)
+        .map_err(|error| candle_core::Error::Msg(format!("tokenize: {error}")))?;
+    let input_ids = encoding.get_ids();
+    let attention_mask = encoding.get_attention_mask();
+    let token_type_ids = encoding.get_type_ids();
+    let device = Device::Cpu;
+    let input_ids_tensor = Tensor::new(input_ids, &device)?.unsqueeze(0)?;
+    let attention_mask_tensor = Tensor::new(attention_mask, &device)?
+        .unsqueeze(0)?
+        .to_dtype(DType::F32)?;
+    let token_type_ids_tensor = Tensor::new(token_type_ids, &device)?.unsqueeze(0)?;
+    let hidden_states = model.forward(
+        &input_ids_tensor,
+        &token_type_ids_tensor,
+        Some(&attention_mask_tensor),
+    )?;
+    // hidden_states: [1, seq_len, hidden_size].
+    // Mean-pool over seq_len weighted by the attention mask (padding tokens
+    // contribute zero), then L2-normalize to unit length.
+    let mask = attention_mask_tensor.unsqueeze(2)?; // [1, seq_len, 1]
+    let masked = hidden_states.broadcast_mul(&mask)?; // [1, seq_len, hidden]
+    let summed = masked.sum(1)?; // [1, hidden]
+    let token_count = attention_mask_tensor.sum(1)?.unsqueeze(1)?; // [1, 1]
+    let pooled = summed.broadcast_div(&token_count)?; // [1, hidden]
+    let norm = pooled.sqr()?.sum(1)?.sqrt()?.unsqueeze(1)?; // [1, 1]
+    let normalized = pooled.broadcast_div(&norm)?; // [1, hidden]
+    normalized.squeeze(0)?.to_vec1()
+}
+
+/// Embed `text` into a 384-dim L2-normalized vector using the vendored
+/// TaylorAI/bge-micro-v2 BERT model (model_type=bert, hidden_size=384).
+///
+/// The model + tokenizer are loaded once (via [`OnceLock`]) and reused
+/// across calls. The token-level hidden states are mean-pooled with the
+/// attention mask and L2-normalized, producing a `Vec<f32>` of length
+/// [`EMBEDDING_DIM`] (384).
+///
+/// Errors are returned as `String` so callers can degrade gracefully:
+/// `sync_recall_index` skips a document whose embed failed rather than
+/// aborting the whole reindex.
+#[cfg(feature = "semantic")]
+pub fn embed_text(text: &str) -> Result<Vec<f32>, String> {
+    let embedder = cached_embedder()?;
+    let vector = bert_embed(&embedder.model, &embedder.tokenizer, text)
+        .map_err(|error| format!("embed: {error}"))?;
+    debug_assert_eq!(
+        vector.len(),
+        EMBEDDING_DIM,
+        "embedding dimension mismatch: expected {EMBEDDING_DIM}, got {}",
+        vector.len()
+    );
+    Ok(vector)
 }
 
 #[cfg(test)]
