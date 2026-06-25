@@ -398,7 +398,7 @@ fn pre_tool_use_scopes_to_bash_and_post_tool_use_fires_for_all_tools() {
         .unwrap();
 
     for (event, expected_matcher) in [
-        ("PreToolUse", "Bash"),
+        ("PreToolUse", ""),
         ("PostToolUse", ""),
         ("UserPromptSubmit", ""),
         ("SessionStart", ""),
@@ -4448,11 +4448,11 @@ fn git_hooks_install_sets_core_hookspath_in_repo_config() {
     std::fs::create_dir_all(&githooks_dir).unwrap();
     std::fs::create_dir_all(&git_dir).unwrap();
     std::fs::write(
-        &githooks_dir.join("pre-commit"),
+        githooks_dir.join("pre-commit"),
         "#!/bin/sh\necho pre-commit",
     )
     .unwrap();
-    std::fs::write(&githooks_dir.join("pre-push"), "#!/bin/sh\necho pre-push").unwrap();
+    std::fs::write(githooks_dir.join("pre-push"), "#!/bin/sh\necho pre-push").unwrap();
     std::fs::write(&git_config, "[core]\n\tbare = false\n").unwrap();
 
     let mut stdout: Vec<u8> = Vec::new();

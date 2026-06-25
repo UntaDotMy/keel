@@ -194,6 +194,26 @@ Long, chatty, multi-paragraph comments make a diff hard to review. Keep them tig
 - A function-level doc comment with `@param` / `@returns` is preferred over inline comments inside the function body.
 - Delete dead comments, commented-out code, and "TODO from 2019" markers when you touch the file.
 
+#### AI Slop Comment Ban — Zero Tolerance
+
+The rules above are not suggestions. Agents repeatedly write chatty, summary-style comments and then claim they are "necessary." They are not. No reviewer wants to read a summary of what the code does — the code itself is the summary. We are not writing a novel.
+
+**Banned patterns (delete on sight, do not argue "necessary"):**
+- Multi-sentence docstrings that describe what a function does in prose. Use `@param` / `@returns` / `# Errors` tags instead. If a tag covers it, the prose is slop.
+- Section-header block comments (`// ---- Setup ----`, `// ===== Helpers =====`). The function name is the header.
+- "This function does X so that Y" narrative comments. If Y matters, it goes in a one-line `// why: Y` comment, not a paragraph.
+- Restating the function name as a comment: `// Parse the config` above `fn parse_config()`. The name already says that.
+- "Created by AI" / "Generated with" / "This was added to handle..." origin-story comments. No one cares.
+- Defensive preambles: "This is a necessary comment because..." — if you have to justify the comment, it should not exist.
+
+**The only acceptable comments:**
+1. One-line `// why: <reason>` when the reason is not obvious from the code.
+2. Structured doc tags (`@param`, `@returns`, `# Errors`, `# Panics`) on public APIs.
+3. `// TODO: <ticket>` or `// FIXME: <ticket>` with a tracking reference — short, actionable.
+4. Regex/math/algorithm comments that explain a non-obvious formula — one line, the formula, done.
+
+**Self-test before writing a comment:** Read it back. Would a senior engineer reviewing this diff think "this comment is noise"? If yes, delete it. Would they think "I learned something from this comment"? If no, delete it. The comment is for the reviewer, not for you.
+
 #### Reviewable Change Shape
 
 - Each change should address one concern. Do not bundle unrelated cleanup, refactors, and features ([Google — Small CLs](https://google.github.io/eng-practices/review/developer/small-cls.html)).
