@@ -113,6 +113,30 @@ jobs:
             os_name: windows
             arch: arm64
             executable: keel.exe
+          # Semantic (vector-recall) variants for the three most common dev
+          # targets. Built with --features semantic so the baked-in BERT model
+          # + sqlite-vec ship in the binary. Archived as *_semantic.
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            os_name: linux
+            arch: amd64
+            executable: keel
+            extra_features: "--features semantic"
+            archive_suffix: "_semantic"
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            os_name: darwin
+            arch: arm64
+            executable: keel
+            extra_features: "--features semantic"
+            archive_suffix: "_semantic"
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            os_name: windows
+            arch: amd64
+            executable: keel.exe
+            extra_features: "--features semantic"
+            archive_suffix: "_semantic"
 
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
@@ -139,7 +163,7 @@ jobs:
         env:
           RUSTFLAGS: -D warnings
           CLAUDE_SKILLS_BUILD_VERSION: ${{ needs.release-preflight.outputs.build_version }}
-        run: cargo build --release --target ${{ matrix.target }}
+          run: cargo build --release --target ${{ matrix.target }} ${{ matrix.extra_features }}
       - name: Stage release bundle
         shell: bash
         run: |
@@ -198,7 +222,7 @@ jobs:
             "repository_slug": "${{ github.repository }}",
             "release_tag": "${{ needs.release-preflight.outputs.release_tag }}",
             "build_version": "${build_version}",
-            "archive_file_name": "keel_${build_version}_${{ matrix.os_name }}_${{ matrix.arch }}.${{ matrix.os_name == 'windows' && 'zip' || 'tar.gz' }}"
+            "archive_file_name": "keel_${build_version}_${{ matrix.os_name }}_${{ matrix.arch }}${{ matrix.archive_suffix }}.${{ matrix.os_name == 'windows' && 'zip' || 'tar.gz' }}"
           }
           EOF
       - name: Package (Unix)
@@ -206,18 +230,18 @@ jobs:
         run: |
           build_version="${{ needs.release-preflight.outputs.build_version }}"
           cd "dist/${{ matrix.os_name }}-${{ matrix.arch }}"
-          tar czf "../keel_${build_version}_${{ matrix.os_name }}_${{ matrix.arch }}.tar.gz" .
+          tar czf "../keel_${build_version}_${{ matrix.os_name }}_${{ matrix.arch }}${{ matrix.archive_suffix }}.tar.gz" .
       - name: Package (Windows)
         if: runner.os == 'Windows'
         run: |
           $build_version = "${{ needs.release-preflight.outputs.build_version }}"
           $source = "dist/${{ matrix.os_name }}-${{ matrix.arch }}"
-          $dest = "dist/keel_${build_version}_${{ matrix.os_name }}_${{ matrix.arch }}.zip"
+          $dest = "dist/keel_${build_version}_${{ matrix.os_name }}_${{ matrix.arch }}${{ matrix.archive_suffix }}.zip"
           Compress-Archive -Path "$source\*" -DestinationPath "$dest" -Force
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: release-${{ matrix.os_name }}-${{ matrix.arch }}
-          path: dist/keel_${{ needs.release-preflight.outputs.build_version }}_${{ matrix.os_name }}_${{ matrix.arch }}.*
+          name: release-${{ matrix.os_name }}-${{ matrix.arch }}${{ matrix.archive_suffix }}
+          path: dist/keel_${{ needs.release-preflight.outputs.build_version }}_${{ matrix.os_name }}_${{ matrix.arch }}${{ matrix.archive_suffix }}.*
           if-no-files-found: error
 
   publish:

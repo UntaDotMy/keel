@@ -61,6 +61,16 @@ need_command curl
 need_command tar
 need_command mktemp
 
+semantic=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --semantic) semantic="_semantic" ;;
+    --help|-h) printf 'Usage: install.sh [--semantic]\n'; exit 0 ;;
+    *) printf 'Unknown argument: %s\n' "$1" >&2; exit 1 ;;
+  esac
+  shift
+done
+
 os="$(detect_os)"
 arch="$(detect_arch)"
 
@@ -75,7 +85,7 @@ else
 fi
 
 asset_version="$(asset_version_from_tag "$release_tag")"
-archive_name="keel_${asset_version}_${os}_${arch}.tar.gz"
+archive_name="keel_${asset_version}_${os}_${arch}${semantic}.tar.gz"
 download_url="https://github.com/${repository}/releases/download/${release_tag}/${archive_name}"
 temporary_directory="$(mktemp -d "${TMPDIR:-/tmp}/keel-install.XXXXXX")"
 

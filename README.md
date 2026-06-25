@@ -39,6 +39,23 @@ curl -fsSL https://raw.githubusercontent.com/UntaDotMy/keel/main/install.cmd -o 
 
 The installer detects your OS and architecture, pulls the matching prebuilt binary from [GitHub Releases](https://github.com/UntaDotMy/keel/releases/latest), runs `keel install`, verifies `status`, and cleans up. No Rust toolchain required. Pin a version with `CLAUDE_SKILLS_VERSION=vX.Y.Z`.
 
+**Semantic (vector-recall) build.** The default binary is lexical-only (FTS5). To install the variant with built-in vector semantic recall (sqlite-vec + a 33MB BERT model baked in), pass `--semantic`:
+
+```bash
+# macOS / Linux
+curl -fsSL https://raw.githubusercontent.com/UntaDotMy/keel/main/install.sh | bash -s -- --semantic
+```
+```powershell
+# Windows PowerShell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/UntaDotMy/keel/main/install.ps1))) -Semantic
+```
+```bat
+:: Windows CMD
+curl -fsSL https://raw.githubusercontent.com/UntaDotMy/keel/main/install.cmd -o install.cmd && install.cmd --semantic && del install.cmd
+```
+
+The `--semantic` variant is published for `linux/amd64`, `darwin/arm64`, and `windows/amd64`; other platforms fall back to the lexical-only binary or build from source with `cargo build --release --features semantic`.
+
 ## Demo
 
 A 30-second walkthrough of `workflow start -> cockpit -> finish`:
