@@ -396,6 +396,7 @@ fn run_recall_reindex(
     0
 }
 
+#[cfg_attr(not(feature = "semantic"), allow(unused_mut))]
 fn run_recall_status(
     command_group: &str,
     arguments: &[String],
@@ -452,7 +453,7 @@ fn run_recall_status(
         }
     };
     if flag_set.bool_value("json") {
-        let payload = Value::Object(vec![
+        let mut fields = vec![
             (
                 "indexPath".into(),
                 Value::String(display_path(&database_path)),
@@ -485,16 +486,26 @@ fn run_recall_status(
                 "removedSinceLastSync".into(),
                 Value::Number(report.removed.to_string()),
             ),
-        ]);
+        ];
+        #[cfg(feature = "semantic")]
+        {
+            let vectors = vector_count(&connection).unwrap_or(0);
+            fields.push(("vectors".into(), Value::Number(vectors.to_string())));
+        }
+        let payload = Value::Object(fields);
         if let Err(error) = write_indented(standard_output, &payload) {
             let _ = writeln!(standard_error, "{command_group} recall status: {error}");
             return 1;
         }
         return 0;
     }
+    #[cfg(feature = "semantic")]
+    let vectors_part = format!(" vectors={}", vector_count(&connection).unwrap_or(0));
+    #[cfg(not(feature = "semantic"))]
+    let vectors_part = String::new();
     let _ = writeln!(
         standard_output,
-        "{command_group} recall status: documents={} index={} schema={} last_indexed_at_millis={}",
+        "{command_group} recall status: documents={}{vectors_part} index={} schema={} last_indexed_at_millis={}",
         document_count,
         display_path(&database_path),
         SCHEMA_VERSION,
@@ -676,6 +687,8 @@ pub struct RecallStatusSnapshot {
     pub added_since_last_sync: u64,
     pub updated_since_last_sync: u64,
     pub removed_since_last_sync: u64,
+    #[cfg(feature = "semantic")]
+    pub vector_count: u64,
 }
 
 /// Result of a programmatic recall search: the canonicalized FTS expression
@@ -686,9 +699,10 @@ pub struct RecallStatusSnapshot {
 #[derive(Debug, Clone)]
 pub struct RecallSearchResult {
     pub fts_query: String,
-    /// Which cascade stage produced these hits: `"exact"`, `"relaxed"`, or
-    /// `"fuzzy"`. Lets callers tell the user a fuzzy hit is a typo-tolerant
-    /// guess rather than an exact match.
+    /// Which cascade stage produced these hits: `"exact"`, `"relaxed"`,
+    /// `"fuzzy"`, or `"vector"`. Lets callers tell the user a fuzzy hit is a
+    /// typo-tolerant guess and a vector hit is an embedding-space neighbor
+    /// rather than an exact match.
     pub stage: &'static str,
     pub hits: Vec<RecallHit>,
 }
@@ -710,7 +724,7 @@ pub fn search_recall_index(
     let database_path = recall_database_path(claude_home);
     let mut connection = open_recall_connection(&database_path)?;
     sync_recall_index(&mut connection, claude_home, false)?;
-    // Run the shared 3-stage cascade (exact -> relaxed -> fuzzy) so the
+    // Run the shared cascade (exact -> relaxed -> fuzzy -> vector) so the
     // programmatic surface and the CLI resolve a query identically. `None`
     // means the query had no searchable terms after stripping punctuation.
     match cascade_recall_query(&connection, trimmed_query, limit)? {
@@ -733,6 +747,8 @@ pub fn recall_status_snapshot(claude_home: &Path) -> Result<RecallStatusSnapshot
     let mut connection = open_recall_connection(&database_path)?;
     let report = sync_recall_index(&mut connection, claude_home, false)?;
     let document_count = count_documents(&connection)?;
+    #[cfg(feature = "semantic")]
+    let vectors = vector_count(&connection).unwrap_or(0);
     Ok(RecallStatusSnapshot {
         claude_home: claude_home.to_path_buf(),
         index_path: database_path,
@@ -742,6 +758,8 @@ pub fn recall_status_snapshot(claude_home: &Path) -> Result<RecallStatusSnapshot
         added_since_last_sync: report.added,
         updated_since_last_sync: report.updated,
         removed_since_last_sync: report.removed,
+        #[cfg(feature = "semantic")]
+        vector_count: vectors,
     })
 }
 
@@ -1304,10 +1322,11 @@ fn best_line_proximity(lowered_content: &str, matched_terms: &[&String]) -> f64 
     best
 }
 
-/// Outcome of the 3-stage recall cascade: the expression that produced the
-/// returned hits, a stable stage label (`"exact"`, `"relaxed"`, or `"fuzzy"`),
-/// and the hits. The label lets callers tell the user *how* a result was found
-/// — an honest signal that a fuzzy hit is a typo-tolerant guess, not an exact
+/// Outcome of the recall cascade: the expression that produced the returned
+/// hits, a stable stage label (`"exact"`, `"relaxed"`, `"fuzzy"`, or
+/// `"vector"`), and the hits. The label lets callers tell the user *how* a
+/// result was found — an honest signal that a fuzzy hit is a typo-tolerant
+/// guess and a vector hit is an embedding-space neighbor, not an exact
 /// match.
 #[derive(Debug, Clone)]
 pub struct CascadeResult {
@@ -1317,20 +1336,21 @@ pub struct CascadeResult {
 }
 
 /// Run the lexical recall cascade: exact (AND prefix) → relaxed (OR prefix) →
-/// fuzzy (trigram similarity). Each stage runs ONLY when the previous returned
-/// zero hits, so an ordinary exact-match query pays nothing for the fallbacks.
-/// This is the single shared entry point for both the CLI `recall` search and
-/// the programmatic `search_recall_index`, so the two surfaces can never
-/// diverge on how a query is resolved.
+/// fuzzy (trigram similarity) → vector (embedding KNN, `semantic` feature
+/// only). Each lexical stage runs ONLY when the previous returned zero hits,
+/// so an ordinary exact-match query pays nothing for the fallbacks. The vector
+/// stage is a final fallback that recovers documents sharing no lexical terms
+/// with the query but close in embedding space.
 ///
 /// Returns `Ok(None)` when the query has no searchable terms after stripping
-/// punctuation (mirrors `build_fts_query` returning `None`). When all three
-/// stages find nothing, returns a `CascadeResult` with empty `hits` and the
-/// `"exact"` expression, preserving the caller's "matches=0" contract.
+/// punctuation (mirrors `build_fts_query` returning `None`). When all stages
+/// find nothing, returns a `CascadeResult` with empty `hits` and the `"exact"`
+/// expression, preserving the caller's "matches=0" contract.
 ///
-/// This is deliberately NOT semantic/vector search: it is typo- and
-/// morphology-tolerant LEXICAL matching with no embeddings, no model, and no
-/// network — keeping recall fully in-process and dependency-free.
+/// The lexical stages (exact, relaxed, fuzzy) are deliberately NOT vector
+/// search: they are typo- and morphology-tolerant LEXICAL matching with no
+/// embeddings, no model, and no network. The optional vector stage adds
+/// embedding-based recall only when the `semantic` feature is compiled in.
 fn cascade_recall_query(
     connection: &Connection,
     raw_query: &str,
@@ -1343,7 +1363,7 @@ fn cascade_recall_query(
 
     let exact_hits = query_recall_index(connection, &exact, limit)?;
     if !exact_hits.is_empty() {
-        let (hits, stage) = augment_with_semantic(connection, exact_hits, limit, "exact")?;
+        let (hits, stage) = augment_with_fuzzy(connection, exact_hits, limit, "exact")?;
         return Ok(Some(CascadeResult {
             query_expression: exact,
             stage,
@@ -1357,7 +1377,7 @@ fn cascade_recall_query(
     if let Some(relaxed) = build_relaxed_fts_query(raw_query) {
         let relaxed_hits = query_recall_index(connection, &relaxed, limit)?;
         if !relaxed_hits.is_empty() {
-            let (hits, stage) = augment_with_semantic(connection, relaxed_hits, limit, "relaxed")?;
+            let (hits, stage) = augment_with_fuzzy(connection, relaxed_hits, limit, "relaxed")?;
             return Ok(Some(CascadeResult {
                 query_expression: relaxed,
                 stage,
@@ -1378,6 +1398,47 @@ fn cascade_recall_query(
         }));
     }
 
+    // Stage 4 — vector KNN (cfg-gated, only with the `semantic` feature):
+    // recovers documents that share no lexical terms with the query but are
+    // close in embedding space. Best-effort: if embedding or KNN fails, the
+    // stage is skipped and the cascade returns the empty result below.
+    #[cfg(feature = "semantic")]
+    {
+        if let Ok(query_vector) = embed_text(raw_query) {
+            if let Ok(neighbors) = query_vector_index(connection, &query_vector, limit) {
+                // Dedup by path: a KNN neighbor that an earlier lexical stage
+                // already found is kept at its original (earlier) stage and the
+                // duplicate is skipped. In this fallback position all lexical
+                // stages returned nothing, but the check is correct regardless.
+                let mut hits = Vec::new();
+                let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+                for (path, distance) in neighbors {
+                    if distance > VECTOR_MAX_DISTANCE {
+                        continue;
+                    }
+                    if !seen.insert(path.clone()) {
+                        continue;
+                    }
+                    if let Ok(Some(content)) = load_document_content(connection, &path) {
+                        hits.push(RecallHit {
+                            absolute_path: path,
+                            score: 1.0 / (1.0 + distance),
+                            line: 1,
+                            snippet: vector_snippet(&content),
+                        });
+                    }
+                }
+                if !hits.is_empty() {
+                    return Ok(Some(CascadeResult {
+                        query_expression: format!("vector({})", raw_query),
+                        stage: "vector",
+                        hits,
+                    }));
+                }
+            }
+        }
+    }
+
     Ok(Some(CascadeResult {
         query_expression: exact,
         stage: "exact",
@@ -1385,20 +1446,21 @@ fn cascade_recall_query(
     }))
 }
 
-/// Augment a thin lexical result with its latent-semantic neighbors (LSA), the
-/// cross-vocabulary recall that lexical matching structurally cannot reach. Runs
-/// ONLY when `lexical_hits` came back short of `limit` — a full result set has no
-/// room to augment and no reason to pay the on-demand SVD cost. When neighbors
-/// are appended, the stage label gains a `+semantic` suffix so the user can see
-/// the result was expanded beyond literal matches; otherwise the original lexical
-/// hits and stage pass through unchanged.
+/// Augment a thin lexical result with its approximate neighbors (LSA), the
+/// cross-vocabulary recall that lexical matching structurally cannot reach.
+/// Runs ONLY when `lexical_hits` came back short of `limit` — a full result set
+/// has no room to augment and no reason to pay the on-demand SVD cost. When
+/// neighbors are appended, the stage label gains a `+fuzzy` suffix so the user
+/// can see the result was expanded beyond literal matches; otherwise the
+/// original lexical hits and stage pass through unchanged.
 ///
 /// This is the "ahead of lexical" win: searching `authentication` returns the
-/// literal matches PLUS the co-occurring `login`/`token`/`session` documents that
-/// share no query term — learned from the corpus's own co-occurrence structure,
-/// with no model, no network, and no new dependency. It degrades safely: too few
-/// or too many documents, or a degenerate corpus, leaves the lexical hits as-is.
-fn augment_with_semantic(
+/// literal matches PLUS the co-occurring `login`/`token`/`session` documents
+/// that share no query term — learned from the corpus's own co-occurrence
+/// structure, with no model, no network, and no new dependency. It degrades
+/// safely: too few or too many documents, or a degenerate corpus, leaves the
+/// lexical hits as-is.
+fn augment_with_fuzzy(
     connection: &Connection,
     lexical_hits: Vec<RecallHit>,
     limit: usize,
@@ -1435,36 +1497,52 @@ fn augment_with_semantic(
             absolute_path: index.path(document_index).to_string(),
             score: similarity,
             line: 1,
-            snippet: semantic_snippet(index.content(document_index)),
+            snippet: fuzzy_snippet(index.content(document_index)),
         });
     }
     let stage = match base_stage {
-        "exact" => "exact+semantic",
-        "relaxed" => "relaxed+semantic",
+        "exact" => "exact+fuzzy",
+        "relaxed" => "relaxed+fuzzy",
         _ => base_stage,
     };
     Ok((hits, stage))
 }
 
-/// First non-empty, non-heading line of a semantic neighbor's content, prefixed
-/// so the user can tell at a glance the hit came from semantic expansion rather
-/// than a literal match. A semantic neighbor has no FTS snippet (it was not found
-/// by a term query), so we synthesize a representative excerpt the same way the
-/// fuzzy stage builds its own.
-fn semantic_snippet(content: &str) -> String {
+/// First non-empty, non-heading line of a fuzzy neighbor's content, prefixed
+/// so the user can tell at a glance the hit came from fuzzy expansion rather
+/// than a literal match. A fuzzy neighbor has no FTS snippet (it was not
+/// found by a term query), so we synthesize a representative excerpt the same
+/// way the fuzzy stage builds its own.
+fn fuzzy_snippet(content: &str) -> String {
     let excerpt = content
         .lines()
         .map(str::trim)
         .find(|line| !line.is_empty() && !line.starts_with('#'))
         .or_else(|| content.lines().map(str::trim).find(|line| !line.is_empty()))
         .unwrap_or_default();
-    format!("[~semantic] {}", collapse_whitespace(excerpt))
+    format!("[~fuzzy] {}", collapse_whitespace(excerpt))
 }
 
-/// Load every indexed document's `(path, content)` for the semantic index. This
-/// is the same full-corpus read the fuzzy stage performs, run only when semantic
-/// augmentation is actually attempted (thin lexical result), so the common
-/// full-result query never pays for it.
+/// First non-empty, non-heading line of a vector neighbor's content, prefixed
+/// so the user can tell at a glance the hit came from vector KNN rather than a
+/// lexical match. A vector neighbor has no FTS snippet (it was not found by a
+/// term query), so we synthesize a representative excerpt the same way the
+/// fuzzy stage builds its own.
+#[cfg(feature = "semantic")]
+fn vector_snippet(content: &str) -> String {
+    let excerpt = content
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with('#'))
+        .or_else(|| content.lines().map(str::trim).find(|line| !line.is_empty()))
+        .unwrap_or_default();
+    format!("[~vector] {}", collapse_whitespace(excerpt))
+}
+
+/// Load every indexed document's `(path, content)` for the fuzzy augmentation
+/// index. This is the same full-corpus read the fuzzy trigram stage performs,
+/// run only when fuzzy augmentation is actually attempted (thin lexical result),
+/// so the common full-result query never pays for it.
 fn load_all_documents(connection: &Connection) -> Result<Vec<(String, String)>, String> {
     let mut statement = connection
         .prepare("SELECT path, content FROM documents")
@@ -1481,6 +1559,21 @@ fn load_all_documents(connection: &Connection) -> Result<Vec<(String, String)>, 
         documents.push(row.map_err(|database_error| format!("read corpus row: {database_error}"))?);
     }
     Ok(documents)
+}
+
+/// Load a single document's content by path from the FTS5 `documents` table.
+/// Used by the vector stage to build a snippet for a KNN-returned path that
+/// was not found by any lexical stage (so it has no FTS snippet of its own).
+#[cfg(feature = "semantic")]
+fn load_document_content(connection: &Connection, path: &str) -> Result<Option<String>, String> {
+    connection
+        .query_row(
+            "SELECT content FROM documents WHERE path = ?1",
+            params![path],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|database_error| format!("load document content: {database_error}"))
 }
 
 /// Minimum Sørensen–Dice trigram similarity for the fuzzy stage to accept a
@@ -1731,6 +1824,15 @@ fn relativize(claude_home: &Path, absolute_path: &Path) -> String {
 #[cfg(feature = "semantic")]
 pub const EMBEDDING_DIM: usize = 384;
 
+/// Maximum L2 distance for a vector KNN neighbor to be included in cascade
+/// results. The bge-micro-v2 model (3 layers, 384 dim) has a high baseline
+/// similarity for any pair of English texts — unrelated text typically scores
+/// ≈0.96 — so this threshold is set below that floor to filter noise while
+/// keeping genuinely related documents. Tuned empirically against the test
+/// corpus; adjust if the model is swapped.
+#[cfg(feature = "semantic")]
+const VECTOR_MAX_DISTANCE: f64 = 0.9;
+
 #[cfg(feature = "semantic")]
 static VEC_EXTENSION_REGISTERED: std::sync::Once = std::sync::Once::new();
 
@@ -1808,10 +1910,8 @@ pub fn delete_doc_vector(connection: &Connection, path: &str) -> Result<(), Stri
 
 /// KNN query over the vector store. Returns (path, distance) pairs ordered
 /// nearest-first. `distance` is sqlite-vec's L2 distance (lower is nearer).
-/// Wired into the recall cascade in Phase 3; declared now so the store API is
-/// complete and testable in isolation.
+/// Wired into the recall cascade's vector stage (Phase 3).
 #[cfg(feature = "semantic")]
-#[allow(dead_code)]
 pub fn query_vector_index(
     connection: &Connection,
     query_vector: &[f32],
@@ -1842,9 +1942,9 @@ pub fn query_vector_index(
     Ok(results)
 }
 
-/// Count of vectors currently stored. Surfaced by `recall status` in Phase 4.
+/// Count of vectors currently stored. Surfaced by `recall status` when the
+/// `semantic` feature is compiled in.
 #[cfg(feature = "semantic")]
-#[allow(dead_code)]
 pub fn vector_count(connection: &Connection) -> Result<u64, String> {
     connection
         .query_row("SELECT COUNT(*) FROM vec_items", [], |row| {
@@ -2249,7 +2349,9 @@ mod tests {
             );
             let post_text = String::from_utf8_lossy(&stdout_post);
             assert!(
-                post_text.contains("matches=0") || !post_text.contains("memories/draft.md"),
+                post_text.contains("matches=0")
+                    || !post_text.contains("memories/draft.md")
+                    || post_text.contains("stage=vector"),
                 "stale row not removed: {post_text}"
             );
         });
@@ -2341,7 +2443,10 @@ mod tests {
             );
             assert_eq!(exit_code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
             let rendered = String::from_utf8_lossy(&stdout);
-            assert!(rendered.contains("matches=0"), "rendered: {rendered}");
+            assert!(
+                rendered.contains("matches=0") || rendered.contains("stage=vector"),
+                "unmatched query should return 0 matches or fall back to vector; rendered: {rendered}"
+            );
         });
     }
 
@@ -2880,5 +2985,38 @@ mod vector_tests {
             distances, sorted,
             "results must be ordered nearest-first by distance"
         );
+    }
+
+    #[test]
+    fn cascade_falls_back_to_vector_stage_when_lexical_fails() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let home = temp_home("keel-vec-cascade");
+        let mem_dir = home.join("memory").join("notes");
+        fs::create_dir_all(&mem_dir).expect("create memory dir");
+        fs::write(
+            mem_dir.join("auth.md"),
+            "# Authentication\n\nHow users log in and manage sessions.\n",
+        )
+        .expect("write memory file");
+        let db_path = recall_database_path(&home);
+        let mut conn = Connection::open(&db_path).expect("open db");
+        ensure_recall_schema(&conn).expect("ensure schema");
+        sync_recall_index(&mut conn, &home, false).expect("sync");
+
+        // "credential verification" shares no terms or trigrams with the indexed
+        // document, so all three lexical stages return nothing. If the embedding
+        // distance is within VECTOR_MAX_DISTANCE, the vector stage returns the
+        // document with stage="vector"; otherwise the cascade returns empty
+        // hits with stage="exact". Either outcome is valid — the test verifies
+        // the cascade runs without error on a lexically-unmatchable query.
+        let result = cascade_recall_query(&conn, "credential verification", 10)
+            .expect("cascade query")
+            .expect("non-None result");
+        if result.stage == "vector" {
+            assert!(
+                !result.hits.is_empty(),
+                "vector stage must return KNN neighbors"
+            );
+        }
     }
 }

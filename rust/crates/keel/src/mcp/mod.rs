@@ -402,10 +402,11 @@ pub(super) fn system_map_text(workspace_override: Option<&Path>) -> Result<Strin
 /// Build the recall index health snapshot payload. Shared by the
 /// `recall_status` / `memory_status` tools and the `keel://recall/status`
 /// resource so all surfaces report the same shape.
+#[cfg_attr(not(feature = "semantic"), allow(unused_mut))]
 pub(super) fn recall_status_payload() -> Result<Value, String> {
     let claude_home = resolve_claude_home("")?;
     let snapshot = recall_status_snapshot(&claude_home)?;
-    Ok(json!({
+    let mut payload = json!({
         "claudeHome": display_path(&snapshot.claude_home),
         "indexPath": display_path(&snapshot.index_path),
         "schemaVersion": snapshot.schema_version,
@@ -414,7 +415,14 @@ pub(super) fn recall_status_payload() -> Result<Value, String> {
         "addedSinceLastSync": snapshot.added_since_last_sync,
         "updatedSinceLastSync": snapshot.updated_since_last_sync,
         "removedSinceLastSync": snapshot.removed_since_last_sync,
-    }))
+    });
+    #[cfg(feature = "semantic")]
+    {
+        if let Some(object) = payload.as_object_mut() {
+            object.insert("vectors".to_string(), json!(snapshot.vector_count));
+        }
+    }
+    Ok(payload)
 }
 
 fn success_response(id: Value, result: Value) -> Value {
