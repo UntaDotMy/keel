@@ -480,8 +480,8 @@ N = absent.
 
 The repo ships a manifest-driven skill count discovered from `.claude-plugin/plugin.json`
 at install time (the binary never hardcodes a total, so no number drifts). As of the
-2026-06-24 audit, the manifest lists 45 skills plus the `using-keel` bootstrap
-(46 SKILL.md files on disk). Run `keel skill-lint` for the live verified count.
+2026-06-24 audit, the manifest lists 46 skills plus the `using-keel` bootstrap
+(47 SKILL.md files on disk). Run `keel skill-lint` for the live verified count.
 The methodology trio
 (`test-driven-development`, `systematic-debugging`, `brainstorming`) closed the first
 superpowers gap; the eight skills (`writing-skills`, `writing-plans`, `executing-plans`,

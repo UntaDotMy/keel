@@ -22,8 +22,10 @@ Four rules are restated to the agent on every prompt. You cannot skip them.
 
 ## Install in One Paste
 
+Works on macOS, Linux (incl. WSL), and Windows, on x86_64 and arm64 (Apple Silicon, Graviton, Pi). Pick the line for your shell:
+
 ```bash
-# macOS / Linux
+# macOS / Linux / WSL
 curl -fsSL https://raw.githubusercontent.com/UntaDotMy/keel/main/install.sh | bash
 ```
 

@@ -99,6 +99,14 @@ function extractUserText(parts: MessagePart[]): string {
   return "";
 }
 
+const EDIT_CLASS_TOOLS = new Set([
+  "edit", "write", "multiedit", "notebookedit", "apply_patch", "str_replace", "patch",
+]);
+
+function isEditClassTool(toolName: string): boolean {
+  return EDIT_CLASS_TOOLS.has(toolName.toLowerCase());
+}
+
 // ---------------------------------------------------------------------------
 // Plugin entry point
 // ---------------------------------------------------------------------------
@@ -195,6 +203,33 @@ const KeelPlugin: Plugin = async ({ client, directory, $ }) => {
       } catch (e) {
         console.error("[keel-plugin] chat.message error:", e);
         // Degrade gracefully — no context injected, turn continues.
+      }
+    },
+
+    "tool.execute.before": async (input, _output) => {
+      const toolName: string =
+        (input as { tool?: string })?.tool ?? "";
+      if (!isEditClassTool(toolName)) return;
+      const sessionID: string =
+        (input as { sessionID?: string })?.sessionID ?? "";
+      const result = await runBridge("pre-tool-use", [
+        "--session",
+        sessionID,
+        "--cwd",
+        cwd,
+        "--tool",
+        toolName,
+      ]);
+      if (result.startsWith("KEEL_GATE_DENY")) {
+        const reason = result
+          .split("\n")
+          .slice(1)
+          .join("\n")
+          .trim();
+        throw new Error(
+          reason ||
+            "keel Iron Law gate: read context + load a skill before editing.",
+        );
       }
     },
 
