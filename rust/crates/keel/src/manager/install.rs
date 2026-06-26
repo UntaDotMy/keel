@@ -430,26 +430,69 @@ fn maybe_wire_cursor(repository_root: &Path, claude_home: &Path, detected: bool)
     if !detected {
         return Some("skipped (not detected)".to_string());
     }
-    let cursorrules_source = repository_root.join("cursor").join(".cursorrules");
-    if !cursorrules_source.is_file() {
-        return Some("source absent".to_string());
-    }
     let home = match claude_home.parent() {
         Some(path) => path.to_path_buf(),
         None => return Some("no home directory".to_string()),
     };
-    let cursorrules_target = home.join(".cursorrules");
-    if cursorrules_target.is_file() {
-        let source_bytes = std::fs::read(&cursorrules_source).unwrap_or_default();
-        let target_bytes = std::fs::read(&cursorrules_target).unwrap_or_default();
-        if source_bytes != target_bytes {
-            return Some("skipped (user-customized)".to_string());
+    let mut status_parts: Vec<String> = Vec::new();
+
+    // Copy .cursorrules
+    let cursorrules_source = repository_root.join("cursor").join(".cursorrules");
+    if !cursorrules_source.is_file() {
+        status_parts.push("cursorrules source absent".to_string());
+    } else {
+        let cursorrules_target = home.join(".cursorrules");
+        if cursorrules_target.is_file() {
+            let source_bytes = std::fs::read(&cursorrules_source).unwrap_or_default();
+            let target_bytes = std::fs::read(&cursorrules_target).unwrap_or_default();
+            if source_bytes != target_bytes {
+                status_parts.push("cursorrules skipped (user-customized)".to_string());
+            } else {
+                status_parts.push("cursorrules already current".to_string());
+            }
+        } else {
+            match std::fs::copy(&cursorrules_source, &cursorrules_target) {
+                Ok(_) => status_parts.push(format!(
+                    "cursorrules -> {}",
+                    display_path(&cursorrules_target)
+                )),
+                Err(error) => status_parts.push(format!("cursorrules copy failed ({error})")),
+            }
         }
-        return Some("already current".to_string());
     }
-    match std::fs::copy(&cursorrules_source, &cursorrules_target) {
-        Ok(_) => Some(format!("copied to {}", display_path(&cursorrules_target))),
-        Err(error) => Some(format!("copy failed ({error})")),
+
+    // Copy compaction reroute hooks (preToolUse + keel-cursor.sh)
+    let hooks_json_source = repository_root
+        .join("cursor")
+        .join("hooks")
+        .join("hooks.json");
+    let rewrite_script_source = repository_root
+        .join("cursor")
+        .join("hooks")
+        .join("keel-cursor.sh");
+    if hooks_json_source.is_file() || rewrite_script_source.is_file() {
+        let hooks_dir = home.join(".cursor").join("hooks");
+        let _ = std::fs::create_dir_all(&hooks_dir);
+        if hooks_json_source.is_file() {
+            let target = hooks_dir.join("hooks.json");
+            match std::fs::copy(&hooks_json_source, &target) {
+                Ok(_) => status_parts.push("hooks.json copied".to_string()),
+                Err(e) => status_parts.push(format!("hooks.json copy failed ({e})")),
+            }
+        }
+        if rewrite_script_source.is_file() {
+            let target = hooks_dir.join("keel-cursor.sh");
+            match std::fs::copy(&rewrite_script_source, &target) {
+                Ok(_) => status_parts.push("keel-cursor.sh copied".to_string()),
+                Err(e) => status_parts.push(format!("keel-cursor.sh copy failed ({e})")),
+            }
+        }
+    }
+
+    if status_parts.is_empty() {
+        Some("nothing to copy".to_string())
+    } else {
+        Some(status_parts.join("; "))
     }
 }
 
@@ -535,6 +578,17 @@ fn maybe_wire_pi(repository_root: &Path, claude_home: &Path, detected: bool) -> 
             Err(error) => status_parts.push(format!("MCP skipped ({error})")),
         }
     }
+    let extension_source = repository_root.join("pi").join("keel-pi.ts");
+    if extension_source.is_file() {
+        let extensions_dir = home.join(".pi").join("extensions");
+        let _ = std::fs::create_dir_all(&extensions_dir);
+        let target = extensions_dir.join("keel-pi.ts");
+        match std::fs::copy(&extension_source, &target) {
+            Ok(_) => status_parts.push(format!("keel-pi.ts -> {}", display_path(&target))),
+            Err(e) => status_parts.push(format!("keel-pi.ts copy failed ({e})")),
+        }
+    }
+
     Some(status_parts.join("; "))
 }
 
