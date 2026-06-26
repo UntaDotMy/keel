@@ -40,6 +40,7 @@
     "./finishing-a-development-branch",
     "./git-expert",
     "./internationalization-and-localization",
+    "./memory-consolidation",
     "./memory-status-reporter",
     "./mobile-development-life-cycle",
     "./observability-and-incident-response",
