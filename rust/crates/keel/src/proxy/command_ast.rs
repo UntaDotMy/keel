@@ -179,7 +179,7 @@ impl CommandAst {
                 }
             }
             "git" if self.args.first().map(String::as_str) == Some("grep") => CommandKind::Search,
-            "git" | "gh" | "git-lfs" => CommandKind::Git,
+            "git" | "gh" | "glab" | "git-lfs" => CommandKind::Git,
             // Jujutsu (jj) is a Git-compatible VCS; its status/log/diff output is
             // the same shape as git, so route it to the git adapter.
             "jj" => CommandKind::Git,
