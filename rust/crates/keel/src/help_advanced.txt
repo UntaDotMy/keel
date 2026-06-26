@@ -8,9 +8,3 @@
   memory working-brief list [--claude-home <path>] [--json]
   memory completion-gate check --id <entry-id> [--brief-id <id>] [--proof <text>] [--claude-home <path>] [--json]
   memory recall <query> [--limit <count>] [--json] [--claude-home <path>]
-  memoriesv2 scope resolve [--workspace-root <path>] [--format text|json] [--create-missing] [--refresh-system-map]
-  memoriesv2 system-map refresh [--workspace-root <path>]
-  memoriesv2 system-map show [--workspace-root <path>]
-  memoriesv2 working-brief [write|show|list] (same flags as memory working-brief; stores under ~/.claude/memoriesv2/)
-  memoriesv2 completion-gate check (same flags as memory completion-gate check; stores under ~/.claude/memoriesv2/)
-  memoriesv2 recall <query> [--limit <count>] [--json] [--claude-home <path>]

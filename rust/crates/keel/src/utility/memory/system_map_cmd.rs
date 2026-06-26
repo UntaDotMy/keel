@@ -51,22 +51,16 @@ pub(super) fn run_system_map_command(
 }
 
 /// Resolve the cached SYSTEM_MAP.md reference directory for a workspace under a
-/// command group. `memoriesv2` and `memories` keep isolated trees exactly like
-/// their scope-resolve paths do. Shared so the CLI refresh and the MCP
+/// command group. Shared so the CLI refresh and the MCP
 /// `system_map_refresh` tool agree on where the map lives.
 pub fn system_map_reference_directory(
     claude_home: &Path,
-    command_group: &str,
+    _command_group: &str,
     workspace_root: &Path,
 ) -> PathBuf {
     let workspace_slug = sanitize_key(&workspace_root.to_string_lossy());
-    let group_root = if command_group == "memoriesv2" {
-        "memoriesv2"
-    } else {
-        "memories"
-    };
     claude_home
-        .join(group_root)
+        .join("memories")
         .join("workspaces")
         .join(&workspace_slug)
         .join("reference")
@@ -196,21 +190,12 @@ fn run_system_map_show(
         return 1;
     };
     let workspace_slug = sanitize_key(&workspace_root.to_string_lossy());
-    let system_map_path = if command_group == "memoriesv2" {
-        claude_home
-            .join("memoriesv2")
-            .join("workspaces")
-            .join(&workspace_slug)
-            .join("reference")
-            .join("SYSTEM_MAP.md")
-    } else {
-        claude_home
-            .join("memories")
-            .join("workspaces")
-            .join(&workspace_slug)
-            .join("reference")
-            .join("SYSTEM_MAP.md")
-    };
+    let system_map_path = claude_home
+        .join("memories")
+        .join("workspaces")
+        .join(&workspace_slug)
+        .join("reference")
+        .join("SYSTEM_MAP.md");
     if !system_map_path.is_file() {
         let _ = writeln!(
             standard_error,

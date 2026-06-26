@@ -1,12 +1,12 @@
 //! Purpose: SQLite FTS5-backed full-text search over the local Markdown and JSON memory stores.
-//! Caller: `utility::memory::run_memory_command` for the `recall` subcommand on both the
-//!   `memory` and `memoriesv2` command groups.
+//! Caller: `utility::memory::run_memory_command` for the `recall` subcommand on the
+//!   `memory` command group.
 //! Dependencies: rusqlite (bundled SQLite with FTS5), std::fs, std::path, std::time, the
 //!   crate-local args/json/runtime helpers.
 //! Main Functions: `run_recall_command`, `sync_recall_index`, `query_recall_index`,
 //!   `recall_database_path`, `default_search_roots`.
 //! Side Effects: Creates and writes the SQLite index file at `<claude-home>/recall-index.sqlite3`,
-//!   reads `.md` and `.json` files under `<claude-home>/memories`, `<claude-home>/memoriesv2`, and
+//!   reads `.md` and `.json` files under `<claude-home>/memories` and
 //!   `<claude-home>/working-briefs`. No network. No global state.
 //!
 //! Invariants:
@@ -67,7 +67,7 @@ const SCHEMA_VERSION: &str = "1";
 /// plural root would silently skip everything `memory <family> record` writes —
 /// the primary recall surface returning zero hits with no error. Listing both
 /// keeps recall complete regardless of which tree a write landed in.
-const DEFAULT_RECALL_ROOTS: &[&str] = &["memory", "memories", "memoriesv2", "working-briefs"];
+const DEFAULT_RECALL_ROOTS: &[&str] = &["memory", "memories", "working-briefs"];
 
 /// Maximum number of FTS5 hits returned when `--limit` is not supplied.
 const DEFAULT_RECALL_LIMIT: usize = 20;
@@ -136,7 +136,7 @@ fn render_recall_help(command_group: &str, standard_output: &mut dyn Write) {
     let _ = writeln!(standard_output);
     let _ = writeln!(
         standard_output,
-        "Searches Markdown and JSON files under <claude-home>/{{memories,memoriesv2,working-briefs}} via SQLite FTS5."
+        "Searches Markdown and JSON files under <claude-home>/{{memories,working-briefs}} via SQLite FTS5."
     );
     let _ = writeln!(
         standard_output,
@@ -2156,11 +2156,6 @@ mod tests {
             );
             write_memory(
                 claude_home,
-                "memoriesv2/team/stripe.md",
-                "# Stripe payment intent\n\nVerify webhook signatures.\n",
-            );
-            write_memory(
-                claude_home,
                 "working-briefs/today.md",
                 "# Working brief\n\nQuiet day, mostly OpenAPI cleanup.\n",
             );
@@ -2829,35 +2824,6 @@ mod tests {
         let arguments = vec!["webhook".to_string(), "--limit".to_string()];
         let error_message = split_flags_and_query(&arguments).expect_err("missing value");
         assert!(error_message.contains("--limit"), "error: {error_message}");
-    }
-
-    #[test]
-    fn memoriesv2_command_group_uses_same_recall_index() {
-        run_with_home("keel-recall-memoriesv2", |claude_home| {
-            write_memory(
-                claude_home,
-                "memoriesv2/library/postgres.md",
-                "# Postgres\n\nLock timeout strategy for migrations.\n",
-            );
-            let mut stdout: Vec<u8> = Vec::new();
-            let mut stderr: Vec<u8> = Vec::new();
-            let exit_code = run_recall_command(
-                "memoriesv2",
-                &["postgres".to_string()],
-                &mut stdout,
-                &mut stderr,
-            );
-            assert_eq!(exit_code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
-            let rendered = String::from_utf8_lossy(&stdout);
-            assert!(
-                rendered.starts_with("memoriesv2 recall:"),
-                "rendered: {rendered}"
-            );
-            assert!(
-                rendered.contains("memoriesv2/library/postgres.md"),
-                "rendered: {rendered}"
-            );
-        });
     }
 }
 

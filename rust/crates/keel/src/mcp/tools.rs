@@ -66,7 +66,7 @@ pub(super) fn handle_tools_list() -> Value {
         "tools": [
             {
                 "name": "recall",
-                "description": "Call this BEFORE claiming what you remember or previously learned — search your durable memory instead of relying on conversation alone. Full-text search over Markdown under <claude-home>/{memories,memoriesv2,working-briefs}. Auto-syncs the index before querying.",
+                "description": "Call this BEFORE claiming what you remember or previously learned — search your durable memory instead of relying on conversation alone. Full-text search over Markdown under <claude-home>/{memories,working-briefs}. Auto-syncs the index before querying.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -197,7 +197,7 @@ pub(super) fn handle_tools_list() -> Value {
             },
             {
                 "name": "cli",
-                "description": "Run any keel CLI subcommand and get its compacted output — the full toolkit surface (review, git-workflow, workflow, memory, memoriesv2, orchestration, flow, code-search, config-audit, skill-lint, checkpoint, gain, session, telemetry, status, doctor, ...). Pass the subcommand and flags as `args`. Read/inspection subcommands run directly; destructive or management subcommands (install, update, repair, uninstall, validate, all, self-replace, `checkpoint restore`, and `hook install`/`hook uninstall`) require `confirm: true`. The `mcp` subcommand is refused. Prefer the dedicated tools (recall, skill_route, brief_create, sprint, user_story_lint, ...) when one fits; use cli for everything else.",
+                "description": "Run any keel CLI subcommand and get its compacted output — the full toolkit surface (review, git-workflow, workflow, memory, orchestration, flow, code-search, config-audit, skill-lint, checkpoint, gain, session, telemetry, status, doctor, ...). Pass the subcommand and flags as `args`. Read/inspection subcommands run directly; destructive or management subcommands (install, update, repair, uninstall, validate, all, self-replace, `checkpoint restore`, and `hook install`/`hook uninstall`) require `confirm: true`. The `mcp` subcommand is refused. Prefer the dedicated tools (recall, skill_route, brief_create, sprint, user_story_lint, ...) when one fits; use cli for everything else.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {

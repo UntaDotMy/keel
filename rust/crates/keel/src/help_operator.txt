@@ -41,11 +41,6 @@
   memory working-brief|completion-gate
   memory recall <query>
   memory instincts|research-cache|maintenance|agent-registry|agent-packets|loop-guard|entity|graph|retrieve|status
-  memoriesv2 scope resolve [same flags as memory scope resolve]
-  memoriesv2 system-map refresh [same flags as memory system-map refresh]
-  memoriesv2 system-map show [same flags as memory system-map show]
-  memoriesv2 working-brief|completion-gate
-  memoriesv2 recall <query>
   orchestration runtime-preflight|resume-status|task|checkpoint
   workflow route|start|cockpit|status|dashboard|watch|finish|resume
   gain [reset]

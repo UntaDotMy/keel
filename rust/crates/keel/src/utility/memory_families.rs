@@ -1,8 +1,7 @@
 //! Purpose: Implements the previously-planned memory command families on top of the
 //!   shared scoped record store: research-cache, maintenance, agent-registry,
 //!   agent-packets, loop-guard, entity, graph, retrieve, and a status summary.
-//! Caller: utility::memory::run_memory_command dispatch for both the `memory` and
-//!   `memoriesv2` command groups.
+//! Caller: utility::memory::run_memory_command dispatch for the `memory` command group.
 //! Dependencies: crate::args::FlagSet, crate::json::{write_indented, Value},
 //!   crate::runtime::{display_path, resolve_claude_home}, crate::utility::record_store,
 //!   crate::utility::workflow_ledger timestamp helpers.
@@ -12,9 +11,8 @@
 //!
 //! Design: every family is a thin handler over `RecordStore`, mirroring the
 //! workflow ledger and working-brief storage shapes already in the tree rather
-//! than introducing a new persistence concept. `<group>` is `memories` or
-//! `memoriesv2` so the two command groups stay isolated on disk exactly like
-//! their scope-resolve paths do.
+//! than introducing a new persistence concept. `<group>` is `memory` so the
+//! command group's records stay isolated on disk.
 
 use std::io::Write;
 use std::path::Path;
@@ -1212,8 +1210,7 @@ const STATUS_FAMILIES: &[&str] = &[
     "instincts",
 ];
 
-/// Record counts per memory family for `command_group` (`memories` or
-/// `memoriesv2`). A family whose store cannot be read counts as 0 so a partial
+/// Record counts per memory family for `command_group`. A family whose store cannot be read counts as 0 so a partial
 /// store never fails the whole summary. Backs both the CLI `status` subcommand
 /// and the MCP `memory_status` tool, so the two share one definition of "what
 /// families exist and how many records each holds".
@@ -1904,7 +1901,7 @@ mod tests {
         let home = temp_home("graph");
         let h = home.to_string_lossy().to_string();
         run(
-            "memoriesv2",
+            "memory",
             "graph",
             &[
                 "add",
@@ -1919,22 +1916,12 @@ mod tests {
             ],
         );
         let (code, out, err) = run(
-            "memoriesv2",
+            "memory",
             "graph",
             &["query", "--node", "bug-42", "--claude-home", &h],
         );
         assert_eq!(code, 0, "stderr: {err}");
         assert!(out.contains("PR-1 --[fixes]--> bug-42"), "stdout: {out}");
-        // group isolation: the memory group must not see the memoriesv2 edge
-        let (_, out_other, _) = run(
-            "memory",
-            "graph",
-            &["query", "--node", "bug-42", "--claude-home", &h],
-        );
-        assert!(
-            out_other.contains("0 edge"),
-            "groups must be isolated; stdout: {out_other}"
-        );
         let _ = std::fs::remove_dir_all(&home);
     }
 

@@ -1,5 +1,5 @@
 //! Purpose: Thin dispatcher for utility command groups with pub use re-exports
-//! Caller: commands.rs for code-search, design-intelligence, memory, memoriesv2, orchestration, workflow, gain, session, and bench
+//! Caller: commands.rs for code-search, design-intelligence, memory, orchestration, workflow, gain, session, and bench
 //! Dependencies: submodules code_search, memory, gain, session, system_map
 //! Main Functions: Re-exports public functions from submodules
 //! Side Effects: None, pure module organization
