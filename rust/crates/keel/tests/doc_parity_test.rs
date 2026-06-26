@@ -141,15 +141,15 @@ fn documented_skill_counts_match_disk_and_manifest() {
 
     assert_eq!(
         manifest.len(),
-        46,
-        "expected 46 manifest skills; \
+        47,
+        "expected 47 manifest skills; \
          got {}. If this changed intentionally, update CLAUDE.md and using-keel/SKILL.md.",
         manifest.len()
     );
     assert_eq!(
         on_disk.len(),
-        47,
-        "expected 47 first-party SKILL.md dirs (46 manifest skills + using-keel bootstrap); \
+        48,
+        "expected 48 first-party SKILL.md dirs (47 manifest skills + using-keel bootstrap); \
          got {}. Update the docs and this test together.",
         on_disk.len()
     );
