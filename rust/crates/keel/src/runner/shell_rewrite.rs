@@ -110,7 +110,7 @@ pub fn adapter_name_for_rewrite(command: &str) -> &'static str {
             analysis.effective_fields.iter().skip(1).map(String::as_str),
         ),
 
-        "git" | "gh" | "jj" => "git",
+        "git" | "gh" | "glab" | "jj" => "git",
 
         "rg" | "grep" => "search",
 
@@ -846,6 +846,7 @@ pub fn is_supported_noisy_command(fields: &[String]) -> bool {
             | "gh"
             | "git"
             | "git-lfs"
+            | "glab"
             | "jj"
             | "rg"
             | "grep"
@@ -1187,6 +1188,7 @@ mod tests {
             &["mix", "test"],
             &["git", "status"],
             &["gh", "pr", "list"],
+            &["glab", "mr", "list"],
             &["jj", "status"],
             &["rg", "foo"],
             &["grep", "foo"],
