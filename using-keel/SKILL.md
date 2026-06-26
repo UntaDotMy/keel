@@ -162,8 +162,8 @@ skill matcher fires. The full text and the tactical rules they imply live in
 
 **Writing Discipline** governs every word you write — docs, code comments, commit/PR text, review notes, and chat replies. Write less, be accurate not impressive, lead with the point, no filler or AI tells, stay on the asked scope. Full rule in `_shared/common-discipline.md` § Writing Discipline.
 
-## Skill catalog (43 skills installed under ~/.claude/skills/)
-<!-- 43 = every skill in .claude-plugin/plugin.json (24 specialists + 18 technique + the requesting-code-review alias). The using-keel bootstrap is a 44th first-party directory that loads at SessionStart rather than being matcher-invoked, so it is not counted here. -->
+## Skill catalog (46 skills installed under ~/.claude/skills/)
+<!-- 46 = every skill in .claude-plugin/plugin.json. The using-keel bootstrap is a 47th first-party directory that loads at SessionStart rather than being matcher-invoked, so it is not counted here. Run `keel skill-lint` for the live verified count. -->
 
 
 Source: each `<name>/SKILL.md` in this repo. Use the Skill tool with the bare

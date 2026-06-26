@@ -107,6 +107,14 @@ function isEditClassTool(toolName: string): boolean {
   return EDIT_CLASS_TOOLS.has(toolName.toLowerCase());
 }
 
+const SHELL_TOOLS = new Set([
+  "bash", "shell", "sh", "zsh", "fish", "powershell", "pwsh", "cmd",
+]);
+
+function isShellTool(toolName: string): boolean {
+  return SHELL_TOOLS.has(toolName.toLowerCase());
+}
+
 // ---------------------------------------------------------------------------
 // Plugin entry point
 // ---------------------------------------------------------------------------
@@ -206,30 +214,46 @@ const KeelPlugin: Plugin = async ({ client, directory, $ }) => {
       }
     },
 
-    "tool.execute.before": async (input, _output) => {
+    "tool.execute.before": async (input, output) => {
       const toolName: string =
         (input as { tool?: string })?.tool ?? "";
-      if (!isEditClassTool(toolName)) return;
-      const sessionID: string =
-        (input as { sessionID?: string })?.sessionID ?? "";
-      const result = await runBridge("pre-tool-use", [
-        "--session",
-        sessionID,
-        "--cwd",
-        cwd,
-        "--tool",
-        toolName,
-      ]);
-      if (result.startsWith("KEEL_GATE_DENY")) {
-        const reason = result
-          .split("\n")
-          .slice(1)
-          .join("\n")
-          .trim();
-        throw new Error(
-          reason ||
-            "keel Iron Law gate: read context + load a skill before editing.",
-        );
+
+      if (isEditClassTool(toolName)) {
+        const sessionID: string =
+          (input as { sessionID?: string })?.sessionID ?? "";
+        const result = await runBridge("pre-tool-use", [
+          "--session",
+          sessionID,
+          "--cwd",
+          cwd,
+          "--tool",
+          toolName,
+        ]);
+        if (result.startsWith("KEEL_GATE_DENY")) {
+          const reason = result
+            .split("\n")
+            .slice(1)
+            .join("\n")
+            .trim();
+          throw new Error(
+            reason ||
+              "keel Iron Law gate: read context + load a skill before editing.",
+          );
+        }
+        return;
+      }
+
+      if (isShellTool(toolName)) {
+        const command: string =
+          (output as { args?: { command?: string } })?.args?.command ?? "";
+        if (!command) return;
+        const rewrite = await runBridgeWithStdin("rewrite", ["--tool", toolName], command);
+        if (rewrite.startsWith("KEEL_REWRITE ")) {
+          const rewritten = rewrite.slice("KEEL_REWRITE ".length).trim();
+          if (rewritten) {
+            (output as { args: { command: string } }).args.command = rewritten;
+          }
+        }
       }
     },
 
