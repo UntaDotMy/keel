@@ -31,6 +31,7 @@ pub fn run_bridge_command(
         "session-end" => run_bridge_session_end(&arguments[1..], standard_output, standard_error),
         "post-compact" => run_bridge_post_compact(&arguments[1..], standard_output, standard_error),
         "gate-status" => run_bridge_gate_status(&arguments[1..], standard_output, standard_error),
+        "pre-tool-use" => run_bridge_pre_tool_use(&arguments[1..], standard_output, standard_error),
         _ => {
             let _ = writeln!(
                 standard_error,
@@ -57,7 +58,8 @@ fn render_bridge_help(standard_output: &mut dyn Write) {
          \x20 observe       --session <id> --cwd <path> --tool <name> [--failed]\n\
          \x20 session-end   --session <id> --cwd <path>\n\
          \x20 post-compact  --session <id> --cwd <path>\n\
-         \x20 gate-status   --session <id> --cwd <path>"
+         \x20 gate-status   --session <id> --cwd <path>\n\
+         \x20 pre-tool-use  --session <id> --cwd <path> --tool <name>"
     );
 }
 
@@ -248,6 +250,40 @@ fn run_bridge_gate_status(
             _ => "fired",
         };
         let _ = writeln!(standard_output, "  {label}: {cleared} (count: {count})");
+    }
+    0
+}
+
+fn run_bridge_pre_tool_use(
+    arguments: &[String],
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let mut flags = bridge_flag_set("bridge pre-tool-use");
+    flags.string_flag("tool", "");
+    if let Err(parse_error) = flags.parse(arguments) {
+        let _ = writeln!(standard_error, "{}", parse_error.message);
+    }
+    let (session, _cwd) = resolve_bridge_args(&flags, standard_error);
+    let tool_name = flags.string_value("tool");
+
+    if !hook_lifecycle::is_edit_class_tool(tool_name) {
+        let _ = writeln!(standard_output, "KEEL_GATE_ALLOW");
+        return 0;
+    }
+
+    let session_id = if session.is_empty() {
+        "default"
+    } else {
+        &session
+    };
+    match hook_lifecycle::iron_law_gate_decision(session_id) {
+        Some(reason) => {
+            let _ = writeln!(standard_output, "KEEL_GATE_DENY\n{reason}");
+        }
+        None => {
+            let _ = writeln!(standard_output, "KEEL_GATE_ALLOW");
+        }
     }
     0
 }

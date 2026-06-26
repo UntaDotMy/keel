@@ -54,7 +54,10 @@ impl Application {
         standard_error: &mut dyn Write,
     ) -> u8 {
         if arguments.is_empty() {
-            let _ = render_help_surface(standard_output, false);
+            let _ = writeln!(
+                standard_output,
+                "keel - discipline as code. Run `keel help` for commands or `keel status` for install state."
+            );
             return 0;
         }
         let command_name = arguments[0].trim().to_string();

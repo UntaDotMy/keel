@@ -711,44 +711,50 @@ fn run_hook_instructions(
 
 const IRON_LAW_GATE_ENV_VAR: &str = "KEEL_IRON_LAW_GATE";
 
-fn run_iron_law_gate(
-    input: &JsonDocument,
-    standard_output: &mut dyn Write,
-    standard_error: &mut dyn Write,
-) -> u8 {
-    if std::env::var(IRON_LAW_GATE_ENV_VAR)
-        .map(|v| v.eq_ignore_ascii_case("off"))
-        .unwrap_or(false)
-    {
-        return 0;
-    }
-
-    let session_id = input
-        .get("session_id")
-        .and_then(JsonDocument::as_str)
-        .unwrap_or("default");
-
-    let claude_home = match crate::runtime::resolve_claude_home("") {
-        Ok(path) => path,
-        Err(_) => return 0,
-    };
-
-    let gate_dir = claude_home.join("state").join("iron-law-gate");
-    let gate_file = gate_dir.join(session_id);
-
-    if gate_file.exists() {
-        return 0;
-    }
-
-    let _ = std::fs::create_dir_all(&gate_dir);
-    let _ = std::fs::write(&gate_file, "acknowledged");
-
-    let reason = "[keel] Iron Law gate: This is your first code edit this session. \
+const IRON_LAW_GATE_DENIAL_REASON: &str =
+    "[keel] Iron Law gate: This is your first code edit this session. \
         The Iron Law is NOT optional — it is a hard gate. Before retrying this edit, you MUST:\n\
         1. Call keel_context_brief (or keel system_map) to read the workspace structure.\n\
         2. Load any relevant skill via skill_route / skill_get.\n\
         3. If editing existing code, trace ownership first (preserve-existing-flow).\n\
         If you skip these steps, you are violating the Iron Law. Retry your edit after complying.";
+
+pub(crate) fn iron_law_gate_decision(session_id: &str) -> Option<&'static str> {
+    if std::env::var(IRON_LAW_GATE_ENV_VAR)
+        .map(|v| v.eq_ignore_ascii_case("off"))
+        .unwrap_or(false)
+    {
+        return None;
+    }
+
+    let claude_home = crate::runtime::resolve_claude_home("").ok()?;
+
+    let gate_dir = claude_home.join("state").join("iron-law-gate");
+    let gate_file = gate_dir.join(session_id);
+
+    if gate_file.exists() {
+        return None;
+    }
+
+    let _ = std::fs::create_dir_all(&gate_dir);
+    let _ = std::fs::write(&gate_file, "acknowledged");
+
+    Some(IRON_LAW_GATE_DENIAL_REASON)
+}
+
+fn run_iron_law_gate(
+    input: &JsonDocument,
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let session_id = input
+        .get("session_id")
+        .and_then(JsonDocument::as_str)
+        .unwrap_or("default");
+
+    let Some(reason) = iron_law_gate_decision(session_id) else {
+        return 0;
+    };
 
     let deny_payload = serde_json::json!({
         "hookSpecificOutput": {
@@ -1272,8 +1278,12 @@ fn read_stdin_text(stdin: &mut dyn Read) -> Result<String, String> {
     Ok(buf)
 }
 
-fn is_edit_class_tool(tool_name: &str) -> bool {
-    matches!(tool_name, "Edit" | "Write" | "MultiEdit" | "NotebookEdit")
+pub(crate) fn is_edit_class_tool(tool_name: &str) -> bool {
+    let lower = tool_name.to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "edit" | "write" | "multiedit" | "notebookedit" | "apply_patch" | "str_replace" | "patch"
+    )
 }
 
 fn system_map_refresh_threshold() -> u64 {
