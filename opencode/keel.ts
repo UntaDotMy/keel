@@ -116,6 +116,72 @@ function isShellTool(toolName: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// Iron Law enforcement — reading tools that satisfy "read first"
+// ---------------------------------------------------------------------------
+
+const READING_TOOLS = new Set([
+  "read", "glob", "grep", "lsp_diagnostics", "lsp_goto_definition",
+  "lsp_find_references", "lsp_symbols", "lsp_prepare_rename",
+]);
+
+function isReadingTool(toolName: string): boolean {
+  return READING_TOOLS.has(toolName.toLowerCase());
+}
+
+const IRON_LAW_DIR = path.join(
+  os.homedir(),
+  ".claude",
+  "state",
+  "iron-law-satisfied",
+);
+
+function ensureIronLawDir(): void {
+  try {
+    fs.mkdirSync(IRON_LAW_DIR, { recursive: true });
+  } catch {
+    /* best-effort */
+  }
+}
+
+function ironLawSatisfied(sessionID: string): boolean {
+  ensureIronLawDir();
+  try {
+    return fs.existsSync(path.join(IRON_LAW_DIR, sessionID));
+  } catch {
+    return false;
+  }
+}
+
+function markIronLawSatisfied(sessionID: string): void {
+  ensureIronLawDir();
+  try {
+    fs.writeFileSync(path.join(IRON_LAW_DIR, sessionID), "", "utf-8");
+  } catch {
+    /* best-effort */
+  }
+}
+
+function clearIronLaw(sessionID: string): void {
+  try {
+    fs.rmSync(path.join(IRON_LAW_DIR, sessionID), { force: true });
+  } catch {
+    /* best-effort */
+  }
+}
+
+function isKeelReadingCommand(command: string): boolean {
+  const trimmed = command.trim().toLowerCase();
+  return trimmed.startsWith("keel ") && (
+    trimmed.includes("system-map") ||
+    trimmed.includes("recall") ||
+    trimmed.includes("doctor") ||
+    trimmed.includes("code-search") ||
+    trimmed.includes("status") ||
+    trimmed.includes("help")
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Plugin entry point
 // ---------------------------------------------------------------------------
 
@@ -217,10 +283,36 @@ const KeelPlugin: Plugin = async ({ client, directory, $ }) => {
     "tool.execute.before": async (input, output) => {
       const toolName: string =
         (input as { tool?: string })?.tool ?? "";
+      const sessionID: string =
+        (input as { sessionID?: string })?.sessionID ?? "";
 
+      // Iron Law enforcement: reading tools satisfy the gate and are always allowed.
+      if (isReadingTool(toolName)) {
+        markIronLawSatisfied(sessionID);
+        return;
+      }
+
+      // Shell tools running keel reading commands also satisfy the gate.
+      if (isShellTool(toolName)) {
+        const command: string =
+          (output as { args?: { command?: string } })?.args?.command ?? "";
+        if (command && isKeelReadingCommand(command)) {
+          markIronLawSatisfied(sessionID);
+          return;
+        }
+      }
+
+      // Iron Law enforcement: non-reading tools are DENIED until the model has
+      // demonstrated reading behavior in this session. This is the enforcement
+      // mechanism — not just text injection, but an actual block.
+      if (!ironLawSatisfied(sessionID)) {
+        throw new Error(
+          "IRON LAW ENFORCED: Read first. You must use Read, Glob, Grep, LSP, or keel tools (system-map, recall, doctor, code-search) BEFORE acting. The iron law is enforced — you cannot skip it.",
+        );
+      }
+
+      // Iron Law gate for edit-class tools (existing behavior).
       if (isEditClassTool(toolName)) {
-        const sessionID: string =
-          (input as { sessionID?: string })?.sessionID ?? "";
         const result = await runBridge("pre-tool-use", [
           "--session",
           sessionID,
@@ -243,6 +335,7 @@ const KeelPlugin: Plugin = async ({ client, directory, $ }) => {
         return;
       }
 
+      // Compaction reroute for shell tools (existing behavior).
       if (isShellTool(toolName)) {
         const command: string =
           (output as { args?: { command?: string } })?.args?.command ?? "";
@@ -301,6 +394,7 @@ const KeelPlugin: Plugin = async ({ client, directory, $ }) => {
                 cwd,
               ]);
               clearMarker(sid);
+              clearIronLaw(sid);
               break;
             }
           }
