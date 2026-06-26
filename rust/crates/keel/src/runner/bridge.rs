@@ -10,7 +10,7 @@
 use std::io::{Read, Write};
 
 use crate::args::FlagSet;
-use crate::runner::{hook_lifecycle, observation};
+use crate::runner::{hook_lifecycle, observation, shell_rewrite};
 use crate::runtime::resolve_claude_home;
 
 pub fn run_bridge_command(
@@ -32,6 +32,7 @@ pub fn run_bridge_command(
         "post-compact" => run_bridge_post_compact(&arguments[1..], standard_output, standard_error),
         "gate-status" => run_bridge_gate_status(&arguments[1..], standard_output, standard_error),
         "pre-tool-use" => run_bridge_pre_tool_use(&arguments[1..], standard_output, standard_error),
+        "rewrite" => run_bridge_rewrite(&arguments[1..], standard_output, standard_error),
         _ => {
             let _ = writeln!(
                 standard_error,
@@ -59,7 +60,8 @@ fn render_bridge_help(standard_output: &mut dyn Write) {
          \x20 session-end   --session <id> --cwd <path>\n\
          \x20 post-compact  --session <id> --cwd <path>\n\
          \x20 gate-status   --session <id> --cwd <path>\n\
-         \x20 pre-tool-use  --session <id> --cwd <path> --tool <name>"
+         \x20 pre-tool-use  --session <id> --cwd <path> --tool <name>\n\
+         \x20 rewrite       --tool <name>  (command on stdin)"
     );
 }
 
@@ -284,6 +286,42 @@ fn run_bridge_pre_tool_use(
         None => {
             let _ = writeln!(standard_output, "KEEL_GATE_ALLOW");
         }
+    }
+    0
+}
+
+fn run_bridge_rewrite(
+    arguments: &[String],
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let mut flags = bridge_flag_set("bridge rewrite");
+    flags.string_flag("tool", "");
+    if let Err(parse_error) = flags.parse(arguments) {
+        let _ = writeln!(standard_error, "{}", parse_error.message);
+    }
+    let tool_name = flags.string_value("tool");
+    let lower = tool_name.to_ascii_lowercase();
+    if !matches!(
+        lower.as_str(),
+        "bash" | "shell" | "sh" | "zsh" | "fish" | "powershell" | "pwsh" | "cmd"
+    ) {
+        return 0;
+    }
+    let mut command = String::new();
+    let _ = std::io::stdin().read_to_string(&mut command);
+    let command = command.trim();
+    if command.is_empty() {
+        return 0;
+    }
+    let decision =
+        shell_rewrite::rewrite_command_text_for_shell(command, shell_rewrite::RewriteShell::Bash);
+    if decision.supported {
+        let _ = writeln!(
+            standard_output,
+            "KEEL_REWRITE {}",
+            decision.rewritten_command
+        );
     }
     0
 }

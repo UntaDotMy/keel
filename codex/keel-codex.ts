@@ -193,7 +193,23 @@ function handleUserPromptSubmit(input: CodexHookInput): string {
   ]);
 }
 
-function handlePreToolUse(input: CodexHookInput): string {
+const SHELL_TOOL_NAMES = new Set([
+  "bash", "shell", "sh", "zsh", "fish", "powershell", "pwsh", "cmd",
+]);
+
+function isShellTool(toolName: string): boolean {
+  return SHELL_TOOL_NAMES.has(toolName.toLowerCase());
+}
+
+function extractCommand(toolInput: unknown): string {
+  if (toolInput && typeof toolInput === "object" && "command" in toolInput) {
+    const cmd = (toolInput as { command?: unknown }).command;
+    return typeof cmd === "string" ? cmd : "";
+  }
+  return "";
+}
+
+function handlePreToolUse(input: CodexHookInput, isPre: boolean): string {
   // Observations are fire-and-forget. Codex hooks are synchronous, so we
   // call observe with a short timeout and discard the result.
   const sessionID = input.session_id ?? "unknown";
@@ -211,6 +227,26 @@ function handlePreToolUse(input: CodexHookInput): string {
   if (input.failed) args.push("--failed");
 
   runBridgeWithStdin("observe", args, stdin);
+
+  if (isPre && isShellTool(toolName)) {
+    const command = extractCommand(input.tool_input);
+    if (command) {
+      const rewrite = runBridgeWithStdin("rewrite", ["--tool", toolName], command);
+      if (rewrite.startsWith("KEEL_REWRITE ")) {
+        const rewritten = rewrite.slice("KEEL_REWRITE ".length).trim();
+        if (rewritten) {
+          return JSON.stringify({
+            hookSpecificOutput: {
+              hookEventName: "PreToolUse",
+              permissionDecision: "allow",
+              updatedInput: { command: rewritten },
+            },
+          });
+        }
+      }
+    }
+  }
+
   return "";
 }
 
@@ -302,11 +338,10 @@ function main(): void {
         contextText = handleUserPromptSubmit(input);
         break;
       case "PreToolUse":
-        handlePreToolUse(input);
+        contextText = handlePreToolUse(input, true);
         break;
       case "PostToolUse":
-        // PostToolUse is fire-and-forget for observation recording
-        handlePreToolUse(input);
+        handlePreToolUse(input, false);
         break;
       case "PreCompact":
         contextText = handlePreCompact(input);
