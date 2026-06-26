@@ -24,7 +24,7 @@ use std::io::Write;
 
 use shared::is_help_argument;
 
-/// Top-level dispatcher for the `memory` / `memoriesv2` command groups.
+/// Top-level dispatcher for the `memory` command group.
 pub fn run_memory_command(
     command_group: &str,
     arguments: &[String],

@@ -92,17 +92,10 @@ fn run_scope_resolve(
         return 1;
     };
     let workspace_slug = sanitize_key(&workspace_root.to_string_lossy());
-    let workspace_directory = if command_group == "memoriesv2" {
-        claude_home
-            .join("memoriesv2")
-            .join("workspaces")
-            .join(&workspace_slug)
-    } else {
-        claude_home
-            .join("memories")
-            .join("workspaces")
-            .join(&workspace_slug)
-    };
+    let workspace_directory = claude_home
+        .join("memories")
+        .join("workspaces")
+        .join(&workspace_slug);
     let reference_directory = workspace_directory.join("reference");
     let system_map_path = reference_directory.join("SYSTEM_MAP.md");
     if flag_set.bool_value("create-missing") {

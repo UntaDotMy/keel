@@ -177,12 +177,6 @@ impl Application {
                 standard_output,
                 standard_error,
             ),
-            "memoriesv2" => utility::run_memory_command(
-                "memoriesv2",
-                command_arguments,
-                standard_output,
-                standard_error,
-            ),
             "orchestration" => utility::run_orchestration_command(
                 command_arguments,
                 standard_output,

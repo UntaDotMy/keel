@@ -30,7 +30,7 @@ pub fn render_help_surface<W: Write + ?Sized>(
     writeln!(output_writer, "  help advanced")?;
     writeln!(
         output_writer,
-        "  Use this when you need orchestration, memory, or memoriesv2 internals instead of the default operator path."
+        "  Use this when you need orchestration or memory internals instead of the default operator path."
     )?;
     if include_advanced {
         writeln!(output_writer)?;
@@ -107,7 +107,7 @@ mod tests {
             let mut stdout: Vec<u8> = Vec::new();
             let mut stderr: Vec<u8> = Vec::new();
             let _ = match group.as_str() {
-                "memory" | "memoriesv2" => {
+                "memory" => {
                     run_memory_command(group.as_str(), &subcommand_args, &mut stdout, &mut stderr)
                 }
                 "orchestration" => {
@@ -137,7 +137,7 @@ mod tests {
     /// but for the operator-tier help surface in `help_operator.txt`.
     ///
     /// The operator file mixes top-level commands (help, version, install, ...) with
-    /// group commands (memory, memoriesv2, orchestration, workflow). Top-level commands
+    /// group commands (memory, orchestration, workflow). Top-level commands
     /// are matched in `commands.rs` directly and don't have the phantom-subcommand
     /// failure mode this test guards against, so we only inspect lines whose first
     /// token is a group dispatcher. Group-command lines may use pipe-separated
@@ -155,10 +155,7 @@ mod tests {
                 continue;
             }
             let group = tokens[0].clone();
-            if !matches!(
-                group.as_str(),
-                "memory" | "memoriesv2" | "orchestration" | "workflow"
-            ) {
+            if !matches!(group.as_str(), "memory" | "orchestration" | "workflow") {
                 continue;
             }
             assert!(
@@ -179,7 +176,7 @@ mod tests {
                 let mut stdout: Vec<u8> = Vec::new();
                 let mut stderr: Vec<u8> = Vec::new();
                 let _ = match group.as_str() {
-                    "memory" | "memoriesv2" => run_memory_command(
+                    "memory" => run_memory_command(
                         group.as_str(),
                         &subcommand_args,
                         &mut stdout,
@@ -220,10 +217,6 @@ mod tests {
                 "  orchestration runtime-preflight [--claude-home <path>] [--json]"
             ),
             vec!["orchestration", "runtime-preflight"]
-        );
-        assert_eq!(
-            parse_command_tokens("  memoriesv2 working-brief [write|show|list] (note)"),
-            vec!["memoriesv2", "working-brief"]
         );
     }
 }

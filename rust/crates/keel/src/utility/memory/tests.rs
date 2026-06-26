@@ -95,46 +95,6 @@ fn memory_scope_defaults_to_global_workspace_reference_map() {
 }
 
 #[test]
-fn memoriesv2_scope_uses_second_layer_global_base() {
-    let _guard = ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let temporary_directory = tempdir_under("keel-memoriesv2-scope-global");
-    let claude_home = temporary_directory.join("claude-home");
-    let workspace_root = temporary_directory.join("workspace");
-    fs::create_dir_all(&workspace_root).expect("create workspace");
-    let previous_override = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
-    std::env::set_var("CLAUDE_TARGET_OVERRIDE", &claude_home);
-
-    let mut stdout: Vec<u8> = Vec::new();
-    let mut stderr: Vec<u8> = Vec::new();
-    let exit_code = run_memory_command(
-        "memoriesv2",
-        &[
-            "scope".to_string(),
-            "resolve".to_string(),
-            "--workspace-root".to_string(),
-            workspace_root.to_string_lossy().to_string(),
-            "--format".to_string(),
-            "json".to_string(),
-        ],
-        &mut stdout,
-        &mut stderr,
-    );
-    assert_eq!(exit_code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
-    let output = String::from_utf8_lossy(&stdout);
-    assert!(output.contains("memoriesv2"));
-    assert!(output.contains("systemMapPath"));
-
-    if let Some(previous_value) = previous_override {
-        std::env::set_var("CLAUDE_TARGET_OVERRIDE", previous_value);
-    } else {
-        std::env::remove_var("CLAUDE_TARGET_OVERRIDE");
-    }
-    let _ = fs::remove_dir_all(&temporary_directory);
-}
-
-#[test]
 fn memory_remember_natural_form_records_and_is_retrievable() {
     let home = tempdir_under("keel-remember-natural");
     let h = home.to_string_lossy().to_string();

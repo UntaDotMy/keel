@@ -318,11 +318,11 @@ mod tests {
     #[test]
     fn nested_group_path_creates_directory_levels() {
         let home = temp_home("nested");
-        let store = RecordStore::new(&home, "memoriesv2/graph");
+        let store = RecordStore::new(&home, "memory/graph");
         store
             .write_record("e-1", &vec![("id".into(), "e-1".into())])
             .expect("write");
-        assert!(home.join("memoriesv2/graph/e-1.json").is_file());
+        assert!(home.join("memory/graph/e-1.json").is_file());
         let _ = fs::remove_dir_all(&home);
     }
 
