@@ -87,10 +87,11 @@ pub fn record_observation_from_parts(
         }
     };
 
-    // Build a minimal document shaped enough for derive_signature to resolve
-    // tool_input correctly. The shared handler only reads `tool_name` and
-    // `tool_input`; the other keys (session_id, cwd) are injected directly.
-    let Some((mut signature, detail)) = derive_signature(tool_name, &tool_input) else {
+    // Wrap the raw tool input in a { tool_input: ... } envelope so
+    // derive_signature can resolve it the same way the native Claude hook
+    // path does (where the full hook input already contains tool_input).
+    let envelope = serde_json::json!({ "tool_input": tool_input });
+    let Some((mut signature, detail)) = derive_signature(tool_name, &envelope) else {
         return Ok(false);
     };
     if failed {
@@ -184,8 +185,9 @@ fn record_observation_with_outcome(input: &JsonDocument, failed: bool) -> std::i
 /// program+subcommand (`git commit`, `cargo test`) does.
 fn derive_signature(tool_name: &str, input: &JsonDocument) -> Option<(String, String)> {
     let tool_input = input.get("tool_input");
-    match tool_name {
-        "Bash" => {
+    let tool_name_lower = tool_name.to_ascii_lowercase();
+    match tool_name_lower.as_str() {
+        "bash" => {
             let command = tool_input
                 .and_then(|value| value.get("command"))
                 .and_then(JsonDocument::as_str)
@@ -194,7 +196,7 @@ fn derive_signature(tool_name: &str, input: &JsonDocument) -> Option<(String, St
             let signature = command_signature(&scrubbed)?;
             Some((signature, truncate_detail(&scrubbed)))
         }
-        "Edit" | "Write" | "MultiEdit" | "NotebookEdit" => {
+        "edit" | "write" | "multiedit" | "notebookedit" => {
             let path = tool_input
                 .and_then(|value| value.get("file_path"))
                 .and_then(JsonDocument::as_str)
