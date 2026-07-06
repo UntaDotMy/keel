@@ -1,0 +1,9 @@
+{
+  "_comment": "keel MCP server registration for Codex. A Codex plugin bundles MCP servers via the manifest 'mcpServers' field pointing at this file (see https://developers.openai.com/codex/plugins/build). The structure mirrors config.toml's [mcp_servers.<name>] table (snake_case 'mcp_servers'). Codex resolves 'keel' on PATH; the keel installer places the binary at ~/.claude/keel (unix) or ~/.claude/keel.exe (win32) and on PATH. Users can enable/disable and set tool-approval policy via Codex config under plugins.keel.mcp_servers.keel without editing this file.",
+  "mcp_servers": {
+    "keel": {
+      "command": "keel",
+      "args": ["mcp", "serve"]
+    }
+  }
+}

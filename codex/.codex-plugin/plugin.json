@@ -1,11 +1,11 @@
 {
   "name": "keel",
   "version": "1.0.0",
-  "description": "Bridges Codex lifecycle events to the keel Rust CLI for context injection, observation recording, learning checkpoints, and session management.",
+  "description": "Bridges Codex lifecycle events to the keel Rust CLI for context injection, observation recording, learning checkpoints, session management, and the keel MCP server (31 tools: recall, skill_route, sprint, etc.).",
   "author": {
     "name": "UntaDotMy",
     "url": "https://github.com/UntaDotMy/keel"
   },
-  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
   "hooks": "./hooks/hooks.json"
 }
