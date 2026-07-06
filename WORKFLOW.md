@@ -18,79 +18,55 @@ The managed `PreToolUse` hook may return a harness denial whose reason begins wi
 
 ## Branch Model
 
-Four tiers, promoted in one direction only. The three upper tiers are permanent; work branches are where day-to-day commits land.
+Four tiers, promoted one direction only. Three tiers are permanent; work branches carry day-to-day commits:
 
-- **`main`** — final stable, verified. Only receives merges from `dev`. Never commit directly to `main`.
-- **`dev`** — staging integration. Receives merges from `feat` and is where a feature is verified on staging before promotion to `main`. Never commit directly to `dev`.
-- **`feat`** — feature integration. Receives merges from work branches once each piece of work is verified. Never commit directly to `feat`.
-- **work branch** `<category>/<FEATURE>` (e.g. `add/RGB`, `fix/SENSOR`) — all hands-on commits live here. Branch off `feat`, keep one coherent feature per branch.
+```
+main  (final stable — verified after dev passes staging)
+dev  (active development — verified when testing new features, staging)
+feat  (new features, fixes, subtasks — development branch)
+<category>/<FEATURE>  (work branch — all hands-on commits, branch off feat)
+```
 
-Promotion flow: `work branch` → `feat` (feature integration) → `dev` (staging verify) → `main` (stable).
+**Promotion flow:** `work branch` → `feat` → `dev` → `main`
 
-**Fixes for in-flight work stay on the same work branch.** If you commit `add: RGB: synchronize all` and later find a problem during verification, commit the `fix: RGB: ...` on that **same** work branch — do **not** open a new branch for the fix. A work branch accumulates every commit for its feature (any category: `add`, `fix`, `wip`, `refactor`, ...) until the whole feature is verified, then merges up to `feat`. A new branch is only for a genuinely new, separate feature.
+**Fixes stay on the same work branch.** If you commit `Add: RGB: synchronize all` and later find a problem during verification, commit the `Fix: RGB: ...` on that **same** work branch. Do **not** open a new branch for the fix. A work branch accumulates every commit for its feature until verified, then merges up to `feat`. A new branch is only for a genuinely new, separate feature.
 
-**Never delete a branch.** After pushing new work or merging it — at any tier — leave the branch in place. Do not run `git branch -d/-D` or `git push origin --delete`. Branches are permanent history in this model; merge does not imply cleanup.
+**Never delete a branch.** After pushing or merging — at any tier — leave the branch in place. No `git branch -d/-D` or `git push origin --delete`. Branches are permanent.
+
+**Commit locally first.** Always commit to local branch before pushing to the server. Avoid direct commits to the server.
 
 ## Feature Branch and Merge Request Rules
 
 - One feature = one `<category>/<FEATURE>` work branch = one merge request into `feat`.
 - Do not mix multiple features in the same branch or merge request.
-- Create a new work branch off `feat` only for a genuinely new, separate feature — never to hold a fix for work already in flight on another branch.
-- Fixes, retries, and subtasks for an in-flight feature commit to that feature's existing work branch, regardless of their commit category.
+- Create a new work branch off `feat` only for a genuinely new, separate feature — never for a fix to in-flight work.
+- Fixes, retries, and subtasks for an in-flight feature commit to that feature's existing work branch.
 - If unrelated work is already in the working tree, split it before committing.
 - Use patch staging (`git add -p`) to stage only the required feature.
 - Review `git diff --cached` before every commit.
 - If a change belongs to another feature, move it to that feature's work branch.
 - Do not open a merge request with mixed feature scopes.
-- Avoid duplicate behavior or overlapping implementation across work branches.
 - Rebase remaining open work branches onto `feat` after another work branch merges.
 - Never delete a branch after pushing or merging it.
 
-## Scope Definition
-
-A feature branch may contain:
-- the code for one user-visible feature or one tightly related fix
-- tests for that same feature
-- docs only for that same feature
-
-A feature branch must not contain:
-- unrelated refactors
-- another feature
-- another bug fix outside the same feature scope
-- opportunistic cleanup unless explicitly requested
-
 ## Required Naming
 
-- The permanent tiers are `main`, `dev`, and `feat`. Hands-on work uses a `<category>/<FEATURE>` work branch off `feat` (e.g. `add/RGB`, `fix/SENSOR`, `wip/ARGB`); fixes and subtasks for that feature stay on the same work branch.
-- **Commit subjects must follow `<category>: <FEATURE>: <short information>`** and this format is strictly enforced.
-  - `<category>` is one of (lowercase): `add`, `config`, `refactor`, `wip`, `fix`, `docs`.
-  - `<FEATURE>` is the component or area being worked on, written in uppercase, e.g. `RGB`, `LED`, `ARGB`, `SENSOR`.
-  - `<short information>` is a concise description of the change.
-  - Example: `wip: RGB: Build light effect mode (multi color)`.
-  - **Colon vs slash:** the commit subject uses colons (`add: RGB: sync all`); the branch name uses a slash (`add/RGB`). Same category vocabulary, different separator — never write a commit with a slash or a branch with a colon.
-- When a commit body is needed, keep it professional, non-chatty, and matched to the committed diff. Use a precise title, include only the sections the change genuinely needs, and keep this order when a section is present: `Problem`, `Solution`, `Summary`, `Notes`, `What Changed`, `Test Result`. Omit `Problem` and `Solution` when the commit is additive, preventive, or housekeeping rather than fixing a concrete issue, and keep `Test Result` limited to validation that directly proves the committed change.
-- do not mention the harness, keel, or tool-brand validation in commit or PR text unless the change itself is about those surfaces.
+- Permanent tiers: `main` (stable), `dev` (staging), `feat` (integration). Hands-on work uses `<category>/<FEATURE>` off `feat` (e.g. `add/RGB`, `Fix/SENSOR`, `Wip/ARGB`).
+- **Commit subjects strictly follow `[category]: [feature_category]: short information`**:
+  - `[category]` — one of: `Add`, `Config`, `Refactor`, `Wip`, `Fix`, `Docs`
+  - `[feature_category]` — what you are working on, uppercase: `RGB`, `LED`, `ARGB`, `SENSOR`
+  - `short information` — concise description
+  - Example: `Wip: RGB: Build light effect mode (multi color)`
+- **Colon vs slash:** commit subject uses colons (`Add: RGB: sync all`); branch name uses a slash (`add/RGB`). Never write a commit with a slash or a branch with a colon.
+- When a commit body is needed: `Problem`, `Solution`, `Summary`, `Notes`, `What Changed`, `Test Result` — in that order when present. Omit `Problem` and `Solution` for additive/preventive/housekeeping commits.
 
 ## Required Preflight
-
-Run the native Git workflow preflight before push or merge-request creation. Use the integration target as the base ref — `origin/feat` for work branches, `origin/dev` when promoting `feat` to `dev`, and `origin/main` only when promoting `dev` to `main`:
 
 ```bash
 keel git-workflow preflight --repo-root . --base-ref origin/feat
 ```
 
-The preflight blocks on branch naming, dirty worktrees, empty diffs, and missing committed history against the target base ref. It warns when commit subjects drift from the `<category>: <FEATURE>: <short information>` format or suggest mixed scope.
-
-When opening a GitHub pull request or GitLab merge request from the CLI:
-- do not pass literal escaped newline sequences such as \`\\n\`, \`\\r\`, or \`\\t\` inside the rendered title or body text
-- use a real multiline body, an editor flow, or a body file such as \`gh pr create --body-file <path>\`
-- preview the rendered body before submission when the command path performs shell quoting or variable interpolation
-
-## Merge Request Template
-
-- GitLab contributors should use [.gitlab/merge_request_templates/Feature.md](.gitlab/merge_request_templates/Feature.md).
-
-## Reviewer Reject Rules
+Use `origin/feat` for work branches; `origin/dev` when promoting `feat` to `dev`; `origin/main` only when promoting `dev` to `main`.
 
 Reject or request a split when:
 - the merge request contains more than one feature
@@ -100,19 +76,18 @@ Reject or request a split when:
 
 ## Practical Branch Flow
 
-1. Start from `feat` (the feature-integration branch). Pull it current.
+1. Start from `feat`. Pull it current.
 2. If the request is still broad, run `keel workflow route --request "..."` first so the lane choice is explicit. See [docs/first-success-path.md](docs/first-success-path.md) when an operator wants the named end-to-end path before widening into custom flows.
-3. Create one new work branch off `feat` with normal Git tooling (e.g. `git switch -c add/RGB`). Use a `<category>/<FEATURE>` name.
-4. Implement only that feature. Fixes and retries for it stay on this same branch — do not branch again for a fix to in-flight work.
-5. Keep `keel workflow cockpit`, `keel workflow status`, or `keel workflow watch` visible while the branch is active so stage, active lane, proof state, blockers, and the next command stay easy to scan.
+3. Create one new work branch off `feat` (e.g. `git switch -c add/RGB`). Use a `<category>/<FEATURE>` name.
+4. Implement only that feature. Fixes and retries for it stay on this same branch.
+5. Keep `keel workflow cockpit`, `keel workflow status`, or `keel workflow watch` visible.
 6. Use `git add -p` when selective staging is required.
 7. Review `git diff --cached`.
-8. Commit using the `<category>: <FEATURE>: <short information>` format (categories: `add`, `config`, `refactor`, `wip`, `fix`, `docs`; FEATURE uppercase, e.g. `wip: RGB: Build light effect mode (multi color)`).
-   If a commit body is included, keep it professional, make the title and body match the committed diff exactly, include only the sections the change genuinely needs, and keep this order when a section is present: `Problem`, `Solution`, `Summary`, `Notes`, `What Changed`, `Test Result`. Omit `Problem` and `Solution` when the commit is additive, preventive, or housekeeping rather than fixing a concrete issue, and keep `Test Result` limited to validation that directly proves the committed change.
-   do not mention the harness, keel, or tool-brand validation in commit or PR text unless the change itself is about those surfaces.
-9. Run `keel workflow status` or `keel workflow cockpit` when the team needs the current ledger state in one place.
+8. Commit using the `[category]: [feature_category]: short information` format (categories: `Add`, `Config`, `Refactor`, `Wip`, `Fix`, `Docs`; feature_category uppercase, e.g. `Wip: RGB: Build light effect mode`).
+   Commit body when needed: `Problem`, `Solution`, `Summary`, `Notes`, `What Changed`, `Test Result` — in that order when present. Omit `Problem` and `Solution` for additive/preventive/housekeeping commits. Do not mention the harness or keel in commit text unless the change is about those surfaces.
+9. Run `keel workflow status` or `keel workflow cockpit`.
 10. Run `keel git-workflow preflight --base-ref origin/feat`.
-11. Push the work branch and open one merge request into `feat`. Never delete the branch after pushing or merging.
+11. Commit locally, then push the work branch. Open one merge request into `feat`. Never delete the branch after pushing or merging.
 12. Once the feature is verified, promote `feat` into `dev` and verify on staging; after staging passes, promote `dev` into `main`. Repeat on a new work branch for the next feature.
 
 If another, separate feature appears during implementation:
@@ -129,7 +104,7 @@ Automation can enforce:
 - changed-file and commit-subject reporting
 - merge-request checklist presence
 
-Automation cannot prove semantic single-feature scope perfectly. Human review and the merge-request checklist remain required for that judgment.
+Automation cannot prove semantic singlefeature scope perfectly. Human review and the merge-request checklist remain required for that judgment.
 
 ## Completion and Re-Audit Rules
 

@@ -67,42 +67,64 @@ Use one narrow lane per issue or feature so review, validation, and rollback sta
 
 See `references/20-issue-branch-pr-flow.md` for the full worktree, branch, and PR walkthrough.
 
-## Branch Model and Feature Branch Discipline
+## Branch Model
 
-This repository uses four tiers, promoted one direction only. The three upper tiers are permanent; work branches carry the day-to-day commits:
-- **`main`** — final stable, verified. Only receives merges from `dev`. Never commit directly.
-- **`dev`** — staging integration. Receives merges from `feat`; features are verified here before promotion to `main`. Never commit directly.
-- **`feat`** — feature integration. Receives merges from work branches once each piece is verified. Never commit directly.
-- **work branch** `<category>/<FEATURE>` (e.g. `add/RGB`, `fix/SENSOR`) — all hands-on commits. Branch off `feat`, one coherent feature per branch.
+This repository uses four tiers, promoted one direction only. Three tiers are permanent; work branches carry day-to-day commits:
 
-Promotion flow: `work branch` → `feat` → `dev` → `main`.
+```
+main  (final stable — verified after dev passes staging)
+dev  (active development — verified when testing new features, staging)
+feat  (new features, fixes, subtasks — development branch)
+<category>/<FEATURE>  (work branch — all hands-on commits, branch off feat)
+```
 
-Discipline:
-- One feature = one `<category>/<FEATURE>` work branch = one merge request into `feat`.
-- **Fixes for in-flight work stay on the same work branch.** If `add: RGB: synchronize all` is committed and testing then surfaces a problem, commit the `fix: RGB: ...` on that **same** branch — do not open a new branch for it. A work branch accumulates every commit for its feature (any category) until verified, then merges up to `feat`. A new branch is only for a genuinely new, separate feature.
-- Never mix unrelated features in the same branch.
-- **Never delete a branch after pushing or merging it** — no `git branch -d/-D`, no `git push origin --delete`. Branches are permanent in this model.
-- Use patch staging (`git add -p`) when selective staging is required.
-- Review `git diff --cached` before committing.
-- When a commit body is needed, keep it professional, make the subject and body match the committed diff exactly, include only the sections the change genuinely needs, and keep this order when a section is present: `Problem`, `Solution`, `Summary`, `Notes`, `What Changed`, `Test Result`. Omit `Problem` and `Solution` when the commit is additive, preventive, or housekeeping rather than fixing a concrete issue, and keep `Test Result` limited to validation that directly proves the committed change.
-- Run `keel git-workflow preflight --repo-root . --base-ref origin/feat` before push or merge-request creation (`origin/dev` when promoting `feat` to `dev`; `origin/main` only when promoting `dev` to `main`).
-- Request a split when the diff cannot be described as one cohesive feature.
+**Promotion flow:** `work branch` → `feat` → `dev` → `main`
 
-## Branch Naming and Commit Format
+**Tier discipline:**
+- **`main`** — final stable. Only receives merges from `dev`. Never commit directly.
+- **`dev`** — active staging for daily development. Never commit directly.
+- **`feat`** — new features, fixes, and subtasks. Never commit directly.
+- **work branch** `<category>/<FEATURE>` (e.g. `add/RGB`, `fix/SENSOR`) — all hands-on commits live here. Branch off `feat`.
 
-**Branch tiers** (one feature, one work branch, one PR):
-- `main` final stable, verified · `dev` staging verification · `feat` feature integration · `<category>/<FEATURE>` work branch for all hands-on commits (branch off `feat`).
-- Branches are never deleted after push or merge.
+**Fixes stay on the same work branch.** If `Add: RGB: synchronize all` is committed and testing surfaces a problem, commit the fix on that **same** branch. Do not open a new branch for the fix. A work branch accumulates every commit for its feature until verified, then merges up to `feat`.
 
-**Commit format** (strictly enforced):
-- Subject must follow `<category>: <FEATURE>: <short information>` — colon-separated, three parts.
-- `<category>` is one of (lowercase): `add`, `config`, `refactor`, `wip`, `fix`, `docs`.
-- `<FEATURE>` is the component or area, uppercase, e.g. `RGB`, `LED`, `ARGB`, `SENSOR`.
-- `<short information>` is a concise description.
-- Example: `wip: RGB: Build light effect mode (multi color)`.
-- **Colon vs slash:** the commit subject uses colons (`add: RGB: sync all`); the branch name uses a slash (`add/RGB`). Same category words, different separator. Never write a commit with a slash or a branch with a colon.
-- Atomic: one logical change per commit. Body wrapped at 72 chars when present.
-- Use the configured Git `user.name` and `user.email`; never substitute assistant or tool branding for the author name. When a repo already has a local or global identity configured, preserve it.
+**Never delete a branch after pushing or merging.** No `git branch -d/-D`, no `git push origin --delete`. Branches are permanent in this model.
+
+**Commit locally first.** Always commit to local branch before pushing to the server. Avoid direct commits to the server.
+
+**Run preflight before push:**
+```bash
+keel git-workflow preflight --repo-root . --base-ref origin/feat
+```
+
+## Commit Format
+
+**Strictly enforced format:**
+```
+[category]: [feature_category]: short information
+```
+
+- `[category]` — one of (lowercase): `Add`, `Config`, `Refactor`, `Wip`, `Fix`, `Docs`
+- `[feature_category]` — what you are working on, uppercase, e.g. `RGB`, `LED`, `ARGB`, `SENSOR`, `MOTOR`
+- `short information` — concise description of the change
+
+**Examples:**
+```
+Wip: RGB: Build light effect mode (multi color)
+Add: RGB: Synchronize all channels
+Fix: LED: Correct timing for blink pattern
+Config: Sensor: Calibrate threshold values
+```
+
+**Colon vs slash:** commit subject uses colons (`Add: RGB: sync all`); branch name uses a slash (`add/RGB`). Never write a commit with a slash or a branch with a colon.
+
+**Rules:**
+- One logical change per commit
+- Body wrapped at 72 chars when present
+- Use the configured Git `user.name` and `user.email`; never use assistant or tool branding as author name
+- When a commit body is needed: `Problem`, `Solution`, `Summary`, `Notes`, `What Changed`, `Test Result` — in that order when present. Omit `Problem` and `Solution` for additive/preventive/housekeeping commits.
+
+**Preflight:** run `keel git-workflow preflight --repo-root . --base-ref origin/feat` before push or merge request creation.
 
 ## Target Repository Conventions
 
@@ -119,9 +141,12 @@ A firmware repo uses `/datasheet`, `/docs`, `/sdk`; a web service might use `/sp
 
 **Always commit a `.gitignore`** from the first commit. Exclude build output, toolchain/IDE artifacts, and any generated or secret material so they never enter history. The specific patterns follow the stack (e.g. `*.o`/`*.elf`/`*.hex` for embedded, `node_modules/`/`dist/` for JS, `target/` for Rust).
 
-**Commit format uses colons; branch names use slashes — never conflate them.** A commit subject is `<category>: <FEATURE>: <short information>` (colon-separated). A branch is `<category>/<FEATURE>` (slash). Same category vocabulary, different separator: `add: RGB: sync all channels` is the commit; `add/RGB` is the branch.
-
-The branch model, commit format, "fixes stay on the same work branch," and "never delete a branch" rules above apply to these repos unchanged.
+**Branch model and commit format:**
+- Branch tiers: `main` (stable) ← `dev` (staging) ← `feat` (integration) ← `<category>/<FEATURE>` work branch
+- Commit format uses colons: `[category]: [feature_category]: short information` (e.g. `Add: RGB: sync all`)
+- Branch name uses slash: `add/RGB` (e.g. `fix/SENSOR`)
+- Fixes stay on the same work branch — never open a new branch for a fix to in-flight work
+- Never delete a branch after push or merge
 
 ## High-Risk Operations (Explicit User Approval Only)
 
@@ -177,7 +202,8 @@ See `_shared/common-discipline.md` § Windows Execution Guidance and `references
 - Auto-commit, auto-push, or auto-merge changes
 - Force push to shared branches
 - Rewrite public history
-- Delete any branch — this repository never deletes branches after push or merge, even when the user asks casually; confirm it is a genuine, explicit exception before running `git branch -d/-D` or `git push origin --delete`
+- Delete any branch — this repository never deletes branches after push or merge; even when the user asks casually, confirm it is a genuine explicit exception before running `git branch -d/-D` or `git push origin --delete`
+- Direct commit to the server — always commit locally first
 
 ### Always Do
 - Explain what command will do
@@ -185,3 +211,5 @@ See `_shared/common-discipline.md` § Windows Execution Guidance and `references
 - Warn about destructive operations
 - Provide rollback instructions
 - Verify user intent for risky operations
+- Run `keel git-workflow preflight` before push or merge request
+- Keep fixes on the same work branch as the original commit

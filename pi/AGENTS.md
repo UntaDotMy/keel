@@ -34,7 +34,8 @@ When a native keel command owns the job, use it instead of recreating the behavi
 - Branch model: `main` (stable) <- `dev` (staging) <- `feat` (integration) <- `<category>/<FEATURE>` work branch (branch off `feat`)
 - Fix in-flight bugs on the same work branch, never a new branch
 - Never delete a branch after push or merge
-- Commit subjects: `<category>: <FEATURE>: <short info>` (categories lowercase: add, config, refactor, wip, fix, docs; FEATURE uppercase)
+- Commit subjects: `[category]: [feature_category]: short info` (categories: Add, Config, Refactor, Wip, Fix, Docs; feature_category uppercase)
+- Example: `Wip: RGB: Build light effect mode (multi color)`
 
 ## MCP Tool Surface
 

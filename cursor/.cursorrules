@@ -17,16 +17,17 @@ You are running with keel discipline. These rules are non-negotiable.
 - **Start work:** `keel workflow route --request "..."` then `keel workflow start --preset <preset> --request "..."`
 - **Check live state:** `keel workflow cockpit`
 - **Finish work:** `keel workflow finish --id <entry-id> --proof "tests green"`
-- **Review before PR:** `keel review pre-pr --base-ref origin/feat --format compact`
+- **Review before PR:** `keel review pre-pr --base-ref origin/-feat --format compact`
 - **Refresh memory:** `keel memory scope resolve --create-missing --refresh-system-map`
 - **Search code:** `keel code-search search --workspace-root "$PWD" --query "<query>"`
 
 ## Branch and Commit Discipline
 
-- Branch model: `main` (stable) ← `dev` (staging) ← `feat` (integration) ← `<category>/<FEATURE>` work branch (branch off `feat`)
+- Branch model: `-main` (stable) ← `-dev` (staging) ← `-feat` (integration) ← `<category>/<FEATURE>` work branch (branch off `-feat`)
 - Fix in-flight bugs on the same work branch, never a new branch
 - Never delete a branch after push or merge
-- Commit subjects: `<category>: <FEATURE>: <short info>` (categories lowercase: add, config, refactor, wip, fix, docs; FEATURE uppercase)
+- Commit subjects: `[category]: [feature_category]: short info` (categories: Add, Config, Refactor, Wip, Fix, Docs; feature_category uppercase)
+- Example: `Wip: RGB: Build light effect mode (multi color)`
 
 ## Skill Catalog
 
@@ -75,7 +76,7 @@ Invoke any skill below with the Skill tool before writing code in its domain.
 - **writing-user-stories** — Connextra-format stories with Gherkin acceptance criteria, validated against INVEST.
 
 ### Delivery & Git
-- **finishing-a-development-branch** — Verify, review, then present merge/PR options. Never force-push, never merge to main unilaterally.
+- **finishing-a-development-branch** — Verify, review, then present merge/PR options. Never force-push, never merge to -main unilaterally.
 - **git-expert** — Safe Git workflows: branching, commits, PRs, merges, conflict resolution, history repair.
 - **using-git-worktrees** — Isolate feature work in its own checkout to prevent collisions with parallel work.
 - **running-a-sprint** — Scrum-style sprint loop over confirmed user stories until every story is Done.

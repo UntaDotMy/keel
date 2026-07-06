@@ -42,7 +42,13 @@ Anchor reviews to the [Google Engineering Practices reviewer rubric](https://goo
 3. **Complexity** — flag code that "can't be understood quickly by code readers" or where developers are likely to introduce bugs. Watch for over-engineering: solving hypothetical future problems instead of present ones (YAGNI).
 4. **Tests** — require unit, integration, or end-to-end tests appropriate to the change. Tests must fail when the code breaks and must not produce false positives.
 5. **Naming** — descriptive enough to communicate purpose without becoming unwieldy. Reject shortforms (`usrAcc`, `parseReqBody`, `idx` outside tight loop scope) — see `_shared/common-discipline.md` § Code Implementation Discipline.
-6. **Comments** — verify comments explain **why**, not **what**. The "what" must be readable from names and structure. Replace explanatory inline blocks with extracted functions or structured doc tags (rustdoc `# Errors`/`# Panics`/`# Safety`, TSDoc `@param`/`@returns`/`@throws`, JSDoc, Javadoc, KDoc).
+6. **Comments** — verify comments are strict and minimal:
+   - **Maximum 2 lines.** No comment exceeds two lines. If you need more, extract a named function.
+   - **No summarization.** Do not restate what the code does in prose. The code is the summary.
+   - **Only explain non-obvious "why".** One-line `// why: <reason>` when the reason is not obvious from the code.
+   - **Param docs on public APIs.** Use structured tags: rustdoc `# Errors`/`# Panics`, TSDoc `@param`/`@returns`, Javadoc/KDoc `@param`/`@return`.
+   - **Reject on sight:** multi-sentence prose docstrings, section headers (`// ---- Setup ----`), "This function does X so that Y" narrative, restating the function name as a comment, origin-story comments ("Created by AI"), defensive preambles justifying the comment.
+   - **Self-test:** Would a senior engineer scanning the diff think "this is noise"? If yes, reject it.
 7. **Style** — adherence to the language's style guide. Use `Nit:` prefix for non-mandatory improvements.
 8. **Consistency** — local code patterns matter; the style guide wins ties. Reject parallel implementations of the same concept.
 9. **Documentation** — build, test, release, and public-API changes must include matching doc updates.

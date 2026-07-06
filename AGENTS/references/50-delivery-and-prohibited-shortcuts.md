@@ -30,7 +30,7 @@ Four tiers, promoted one direction only. The three upper tiers are permanent; wo
 Promotion flow: `work branch` → `feat` → `dev` → `main`.
 
 - One feature = one `<category>/<FEATURE>` work branch = one merge request into `feat`.
-- **Fixes for in-flight work stay on the same work branch** — if `add: RGB: synchronize all` is committed and testing surfaces a problem, commit the `fix: RGB: ...` on that same branch, never a new one. A work branch accumulates every commit for its feature until verified, then merges up to `feat`. A new branch is only for a genuinely new, separate feature.
+- **Fixes for in-flight work stay on the same work branch** — if `Add: RGB: synchronize all` is committed and testing surfaces a problem, commit the `Fix: RGB: ...` on that same branch, never a new one. A work branch accumulates every commit for its feature until verified, then merges up to `feat`. A new branch is only for a genuinely new, separate feature.
 - Never mix multiple features in the same branch or merge request.
 - **Never delete a branch after pushing or merging it** — no `git branch -d/-D`, no `git push origin --delete`. Branches are permanent in this model.
 - Use `git add -p` when selective staging is required.

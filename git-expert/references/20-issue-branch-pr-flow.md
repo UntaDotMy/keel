@@ -8,8 +8,8 @@ Support optional structured collaboration flow when the user explicitly requests
 
 Four tiers, promoted one direction only. The three upper tiers are permanent; work branches carry hands-on commits:
 - **`main`** — final stable, verified. Only merges from `dev`.
-- **`dev`** — staging integration; features verified here before promotion to `main`.
-- **`feat`** — feature integration; receives merges from work branches once verified.
+- **`dev`** — active development, staging for daily commits.
+- **`feat`** — new features, fixes, subtasks. Receives merges from work branches.
 - **work branch** `<category>/<FEATURE>` — all hands-on commits. Branch off `feat`.
 
 Promotion flow: `work branch` → `feat` → `dev` → `main`.
@@ -18,7 +18,7 @@ Promotion flow: `work branch` → `feat` → `dev` → `main`.
 
 1. Create or confirm issue context.
 2. Create a `<category>/<FEATURE>` work branch from `feat`.
-3. Implement change in small, reviewable commits using the `<category>: <FEATURE>: <short information>` commit format. Fixes for this in-flight work stay on the same branch — never a new branch.
+3. Implement change in small, reviewable commits using the `[category]: [feature_category]: short information` commit format. Fixes for this in-flight work stay on the same branch — never a new branch. Always commit locally first, avoid direct commits to the server.
 4. Open PR against `feat` with clear rationale and validation evidence.
 5. Address feedback and update PR.
 6. Request human review.
@@ -31,6 +31,7 @@ Promotion flow: `work branch` → `feat` → `dev` → `main`.
   - e.g. `add/RGB`, `fix/SENSOR`, or `<category>/<issue-id>-<TOPIC>`
 - Fixes and subtasks for in-flight work stay on that feature's existing work branch, regardless of commit category.
 - Never delete a branch after pushing or merging it. Branches are permanent in this model.
+- Always commit locally before pushing to the server.
 
 ## PR Guidance
 

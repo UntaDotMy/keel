@@ -196,7 +196,12 @@ Long, chatty, multi-paragraph comments make a diff hard to review. Keep them tig
 
 #### AI Slop Comment Ban — Zero Tolerance
 
-The rules above are not suggestions. Agents repeatedly write chatty, summary-style comments and then claim they are "necessary." They are not. No reviewer wants to read a summary of what the code does — the code itself is the summary. We are not writing a novel.
+The rules above are not suggestions. Zero tolerance: no chatty, summary-style, or multi-line comments. No reviewer wants to read a summary of what the code does — the code itself is the summary.
+
+**Hard limits:**
+- Maximum 2 lines per comment. A comment that needs 3+ lines means the code needs a better name or a doc tag, not a longer comment.
+- No summarization in prose. Do not restate what the code does.
+- Only one legitimate use: `// why: <non-obvious reason>` (max 2 lines).
 
 **Banned patterns (delete on sight, do not argue "necessary"):**
 - Multi-sentence docstrings that describe what a function does in prose. Use `@param` / `@returns` / `# Errors` tags instead. If a tag covers it, the prose is slop.

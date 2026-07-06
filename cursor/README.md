@@ -74,8 +74,8 @@ This applies keel discipline to every project in Cursor.
 
 ### Branch and Commit Rules
 
-- Branch model: `main` ← `dev` ← `feat` ← `<category>/<FEATURE>`
-- Commit format: `<category>: <FEATURE>: <short info>`
+- Branch model: `main` (stable) ← `dev` (staging) ← `feat` (integration) ← `<category>/<FEATURE>`
+- Commit format: `[category]: [feature_category]: short info` (categories: Add, Config, Refactor, Wip, Fix, Docs; feature_category uppercase)
 - Never delete a branch after push or merge
 
 ### Skill Catalog (44 skills)
