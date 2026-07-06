@@ -1,10 +1,11 @@
 {
+  "_comment": "keel MCP server registration for Pi Agent. Pi loads MCP config from ~/.pi/agent/mcp.json (global) or .pi/mcp.json (project-local) — NOT from settings.json and NOT from .mcp.json. The `settings` block holds server-wide options (idleTimeout in seconds); each server entry supports command/args/env/url/lifecycle/idleTimeout/directTools/debug. lifecycle: 'lazy' (spawn on first use), 'eager' (spawn at startup), or 'keep-alive'. directTools:true exposes each tool as a top-level tool instead of under an mcp_ prefix. The command below is resolved per-OS by the keel installer: 'keel' on unix, 'keel.exe' on win32 — edit to match your platform if installing manually.",
   "settings": {
     "idleTimeout": 60
   },
   "mcpServers": {
     "keel": {
-      "command": "~/.claude/keel",
+      "command": "keel",
       "args": ["mcp", "serve"],
       "lifecycle": "lazy",
       "directTools": true

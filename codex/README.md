@@ -133,13 +133,20 @@ After installing, Codex will prompt you to review and trust the new hooks. Open 
 
 | Codex Hook Event | Bridge Subcommand | Timing | Blocking? |
 |---|---|---|---|
-| `SessionStart` (1st per session) | `bridge session-start` — injects bootstrap + workspace digest | Before model sees message | Yes (500ms timeout) |
+| `SessionStart` (1st per session) | `bridge session-start` — injects bootstrap + workspace digest + MCP self-heal | Before model sees message | Yes (500ms timeout) |
 | `UserPromptSubmit` (every) | `bridge user-prompt` — injects iron law + skill brief | Before model sees message | Yes (500ms timeout) |
-| `PreToolUse` (Bash) | `bridge observe` — records tool observation | After tool completes | Fire-and-forget (500ms timeout) |
-| `PostToolUse` (Bash) | `bridge observe` — records tool observation | After tool completes | Fire-and-forget (500ms timeout) |
-| `PreCompact` | `bridge post-compact` — learning checkpoint + context injection | During compaction | Yes (500ms timeout) |
-| `PostCompact` | `bridge post-compact` — learning checkpoint | After compaction | Fire-and-forget (500ms timeout) |
+| `PreToolUse` (reading tool) | marks Iron Law satisfied, allows | Before tool runs | Never blocks |
+| `PreToolUse` (edit-class) | `bridge pre-tool-use` — Iron Law edit gate; `permissionDecision: "deny"` if gate not satisfied | Before tool runs | **Blocks** edits until the model has read first |
+| `PreToolUse` (Bash/shell) | `bridge observe` + `bridge rewrite` — records observation, reroutes noisy commands via `updatedInput` | Before tool runs | Allow (with mutation) |
+| `PostToolUse` | `bridge observe` — records tool observation | After tool completes | Fire-and-forget (500ms timeout) |
+| `PreCompact` | `bridge pre-compact` — pre-compaction learning checkpoint | During compaction | Yes (500ms timeout) |
+| `PostCompact` | `bridge post-compact` — post-compaction context + learning | After compaction | Fire-and-forget (500ms timeout) |
 | `Stop` | `bridge post-compact` — turn-end checkpoint | On turn end | Yes (500ms timeout) |
+| `SessionEnd` | `bridge session-end` — learning cycle + session summary capture + marker cleanup | On session end | Fire-and-forget (500ms timeout) |
+
+### Iron Law enforcement
+
+The Codex adapter enforces keel's Iron Law — **read before editing** — using Codex's native `PreToolUse` deny mechanism (the same enforcement the OpenCode adapter delivers via `tool.execute.before` throwing). On the first edit-class tool call in a fresh session, the hook returns `permissionDecision: "deny"` with a reason until the model has used a reading tool (Read/Glob/Grep) or a keel reading command (`keel system-map`, `keel recall`, `keel doctor`, `keel code-search`). Once satisfied, the gate stays open for the rest of the session. Per-session satisfaction is tracked via an on-disk marker at `~/.claude/state/codex-iron-law-satisfied/<sessionID>`, cleared on `SessionEnd`.
 
 ## Design
 
@@ -161,20 +168,21 @@ Prefer the explicit `~/.claude/keel` path (with `.exe` suffix on win32). Fall ba
 
 ### Plugin environment variables
 
-Codex injects `PLUGIN_ROOT` and `PLUGIN_DATA` into hook command environments. The adapter script uses `$PLUGIN_ROOT` in hook commands to locate itself relative to the plugin root.
+Codex injects `PLUGIN_ROOT` and `PLUGIN_DATA` into hook command environments (plus legacy `CLAUDE_PLUGIN_ROOT` / `CLAUDE_PLUGIN_DATA`). The hook commands use `${PLUGIN_ROOT}` to locate the adapter script relative to the plugin root. Plugin-bundled hooks are non-managed, so Codex skips them until you review and trust the current hook definition (use `/hooks`).
 
 ## File Structure
 
 ```
 keel/
 ├── .codex-plugin/
-│   └── plugin.json          # Plugin manifest
+│   └── plugin.json          # Plugin manifest (name, version, hooks path, interface)
 ├── hooks/
-│   ├── hooks.json           # Lifecycle hook registrations
-│   └── keel-codex.ts        # Adapter script (this file)
-├── skills/                  # Optional: keel skills for Codex
+│   ├── hooks.json           # Lifecycle hook registrations (default-discovered by Codex)
+│   └── keel-codex.ts        # Adapter script (the bridge to `keel bridge`)
 └── README.md                # This file
 ```
+
+The manifest at `.codex-plugin/plugin.json` references `hooks` at `./hooks/hooks.json` and `mcpServers` at `./.mcp.json` (both default-discovered by Codex). The `.mcp.json` bundles the keel MCP server (`keel mcp serve`), exposing all 31 keel tools (`recall`, `skill_route`, `skill_get`, `sprint`, `brief_create`, etc.) as native MCP tool calls in Codex — no CLI shell-out required for tool access. Codex loads plugin-bundled MCP servers per the [official plugin spec](https://developers.openai.com/codex/plugins/build); enable/disable and tool-approval policy are controlled under `plugins.keel.mcp_servers.keel` in your Codex config without editing the plugin. (There is no `skills/` directory — keel skills are reached via the `skill_route`/`skill_get` MCP tools, not bundled as Codex skills.)
 
 ## Differences from the OpenCode Adapter
 
@@ -183,6 +191,8 @@ keel/
 | Runtime | Bun (TypeScript native) | Node.js via tsx or compiled JS |
 | Plugin format | TypeScript module exports | hooks.json + script files |
 | Event model | Named hooks with typed I/O | JSON stdin → stdout per invocation |
+| Iron Law enforcement | throws from `tool.execute.before` | `PreToolUse` returns `permissionDecision: "deny"` |
+| Iron Law marker dir | `opencode-iron-law-satisfied` | `codex-iron-law-satisfied` |
 | Compaction hook | `experimental.session.compacting` (awaited) | `PreCompact` (synchronous) |
 | Session-end trigger | `session.deleted` event | `SessionEnd` event |
-| Marker directory | `opencode-session-started` | `codex-session-started` |
+| Session-start marker dir | `opencode-session-started` | `codex-session-started` |

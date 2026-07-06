@@ -4,7 +4,33 @@
     "preToolUse": [
       {
         "command": "bash ~/.cursor/hooks/keel-cursor.sh",
-        "matcher": "Shell"
+        "matcher": "Write|Edit|Delete|Shell|Read|Grep",
+        "timeout": 5
+      }
+    ],
+    "postToolUse": [
+      {
+        "command": "bash ~/.cursor/hooks/keel-cursor.sh",
+        "matcher": "Shell",
+        "timeout": 5
+      }
+    ],
+    "preCompact": [
+      {
+        "command": "bash ~/.cursor/hooks/keel-cursor.sh",
+        "timeout": 5
+      }
+    ],
+    "stop": [
+      {
+        "command": "bash ~/.cursor/hooks/keel-cursor.sh",
+        "timeout": 5
+      }
+    ],
+    "sessionEnd": [
+      {
+        "command": "bash ~/.cursor/hooks/keel-cursor.sh",
+        "timeout": 5
       }
     ]
   }

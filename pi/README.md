@@ -1,77 +1,74 @@
 # keel Pi Agent Bridge
 
-Injects keel's iron law, skill catalog, and operating instructions into Pi Agent via the `AGENTS.md` file and standard MCP server configuration.
+Bridges Pi coding agent lifecycle events to the `keel` Rust CLI for context injection, Iron Law enforcement, compaction rerouting, observation recording, learning checkpoints, and session management.
 
 ## What This Does
 
-Pi Agent reads `AGENTS.md` from the project root (or `~/.pi/agent/AGENTS.md` globally) and loads the contents as project instructions at startup. This adapter puts keel's discipline -- the four iron law rules, the full 24-skill catalog, workflow commands, branch/commit rules, and MCP tool surface -- into that instruction surface so Pi Agent follows the keel operating contract automatically.
+Pi coding agent (https://pi.dev) loads `AGENTS.md` from the project root (or `~/.pi/agent/AGENTS.md` globally) as project instructions at startup, and runs TypeScript extensions that subscribe to a rich event set (https://pi.dev/docs/latest/extensions). This bridge has **three layers**, mirroring the OpenCode and Codex adapters:
 
-Unlike the Codex adapter, this is a **static rules file plus MCP configuration**, not a hook-based bridge. Pi Agent's core does not expose a hook lifecycle comparable to Codex or Claude Code, but it supports hook-like behavior through extensions (`pi-autohooks`, `pi-shepherd`). The `AGENTS.md` file ensures the model operating in Pi Agent has the full keel discipline available from the first prompt, and the `.mcp.json` file registers keel's MCP server so its tools are discoverable.
+1. **`AGENTS.md`** — the persistent keel iron law, skill catalog, workflow commands, and branch/commit rules, loaded into the system prompt at startup so the model has keel discipline from the first prompt.
+2. **`keel-pi.ts`** — a TypeScript extension that subscribes to Pi's `session_start`, `input`/`message_start`, `tool_call`, `tool_execution_end`, `session_before_compact`, `session_compact`, and `session_shutdown` events, wiring each to a host-neutral `keel bridge` subcommand. This delivers the same automatic behavior the hook system provides in Claude Code and Codex: bootstrap context injection, the Iron Law edit gate (blocks edits until the model has read first), compaction rerouting for noisy shell commands, observation capture, and the compaction/session-end learning cycle.
+3. **`.mcp.json`** — registers keel's MCP server so its 31 tools (recall, system_map, skill_route, sprint, etc.) are directly callable by the model without spawning the keel binary per invocation.
 
 ## Prerequisites
 
-1. Pi Agent installed (`npm install -g pi` or via `pi install`).
+1. Pi coding agent installed (`npm install -g @earendil-works/pi-coding-agent`, or `pi install`).
 2. The `keel` binary installed at `~/.claude/keel` (unix) or `~/.claude/keel.exe` (win32), or on `PATH`.
-3. The `pi-mcp` adapter extension installed for MCP server support:
-   ```bash
-   pi install npm:@spences10/pi-mcp
-   ```
+3. `tsx` or `node` available for TypeScript extension execution (Pi handles this natively for `*.ts` extensions in its discovery paths).
 
 ## Install
 
-`keel install` auto-detects Pi Agent (via `~/.pi/agent/` dir, `PI_CODING_AGENT_DIR` env var, or `pi` binary on PATH) and wires this adapter automatically. Use `--without pi` to skip, `--with pi` to force.
+`keel install` auto-detects Pi coding agent (via `~/.pi/agent/` dir, `PI_CODING_AGENT_DIR` env var, or `pi` binary on PATH) and wires this bridge automatically. Use `--without pi` to skip, `--with pi` to force.
 
 Manual install options:
 
-### Option A: Project-scoped (recommended)
+### Option A: Global (recommended — applies keel to every project)
 
-Copy the instruction file into your project root:
-
-```bash
-cp pi/AGENTS.md /path/to/your/project/AGENTS.md
-```
-
-On Windows:
-
-```powershell
-Copy-Item pi\AGENTS.md "C:\path\to\your\project\AGENTS.md"
-```
-
-Copy the MCP configuration into your project root:
+Pi loads global agent state from `~/.pi/agent/`. Copy the three layers there:
 
 ```bash
-cp pi/.mcp.json /path/to/your/project/.mcp.json
+mkdir -p ~/.pi/agent/extensions
+cp pi/AGENTS.md         ~/.pi/agent/AGENTS.md
+cp pi/.mcp.json         ~/.pi/agent/mcp.json      # NOTE: Pi expects mcp.json, not .mcp.json
+cp pi/keel-pi.ts        ~/.pi/agent/extensions/keel-pi.ts
 ```
 
-On Windows:
+On Windows PowerShell:
 
 ```powershell
-Copy-Item pi\.mcp.json "C:\path\to\your\project\.mcp.json"
+New-Item -ItemType Directory -Path "$env:USERPROFILE\.pi\agent\extensions" -Force
+Copy-Item pi\AGENTS.md         "$env:USERPROFILE\.pi\agent\AGENTS.md"
+Copy-Item pi\.mcp.json         "$env:USERPROFILE\.pi\agent\mcp.json"
+Copy-Item pi\keel-pi.ts        "$env:USERPROFILE\.pi\agent\extensions\keel-pi.ts"
 ```
 
-Pi Agent loads both files automatically when you open the project.
+Pi auto-discovers extensions from `~/.pi/agent/extensions/*.ts`, loads `AGENTS.md` into the system prompt, and reads `mcp.json` for MCP servers — all at startup. No `settings.json` `extensions` array entry is required for auto-discovered files, but you may add one explicitly if you place the file elsewhere (see the Note below).
 
-### Option B: Global
+### Option B: Project-scoped
 
-Copy to your Pi agent directory:
+Copy the three layers into your project root:
 
 ```bash
-cp pi/AGENTS.md ~/.pi/agent/AGENTS.md
-cp pi/.mcp.json ~/.config/mcp/mcp.json
+mkdir -p .pi/extensions
+cp pi/AGENTS.md         ./AGENTS.md
+cp pi/.mcp.json         ./.pi/mcp.json            # project-local MCP config lives in .pi/mcp.json
+cp pi/keel-pi.ts        ./.pi/extensions/keel-pi.ts
 ```
 
-On Windows:
+On Windows PowerShell:
 
 ```powershell
-Copy-Item pi\AGENTS.md "$env:USERPROFILE\.pi\agent\AGENTS.md"
-Copy-Item pi\.mcp.json "$env:USERPROFILE\.config\mcp\mcp.json"
+New-Item -ItemType Directory -Path ".\.pi\extensions" -Force
+Copy-Item pi\AGENTS.md         ".\AGENTS.md"
+Copy-Item pi\.mcp.json         ".\.pi\mcp.json"
+Copy-Item pi\keel-pi.ts        ".\.pi\extensions\keel-pi.ts"
 ```
 
-This applies keel discipline to every project in Pi Agent.
+Project-local settings override global ones. `AGENTS.md` at the repo root is discovered natively; the extension and MCP config are discovered from `.pi/`.
 
 ### Option C: Pi rules extension (optional, for glob-based scoping)
 
-If you use the `pi-rules` extension, you can place keel rules under `.pi/rules/` for project-scoped loading:
+If you use the `pi-rules` package, you can place keel rules under `.pi/rules/` for file-type-scoped loading instead of (or in addition to) a root `AGENTS.md`:
 
 ```bash
 mkdir -p .pi/rules
@@ -87,30 +84,39 @@ alwaysApply: true
 ---
 ```
 
-Pi Agent also discovers `AGENTS.md` natively, so Option A or B is sufficient without the rules extension.
+### Note on extension discovery
+
+Pi auto-discovers `*.ts` and `*/index.ts` from `~/.pi/agent/extensions/` (global) and `.pi/extensions/` (project-local). If you place `keel-pi.ts` elsewhere, reference it explicitly in `settings.json`:
+
+```json
+{
+  "extensions": ["/absolute/path/to/keel-pi.ts"]
+}
+```
+
+`settings.json` lives at `~/.pi/agent/settings.json` (global) or `.pi/settings.json` (project). Paths in the global file resolve relative to `~/.pi/agent`; paths in the project file resolve relative to `.pi`.
 
 ### Verify the install
 
-After copying the files, confirm Pi Agent loads them:
+After copying the files, confirm Pi loads them:
 
 ```bash
 # Start Pi and check that AGENTS.md content is present in the system prompt
 pi
 
-# Check MCP server connectivity (if pi-mcp adapter is installed)
+# Check MCP server connectivity (keel's tools should appear)
 /mcp
 ```
+
+On the first edit-class tool call in a fresh session, the Iron Law gate will block until you have used a reading tool (Read/Glob/Grep) or a keel reading command — this is intended behavior.
 
 ## What the Rules Include
 
 ### Iron Law (4 rules)
 
 0. **Read first.** Read the workspace SYSTEM_MAP and the owning file before claiming behavior; never propose changes against an imagined version.
-
 1. **Understand before building.** Restate what the request asks and research what is genuinely needed before writing code. No guessing, no building against an imagined spec.
-
 2. **Invoke relevant skills.** If there is even a 1% chance a skill applies, use the Skill tool before writing code or giving a final answer.
-
 3. **Find the root cause.** Trace the symptom end-to-end with file:line evidence and confirm the suspect is on that path before changing anything.
 
 ### Workflow Commands
@@ -133,7 +139,7 @@ pi
 
 ### MCP Server
 
-The included `.mcp.json` registers keel's MCP server, exposing 31 tools:
+The included `.mcp.json` (installed as `mcp.json`) registers keel's MCP server, exposing 31 tools:
 
 | Tool | Description |
 |---|---|
@@ -153,6 +159,8 @@ The included `.mcp.json` registers keel's MCP server, exposing 31 tools:
 | `cli` | Run any keel CLI subcommand |
 | `sprint` | Drive a Scrum-style sprint loop |
 | `user_story_lint` | Validate user stories against strict format |
+
+The MCP config uses Pi's documented structure (`{"settings": {...}, "mcpServers": {...}}`), with `idleTimeout` under `settings` and per-server options `command`/`args`/`env`/`url`/`lifecycle` (`lazy`|`eager`|`keep-alive`)/`idleTimeout`/`directTools`/`debug`. `directTools: true` exposes each keel tool as a top-level tool instead of under an `mcp_` prefix. Adjust the `command` field to `keel.exe` on Windows if installing manually.
 
 ### Skill Catalog (24 specialist skills)
 
@@ -219,25 +227,42 @@ Invoke any skill below by routing through the MCP `skill_route` and `skill_get` 
 - **output-economy** -- Per-response output-token economy. Cut verbosity without dropping signal.
 - **internationalization-and-localization** -- i18n/l10n message catalogs, ICU MessageFormat, locale-aware formatting, RTL/bidi.
 
+## Event → bridge wiring (keel-pi.ts)
+
+| Pi event | keel bridge subcommand | Behavior |
+|---|---|---|
+| `session_start` | `session-start` | Bootstrap + workspace digest + MCP self-heal (once per session, marker-guarded) |
+| `input` / `message_start` (role=user) | `user-prompt` | Per-prompt context brief (skill routing + iron law + pointers) |
+| `tool_call` (reading tool) | — | Marks Iron Law satisfied, allows |
+| `tool_call` (edit-class) | `pre-tool-use` | Blocks with `{block:true,reason}` until Iron Law satisfied; then records gate state |
+| `tool_call` (bash/shell) | `rewrite` | Mutates `event.input.command` in place to reroute noisy commands through `keel run --` |
+| `tool_execution_end` | `observe` | Records tool observation (fire-and-forget) |
+| `session_before_compact` | `pre-compact` | Pre-compaction learning checkpoint |
+| `session_compact` | `post-compact` | Post-compaction context injection + learning |
+| `session_shutdown` | `session-end` | Learning cycle + session summary capture + marker cleanup |
+
+Every bridge call is capped at a 500ms timeout and fails open to "no context / no block" on any error, so the extension never hangs a turn.
+
 ## Differences from Other Adapters
 
 | Aspect | OpenCode Adapter | Codex Adapter | Cursor Adapter | Pi Agent Adapter |
 |---|---|---|---|---|
-| Mechanism | TypeScript plugin with lifecycle hooks | Codex plugin with hooks.json + script | Static .cursorrules file | Static AGENTS.md + .mcp.json |
-| Runtime bridge | Yes -- bridge subcommands per event | Yes -- bridge subcommands per event | No -- rules only, manual keel CLI | No -- rules + MCP tools, manual keel CLI |
-| Context injection | Automatic per session/prompt | Automatic per session/prompt | Via Cursor's rules injection | Via Pi Agent's AGENTS.md loading |
-| Observation recording | Automatic on tool events | Automatic on tool events | Manual via keel CLI | Manual via keel CLI or MCP tools |
-| Learning checkpoints | Automatic on compaction | Automatic on compaction | Manual via keel CLI | Manual via keel CLI or MCP tools |
-| MCP server | N/A (native MCP in OpenCode) | N/A (Codex plugin model) | Via cursor mcp.json | Via standard .mcp.json |
+| Mechanism | TypeScript plugin with lifecycle hooks | Codex plugin with hooks.json + script | Static .cursorrules file | AGENTS.md + TypeScript extension + mcp.json |
+| Runtime bridge | Yes — bridge subcommands per event | Yes — bridge subcommands per event | No — rules only, manual keel CLI | Yes — bridge subcommands per event (via extension) |
+| Iron Law enforcement | Yes — throws on `tool.execute.before` | Yes — PreToolUse hook | No (static rules) | Yes — `tool_call` returns `{block:true}` |
+| Context injection | Automatic per session/prompt | Automatic per session/prompt | Via Cursor's rules injection | Automatic per session/prompt + AGENTS.md |
+| Observation recording | Automatic on tool events | Automatic on tool events | Manual via keel CLI | Automatic on `tool_execution_end` |
+| Learning checkpoints | Automatic on compaction | Automatic on compaction | Manual via keel CLI | Automatic on `session_compact` / `session_shutdown` |
+| MCP server | N/A (native MCP in OpenCode) | N/A (Codex plugin model) | Via cursor mcp.json | Via `mcp.json` (Pi native MCP) |
+| Marker dir | `opencode-session-started` | `codex-session-started` | N/A | `pi-session-started` |
 
-The Pi Agent adapter is similar to the Cursor adapter in that it uses static instruction files rather than hook-based bridges. The key difference is that Pi Agent natively supports MCP servers, so the adapter includes a `.mcp.json` that registers keel's MCP server for direct tool access without needing the keel binary on every invocation. The 16 MCP tools provide the same capabilities that hooks deliver in Claude Code -- memory search, system map, skill routing, workflow management, and sprint tracking.
+The Pi Agent adapter now matches the OpenCode and Codex adapters in runtime coverage. The `AGENTS.md` file carries the persistent iron law in the system prompt (the part Pi can inject into the model turn directly), and the `keel-pi.ts` extension delivers the automatic, per-event behavior (Iron Law block, compaction reroute, observation, learning) that the static rules alone cannot.
 
 ## Hooks Reference
 
-Pi Agent's core does not expose a hook lifecycle comparable to Claude Code or Codex, but hook-like behavior is available through extensions:
+Pi coding agent's core does not expose a JSON hook registry like Claude Code or Codex; instead, hook-equivalent behavior is delivered by the `keel-pi.ts` extension (above) subscribing to Pi's ExtensionAPI events. `hooks.json` in this directory is a **reference mapping** that documents each keel hook, which Pi event delivers it, and the manual `keel` CLI / MCP fallback for users who choose not to install the extension.
+
+For users who want additional hook-like behavior, these community packages complement (but are not required by) the keel bridge:
 
 - **pi-autohooks** (`pi install npm:pi-autohooks`) -- Script-based hooks at `pre-tool-use`, `post-tool-use`, and `agent-stop` stages, using the Claude Code-compatible JSON stdin/stdout protocol.
 - **pi-shepherd** -- Rule-based hooks that block, notify, or rewrite tool calls dynamically via JSON config.
-- **Extension API** -- Extensions can listen to `tool_call`, `tool_result`, `agent_end`, `session_end`, and `session_shutdown` events directly.
-
-For users who want keel's hook equivalent behavior without extensions, see `hooks.json` in this directory for a reference mapping of what keel hooks provide and how to trigger them manually via the keel CLI or MCP tools.

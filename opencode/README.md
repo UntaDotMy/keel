@@ -65,10 +65,10 @@ Prefer the explicit `~/.claude/keel` path (with `.exe` suffix on win32). Fall ba
 
 Every `$` shell call uses `.timeout(500)` — Bun's built-in timeout that kills the subprocess. This guarantees the plugin never blocks a turn for more than half a second.
 
-## API Uncertainties
+## API Notes
 
-1. **`chat.message` hook availability**: This hook is **not documented** in the public OpenCode plugin docs (https://opencode.ai/docs/plugins). It was provided in the task specification as verified against the sst/opencode source. If this hook does not exist in the installed OpenCode version, all context injection degrades silently — `chat.message` would never fire and `event`/`experimental.session.compacting` would still operate normally.
+1. **`chat.message` hook**: This hook is the primary context-injection seam. It is not listed on the public OpenCode plugin docs page (https://opencode.ai/docs/plugins), but it is a real OpenCode plugin hook used by community plugins (e.g. `oh-my-openagent`, whose GitHub issue code-yeongyu/oh-my-openagent#885 "chat.message hook output not visible when plugin injects into output.parts" confirms plugins inject into `output.parts` via this hook). The adapter prepends injected context to `output.parts` before the model sees the message. If a future OpenCode version removes it, context injection degrades silently — `event`/`experimental.session.compacting` would still operate normally.
 
-2. **`tool.execute.after` event shape**: The task spec says the event carries `{ type, tool, input, failed? }`. The plugin accesses `event.tool`, `event.input`, and `event.failed` via `as unknown as {...}` cast. If the actual shape differs (e.g. nested under `event.properties.tool`), observations will be recorded with an empty tool name and `{}` input — non-breaking but incomplete.
+2. **`tool.execute.after` event shape**: The event carries `{ type, tool, input, failed? }` (per the sst/opencode source). The plugin accesses `event.tool`, `event.input`, and `event.failed` via `as unknown as {...}` cast. If the actual shape differs (e.g. nested under `event.properties.tool`), observations will be recorded with an empty tool name and `{}` input — non-breaking but incomplete.
 
 3. **`Bun.Shell.quiet()` availability**: The `.quiet()` method is documented in Bun's shell API. If unavailable in the OpenCode Bun runtime, the subprocess stderr will leak into stdout, potentially polluting the returned text — non-breaking but may produce unexpected injected context.
