@@ -17,7 +17,7 @@ You are running with keel discipline. These rules are non-negotiable.
 - **Start work:** `keel workflow route --request "..."` then `keel workflow start --preset <preset> --request "..."`
 - **Check live state:** `keel workflow cockpit`
 - **Finish work:** `keel workflow finish --id <entry-id> --proof "tests green"`
-- **Review before PR:** `keel review pre-pr --base-ref origin/-feat --format compact`
+- **Review before PR:** `keel review pre-pr --base-ref origin/feat --format compact`
 - **Refresh memory:** `keel memory scope resolve --create-missing --refresh-system-map`
 - **Search code:** `keel code-search search --workspace-root "$PWD" --query "<query>"`
 
