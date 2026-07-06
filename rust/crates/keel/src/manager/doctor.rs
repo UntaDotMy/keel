@@ -113,6 +113,7 @@ pub fn run_doctor_command(
     );
     report_mcp_registration(standard_output, &claude_home);
     probe_mcp_launch(standard_output, &claude_home);
+    report_bridge_host_wiring(standard_output, &claude_home);
     let _ = writeln!(
         standard_output,
         "[warn] unified_exec interception incomplete in current the harness"
@@ -375,6 +376,118 @@ fn report_mcp_registration(standard_output: &mut dyn Write, claude_home: &std::p
             );
         }
     }
+}
+
+/// Report the wiring health of the four bridge hosts (OpenCode, Pi, Codex,
+/// Cursor). Unlike the native host probes above, these are file-presence checks
+/// — doctor reads the installed artifacts and reports which are present/absent
+/// so an operator can see, at a glance, which bridge hosts are wired. Read-only.
+/// `claude_home` is the standard `~/.claude`; each host's files live under
+/// `claude_home.parent()` (the user home), mirroring the installer's paths.
+fn report_bridge_host_wiring(standard_output: &mut dyn Write, claude_home: &std::path::Path) {
+    let _ = writeln!(standard_output, "Bridge hosts:");
+    let home = match claude_home.parent() {
+        Some(path) => path,
+        None => return,
+    };
+
+    // OpenCode: plugin file + mcp.keel entry in opencode.json.
+    let opencode_plugin = home
+        .join(".config")
+        .join("opencode")
+        .join("plugins")
+        .join("keel.ts");
+    let opencode_json = home.join(".config").join("opencode").join("opencode.json");
+    let opencode_mcp = if opencode_json.is_file() {
+        fs::read_to_string(&opencode_json)
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+            .map(|doc| doc.get("mcp").and_then(|m| m.get("keel")).is_some())
+            .unwrap_or(false)
+    } else {
+        false
+    };
+    report_host(
+        standard_output,
+        "opencode",
+        opencode_plugin.is_file(),
+        opencode_mcp,
+    );
+
+    // Pi: AGENTS.md + mcp.json keel entry + keel-pi.ts extension.
+    let pi_agents = home.join(".pi").join("agent").join("AGENTS.md");
+    let pi_mcp_json = home.join(".pi").join("agent").join("mcp.json");
+    let pi_mcp = if pi_mcp_json.is_file() {
+        fs::read_to_string(&pi_mcp_json)
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+            .map(|doc| doc.get("mcpServers").and_then(|s| s.get("keel")).is_some())
+            .unwrap_or(false)
+    } else {
+        false
+    };
+    let pi_ext = home
+        .join(".pi")
+        .join("agent")
+        .join("extensions")
+        .join("keel-pi.ts");
+    report_host(
+        standard_output,
+        "pi",
+        pi_agents.is_file() && pi_ext.is_file(),
+        pi_mcp,
+    );
+
+    // Codex: plugin dir with manifest + bundled .mcp.json (plugin MCP server).
+    let codex_plugin = home
+        .join(".codex")
+        .join("plugins")
+        .join("keel")
+        .join(".codex-plugin")
+        .join("plugin.json");
+    let codex_mcp = home
+        .join(".codex")
+        .join("plugins")
+        .join("keel")
+        .join(".mcp.json")
+        .is_file();
+    report_host(standard_output, "codex", codex_plugin.is_file(), codex_mcp);
+
+    // Cursor: .cursorrules + hooks dir + mcp.json keel entry.
+    let cursor_rules = home.join(".cursorrules");
+    let cursor_hooks = home.join(".cursor").join("hooks").join("hooks.json");
+    let cursor_mcp_json = home.join(".cursor").join("mcp.json");
+    let cursor_mcp = if cursor_mcp_json.is_file() {
+        fs::read_to_string(&cursor_mcp_json)
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+            .map(|doc| doc.get("mcpServers").and_then(|s| s.get("keel")).is_some())
+            .unwrap_or(false)
+    } else {
+        false
+    };
+    report_host(
+        standard_output,
+        "cursor",
+        cursor_rules.is_file() && cursor_hooks.is_file(),
+        cursor_mcp,
+    );
+}
+
+/// One summary line per bridge host: name + wired state + MCP state.
+/// `wired` is the host's primary artifact presence; `mcp` is whether an MCP
+/// entry was registered (all four bridge hosts now register one).
+fn report_host(standard_output: &mut dyn Write, name: &str, wired: bool, mcp: bool) {
+    let state = if wired {
+        if mcp {
+            "wired (rules + MCP)"
+        } else {
+            "wired (rules)"
+        }
+    } else {
+        "not wired"
+    };
+    write_doctor_check(standard_output, true, &format!("{name} host: {state}"));
 }
 
 fn find_on_path(executable: &str) -> Option<PathBuf> {

@@ -351,7 +351,7 @@ fn maybe_install_hooks(claude_home: &Path) -> Option<String> {
 /// loads, per opencode.ai/docs/plugins) and merge a `keel` MCP server
 /// into `opencode.json` (merge, never clobber). Guarded on standard `.claude`
 /// home; best-effort — a failure is reported in the summary, never fails install.
-fn maybe_wire_opencode(
+pub(crate) fn maybe_wire_opencode(
     repository_root: &Path,
     claude_home: &Path,
     detected: bool,
@@ -418,7 +418,11 @@ fn maybe_wire_opencode(
     Some(format!("{plugin_status}; {mcp_status}"))
 }
 
-fn maybe_wire_cursor(repository_root: &Path, claude_home: &Path, detected: bool) -> Option<String> {
+pub(crate) fn maybe_wire_cursor(
+    repository_root: &Path,
+    claude_home: &Path,
+    detected: bool,
+) -> Option<String> {
     let is_standard_home = claude_home
         .file_name()
         .and_then(|name| name.to_str())
@@ -489,6 +493,51 @@ fn maybe_wire_cursor(repository_root: &Path, claude_home: &Path, detected: bool)
         }
     }
 
+    // Cursor MCP: merge the `keel` entry into ~/.cursor/mcp.json. Cursor loads
+    // MCP servers from this file (https://cursor.com/docs/mcp). Merge, never
+    // clobber — preserve the user's other MCP servers. No alwaysLoad equivalent;
+    // Cursor loads MCP servers on demand.
+    let cursor_mcp_source = repository_root.join("cursor").join("mcp.json");
+    if cursor_mcp_source.is_file() {
+        let mcp_target = home.join(".cursor").join("mcp.json");
+        if let Some(parent) = mcp_target.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let mcp_entry = match std::fs::read_to_string(&cursor_mcp_source) {
+            Ok(text) => {
+                let parsed: serde_json::Value =
+                    serde_json::from_str(&text).unwrap_or(serde_json::json!({}));
+                parsed
+                    .get("mcpServers")
+                    .and_then(|s| s.get("keel"))
+                    .cloned()
+                    .unwrap_or(serde_json::json!({}))
+            }
+            Err(_) => serde_json::json!({}),
+        };
+        let binary = installed_executable_path(claude_home);
+        let mcp_entry = if mcp_entry.is_null() {
+            serde_json::json!({
+                "command": display_path(&binary),
+                "args": ["mcp", "serve"],
+            })
+        } else {
+            mcp_entry
+        };
+        match merge_cursor_mcp(&mcp_target, "keel", &mcp_entry) {
+            Ok(CursorMcpResult::Added) => {
+                status_parts.push(format!("MCP registered in {}", display_path(&mcp_target)))
+            }
+            Ok(CursorMcpResult::AlreadyCurrent) => {
+                status_parts.push("MCP already current".to_string())
+            }
+            Ok(CursorMcpResult::Updated) => {
+                status_parts.push(format!("MCP updated in {}", display_path(&mcp_target)))
+            }
+            Err(error) => status_parts.push(format!("MCP skipped ({error})")),
+        }
+    }
+
     if status_parts.is_empty() {
         Some("nothing to copy".to_string())
     } else {
@@ -496,7 +545,11 @@ fn maybe_wire_cursor(repository_root: &Path, claude_home: &Path, detected: bool)
     }
 }
 
-fn maybe_wire_pi(repository_root: &Path, claude_home: &Path, detected: bool) -> Option<String> {
+pub(crate) fn maybe_wire_pi(
+    repository_root: &Path,
+    claude_home: &Path,
+    detected: bool,
+) -> Option<String> {
     let is_standard_home = claude_home
         .file_name()
         .and_then(|name| name.to_str())
@@ -541,7 +594,10 @@ fn maybe_wire_pi(repository_root: &Path, claude_home: &Path, detected: bool) -> 
         }
     }
     if mcp_source.is_file() {
-        let mcp_target = home.join(".config").join("mcp").join("mcp.json");
+        // Pi loads MCP config from ~/.pi/agent/mcp.json (global) or
+        // .pi/mcp.json (project) — NOT ~/.config/mcp/mcp.json. See
+        // https://pi.dev/docs/latest/extensions and the settings.md reference.
+        let mcp_target = home.join(".pi").join("agent").join("mcp.json");
         if let Some(parent) = mcp_target.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -560,9 +616,10 @@ fn maybe_wire_pi(repository_root: &Path, claude_home: &Path, detected: bool) -> 
         let binary = installed_executable_path(claude_home);
         let mcp_entry = if mcp_entry.is_null() {
             serde_json::json!({
-                "type": "local",
-                "command": [display_path(&binary), "mcp", "serve"],
-                "enabled": true,
+                "command": display_path(&binary),
+                "args": ["mcp", "serve"],
+                "lifecycle": "lazy",
+                "directTools": true,
             })
         } else {
             mcp_entry
@@ -580,7 +637,9 @@ fn maybe_wire_pi(repository_root: &Path, claude_home: &Path, detected: bool) -> 
     }
     let extension_source = repository_root.join("pi").join("keel-pi.ts");
     if extension_source.is_file() {
-        let extensions_dir = home.join(".pi").join("extensions");
+        // Pi auto-discovers extensions from ~/.pi/agent/extensions/*.ts
+        // (global) or .pi/extensions/*.ts (project) — NOT ~/.pi/extensions/.
+        let extensions_dir = home.join(".pi").join("agent").join("extensions");
         let _ = std::fs::create_dir_all(&extensions_dir);
         let target = extensions_dir.join("keel-pi.ts");
         match std::fs::copy(&extension_source, &target) {
@@ -592,7 +651,11 @@ fn maybe_wire_pi(repository_root: &Path, claude_home: &Path, detected: bool) -> 
     Some(status_parts.join("; "))
 }
 
-fn maybe_wire_codex(repository_root: &Path, claude_home: &Path, detected: bool) -> Option<String> {
+pub(crate) fn maybe_wire_codex(
+    repository_root: &Path,
+    claude_home: &Path,
+    detected: bool,
+) -> Option<String> {
     let is_standard_home = claude_home
         .file_name()
         .and_then(|name| name.to_str())
@@ -621,6 +684,7 @@ fn maybe_wire_codex(repository_root: &Path, claude_home: &Path, detected: bool) 
         "hooks/hooks.json",
         "keel-codex.ts",
         ".codex-plugin/plugin.json",
+        ".mcp.json",
     ] {
         let source = codex_source_dir.join(entry);
         let target = plugin_target.join(entry);
@@ -649,6 +713,64 @@ enum PiMcpResult {
     Added,
     AlreadyCurrent,
     Updated,
+}
+
+enum CursorMcpResult {
+    Added,
+    AlreadyCurrent,
+    Updated,
+}
+
+/// Merge the `keel` entry into `~/.cursor/mcp.json` under `mcpServers`. Merge,
+/// never clobber — preserve the user's other MCP servers. BOM-tolerant. Cursor
+/// uses the standard `{"mcpServers": {<name>: {command, args, env}}}` shape.
+fn merge_cursor_mcp(
+    config_path: &std::path::Path,
+    server_key: &str,
+    entry: &serde_json::Value,
+) -> Result<CursorMcpResult, String> {
+    let existing_text = crate::runtime::read_text_if_exists(config_path).unwrap_or_default();
+    let stripped = existing_text
+        .strip_prefix('\u{feff}')
+        .unwrap_or(&existing_text);
+    let mut document: serde_json::Value = if stripped.trim().is_empty() {
+        serde_json::json!({})
+    } else {
+        serde_json::from_str(stripped).map_err(|error| format!("parse error: {error}"))?
+    };
+
+    if document.get("mcpServers").is_none() {
+        document["mcpServers"] = serde_json::json!({});
+    }
+    let current = document["mcpServers"]
+        .as_object_mut()
+        .ok_or("mcpServers is not an object")?;
+
+    let desired =
+        serde_json::to_string_pretty(entry).map_err(|error| format!("serialize error: {error}"))?;
+
+    if let Some(existing) = current.get(server_key) {
+        let existing_str = serde_json::to_string_pretty(existing)
+            .map_err(|error| format!("serialize error: {error}"))?;
+        if existing_str == desired {
+            return Ok(CursorMcpResult::AlreadyCurrent);
+        }
+        current.insert(server_key.to_string(), entry.clone());
+        write_text(
+            config_path,
+            &serde_json::to_string_pretty(&document)
+                .map_err(|error| format!("serialize error: {error}"))?,
+        )?;
+        return Ok(CursorMcpResult::Updated);
+    }
+
+    current.insert(server_key.to_string(), entry.clone());
+    write_text(
+        config_path,
+        &serde_json::to_string_pretty(&document)
+            .map_err(|error| format!("serialize error: {error}"))?,
+    )?;
+    Ok(CursorMcpResult::Added)
 }
 
 fn merge_pi_mcp(
@@ -1051,6 +1173,10 @@ fn uninstall_managed_files(claude_home: &Path) -> Result<usize, String> {
         managed_skills_inventory_path(claude_home),
         managed_agents_inventory_path(claude_home),
         managed_shared_resources_inventory_path(claude_home),
+        // install-metadata.txt records repo/installed version; install writes it
+        // (install.rs), so uninstall must remove it or doctor/verify report a
+        // stale "installed" state against a now-deleted binary.
+        crate::manager::verify::install_metadata_path(claude_home),
     ] {
         let _ = remove_path_if_exists_counted(&inventory)?;
     }
@@ -1084,6 +1210,39 @@ fn remove_wired_adapters(claude_home: &Path) -> usize {
         .join("keel.ts");
     removed += remove_path_if_exists_counted(&plugin_file).unwrap_or(0);
 
+    // OpenCode MCP: install merges `mcp.keel` into opencode.json (merge_opencode_mcp).
+    // Uninstall must remove that entry or OpenCode keeps spawning the now-deleted
+    // keel binary every session. Mirrors the Pi mcp.json entry-removal below.
+    let opencode_config = home.join(".config").join("opencode").join("opencode.json");
+    if opencode_config.is_file() {
+        if let Ok(text) = crate::runtime::read_text_if_exists(&opencode_config) {
+            let stripped = text.strip_prefix('\u{feff}').unwrap_or(&text);
+            if let Ok(mut doc) = serde_json::from_str::<serde_json::Value>(stripped) {
+                let mutated = if let Some(mcp) = doc.get_mut("mcp").and_then(|v| v.as_object_mut())
+                {
+                    if mcp.remove("keel").is_some() {
+                        if mcp.is_empty() {
+                            doc.as_object_mut().map(|o| o.remove("mcp"));
+                        }
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+                if mutated {
+                    let _ = write_text(
+                        &opencode_config,
+                        &serde_json::to_string_pretty(&doc)
+                            .unwrap_or_else(|_| stripped.to_string()),
+                    );
+                    removed += 1;
+                }
+            }
+        }
+    }
+
     let codex_dir = home.join(".codex").join("plugins").join("keel");
     if codex_dir.is_dir() {
         removed += remove_path_if_exists_counted(&codex_dir).unwrap_or(0);
@@ -1098,6 +1257,50 @@ fn remove_wired_adapters(claude_home: &Path) -> usize {
         }
     }
 
+    // Cursor hooks: install writes ~/.cursor/hooks/{hooks.json,keel-cursor.sh}.
+    // Uninstall must remove both or Cursor keeps invoking a hook that shells to
+    // the now-deleted keel binary on every tool call.
+    for hook_file in [
+        home.join(".cursor").join("hooks").join("hooks.json"),
+        home.join(".cursor").join("hooks").join("keel-cursor.sh"),
+    ] {
+        removed += remove_path_if_exists_counted(&hook_file).unwrap_or(0);
+    }
+
+    // Cursor MCP: install merges `keel` into ~/.cursor/mcp.json (merge_cursor_mcp).
+    // Uninstall must remove that entry or Cursor keeps spawning the now-deleted
+    // keel binary. Mirrors the OpenCode/Pi MCP entry-removal.
+    let cursor_mcp = home.join(".cursor").join("mcp.json");
+    if cursor_mcp.is_file() {
+        if let Ok(text) = crate::runtime::read_text_if_exists(&cursor_mcp) {
+            let stripped = text.strip_prefix('\u{feff}').unwrap_or(&text);
+            if let Ok(mut doc) = serde_json::from_str::<serde_json::Value>(stripped) {
+                let mutated = if let Some(servers) =
+                    doc.get_mut("mcpServers").and_then(|v| v.as_object_mut())
+                {
+                    if servers.remove("keel").is_some() {
+                        if servers.is_empty() {
+                            doc.as_object_mut().map(|o| o.remove("mcpServers"));
+                        }
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+                if mutated {
+                    let _ = write_text(
+                        &cursor_mcp,
+                        &serde_json::to_string_pretty(&doc)
+                            .unwrap_or_else(|_| stripped.to_string()),
+                    );
+                    removed += 1;
+                }
+            }
+        }
+    }
+
     let agents_md = home.join(".pi").join("agent").join("AGENTS.md");
     if agents_md.is_file() {
         if let Ok(content) = std::fs::read_to_string(&agents_md) {
@@ -1107,21 +1310,41 @@ fn remove_wired_adapters(claude_home: &Path) -> usize {
         }
     }
 
-    let mcp_json = home.join(".config").join("mcp").join("mcp.json");
-    if mcp_json.is_file() {
-        if let Ok(text) = crate::runtime::read_text_if_exists(&mcp_json) {
-            if let Ok(mut doc) = serde_json::from_str::<serde_json::Value>(&text) {
-                if let Some(servers) = doc.get_mut("mcpServers").and_then(|v| v.as_object_mut()) {
-                    if servers.remove("keel").is_some() {
-                        let _ = write_text(
-                            &mcp_json,
-                            &serde_json::to_string_pretty(&doc).unwrap_or(text.clone()),
-                        );
-                        removed += 1;
+    // Pi MCP config: check the correct location (~/.pi/agent/mcp.json) and
+    // the legacy wrong location (~/.config/mcp/mcp.json) from older installs,
+    // so uninstall cleans up both. See maybe_wire_pi for the path rationale.
+    for mcp_json in [
+        home.join(".pi").join("agent").join("mcp.json"),
+        home.join(".config").join("mcp").join("mcp.json"),
+    ] {
+        if mcp_json.is_file() {
+            if let Ok(text) = crate::runtime::read_text_if_exists(&mcp_json) {
+                if let Ok(mut doc) = serde_json::from_str::<serde_json::Value>(&text) {
+                    if let Some(servers) = doc.get_mut("mcpServers").and_then(|v| v.as_object_mut())
+                    {
+                        if servers.remove("keel").is_some() {
+                            let _ = write_text(
+                                &mcp_json,
+                                &serde_json::to_string_pretty(&doc).unwrap_or(text.clone()),
+                            );
+                            removed += 1;
+                        }
                     }
                 }
             }
         }
+    }
+
+    // Remove the Pi extension from both the correct auto-discovery path
+    // (~/.pi/agent/extensions/) and the legacy wrong path (~/.pi/extensions/).
+    for ext in [
+        home.join(".pi")
+            .join("agent")
+            .join("extensions")
+            .join("keel-pi.ts"),
+        home.join(".pi").join("extensions").join("keel-pi.ts"),
+    ] {
+        removed += remove_path_if_exists_counted(&ext).unwrap_or(0);
     }
 
     removed
@@ -3188,6 +3411,7 @@ mod tests {
             repo.join("pi").join(".mcp.json"),
             r#"{"mcpServers":{"keel":{"command":"keel","args":["mcp","serve"]}}}"#,
         );
+        let _ = fs::write(repo.join("pi").join("keel-pi.ts"), "// keel pi extension\n");
 
         let summary = maybe_wire_pi(&repo, &claude_home, true);
         assert!(
@@ -3203,6 +3427,10 @@ mod tests {
             status.contains("MCP"),
             "must report MCP registered, got: {status}"
         );
+        assert!(
+            status.contains("keel-pi.ts"),
+            "must report keel-pi.ts wired, got: {status}"
+        );
 
         let home = claude_home.parent().unwrap();
         assert!(
@@ -3210,8 +3438,16 @@ mod tests {
             "Pi AGENTS.md must land in ~/.pi/agent/"
         );
         assert!(
-            home.join(".config").join("mcp").join("mcp.json").is_file(),
-            "Pi MCP config must land in ~/.config/mcp/mcp.json"
+            home.join(".pi").join("agent").join("mcp.json").is_file(),
+            "Pi MCP config must land in ~/.pi/agent/mcp.json (Pi's documented location, not ~/.config/mcp/)"
+        );
+        assert!(
+            home.join(".pi")
+                .join("agent")
+                .join("extensions")
+                .join("keel-pi.ts")
+                .is_file(),
+            "Pi extension must land in ~/.pi/agent/extensions/ (Pi's auto-discovery path, not ~/.pi/extensions/)"
         );
 
         let _ = fs::remove_dir_all(&base);

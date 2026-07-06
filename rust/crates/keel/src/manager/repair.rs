@@ -28,6 +28,7 @@ pub fn run_repair_command(
 ) -> u8 {
     let mut flag_set = crate::args::FlagSet::new("repair");
     flag_set.string_flag("claude-home", "");
+    flag_set.string_flag("repo-root", "");
     if let Err(parse_error) = flag_set.parse(arguments) {
         let _ = writeln!(standard_error, "{}", parse_error.message);
         return 1;
@@ -87,7 +88,60 @@ pub fn run_repair_command(
         }
     }
 
-    // 3. Status note. The skill brief is now inlined into per-prompt context,
+    // 3. Re-wire the four bridge hosts (OpenCode, Pi, Codex, Cursor). Like the
+    //    native MCP step, repair is an explicit operator action, so we force
+    //    detected=true for each host the operator has installed — re-running its
+    //    wiring idempotently. Cursor is never auto-detected, so we always force
+    //    it (the maybe_wire call is a no-op if the source files are absent).
+    let repo_root =
+        match crate::runtime::resolve_repository_root(flag_set.string_value("repo-root")) {
+            Ok(path) => path,
+            Err(error) => {
+                had_error = true;
+                let _ = writeln!(
+                    standard_error,
+                    "[fail] bridge hosts: resolve repo root: {error}"
+                );
+                return if had_error { 1 } else { 0 };
+            }
+        };
+    for (name, status) in [
+        (
+            "opencode",
+            crate::manager::install::maybe_wire_opencode(&repo_root, &claude_home, true),
+        ),
+        (
+            "pi",
+            crate::manager::install::maybe_wire_pi(&repo_root, &claude_home, true),
+        ),
+        (
+            "codex",
+            crate::manager::install::maybe_wire_codex(&repo_root, &claude_home, true),
+        ),
+        (
+            "cursor",
+            crate::manager::install::maybe_wire_cursor(&repo_root, &claude_home, true),
+        ),
+    ] {
+        match status {
+            Some(detail)
+                if !detail.starts_with("skipped") && !detail.starts_with("source absent") =>
+            {
+                let _ = writeln!(standard_output, "[ok] {name}: {detail}");
+            }
+            Some(detail) => {
+                let _ = writeln!(standard_output, "[--] {name}: {detail}");
+            }
+            None => {
+                let _ = writeln!(
+                    standard_output,
+                    "[--] {name}: not a standard ~/.claude home"
+                );
+            }
+        }
+    }
+
+    // 4. Status note. The skill brief is now inlined into per-prompt context,
     //    so a matched skill's guidance lands regardless of model compliance.
     let _ = writeln!(standard_output);
     let _ = writeln!(standard_output, "Next steps:");

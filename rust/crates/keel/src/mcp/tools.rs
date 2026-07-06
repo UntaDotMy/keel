@@ -66,7 +66,7 @@ pub(super) fn handle_tools_list() -> Value {
         "tools": [
             {
                 "name": "recall",
-                "description": "Call this BEFORE claiming what you remember or previously learned — search your durable memory instead of relying on conversation alone. Full-text search over Markdown under <claude-home>/{memories,working-briefs}. Auto-syncs the index before querying.",
+                "description": "Call this BEFORE claiming what you remember or previously learned — search your durable memory instead of relying on conversation alone. Full-text search over Markdown under <claude-home>/{memory,memories,working-briefs}. Auto-syncs the index before querying.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {

@@ -380,3 +380,135 @@ fn uninstall_preserves_user_cursorrules() {
     );
     let _ = fs::remove_dir_all(&home);
 }
+
+#[test]
+fn uninstall_removes_opencode_mcp_entry() {
+    // install↔uninstall symmetry: install merges mcp.keel into opencode.json,
+    // so uninstall must remove that entry or OpenCode keeps spawning the
+    // now-deleted keel binary every session.
+    let repo = repository_root();
+    let (home, claude_home) = fake_home_with_claude("keel-uninstall-opencode-mcp");
+    let _ = fs::create_dir_all(home.join(".config").join("opencode"));
+    run_install(&repo, &claude_home, &[]);
+    let opencode_json = home.join(".config").join("opencode").join("opencode.json");
+    assert!(
+        opencode_json.is_file(),
+        "install must create opencode.json for this test to be meaningful"
+    );
+    let before = fs::read_to_string(&opencode_json).expect("read opencode.json");
+    assert!(
+        before.contains("\"keel\""),
+        "opencode.json should contain keel MCP entry after install"
+    );
+    run_uninstall(&repo, &claude_home);
+    let after = fs::read_to_string(&opencode_json).unwrap_or_default();
+    assert!(
+        !after.contains("\"keel\""),
+        "keel MCP entry must be removed from opencode.json after uninstall"
+    );
+    let _ = fs::remove_dir_all(&home);
+}
+
+#[test]
+fn uninstall_removes_cursor_hooks() {
+    // install↔uninstall symmetry: install writes ~/.cursor/hooks/{hooks.json,
+    // keel-cursor.sh}, so uninstall must remove both or Cursor keeps invoking a
+    // hook that shells to the now-deleted keel binary on every tool call.
+    let repo = repository_root();
+    let (home, claude_home) = fake_home_with_claude("keel-uninstall-cursor-hooks");
+    run_install(&repo, &claude_home, &["--with", "cursor"]);
+    let hooks_json = home.join(".cursor").join("hooks").join("hooks.json");
+    let hook_script = home.join(".cursor").join("hooks").join("keel-cursor.sh");
+    assert!(
+        hooks_json.is_file(),
+        "cursor hooks.json should exist after install with --with cursor"
+    );
+    assert!(
+        hook_script.is_file(),
+        "cursor keel-cursor.sh should exist after install with --with cursor"
+    );
+    run_uninstall(&repo, &claude_home);
+    assert!(
+        !hooks_json.exists(),
+        "cursor hooks.json must be removed after uninstall"
+    );
+    assert!(
+        !hook_script.exists(),
+        "cursor keel-cursor.sh must be removed after uninstall"
+    );
+    let _ = fs::remove_dir_all(&home);
+}
+
+#[test]
+fn install_copies_codex_mcp_config() {
+    // Codex registers its MCP server via a plugin-bundled .mcp.json referenced
+    // by the manifest's mcpServers field. install must copy it alongside the
+    // other plugin files so Codex loads the keel MCP server.
+    let repo = repository_root();
+    let (home, claude_home) = fake_home_with_claude("keel-install-codex-mcp");
+    let _ = fs::create_dir_all(home.join(".codex"));
+    run_install(&repo, &claude_home, &[]);
+    let mcp_json = home
+        .join(".codex")
+        .join("plugins")
+        .join("keel")
+        .join(".mcp.json");
+    assert!(
+        mcp_json.is_file(),
+        "codex .mcp.json should exist after install"
+    );
+    let manifest = home
+        .join(".codex")
+        .join("plugins")
+        .join("keel")
+        .join(".codex-plugin")
+        .join("plugin.json");
+    let manifest_text = fs::read_to_string(&manifest).expect("read codex plugin.json");
+    assert!(
+        manifest_text.contains("\"mcpServers\""),
+        "codex plugin.json manifest must reference the bundled MCP config"
+    );
+    let _ = fs::remove_dir_all(&home);
+}
+
+#[test]
+fn uninstall_removes_cursor_mcp_entry() {
+    // install↔uninstall symmetry: install merges the `keel` entry into
+    // ~/.cursor/mcp.json, so uninstall must remove that entry (preserving any
+    // other MCP servers the user configured) or Cursor keeps spawning the
+    // now-deleted keel binary.
+    let repo = repository_root();
+    let (home, claude_home) = fake_home_with_claude("keel-uninstall-cursor-mcp");
+    // Pre-existing user MCP server that uninstall must preserve.
+    let mcp_json = home.join(".cursor").join("mcp.json");
+    let _ = fs::create_dir_all(mcp_json.parent().unwrap());
+    let user_preexisting = r#"{
+  "mcpServers": {
+    "user-other": { "command": "other-binary", "args": ["run"] }
+  }
+}"#;
+    let _ = fs::write(&mcp_json, user_preexisting);
+
+    run_install(&repo, &claude_home, &["--with", "cursor"]);
+    let after_install = fs::read_to_string(&mcp_json).expect("read cursor mcp.json after install");
+    assert!(
+        after_install.contains("\"keel\""),
+        "cursor mcp.json should contain keel entry after install"
+    );
+    assert!(
+        after_install.contains("\"user-other\""),
+        "install must preserve the user's pre-existing MCP servers"
+    );
+
+    run_uninstall(&repo, &claude_home);
+    let after_uninstall = fs::read_to_string(&mcp_json).unwrap_or_default();
+    assert!(
+        !after_uninstall.contains("\"keel\""),
+        "keel entry must be removed from cursor mcp.json after uninstall"
+    );
+    assert!(
+        after_uninstall.contains("\"user-other\""),
+        "uninstall must preserve the user's pre-existing MCP servers"
+    );
+    let _ = fs::remove_dir_all(&home);
+}
