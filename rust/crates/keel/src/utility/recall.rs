@@ -123,7 +123,7 @@ pub fn run_recall_command(
 fn render_recall_help(command_group: &str, standard_output: &mut dyn Write) {
     let _ = writeln!(
         standard_output,
-        "Usage: keel {command_group} recall <query> [--limit N] [--json] [--claude-home PATH]"
+        "Usage: keel {command_group} recall <query> [--limit N] [--json] [--claude-home PATH] [--workspace SLUG] [--local-only]"
     );
     let _ = writeln!(
         standard_output,
@@ -171,6 +171,8 @@ fn run_recall_search(
     let mut flag_set = FlagSet::new(format!("{command_group} recall"));
     flag_set.string_flag("limit", "");
     flag_set.string_flag("claude-home", "");
+    flag_set.string_flag("workspace", "");
+    flag_set.bool_flag("local-only", false);
     flag_set.bool_flag("json", false);
     if let Err(parse_error) = flag_set.parse(&combined) {
         let _ = writeln!(standard_error, "{}", parse_error.message);
@@ -220,25 +222,49 @@ fn run_recall_search(
         return 1;
     }
 
-    let cascade = match cascade_recall_query(&connection, trimmed_query, limit) {
-        Ok(Some(cascade)) => cascade,
-        Ok(None) => {
-            let _ = writeln!(
-                standard_error,
-                "{command_group} recall: query has no searchable terms"
-            );
-            return 1;
-        }
-        Err(error_message) => {
-            let _ = writeln!(
-                standard_error,
-                "{command_group} recall: query index: {error_message}"
-            );
-            return 1;
+    // Workspace affinity: boost current-project hits above cross-project.
+    // `--workspace` forces a slug; otherwise cwd is slugged like system_map.
+    let workspace_slug = {
+        let explicit = flag_set.string_value("workspace").trim().to_string();
+        if !explicit.is_empty() {
+            Some(crate::utility::system_map::sanitize_key(&explicit))
+        } else {
+            std::env::current_dir()
+                .ok()
+                .map(|cwd| crate::utility::system_map::sanitize_key(&cwd.to_string_lossy()))
         }
     };
-    let matches = cascade.hits;
+    let cascade =
+        match cascade_recall_query(&connection, trimmed_query, limit, workspace_slug.as_deref()) {
+            Ok(Some(cascade)) => cascade,
+            Ok(None) => {
+                let _ = writeln!(
+                    standard_error,
+                    "{command_group} recall: query has no searchable terms"
+                );
+                return 1;
+            }
+            Err(error_message) => {
+                let _ = writeln!(
+                    standard_error,
+                    "{command_group} recall: query index: {error_message}"
+                );
+                return 1;
+            }
+        };
+    let mut matches = cascade.hits;
     let stage = cascade.stage;
+
+    // `--local-only`: restrict to the current workspace lane (a new project
+    // returns empty). Both sides are dash-collapsed (`D:\` -> `D--` vs `D-`).
+    if flag_set.bool_value("local-only") {
+        if let Some(slug) = &workspace_slug {
+            let slug_norm = collapse_dashes(&slug.to_ascii_lowercase());
+            matches.retain(|hit| {
+                collapse_dashes(&hit.absolute_path.to_ascii_lowercase()).contains(&slug_norm)
+            });
+        }
+    }
 
     if flag_set.bool_value("json") {
         let payload = build_search_json(trimmed_query, &claude_home, &matches);
@@ -541,8 +567,8 @@ fn parse_limit(raw_value: &str) -> Result<usize, String> {
 /// `--json=true|false`. A bare `--` terminates flag scanning and forces all
 /// remaining tokens into the query, matching standard Unix conventions.
 fn split_flags_and_query(arguments: &[String]) -> Result<(Vec<String>, Vec<String>), String> {
-    const VALUE_FLAGS: &[&str] = &["--limit", "--claude-home"];
-    const BOOL_FLAGS: &[&str] = &["--json"];
+    const VALUE_FLAGS: &[&str] = &["--limit", "--claude-home", "--workspace"];
+    const BOOL_FLAGS: &[&str] = &["--json", "--local-only"];
     let mut flag_arguments: Vec<String> = Vec::new();
     let mut query_arguments: Vec<String> = Vec::new();
     let mut index = 0;
@@ -712,10 +738,16 @@ pub struct RecallSearchResult {
 /// hits so callers (the MCP `recall` tool, programmatic embedders) can render
 /// their own JSON envelope. `Ok(None)` means the query had no searchable
 /// terms after stripping punctuation, mirroring the CLI's "no terms" branch.
+/// Scoped recall: when `workspace_slug` is `Some`, hits from the current
+/// workspace are boosted above cross-project hits (see
+/// [`WORKSPACE_AFFINITY_BOOST`]). Pass `None` for unscoped (global,
+/// cross-project) recall, which is the default for callers that have no
+/// current-workspace context.
 pub fn search_recall_index(
     claude_home: &Path,
     raw_query: &str,
     limit: usize,
+    workspace_slug: Option<&str>,
 ) -> Result<Option<RecallSearchResult>, String> {
     let trimmed_query = raw_query.trim();
     if trimmed_query.is_empty() {
@@ -724,10 +756,7 @@ pub fn search_recall_index(
     let database_path = recall_database_path(claude_home);
     let mut connection = open_recall_connection(&database_path)?;
     sync_recall_index(&mut connection, claude_home, false)?;
-    // Run the shared cascade (exact -> relaxed -> fuzzy -> vector) so the
-    // programmatic surface and the CLI resolve a query identically. `None`
-    // means the query had no searchable terms after stripping punctuation.
-    match cascade_recall_query(&connection, trimmed_query, limit)? {
+    match cascade_recall_query(&connection, trimmed_query, limit, workspace_slug)? {
         Some(cascade) => Ok(Some(RecallSearchResult {
             fts_query: cascade.query_expression,
             stage: cascade.stage,
@@ -1130,6 +1159,7 @@ pub fn query_recall_index(
     connection: &Connection,
     fts_query: &str,
     limit: usize,
+    workspace_slug: Option<&str>,
 ) -> Result<Vec<RecallHit>, String> {
     let raw_query_terms = fts_terms(fts_query);
     // Over-fetch BM25 candidates so the relevance re-rank has room to promote a
@@ -1192,7 +1222,12 @@ pub fn query_recall_index(
             bm25_rank: rank,
         });
     }
-    Ok(rerank_by_relevance(candidates, &raw_query_terms, limit))
+    Ok(rerank_by_relevance(
+        candidates,
+        &raw_query_terms,
+        limit,
+        workspace_slug,
+    ))
 }
 
 /// A BM25 candidate carried through the relevance re-rank. `content` is the full
@@ -1240,19 +1275,57 @@ fn fts_terms(fts_query: &str) -> Vec<String> {
 /// BM25 rank breaks ties, keeping the ordering deterministic. A single-term
 /// query has coverage 1.0 for every candidate, so the re-rank degenerates
 /// gracefully to BM25 order (proximity is also 1.0), i.e. no behavior change.
+/// How much a hit whose path matches the current workspace slug is boosted
+/// above an otherwise-equal cross-project hit. A current-project note should
+/// outrank a different-project note that happens to match the same words, so
+/// the new-project flood you hit is suppressed without disabling cross-project
+/// recall. Applied as a multiplier on the relevance score (capped at 1.0).
+const WORKSPACE_AFFINITY_BOOST: f64 = 1.5;
+
+/// Collapse runs of `-` into a single `-`. Used to normalize workspace slugs
+/// and memory-lane paths before substring matching, because the lane path may
+/// have been written by a slugger that did not collapse separator runs
+/// (e.g. `D:\` -> `D--` vs the collapsed `D-`).
+pub(crate) fn collapse_dashes(value: &str) -> String {
+    let mut collapsed = String::with_capacity(value.len());
+    let mut prev_dash = false;
+    for ch in value.chars() {
+        if ch == '-' {
+            if !prev_dash {
+                collapsed.push(ch);
+            }
+            prev_dash = true;
+        } else {
+            collapsed.push(ch);
+            prev_dash = false;
+        }
+    }
+    collapsed
+}
+
 fn rerank_by_relevance(
     mut candidates: Vec<RerankCandidate>,
     query_terms: &[String],
     limit: usize,
+    workspace_slug: Option<&str>,
 ) -> Vec<RecallHit> {
     if query_terms.is_empty() {
         candidates.truncate(limit);
         return candidates.into_iter().map(|c| c.hit).collect();
     }
+    let slug_lower = workspace_slug
+        .filter(|s| !s.is_empty())
+        .map(|s| collapse_dashes(&s.to_ascii_lowercase()));
     let mut scored: Vec<(f64, usize, RecallHit)> = candidates
         .drain(..)
         .map(|candidate| {
-            let relevance = relevance_score(&candidate.content, query_terms);
+            let mut relevance = relevance_score(&candidate.content, query_terms);
+            if let Some(slug) = &slug_lower {
+                if collapse_dashes(&candidate.hit.absolute_path.to_ascii_lowercase()).contains(slug)
+                {
+                    relevance = (relevance * WORKSPACE_AFFINITY_BOOST).min(1.0);
+                }
+            }
             (relevance, candidate.bm25_rank, candidate.hit)
         })
         .collect();
@@ -1355,13 +1428,14 @@ fn cascade_recall_query(
     connection: &Connection,
     raw_query: &str,
     limit: usize,
+    workspace_slug: Option<&str>,
 ) -> Result<Option<CascadeResult>, String> {
     let exact = match build_fts_query(raw_query) {
         Some(query) => query,
         None => return Ok(None),
     };
 
-    let exact_hits = query_recall_index(connection, &exact, limit)?;
+    let exact_hits = query_recall_index(connection, &exact, limit, workspace_slug)?;
     if !exact_hits.is_empty() {
         let (hits, stage) = augment_with_fuzzy(connection, exact_hits, limit, "exact")?;
         return Ok(Some(CascadeResult {
@@ -1375,7 +1449,7 @@ fn cascade_recall_query(
     // token's OR and AND expressions are identical, so build_relaxed returns
     // None and we skip straight to fuzzy).
     if let Some(relaxed) = build_relaxed_fts_query(raw_query) {
-        let relaxed_hits = query_recall_index(connection, &relaxed, limit)?;
+        let relaxed_hits = query_recall_index(connection, &relaxed, limit, workspace_slug)?;
         if !relaxed_hits.is_empty() {
             let (hits, stage) = augment_with_fuzzy(connection, relaxed_hits, limit, "relaxed")?;
             return Ok(Some(CascadeResult {
@@ -2230,7 +2304,7 @@ mod tests {
             let connection =
                 open_recall_connection(&database_path).expect("open recall index read-only");
             let fts_query = build_fts_query("blind tool search").expect("non-empty query");
-            let hits = query_recall_index(&connection, &fts_query, 20).expect("query index");
+            let hits = query_recall_index(&connection, &fts_query, 20, None).expect("query index");
 
             assert!(
                 hits.iter()
@@ -2548,7 +2622,7 @@ mod tests {
                 bm25_rank: 1,
             },
         ];
-        let ranked = rerank_by_relevance(candidates, &terms, 10);
+        let ranked = rerank_by_relevance(candidates, &terms, 10, None);
         assert_eq!(
             ranked[0].absolute_path, "covered.md",
             "the doc covering both terms must rank first"
@@ -2583,7 +2657,7 @@ mod tests {
                 bm25_rank: 1,
             },
         ];
-        let ranked = rerank_by_relevance(candidates, &terms, 10);
+        let ranked = rerank_by_relevance(candidates, &terms, 10, None);
         assert_eq!(ranked[0].absolute_path, "first.md");
         assert_eq!(ranked[1].absolute_path, "second.md");
     }
@@ -2604,7 +2678,7 @@ mod tests {
                 "memories/b-covered.md",
                 "# Webhook retry\n\nThe webhook retry policy uses exponential backoff.\n",
             );
-            let result = search_recall_index(claude_home, "webhook retry", 10)
+            let result = search_recall_index(claude_home, "webhook retry", 10, None)
                 .expect("search succeeds")
                 .expect("non-empty query");
             assert_eq!(result.stage, "exact");
@@ -2971,7 +3045,7 @@ mod vector_tests {
         // document with stage="vector"; otherwise the cascade returns empty
         // hits with stage="exact". Either outcome is valid — the test verifies
         // the cascade runs without error on a lexically-unmatchable query.
-        let result = cascade_recall_query(&conn, "credential verification", 10)
+        let result = cascade_recall_query(&conn, "credential verification", 10, None)
             .expect("cascade query")
             .expect("non-None result");
         if result.stage == "vector" {
@@ -2980,5 +3054,48 @@ mod vector_tests {
                 "vector stage must return KNN neighbors"
             );
         }
+    }
+
+    #[test]
+    fn workspace_affinity_boost_promotes_current_project_hit() {
+        // Two docs with identical content; one under the current workspace
+        // slug, one under another project. The current hit must rank first.
+        let terms = vec!["login".to_string()];
+        let slug = "clicksync-main";
+        let candidates = vec![
+            RerankCandidate {
+                hit: RecallHit {
+                    absolute_path: "memories/projects/D--other-project/auth.md".to_string(),
+                    score: 0.0,
+                    line: 1,
+                    snippet: String::new(),
+                },
+                content: "login form submission".to_string(),
+                bm25_rank: 0,
+            },
+            RerankCandidate {
+                hit: RecallHit {
+                    absolute_path: "memories/projects/D-learn-flutter-ClickSync-main/auth.md"
+                        .to_string(),
+                    score: 0.0,
+                    line: 1,
+                    snippet: String::new(),
+                },
+                content: "login form submission".to_string(),
+                bm25_rank: 1,
+            },
+        ];
+        // Without a slug: BM25 rank breaks the tie, so the first (other-project) hit wins.
+        let unscoped = rerank_by_relevance(candidates.clone(), &terms, 10, None);
+        assert_eq!(
+            unscoped[0].absolute_path,
+            "memories/projects/D--other-project/auth.md"
+        );
+        // With the current-workspace slug: the ClickSync hit is boosted and wins.
+        let scoped = rerank_by_relevance(candidates, &terms, 10, Some(slug));
+        assert_eq!(
+            scoped[0].absolute_path, "memories/projects/D-learn-flutter-ClickSync-main/auth.md",
+            "current-workspace hit must outrank an equal cross-project hit"
+        );
     }
 }

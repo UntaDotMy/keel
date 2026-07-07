@@ -3320,7 +3320,7 @@ fn session_end_dispatch_auto_captures_work_summary_to_memory() {
     );
 
     // And it must be immediately recallable (s4 index sync on the write path).
-    let hit = crate::utility::recall::search_recall_index(&claude_home, "Edited file", 20)
+    let hit = crate::utility::recall::search_recall_index(&claude_home, "Edited file", 20, None)
         .expect("recall search runs");
     assert!(
         hit.map(|result| !result.hits.is_empty()).unwrap_or(false),
