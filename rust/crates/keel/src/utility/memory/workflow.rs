@@ -31,7 +31,6 @@ fn colorize(text: &str, color_prefix: &str, mode: ColorMode) -> String {
     }
 }
 
-#[allow(dead_code)]
 fn status_color_prefix(status: &str, mode: ColorMode) -> &'static str {
     if mode == ColorMode::Off {
         return "";
@@ -250,7 +249,11 @@ fn run_workflow_cockpit(
             pad_to_width(&entry.preset, 38)
         );
         let status_text = "\u{25cf} in-progress".to_string();
-        let colored_status = colorize(&status_text, "\x1b[33m", color_mode);
+        let colored_status = colorize(
+            &status_text,
+            status_color_prefix("in-progress", color_mode),
+            color_mode,
+        );
         let _ = writeln!(
             standard_output,
             "\u{2551}  Status:  {colored_status}{}",

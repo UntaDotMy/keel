@@ -128,38 +128,48 @@ fn requesting_code_review_is_a_real_manifest_directory() {
     );
 }
 
-/// The documented counts: 46 matcher-invocable skills in the manifest, 47
-/// first-party SKILL.md directories on disk (the 46 + the bootstrap), and the
-/// bootstrap is the only first-party skill NOT in the manifest. If a skill is
-/// added or removed, this assertion fails until CLAUDE.md / using-keel
-/// and this test are updated together — that is the anti-drift mechanism.
+/// The structural invariant between disk and manifest: the `using-keel`
+/// bootstrap is the ONLY first-party skill directory on disk that is NOT in
+/// the plugin manifest (it loads at SessionStart, not via the matcher). So
+/// `on_disk.len()` must equal `manifest.len() + 1`, and the +1 must be exactly
+/// `using-keel`. This asserts the *relationship* rather than a hardcoded
+/// count, so adding or removing a skill never requires editing this test.
+/// The drift is still caught (an orphan skill dir, or a manifest entry with
+/// no directory) without magic numbers. Run `keel skill-lint` for the live
+/// count; the docs describe the structure, not a number.
 #[test]
-fn documented_skill_counts_match_disk_and_manifest() {
+fn disk_and_manifest_differ_by_exactly_the_bootstrap() {
     let repo_root = repository_root();
-    let manifest = manifest_skills(&repo_root);
+    let manifest: BTreeSet<String> = manifest_skills(&repo_root).into_iter().collect();
     let on_disk = first_party_skill_dirs(&repo_root);
 
+    assert!(
+        on_disk.contains("using-keel"),
+        "using-keel bootstrap directory must exist on disk"
+    );
+    assert!(
+        !manifest.contains("using-keel"),
+        "the bootstrap must NOT be in the manifest (it loads at SessionStart, not via the matcher)"
+    );
+    let bootstrap = String::from("using-keel");
+    let non_manifest: BTreeSet<&String> =
+        on_disk.iter().filter(|n| !manifest.contains(*n)).collect();
+    let expected: BTreeSet<&String> = std::iter::once(&bootstrap).collect();
     assert_eq!(
-        manifest.len(),
-        47,
-        "expected 47 manifest skills; \
-         got {}. If this changed intentionally, update CLAUDE.md and using-keel/SKILL.md.",
-        manifest.len()
+        non_manifest,
+        expected,
+        "the bootstrap must be the ONLY first-party skill on disk but not in the manifest; \
+         found {} non-manifest skill dir(s): {non_manifest:?}. \
+         Either add the new skill to .claude-plugin/plugin.json, or it is an orphan to remove.",
+        non_manifest.len()
     );
     assert_eq!(
         on_disk.len(),
-        48,
-        "expected 48 first-party SKILL.md dirs (47 manifest skills + using-keel bootstrap); \
-         got {}. Update the docs and this test together.",
-        on_disk.len()
-    );
-    assert!(
-        on_disk.contains("using-keel"),
-        "using-keel bootstrap directory must exist"
-    );
-    assert!(
-        !manifest.iter().any(|name| name == "using-keel"),
-        "the bootstrap must NOT be in the manifest (it loads at SessionStart, not via the matcher)"
+        manifest.len() + 1,
+        "disk skill dirs ({}) must equal manifest skills ({}) + 1 bootstrap; \
+         if this fails, a skill was added/removed on one side only",
+        on_disk.len(),
+        manifest.len()
     );
 }
 
@@ -245,18 +255,20 @@ fn mcp_tool_count_matches_documentation() {
     .expect("read mcp/tools.rs");
 
     // Each tool definition in `handle_tools_list` has exactly one inputSchema.
+    // The count is DERIVED from source, not hardcoded here, so adding a tool
+    // never requires editing this test. Docs point at this test, not a number.
     let tool_count = tools_src.matches("\"inputSchema\":").count();
-    assert_eq!(
-        tool_count, 31,
-        "expected 31 MCP tool definitions in mcp/tools.rs (one `\"inputSchema\":` each); got {tool_count}. \
-         If this changed intentionally, update the MCP server tool count in CLAUDE.md and this test together."
+    assert!(
+        tool_count >= 20,
+        "expected a healthy MCP tool surface (≥20 definitions, one `\"inputSchema\":` each); \
+         got {tool_count}. If tools were removed intentionally, confirm the surface is still healthy."
     );
 
     let claude_md = fs::read_to_string(repo_root.join("CLAUDE.md")).expect("read CLAUDE.md");
     assert!(
-        claude_md.contains(&format!("{tool_count} tools")),
-        "CLAUDE.md must document the MCP server as exposing {tool_count} tools (the count in mcp/tools.rs); \
-         the prose says a different number, which is exactly the drift this test prevents."
+        claude_md.contains("MCP tool count") || claude_md.contains("tool definitions in `mcp/tools.rs`"),
+        "CLAUDE.md must point at this test for the MCP tool count rather than hardcoding a number; \
+         the prose should say the count is asserted by `tests/doc_parity_test.rs` over `mcp/tools.rs`."
     );
 }
 

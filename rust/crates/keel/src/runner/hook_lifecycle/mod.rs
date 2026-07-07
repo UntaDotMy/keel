@@ -980,6 +980,22 @@ fn run_hook_post_tool_use(standard_error: &mut dyn Write) -> u8 {
         return 0;
     }
 
+    // Comment-style lint: catch long/chatty comments at write time, not just review.
+    // Advisory only (env-gated, fail-open). See run_post_tool_comment_lint.
+    if let Some(nudge) = run_post_tool_comment_lint(tool_name, &input) {
+        let _ = writeln!(standard_error, "{nudge}");
+        let payload = serde_json::json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PostToolUse",
+                "additionalContext": nudge,
+            },
+            "suppressOutput": true,
+        });
+        if let Ok(rendered) = serde_json::to_string(&payload) {
+            let _ = writeln!(std::io::stdout(), "{rendered}");
+        }
+    }
+
     let threshold = system_map_refresh_threshold();
 
     if threshold == 0 {
@@ -1008,6 +1024,65 @@ fn run_hook_post_tool_use(standard_error: &mut dyn Write) -> u8 {
     }
 
     0
+}
+
+/// Advisory comment-style lint for PostToolUse. Returns a nudge string when the
+/// just-edited file introduced a blocking comment finding (over-length impl
+/// comment, em/en dash, chatty/first-person wording), `None` otherwise.
+///
+/// Design constraints (it runs on every Edit/Write, a hot path):
+/// - **Env-gated**: `CLAUDE_SKILLS_COMMENT_LINT_GATE=off` disables; anything
+///   else (incl. unset) leaves it advisory-on. Matches the gate-mode convention.
+/// - **Fail-open**: any error (no git repo, no cwd, parse failure) → `None`.
+///   A comment lint must never break the PostToolUse hook.
+/// - **Natural dedup**: the nudge stops firing once the comment is fixed
+///   (findings clear from the working diff), so a repeated nudge means the
+///   comment is still wrong, not spam.
+/// - **Scoped to the edited file**: scans the working diff, filters findings to
+///   the file just written so unrelated pre-existing comments are not flagged.
+fn run_post_tool_comment_lint(tool_name: &str, input: &JsonDocument) -> Option<String> {
+    if std::env::var("CLAUDE_SKILLS_COMMENT_LINT_GATE").as_deref() == Ok("off") {
+        return None;
+    }
+    // Only Edit/Write carry a file path we can scope to. Other edit-class tools
+    // (apply_patch, str_replace) have no single file, so skip them to avoid noise.
+    let edited_path = if matches!(tool_name, "Edit" | "Write" | "MultiEdit") {
+        input
+            .get("tool_input")
+            .and_then(|ti| ti.get("file_path"))
+            .and_then(JsonDocument::as_str)
+            .unwrap_or_default()
+    } else {
+        return None;
+    };
+    if edited_path.is_empty() {
+        return None;
+    }
+    let repo_root = std::env::current_dir().ok()?;
+    let findings = crate::comment_lint::lint_working_comments(&repo_root);
+    if findings.is_empty() {
+        return None;
+    }
+    // Scope to the file just edited (path may be absolute or repo-relative).
+    let target = std::path::Path::new(edited_path);
+    let target_str = target.to_string_lossy();
+    let scoped: Vec<&crate::comment_lint::FileCommentFinding> = findings
+        .iter()
+        .filter(|f| target_str.ends_with(f.file.as_str()) || f.file.ends_with(target_str.as_ref()))
+        .collect();
+    if scoped.is_empty() {
+        return None;
+    }
+    let blocking = crate::comment_lint::has_blocking(&findings);
+    if !blocking {
+        return None;
+    }
+    let rendered = crate::comment_lint::format_findings(
+        &scoped.iter().map(|f| (*f).clone()).collect::<Vec<_>>(),
+    );
+    Some(format!(
+        "keel comment-lint: blocking comment finding(s) in this edit — fix before moving on:\n{rendered}\nAdvisory; set CLAUDE_SKILLS_COMMENT_LINT_GATE=off to silence."
+    ))
 }
 
 /// PostToolUseFailure handler.
@@ -4181,16 +4256,13 @@ fn truncate_on_line_boundary(text: &str, max_bytes: usize) -> String {
 
 fn memory_system_map_path_for_workspace(workspace_root: &Path) -> Option<PathBuf> {
     let claude_home = resolve_claude_home("").ok()?;
-
-    let workspace_key = sanitize_memory_key(&display_path(workspace_root));
-
     Some(
-        claude_home
-            .join("memories")
-            .join("workspaces")
-            .join(workspace_key)
-            .join("reference")
-            .join("SYSTEM_MAP.md"),
+        crate::utility::memory::system_map_reference_directory(
+            &claude_home,
+            "memory",
+            workspace_root,
+        )
+        .join("SYSTEM_MAP.md"),
     )
 }
 

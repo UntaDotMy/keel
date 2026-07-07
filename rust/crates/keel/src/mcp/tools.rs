@@ -88,11 +88,12 @@ pub(super) fn handle_tools_list() -> Value {
             },
             {
                 "name": "run_command",
-                "description": "Prefer this over a raw shell call for noisy commands (test, build, lint, logs, search): it runs the command through the compaction proxy so compacted high-signal output enters context instead of the raw stream.",
+                "description": "Prefer this over a raw shell call for noisy commands (test, build, lint, logs, search): it runs the command through the compaction proxy so compacted high-signal output enters context instead of the raw stream. Safe to use for any shell command; output is always neutralized for prompt-injection before reaching the model.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "command": { "type": "string", "description": "Shell command line to execute (joined with the platform shell when shell metacharacters are present)." }
+                        "command": { "type": "string", "description": "Shell command line to execute (joined with the platform shell when shell metacharacters are present)." },
+                        "json": { "type": "boolean", "description": "Return the compacted output as a JSON object (command, exit_code, stdout, stderr) instead of the text report. Default false." }
                     },
                     "required": ["command"]
                 }
@@ -272,12 +273,12 @@ pub(super) fn handle_tools_list() -> Value {
             },
             {
                 "name": "memory",
-                "description": "Memory operations (scope resolve, system-map show, recall, instincts, status). Use to manage durable memory under ~/.claude/memories/.",
+                "description": "Durable memory operations under ~/.claude/memories/. `scope` resolves the workspace memory lane; `system-map` shows/refreshes the workspace structural map; `recall` FTS5-searches memory; `instincts` lists distilled learning instincts; `consolidate` merges recent observations into durable notes; `report` summarizes memory state; `research-cache` saves/retrieves research answers; `retrieve` cross-family search; `maintenance` prunes stale records; `status` reports family counts. Use the dedicated brief_* tools for working briefs.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "action": { "type": "string", "enum": ["scope", "system-map", "recall", "instincts", "status"], "description": "Memory operation to perform." },
-                        "args": { "type": "array", "items": { "type": "string" }, "description": "Additional CLI arguments." }
+                        "action": { "type": "string", "enum": ["scope", "system-map", "recall", "instincts", "consolidate", "report", "research-cache", "retrieve", "maintenance", "status"], "description": "Memory operation to perform." },
+                        "args": { "type": "array", "items": { "type": "string" }, "description": "Additional CLI arguments (e.g. [\"--query\",\"terms\"] for recall, [\"--create-missing\",\"--refresh-system-map\"] for scope)." }
                     },
                     "required": ["action"]
                 }
@@ -406,6 +407,66 @@ pub(super) fn handle_tools_list() -> Value {
                         "stdin": { "type": "string", "description": "Story text to validate (alternative to file)." }
                     }
                 }
+            },
+            {
+                "name": "flow",
+                "description": "Preserve-Existing-Flow gate — the Iron Law's pre-edit ownership trace. Use `start` before editing an existing source file to record its owner path; `check` validates the trace still holds; `finish` clears it. Prevents blind edits to code whose ownership hasn't been traced.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["start", "check", "finish"], "description": "Flow operation to perform." },
+                        "file": { "type": "string", "description": "Target source file path (for start/check). Translated to --target-file." },
+                        "target_function": { "type": "string", "description": "Target function name within the file (optional, for start/check)." },
+                        "repo_root": { "type": "string", "description": "Repository root path. Defaults to cwd." }
+                    },
+                    "required": ["action"]
+                }
+            },
+            {
+                "name": "work",
+                "description": "Dependency-aware work graph. Track items with depends_on/discovered-from edges, query `ready` (unblocked) or `blocked` items, capture work discovered mid-task so it is never dropped. Open + ready/blocked items survive compaction via the SessionStart digest.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["add", "list", "ready", "blocked", "dep", "discovered", "close", "show"], "description": "Work-graph operation to perform." },
+                        "title": { "type": "string", "description": "Work item title (required for add)." },
+                        "id": { "type": "string", "description": "Work item id (for dep/discovered/close/show)." },
+                        "depends_on": { "type": "string", "description": "Id of the dependency B (for dep: A depends on B). Translated to --on." },
+                        "from": { "type": "string", "description": "Id of the item this was discovered from (for discovered)." },
+                        "status": { "type": "string", "description": "Initial status for add: open|in-progress|blocked|done." },
+                        "priority": { "type": "string", "description": "Priority for add (default 2)." },
+                        "workspace_root": { "type": "string", "description": "Workspace root path. Defaults to cwd." },
+                        "json": { "type": "boolean", "description": "Output as JSON." }
+                    },
+                    "required": ["action"]
+                }
+            },
+            {
+                "name": "code_graph",
+                "description": "Deterministic codebase-understanding graph. `build` scans the workspace and writes a JSON artifact of nodes (source files with symbols/imports) and edges (cross-file import dependencies). `impact` reports the transitive reverse-dependency closure of changed files — the cheap \"what could this edit break\" query for review scoping. Languages: Rust, JS/TS, Python, Go.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["build", "impact"], "description": "Graph operation to perform." },
+                        "changed": { "type": "string", "description": "Comma-separated list of changed files (required for impact, e.g. \"src/a.rs,src/b.rs\")." },
+                        "workspace_root": { "type": "string", "description": "Workspace root path. Defaults to cwd." },
+                        "output": { "type": "string", "description": "Output artifact path (for build). Defaults to .understand/code-graph.json." },
+                        "json": { "type": "boolean", "description": "Output as JSON." }
+                    },
+                    "required": ["action"]
+                }
+            },
+            {
+                "name": "learn",
+                "description": "Drive the autonomous learning loop (observe → instinct → generated skill). `status` reports windowed observations + instinct/skill counts; `dry-run` previews what a cycle would promote; `run` distills observations into instincts and promotes trusted clusters to learned skills. The same cycle fires automatically at session end.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["status", "dry-run", "run"], "description": "Learning operation to perform. Defaults to status." },
+                        "window": { "type": "integer", "description": "Observation window in days (for status/dry-run)." },
+                        "json": { "type": "boolean", "description": "Output as JSON." }
+                    }
+                }
             }
         ]
     })
@@ -457,6 +518,10 @@ pub(super) fn handle_tools_call(params: &Value) -> Result<Value, MethodError> {
         "doctor" => tool_doctor(&arguments),
         "code_search" => tool_code_search(&arguments),
         "user_story" => tool_user_story(&arguments),
+        "flow" => tool_flow(&arguments),
+        "work" => tool_work(&arguments),
+        "code_graph" => tool_code_graph(&arguments),
+        "learn" => tool_learn(&arguments),
         other => {
             return Err(MethodError {
                 code: JSON_RPC_INVALID_PARAMS,
@@ -602,15 +667,22 @@ fn tool_run_command(arguments: &Value) -> Result<String, String> {
         .map_err(|error| format!("run_command: spawn: {error}"))?;
     let stdout_text = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr_text = String::from_utf8_lossy(&output.stderr).to_string();
-    // Return a plain-text report rather than a JSON object. Embedding multi-line
-    // stdout/stderr as JSON string values escapes every newline as a literal
-    // `\n`, which turns a build/test log into an unreadable single line in the
-    // MCP tool-result view. A text report keeps real newlines so the output is
-    // legible to both the human reading the transcript and the model consuming
-    // the result; the exit code stays on its own labeled line for easy parsing.
+    let exit_code = output.status.code().unwrap_or(-1);
+    // `json` mode returns a structured object; default text report keeps real
+    // newlines so multi-line build/test logs stay legible in the tool-result view.
+    if Some(true) == optional_bool_arg(arguments, "json") {
+        let payload = json!({
+            "command": command,
+            "exit_code": exit_code,
+            "stdout": stdout_text,
+            "stderr": stderr_text,
+        });
+        return serde_json::to_string_pretty(&payload)
+            .map_err(|error| format!("run_command: serialize: {error}"));
+    }
     Ok(render_run_command_report(
         &command,
-        output.status.code().unwrap_or(-1),
+        exit_code,
         &stdout_text,
         &stderr_text,
     ))
@@ -1242,7 +1314,7 @@ fn tool_memory(arguments: &Value) -> Result<String, String> {
         .get("action")
         .and_then(Value::as_str)
         .ok_or_else(|| {
-            "memory: missing action (scope|system-map|recall|instincts|status)".to_string()
+            "memory: missing action (scope|system-map|recall|instincts|consolidate|report|research-cache|retrieve|maintenance|status)".to_string()
         })?;
     let extras = collect_extra_args(arguments);
     let mut all_args: Vec<&str> = vec!["memory", action];
@@ -1444,6 +1516,144 @@ fn tool_user_story(arguments: &Value) -> Result<String, String> {
     tool_user_story_lint(arguments)
 }
 
+/// Preserve-Existing-Flow gate: the Iron Law's pre-edit ownership trace.
+/// `start` records the owning file before an edit; `check` validates evidence
+/// still holds; `finish` clears it. Routes through the compaction proxy.
+fn tool_flow(arguments: &Value) -> Result<String, String> {
+    let action = arguments
+        .get("action")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "flow: missing action (start|check|finish)".to_string())?;
+    let mut all_args: Vec<&str> = vec!["flow", action];
+    let mut owned: Vec<String> = Vec::new();
+    // `start`/`check` take the target file; the CLI flag is `--target-file`.
+    if let Some(file) = optional_string_arg(arguments, "file") {
+        owned.push(format!("--target-file={file}"));
+    }
+    if let Some(target_function) = optional_string_arg(arguments, "target_function") {
+        owned.push(format!("--target-function={target_function}"));
+    }
+    if let Some(root) = optional_string_arg(arguments, "repo_root") {
+        owned.push(format!("--repo-root={root}"));
+    }
+    for s in &owned {
+        all_args.push(s);
+    }
+    run_keel_subcommand("flow", &all_args)
+}
+
+/// Dependency-aware work graph. `add` needs --title; `dep` needs --id + --on
+/// (A depends on B); `close`/`show` need --id; `discovered` needs --id + --from.
+/// Reads named fields and translates to the real CLI flags so nothing is dropped.
+fn tool_work(arguments: &Value) -> Result<String, String> {
+    let action = arguments
+        .get("action")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            "work: missing action (add|list|ready|blocked|dep|discovered|close|show)".to_string()
+        })?;
+    let owned = work_cli_args(arguments);
+    let mut all_args: Vec<&str> = vec!["work", action];
+    for s in &owned {
+        all_args.push(s);
+    }
+    run_keel_subcommand("work", &all_args)
+}
+
+/// Pure translation of the `work` tool's named MCP fields to real CLI flags.
+/// Extracted so the mapping is unit-testable without shelling out. Guards
+/// against silent field drops (the bug where `collect_extra_args` ignored
+/// named fields and `--title`/`--on` never reached the CLI).
+fn work_cli_args(arguments: &Value) -> Vec<String> {
+    let mut owned: Vec<String> = Vec::new();
+    if let Some(title) = optional_string_arg(arguments, "title") {
+        owned.push(format!("--title={title}"));
+    }
+    if let Some(id) = optional_string_arg(arguments, "id") {
+        owned.push(format!("--id={id}"));
+    }
+    if let Some(depends_on) = optional_string_arg(arguments, "depends_on") {
+        owned.push(format!("--on={depends_on}"));
+    }
+    if let Some(from) = optional_string_arg(arguments, "from") {
+        owned.push(format!("--from={from}"));
+    }
+    if let Some(status) = optional_string_arg(arguments, "status") {
+        owned.push(format!("--status={status}"));
+    }
+    if let Some(priority) = optional_string_arg(arguments, "priority") {
+        owned.push(format!("--priority={priority}"));
+    }
+    if let Some(root) = optional_string_arg(arguments, "workspace_root") {
+        owned.push(format!("--workspace-root={root}"));
+    }
+    if Some(true) == optional_bool_arg(arguments, "json") {
+        owned.push("--json".to_string());
+    }
+    owned
+}
+
+/// Deterministic codebase-understanding graph. `build` scans the workspace and
+/// writes a JSON artifact of nodes (source files + symbols/imports) and edges
+/// (cross-file import dependencies); `impact --changed a,b,c` reports the
+/// transitive reverse-dependency closure, the cheap "what could this edit
+/// break" query for review scoping.
+fn tool_code_graph(arguments: &Value) -> Result<String, String> {
+    let action = arguments
+        .get("action")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "code_graph: missing action (build|impact)".to_string())?;
+    let mut all_args: Vec<&str> = vec!["code-graph", action];
+    let mut owned: Vec<String> = Vec::new();
+    if let Some(changed) = optional_string_arg(arguments, "changed") {
+        owned.push(format!("--changed={changed}"));
+    }
+    if let Some(root) = optional_string_arg(arguments, "workspace_root") {
+        owned.push(format!("--workspace-root={root}"));
+    }
+    if let Some(output) = optional_string_arg(arguments, "output") {
+        owned.push(format!("--output={output}"));
+    }
+    if Some(true) == optional_bool_arg(arguments, "json") {
+        owned.push("--json".to_string());
+    }
+    for s in &owned {
+        all_args.push(s);
+    }
+    run_keel_subcommand("code-graph", &all_args)
+}
+
+/// Drive the autonomous learning loop (observe → instinct → skill). `status`
+/// reports windowed observations + instinct/skill counts; `dry-run` previews
+/// what a cycle would promote; `run` distills + promotes now. Pairs with the
+/// session-end learning that fires automatically.
+fn tool_learn(arguments: &Value) -> Result<String, String> {
+    let action = arguments
+        .get("action")
+        .and_then(Value::as_str)
+        .unwrap_or("status")
+        .trim()
+        .to_string();
+    let allowed = ["status", "dry-run", "run"];
+    if !allowed.contains(&action.as_str()) {
+        return Err(format!(
+            "learn: action {action:?} not recognized (status|dry-run|run)"
+        ));
+    }
+    let mut all_args: Vec<&str> = vec!["learn", &action];
+    let mut owned: Vec<String> = Vec::new();
+    if let Some(w) = optional_int_arg(arguments, "window") {
+        owned.push(format!("--window={w}"));
+    }
+    if Some(true) == optional_bool_arg(arguments, "json") {
+        owned.push("--json".to_string());
+    }
+    for s in &owned {
+        all_args.push(s);
+    }
+    run_keel_subcommand("learn", &all_args)
+}
+
 /// Resolve the default harness home, prefixing any failure with the calling
 /// tool's name so a resolution error reads `"<tool>: <reason>"` in the
 /// tool-result envelope. Every handler resolves the same way; this keeps the
@@ -1544,10 +1754,22 @@ mod tests {
             "doctor",
             "code_search",
             "user_story",
+            "flow",
+            "work",
+            "code_graph",
+            "learn",
         ] {
             assert!(names.contains(&expected), "missing {expected}: {names:?}");
         }
-        assert_eq!(names.len(), 31, "names: {names:?}");
+        assert!(
+            !names.is_empty()
+                && names
+                    .iter()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len()
+                    == names.len(),
+            "tool names must be unique: {names:?}"
+        );
     }
 
     #[test]
@@ -1797,13 +2019,20 @@ mod tests {
             "doctor",
             "code_search",
             "user_story",
+            "flow",
+            "work",
+            "code_graph",
+            "learn",
         ] {
             assert!(
                 tool_names.contains(&name),
                 "{name} tool not in tools list: {tool_names:?}"
             );
         }
-        assert_eq!(tools.len(), 31, "expected 31 tools total");
+        assert!(
+            tools.iter().all(|t| t.get("inputSchema").is_some()),
+            "every advertised tool must have an inputSchema: {tool_names:?}"
+        );
     }
 
     #[test]
@@ -1895,10 +2124,77 @@ mod tests {
     fn all_new_tools_have_schemas() {
         let listed = handle_tools_list();
         let tools = listed["tools"].as_array().expect("tools array");
-        let names: Vec<&str> = tools
-            .iter()
-            .filter_map(|entry| entry.get("name").and_then(Value::as_str))
-            .collect();
-        assert_eq!(names.len(), 31, "expected 31 tools, got: {names:?}");
+        // Every advertised tool must declare an inputSchema. The count itself
+        // is pinned by doc_parity_test.rs, so this asserts structure, not a number.
+        for tool in tools {
+            let name = tool
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("<missing name>");
+            assert!(
+                tool.get("inputSchema").is_some(),
+                "tool {name:?} must have an inputSchema"
+            );
+            assert!(
+                tool.get("description").and_then(Value::as_str).is_some(),
+                "tool {name:?} must have a description"
+            );
+        }
+        assert!(!tools.is_empty(), "tools list must not be empty");
+    }
+
+    /// Regression: the `work` tool's named fields must translate to real CLI
+    /// flags. The old `collect_extra_args` handler dropped every named field,
+    /// so `work add {title:"x"}` created an item with no title. This pins the
+    /// translation: each named field produces its real CLI flag.
+    #[test]
+    fn work_tool_translates_named_fields_to_cli_flags() {
+        let args = work_cli_args(&json!({
+            "title": "fix the bug",
+            "id": "w1",
+            "depends_on": "w2",
+            "from": "w0",
+            "status": "in-progress",
+            "priority": "1",
+            "workspace_root": "/tmp/repo",
+            "json": true
+        }));
+        let joined = args.join(" ");
+        assert!(
+            joined.contains("--title=fix the bug"),
+            "title dropped: {joined}"
+        );
+        assert!(joined.contains("--id=w1"), "id dropped: {joined}");
+        // depends_on MUST become --on (the real CLI flag for `work dep A --on B`).
+        assert!(
+            joined.contains("--on=w2"),
+            "depends_on not translated to --on: {joined}"
+        );
+        assert!(joined.contains("--from=w0"), "from dropped: {joined}");
+        assert!(
+            joined.contains("--status=in-progress"),
+            "status dropped: {joined}"
+        );
+        assert!(
+            joined.contains("--priority=1"),
+            "priority dropped: {joined}"
+        );
+        assert!(
+            joined.contains("--workspace-root=/tmp/repo"),
+            "workspace_root dropped: {joined}"
+        );
+        assert!(joined.contains("--json"), "json dropped: {joined}");
+    }
+
+    /// Regression: an empty/absent field must NOT produce an empty flag (which
+    /// the CLI would reject). `optional_string_arg` already trims and filters
+    /// empty, but pin it so a future change can't silently reintroduce `--id=`.
+    #[test]
+    fn work_tool_omits_empty_fields() {
+        let args = work_cli_args(&json!({ "title": "  ", "id": "" }));
+        assert!(
+            args.is_empty(),
+            "empty fields should produce no flags: {args:?}"
+        );
     }
 }

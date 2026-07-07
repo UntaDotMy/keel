@@ -162,8 +162,11 @@ skill matcher fires. The full text and the tactical rules they imply live in
 
 **Writing Discipline** governs every word you write — docs, code comments, commit/PR text, review notes, and chat replies. Write less, be accurate not impressive, lead with the point, no filler or AI tells, stay on the asked scope. Full rule in `_shared/common-discipline.md` § Writing Discipline.
 
-## Skill catalog (47 skills installed under ~/.claude/skills/)
-<!-- 47 = every skill in .claude-plugin/plugin.json. The using-keel bootstrap is a 48th first-party directory that loads at SessionStart rather than being matcher-invoked, so it is not counted here. Run `keel skill-lint` for the live verified count. -->
+## Skill catalog (every matcher-invocable skill, installed under ~/.claude/skills/)
+<!-- The count is deliberately not stated; it drifts. Every skill in .claude-plugin/plugin.json
+     is listed below; this bootstrap (`using-keel`) is the only first-party skill NOT in the
+     manifest (it loads at SessionStart). The structural invariant (disk == manifest + 1) is
+     asserted by tests/doc_parity_test.rs. Run `keel skill-lint` for the live verified count. -->
 
 
 Source: each `<name>/SKILL.md` in this repo. Use the Skill tool with the bare
@@ -175,6 +178,7 @@ separate skill directory — it routes to `reviewer`.
 - `software-development-life-cycle` — Cross-domain planning, architecture framing, multi-phase delivery sequencing.
 - `web-development-life-cycle` — Web architecture, quality, and production delivery (Core Web Vitals, SEO, accessibility).
 - `mobile-development-life-cycle` — Mobile architecture, quality, and release (Android/iOS lifecycle, store submission).
+- `dart-and-flutter-expert` — Dart & Flutter: widget architecture (pure `build`, `const` constructors), state management (Provider/Riverpod/Bloc), jank diagnosis (`ListView.builder`, `RepaintBoundary`), isolates for >16ms work, null-safety without `!`, pubspec hygiene, platform channels, Flutter web/desktop.
 - `backend-and-data-architecture` — Backend systems, API design, and data engineering (schemas, messaging, microservice boundaries).
 - `cloud-and-devops-expert` — Cloud infrastructure, CI/CD, and DevOps (IaC, container orchestration, progressive delivery).
 - `qa-and-automation-engineer` — QA, automated testing, and release reliability (Smoke → Functional → Integration → UI → Load → Stress → Security ladder).
@@ -200,6 +204,7 @@ separate skill directory — it routes to `reviewer`.
 - `compounding-knowledge` — Capture each solved problem as a durable, deduped, discoverable solution note (problem/root-cause/solution/evidence) wired into the project's CLAUDE.md/AGENTS.md pointers so future work starts ahead. The deliberate, human-readable counterpart to the automatic learn loop.
 - `adversarial-security-review` — Red-team / blue-team / adjudicator pass that chains static findings into concrete attacker scenarios and adjudicates each to confirmed/refuted/needs-proof with evidence. The reasoning layer above keel config-audit's deterministic scan.
 - `ui-design-systems-and-responsive-interfaces` — UI systems, responsive design, accessibility (WCAG 2.1 AA).
+- `component-driven-development` — Component-Driven Development (CDD): build UI component-first (atomic → composite → page, each proven in isolation) instead of page-first. Use when scaffolding/restructuring a UI, building a component library, or setting up Storybook/widgetbook.
 - `ux-research-and-experience-strategy` — UX research and evidence-based experience design (journeys, funnels, usability).
 - `memory-status-reporter` — Human-style memory health and learning reports.
 - `api-contract-design` — REST, GraphQL, and gRPC contract evolution; breaking-change classification, error taxonomy, idempotency, pagination, and SDK migration windows.

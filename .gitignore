@@ -29,6 +29,9 @@ coverage.out
 /target/
 # Scratch build/test dir used for isolated verification runs (cargo output + logs).
 /target-test/
+# Generated code-graph artifacts (keel code-graph build output).
+/.understand/
+.understand/
 # Cargo.lock is committed for reproducible binary builds per Cargo convention.
 
 # Local assistant settings

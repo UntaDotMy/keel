@@ -432,6 +432,7 @@ mod tests {
             "FileChanged",
             "Elicitation",
             "ElicitationResult",
+            "MessageDisplay",
         ] {
             assert!(
                 event_by_name(expected).is_some(),

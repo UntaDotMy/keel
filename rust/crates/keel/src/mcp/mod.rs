@@ -22,8 +22,9 @@ use std::path::Path;
 use serde_json::{json, Value};
 
 use crate::runtime::{display_path, resolve_claude_home};
+use crate::utility::memory::system_map_reference_directory;
 use crate::utility::recall::recall_status_snapshot;
-use crate::utility::system_map::{render_system_map, sanitize_key};
+use crate::utility::system_map::render_system_map;
 
 mod tools;
 
@@ -382,12 +383,7 @@ pub(super) fn system_map_text(workspace_override: Option<&Path>) -> Result<Strin
     };
     let claude_home =
         resolve_claude_home("").map_err(|error| format!("resolve claude home: {error}"))?;
-    let workspace_slug = sanitize_key(&workspace_root.to_string_lossy());
-    let cached_map = claude_home
-        .join("memories")
-        .join("workspaces")
-        .join(&workspace_slug)
-        .join("reference")
+    let cached_map = system_map_reference_directory(&claude_home, "memory", &workspace_root)
         .join("SYSTEM_MAP.md");
     if cached_map.is_file() {
         if let Ok(text) = std::fs::read_to_string(&cached_map) {
@@ -589,10 +585,22 @@ mod tests {
             "doctor",
             "code_search",
             "user_story",
+            "flow",
+            "work",
+            "code_graph",
+            "learn",
         ] {
             assert!(names.contains(&expected), "missing {expected}: {names:?}");
         }
-        assert_eq!(names.len(), 31, "names: {names:?}");
+        assert!(
+            !names.is_empty()
+                && names
+                    .iter()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len()
+                    == names.len(),
+            "tool names must be unique: {names:?}"
+        );
     }
 
     #[test]

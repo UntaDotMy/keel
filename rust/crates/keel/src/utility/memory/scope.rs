@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use crate::args::FlagSet;
 use crate::json::{write_indented, Value};
 use crate::runtime::{display_path, resolve_claude_home, resolve_repository_root, write_text};
-use crate::utility::system_map::{render_system_map, sanitize_key};
+use crate::utility::system_map::render_system_map;
 
 use super::shared::is_help_argument;
 
@@ -91,12 +91,15 @@ fn run_scope_resolve(
         );
         return 1;
     };
-    let workspace_slug = sanitize_key(&workspace_root.to_string_lossy());
-    let workspace_directory = claude_home
-        .join("memories")
-        .join("workspaces")
-        .join(&workspace_slug);
-    let reference_directory = workspace_directory.join("reference");
+    let reference_directory = super::system_map_cmd::system_map_reference_directory(
+        &claude_home,
+        command_group,
+        &workspace_root,
+    );
+    let workspace_directory = reference_directory
+        .parent()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| reference_directory.clone());
     let system_map_path = reference_directory.join("SYSTEM_MAP.md");
     if flag_set.bool_value("create-missing") {
         if let Err(error) = fs::create_dir_all(&reference_directory) {
@@ -126,7 +129,15 @@ fn run_scope_resolve(
                 "workspaceRoot".into(),
                 Value::String(display_path(&workspace_root)),
             ),
-            ("workspaceSlug".into(), Value::String(workspace_slug)),
+            (
+                "workspaceSlug".into(),
+                Value::String(
+                    workspace_directory
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default(),
+                ),
+            ),
             (
                 "workspaceDirectory".into(),
                 Value::String(display_path(&workspace_directory)),
@@ -160,7 +171,14 @@ fn run_scope_resolve(
         "workspace_root: {}",
         display_path(&workspace_root)
     );
-    let _ = writeln!(standard_output, "workspace_slug: {workspace_slug}");
+    let _ = writeln!(
+        standard_output,
+        "workspace_slug: {}",
+        workspace_directory
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default()
+    );
     let _ = writeln!(
         standard_output,
         "workspace_directory: {}",

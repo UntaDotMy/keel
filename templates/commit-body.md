@@ -7,10 +7,12 @@ Side Effects: None.
 -->
 # Commit Body Template
 
-Subject line (strictly enforced): `<category>: <FEATURE>: <short information>`
-- `<category>` (lowercase): add | config | refactor | wip | fix | docs
+Subject line (strictly enforced): `<Category>: <FEATURE>: <short information>`
+- `<Category>` (Title Case): Add | Config | Refactor | Wip | Fix | Docs
 - `<FEATURE>` (uppercase component): e.g. RGB, LED, ARGB, SENSOR
-- Example: `wip: RGB: Build light effect mode (multi color)`
+- Example: `Wip: RGB: Build light effect mode (multi color)`
+
+Note: the commit subject uses colons (`Add: RGB: sync all`); the branch name uses a slash (`add/RGB`). Never mix the two.
 
 Problem
 <Only include when the diff fixes a concrete problem.>

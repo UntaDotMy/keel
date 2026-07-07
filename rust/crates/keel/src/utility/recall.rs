@@ -607,7 +607,7 @@ fn clean_query_tokens(raw_query: &str) -> Vec<String> {
 /// default behaviour is "all words must appear, in any order, with prefix
 /// match". This intentionally hides FTS5 syntax from the caller; advanced raw
 /// queries can be added later if there's demand.
-pub fn build_fts_query(raw_query: &str) -> Option<String> {
+fn build_fts_query(raw_query: &str) -> Option<String> {
     let tokens = clean_query_tokens(raw_query);
     if tokens.is_empty() {
         None
@@ -630,7 +630,7 @@ pub fn build_fts_query(raw_query: &str) -> Option<String> {
 /// Returns `None` for a single token: with one term, `OR` and `AND` produce an
 /// identical FTS5 expression, so the relaxed stage would just repeat the exact
 /// stage. Skipping it keeps the cascade from running a redundant query.
-pub fn build_relaxed_fts_query(raw_query: &str) -> Option<String> {
+fn build_relaxed_fts_query(raw_query: &str) -> Option<String> {
     let tokens = clean_query_tokens(raw_query);
     if tokens.len() < 2 {
         return None;
@@ -763,7 +763,7 @@ pub fn recall_status_snapshot(claude_home: &Path) -> Result<RecallStatusSnapshot
     })
 }
 
-pub fn default_search_roots(claude_home: &Path) -> Vec<PathBuf> {
+fn default_search_roots(claude_home: &Path) -> Vec<PathBuf> {
     DEFAULT_RECALL_ROOTS
         .iter()
         .map(|name| claude_home.join(name))
@@ -1842,7 +1842,7 @@ static VEC_EXTENSION_REGISTERED: std::sync::Once = std::sync::Once::new();
 /// C entry point is declared with no args in the FFI binding but the
 /// auto-extension slot expects the standard `fn(*mut c_void) -> c_int` shape.
 #[cfg(feature = "semantic")]
-pub fn ensure_vec_extension_registered() {
+fn ensure_vec_extension_registered() {
     type ExtensionInit = unsafe extern "C" fn(
         *mut rusqlite::ffi::sqlite3,
         *mut *mut std::os::raw::c_char,
@@ -1859,7 +1859,7 @@ pub fn ensure_vec_extension_registered() {
 /// stores one 384-dim float vector per indexed memory path, keyed by the same
 /// absolute path string the FTS5 `documents` table uses.
 #[cfg(feature = "semantic")]
-pub fn ensure_vec_schema(connection: &Connection) -> Result<(), String> {
+fn ensure_vec_schema(connection: &Connection) -> Result<(), String> {
     ensure_vec_extension_registered();
     connection
         .execute_batch(&format!(
@@ -1885,11 +1885,7 @@ fn serialize_f32_blob(vector: &[f32]) -> Vec<u8> {
 /// Upsert a document's vector. Placeholder Phase 1 callers pass a zero vector;
 /// Phase 2 replaces it with a real candle embedding.
 #[cfg(feature = "semantic")]
-pub fn upsert_doc_vector(
-    connection: &Connection,
-    path: &str,
-    vector: &[f32],
-) -> Result<(), String> {
+fn upsert_doc_vector(connection: &Connection, path: &str, vector: &[f32]) -> Result<(), String> {
     connection
         .execute(
             "INSERT OR REPLACE INTO vec_items(path, embedding) VALUES (?1, ?2)",
@@ -1901,7 +1897,7 @@ pub fn upsert_doc_vector(
 
 /// Drop a document's vector when the file vanishes from disk.
 #[cfg(feature = "semantic")]
-pub fn delete_doc_vector(connection: &Connection, path: &str) -> Result<(), String> {
+fn delete_doc_vector(connection: &Connection, path: &str) -> Result<(), String> {
     connection
         .execute("DELETE FROM vec_items WHERE path = ?1", params![path])
         .map_err(|database_error| format!("delete vec_items: {database_error}"))?;
@@ -1912,7 +1908,7 @@ pub fn delete_doc_vector(connection: &Connection, path: &str) -> Result<(), Stri
 /// nearest-first. `distance` is sqlite-vec's L2 distance (lower is nearer).
 /// Wired into the recall cascade's vector stage (Phase 3).
 #[cfg(feature = "semantic")]
-pub fn query_vector_index(
+fn query_vector_index(
     connection: &Connection,
     query_vector: &[f32],
     limit: usize,
@@ -1945,7 +1941,7 @@ pub fn query_vector_index(
 /// Count of vectors currently stored. Surfaced by `recall status` when the
 /// `semantic` feature is compiled in.
 #[cfg(feature = "semantic")]
-pub fn vector_count(connection: &Connection) -> Result<u64, String> {
+fn vector_count(connection: &Connection) -> Result<u64, String> {
     connection
         .query_row("SELECT COUNT(*) FROM vec_items", [], |row| {
             row.get::<_, i64>(0)
@@ -2061,7 +2057,7 @@ fn bert_embed(
 /// `sync_recall_index` skips a document whose embed failed rather than
 /// aborting the whole reindex.
 #[cfg(feature = "semantic")]
-pub fn embed_text(text: &str) -> Result<Vec<f32>, String> {
+fn embed_text(text: &str) -> Result<Vec<f32>, String> {
     let embedder = cached_embedder()?;
     let vector = bert_embed(&embedder.model, &embedder.tokenizer, text)
         .map_err(|error| format!("embed: {error}"))?;

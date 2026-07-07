@@ -189,13 +189,9 @@ fn run_system_map_show(
         );
         return 1;
     };
-    let workspace_slug = sanitize_key(&workspace_root.to_string_lossy());
-    let system_map_path = claude_home
-        .join("memories")
-        .join("workspaces")
-        .join(&workspace_slug)
-        .join("reference")
-        .join("SYSTEM_MAP.md");
+    let system_map_path =
+        system_map_reference_directory(&claude_home, command_group, &workspace_root)
+            .join("SYSTEM_MAP.md");
     if !system_map_path.is_file() {
         let _ = writeln!(
             standard_error,
