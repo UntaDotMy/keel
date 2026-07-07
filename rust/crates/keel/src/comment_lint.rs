@@ -7,8 +7,8 @@
 use std::path::Path;
 
 use keel_professionaltext::{
-    comment_syntax_for_path, has_blocking_comment_findings, lint_code_comments, CommentFinding,
-    CommentSyntax,
+    comment_syntax_for_path, has_blocking_comment_findings, lint_code_comments, lint_prose,
+    CommentFinding, CommentSyntax,
 };
 
 use crate::runtime::run_command;
@@ -55,6 +55,40 @@ pub fn lint_working_comments(repo_root: &Path) -> Vec<FileCommentFinding> {
         _ => return Vec::new(),
     };
     scan_unified_diff(&diff)
+}
+
+/// Lint the prose style (AI-slop, em-dash, hype, first-person, chatty) of added
+/// lines in markdown/doc files between `base_ref` and HEAD. Pre-existing prose
+/// is grandfathered (added lines only). Pairs with `lint_added_comments`.
+pub fn lint_added_prose(repo_root: &Path, base_ref: &str) -> Vec<FileCommentFinding> {
+    let range = format!("{base_ref}...HEAD");
+    let args = vec![
+        "diff".to_string(),
+        "--unified=0".to_string(),
+        "--no-color".to_string(),
+        range,
+    ];
+    let diff = match run_command("git", &args, Some(repo_root)) {
+        Ok(result) if result.code == 0 => String::from_utf8_lossy(&result.stdout).to_string(),
+        _ => return Vec::new(),
+    };
+    scan_prose_diff(&diff)
+}
+
+/// Lint the prose style of currently staged changes in markdown/doc files.
+/// Used by the pre-commit surface where there is no upstream ref.
+pub fn lint_working_prose(repo_root: &Path) -> Vec<FileCommentFinding> {
+    let args = vec![
+        "diff".to_string(),
+        "--unified=0".to_string(),
+        "--no-color".to_string(),
+        "HEAD".to_string(),
+    ];
+    let diff = match run_command("git", &args, Some(repo_root)) {
+        Ok(result) if result.code == 0 => String::from_utf8_lossy(&result.stdout).to_string(),
+        _ => return Vec::new(),
+    };
+    scan_prose_diff(&diff)
 }
 
 /// Lint every tracked source file in the tree (whole-file scan). Used by
@@ -165,6 +199,88 @@ pub fn scan_unified_diff(diff: &str) -> Vec<FileCommentFinding> {
     findings
 }
 
+/// File extensions whose body text is prose and must be gated for AI-slop.
+/// Markdown and plain-text docs. Code files are covered by `scan_unified_diff`
+/// (comment lint); this covers the prose body those skip.
+fn is_prose_file(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    lower.ends_with(".md")
+        || lower.ends_with(".markdown")
+        || lower.ends_with(".txt")
+        || lower.ends_with(".rst")
+}
+
+/// Parse a unified diff and lint the ADDED prose lines in markdown/doc files.
+/// Runs `lint_prose` (em-dash, dangling-dash, first-person, chatty, hype, AI-slop
+/// vocabulary) on each added line's hunk, so AI-generated prose is gated the same
+/// way code comments are. Pre-existing prose is grandfathered (added lines only).
+pub fn scan_prose_diff(diff: &str) -> Vec<FileCommentFinding> {
+    let mut findings = Vec::new();
+    let mut current_file = String::new();
+    let mut in_prose = false;
+    let mut added_lines: Vec<(usize, String)> = Vec::new();
+
+    let flush = |file: &str, added: &[(usize, String)], out: &mut Vec<FileCommentFinding>| {
+        if added.is_empty() || !is_prose_file(file) {
+            return;
+        }
+        let mut joined = String::new();
+        let mut base_line = 0usize;
+        for (i, (line_no, text)) in added.iter().enumerate() {
+            if i == 0 {
+                base_line = *line_no;
+            }
+            if !joined.is_empty() {
+                joined.push('\n');
+            }
+            joined.push_str(text);
+        }
+        for prose_finding in lint_prose(&joined, base_line) {
+            out.push(FileCommentFinding {
+                file: file.to_string(),
+                line: prose_finding.line,
+                id: prose_finding.id,
+                severity: prose_finding.severity,
+                message: prose_finding.message,
+            });
+        }
+    };
+
+    let mut new_line_cursor = 0usize;
+    for line in diff.lines() {
+        if let Some(path) = line.strip_prefix("+++ b/") {
+            flush(&current_file, &added_lines, &mut findings);
+            current_file = path.trim().to_string();
+            in_prose = is_prose_file(&current_file);
+            added_lines.clear();
+            continue;
+        }
+        if line.starts_with("@@") {
+            if let Some(rest) = line.split("@@").nth(1) {
+                if let Some(start) = parse_hunk_new_start(rest) {
+                    new_line_cursor = start;
+                }
+            }
+            continue;
+        }
+        if let Some(added) = line.strip_prefix('+') {
+            if !added.starts_with("+++") && in_prose {
+                added_lines.push((new_line_cursor, added.to_string()));
+            }
+            new_line_cursor += 1;
+        } else if !line.starts_with('-') {
+            new_line_cursor += 1;
+        }
+    }
+    flush(&current_file, &added_lines, &mut findings);
+    findings
+}
+
+/// True when any prose finding in the set is blocking (high severity).
+pub fn has_blocking_prose(findings: &[FileCommentFinding]) -> bool {
+    findings.iter().any(|f| f.severity == "high")
+}
+
 /// Attach a file path to an engine finding, mapping it into a located result.
 fn promote(file: &str, finding: CommentFinding) -> FileCommentFinding {
     FileCommentFinding {
@@ -264,5 +380,49 @@ mod tests {
         let diff = "+++ b/src/ok.rs\n@@ -0,0 +5,3 @@\n+// validate the token\n+// before the insert\n+foo();\n";
         let findings = scan_unified_diff(diff);
         assert!(findings.is_empty(), "expected clean, got {findings:?}");
+    }
+
+    #[test]
+    fn prose_diff_catches_ai_slop_in_markdown() {
+        let diff = "+++ b/docs/guide.md\n@@ -0,0 +1,2 @@\n+Let's delve into how we leverage this.\n+This is robust — and seamless.\n";
+        let findings = scan_prose_diff(diff);
+        let ids: Vec<&str> = findings.iter().map(|f| f.id.as_str()).collect();
+        assert!(
+            ids.contains(&"prose-ai-slop"),
+            "slop not caught: {findings:?}"
+        );
+        assert!(
+            ids.contains(&"prose-em-dash"),
+            "em-dash not caught: {findings:?}"
+        );
+        assert!(ids.contains(&"prose-hype"), "hype not caught: {findings:?}");
+        assert!(has_blocking_prose(&findings), "slop must be blocking");
+    }
+
+    #[test]
+    fn prose_diff_skips_code_files() {
+        // A .rs file with slop words in a comment is NOT prose-linted here
+        // (it's covered by scan_unified_diff's comment lint, not prose lint).
+        let diff = "+++ b/src/x.rs\n@@ -0,0 +1,1 @@\n+// delve into the leverage\n";
+        let findings = scan_prose_diff(diff);
+        assert!(
+            findings.is_empty(),
+            "code file should not be prose-linted: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn prose_diff_catches_chatty_and_first_person() {
+        let diff = "+++ b/README.md\n@@ -0,0 +1,1 @@\n+Thanks for reading! We hope this helps.\n";
+        let findings = scan_prose_diff(diff);
+        let ids: Vec<&str> = findings.iter().map(|f| f.id.as_str()).collect();
+        assert!(
+            ids.contains(&"prose-chatty"),
+            "chatty not caught: {findings:?}"
+        );
+        assert!(
+            ids.contains(&"prose-first-person"),
+            "first-person not caught: {findings:?}"
+        );
     }
 }

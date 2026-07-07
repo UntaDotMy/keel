@@ -53,6 +53,30 @@ fn hype_pattern() -> &'static Regex {
     })
 }
 
+/// AI-slop vocabulary: the strongest tells that text was model-generated. These
+/// words/phrases rarely appear in senior-engineer prose but dominate LLM output.
+/// Matched as whole words, case-insensitive. Add terms conservatively: a term
+/// belongs here only if its presence in technical prose is almost always AI slop.
+fn slop_pattern() -> &'static Regex {
+    static PATTERN: OnceLock<Regex> = OnceLock::new();
+    PATTERN.get_or_init(|| {
+        Regex::new(
+            r"(?i)\b(delve|delves|delving|leverage|leveraging|streamline|streamlining\
+            |embark|embarking|navigate|navigating|realm|tapestry|intricate|nuanced\
+            |it's worth noting|worth noting|it is worth noting\
+            |in today's|in the world of|in the realm of\
+            |ever-evolving|ever-evolve|game-changer|game-changing\
+            |unlock|unlocking|unleash|unleashing\
+            |cutting-edge|bleeding-edge|state-of-the-art\
+            |holistic|holistically|synergy|synergies\
+            |paving the way|paves the way\
+            |when it comes to|at the end of the day\
+            |landscape|paradigm|ecosystem)\b",
+        )
+        .expect("slop pattern compiles")
+    })
+}
+
 pub fn lint_message(message_text: &str, options: LintOptions) -> Vec<Finding> {
     let mut findings: Vec<Finding> = Vec::new();
     let trimmed_message = message_text.trim();
@@ -286,6 +310,89 @@ pub fn has_blocking_comment_findings(findings: &[CommentFinding]) -> bool {
     findings.iter().any(|finding| finding.severity == "high")
 }
 
+/// One prose-wording finding located at a 1-based line in a markdown/doc file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProseFinding {
+    pub line: usize,
+    pub id: String,
+    pub severity: String,
+    pub message: String,
+}
+
+/// Lint prose (markdown, docs, any generated text) for AI-slop and unprofessional
+/// wording. Unlike `lint_code_comments` (which only lints comment markers), this
+/// lints the body text itself: every non-empty line is checked against the em-dash,
+/// dangling-dash, first-person, chatty, hype, and AI-slop-vocabulary rules.
+///
+/// `line_base` offsets the reported line numbers (use 1 for whole-file scans; the
+/// diff-scoped caller passes the hunk's starting line so findings point at real
+/// post-merge lines).
+pub fn lint_prose(source: &str, line_base: usize) -> Vec<ProseFinding> {
+    let mut findings = Vec::new();
+    for (offset, raw) in source.lines().enumerate() {
+        let text = raw.trim();
+        if text.is_empty() {
+            continue;
+        }
+        let report_line = line_base + offset;
+        if text.contains('\u{2014}') || text.contains('\u{2013}') {
+            findings.push(ProseFinding {
+                line: report_line,
+                id: "prose-em-dash".into(),
+                severity: "high".into(),
+                message: "Replace em/en dash with a period or comma; it reads as AI-generated."
+                    .into(),
+            });
+        }
+        if dangling_dash_pattern().is_match(text) {
+            findings.push(ProseFinding {
+                line: report_line,
+                id: "prose-dangling-dash".into(),
+                severity: "medium".into(),
+                message: "Avoid ' - ' asides; split into a short sentence.".into(),
+            });
+        }
+        if first_person_pattern().is_match(text) {
+            findings.push(ProseFinding {
+                line: report_line,
+                id: "prose-first-person".into(),
+                severity: "medium".into(),
+                message: "Drop first-person wording; state the facts.".into(),
+            });
+        }
+        if chatty_pattern().is_match(text) {
+            findings.push(ProseFinding {
+                line: report_line,
+                id: "prose-chatty".into(),
+                severity: "medium".into(),
+                message: "Drop chatty filler; keep the prose factual.".into(),
+            });
+        }
+        if hype_pattern().is_match(text) {
+            findings.push(ProseFinding {
+                line: report_line,
+                id: "prose-hype".into(),
+                severity: "medium".into(),
+                message: "Drop hype words; describe the thing plainly.".into(),
+            });
+        }
+        if slop_pattern().is_match(text) {
+            findings.push(ProseFinding {
+                line: report_line,
+                id: "prose-ai-slop".into(),
+                severity: "high".into(),
+                message: "Drop AI-slop vocabulary; rewrite in plain technical prose.".into(),
+            });
+        }
+    }
+    findings
+}
+
+/// True when any prose finding is blocking (high severity).
+pub fn has_blocking_prose_findings(findings: &[ProseFinding]) -> bool {
+    findings.iter().any(|finding| finding.severity == "high")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -439,5 +546,66 @@ mod tests {
             severity: "high".into(),
             message: "m".into(),
         }]));
+    }
+
+    #[test]
+    fn prose_lint_catches_ai_slop_in_markdown_body() {
+        let md = "# Guide\n\nLet's delve into how we leverage this robust ecosystem.\n";
+        let findings = lint_prose(md, 1);
+        let ids: Vec<&str> = findings.iter().map(|f| f.id.as_str()).collect();
+        assert!(
+            ids.contains(&"prose-ai-slop"),
+            "slop not caught: {findings:?}"
+        );
+        assert!(ids.contains(&"prose-hype"), "hype not caught: {findings:?}");
+        assert!(
+            ids.contains(&"prose-first-person"),
+            "first-person not caught: {findings:?}"
+        );
+        assert!(
+            has_blocking_prose_findings(&findings),
+            "slop must be blocking"
+        );
+    }
+
+    #[test]
+    fn prose_lint_catches_em_dash_in_body_text() {
+        let md = "This is a feature — it does the thing.\n";
+        let findings = lint_prose(md, 1);
+        assert!(
+            findings.iter().any(|f| f.id == "prose-em-dash"),
+            "em-dash not caught: {findings:?}"
+        );
+        assert!(has_blocking_prose_findings(&findings));
+    }
+
+    #[test]
+    fn prose_lint_leaves_clean_technical_prose_untouched() {
+        let md = "# API\n\nThe endpoint returns JSON. Set the timeout to 30 seconds.\n\n## Errors\n\nReturns 404 when the resource is absent.\n";
+        let findings = lint_prose(md, 1);
+        assert!(findings.is_empty(), "clean prose flagged: {findings:?}");
+    }
+
+    #[test]
+    fn slop_pattern_catches_common_ai_tells() {
+        for word in [
+            "delve",
+            "leverage",
+            "streamline",
+            "embark",
+            "navigate",
+            "realm",
+            "tapestry",
+            "intricate",
+            "paradigm",
+            "landscape",
+            "ecosystem",
+        ] {
+            let findings = lint_prose(&format!("We {word} the system."), 1);
+            assert!(
+                findings.iter().any(|f| f.id == "prose-ai-slop"),
+                "slop word {word:?} not caught"
+            );
+        }
     }
 }

@@ -11,7 +11,7 @@ This is the keel project — native delivery rails for the harness. It provides:
 - Matching harness **subagents** for token-efficient delegation (`.claude/agents/<name>.md`) — one per specialist.
 - Internal **managed profiles** consumed by the CLI (`<name>/agents/claude.yaml`) — one per specialist.
 - Workflow routing and escalation rules
-- Review gates (pre-commit, pre-PR)
+- Review gates (pre-commit, pre-PR): a comment-style gate (over-length/chatty/em-dash code comments), a **prose-style gate** (AI-slop vocabulary, em-dash, hype, first-person, chatty wording in markdown/doc body text), and a code-slop detector (dead defensive code, over-commenting, phantom flags)
 - Professional text templates
 - Hooks wired into the harness's `settings.json` for transparent command rewriting and auto-routing
 - A Rust CLI (`keel`) for workflow, memory, command compaction, and hook installation
