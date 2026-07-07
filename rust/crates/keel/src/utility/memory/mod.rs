@@ -9,7 +9,7 @@ mod completion_gate;
 mod orchestration;
 mod routing;
 mod scope;
-mod shared;
+pub(crate) mod shared;
 mod system_map_cmd;
 mod workflow;
 mod working_brief_cmd;
@@ -18,7 +18,7 @@ mod working_brief_cmd;
 mod tests;
 
 // Re-exports used by mcp/tools.rs and utility/mod.rs
-pub use system_map_cmd::refresh_system_map;
+pub use system_map_cmd::{refresh_system_map, system_map_reference_directory};
 
 use std::io::Write;
 
@@ -269,7 +269,7 @@ fn run_consolidate_command(
     let group_dir = claude_home.join(command_group);
     let families = [
         "research-cache",
-        "entity",
+        "entities",
         "graph",
         "loop-guard",
         "instincts",

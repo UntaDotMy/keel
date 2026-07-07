@@ -1,0 +1,9 @@
+# Reasoning: repo-managed high baseline so this skill can push deeper on widget
+# architecture, state-management, isolates, and null-safety without a model pin.
+reasoning_effort: "high"
+interface:
+  display_name: "Dart & Flutter Expert"
+  short_description: "Dart/Flutter widget architecture, state management, performance, isolates, null-safety, pubspec hygiene"
+  default_prompt: "Use $dart-and-flutter-expert for Dart/Flutter work: widget architecture (pure build, const constructors), state-management selection (setState/Provider/Riverpod/Bloc), jank diagnosis (ListView.builder, RepaintBoundary, DevTools timeline), isolates for >16ms work, null-safety without ! assertions, and pubspec hygiene. Reject build-side side effects, unbounded ListViews, leaked subscriptions, and UI-thread blocking. Run dart analyze + flutter test before close. Shared execution policy is appended from the central managed catalog during install."
+policy:
+  allow_implicit_invocation: true

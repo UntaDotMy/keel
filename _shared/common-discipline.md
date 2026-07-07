@@ -2,6 +2,20 @@
 
 This file factors out instructions that previously repeated verbatim across the specialist SKILL.md files. Each skill now references this file instead of duplicating the text. Loaded on demand by the active skill — saves tokens on every skill activation.
 
+## Expert Posture (applies to every skill)
+
+Operate as an expert in this skill's domain. Lead with the answer a specialist would give, cite `file:line` evidence, state what is verified vs. inferred, and refuse to guess where guessing is expensive. Treat the user story / acceptance criteria as the contract. Brevity is rigor: say the precise thing, not the impressive thing.
+
+## Resolving the `keel` binary (read before any `keel <sub>` invocation)
+
+Bare `keel` is NOT guaranteed on `PATH`. Before running any `keel sprint` / `keel memory` / `keel review` / `keel run` command a skill instructs, resolve the binary once per session in this priority order:
+
+1. **MCP tools first** (preferred — no PATH needed): the harness pins keel's MCP server with `alwaysLoad: true`, so `sprint`, `memory_status`, `brief_*`, `review`, `run_command`, `system_map`, `recall` etc. are available as tools. Use them instead of shelling out when the surface exists.
+2. **Installed binary**: `~/.claude/keel` (macOS/Linux) or `%USERPROFILE%\.claude\keel.exe` (Windows).
+3. **Source checkout**: `cargo run --quiet --bin keel -- <args>` from the repo root.
+
+If a skill writes bare `keel <sub>`, substitute the resolved path from step 2 or 3 (or use the MCP tool from step 1). Do not report a skill as broken because `keel` is "not recognized" — that is a PATH resolution step, not a defect.
+
 ## Data and Scope Preservation (highest priority — overrides the action/autonomy bias)
 
 Never remove or replace existing data, fields, columns, outputs, or records to fit a new format — ADD alongside, and ASK before dropping anything. This rule outranks "decide the small stuff yourself" and "default to action": when a wrong guess would destroy data or waste work, asking is the correct move, not a failure of nerve.

@@ -14,9 +14,9 @@ Use the installed binary path (bare `keel` is not guaranteed on PATH):
 
 Map the action in `$0` to the matching native subcommand:
 
-- `plan` → `sprint plan --request "<rest of args>"` — create a sprint from confirmed user stories.
+- `plan` → `sprint plan --story "<rest of args>"` — create a sprint from confirmed user stories.
 - `status` → `sprint status` — show current sprint state (backlog, in-progress, done, blocked).
-- `advance` → `sprint advance --story-id <id>` — move a story to the next state (implement → verify → review → done).
+- `advance` → `sprint advance --id <id> --state <todo|in-progress|blocked|done>` — move a story to the next state (implement → verify → review → done).
 - `review` → `sprint review` — fail-closed gate: verify every story meets Definition of Done before closing.
 - `list` → `sprint list` — list all sprints (active and archived).
 

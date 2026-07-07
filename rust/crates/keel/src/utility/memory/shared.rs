@@ -8,11 +8,11 @@ use std::io::Write;
 
 use crate::json::{write_indented, Value};
 
-pub(super) fn is_help_argument(argument: &str) -> bool {
+pub(crate) fn is_help_argument(argument: &str) -> bool {
     argument == "--help" || argument == "-h" || argument == "help"
 }
 
-pub(super) fn render_workflow_json(
+pub(crate) fn render_workflow_json(
     standard_output: &mut dyn Write,
     standard_error: &mut dyn Write,
     value: &Value,

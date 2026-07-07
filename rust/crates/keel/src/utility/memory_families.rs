@@ -18,8 +18,11 @@ use std::io::Write;
 use std::path::Path;
 
 use crate::args::FlagSet;
-use crate::json::{write_indented, Value};
+use crate::json::Value;
 use crate::runtime::{display_path, resolve_claude_home};
+use crate::utility::memory::shared::{
+    is_help_argument as is_help, render_workflow_json as render_json,
+};
 use crate::utility::record_store::{field, join_lines, record_to_value, Record, RecordStore};
 use crate::utility::workflow_ledger::{current_timestamp_millis, format_timestamp_iso8601};
 
@@ -83,18 +86,6 @@ fn now_id(prefix: &str) -> (String, String) {
         format!("{prefix}-{millis:x}"),
         format_timestamp_iso8601(millis),
     )
-}
-
-fn render_json(
-    standard_output: &mut dyn Write,
-    standard_error: &mut dyn Write,
-    value: &Value,
-) -> u8 {
-    if let Err(error) = write_indented(standard_output, value) {
-        let _ = writeln!(standard_error, "render JSON: {error}");
-        return 1;
-    }
-    0
 }
 
 // ---------------------------------------------------------------------------
@@ -1612,10 +1603,6 @@ fn instincts_promote(
 // ---------------------------------------------------------------------------
 // shared helpers
 // ---------------------------------------------------------------------------
-
-fn is_help(argument: &str) -> bool {
-    matches!(argument, "help" | "--help" | "-h")
-}
 
 fn set_field(record: &mut Record, key: &str, value: String) {
     if let Some(slot) = record.iter_mut().find(|(field_key, _)| field_key == key) {
