@@ -35,7 +35,7 @@ use serde_json::{json, Value};
 use crate::runtime::{display_path, resolve_claude_home, safe_path_segment};
 use crate::utility::memory::refresh_system_map;
 use crate::utility::memory_families::family_counts;
-use crate::utility::recall::{search_recall_index, RecallSearchResult};
+use crate::utility::recall::{collapse_dashes, search_recall_index, RecallSearchResult};
 use crate::utility::skill_match::{
     match_skill_for_prompt, skill_catalog, skill_full_body, skill_inline_brief,
 };
@@ -71,7 +71,9 @@ pub(super) fn handle_tools_list() -> Value {
                     "type": "object",
                     "properties": {
                         "query": { "type": "string", "description": "Search terms; punctuation is stripped and tokens are AND-ed with prefix match." },
-                        "limit": { "type": "integer", "minimum": 1, "maximum": MAX_RECALL_LIMIT, "description": "Maximum hits (default 20)." }
+                        "limit": { "type": "integer", "minimum": 1, "maximum": MAX_RECALL_LIMIT, "description": "Maximum hits (default 20)." },
+                        "workspace": { "type": "string", "description": "Workspace slug to boost in ranking (current-project hits outrank cross-project). Auto-derived from cwd if omitted; pass explicitly to force." },
+                        "local_only": { "type": "boolean", "description": "Restrict results to the current workspace's lane only. A new project returns empty instead of flooding with cross-project hits. Default false." }
                     },
                     "required": ["query"]
                 }
@@ -574,9 +576,33 @@ fn tool_recall(arguments: &Value) -> Result<String, String> {
         }
     };
     let claude_home = tool_claude_home("recall")?;
-    let result = search_recall_index(&claude_home, &query, limit)
+    // Workspace affinity: boost current-project hits above cross-project, and
+    // slugged from cwd like system_map. `workspace` forces a slug.
+    let workspace_slug = optional_string_arg(arguments, "workspace")
+        .map(crate::utility::system_map::sanitize_key)
+        .or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .map(|cwd| crate::utility::system_map::sanitize_key(&cwd.to_string_lossy()))
+        });
+    let result = search_recall_index(&claude_home, &query, limit, workspace_slug.as_deref())
         .map_err(|error| format!("recall: {error}"))?;
-    let payload = render_recall_payload(&claude_home, &query, limit, result);
+    let mut payload = render_recall_payload(&claude_home, &query, limit, result);
+    // `local_only`: restrict to the current workspace's lane only (a new
+    // project returns empty instead of flooding with cross-project hits).
+    if Some(true) == optional_bool_arg(arguments, "local_only") {
+        if let Some(slug) = &workspace_slug {
+            let slug_norm = collapse_dashes(&slug.to_ascii_lowercase());
+            if let Some(matches) = payload.get_mut("matches").and_then(|m| m.as_array_mut()) {
+                matches.retain(|hit| {
+                    hit.get("path")
+                        .and_then(|p| p.as_str())
+                        .map(|p| collapse_dashes(&p.to_ascii_lowercase()).contains(&slug_norm))
+                        .unwrap_or(false)
+                });
+            }
+        }
+    }
     serde_json::to_string_pretty(&payload).map_err(|error| format!("recall: serialize: {error}"))
 }
 
