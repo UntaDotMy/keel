@@ -1160,6 +1160,11 @@ fn run_review_surface_command(
         flag_set.string_value("base-ref"),
         surface_name,
     ));
+    gate_results.push(prose_style_gate(
+        &repository_root,
+        flag_set.string_value("base-ref"),
+        surface_name,
+    ));
     gate_results.push(slop_gate(
         &repository_root,
         flag_set.string_value("base-ref"),
@@ -1324,6 +1329,48 @@ fn comment_style_gate(repository_root: &Path, base_ref: &str, surface_name: &str
     }
 }
 
+/// Build the prose-style gate result for a review surface. Lints added lines in
+/// markdown/doc files for AI-slop vocabulary, em-dash, hype, first-person, and
+/// chatty wording. Pre-existing prose is grandfathered (added lines only).
+/// Blocking when a high-severity finding (AI-slop or em-dash) appears.
+fn prose_style_gate(repository_root: &Path, base_ref: &str, surface_name: &str) -> GateResult {
+    let findings = if surface_name == "pre-commit" {
+        crate::comment_lint::lint_working_prose(repository_root)
+    } else {
+        let base = base_ref.trim();
+        let base = if base.is_empty() { "origin/main" } else { base };
+        crate::comment_lint::lint_added_prose(repository_root, base)
+    };
+    let blocking = crate::comment_lint::has_blocking_prose(&findings);
+    let status = if findings.is_empty() {
+        GateStatus::Pass
+    } else if blocking {
+        GateStatus::Fail
+    } else {
+        GateStatus::Warn
+    };
+    let details = if findings.is_empty() {
+        "no prose-style issues in added markdown/doc lines".to_string()
+    } else {
+        let shown: Vec<String> = findings
+            .iter()
+            .take(5)
+            .map(|f| format!("{}:{} {}", f.file, f.line, f.message))
+            .collect();
+        format!(
+            "{} prose-style issue(s) in markdown/doc: {}",
+            findings.len(),
+            shown.join("; ")
+        )
+    };
+    GateResult {
+        name: "prose_style".to_string(),
+        status,
+        blocking,
+        details: Some(details),
+    }
+}
+
 fn slop_gate(repository_root: &Path, base_ref: &str, surface_name: &str) -> GateResult {
     let findings = if surface_name == "pre-commit" {
         crate::slop_detector::lint_working_slop(repository_root)
@@ -1376,7 +1423,7 @@ fn run_review_comments_command(
             return 1;
         }
     };
-    let findings = if flag_set.bool_value("all") {
+    let mut findings = if flag_set.bool_value("all") {
         crate::comment_lint::lint_tracked_tree(&repository_root)
     } else {
         crate::comment_lint::lint_added_comments(
@@ -1384,7 +1431,16 @@ fn run_review_comments_command(
             flag_set.string_value("base-ref").trim(),
         )
     };
-    let blocking = crate::comment_lint::has_blocking(&findings);
+    // Also lint added prose (markdown/doc body text) for AI-slop, unless --all
+    // (whole-tree prose scan is out of scope for the comments surface).
+    if !flag_set.bool_value("all") {
+        findings.extend(crate::comment_lint::lint_added_prose(
+            &repository_root,
+            flag_set.string_value("base-ref").trim(),
+        ));
+    }
+    let blocking = crate::comment_lint::has_blocking(&findings)
+        || crate::comment_lint::has_blocking_prose(&findings);
     if flag_set.string_value("format") == "json" {
         let items: Vec<Value> = findings
             .iter()
