@@ -443,7 +443,11 @@ fn uninstall_removes_cursor_hooks() {
 fn install_copies_codex_mcp_config() {
     // Codex registers its MCP server via a plugin-bundled .mcp.json referenced
     // by the manifest's mcpServers field. install must copy it alongside the
-    // other plugin files so Codex loads the keel MCP server.
+    // other plugin files so Codex loads the keel MCP server. It must also
+    // rewrite the MCP `command` to the absolute keel binary path, because
+    // Codex resolves `command` via PATH only and the bare `keel` from the
+    // shipped template fails with "program not found" when ~/.claude is not on
+    // PATH (the common case on Windows, where install does not touch PATH).
     let repo = repository_root();
     let (home, claude_home) = fake_home_with_claude("keel-install-codex-mcp");
     let _ = fs::create_dir_all(home.join(".codex"));
@@ -467,6 +471,30 @@ fn install_copies_codex_mcp_config() {
     assert!(
         manifest_text.contains("\"mcpServers\""),
         "codex plugin.json manifest must reference the bundled MCP config"
+    );
+    // The MCP command must be the absolute installed-binary path, not the
+    // bare `keel` from the shipped template.
+    let mcp_text = fs::read_to_string(&mcp_json).expect("read codex .mcp.json");
+    let mcp_doc: serde_json::Value =
+        serde_json::from_str(&mcp_text).expect("codex .mcp.json must be valid JSON");
+    let command = mcp_doc
+        .get("mcp_servers")
+        .and_then(|s| s.get("keel"))
+        .and_then(|s| s.get("command"))
+        .and_then(|v| v.as_str())
+        .expect("codex .mcp.json must have mcp_servers.keel.command");
+    assert_ne!(
+        command, "keel",
+        "codex MCP command must not be the bare PATH-dependent template value"
+    );
+    // It must point at the binary under the install claude-home.
+    let exe_name = if cfg!(windows) { "keel.exe" } else { "keel" };
+    let expected_binary = claude_home.join(exe_name);
+    assert!(
+        command.contains(&expected_binary.to_string_lossy().to_string())
+            || command.ends_with(exe_name),
+        "codex MCP command `{command}` should resolve to the installed binary at {}",
+        expected_binary.display(),
     );
     let _ = fs::remove_dir_all(&home);
 }
