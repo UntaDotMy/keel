@@ -544,6 +544,9 @@ pub struct SkillCatalogEntry {
     /// How many times the matcher has selected this skill (monotonic counter
     /// under `<claude_home>/state/skill-usage/<name>.count`). 0 = never matched.
     pub use_count: u64,
+    /// Other installed skill names this skill declares as related (frontmatter
+    /// `related_skills`). Surfaced so the matcher can suggest adjacent skills.
+    pub related_skills: Vec<String>,
 }
 
 /// Enumerate every installed skill under `<claude_home>/skills`, returning the
@@ -576,6 +579,7 @@ pub fn skill_catalog(claude_home: &Path) -> Vec<SkillCatalogEntry> {
         let description = frontmatter_field(&frontmatter, "description").unwrap_or_default();
         let when_to_use = frontmatter_field(&frontmatter, "when_to_use").unwrap_or_default();
         let use_count = crate::utility::skill_usage::skill_use_count(claude_home, &dir_name);
+        let related_skills = related_skills_list(&frontmatter);
         // `name` is the directory name — the key `skill_get`/`skill_route`
         // resolve against — so a `skill_list` entry always round-trips back
         // through `skill_get`. The frontmatter `name` is display metadata only.
@@ -584,6 +588,7 @@ pub fn skill_catalog(claude_home: &Path) -> Vec<SkillCatalogEntry> {
             description,
             when_to_use,
             use_count,
+            related_skills,
         });
     }
     catalog.sort_by(|left, right| left.name.cmp(&right.name));
@@ -913,9 +918,111 @@ fn frontmatter_field(frontmatter: &str, key: &str) -> Option<String> {
     None
 }
 
+/// Parse a `related_skills` frontmatter value into a list of skill names.
+/// Accepts three forms authors actually write: YAML flow list
+/// (`[reviewer, git-expert]`), comma-separated (`reviewer, git-expert`), or a
+/// YAML block list (`- reviewer\n- git-expert`). Names are trimmed; quotes and
+/// empty entries are dropped. Returns `Vec<String>` (possibly empty).
+fn related_skills_list(frontmatter: &str) -> Vec<String> {
+    // Block-list form: the key line has an empty value, followed by `- name` lines.
+    let mut names = Vec::new();
+    let mut in_block = false;
+    for line in frontmatter.lines() {
+        let trimmed = line.trim_end();
+        if !trimmed.starts_with(char::is_whitespace) {
+            in_block = false;
+            if let Some(colon) = trimmed.find(':') {
+                if trimmed[..colon].trim() == "related_skills" {
+                    let rest = trimmed[colon + 1..].trim();
+                    if rest.is_empty() {
+                        in_block = true;
+                        continue;
+                    }
+                    // Inline value on the key line: flow list or comma string.
+                    names.extend(split_related_value(rest));
+                }
+            }
+        } else if in_block {
+            let item = trimmed.trim().trim_start_matches('-').trim();
+            if !item.is_empty() {
+                names.push(strip_quotes(item).to_string());
+            }
+        }
+    }
+    names
+}
+
+/// Split an inline `related_skills` value (`[a, b]` or `a, b`) into names.
+fn split_related_value(value: &str) -> Vec<String> {
+    let inner = value.trim().trim_start_matches('[').trim_end_matches(']');
+    inner
+        .split(',')
+        .map(|s| strip_quotes(s.trim()))
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect()
+}
+
+fn strip_quotes(value: &str) -> &str {
+    let v = value.trim();
+    if (v.starts_with('"') && v.ends_with('"') && v.len() >= 2)
+        || (v.starts_with('\'') && v.ends_with('\'') && v.len() >= 2)
+    {
+        &v[1..v.len() - 1]
+    } else {
+        v
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn related_skills_parses_flow_list() {
+        let fm = "name: x\ndescription: d.\nrelated_skills: [reviewer, git-expert]\n";
+        let names = related_skills_list(fm);
+        assert_eq!(
+            names,
+            vec!["reviewer".to_string(), "git-expert".to_string()]
+        );
+    }
+
+    #[test]
+    fn related_skills_parses_comma_string() {
+        let fm = "name: x\ndescription: d.\nrelated_skills: reviewer, git-expert\n";
+        let names = related_skills_list(fm);
+        assert_eq!(
+            names,
+            vec!["reviewer".to_string(), "git-expert".to_string()]
+        );
+    }
+
+    #[test]
+    fn related_skills_parses_block_list() {
+        let fm = "name: x\ndescription: d.\nrelated_skills:\n  - reviewer\n  - git-expert\n";
+        let names = related_skills_list(fm);
+        assert_eq!(
+            names,
+            vec!["reviewer".to_string(), "git-expert".to_string()]
+        );
+    }
+
+    #[test]
+    fn related_skills_empty_when_absent() {
+        let fm = "name: x\ndescription: d.\n";
+        assert!(related_skills_list(fm).is_empty());
+    }
+
+    #[test]
+    fn related_skills_strips_quotes() {
+        let fm = "name: x\nrelated_skills: [\"reviewer\", 'git-expert']\n";
+        let names = related_skills_list(fm);
+        assert_eq!(
+            names,
+            vec!["reviewer".to_string(), "git-expert".to_string()]
+        );
+    }
 
     #[test]
     fn resolve_skill_path_rejects_traversal_and_reserved_names() {
