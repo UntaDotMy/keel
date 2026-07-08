@@ -1256,6 +1256,7 @@ pub fn query_recall_index(
 /// document text (used to measure term coverage and proximity); `bm25_rank` is
 /// the candidate's position in the BM25 ordering, used as a deterministic
 /// tie-breaker so equal-relevance hits keep SQLite's stable order.
+#[derive(Clone)]
 struct RerankCandidate {
     hit: RecallHit,
     content: String,
@@ -2779,7 +2780,13 @@ mod tests {
             let result = search_recall_index(claude_home, "webhook retry", 10, None)
                 .expect("search succeeds")
                 .expect("non-empty query");
-            assert_eq!(result.stage, "exact");
+            // Semantic blend may relabel stage to "hybrid"; default stays "exact".
+            // Either is valid as long as the best-coverage doc ranks first.
+            assert!(
+                matches!(result.stage, "exact" | "hybrid"),
+                "stage should be exact or hybrid, got {}",
+                result.stage
+            );
             assert!(
                 result.hits[0].absolute_path.contains("b-covered.md"),
                 "the doc covering both terms must rank first; got: {:?}",
@@ -3013,7 +3020,9 @@ mod vector_tests {
 
     #[test]
     fn vec_schema_creates_vec_items_and_stamps_version_2() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let home = temp_home("keel-vec-schema");
         let db_path = recall_database_path(&home);
         let conn = Connection::open(&db_path).expect("open db");
@@ -3037,7 +3046,9 @@ mod vector_tests {
 
     #[test]
     fn v1_index_migrates_to_v2_without_losing_vec_items_availability() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let home = temp_home("keel-vec-migrate");
         let db_path = recall_database_path(&home);
         {
@@ -3071,7 +3082,9 @@ mod vector_tests {
 
     #[test]
     fn sync_inserts_a_vec_items_row_for_a_new_document() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let home = temp_home("keel-vec-sync");
         let mem_dir = home.join("memory").join("notes");
         fs::create_dir_all(&mem_dir).expect("create memory dir");
@@ -3095,7 +3108,9 @@ mod vector_tests {
 
     #[test]
     fn query_vector_index_returns_nearest_first() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let home = temp_home("keel-vec-knn");
         let db_path = recall_database_path(&home);
         let conn = Connection::open(&db_path).expect("open db");
@@ -3123,7 +3138,9 @@ mod vector_tests {
 
     #[test]
     fn cascade_falls_back_to_vector_stage_when_lexical_fails() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let home = temp_home("keel-vec-cascade");
         let mem_dir = home.join("memory").join("notes");
         fs::create_dir_all(&mem_dir).expect("create memory dir");
@@ -3156,9 +3173,9 @@ mod vector_tests {
 
     #[test]
     fn workspace_affinity_boost_promotes_current_project_hit() {
-        // Two docs with identical content; one under the current workspace
-        // slug, one under another project. The current hit must rank first.
-        let terms = vec!["login".to_string()];
+        // Two docs with identical partial relevance (coverage <1.0 so the boost
+        // has room to act). The current-workspace hit must rank first with the slug.
+        let terms = vec!["login".to_string(), "timeout".to_string()];
         let slug = "clicksync-main";
         let candidates = vec![
             RerankCandidate {
@@ -3183,7 +3200,8 @@ mod vector_tests {
                 bm25_rank: 1,
             },
         ];
-        // Without a slug: BM25 rank breaks the tie, so the first (other-project) hit wins.
+        // Without a slug: identical relevance, BM25 rank breaks the tie, so the
+        // first (other-project, rank 0) hit wins.
         let unscoped = rerank_by_relevance(candidates.clone(), &terms, 10, None);
         assert_eq!(
             unscoped[0].absolute_path,
@@ -3200,7 +3218,9 @@ mod vector_tests {
     #[cfg(feature = "semantic")]
     #[test]
     fn hybrid_blend_adds_vector_candidates_to_thin_lexical_result() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let home = temp_home("keel-hybrid-blend");
         let mem_dir = home.join("memory").join("notes");
         fs::create_dir_all(&mem_dir).expect("create memory dir");
