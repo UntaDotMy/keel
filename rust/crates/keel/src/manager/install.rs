@@ -695,10 +695,69 @@ pub(crate) fn maybe_wire_codex(
             copied += 1;
         }
     }
+    // Codex resolves the MCP `command` via PATH only. The shipped .mcp.json
+    // uses a bare `keel`, which fails with "program not found" when
+    // ~/.claude is not on PATH (the common case on Windows, where install
+    // does not modify PATH). Rewrite the copied file's command to the
+    // absolute binary path, mirroring how OpenCode/Cursor/pi template the
+    // resolved path into their MCP config at install time.
+    let mcp_target = plugin_target.join(".mcp.json");
+    let binary = installed_executable_path(claude_home);
+    let mcp_status = if mcp_target.is_file() {
+        match std::fs::read_to_string(&mcp_target)
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        {
+            Some(mut doc) => {
+                let absolute = display_path(&binary);
+                let mutated = rewrite_codex_mcp_command(&mut doc, &absolute);
+                if mutated {
+                    if let Ok(pretty) = serde_json::to_string_pretty(&doc) {
+                        let _ = write_text(&mcp_target, &pretty);
+                    }
+                }
+                if mutated {
+                    "MCP command -> absolute".to_string()
+                } else {
+                    "MCP command unchanged".to_string()
+                }
+            }
+            None => "MCP unparseable".to_string(),
+        }
+    } else {
+        "MCP absent".to_string()
+    };
     Some(format!(
-        "{copied} files -> {}",
+        "{copied} files -> {}; {mcp_status}",
         display_path(&plugin_target)
     ))
+}
+
+/// Rewrite the Codex MCP `keel` server's `command` to the absolute binary
+/// path. Handles both the wrapped `{"mcp_servers": {"keel": {...}}}` shape
+/// that keel ships and a direct `{"keel": {...}}` shape. Returns true when the
+/// document was mutated (and should be persisted), false when the command was
+/// already the absolute path or the expected structure was absent.
+fn rewrite_codex_mcp_command(doc: &mut serde_json::Value, absolute: &str) -> bool {
+    // Prefer the wrapped {"mcp_servers": {"keel": {...}}} shape keel ships;
+    // fall back to a direct {"keel": {...}} object for robustness.
+    let servers = doc.get_mut("mcp_servers").and_then(|v| v.as_object_mut());
+    let servers = match servers {
+        Some(s) => s,
+        None => match doc.as_object_mut() {
+            Some(s) => s,
+            None => return false,
+        },
+    };
+    let Some(server) = servers.get_mut("keel").and_then(|v| v.as_object_mut()) else {
+        return false;
+    };
+    let current = server.get("command").and_then(|v| v.as_str()).unwrap_or("");
+    if current == absolute {
+        return false;
+    }
+    server["command"] = serde_json::Value::String(absolute.to_string());
+    true
 }
 
 #[derive(Debug)]
@@ -3472,5 +3531,61 @@ mod tests {
 
         let _ = fs::remove_dir_all(&claude_home);
         let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn rewrite_codex_mcp_command_wrapped_shape() {
+        // The shipped .mcp.json uses the wrapped mcp_servers shape with a
+        // bare PATH-dependent `keel` command; install must rewrite it to the
+        // absolute binary path.
+        let mut doc = serde_json::json!({
+            "mcp_servers": {
+                "keel": { "command": "keel", "args": ["mcp", "serve"] }
+            }
+        });
+        let mutated = rewrite_codex_mcp_command(&mut doc, "/home/u/.claude/keel");
+        assert!(mutated, "bare keel command must be rewritten");
+        assert_eq!(
+            doc["mcp_servers"]["keel"]["command"], "/home/u/.claude/keel",
+            "command must be the absolute binary path"
+        );
+        // args must be preserved.
+        assert_eq!(doc["mcp_servers"]["keel"]["args"][0], "mcp");
+    }
+
+    #[test]
+    fn rewrite_codex_mcp_command_idempotent() {
+        // A second pass over an already-absolute command must report no
+        // mutation (idempotent) so re-install/update is a no-op.
+        let absolute = "/home/u/.claude/keel";
+        let mut doc = serde_json::json!({
+            "mcp_servers": {
+                "keel": { "command": absolute, "args": ["mcp", "serve"] }
+            }
+        });
+        let mutated = rewrite_codex_mcp_command(&mut doc, absolute);
+        assert!(!mutated, "already-absolute command must not be rewritten");
+    }
+
+    #[test]
+    fn rewrite_codex_mcp_command_direct_shape() {
+        // A direct {"keel": {...}} shape (no mcp_servers wrapper) must also be
+        // handled, for robustness against alternative Codex manifests.
+        let mut doc = serde_json::json!({
+            "keel": { "command": "keel", "args": ["mcp", "serve"] }
+        });
+        let mutated = rewrite_codex_mcp_command(&mut doc, "/x/keel.exe");
+        assert!(mutated, "direct-shape bare command must be rewritten");
+        assert_eq!(doc["keel"]["command"], "/x/keel.exe");
+    }
+
+    #[test]
+    fn rewrite_codex_mcp_command_absent_keel_is_noop() {
+        // When the keel entry is absent (or the doc is not an object), the
+        // helper must report no mutation rather than panic.
+        let mut doc = serde_json::json!({ "mcp_servers": {} });
+        assert!(!rewrite_codex_mcp_command(&mut doc, "/x/keel"));
+        let mut non_object = serde_json::json!(42);
+        assert!(!rewrite_codex_mcp_command(&mut non_object, "/x/keel"));
     }
 }
