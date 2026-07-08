@@ -22,6 +22,7 @@ pub mod session;
 pub mod skill_eval;
 pub mod skill_lint;
 pub mod skill_match;
+pub mod skill_usage;
 pub mod sprint;
 pub mod system_map;
 pub mod team;
