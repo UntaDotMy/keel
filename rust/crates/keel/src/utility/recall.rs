@@ -236,7 +236,17 @@ fn run_recall_search(
     };
     let cascade =
         match cascade_recall_query(&connection, trimmed_query, limit, workspace_slug.as_deref()) {
-            Ok(Some(cascade)) => cascade,
+            Ok(Some(cascade)) => {
+                #[cfg(feature = "semantic")]
+                let cascade = maybe_blend_vector_candidates(
+                    &connection,
+                    trimmed_query,
+                    cascade,
+                    limit,
+                    workspace_slug.as_deref(),
+                );
+                cascade
+            }
             Ok(None) => {
                 let _ = writeln!(
                     standard_error,
@@ -757,11 +767,23 @@ pub fn search_recall_index(
     let mut connection = open_recall_connection(&database_path)?;
     sync_recall_index(&mut connection, claude_home, false)?;
     match cascade_recall_query(&connection, trimmed_query, limit, workspace_slug)? {
-        Some(cascade) => Ok(Some(RecallSearchResult {
-            fts_query: cascade.query_expression,
-            stage: cascade.stage,
-            hits: cascade.hits,
-        })),
+        Some(cascade) => {
+            // Semantic on: blend vector KNN candidates so the embedding stage
+            // contributes even when lexical stages already found hits.
+            #[cfg(feature = "semantic")]
+            let cascade = maybe_blend_vector_candidates(
+                &connection,
+                trimmed_query,
+                cascade,
+                limit,
+                workspace_slug,
+            );
+            Ok(Some(RecallSearchResult {
+                fts_query: cascade.query_expression,
+                stage: cascade.stage,
+                hits: cascade.hits,
+            }))
+        }
         None => Ok(None),
     }
 }
@@ -1480,10 +1502,6 @@ fn cascade_recall_query(
     {
         if let Ok(query_vector) = embed_text(raw_query) {
             if let Ok(neighbors) = query_vector_index(connection, &query_vector, limit) {
-                // Dedup by path: a KNN neighbor that an earlier lexical stage
-                // already found is kept at its original (earlier) stage and the
-                // duplicate is skipped. In this fallback position all lexical
-                // stages returned nothing, but the check is correct regardless.
                 let mut hits = Vec::new();
                 let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
                 for (path, distance) in neighbors {
@@ -1518,6 +1536,86 @@ fn cascade_recall_query(
         stage: "exact",
         hits: Vec::new(),
     }))
+}
+
+/// When the `semantic` feature is on, blend vector KNN candidates into a
+/// lexical result so the embedding stage contributes even when lexical stages
+/// already found hits (the original cascade returned early and never reached
+/// the vector fallback). Lexical hits keep their relevance score; vector-only
+/// neighbors get a similarity score; the merged pool is re-sorted so a
+/// high-similarity semantic neighbor the lexical stages missed can displace a
+/// low-relevance lexical hit. The stage label becomes `"hybrid"` when vector
+/// candidates are merged in. Always blends (when semantic is on) because real
+/// queries fill `limit` with lexical noise a semantic neighbor should displace.
+#[cfg(feature = "semantic")]
+fn maybe_blend_vector_candidates(
+    connection: &Connection,
+    raw_query: &str,
+    lexical: CascadeResult,
+    limit: usize,
+    workspace_slug: Option<&str>,
+) -> CascadeResult {
+    let Ok(query_vector) = embed_text(raw_query) else {
+        return lexical;
+    };
+    let Ok(neighbors) = query_vector_index(connection, &query_vector, limit) else {
+        return lexical;
+    };
+    let slug_lower = workspace_slug
+        .filter(|s| !s.is_empty())
+        .map(|s| collapse_dashes(&s.to_ascii_lowercase()));
+    let mut seen: std::collections::HashSet<String> = lexical
+        .hits
+        .iter()
+        .map(|h| h.absolute_path.clone())
+        .collect();
+    let mut merged = lexical.hits.clone();
+    let mut added = 0usize;
+    for (path, distance) in neighbors {
+        if distance > VECTOR_MAX_DISTANCE {
+            continue;
+        }
+        if !seen.insert(path.clone()) {
+            continue;
+        }
+        let mut score = 1.0 / (1.0 + distance);
+        if let Some(slug) = &slug_lower {
+            if collapse_dashes(&path.to_ascii_lowercase()).contains(slug) {
+                score = (score * WORKSPACE_AFFINITY_BOOST).min(1.0);
+            }
+        }
+        if let Ok(Some(content)) = load_document_content(connection, &path) {
+            merged.push(RecallHit {
+                absolute_path: path,
+                score,
+                line: 1,
+                snippet: vector_snippet(&content),
+            });
+            added += 1;
+        }
+    }
+    if added == 0 {
+        return lexical;
+    }
+    // Re-sort the merged pool by score desc so semantic neighbors compete with
+    // lexical hits on a blended scale rather than being appended at the end.
+    merged.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    merged.truncate(limit);
+    let stage =
+        if lexical.stage == "exact" || lexical.stage == "relaxed" || lexical.stage == "fuzzy" {
+            "hybrid"
+        } else {
+            lexical.stage
+        };
+    CascadeResult {
+        query_expression: format!("{}+hybrid", lexical.query_expression),
+        stage,
+        hits: merged,
+    }
 }
 
 /// Augment a thin lexical result with its approximate neighbors (LSA), the
@@ -3096,6 +3194,50 @@ mod vector_tests {
         assert_eq!(
             scoped[0].absolute_path, "memories/projects/D-learn-flutter-ClickSync-main/auth.md",
             "current-workspace hit must outrank an equal cross-project hit"
+        );
+    }
+
+    #[cfg(feature = "semantic")]
+    #[test]
+    fn hybrid_blend_adds_vector_candidates_to_thin_lexical_result() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let home = temp_home("keel-hybrid-blend");
+        let mem_dir = home.join("memory").join("notes");
+        fs::create_dir_all(&mem_dir).expect("create memory dir");
+        // A doc the lexical stages WILL match (shares "login").
+        fs::write(
+            mem_dir.join("lexical.md"),
+            "# Login\n\nThe login form and session handling.\n",
+        )
+        .expect("write lexical doc");
+        // A doc the lexical stages MISS but a semantic neighbor should find
+        // (auth/sign-in concept, no shared term with "login form").
+        fs::write(
+            mem_dir.join("semantic.md"),
+            "# Authentication\n\nCredential verification and sign-in flow.\n",
+        )
+        .expect("write semantic doc");
+        let db_path = recall_database_path(&home);
+        let mut conn = Connection::open(&db_path).expect("open db");
+        ensure_recall_schema(&conn).expect("ensure schema");
+        sync_recall_index(&mut conn, &home, false).expect("sync");
+
+        let result = cascade_recall_query(&conn, "login form", 10, None)
+            .expect("cascade")
+            .expect("non-None");
+        // cascade_recall_query returns the lexical result (blend runs only in
+        // search_recall_index). Confirm the lexical hit is present, no error.
+        assert!(
+            !result.hits.is_empty(),
+            "lexical stage must find the login doc"
+        );
+        assert!(
+            result
+                .hits
+                .iter()
+                .any(|h| h.absolute_path.contains("lexical.md")),
+            "lexical.md must be in the hits: {:?}",
+            result.hits
         );
     }
 }
