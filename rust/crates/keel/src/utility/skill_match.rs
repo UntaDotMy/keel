@@ -104,7 +104,13 @@ pub fn match_skill_for_prompt(claude_home: &Path, prompt: &str) -> Option<SkillM
     if skills.is_empty() {
         return None;
     }
-    resolve_skill_for_prompt(prompt, &skills)
+    let resolved = resolve_skill_for_prompt(prompt, &skills);
+    // Record match-usage telemetry for skill_list. Fail-open: a write error
+    // inside record_skill_match never breaks the match path.
+    if let Some(found) = &resolved {
+        crate::utility::skill_usage::record_skill_match(claude_home, &found.name);
+    }
+    resolved
 }
 
 /// Pure two-tier resolution over an already-loaded skill corpus: the IDF
@@ -535,6 +541,9 @@ pub struct SkillCatalogEntry {
     pub name: String,
     pub description: String,
     pub when_to_use: String,
+    /// How many times the matcher has selected this skill (monotonic counter
+    /// under `<claude_home>/state/skill-usage/<name>.count`). 0 = never matched.
+    pub use_count: u64,
 }
 
 /// Enumerate every installed skill under `<claude_home>/skills`, returning the
@@ -566,6 +575,7 @@ pub fn skill_catalog(claude_home: &Path) -> Vec<SkillCatalogEntry> {
         };
         let description = frontmatter_field(&frontmatter, "description").unwrap_or_default();
         let when_to_use = frontmatter_field(&frontmatter, "when_to_use").unwrap_or_default();
+        let use_count = crate::utility::skill_usage::skill_use_count(claude_home, &dir_name);
         // `name` is the directory name — the key `skill_get`/`skill_route`
         // resolve against — so a `skill_list` entry always round-trips back
         // through `skill_get`. The frontmatter `name` is display metadata only.
@@ -573,6 +583,7 @@ pub fn skill_catalog(claude_home: &Path) -> Vec<SkillCatalogEntry> {
             name: dir_name,
             description,
             when_to_use,
+            use_count,
         });
     }
     catalog.sort_by(|left, right| left.name.cmp(&right.name));

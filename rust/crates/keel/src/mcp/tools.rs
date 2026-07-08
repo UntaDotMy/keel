@@ -817,6 +817,7 @@ fn tool_skill_list(_arguments: &Value) -> Result<String, String> {
                 "name": entry.name,
                 "description": entry.description,
                 "whenToUse": entry.when_to_use,
+                "useCount": entry.use_count,
             })
         })
         .collect();
