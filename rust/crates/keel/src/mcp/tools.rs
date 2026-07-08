@@ -762,11 +762,29 @@ fn tool_skill_route(arguments: &Value) -> Result<String, String> {
     let payload = match match_skill_for_prompt(&claude_home, &prompt) {
         Some(found) => {
             let brief = skill_inline_brief(&claude_home, &found.name);
+            // Surface related skills that are actually installed, so the agent
+            // knows adjacent skills exist without a separate skill_list call.
+            let installed: std::collections::BTreeSet<String> = skill_catalog(&claude_home)
+                .into_iter()
+                .map(|entry| entry.name)
+                .collect();
+            let related_installed: Vec<String> = skill_catalog(&claude_home)
+                .into_iter()
+                .find(|entry| entry.name == found.name)
+                .map(|entry| {
+                    entry
+                        .related_skills
+                        .into_iter()
+                        .filter(|name| installed.contains(name) && name != &found.name)
+                        .collect()
+                })
+                .unwrap_or_default();
             json!({
                 "matched": true,
                 "name": found.name,
                 "score": format!("{:.4}", found.score),
                 "brief": brief,
+                "relatedSkills": related_installed,
             })
         }
         None => json!({
@@ -818,6 +836,7 @@ fn tool_skill_list(_arguments: &Value) -> Result<String, String> {
                 "description": entry.description,
                 "whenToUse": entry.when_to_use,
                 "useCount": entry.use_count,
+                "relatedSkills": entry.related_skills,
             })
         })
         .collect();
