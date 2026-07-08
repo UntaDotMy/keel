@@ -1687,7 +1687,11 @@ pub(crate) fn session_start_context() -> String {
             context.push_str(&instinct_digest);
         }
         let synthesis = learning::project_synthesis_nudge(&claude_home, &cwd);
-        if !synthesis.trim().is_empty() {
+        // Synthesis nudge: refine a template-state skill's prose. Gated by
+        // CLAUDE_SKILLS_LEARNED_SKILL_ENRICH=off (mirrors CLAUDE_SKILLS_LEARNING=off).
+        let enrichment_enabled =
+            std::env::var("CLAUDE_SKILLS_LEARNED_SKILL_ENRICH").as_deref() != Ok("off");
+        if enrichment_enabled && !synthesis.trim().is_empty() {
             context.push_str("\n\n");
             context.push_str(&synthesis);
         }
