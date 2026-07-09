@@ -32,6 +32,7 @@ pub enum PlatformName {
     Codex,
     Pi,
     Cursor,
+    Cowork,
 }
 
 impl PlatformName {
@@ -41,6 +42,7 @@ impl PlatformName {
             "codex" => Some(Self::Codex),
             "pi" => Some(Self::Pi),
             "cursor" => Some(Self::Cursor),
+            "cowork" | "desktop" => Some(Self::Cowork),
             _ => None,
         }
     }
@@ -83,6 +85,9 @@ fn apply_overrides(
     if overrides.force.contains(&PlatformName::Cursor) {
         detected.cursor = true;
     }
+    if overrides.force.contains(&PlatformName::Cowork) {
+        detected.cowork = true;
+    }
     if overrides.skip.contains(&PlatformName::Opencode) {
         detected.opencode = false;
     }
@@ -94,6 +99,9 @@ fn apply_overrides(
     }
     if overrides.skip.contains(&PlatformName::Cursor) {
         detected.cursor = false;
+    }
+    if overrides.skip.contains(&PlatformName::Cowork) {
+        detected.cowork = false;
     }
     detected
 }
@@ -141,6 +149,9 @@ pub struct InstallSummary {
     /// Human-readable outcome of copying the Pi Agent adapter files into the
     /// project root during install, or `None` when skipped. Best-effort.
     pub pi_wiring: Option<String>,
+    /// Human-readable outcome of installing the Cowork (Claude Desktop) plugin
+    /// files, or `None` when skipped. Best-effort.
+    pub cowork_wiring: Option<String>,
 }
 
 struct FileTracker<'a> {
@@ -257,6 +268,7 @@ pub fn install_from_paths(
     let cursor_wiring = maybe_wire_cursor(repository_root, claude_home, detected.cursor);
     let codex_wiring = maybe_wire_codex(repository_root, claude_home, detected.codex);
     let pi_wiring = maybe_wire_pi(repository_root, claude_home, detected.pi);
+    let cowork_wiring = maybe_wire_cowork(repository_root, claude_home, detected.cowork);
     Ok(InstallSummary {
         synced_skills,
         synced_agents,
@@ -274,6 +286,7 @@ pub fn install_from_paths(
         cursor_wiring,
         codex_wiring,
         pi_wiring,
+        cowork_wiring,
     })
 }
 
@@ -733,6 +746,185 @@ pub(crate) fn maybe_wire_codex(
     ))
 }
 
+/// Install the Cowork (Claude Desktop) plugin files into `~/.claude/plugins/keel-cowork/`.
+pub(crate) fn maybe_wire_cowork(
+    repository_root: &Path,
+    claude_home: &Path,
+    detected: bool,
+) -> Option<String> {
+    let is_standard_home = claude_home
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name == ".claude")
+        .unwrap_or(false);
+    if !is_standard_home {
+        return None;
+    }
+    if !detected {
+        return Some("skipped (not detected)".to_string());
+    }
+
+    let home = match claude_home.parent() {
+        Some(path) => path.to_path_buf(),
+        None => return Some("skipped (no home directory)".to_string()),
+    };
+
+    let cowork_source = repository_root.join("cowork");
+    if !cowork_source.is_dir() {
+        return Some("skipped (cowork source absent)".to_string());
+    }
+
+    let plugin_dir = home.join(".claude").join("plugins").join("keel-cowork");
+    if let Err(error) = std::fs::create_dir_all(&plugin_dir) {
+        return Some(format!("plugin dir skipped ({error})"));
+    }
+
+    // Copy the cowork plugin files
+    let mut copied = 0;
+    let mut status_parts: Vec<String> = Vec::new();
+
+    for entry in [
+        "keel.ts",
+        "plugin.json",
+        "package.json",
+        "tsconfig.json",
+        "README.md",
+    ] {
+        let source = cowork_source.join(entry);
+        let target = plugin_dir.join(entry);
+        if source.is_file() && std::fs::copy(&source, &target).is_ok() {
+            copied += 1;
+        }
+    }
+
+    // Copy skills
+    let skills_source = cowork_source.join("skills");
+    let skills_target = plugin_dir.join("skills");
+    if skills_source.is_dir() {
+        if let Err(e) = copy_dir_recursive(&skills_source, &skills_target) {
+            status_parts.push(format!("skills copy skipped ({})", e));
+        } else {
+            status_parts.push("skills copied".to_string());
+        }
+    }
+
+    // Copy commands
+    let commands_source = cowork_source.join("commands");
+    let commands_target = plugin_dir.join("commands");
+    if commands_source.is_dir() {
+        if let Err(e) = copy_dir_recursive(&commands_source, &commands_target) {
+            status_parts.push(format!("commands copy skipped ({})", e));
+        } else {
+            status_parts.push("commands copied".to_string());
+        }
+    }
+
+    // Configure MCP server in settings (same as main install, but Cowork-specific)
+    let binary = installed_executable_path(claude_home);
+    let settings_path = claude_home.join("settings.json");
+
+    let mcp_entry = serde_json::json!({
+        "type": "local",
+        "command": display_path(&binary),
+        "args": ["mcp", "serve"],
+        "description": "Keel CLI tools for workflow, memory, recall, and sprint management"
+    });
+
+    let mcp_status = match merge_cowork_mcp(&settings_path, "keel", &mcp_entry) {
+        Ok(CoworkMcpResult::Added) => {
+            format!("MCP registered in {}", display_path(&settings_path))
+        }
+        Ok(CoworkMcpResult::AlreadyCurrent) => "MCP already current".to_string(),
+        Ok(CoworkMcpResult::Updated) => {
+            format!("MCP updated in {}", display_path(&settings_path))
+        }
+        Err(error) => format!("MCP skipped ({error})"),
+    };
+
+    status_parts.push(mcp_status);
+
+    if copied > 0 || !status_parts.is_empty() {
+        Some(format!(
+            "{} plugin files; {}",
+            copied,
+            status_parts.join("; ")
+        ))
+    } else {
+        Some("nothing to copy".to_string())
+    }
+}
+
+/// Copy directory recursively
+fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    if !dst.exists() {
+        std::fs::create_dir_all(dst)?;
+    }
+
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+
+        if ty.is_dir() {
+            copy_dir_recursive(&src_path, &dst_path)?;
+        } else {
+            std::fs::copy(&src_path, &dst_path)?;
+        }
+    }
+    Ok(())
+}
+
+/// Merge the `keel` entry into Cowork's settings.json under `mcpServers`.
+fn merge_cowork_mcp(
+    config_path: &Path,
+    server_key: &str,
+    entry: &serde_json::Value,
+) -> Result<CoworkMcpResult, String> {
+    let existing_text = crate::runtime::read_text_if_exists(config_path).unwrap_or_default();
+    let stripped = existing_text
+        .strip_prefix('\u{feff}')
+        .unwrap_or(&existing_text);
+    let mut document: serde_json::Value = if stripped.trim().is_empty() {
+        serde_json::json!({})
+    } else {
+        serde_json::from_str(stripped).map_err(|error| format!("parse error: {error}"))?
+    };
+
+    if document.get("mcpServers").is_none() {
+        document["mcpServers"] = serde_json::json!({});
+    }
+    let servers = document["mcpServers"]
+        .as_object_mut()
+        .ok_or("mcpServers is not an object")?;
+
+    let desired =
+        serde_json::to_string_pretty(entry).map_err(|error| format!("serialize error: {error}"))?;
+
+    if let Some(existing) = servers.get(server_key) {
+        let existing_str = serde_json::to_string_pretty(existing)
+            .map_err(|error| format!("serialize error: {error}"))?;
+        if existing_str == desired {
+            return Ok(CoworkMcpResult::AlreadyCurrent);
+        }
+        servers.insert(server_key.to_string(), entry.clone());
+        write_text(
+            config_path,
+            &serde_json::to_string_pretty(&document)
+                .map_err(|error| format!("serialize error: {error}"))?,
+        )?;
+        return Ok(CoworkMcpResult::Updated);
+    }
+
+    servers.insert(server_key.to_string(), entry.clone());
+    write_text(
+        config_path,
+        &serde_json::to_string_pretty(&document)
+            .map_err(|error| format!("serialize error: {error}"))?,
+    )?;
+    Ok(CoworkMcpResult::Added)
+}
+
 /// Rewrite the Codex MCP `keel` server's `command` to the absolute binary
 /// path. Handles both the wrapped `{"mcp_servers": {"keel": {...}}}` shape
 /// that keel ships and a direct `{"keel": {...}}` shape. Returns true when the
@@ -775,6 +967,13 @@ enum PiMcpResult {
 }
 
 enum CursorMcpResult {
+    Added,
+    AlreadyCurrent,
+    Updated,
+}
+
+#[derive(Debug)]
+enum CoworkMcpResult {
     Added,
     AlreadyCurrent,
     Updated,
@@ -1176,6 +1375,9 @@ pub fn write_install_summary(summary: &InstallSummary, output: &mut dyn Write) {
     }
     if let Some(pi_status) = &summary.pi_wiring {
         let _ = writeln!(output, "  Pi Agent wiring: {pi_status}");
+    }
+    if let Some(cowork_status) = &summary.cowork_wiring {
+        let _ = writeln!(output, "  Cowork wiring: {cowork_status}");
     }
 }
 

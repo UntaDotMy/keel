@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "keel-cowork",
+  "displayName": "Keel for Claude Desktop",
+  "version": "0.1.0",
+  "description": "Native delivery rails for Claude Desktop — managed specialist skills, subagents, hooks, review gates, and the keel CLI for workflow, memory, and command compaction.",
+  "author": {
+    "name": "UntaDotMy",
+    "url": "https://github.com/UntaDotMy/keel"
+  },
+  "homepage": "https://github.com/UntaDotMy/keel",
+  "repository": "https://github.com/UntaDotMy/keel",
+  "license": "MIT",
+  "keywords": [
+    "claude-desktop",
+    "skills",
+    "subagents",
+    "hooks",
+    "workflow",
+    "review",
+    "memory",
+    "automation"
+  ],
+  "skills": [
+    "./skills/bootstrap",
+    "./skills/using-keel"
+  ],
+  "commands": [
+    "./commands/"
+  ],
+  "mcpServers": {
+    "keel": {
+      "command": "keel",
+      "args": ["mcp", "serve"],
+      "description": "Keel CLI tools for workflow, memory, recall, and sprint management"
+    }
+  },
+  "userConfig": {
+    "review_strictness": {
+      "type": "string",
+      "title": "Review strictness",
+      "description": "How strict the reviewer gate should be: 'advisory' (nudge only), 'strict' (block on missing review), or 'off' (disabled)",
+      "default": "advisory"
+    },
+    "system_map_refresh_interval": {
+      "type": "number",
+      "title": "System map refresh interval",
+      "description": "Number of edit-class tool calls between automatic SYSTEM_MAP.md refreshes. Set to 0 to disable.",
+      "default": 10
+    },
+    "memory_retention_days": {
+      "type": "number",
+      "title": "Memory retention days",
+      "description": "Number of days to retain raw output and tool timing data before pruning.",
+      "default": 14,
+      "min": 1,
+      "max": 90
+    }
+  }
+}
