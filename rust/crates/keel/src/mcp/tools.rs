@@ -1304,7 +1304,7 @@ fn tool_review(arguments: &Value) -> Result<String, String> {
     if let Some(root) = optional_string_arg(arguments, "repo_root") {
         owned.push(format!("--repo-root={root}"));
     }
-    let mut all_args: Vec<&str> = vec!["review", action];
+    let mut all_args: Vec<&str> = vec![action];
     for s in &owned {
         all_args.push(s);
     }
@@ -1328,7 +1328,7 @@ fn tool_workflow(arguments: &Value) -> Result<String, String> {
     if let Some(p) = optional_string_arg(arguments, "proof") {
         owned.push(format!("--proof={p}"));
     }
-    let mut all_args: Vec<&str> = vec!["workflow", action];
+    let mut all_args: Vec<&str> = vec![action];
     for s in &owned {
         all_args.push(s);
     }
@@ -1344,7 +1344,7 @@ fn tool_git_workflow(arguments: &Value) -> Result<String, String> {
                 .to_string()
         })?;
     let extras = collect_extra_args(arguments);
-    let mut all_args: Vec<&str> = vec!["git-workflow", action];
+    let mut all_args: Vec<&str> = vec![action];
     let mut owned: Vec<String> = Vec::new();
     for e in &extras {
         owned.push(e.clone());
@@ -1363,7 +1363,7 @@ fn tool_memory(arguments: &Value) -> Result<String, String> {
             "memory: missing action (scope|system-map|recall|instincts|consolidate|report|research-cache|retrieve|maintenance|status)".to_string()
         })?;
     let extras = collect_extra_args(arguments);
-    let mut all_args: Vec<&str> = vec!["memory", action];
+    let mut all_args: Vec<&str> = vec![action];
     let mut owned: Vec<String> = Vec::new();
     for e in &extras {
         owned.push(e.clone());
@@ -1376,7 +1376,7 @@ fn tool_memory(arguments: &Value) -> Result<String, String> {
 
 fn tool_gain(arguments: &Value) -> Result<String, String> {
     let since = optional_string_arg(arguments, "since").unwrap_or("today");
-    let mut all_args: Vec<&str> = vec!["gain", "--since", since];
+    let mut all_args: Vec<&str> = vec!["--since", since];
     let mut owned: Vec<String> = Vec::new();
     if Some(true) == optional_bool_arg(arguments, "json") {
         owned.push("--json".to_string());
@@ -1391,7 +1391,7 @@ fn tool_raw(arguments: &Value) -> Result<String, String> {
     let action = optional_string_arg(arguments, "action");
     let raw_id = optional_string_arg(arguments, "raw_id");
     let older_than = optional_string_arg(arguments, "older_than");
-    let mut all_args: Vec<&str> = vec!["raw"];
+    let mut all_args: Vec<&str> = Vec::new();
     let mut owned: Vec<String> = Vec::new();
     match action {
         Some("list") => {
@@ -1412,13 +1412,13 @@ fn tool_raw(arguments: &Value) -> Result<String, String> {
         all_args.push(s);
     }
     if action.is_none() && raw_id.is_none() {
-        all_args = vec!["raw", "list"];
+        all_args = vec!["list"];
     }
     run_keel_subcommand("raw", &all_args)
 }
 
 fn tool_config_audit(arguments: &Value) -> Result<String, String> {
-    let mut all_args: Vec<&str> = vec!["config-audit"];
+    let mut all_args: Vec<&str> = Vec::new();
     let mut owned: Vec<String> = Vec::new();
     if let Some(root) = optional_string_arg(arguments, "repo_root") {
         owned.push(format!("--repo-root={root}"));
@@ -1430,7 +1430,7 @@ fn tool_config_audit(arguments: &Value) -> Result<String, String> {
 }
 
 fn tool_skill_lint(arguments: &Value) -> Result<String, String> {
-    let mut all_args: Vec<&str> = vec!["skill-lint"];
+    let mut all_args: Vec<&str> = Vec::new();
     let mut owned: Vec<String> = Vec::new();
     if let Some(root) = optional_string_arg(arguments, "repo_root") {
         owned.push(format!("--repo-root={root}"));
@@ -1445,7 +1445,7 @@ fn tool_skill_lint(arguments: &Value) -> Result<String, String> {
 }
 
 fn tool_telemetry(arguments: &Value) -> Result<String, String> {
-    let mut all_args: Vec<&str> = vec!["telemetry", "summary"];
+    let mut all_args: Vec<&str> = vec!["summary"];
     let mut owned: Vec<String> = Vec::new();
     if let Some(d) = optional_int_arg(arguments, "days") {
         owned.push(format!("--days={d}"));
@@ -1471,7 +1471,7 @@ fn tool_orchestration(arguments: &Value) -> Result<String, String> {
                 .to_string()
         })?;
     let extras = collect_extra_args(arguments);
-    let mut all_args: Vec<&str> = vec!["orchestration", action];
+    let mut all_args: Vec<&str> = vec![action];
     let mut owned: Vec<String> = Vec::new();
     for e in &extras {
         owned.push(e.clone());
@@ -1492,7 +1492,7 @@ fn tool_checkpoint(arguments: &Value) -> Result<String, String> {
             "checkpoint: restore is destructive — re-call with confirm:true to run it".to_string(),
         );
     }
-    let mut all_args: Vec<&str> = vec!["checkpoint", action];
+    let mut all_args: Vec<&str> = vec![action];
     let mut owned: Vec<String> = Vec::new();
     if let Some(i) = optional_string_arg(arguments, "id") {
         owned.push(format!("--id={i}"));
@@ -1507,7 +1507,7 @@ fn tool_checkpoint(arguments: &Value) -> Result<String, String> {
 }
 
 fn tool_session(arguments: &Value) -> Result<String, String> {
-    let mut all_args: Vec<&str> = vec!["session"];
+    let mut all_args: Vec<&str> = Vec::new();
     let mut owned: Vec<String> = Vec::new();
     if let Some(s) = optional_string_arg(arguments, "since") {
         owned.push(format!("--since={s}"));
@@ -1522,7 +1522,7 @@ fn tool_session(arguments: &Value) -> Result<String, String> {
 }
 
 fn tool_doctor(arguments: &Value) -> Result<String, String> {
-    let mut all_args: Vec<&str> = vec!["doctor"];
+    let mut all_args: Vec<&str> = Vec::new();
     let mut owned: Vec<String> = Vec::new();
     if let Some(root) = optional_string_arg(arguments, "repo_root") {
         owned.push(format!("--repo-root={root}"));
@@ -1543,7 +1543,7 @@ fn tool_code_search(arguments: &Value) -> Result<String, String> {
     if query.is_empty() {
         return Err("code_search: missing query".to_string());
     }
-    let mut all_args: Vec<&str> = vec!["code-search", "search"];
+    let mut all_args: Vec<&str> = vec!["search"];
     let mut owned: Vec<String> = Vec::new();
     owned.push(format!("--query={query}"));
     if let Ok(cwd) = env::current_dir() {
@@ -1570,7 +1570,7 @@ fn tool_flow(arguments: &Value) -> Result<String, String> {
         .get("action")
         .and_then(Value::as_str)
         .ok_or_else(|| "flow: missing action (start|check|finish)".to_string())?;
-    let mut all_args: Vec<&str> = vec!["flow", action];
+    let mut all_args: Vec<&str> = vec![action];
     let mut owned: Vec<String> = Vec::new();
     // `start`/`check` take the target file; the CLI flag is `--target-file`.
     if let Some(file) = optional_string_arg(arguments, "file") {
@@ -1599,7 +1599,7 @@ fn tool_work(arguments: &Value) -> Result<String, String> {
             "work: missing action (add|list|ready|blocked|dep|discovered|close|show)".to_string()
         })?;
     let owned = work_cli_args(arguments);
-    let mut all_args: Vec<&str> = vec!["work", action];
+    let mut all_args: Vec<&str> = vec![action];
     for s in &owned {
         all_args.push(s);
     }
@@ -1649,7 +1649,7 @@ fn tool_code_graph(arguments: &Value) -> Result<String, String> {
         .get("action")
         .and_then(Value::as_str)
         .ok_or_else(|| "code_graph: missing action (build|impact)".to_string())?;
-    let mut all_args: Vec<&str> = vec!["code-graph", action];
+    let mut all_args: Vec<&str> = vec![action];
     let mut owned: Vec<String> = Vec::new();
     if let Some(changed) = optional_string_arg(arguments, "changed") {
         owned.push(format!("--changed={changed}"));
@@ -1686,7 +1686,7 @@ fn tool_learn(arguments: &Value) -> Result<String, String> {
             "learn: action {action:?} not recognized (status|dry-run|run)"
         ));
     }
-    let mut all_args: Vec<&str> = vec!["learn", &action];
+    let mut all_args: Vec<&str> = vec![&action];
     let mut owned: Vec<String> = Vec::new();
     if let Some(w) = optional_int_arg(arguments, "window") {
         owned.push(format!("--window={w}"));
@@ -2241,6 +2241,53 @@ mod tests {
         assert!(
             args.is_empty(),
             "empty fields should produce no flags: {args:?}"
+        );
+    }
+
+    // Regression guards for the double-prefix bug: every `run_keel_subcommand`
+    // caller once passed the subcommand name as `all_args[0]` AND as the
+    // `subcommand` param, producing `keel memory memory status` etc. — the CLI
+    // rejected it with "Unknown <x> command: <x>" and exit 1. These tests invoke
+    // each tool with valid args through the real spawned binary (current_exe) and
+    // assert the response carries real output, not the unknown-subcommand banner.
+
+    #[test]
+    fn memory_tool_does_not_double_prefix_subcommand() {
+        let report = tool_memory(&json!({ "action": "status" })).expect("memory status ok");
+        assert!(
+            !report.contains("Unknown memory command"),
+            "double-prefix regression: {report}"
+        );
+    }
+
+    #[test]
+    fn flow_tool_does_not_double_prefix_subcommand() {
+        let report = tool_flow(&json!({ "action": "finish" })).expect("flow finish ok");
+        assert!(
+            !report.contains("Unknown flow subcommand"),
+            "double-prefix regression: {report}"
+        );
+    }
+
+    #[test]
+    fn work_tool_does_not_double_prefix_subcommand() {
+        let report = tool_work(&json!({ "action": "list" })).expect("work list ok");
+        assert!(
+            !report.contains("unknown subcommand: work"),
+            "double-prefix regression: {report}"
+        );
+    }
+
+    #[test]
+    fn orchestration_tool_does_not_double_prefix_subcommand() {
+        // resume-status is fast (reads the ledger, no build/diff probe) and the
+        // orchestration CLI rejects a doubled `orchestration orchestration ...`
+        // token with "Unknown orchestration command: orchestration" (exit 1).
+        let report =
+            tool_orchestration(&json!({ "action": "resume-status" })).expect("orchestration ok");
+        assert!(
+            !report.contains("Unknown orchestration command"),
+            "double-prefix regression: {report}"
         );
     }
 }
