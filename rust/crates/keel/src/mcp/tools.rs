@@ -1236,13 +1236,16 @@ fn tool_user_story_lint(arguments: &Value) -> Result<String, String> {
 
 /// Generic passthrough helper: shell out to the keel binary with the given
 /// subcommand and args. Returns the compacted report text.
-fn run_keel_subcommand(subcommand: &str, extra_args: &[&str]) -> Result<String, String> {
+fn run_keel_subcommand<S: AsRef<str>>(
+    subcommand: &str,
+    extra_args: &[S],
+) -> Result<String, String> {
     let executable =
         env::current_exe().map_err(|error| format!("{subcommand}: locate self: {error}"))?;
     let mut child = Command::new(&executable);
     child.arg(subcommand);
     for arg in extra_args {
-        child.arg(arg);
+        child.arg(arg.as_ref());
     }
     child.env("CLAUDE_SKILLS_HOOK", "mcp");
     child.stdin(Stdio::null());
@@ -1253,7 +1256,14 @@ fn run_keel_subcommand(subcommand: &str, extra_args: &[&str]) -> Result<String, 
         .map_err(|error| format!("{subcommand}: spawn: {error}"))?;
     let stdout_text = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr_text = String::from_utf8_lossy(&output.stderr).to_string();
-    let label = format!("keel {subcommand} {}", extra_args.join(" "));
+    let label = format!(
+        "keel {subcommand} {}",
+        extra_args
+            .iter()
+            .map(|a| a.as_ref())
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
     Ok(render_run_command_report(
         &label,
         output.status.code().unwrap_or(-1),
@@ -1304,7 +1314,7 @@ fn tool_review(arguments: &Value) -> Result<String, String> {
     if let Some(root) = optional_string_arg(arguments, "repo_root") {
         owned.push(format!("--repo-root={root}"));
     }
-    let mut all_args: Vec<&str> = vec!["review", action];
+    let mut all_args: Vec<&str> = vec![action];
     for s in &owned {
         all_args.push(s);
     }
@@ -1328,7 +1338,7 @@ fn tool_workflow(arguments: &Value) -> Result<String, String> {
     if let Some(p) = optional_string_arg(arguments, "proof") {
         owned.push(format!("--proof={p}"));
     }
-    let mut all_args: Vec<&str> = vec!["workflow", action];
+    let mut all_args: Vec<&str> = vec![action];
     for s in &owned {
         all_args.push(s);
     }
@@ -1344,7 +1354,7 @@ fn tool_git_workflow(arguments: &Value) -> Result<String, String> {
                 .to_string()
         })?;
     let extras = collect_extra_args(arguments);
-    let mut all_args: Vec<&str> = vec!["git-workflow", action];
+    let mut all_args: Vec<&str> = vec![action];
     let mut owned: Vec<String> = Vec::new();
     for e in &extras {
         owned.push(e.clone());
@@ -1362,21 +1372,24 @@ fn tool_memory(arguments: &Value) -> Result<String, String> {
         .ok_or_else(|| {
             "memory: missing action (scope|system-map|recall|instincts|consolidate|report|research-cache|retrieve|maintenance|status)".to_string()
         })?;
-    let extras = collect_extra_args(arguments);
-    let mut all_args: Vec<&str> = vec!["memory", action];
-    let mut owned: Vec<String> = Vec::new();
-    for e in &extras {
-        owned.push(e.clone());
-    }
-    for s in &owned {
-        all_args.push(s);
-    }
+    let all_args = memory_args(action, arguments);
     run_keel_subcommand("memory", &all_args)
+}
+
+/// Pure arg-builder for `tool_memory`, extracted so the double-prefix guard
+/// (subcommand must not appear in the extra-args vector) is unit-testable
+/// without shelling out to the real binary — which hangs in CI's clean env.
+fn memory_args(action: &str, arguments: &Value) -> Vec<String> {
+    let mut all_args: Vec<String> = vec![action.to_string()];
+    for extra in collect_extra_args(arguments) {
+        all_args.push(extra);
+    }
+    all_args
 }
 
 fn tool_gain(arguments: &Value) -> Result<String, String> {
     let since = optional_string_arg(arguments, "since").unwrap_or("today");
-    let mut all_args: Vec<&str> = vec!["gain", "--since", since];
+    let mut all_args: Vec<&str> = vec!["--since", since];
     let mut owned: Vec<String> = Vec::new();
     if Some(true) == optional_bool_arg(arguments, "json") {
         owned.push("--json".to_string());
@@ -1391,7 +1404,7 @@ fn tool_raw(arguments: &Value) -> Result<String, String> {
     let action = optional_string_arg(arguments, "action");
     let raw_id = optional_string_arg(arguments, "raw_id");
     let older_than = optional_string_arg(arguments, "older_than");
-    let mut all_args: Vec<&str> = vec!["raw"];
+    let mut all_args: Vec<&str> = Vec::new();
     let mut owned: Vec<String> = Vec::new();
     match action {
         Some("list") => {
@@ -1412,13 +1425,13 @@ fn tool_raw(arguments: &Value) -> Result<String, String> {
         all_args.push(s);
     }
     if action.is_none() && raw_id.is_none() {
-        all_args = vec!["raw", "list"];
+        all_args = vec!["list"];
     }
     run_keel_subcommand("raw", &all_args)
 }
 
 fn tool_config_audit(arguments: &Value) -> Result<String, String> {
-    let mut all_args: Vec<&str> = vec!["config-audit"];
+    let mut all_args: Vec<&str> = Vec::new();
     let mut owned: Vec<String> = Vec::new();
     if let Some(root) = optional_string_arg(arguments, "repo_root") {
         owned.push(format!("--repo-root={root}"));
@@ -1430,7 +1443,7 @@ fn tool_config_audit(arguments: &Value) -> Result<String, String> {
 }
 
 fn tool_skill_lint(arguments: &Value) -> Result<String, String> {
-    let mut all_args: Vec<&str> = vec!["skill-lint"];
+    let mut all_args: Vec<&str> = Vec::new();
     let mut owned: Vec<String> = Vec::new();
     if let Some(root) = optional_string_arg(arguments, "repo_root") {
         owned.push(format!("--repo-root={root}"));
@@ -1445,7 +1458,7 @@ fn tool_skill_lint(arguments: &Value) -> Result<String, String> {
 }
 
 fn tool_telemetry(arguments: &Value) -> Result<String, String> {
-    let mut all_args: Vec<&str> = vec!["telemetry", "summary"];
+    let mut all_args: Vec<&str> = vec!["summary"];
     let mut owned: Vec<String> = Vec::new();
     if let Some(d) = optional_int_arg(arguments, "days") {
         owned.push(format!("--days={d}"));
@@ -1470,16 +1483,17 @@ fn tool_orchestration(arguments: &Value) -> Result<String, String> {
             "orchestration: missing action (runtime-preflight|resume-status|task|checkpoint)"
                 .to_string()
         })?;
-    let extras = collect_extra_args(arguments);
-    let mut all_args: Vec<&str> = vec!["orchestration", action];
-    let mut owned: Vec<String> = Vec::new();
-    for e in &extras {
-        owned.push(e.clone());
-    }
-    for s in &owned {
-        all_args.push(s);
-    }
+    let all_args = orchestration_args(action, arguments);
     run_keel_subcommand("orchestration", &all_args)
+}
+
+/// Pure arg-builder for `tool_orchestration` (see `memory_args` for the testability rationale).
+fn orchestration_args(action: &str, arguments: &Value) -> Vec<String> {
+    let mut all_args: Vec<String> = vec![action.to_string()];
+    for extra in collect_extra_args(arguments) {
+        all_args.push(extra);
+    }
+    all_args
 }
 
 fn tool_checkpoint(arguments: &Value) -> Result<String, String> {
@@ -1492,7 +1506,7 @@ fn tool_checkpoint(arguments: &Value) -> Result<String, String> {
             "checkpoint: restore is destructive — re-call with confirm:true to run it".to_string(),
         );
     }
-    let mut all_args: Vec<&str> = vec!["checkpoint", action];
+    let mut all_args: Vec<&str> = vec![action];
     let mut owned: Vec<String> = Vec::new();
     if let Some(i) = optional_string_arg(arguments, "id") {
         owned.push(format!("--id={i}"));
@@ -1507,7 +1521,7 @@ fn tool_checkpoint(arguments: &Value) -> Result<String, String> {
 }
 
 fn tool_session(arguments: &Value) -> Result<String, String> {
-    let mut all_args: Vec<&str> = vec!["session"];
+    let mut all_args: Vec<&str> = Vec::new();
     let mut owned: Vec<String> = Vec::new();
     if let Some(s) = optional_string_arg(arguments, "since") {
         owned.push(format!("--since={s}"));
@@ -1522,7 +1536,7 @@ fn tool_session(arguments: &Value) -> Result<String, String> {
 }
 
 fn tool_doctor(arguments: &Value) -> Result<String, String> {
-    let mut all_args: Vec<&str> = vec!["doctor"];
+    let mut all_args: Vec<&str> = Vec::new();
     let mut owned: Vec<String> = Vec::new();
     if let Some(root) = optional_string_arg(arguments, "repo_root") {
         owned.push(format!("--repo-root={root}"));
@@ -1543,7 +1557,7 @@ fn tool_code_search(arguments: &Value) -> Result<String, String> {
     if query.is_empty() {
         return Err("code_search: missing query".to_string());
     }
-    let mut all_args: Vec<&str> = vec!["code-search", "search"];
+    let mut all_args: Vec<&str> = vec!["search"];
     let mut owned: Vec<String> = Vec::new();
     owned.push(format!("--query={query}"));
     if let Ok(cwd) = env::current_dir() {
@@ -1570,22 +1584,23 @@ fn tool_flow(arguments: &Value) -> Result<String, String> {
         .get("action")
         .and_then(Value::as_str)
         .ok_or_else(|| "flow: missing action (start|check|finish)".to_string())?;
-    let mut all_args: Vec<&str> = vec!["flow", action];
-    let mut owned: Vec<String> = Vec::new();
-    // `start`/`check` take the target file; the CLI flag is `--target-file`.
+    let all_args = flow_args(action, arguments);
+    run_keel_subcommand("flow", &all_args)
+}
+
+/// Pure arg-builder for `tool_flow` (see `memory_args` for the testability rationale).
+fn flow_args(action: &str, arguments: &Value) -> Vec<String> {
+    let mut all_args: Vec<String> = vec![action.to_string()];
     if let Some(file) = optional_string_arg(arguments, "file") {
-        owned.push(format!("--target-file={file}"));
+        all_args.push(format!("--target-file={file}"));
     }
     if let Some(target_function) = optional_string_arg(arguments, "target_function") {
-        owned.push(format!("--target-function={target_function}"));
+        all_args.push(format!("--target-function={target_function}"));
     }
     if let Some(root) = optional_string_arg(arguments, "repo_root") {
-        owned.push(format!("--repo-root={root}"));
+        all_args.push(format!("--repo-root={root}"));
     }
-    for s in &owned {
-        all_args.push(s);
-    }
-    run_keel_subcommand("flow", &all_args)
+    all_args
 }
 
 /// Dependency-aware work graph. `add` needs --title; `dep` needs --id + --on
@@ -1598,12 +1613,17 @@ fn tool_work(arguments: &Value) -> Result<String, String> {
         .ok_or_else(|| {
             "work: missing action (add|list|ready|blocked|dep|discovered|close|show)".to_string()
         })?;
-    let owned = work_cli_args(arguments);
-    let mut all_args: Vec<&str> = vec!["work", action];
-    for s in &owned {
-        all_args.push(s);
-    }
+    let all_args = work_args(action, arguments);
     run_keel_subcommand("work", &all_args)
+}
+
+/// Pure arg-builder for `tool_work` (see `memory_args` for the testability rationale).
+fn work_args(action: &str, arguments: &Value) -> Vec<String> {
+    let mut all_args: Vec<String> = vec![action.to_string()];
+    for flag in work_cli_args(arguments) {
+        all_args.push(flag);
+    }
+    all_args
 }
 
 /// Pure translation of the `work` tool's named MCP fields to real CLI flags.
@@ -1649,7 +1669,7 @@ fn tool_code_graph(arguments: &Value) -> Result<String, String> {
         .get("action")
         .and_then(Value::as_str)
         .ok_or_else(|| "code_graph: missing action (build|impact)".to_string())?;
-    let mut all_args: Vec<&str> = vec!["code-graph", action];
+    let mut all_args: Vec<&str> = vec![action];
     let mut owned: Vec<String> = Vec::new();
     if let Some(changed) = optional_string_arg(arguments, "changed") {
         owned.push(format!("--changed={changed}"));
@@ -1686,7 +1706,7 @@ fn tool_learn(arguments: &Value) -> Result<String, String> {
             "learn: action {action:?} not recognized (status|dry-run|run)"
         ));
     }
-    let mut all_args: Vec<&str> = vec!["learn", &action];
+    let mut all_args: Vec<&str> = vec![&action];
     let mut owned: Vec<String> = Vec::new();
     if let Some(w) = optional_int_arg(arguments, "window") {
         owned.push(format!("--window={w}"));
@@ -2241,6 +2261,56 @@ mod tests {
         assert!(
             args.is_empty(),
             "empty fields should produce no flags: {args:?}"
+        );
+    }
+
+    // Regression guards for the double-prefix bug: every `run_keel_subcommand`
+    // caller once passed the subcommand name as `all_args[0]` AND as the
+    // `subcommand` param, so the helper prepended it again — producing
+    // `keel memory memory status` etc., which the CLI rejected with
+    // "Unknown <x> command: <x>" and exit 1. These tests call the pure
+    // arg-builders (no subprocess) and assert the subcommand name does NOT
+    // appear in the extra-args vector. Shelling out via `current_exe()` hung
+    // in CI's clean environment, so the guard is structural, not behavioral.
+
+    #[test]
+    fn memory_args_does_not_repeat_subcommand() {
+        let args = memory_args("status", &json!({}));
+        assert_eq!(args[0], "status");
+        assert!(
+            !args.iter().any(|a| a == "memory"),
+            "subcommand leaked into extra args: {args:?}"
+        );
+    }
+
+    #[test]
+    fn flow_args_does_not_repeat_subcommand() {
+        let args = flow_args("finish", &json!({ "file": "src/lib.rs" }));
+        assert_eq!(args[0], "finish");
+        assert!(args.iter().any(|a| a == "--target-file=src/lib.rs"));
+        assert!(
+            !args.iter().any(|a| a == "flow"),
+            "subcommand leaked into extra args: {args:?}"
+        );
+    }
+
+    #[test]
+    fn work_args_does_not_repeat_subcommand() {
+        let args = work_args("list", &json!({}));
+        assert_eq!(args[0], "list");
+        assert!(
+            !args.iter().any(|a| a == "work"),
+            "subcommand leaked into extra args: {args:?}"
+        );
+    }
+
+    #[test]
+    fn orchestration_args_does_not_repeat_subcommand() {
+        let args = orchestration_args("resume-status", &json!({}));
+        assert_eq!(args[0], "resume-status");
+        assert!(
+            !args.iter().any(|a| a == "orchestration"),
+            "subcommand leaked into extra args: {args:?}"
         );
     }
 }
