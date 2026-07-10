@@ -208,10 +208,10 @@ jobs:
           fi
           # Stage cross-agent adapter sources so `keel install` can wire
           # non-Claude-Code targets from a release-bundle extract, not just a
-          # source checkout. maybe_wire_opencode/codex/pi/cursor in
+          # source checkout. maybe_wire_opencode/codex/pi/cursor/cowork in
           # manager/install.rs read these dirs from repository_root; without
           # them install reports "plugin source absent" / "source absent".
-          for adapter in opencode codex pi cursor; do
+          for adapter in opencode codex pi cursor cowork; do
             if [ -d "$adapter" ]; then
               cp -R "$adapter" "$target_dir/$adapter"
             fi

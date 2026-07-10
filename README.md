@@ -671,14 +671,15 @@ keel works with multiple AI coding agents through dedicated adapters. Each adapt
 | Agent | Adapter Type | Mechanism | Files |
 | --- | --- | --- | --- |
 | **Claude Code** (native) | Plugin manifest + hooks | `.claude-plugin/plugin.json` + `~/.claude/settings.json` hooks — automatic via `keel install` | `.claude-plugin/` |
+| **Claude Desktop** (Cowork) | TypeScript plugin | `cowork/keel.ts` — lifecycle bridge with `bridge` subcommands per event | `cowork/` |
 | **OpenCode** | TypeScript plugin | `opencode/keel.ts` — lifecycle bridge with `bridge` subcommands per event | `opencode/` |
 | **Codex CLI** | Plugin + hooks + script | `codex/.codex-plugin/plugin.json` + `hooks/hooks.json` + `keel-codex.ts` | `codex/` |
 | **Cursor IDE** | Static rules file | `cursor/.cursorrules` — iron law + skill catalog injected via Cursor's rules system | `cursor/` |
 | **Pi Agent** | Static rules + MCP config | `pi/AGENTS.md` + `pi/.mcp.json` — loaded at startup, MCP server for direct tool access | `pi/` |
 
-Claude Code is the primary target (hooks, full lifecycle). OpenCode and Codex have runtime bridges that auto-inject context on every session and prompt. Cursor and Pi Agent use static instruction files — simpler but no automatic observation recording.
+Claude Code is the primary target (hooks, full lifecycle). Claude Desktop (Cowork) and OpenCode have runtime bridges that auto-inject context on every session and prompt. Cursor and Pi Agent use static instruction files — simpler but no automatic observation recording.
 
-`keel install` auto-detects which AI CLIs are installed (via config dirs, env vars, and binary-on-PATH) and wires only the matching adapters. Use `--with <name>` to force an adapter even when not detected (e.g. `--with cursor`), and `--without <name>` to skip a detected adapter (e.g. `--without opencode`). Names: `opencode`, `codex`, `pi`, `cursor`. Manual file copying is no longer required.
+`keel install` auto-detects which AI CLIs are installed (via config dirs, env vars, and binary-on-PATH) and wires only the matching adapters. Use `--with <name>` to force an adapter even when not detected (e.g. `--with cursor`), and `--without <name>` to skip a detected adapter (e.g. `--without opencode`). Names: `opencode`, `codex`, `pi`, `cursor`, `cowork`. Manual file copying is no longer required.
 
 ## Managed Agent Profiles
 
@@ -731,6 +732,7 @@ The benchmark docs track real scenario evidence across 8 flows, including greenf
 keel/
 |- rust/crates/keel          Native install, update, hook, review, flow, and compaction surfaces
 |- rust/crates/keel-*        Rust support crates for flow, platform, release assets, and text linting
+|- cowork/                    Claude Desktop (Cowork) adapter (TypeScript plugin with lifecycle bridge)
 |- opencode/                 OpenCode adapter (TypeScript plugin with lifecycle bridge)
 |- codex/                    Codex CLI adapter (plugin + hooks + TypeScript bridge)
 |- cursor/                   Cursor IDE adapter (static .cursorrules)
