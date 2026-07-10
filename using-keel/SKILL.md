@@ -62,6 +62,7 @@ checking. The cost of skipping a skill that did apply is shipping a regression.
 | "I know what that code does" | Knowing the concept ≠ knowing the current implementation. Read it. |
 | "Oh this may be the case" | Suspicion is a hypothesis, not a finding. Confirm the suspected target sits on the symptom's traced path with file:line evidence before changing it. |
 | "Tests already passed earlier" | Re-run before claiming. No completion claims without fresh evidence. |
+| "I noticed a second bug but it's out of scope/pre-existing/cosmetic, I'll leave it" | Surfacing ≠ touching. A defect you found is information the user doesn't have (information asymmetry — you see the code, they don't). Name it with file:line evidence and **ask** whether to fix it now, in a separate change, or defer. "Explicitly defer" is a valid *user* choice; "silently skip" is not a valid *agent* choice. The cosmetic-looking double-label was a 14-site class bug. |
 | "That hook reminder is wrapper-artifact noise, I'll read past it" | Hook reminders state the rule inline so they are self-contained in any repo. Re-read the diff against the rule before skipping. Calling it noise to avoid the work is the dismissal the rule names. |
 | "The hook references files that don't exist in this repo" | The closeout reminder is portable; it states the trivial/non-trivial split inline and treats project-level CLAUDE.md/AGENTS.md as an optional override, not a required citation. Missing convention files do not exempt non-trivial code from a reviewer pass. |
 | "I'll skip the synthetic reviewer dance and self-review the diff" | Self-review is what the rule prevents for non-trivial changes. Logic edits, multi-file changes, public-API touches, and security-sensitive code go through a reviewer pass even if the diff looks small. |
@@ -95,6 +96,12 @@ After implementation work, before claiming completion:
   Trivial work (docs-only, formatting, single-line typo) is exempt. If a
   project-level CLAUDE.md or AGENTS.md defines stricter routing rules, those
   take precedence; otherwise the inline rule in this paragraph is the standard.
+- **Surface defects you found during the work** — including cosmetic or
+  pre-existing ones your change did not cause. Do not silently defer them with
+  "out of scope, I'll leave it." Name the finding (file:line) and ask the user
+  whether to fix it now, in a separate change, or explicitly defer. The user
+  cannot direct work on a defect they never learn exists. (See the decision note
+  `decision-surface-out-of-scope-defects.md` in the project memory lane.)
 
 > **Default-on enforcement gates.** Two PostToolBatch gates are **on by
 > default** — they are the only model-independent backstop for the Iron Law,
