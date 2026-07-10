@@ -1236,13 +1236,16 @@ fn tool_user_story_lint(arguments: &Value) -> Result<String, String> {
 
 /// Generic passthrough helper: shell out to the keel binary with the given
 /// subcommand and args. Returns the compacted report text.
-fn run_keel_subcommand(subcommand: &str, extra_args: &[&str]) -> Result<String, String> {
+fn run_keel_subcommand<S: AsRef<str>>(
+    subcommand: &str,
+    extra_args: &[S],
+) -> Result<String, String> {
     let executable =
         env::current_exe().map_err(|error| format!("{subcommand}: locate self: {error}"))?;
     let mut child = Command::new(&executable);
     child.arg(subcommand);
     for arg in extra_args {
-        child.arg(arg);
+        child.arg(arg.as_ref());
     }
     child.env("CLAUDE_SKILLS_HOOK", "mcp");
     child.stdin(Stdio::null());
@@ -1253,7 +1256,14 @@ fn run_keel_subcommand(subcommand: &str, extra_args: &[&str]) -> Result<String, 
         .map_err(|error| format!("{subcommand}: spawn: {error}"))?;
     let stdout_text = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr_text = String::from_utf8_lossy(&output.stderr).to_string();
-    let label = format!("keel {subcommand} {}", extra_args.join(" "));
+    let label = format!(
+        "keel {subcommand} {}",
+        extra_args
+            .iter()
+            .map(|a| a.as_ref())
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
     Ok(render_run_command_report(
         &label,
         output.status.code().unwrap_or(-1),
@@ -1362,16 +1372,19 @@ fn tool_memory(arguments: &Value) -> Result<String, String> {
         .ok_or_else(|| {
             "memory: missing action (scope|system-map|recall|instincts|consolidate|report|research-cache|retrieve|maintenance|status)".to_string()
         })?;
-    let extras = collect_extra_args(arguments);
-    let mut all_args: Vec<&str> = vec![action];
-    let mut owned: Vec<String> = Vec::new();
-    for e in &extras {
-        owned.push(e.clone());
-    }
-    for s in &owned {
-        all_args.push(s);
-    }
+    let all_args = memory_args(action, arguments);
     run_keel_subcommand("memory", &all_args)
+}
+
+/// Pure arg-builder for `tool_memory`, extracted so the double-prefix guard
+/// (subcommand must not appear in the extra-args vector) is unit-testable
+/// without shelling out to the real binary — which hangs in CI's clean env.
+fn memory_args(action: &str, arguments: &Value) -> Vec<String> {
+    let mut all_args: Vec<String> = vec![action.to_string()];
+    for extra in collect_extra_args(arguments) {
+        all_args.push(extra);
+    }
+    all_args
 }
 
 fn tool_gain(arguments: &Value) -> Result<String, String> {
@@ -1470,16 +1483,17 @@ fn tool_orchestration(arguments: &Value) -> Result<String, String> {
             "orchestration: missing action (runtime-preflight|resume-status|task|checkpoint)"
                 .to_string()
         })?;
-    let extras = collect_extra_args(arguments);
-    let mut all_args: Vec<&str> = vec![action];
-    let mut owned: Vec<String> = Vec::new();
-    for e in &extras {
-        owned.push(e.clone());
-    }
-    for s in &owned {
-        all_args.push(s);
-    }
+    let all_args = orchestration_args(action, arguments);
     run_keel_subcommand("orchestration", &all_args)
+}
+
+/// Pure arg-builder for `tool_orchestration` (see `memory_args` for the testability rationale).
+fn orchestration_args(action: &str, arguments: &Value) -> Vec<String> {
+    let mut all_args: Vec<String> = vec![action.to_string()];
+    for extra in collect_extra_args(arguments) {
+        all_args.push(extra);
+    }
+    all_args
 }
 
 fn tool_checkpoint(arguments: &Value) -> Result<String, String> {
@@ -1570,22 +1584,23 @@ fn tool_flow(arguments: &Value) -> Result<String, String> {
         .get("action")
         .and_then(Value::as_str)
         .ok_or_else(|| "flow: missing action (start|check|finish)".to_string())?;
-    let mut all_args: Vec<&str> = vec![action];
-    let mut owned: Vec<String> = Vec::new();
-    // `start`/`check` take the target file; the CLI flag is `--target-file`.
+    let all_args = flow_args(action, arguments);
+    run_keel_subcommand("flow", &all_args)
+}
+
+/// Pure arg-builder for `tool_flow` (see `memory_args` for the testability rationale).
+fn flow_args(action: &str, arguments: &Value) -> Vec<String> {
+    let mut all_args: Vec<String> = vec![action.to_string()];
     if let Some(file) = optional_string_arg(arguments, "file") {
-        owned.push(format!("--target-file={file}"));
+        all_args.push(format!("--target-file={file}"));
     }
     if let Some(target_function) = optional_string_arg(arguments, "target_function") {
-        owned.push(format!("--target-function={target_function}"));
+        all_args.push(format!("--target-function={target_function}"));
     }
     if let Some(root) = optional_string_arg(arguments, "repo_root") {
-        owned.push(format!("--repo-root={root}"));
+        all_args.push(format!("--repo-root={root}"));
     }
-    for s in &owned {
-        all_args.push(s);
-    }
-    run_keel_subcommand("flow", &all_args)
+    all_args
 }
 
 /// Dependency-aware work graph. `add` needs --title; `dep` needs --id + --on
@@ -1598,12 +1613,17 @@ fn tool_work(arguments: &Value) -> Result<String, String> {
         .ok_or_else(|| {
             "work: missing action (add|list|ready|blocked|dep|discovered|close|show)".to_string()
         })?;
-    let owned = work_cli_args(arguments);
-    let mut all_args: Vec<&str> = vec![action];
-    for s in &owned {
-        all_args.push(s);
-    }
+    let all_args = work_args(action, arguments);
     run_keel_subcommand("work", &all_args)
+}
+
+/// Pure arg-builder for `tool_work` (see `memory_args` for the testability rationale).
+fn work_args(action: &str, arguments: &Value) -> Vec<String> {
+    let mut all_args: Vec<String> = vec![action.to_string()];
+    for flag in work_cli_args(arguments) {
+        all_args.push(flag);
+    }
+    all_args
 }
 
 /// Pure translation of the `work` tool's named MCP fields to real CLI flags.
@@ -2246,48 +2266,51 @@ mod tests {
 
     // Regression guards for the double-prefix bug: every `run_keel_subcommand`
     // caller once passed the subcommand name as `all_args[0]` AND as the
-    // `subcommand` param, producing `keel memory memory status` etc. — the CLI
-    // rejected it with "Unknown <x> command: <x>" and exit 1. These tests invoke
-    // each tool with valid args through the real spawned binary (current_exe) and
-    // assert the response carries real output, not the unknown-subcommand banner.
+    // `subcommand` param, so the helper prepended it again — producing
+    // `keel memory memory status` etc., which the CLI rejected with
+    // "Unknown <x> command: <x>" and exit 1. These tests call the pure
+    // arg-builders (no subprocess) and assert the subcommand name does NOT
+    // appear in the extra-args vector. Shelling out via `current_exe()` hung
+    // in CI's clean environment, so the guard is structural, not behavioral.
 
     #[test]
-    fn memory_tool_does_not_double_prefix_subcommand() {
-        let report = tool_memory(&json!({ "action": "status" })).expect("memory status ok");
+    fn memory_args_does_not_repeat_subcommand() {
+        let args = memory_args("status", &json!({}));
+        assert_eq!(args[0], "status");
         assert!(
-            !report.contains("Unknown memory command"),
-            "double-prefix regression: {report}"
+            !args.iter().any(|a| a == "memory"),
+            "subcommand leaked into extra args: {args:?}"
         );
     }
 
     #[test]
-    fn flow_tool_does_not_double_prefix_subcommand() {
-        let report = tool_flow(&json!({ "action": "finish" })).expect("flow finish ok");
+    fn flow_args_does_not_repeat_subcommand() {
+        let args = flow_args("finish", &json!({ "file": "src/lib.rs" }));
+        assert_eq!(args[0], "finish");
+        assert!(args.iter().any(|a| a == "--target-file=src/lib.rs"));
         assert!(
-            !report.contains("Unknown flow subcommand"),
-            "double-prefix regression: {report}"
+            !args.iter().any(|a| a == "flow"),
+            "subcommand leaked into extra args: {args:?}"
         );
     }
 
     #[test]
-    fn work_tool_does_not_double_prefix_subcommand() {
-        let report = tool_work(&json!({ "action": "list" })).expect("work list ok");
+    fn work_args_does_not_repeat_subcommand() {
+        let args = work_args("list", &json!({}));
+        assert_eq!(args[0], "list");
         assert!(
-            !report.contains("unknown subcommand: work"),
-            "double-prefix regression: {report}"
+            !args.iter().any(|a| a == "work"),
+            "subcommand leaked into extra args: {args:?}"
         );
     }
 
     #[test]
-    fn orchestration_tool_does_not_double_prefix_subcommand() {
-        // resume-status is fast (reads the ledger, no build/diff probe) and the
-        // orchestration CLI rejects a doubled `orchestration orchestration ...`
-        // token with "Unknown orchestration command: orchestration" (exit 1).
-        let report =
-            tool_orchestration(&json!({ "action": "resume-status" })).expect("orchestration ok");
+    fn orchestration_args_does_not_repeat_subcommand() {
+        let args = orchestration_args("resume-status", &json!({}));
+        assert_eq!(args[0], "resume-status");
         assert!(
-            !report.contains("Unknown orchestration command"),
-            "double-prefix regression: {report}"
+            !args.iter().any(|a| a == "orchestration"),
+            "subcommand leaked into extra args: {args:?}"
         );
     }
 }
