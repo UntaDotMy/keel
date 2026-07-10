@@ -80,7 +80,7 @@ fn run_lint(
     flags.bool_flag("stdin", false);
     flags.bool_flag("json", false);
     if let Err(error) = flags.parse(arguments) {
-        let _ = writeln!(standard_error, "user-story lint: {}", error.message);
+        let _ = writeln!(standard_error, "{}", error.message);
         return 1;
     }
 
@@ -545,5 +545,24 @@ mod tests {
         let first = format!("{:?}", lint_stories(GOOD));
         let second = format!("{:?}", lint_stories(GOOD));
         assert_eq!(first, second);
+    }
+
+    // Regression: the flag-parse-error path once printed the command label
+    // twice ("user-story lint: user-story lint: flag provided...") because the
+    // FlagSet name and the writeln prefix both named the command. The error
+    // message already carries the label, so the prefix must not repeat it.
+    #[test]
+    fn flag_error_does_not_double_label() {
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let args = vec!["lint".to_string(), "--bogus".to_string()];
+        let code = run_user_story_command(&args, &mut out, &mut err);
+        assert_eq!(code, 1, "unknown flag errors");
+        let stderr = String::from_utf8_lossy(&err);
+        let label_count = stderr.matches("user-story lint:").count();
+        assert_eq!(
+            label_count, 1,
+            "label must appear exactly once, got {label_count}: {stderr}"
+        );
     }
 }

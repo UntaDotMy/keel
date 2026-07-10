@@ -39,7 +39,7 @@ fn run_code_search_search(
     flag_set.string_flag("workspace-root", "");
     flag_set.string_flag("path", "");
     if let Err(error) = flag_set.parse(arguments) {
-        let _ = writeln!(standard_error, "code-search search: {}", error.message);
+        let _ = writeln!(standard_error, "{}", error.message);
         return 1;
     }
     let query = flag_set.string_value("query");

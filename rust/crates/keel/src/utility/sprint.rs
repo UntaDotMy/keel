@@ -194,7 +194,7 @@ fn run_plan(
     flags.string_flag("claude-home", "");
     flags.bool_flag("json", false);
     if let Err(error) = flags.parse(arguments) {
-        let _ = writeln!(standard_error, "sprint plan: {}", error.message);
+        let _ = writeln!(standard_error, "{}", error.message);
         return 1;
     }
     let story = flags.string_value("story").trim().to_string();
@@ -263,7 +263,7 @@ fn run_advance(
     flags.string_flag("claude-home", "");
     flags.bool_flag("json", false);
     if let Err(error) = flags.parse(arguments) {
-        let _ = writeln!(standard_error, "sprint advance: {}", error.message);
+        let _ = writeln!(standard_error, "{}", error.message);
         return 1;
     }
     let id = flags.string_value("id").trim().to_string();
@@ -334,7 +334,7 @@ fn run_status(
     flags.string_flag("claude-home", "");
     flags.bool_flag("json", false);
     if let Err(error) = flags.parse(arguments) {
-        let _ = writeln!(standard_error, "sprint status: {}", error.message);
+        let _ = writeln!(standard_error, "{}", error.message);
         return 1;
     }
     let Some(store) = resolve_store(
@@ -411,7 +411,7 @@ fn run_review(
     flags.string_flag("claude-home", "");
     flags.bool_flag("json", false);
     if let Err(error) = flags.parse(arguments) {
-        let _ = writeln!(standard_error, "sprint review: {}", error.message);
+        let _ = writeln!(standard_error, "{}", error.message);
         return 1;
     }
     let Some(store) = resolve_store(
