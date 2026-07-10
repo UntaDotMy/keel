@@ -73,6 +73,22 @@ impl FlagSet {
             .insert(flag_name.to_string(), FlagValue::String(default_value));
     }
 
+    /// Comma-separated `--flag` list of every registered flag, for unknown-flag
+    /// diagnostics. Sorted so the message is stable across runs. Empty when the
+    /// command takes no flags.
+    fn accepted_flags_help(&self) -> String {
+        let mut names: Vec<&str> = self.specs.keys().map(String::as_str).collect();
+        names.sort_unstable();
+        if names.is_empty() {
+            return "(none)".to_string();
+        }
+        names
+            .iter()
+            .map(|name| format!("--{name}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
     pub fn parse(&mut self, arguments: &[String]) -> Result<(), FlagError> {
         let mut index = 0;
         while index < arguments.len() {
@@ -98,8 +114,9 @@ impl FlagSet {
                 None => {
                     return Err(FlagError {
                         message: format!(
-                            "{}: flag provided but not defined: -{flag_name}",
-                            self.name
+                            "{}: flag provided but not defined: -{flag_name}. Accepted flags: {}",
+                            self.name,
+                            self.accepted_flags_help()
                         ),
                     });
                 }
@@ -166,5 +183,57 @@ fn parse_bool(value: &str) -> Option<bool> {
         "1" | "t" | "T" | "true" | "TRUE" | "True" => Some(true),
         "0" | "f" | "F" | "false" | "FALSE" | "False" => Some(false),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unknown_flag_error_lists_accepted_flags() {
+        // Regression: `keel memory consolidate --repo-root X` failed with a
+        // cryptic "flag provided but not defined: -repo-root" and no hint about
+        // what IS accepted, forcing the agent to guess across 3 attempts. The
+        // error must now name the accepted flags so the caller self-corrects.
+        let mut flags = FlagSet::new("memory consolidate");
+        flags.string_flag("claude-home", "");
+        flags.bool_flag("json", false);
+        let error = flags
+            .parse(&["--repo-root".to_string(), "x".to_string()])
+            .expect_err("unknown flag should error");
+        assert!(
+            error.message.contains("not defined: -repo-root"),
+            "names the rejected flag: {}",
+            error.message
+        );
+        assert!(
+            error.message.contains("--claude-home") && error.message.contains("--json"),
+            "lists accepted flags: {}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn unknown_flag_error_reports_none_when_no_flags_registered() {
+        let mut flags = FlagSet::new("bare command");
+        let error = flags
+            .parse(&["--bogus".to_string()])
+            .expect_err("unknown flag should error");
+        assert!(
+            error.message.contains("(none)"),
+            "empty flag set reports (none): {}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn accepted_flags_help_is_sorted_and_dashed() {
+        let mut flags = FlagSet::new("demo");
+        flags.bool_flag("zebra", false);
+        flags.string_flag("alpha", "");
+        flags.string_flag("mid", "");
+        let help = flags.accepted_flags_help();
+        assert_eq!(help, "--alpha, --mid, --zebra");
     }
 }
