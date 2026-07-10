@@ -216,7 +216,7 @@ fn run_plan(
     flags.string_flag("worktree-root", "");
     flags.bool_flag("json", false);
     if let Err(error) = flags.parse(arguments) {
-        let _ = writeln!(standard_error, "dispatch plan: {}", error.message);
+        let _ = writeln!(standard_error, "{}", error.message);
         return 1;
     }
     let task = flags.string_value("task").trim().to_string();
@@ -299,7 +299,7 @@ fn run_start(
     flags.string_flag("worktree-root", "");
     flags.bool_flag("json", false);
     if let Err(error) = flags.parse(arguments) {
-        let _ = writeln!(standard_error, "dispatch start: {}", error.message);
+        let _ = writeln!(standard_error, "{}", error.message);
         return 1;
     }
     let id = flags.string_value("id").trim().to_string();
@@ -408,7 +408,7 @@ fn run_complete(
     flags.string_flag("worktree-root", "");
     flags.bool_flag("json", false);
     if let Err(error) = flags.parse(arguments) {
-        let _ = writeln!(standard_error, "dispatch complete: {}", error.message);
+        let _ = writeln!(standard_error, "{}", error.message);
         return 1;
     }
     let id = flags.string_value("id").trim().to_string();
@@ -486,7 +486,7 @@ fn run_merge(
     flags.bool_flag("confirm", false);
     flags.bool_flag("json", false);
     if let Err(error) = flags.parse(arguments) {
-        let _ = writeln!(standard_error, "dispatch merge: {}", error.message);
+        let _ = writeln!(standard_error, "{}", error.message);
         return 1;
     }
     let id = flags.string_value("id").trim().to_string();
@@ -633,7 +633,7 @@ fn run_abandon(
     flags.bool_flag("confirm", false);
     flags.bool_flag("json", false);
     if let Err(error) = flags.parse(arguments) {
-        let _ = writeln!(standard_error, "dispatch abandon: {}", error.message);
+        let _ = writeln!(standard_error, "{}", error.message);
         return 1;
     }
     let id = flags.string_value("id").trim().to_string();
@@ -729,7 +729,7 @@ fn run_status(
     flags.string_flag("worktree-root", "");
     flags.bool_flag("json", false);
     if let Err(error) = flags.parse(arguments) {
-        let _ = writeln!(standard_error, "dispatch status: {}", error.message);
+        let _ = writeln!(standard_error, "{}", error.message);
         return 1;
     }
     let Some(context) = resolve_context(

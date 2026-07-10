@@ -140,7 +140,7 @@ fn run_build(
     flags.string_flag("output", DEFAULT_ARTIFACT);
     flags.bool_flag("json", false);
     if let Err(error) = flags.parse(arguments) {
-        let _ = writeln!(standard_error, "code-graph build: {}", error.message);
+        let _ = writeln!(standard_error, "{}", error.message);
         return 1;
     }
     let Some(root) = resolve_root(
@@ -221,7 +221,7 @@ fn run_impact(
     flags.string_flag("changed", "");
     flags.bool_flag("json", false);
     if let Err(error) = flags.parse(arguments) {
-        let _ = writeln!(standard_error, "code-graph impact: {}", error.message);
+        let _ = writeln!(standard_error, "{}", error.message);
         return 1;
     }
     let changed_raw = flags.string_value("changed");
