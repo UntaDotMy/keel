@@ -66,6 +66,38 @@ pub struct ProcessResult {
     pub code: i32,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
+    /// The true byte length of stdout before any capture cap was applied. Equals
+    /// `stdout.len()` when no truncation occurred. Lets gain analytics report
+    /// honest savings even when a runaway command's output was capped.
+    pub original_stdout_bytes: usize,
+    /// The true byte length of stderr before any capture cap was applied.
+    pub original_stderr_bytes: usize,
+}
+
+/// Hard cap on captured command output per stream. A noisy or malicious command
+/// can produce gigabytes; without a cap, `Command::output()` buffers the entire
+/// stream into RAM and `RawStore::save` writes it all to disk before any check.
+/// 64 MiB leaves room for full test logs (the legitimate large-output case)
+/// while bounding the worst case. Mirrors the `MAX_EVENT_LOG_BYTES` precedent.
+pub const MAX_CAPTURED_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
+
+/// Truncate a captured stream to the cap, returning (bytes, original_len). When
+/// truncation occurs, a trailing marker is appended so the model can see the
+/// output was cut.
+pub fn cap_captured_stream(bytes: Vec<u8>) -> (Vec<u8>, usize) {
+    let original_len = bytes.len();
+    if original_len <= MAX_CAPTURED_OUTPUT_BYTES {
+        return (bytes, original_len);
+    }
+    let mut truncated = bytes[..MAX_CAPTURED_OUTPUT_BYTES].to_vec();
+    let marker = b"\n[keel] captured output capped at MAX_CAPTURED_OUTPUT_BYTES; see raw output locally for the full stream\n";
+    // Make room for the marker so the total stays at/under the cap.
+    let needed = marker.len();
+    if truncated.len() > needed {
+        truncated.truncate(truncated.len() - needed);
+    }
+    truncated.extend_from_slice(marker);
+    (truncated, original_len)
 }
 
 pub fn discover_repository_layout(repository_root: &Path) -> Result<RepositoryLayout, String> {
@@ -462,10 +494,14 @@ pub fn run_command(
     let output = command
         .output()
         .map_err(|error| format!("execute {program}: {error}"))?;
+    let (stdout, original_stdout_bytes) = cap_captured_stream(output.stdout);
+    let (stderr, original_stderr_bytes) = cap_captured_stream(output.stderr);
     Ok(ProcessResult {
         code: output.status.code().unwrap_or(1),
-        stdout: output.stdout,
-        stderr: output.stderr,
+        stdout,
+        stderr,
+        original_stdout_bytes,
+        original_stderr_bytes,
     })
 }
 
@@ -656,5 +692,48 @@ mod write_text_tests {
         assert_eq!(fs::read_to_string(&target).unwrap(), "iteration 19\n");
         assert!(temp_siblings(&dir, "CLAUDE.md").is_empty());
         let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod cap_captured_stream_tests {
+    use super::{cap_captured_stream, MAX_CAPTURED_OUTPUT_BYTES};
+
+    #[test]
+    fn small_output_is_returned_unchanged() {
+        let bytes = b"hello world".to_vec();
+        let (capped, original) = cap_captured_stream(bytes.clone());
+        assert_eq!(capped, bytes);
+        assert_eq!(original, bytes.len());
+    }
+
+    #[test]
+    fn output_at_the_cap_is_returned_unchanged() {
+        let bytes = vec![b'x'; MAX_CAPTURED_OUTPUT_BYTES];
+        let (capped, original) = cap_captured_stream(bytes.clone());
+        assert_eq!(capped.len(), MAX_CAPTURED_OUTPUT_BYTES);
+        assert_eq!(original, MAX_CAPTURED_OUTPUT_BYTES);
+    }
+
+    #[test]
+    fn output_over_the_cap_is_truncated_with_marker_and_honest_count() {
+        // 10 MiB over the cap: the capped buffer must be <= the cap, carry the
+        // truncation marker, and the original count must reflect the true size.
+        let over = MAX_CAPTURED_OUTPUT_BYTES + (10 * 1024 * 1024);
+        let bytes = vec![b'x'; over];
+        let (capped, original) = cap_captured_stream(bytes);
+        assert_eq!(
+            original, over,
+            "original count must be the true pre-cap size"
+        );
+        assert!(
+            capped.len() <= MAX_CAPTURED_OUTPUT_BYTES,
+            "capped buffer must not exceed the cap: {}",
+            capped.len()
+        );
+        assert!(
+            capped.windows(b"[keel]".len()).any(|w| w == b"[keel]"),
+            "capped buffer must carry the truncation marker"
+        );
     }
 }

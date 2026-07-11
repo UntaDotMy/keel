@@ -16,7 +16,7 @@ use crate::proxy::event_log::record_compaction_event;
 use crate::proxy::injection_guard::{neutralize_injection, InjectionFinding};
 use crate::proxy::raw_store::{RawRun, RawStore, RunMeta};
 use crate::proxy::token_meter::TokenMeter;
-use crate::runtime::{display_path, run_command, ProcessResult};
+use crate::runtime::{display_path, run_command, ProcessResult, MAX_CAPTURED_OUTPUT_BYTES};
 
 /// Decide whether the proxy should run in capture mode (with compaction, raw
 /// recovery, gain analytics) or fall back to a transparent passthrough.
@@ -176,8 +176,10 @@ pub fn run_proxy(
                     .or_else(|_| std::env::var("CLAUDE_AGENT"))
                     .unwrap_or_else(|_| "claude-code".to_string()),
                 workspace: cwd.clone(),
-                stdout_bytes: result.stdout.len(),
-                stderr_bytes: result.stderr.len(),
+                // Use the original (pre-cap) byte counts so gain analytics stay
+                // honest when a runaway command's output was capped.
+                stdout_bytes: result.original_stdout_bytes,
+                stderr_bytes: result.original_stderr_bytes,
                 compact_stdout_bytes: 0,
                 compact_stderr_bytes: 0,
                 estimated_tokens_before: TokenMeter::estimate_bytes(&result.stdout)
@@ -478,6 +480,8 @@ fn run_command_streaming_proxy(
 
     let mut stdout_bytes = Vec::new();
     let mut stderr_bytes = Vec::new();
+    let mut stdout_original = 0usize;
+    let mut stderr_original = 0usize;
     let mut stdout_live = 0usize;
     let mut stderr_live = 0usize;
     let mut stdout_high_signal = 0usize;
@@ -486,11 +490,30 @@ fn run_command_streaming_proxy(
     let mut stderr_capped = false;
     for chunk in receiver {
         // Always capture the raw bytes for post-run compaction (which neutralizes
-        // the captured copy). The captured stream is the source of truth.
+        // the captured copy). The captured stream is the source of truth — but
+        // cap it at MAX_CAPTURED_OUTPUT_BYTES so a runaway command cannot exhaust
+        // memory. CRITICAL: keep draining the receiver even after the cap (discard
+        // bytes) so the child does not deadlock on a full OS pipe.
         if chunk.label == "stdout" {
-            stdout_bytes.extend_from_slice(&chunk.bytes);
+            stdout_original += chunk.bytes.len();
+            if stdout_bytes.len() < MAX_CAPTURED_OUTPUT_BYTES {
+                let room = MAX_CAPTURED_OUTPUT_BYTES - stdout_bytes.len();
+                if chunk.bytes.len() <= room {
+                    stdout_bytes.extend_from_slice(&chunk.bytes);
+                } else {
+                    stdout_bytes.extend_from_slice(&chunk.bytes[..room]);
+                }
+            }
         } else {
-            stderr_bytes.extend_from_slice(&chunk.bytes);
+            stderr_original += chunk.bytes.len();
+            if stderr_bytes.len() < MAX_CAPTURED_OUTPUT_BYTES {
+                let room = MAX_CAPTURED_OUTPUT_BYTES - stderr_bytes.len();
+                if chunk.bytes.len() <= room {
+                    stderr_bytes.extend_from_slice(&chunk.bytes);
+                } else {
+                    stderr_bytes.extend_from_slice(&chunk.bytes[..room]);
+                }
+            }
         }
 
         let (live_count, high_signal_count) = if chunk.label == "stdout" {
@@ -538,6 +561,8 @@ fn run_command_streaming_proxy(
         code: status.code().unwrap_or(1),
         stdout: stdout_bytes,
         stderr: stderr_bytes,
+        original_stdout_bytes: stdout_original,
+        original_stderr_bytes: stderr_original,
     })
 }
 
