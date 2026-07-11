@@ -73,6 +73,27 @@ pub fn run_proxy(
         return 1;
     }
 
+    // Validate --max-lines: a non-numeric or negative value previously parsed to
+    // 0 (via unwrap_or(0)) and silently meant "no cap" — the opposite of what a
+    // user typing --max-lines garbage expects. Reject it explicitly. A value of
+    // 0 (the default) still means "no cap".
+    let max_lines_raw = flag_set.string_value("max-lines");
+    let max_lines: usize = if max_lines_raw.trim() == "0" || max_lines_raw.trim().is_empty() {
+        0
+    } else {
+        match max_lines_raw.trim().parse::<usize>() {
+            Ok(value) => value,
+            Err(_) => {
+                let _ = writeln!(
+                    standard_error,
+                    "keel run: --max-lines expects a non-negative integer, got {:?}",
+                    max_lines_raw
+                );
+                return 1;
+            }
+        }
+    };
+
     let registry = crate::proxy::adapters::build_adapter_registry();
 
     if flag_set.bool_value("list-adapters") {
@@ -213,7 +234,7 @@ pub fn run_proxy(
                 neutralize_compact_result(compact_result, &meta.raw_id);
             let rendered = cap_lines(
                 &crate::proxy::render::render_compact_result(&compact_result),
-                flag_set.string_value("max-lines").parse().unwrap_or(0),
+                max_lines,
             );
             // Break-even guard: never emit compacted output that is larger than
             // the raw it replaces. On small or already-terse command output the

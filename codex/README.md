@@ -139,7 +139,7 @@ After installing, Codex will prompt you to review and trust the new hooks. Open 
 | `PreToolUse` (edit-class) | `bridge pre-tool-use` — Iron Law edit gate; `permissionDecision: "deny"` if gate not satisfied | Before tool runs | **Blocks** edits until the model has read first |
 | `PreToolUse` (Bash/shell) | `bridge observe` + `bridge rewrite` — records observation, reroutes noisy commands via `updatedInput` | Before tool runs | Allow (with mutation) |
 | `PostToolUse` | `bridge observe` — records tool observation | After tool completes | Fire-and-forget (500ms timeout) |
-| `PreCompact` | `bridge pre-compact` — pre-compaction learning checkpoint | During compaction | Yes (500ms timeout) |
+| `PreCompact` | `bridge post-compact` — pre-compaction learning checkpoint | During compaction | Yes (500ms timeout) |
 | `PostCompact` | `bridge post-compact` — post-compaction context + learning | After compaction | Fire-and-forget (500ms timeout) |
 | `Stop` | `bridge post-compact` — turn-end checkpoint | On turn end | Yes (500ms timeout) |
 | `SessionEnd` | `bridge session-end` — learning cycle + session summary capture + marker cleanup | On session end | Fire-and-forget (500ms timeout) |
