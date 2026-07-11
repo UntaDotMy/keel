@@ -26,34 +26,32 @@ pub struct FileCommentFinding {
 /// Lint the comment style of lines added between `base_ref` and the work tree.
 /// Returns findings only for added (`+`) lines, so pre-existing comments are
 /// grandfathered. An unreadable diff yields no findings rather than a false gate.
-pub fn lint_added_comments(repo_root: &Path, base_ref: &str) -> Vec<FileCommentFinding> {
-    let range = format!("{base_ref}...HEAD");
-    let args = vec![
+/// Run `git diff --unified=0 --no-color <target>` and return the diff text, or
+/// an empty string on any failure (a git error must not fail the lint gate).
+/// `target` is either a ref range like `origin/feat...HEAD` or `HEAD` for the
+/// working/staged diff. Shared by the added/working comment and prose linters.
+fn run_git_diff(repo_root: &Path, target: &str) -> String {
+    let args = [
         "diff".to_string(),
         "--unified=0".to_string(),
         "--no-color".to_string(),
-        range,
+        target.to_string(),
     ];
-    let diff = match run_command("git", &args, Some(repo_root)) {
+    match run_command("git", &args, Some(repo_root)) {
         Ok(result) if result.code == 0 => String::from_utf8_lossy(&result.stdout).to_string(),
-        _ => return Vec::new(),
-    };
+        _ => String::new(),
+    }
+}
+
+pub fn lint_added_comments(repo_root: &Path, base_ref: &str) -> Vec<FileCommentFinding> {
+    let diff = run_git_diff(repo_root, &format!("{base_ref}...HEAD"));
     scan_unified_diff(&diff)
 }
 
 /// Lint the comment style of currently staged changes (working diff). Used by the
 /// pre-commit surface where there is no upstream ref to compare against.
 pub fn lint_working_comments(repo_root: &Path) -> Vec<FileCommentFinding> {
-    let args = vec![
-        "diff".to_string(),
-        "--unified=0".to_string(),
-        "--no-color".to_string(),
-        "HEAD".to_string(),
-    ];
-    let diff = match run_command("git", &args, Some(repo_root)) {
-        Ok(result) if result.code == 0 => String::from_utf8_lossy(&result.stdout).to_string(),
-        _ => return Vec::new(),
-    };
+    let diff = run_git_diff(repo_root, "HEAD");
     scan_unified_diff(&diff)
 }
 
@@ -61,33 +59,14 @@ pub fn lint_working_comments(repo_root: &Path) -> Vec<FileCommentFinding> {
 /// lines in markdown/doc files between `base_ref` and HEAD. Pre-existing prose
 /// is grandfathered (added lines only). Pairs with `lint_added_comments`.
 pub fn lint_added_prose(repo_root: &Path, base_ref: &str) -> Vec<FileCommentFinding> {
-    let range = format!("{base_ref}...HEAD");
-    let args = vec![
-        "diff".to_string(),
-        "--unified=0".to_string(),
-        "--no-color".to_string(),
-        range,
-    ];
-    let diff = match run_command("git", &args, Some(repo_root)) {
-        Ok(result) if result.code == 0 => String::from_utf8_lossy(&result.stdout).to_string(),
-        _ => return Vec::new(),
-    };
+    let diff = run_git_diff(repo_root, &format!("{base_ref}...HEAD"));
     scan_prose_diff(&diff)
 }
 
 /// Lint the prose style of currently staged changes in markdown/doc files.
 /// Used by the pre-commit surface where there is no upstream ref.
 pub fn lint_working_prose(repo_root: &Path) -> Vec<FileCommentFinding> {
-    let args = vec![
-        "diff".to_string(),
-        "--unified=0".to_string(),
-        "--no-color".to_string(),
-        "HEAD".to_string(),
-    ];
-    let diff = match run_command("git", &args, Some(repo_root)) {
-        Ok(result) if result.code == 0 => String::from_utf8_lossy(&result.stdout).to_string(),
-        _ => return Vec::new(),
-    };
+    let diff = run_git_diff(repo_root, "HEAD");
     scan_prose_diff(&diff)
 }
 
