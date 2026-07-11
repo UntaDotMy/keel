@@ -309,7 +309,9 @@ fn describe_value(value: &serde_json::Value, depth: usize) -> serde_json::Value 
         }
         serde_json::Value::String(string_value) => {
             if string_value.len() > 64 {
-                serde_json::Value::String(format!("<str: {} chars>", string_value.len()))
+                // `.len()` is byte length, not char count — label honestly so a
+                // reader does not misjudge truncation on multibyte content.
+                serde_json::Value::String(format!("<str: {} bytes>", string_value.len()))
             } else {
                 serde_json::Value::String("<str>".to_string())
             }

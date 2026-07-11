@@ -550,6 +550,12 @@ fn run_command_streaming_proxy(
         if should_show {
             if show_high_signal {
                 *high_signal_count += 1;
+            } else {
+                // Only non-high-signal lines consume the normal live cap. A
+                // high-signal line showed via its own budget (STREAM_HIGH_SIGNAL_CAP)
+                // and must not also count against STREAM_LIVE_CAP, or output that
+                // tags every line with "error"/"warning" would exhaust both caps.
+                *live_count += 1;
             }
             // Neutralize prompt-injection before the chunk reaches the live
             // display — the live path is agent-visible just like the captured one.
@@ -573,7 +579,6 @@ fn run_command_streaming_proxy(
             );
             stderr_capped = true;
         }
-        *live_count += 1;
     }
     let status = child.wait().map_err(|error| format!("wait: {error}"))?;
     let _ = stdout_handle.join();
