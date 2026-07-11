@@ -4525,3 +4525,157 @@ fn git_hooks_install_fails_when_githooks_dir_missing() {
 
     let _ = std::fs::remove_dir_all(&temp);
 }
+
+// --- userConfig bridge (H1): the three plugin.json userConfig knobs must
+//     actually affect behavior, not just appear in the /plugin settings UI. ---
+
+/// Helper: run a closure with the given env vars set, then restore the prior
+/// values (or remove if previously unset). Avoids cross-test env leakage.
+/// Acquires the shared ENV_LOCK so env-mutating tests do not race each other.
+fn with_env_vars<F: FnOnce()>(vars: &[(&str, Option<&str>)], body: F) {
+    let _guard = crate::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let saved: Vec<(&str, Option<String>)> = vars
+        .iter()
+        .map(|(name, _)| (*name, std::env::var(name).ok()))
+        .collect();
+    for (name, value) in vars {
+        match value {
+            Some(v) => std::env::set_var(name, v),
+            None => std::env::remove_var(name),
+        }
+    }
+    body();
+    for (name, prior) in saved {
+        match prior {
+            Some(v) => std::env::set_var(name, v),
+            None => std::env::remove_var(name),
+        }
+    }
+}
+
+#[test]
+fn user_config_review_strictness_advisory_maps_to_nudge() {
+    with_env_vars(
+        &[
+            ("CLAUDE_PLUGIN_OPTION_REVIEW_STRICTNESS", Some("advisory")),
+            (REVIEW_GATE_ENV_VAR, None),
+        ],
+        || {
+            assert_eq!(review_gate_mode(), GateMode::Nudge);
+        },
+    );
+}
+
+#[test]
+fn user_config_review_strictness_strict_maps_to_block() {
+    with_env_vars(
+        &[
+            ("CLAUDE_PLUGIN_OPTION_REVIEW_STRICTNESS", Some("strict")),
+            (REVIEW_GATE_ENV_VAR, None),
+        ],
+        || {
+            assert_eq!(review_gate_mode(), GateMode::Block);
+        },
+    );
+}
+
+#[test]
+fn user_config_review_strictness_off_disables_gate() {
+    with_env_vars(
+        &[
+            ("CLAUDE_PLUGIN_OPTION_REVIEW_STRICTNESS", Some("off")),
+            (REVIEW_GATE_ENV_VAR, None),
+        ],
+        || {
+            assert_eq!(review_gate_mode(), GateMode::Off);
+        },
+    );
+}
+
+#[test]
+fn user_config_review_strictness_loses_to_explicit_operator_var() {
+    // The CLAUDE_SKILLS_* var is the operator escape hatch and must win even
+    // when the userConfig value is set.
+    with_env_vars(
+        &[
+            ("CLAUDE_PLUGIN_OPTION_REVIEW_STRICTNESS", Some("strict")),
+            (REVIEW_GATE_ENV_VAR, Some("off")),
+        ],
+        || {
+            assert_eq!(review_gate_mode(), GateMode::Off);
+        },
+    );
+}
+
+#[test]
+fn user_config_review_strictness_default_escalate_when_unset() {
+    with_env_vars(
+        &[
+            ("CLAUDE_PLUGIN_OPTION_REVIEW_STRICTNESS", None),
+            (REVIEW_GATE_ENV_VAR, None),
+        ],
+        || {
+            assert_eq!(review_gate_mode(), GateMode::Escalate);
+        },
+    );
+}
+
+#[test]
+fn user_config_system_map_refresh_interval_takes_effect() {
+    with_env_vars(
+        &[
+            (
+                "CLAUDE_PLUGIN_OPTION_SYSTEM_MAP_REFRESH_INTERVAL",
+                Some("42"),
+            ),
+            ("CLAUDE_SKILLS_SYSTEM_MAP_REFRESH_INTERVAL", None),
+        ],
+        || {
+            assert_eq!(system_map_refresh_threshold(), 42);
+        },
+    );
+}
+
+#[test]
+fn user_config_memory_retention_days_feeds_all_three_prune_readers() {
+    // The single memory_retention_days knob feeds the raw, timings, and
+    // observation retention readers via user_config_or_env_u64.
+    with_env_vars(
+        &[
+            ("CLAUDE_PLUGIN_OPTION_MEMORY_RETENTION_DAYS", Some("7")),
+            ("CLAUDE_SKILLS_RAW_RETENTION_DAYS", None),
+            ("CLAUDE_SKILLS_TIMINGS_RETENTION_DAYS", None),
+            ("CLAUDE_SKILLS_OBSERVATION_RETENTION_DAYS", None),
+        ],
+        || {
+            assert_eq!(
+                user_config_or_env_u64(
+                    PLUGIN_MEMORY_RETENTION_DAYS,
+                    "CLAUDE_SKILLS_RAW_RETENTION_DAYS",
+                    RAW_OUTPUT_DEFAULT_RETENTION_DAYS,
+                ),
+                7
+            );
+        },
+    );
+}
+
+#[test]
+fn user_config_numeric_knob_ignores_garbage_and_falls_back() {
+    // A non-numeric userConfig value must not panic or zero-out; it falls
+    // through to the operator var/default.
+    with_env_vars(
+        &[
+            (
+                "CLAUDE_PLUGIN_OPTION_SYSTEM_MAP_REFRESH_INTERVAL",
+                Some("not-a-number"),
+            ),
+            ("CLAUDE_SKILLS_SYSTEM_MAP_REFRESH_INTERVAL", Some("33")),
+        ],
+        || {
+            assert_eq!(system_map_refresh_threshold(), 33);
+        },
+    );
+}
