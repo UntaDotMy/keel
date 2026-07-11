@@ -1,7 +1,7 @@
 <!--
 Purpose: Compact entry point for skill routing rules and the specialist roster. Detailed doctrine lives under AGENTS/references/.
 Caller: Synced the harness guidance files and contributors needing the routing summary.
-Dependencies: AGENTS.md, AGENTS/references/20-skill-routing.md, the 24 specialist SKILL.md files.
+Dependencies: AGENTS.md, AGENTS/references/20-skill-routing.md, the specialist SKILL.md files (roster asserted by tests/doc_parity_test.rs).
 Main Functions: Provide the short routing contract, ownership map, and pointers to depth references.
 Side Effects: Changes to this file affect every harness session; keep it tight.
 -->

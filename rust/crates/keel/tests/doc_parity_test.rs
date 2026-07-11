@@ -435,3 +435,93 @@ fn release_bundle_stages_adapter_source_dirs() {
         );
     }
 }
+
+/// H5/H6 guard: docs and host-bridge READMEs must not hardcode a literal
+/// specialist-skill count or MCP-tool count. The counts are asserted from disk
+/// (manifest + mcp/tools.rs) by other tests in this file; a literal number in
+/// prose rots the moment a skill or tool is added or removed. This test scans
+/// the known stale-count surfaces and fails if any literal count reappears.
+#[test]
+fn no_stale_literal_counts_in_docs_or_host_readmes() {
+    let repo_root = repository_root();
+    // Files that previously carried stale "24 specialist" / "31 tools" literals.
+    let surfaces = [
+        "AGENTS.md",
+        "AGENTS/references/99-source-anchors.md",
+        "AGENTS/references/20-skill-routing.md",
+        "00-skill-routing-and-escalation.md",
+        "using-keel/SKILL.md",
+        "README.md",
+        "pi/README.md",
+        "cowork/README.md",
+        ".githooks/README.md",
+        ".claude-plugin/marketplace.json",
+        "codex/.codex-plugin/plugin.json",
+    ];
+    // Regex would be cleaner, but a substring scan keeps this dependency-free and
+    // matches the line-based style of the rest of this test file. We flag a
+    // literal count adjacent to specialist/tool language.
+    let forbidden_patterns = [
+        "24 specialist",
+        "24 managed",
+        "24 delegation",
+        "24 profiles",
+        "31 tools",
+        "31 MCP",
+    ];
+    for surface in &surfaces {
+        let path = repo_root.join(surface);
+        let text = match fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(_) => continue, // a surface may not exist on every checkout
+        };
+        for pattern in &forbidden_patterns {
+            assert!(
+                !text.contains(pattern),
+                "{surface} still hardcodes the stale literal \"{pattern}\". \
+                 The specialist/tool counts are asserted from disk by doc_parity_test; \
+                 a literal number in prose rots when a skill or tool is added/removed. \
+                 Replace it with a reference to the test-asserted roster.",
+            );
+        }
+    }
+}
+
+/// H5 guard: every specialist agent file in .claude/agents/ must have a matching
+/// managed profile at <name>/agents/claude.yaml, and vice versa. Pins the
+/// 1:1 agent⇄profile correspondence the docs now describe count-free.
+#[test]
+fn specialist_agent_and_profile_sets_match() {
+    let repo_root = repository_root();
+    let agents_dir = repo_root.join(".claude").join("agents");
+    let agent_files: BTreeSet<String> = fs::read_dir(&agents_dir)
+        .unwrap_or_else(|e| panic!("read {}: {e}", agents_dir.display()))
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("md") {
+                path.file_stem()?.to_str().map(|s| s.to_string())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // Profiles live at <name>/agents/claude.yaml — collect the parent dir name.
+    let mut profile_dirs: BTreeSet<String> = BTreeSet::new();
+    for skill in manifest_skills(&repo_root) {
+        let profile = repo_root.join(&skill).join("agents").join("claude.yaml");
+        if profile.is_file() {
+            profile_dirs.insert(skill);
+        }
+    }
+
+    let agents_only: Vec<_> = agent_files.difference(&profile_dirs).collect();
+    let profiles_only: Vec<_> = profile_dirs.difference(&agent_files).collect();
+    assert!(
+        agents_only.is_empty() && profiles_only.is_empty(),
+        "agent⇄profile mismatch:\n  agents without a profile: {agents_only:?}\n  \
+         profiles without an agent: {profiles_only:?}\n  \
+         Every specialist must ship all three artifacts (SKILL.md + subagent + profile)."
+    );
+}

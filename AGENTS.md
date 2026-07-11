@@ -1,7 +1,7 @@
 <!--
 Purpose: Thin entry point and index for the managed harness routing, memory, validation, and delivery doctrine.
 Caller: the harness agents using the synced keel native guidance surface.
-Dependencies: AGENTS/references/*.md, the 24 specialist SKILL.md files, keel CLI surface.
+Dependencies: AGENTS/references/*.md, the specialist SKILL.md files (roster asserted by tests/doc_parity_test.rs), keel CLI surface.
 Main Functions: Route to the correct reference file in AGENTS/references/ for the section a reader needs.
 Side Effects: None — this file is informational.
 -->

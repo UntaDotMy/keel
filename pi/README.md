@@ -8,7 +8,7 @@ Pi coding agent (https://pi.dev) loads `AGENTS.md` from the project root (or `~/
 
 1. **`AGENTS.md`** — the persistent keel iron law, skill catalog, workflow commands, and branch/commit rules, loaded into the system prompt at startup so the model has keel discipline from the first prompt.
 2. **`keel-pi.ts`** — a TypeScript extension that subscribes to Pi's `session_start`, `input`/`message_start`, `tool_call`, `tool_execution_end`, `session_before_compact`, `session_compact`, and `session_shutdown` events, wiring each to a host-neutral `keel bridge` subcommand. This delivers the same automatic behavior the hook system provides in Claude Code and Codex: bootstrap context injection, the Iron Law edit gate (blocks edits until the model has read first), compaction rerouting for noisy shell commands, observation capture, and the compaction/session-end learning cycle.
-3. **`.mcp.json`** — registers keel's MCP server so its 31 tools (recall, system_map, skill_route, sprint, etc.) are directly callable by the model without spawning the keel binary per invocation.
+3. **`.mcp.json`** — registers keel's MCP server so its tools (recall, system_map, skill_route, sprint, etc.; full surface asserted by `tests/doc_parity_test.rs`) are directly callable by the model without spawning the keel binary per invocation.
 
 ## Prerequisites
 
@@ -139,7 +139,7 @@ On the first edit-class tool call in a fresh session, the Iron Law gate will blo
 
 ### MCP Server
 
-The included `.mcp.json` (installed as `mcp.json`) registers keel's MCP server, exposing 31 tools:
+The included `.mcp.json` (installed as `mcp.json`) registers keel's MCP server, exposing the full keel MCP tool surface (count asserted by `tests/doc_parity_test.rs`):
 
 | Tool | Description |
 |---|---|
@@ -162,7 +162,7 @@ The included `.mcp.json` (installed as `mcp.json`) registers keel's MCP server, 
 
 The MCP config uses Pi's documented structure (`{"settings": {...}, "mcpServers": {...}}`), with `idleTimeout` under `settings` and per-server options `command`/`args`/`env`/`url`/`lifecycle` (`lazy`|`eager`|`keep-alive`)/`idleTimeout`/`directTools`/`debug`. `directTools: true` exposes each keel tool as a top-level tool instead of under an `mcp_` prefix. Adjust the `command` field to `keel.exe` on Windows if installing manually.
 
-### Skill Catalog (24 specialist skills)
+### Skill Catalog (specialist skills, roster asserted by tests/doc_parity_test.rs)
 
 Invoke any skill below by routing through the MCP `skill_route` and `skill_get` tools.
 

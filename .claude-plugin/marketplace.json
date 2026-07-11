@@ -5,14 +5,14 @@
     "url": "https://github.com/UntaDotMy"
   },
   "metadata": {
-    "description": "Discipline as code for the harness — iron-law hooks, workflow rails, review gates, memory, command compaction, and 24 managed specialist skills. Single Rust binary, no Node or Python.",
+    "description": "Discipline as code for the harness — iron-law hooks, workflow rails, review gates, memory, command compaction, and managed specialist skills (roster asserted by tests/doc_parity_test.rs). Single Rust binary, no Node or Python.",
     "version": "0.1.0"
   },
   "plugins": [
     {
       "name": "keel",
       "source": "./",
-      "description": "Bootstrap skill, 24 specialist skills, subagents, hooks, and the keel CLI. Loads the iron-law contract on every SessionStart and restates it on every UserPromptSubmit.",
+      "description": "Bootstrap skill, specialist skills (roster asserted by tests/doc_parity_test.rs), subagents, hooks, and the keel CLI. Loads the iron-law contract on every SessionStart and restates it on every UserPromptSubmit.",
       "version": "0.1.0",
       "category": "workflow",
       "tags": [

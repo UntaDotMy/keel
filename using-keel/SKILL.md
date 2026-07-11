@@ -228,7 +228,7 @@ separate skill directory — it routes to `reviewer`.
 - `compression-discipline` — Per-turn output-compression playbook (narrower line ranges, search before reading, summarize logs). Auto-loaded by the UserPromptSubmit hint when a session crosses the per-day tool-call threshold.
 - `output-economy` — Per-response output-token economy: cut reply verbosity (no preamble, no re-narration of tool output, length tracks the task) without dropping technical signal. The output-side counterpart to compression-discipline's input-side rules.
 
-## Subagent catalog (24 delegation targets in .claude/agents/)
+## Subagent catalog (delegation targets in .claude/agents/, roster asserted by tests/doc_parity_test.rs)
 
 Use these via the Agent tool when the work benefits from an isolated context
 window. Same names as the skills — pick the subagent when token-saving delegation

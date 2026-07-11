@@ -77,5 +77,5 @@ fi
 
 - **Git hooks**: Enforce quality at the git level (format, lint, branch policy)
 - **keel binary**: Enforces quality at the AI-agent level (PreToolUse compaction, review gates, memory, workflow)
-- **keel MCP server**: Exposes 31 tools to any MCP-compatible agent (recall, system_map, workflow, review, etc.)
+- **keel MCP server**: Exposes the keel MCP tool surface (count asserted by `tests/doc_parity_test.rs`) to any MCP-compatible agent (recall, system_map, workflow, review, etc.)
 - **keel adapters**: OpenCode, Codex, Cursor, Pi Agent — each injects the iron law into its own lifecycle
