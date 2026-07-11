@@ -1,7 +1,7 @@
 //! Purpose: Share compact-output helpers across command-specific adapters.
 //! Caller: Built-in adapters for tests, git, search, files, build, lint, logs, and configured filters.
 //! Dependencies: proxy adapter contracts, RunMeta, and TokenMeter.
-//! Main Functions: make_result, compact_edges, signal_lines, command_program.
+//! Main Functions: make_result, compact_edges, signal_lines, normalized_command.
 //! Side Effects: None; callers own persistence through the proxy.
 
 use crate::proxy::adapter::CompactResult;
@@ -9,7 +9,6 @@ use crate::proxy::raw_store::RunMeta;
 use crate::proxy::token_meter::TokenMeter;
 
 pub const DEFAULT_EDGE_LINES: usize = 20;
-pub const DEFAULT_LINE_LIMIT: usize = 80;
 
 pub fn make_result(
     adapter_name: &str,
@@ -160,21 +159,6 @@ fn render_lines(lines: &[&str]) -> String {
         .join("\n")
 }
 
-pub fn command_program(command: &str) -> String {
-    command
-        .split_whitespace()
-        .next()
-        .unwrap_or("command")
-        .replace('\\', "/")
-        .rsplit('/')
-        .next()
-        .unwrap_or("command")
-        .trim_end_matches(".exe")
-        .trim_end_matches(".cmd")
-        .trim_end_matches(".bat")
-        .to_ascii_lowercase()
-}
-
 pub fn normalized_command(program: &str, args: &[String]) -> String {
     if args.is_empty() {
         program.to_string()
@@ -293,9 +277,18 @@ fn describe_value(value: &serde_json::Value, depth: usize) -> serde_json::Value 
     }
     match value {
         serde_json::Value::Object(map) => {
+            const MAX_KEYS: usize = 32;
             let mut description = serde_json::Map::new();
-            for (key, val) in map.iter().take(32) {
+            for (key, val) in map.iter().take(MAX_KEYS) {
                 description.insert(key.clone(), describe_value(val, depth + 1));
+            }
+            if map.len() > MAX_KEYS {
+                // Mirrors the array branch's "... N more items" marker so a
+                // truncated object advertises how many keys were dropped.
+                description.insert(
+                    format!("... {} more keys", map.len() - MAX_KEYS),
+                    serde_json::Value::String("<truncated>".to_string()),
+                );
             }
             serde_json::Value::Object(description)
         }
@@ -316,7 +309,9 @@ fn describe_value(value: &serde_json::Value, depth: usize) -> serde_json::Value 
         }
         serde_json::Value::String(string_value) => {
             if string_value.len() > 64 {
-                serde_json::Value::String(format!("<str: {} chars>", string_value.len()))
+                // `.len()` is byte length, not char count — label honestly so a
+                // reader does not misjudge truncation on multibyte content.
+                serde_json::Value::String(format!("<str: {} bytes>", string_value.len()))
             } else {
                 serde_json::Value::String("<str>".to_string())
             }
@@ -329,7 +324,7 @@ fn describe_value(value: &serde_json::Value, depth: usize) -> serde_json::Value 
 
 #[cfg(test)]
 mod tests {
-    use super::redact_possible_secret;
+    use super::{compact_json_structure, redact_possible_secret};
 
     const REDACTED: &str = "[redacted possible secret; see raw output locally]";
 
@@ -361,5 +356,36 @@ mod tests {
     fn redacts_35_char_alphanumeric_token() {
         let line = "token: abcdefghijklmnopqrstuvwxyz12345678";
         assert_eq!(redact_possible_secret(line), REDACTED);
+    }
+
+    #[test]
+    fn compact_json_marks_truncated_object_keys() {
+        // An object with more than 32 keys must advertise how many were
+        // dropped, mirroring the array branch's "... N more items" marker.
+        let mut entries = Vec::new();
+        for i in 0..40 {
+            entries.push(format!("\"k{i}\": {i}"));
+        }
+        let payload = format!("{{{}}}", entries.join(", "));
+        let compacted = compact_json_structure(&payload);
+        assert!(
+            compacted.contains("... 8 more keys"),
+            "missing truncation marker for 8 dropped keys: {compacted}"
+        );
+    }
+
+    #[test]
+    fn compact_json_leaves_small_object_without_truncation_marker() {
+        // Exactly at the cap (32 keys) the marker must NOT appear.
+        let mut entries = Vec::new();
+        for i in 0..32 {
+            entries.push(format!("\"k{i}\": {i}"));
+        }
+        let payload = format!("{{{}}}", entries.join(", "));
+        let compacted = compact_json_structure(&payload);
+        assert!(
+            !compacted.contains("more keys"),
+            "spurious truncation marker at the cap: {compacted}"
+        );
     }
 }

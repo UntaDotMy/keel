@@ -149,7 +149,7 @@ Claude Desktop (Cowork)
 |---|---|---|
 | Plugin manifest (skills, agents, commands) | ✅ | ✅ |
 | Lifecycle hooks | ✅ | ✅ |
-| MCP server (31 tools) | ✅ | ✅ |
+| MCP server (full tool surface, count asserted by doc_parity_test.rs) | ✅ | ✅ |
 | Command compaction | ✅ | ✅ |
 | Review/sprint/working-brief gates | ✅ | ✅ |
 | OpenCode bridge | N/A | ✅ |

@@ -11,6 +11,12 @@ use std::io;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+/// Defense-in-depth disk cap. The capture chokepoint (runtime::run_command and
+/// the streaming path) already caps at MAX_CAPTURED_OUTPUT_BYTES, but a future
+/// caller could construct a RawRun directly — this ensures save() never writes
+/// an unbounded stream to disk. Matches the capture cap.
+const MAX_RAW_WRITE_BYTES: usize = 64 * 1024 * 1024;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunMeta {
     pub raw_id: String,
@@ -78,8 +84,20 @@ impl RawStore {
         let dir = self.root.join(date).join(&meta.raw_id);
         fs::create_dir_all(&dir)?;
 
-        fs::write(dir.join("stdout.log"), &run.stdout)?;
-        fs::write(dir.join("stderr.log"), &run.stderr)?;
+        // Defense-in-depth: never write an unbounded stream to disk. The capture
+        // chokepoint already caps, but a direct RawRun caller could bypass it.
+        let stdout_bytes = if run.stdout.len() > MAX_RAW_WRITE_BYTES {
+            &run.stdout[..MAX_RAW_WRITE_BYTES]
+        } else {
+            &run.stdout[..]
+        };
+        let stderr_bytes = if run.stderr.len() > MAX_RAW_WRITE_BYTES {
+            &run.stderr[..MAX_RAW_WRITE_BYTES]
+        } else {
+            &run.stderr[..]
+        };
+        fs::write(dir.join("stdout.log"), stdout_bytes)?;
+        fs::write(dir.join("stderr.log"), stderr_bytes)?;
         fs::write(dir.join("command.txt"), &meta.command)?;
 
         let meta_json = serde_json::to_string_pretty(meta)?;
@@ -271,6 +289,58 @@ mod tests {
             let error = store.find_dir(raw_id).expect_err("invalid raw id");
             assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
         }
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn raw_store_caps_oversized_stdout_to_disk() {
+        // H4 defense-in-depth: a RawRun with stdout over MAX_RAW_WRITE_BYTES
+        // must not write the full stream to disk. The on-disk file is capped.
+        let root =
+            std::env::temp_dir().join(format!("keel-raw-store-cap-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let store = RawStore::with_root(root.clone());
+        let mut meta = RunMeta {
+            raw_id: "20260512-captest".to_string(),
+            command: "runaway".to_string(),
+            program: "runaway".to_string(),
+            args: vec![],
+            cwd: PathBuf::from("."),
+            started_at: 1,
+            duration_ms: 2,
+            exit_code: 0,
+            adapter_name: "generic".to_string(),
+            raw_path: PathBuf::new(),
+            compact_path: PathBuf::new(),
+            agent: "test".to_string(),
+            workspace: PathBuf::from("."),
+            stdout_bytes: 0,
+            stderr_bytes: 0,
+            compact_stdout_bytes: 0,
+            compact_stderr_bytes: 0,
+            estimated_tokens_before: 0,
+            estimated_tokens_after: 0,
+            estimated_tokens_saved: 0,
+            savings_pct: 0.0,
+            compacted: false,
+        };
+        // Build a stdout vector 10 MiB over the cap.
+        let over = super::MAX_RAW_WRITE_BYTES + (10 * 1024 * 1024);
+        let run = RawRun {
+            stdout: vec![b'x'; over],
+            stderr: vec![],
+            exit_code: 0,
+        };
+        store.save(&mut meta, &run).expect("save oversized run");
+
+        let stdout_log = std::fs::read(meta.raw_path.join("stdout.log")).expect("read stdout.log");
+        assert!(
+            stdout_log.len() <= super::MAX_RAW_WRITE_BYTES,
+            "on-disk stdout must be capped: {} > {}",
+            stdout_log.len(),
+            super::MAX_RAW_WRITE_BYTES
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }

@@ -4,7 +4,11 @@
 //! Dependencies: crate::runner::hook_lifecycle, crate::utility::skill_match,
 //!   crate::runner::observation, crate::runtime.
 //! Main Functions: run_bridge_command dispatching subcommands (session-start,
-//!   user-prompt, observe, session-end, post-compact, gate-status).
+//!   user-prompt, observe, session-end, post-compact, gate-status, pre-tool-use,
+//!   rewrite). pre-tool-use emits the Iron Law edit-gate decision
+//!   (KEEL_GATE_ALLOW / KEEL_GATE_DENY) as text; rewrite reroutes shell commands
+//!   through compaction (KEEL_REWRITE) by reading the command on stdin. Both
+//!   exit 0 — the host adapter enforces the deny, never the bridge itself.
 //! Side Effects: Prints plain text to stdout; observe writes observation files.
 
 use std::io::{Read, Write};
@@ -227,17 +231,15 @@ fn run_bridge_gate_status(
         }
     };
 
-    let gates: &[(&str, &str)] = &[
-        ("review-gate-blocks", "review"),
-        ("brief-gate-blocks", "working-brief"),
-        ("story-closeout-gate-blocks", "story-closeout"),
-    ];
-
-    let session_key = hook_lifecycle::sanitize_memory_key(&session);
+    let session_key = if session.trim().is_empty() {
+        "no-session".to_string()
+    } else {
+        hook_lifecycle::sanitize_memory_key(&session)
+    };
     let _ = writeln!(standard_output, "gate status for session {session_key}:");
 
-    for (dir, label) in gates {
-        let counter_path = claude_home.join("state").join(dir).join(&session_key);
+    for row in hook_lifecycle::gate_status_rows() {
+        let counter_path = claude_home.join("state").join(row.dir).join(&session_key);
         let count = if counter_path.exists() {
             std::fs::read_to_string(&counter_path)
                 .ok()
@@ -248,10 +250,14 @@ fn run_bridge_gate_status(
         };
         let cleared = match count {
             0 => "not fired",
-            n if n >= hook_lifecycle::default_max_blocks() => "capped",
+            n if n >= row.max_blocks => "capped",
             _ => "fired",
         };
-        let _ = writeln!(standard_output, "  {label}: {cleared} (count: {count})");
+        let _ = writeln!(
+            standard_output,
+            "  {}: {} (count: {})",
+            row.label, cleared, count
+        );
     }
     0
 }
@@ -324,4 +330,113 @@ fn run_bridge_rewrite(
         );
     }
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::ENV_LOCK;
+
+    /// H2 regression: `keel bridge gate-status` must report all 8 PostToolBatch
+    /// gates (previously hardcoded only 3: review/brief/story-closeout) and must
+    /// not crash on an empty session id. Also confirms the "not fired" state for
+    /// a fresh session with no counter files.
+    #[test]
+    fn bridge_gate_status_reports_all_eight_gates() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let temp = std::env::temp_dir().join(format!(
+            "keel-bridge-gate-status-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&temp).expect("create test claude home");
+        let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
+        std::env::set_var("CLAUDE_TARGET_OVERRIDE", &temp);
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = run_bridge_command(
+            &[
+                "gate-status".to_string(),
+                "--session".to_string(),
+                "s1".to_string(),
+            ],
+            &mut stdout,
+            &mut stderr,
+        );
+
+        let out = String::from_utf8_lossy(&stdout);
+        assert_eq!(code, 0, "gate-status must exit 0: {stderr:?}");
+        // All 8 gates must appear in the output.
+        for label in [
+            "review",
+            "working-brief",
+            "story-closeout",
+            "memory",
+            "sprint-start",
+            "learned-skill",
+            "research",
+            "story-first",
+        ] {
+            assert!(
+                out.contains(&format!("{label}:")),
+                "gate-status must report the {label} gate; got: {out}"
+            );
+        }
+        // A fresh session with no counter files must show "not fired" for each.
+        assert!(
+            out.contains("not fired"),
+            "fresh session must show not fired: {out}"
+        );
+
+        // Restore.
+        match previous_home {
+            Some(v) => std::env::set_var("CLAUDE_TARGET_OVERRIDE", v),
+            None => std::env::remove_var("CLAUDE_TARGET_OVERRIDE"),
+        }
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    /// H2: an empty session id must not panic and must use the no-session key
+    /// (matching the gate writers' default path).
+    #[test]
+    fn bridge_gate_status_handles_empty_session() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let temp = std::env::temp_dir().join(format!(
+            "keel-bridge-gate-empty-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&temp).expect("create test claude home");
+        let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
+        std::env::set_var("CLAUDE_TARGET_OVERRIDE", &temp);
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = run_bridge_command(&["gate-status".to_string()], &mut stdout, &mut stderr);
+        let out = String::from_utf8_lossy(&stdout);
+        assert_eq!(code, 0, "empty-session gate-status must exit 0: {stderr:?}");
+        assert!(
+            out.contains("no-session"),
+            "empty session must use the no-session key: {out}"
+        );
+
+        match previous_home {
+            Some(v) => std::env::set_var("CLAUDE_TARGET_OVERRIDE", v),
+            None => std::env::remove_var("CLAUDE_TARGET_OVERRIDE"),
+        }
+        let _ = std::fs::remove_dir_all(&temp);
+    }
 }

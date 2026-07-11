@@ -315,7 +315,36 @@ fn parse_string_literal(bytes: &[u8], index: &mut usize) -> Result<String, Strin
                         .map_err(|_| "non-utf8 in \\u escape".to_string())?;
                     let code_point = u32::from_str_radix(hex_text, 16)
                         .map_err(|_| format!("invalid \\u hex: {hex_text}"))?;
-                    if let Some(character) = char::from_u32(code_point) {
+                    // A surrogate (0xD800..=0xDFFF) is only valid as the high half
+                    // of a UTF-16 surrogate pair: it must be followed by a `\uLOW`
+                    // escape whose code point is the low half (0xDC00..=0xDFFF).
+                    // The pair combines into one astral-plane scalar.
+                    if (0xD800..=0xDBFF).contains(&code_point) {
+                        let high = code_point;
+                        if *index + 10 >= bytes.len()
+                            || bytes[*index + 5] != b'\\'
+                            || bytes[*index + 6] != b'u'
+                        {
+                            return Err("lone high surrogate in \\u escape".into());
+                        }
+                        let low_hex = std::str::from_utf8(&bytes[*index + 7..*index + 11])
+                            .map_err(|_| "non-utf8 in \\u low surrogate".to_string())?;
+                        let low = u32::from_str_radix(low_hex, 16)
+                            .map_err(|_| format!("invalid \\u hex: {low_hex}"))?;
+                        if !(0xDC00..=0xDFFF).contains(&low) {
+                            return Err("invalid low surrogate after high surrogate".into());
+                        }
+                        let scalar = 0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00);
+                        let character = char::from_u32(scalar)
+                            .ok_or_else(|| "surrogate pair out of range".to_string())?;
+                        output.push(character);
+                        // Advance past the low half's `\u` + 4 hex (6 bytes). The
+                        // shared `*index += 4` below covers the high half's hex and
+                        // the shared `*index += 1` covers the high half's `u`.
+                        *index += 6;
+                    } else if (0xDC00..=0xDFFF).contains(&code_point) {
+                        return Err("lone low surrogate in \\u escape".into());
+                    } else if let Some(character) = char::from_u32(code_point) {
                         output.push(character);
                     }
                     *index += 4;
@@ -479,6 +508,38 @@ mod tests {
     fn parse_entry_text_rejects_missing_id() {
         let raw = r#"{"request":"x","preset":"feature","status":"open","startedAt":"","finishedAt":"","proof":""}"#;
         assert!(parse_entry_text(raw).is_err());
+    }
+
+    #[test]
+    fn parse_object_of_strings_decodes_surrogate_pair_as_astral_char() {
+        // U+1F600 encodes in JSON as the UTF-16 surrogate pair 😀.
+        let raw = r#"{"id":"wf-3","request":"ship 😀 emoji"}"#;
+        let fields = parse_object_of_strings(raw).expect("parse");
+        let request = fields
+            .iter()
+            .find(|(key, _)| key == "request")
+            .map(|(_, value)| value.as_str())
+            .expect("request field");
+        assert_eq!(request, "ship 😀 emoji");
+    }
+
+    #[test]
+    fn parse_object_of_strings_rejects_lone_high_surrogate() {
+        let raw = r#"{"id":"wf-3","request":"\uD83D"}"#;
+        assert!(parse_object_of_strings(raw).is_err());
+    }
+
+    #[test]
+    fn parse_object_of_strings_rejects_lone_low_surrogate() {
+        let raw = r#"{"id":"wf-3","request":"\uDE00"}"#;
+        assert!(parse_object_of_strings(raw).is_err());
+    }
+
+    #[test]
+    fn parse_object_of_strings_rejects_high_surrogate_without_low_followup() {
+        // High surrogate followed by a non-surrogate escape is a malformed pair.
+        let raw = r#"{"id":"wf-3","request":"\uD83D\n"}"#;
+        assert!(parse_object_of_strings(raw).is_err());
     }
 
     #[test]

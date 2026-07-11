@@ -20,7 +20,7 @@ use std::path::Path;
 
 use crate::args::FlagSet;
 use crate::json::{write_indented, Value};
-use crate::runtime::{resolve_repository_root, run_command};
+use crate::runtime::{resolve_repository_root, run_command, safe_path_segment};
 
 const REF_PREFIX: &str = "refs/claude-checkpoints/";
 
@@ -290,6 +290,14 @@ fn run_show(
         let _ = writeln!(standard_error, "checkpoint show: --id is required");
         return 1;
     }
+    let Some(id) = validate_checkpoint_id(&id) else {
+        let _ = writeln!(
+            standard_error,
+            "checkpoint show: --id must be a safe ref-name segment (no / \\ : .. or traversal); got {:?}",
+            id
+        );
+        return 1;
+    };
     let Some(root) = resolve_root(
         flags.string_value("repo-root"),
         "checkpoint show",
@@ -337,6 +345,14 @@ fn run_restore(
         let _ = writeln!(standard_error, "checkpoint restore: --id is required");
         return 1;
     }
+    let Some(id) = validate_checkpoint_id(&id) else {
+        let _ = writeln!(
+            standard_error,
+            "checkpoint restore: --id must be a safe ref-name segment (no / \\ : .. or traversal); got {:?}",
+            id
+        );
+        return 1;
+    };
     let Some(root) = resolve_root(
         flags.string_value("repo-root"),
         "checkpoint restore",
@@ -406,6 +422,15 @@ fn checkpoint_exists(root: &Path, id: &str) -> bool {
     )
     .map(|result| result.code == 0)
     .unwrap_or(false)
+}
+
+/// Validate a user-supplied checkpoint id before joining it into a git ref name.
+/// The id is passed to git as an argv element (not a shell string), so shell
+/// injection is not the risk — but `..`, `/`, `\`, `:`, and `~`/`^` could traverse
+/// or collide with other refs under `refs/claude-checkpoints/`. Reject anything
+/// that is not a single safe path segment.
+fn validate_checkpoint_id(raw: &str) -> Option<String> {
+    safe_path_segment(raw)
 }
 
 fn checkpoint_id() -> String {
@@ -595,6 +620,36 @@ mod tests {
             let code = run_checkpoint_command(&args, &mut out, &mut err);
             assert_eq!(code, 1, "{verb} should fail on unknown id");
             assert!(String::from_utf8_lossy(&err).contains("no checkpoint with id"));
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn show_and_restore_reject_unsafe_id_segments() {
+        // A crafted --id with path separators or traversal must be rejected
+        // before it is joined into a git ref name. Safe ids still pass.
+        let root = unique_repo("unsafe-id");
+        git_init(&root);
+        let root_arg = root.to_string_lossy().to_string();
+        for verb in ["show", "restore"] {
+            for bad_id in ["..", "a/b", r"a\b", "a:b", "a/../b"] {
+                let args: Vec<String> = vec![
+                    verb.into(),
+                    "--id".into(),
+                    bad_id.into(),
+                    "--repo-root".into(),
+                    root_arg.clone(),
+                ];
+                let mut out = Vec::new();
+                let mut err = Vec::new();
+                let code = run_checkpoint_command(&args, &mut out, &mut err);
+                assert_eq!(code, 1, "{verb} should reject unsafe id {bad_id:?}");
+                let err_text = String::from_utf8_lossy(&err);
+                assert!(
+                    err_text.contains("safe ref-name segment"),
+                    "{verb} on bad id {bad_id:?} should explain the rejection: {err_text}"
+                );
+            }
         }
         let _ = std::fs::remove_dir_all(&root);
     }

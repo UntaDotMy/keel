@@ -824,10 +824,11 @@ fn run_hook_pre_tool_use(standard_output: &mut dyn Write, standard_error: &mut d
         .and_then(JsonDocument::as_str)
         .unwrap_or_default();
 
-    let analysis = crate::runner::shell_rewrite::analyze_command_text(command);
-    if let Some(finding) =
-        crate::runner::shell_rewrite::detect_destructive_command(&analysis.effective_fields)
-    {
+    // Inspect EVERY segment of a compound command, not just the first supported
+    // noisy segment that `analyze_command_text`'s `effective_fields` surfaces.
+    // Without this, a destructive payload in a later segment
+    // (`cargo test && rm -rf /`) bypasses the guard entirely.
+    if let Some(finding) = crate::runner::shell_rewrite::detect_destructive_in_command(command) {
         let reason = match finding.severity {
             crate::runner::shell_rewrite::DestructiveSeverity::Block => format!(
                 "[keel] Destructive command blocked: {}. This command is almost certainly unsafe. \
@@ -1362,10 +1363,11 @@ pub(crate) fn is_edit_class_tool(tool_name: &str) -> bool {
 }
 
 fn system_map_refresh_threshold() -> u64 {
-    std::env::var("CLAUDE_SKILLS_SYSTEM_MAP_REFRESH_INTERVAL")
-        .ok()
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .unwrap_or(SYSTEM_MAP_REFRESH_DEFAULT_THRESHOLD)
+    user_config_or_env_u64(
+        PLUGIN_SYSTEM_MAP_REFRESH_INTERVAL,
+        "CLAUDE_SKILLS_SYSTEM_MAP_REFRESH_INTERVAL",
+        SYSTEM_MAP_REFRESH_DEFAULT_THRESHOLD,
+    )
 }
 
 fn system_map_edit_counter_path() -> Option<PathBuf> {
@@ -2260,6 +2262,56 @@ fn subagent_start_context() -> String {
 const REVIEW_GATE_ENV_VAR: &str = "CLAUDE_SKILLS_REVIEW_GATE";
 const REVIEW_GATE_MAX_BLOCKS_ENV_VAR: &str = "CLAUDE_SKILLS_REVIEW_GATE_MAX_BLOCKS";
 
+// The plugin manifest (.claude-plugin/plugin.json `userConfig`) declares three
+// user-facing knobs. The harness exports each to plugin subprocesses as
+// `CLAUDE_PLUGIN_OPTION_<KEY>` (per the official plugin reference). Without the
+// bridge below, those knobs appeared in the /plugin settings UI but had zero
+// effect on keel's behavior — the real config was the CLAUDE_SKILLS_* env vars
+// with different names and no translation layer.
+//
+// Precedence: an explicit CLAUDE_SKILLS_* var wins (operator escape hatch for
+// debugging); otherwise the userConfig value is used; otherwise the constant
+// default. This keeps the user-facing setting effective without taking away the
+// lower-level override.
+const PLUGIN_REVIEW_STRICTNESS: &str = "CLAUDE_PLUGIN_OPTION_REVIEW_STRICTNESS";
+const PLUGIN_SYSTEM_MAP_REFRESH_INTERVAL: &str = "CLAUDE_PLUGIN_OPTION_SYSTEM_MAP_REFRESH_INTERVAL";
+const PLUGIN_MEMORY_RETENTION_DAYS: &str = "CLAUDE_PLUGIN_OPTION_MEMORY_RETENTION_DAYS";
+
+/// Map the harness userConfig vocabulary (`advisory`/`strict`/`off`) onto the
+/// `GateMode` vocabulary (`nudge`/`block`/`off`). Unrecognized values fall
+/// through to the caller's default (None) so a typo does not silently disable.
+fn user_config_review_strictness() -> Option<GateMode> {
+    let value = std::env::var(PLUGIN_REVIEW_STRICTNESS)
+        .ok()?
+        .trim()
+        .to_ascii_lowercase();
+    match value.as_str() {
+        "advisory" | "nudge" => Some(GateMode::Nudge),
+        "strict" | "block" => Some(GateMode::Block),
+        "off" | "0" | "false" | "no" => Some(GateMode::Off),
+        _ => None,
+    }
+}
+
+/// Read a numeric userConfig knob, falling back to the explicit operator env
+/// var, then to `default`. Used by the system-map refresh interval and the
+/// memory retention days. Empty/unparseable userConfig falls through to the
+/// operator var/default rather than erroring.
+fn user_config_or_env_u64(plugin_var: &str, operator_var: &str, default: u64) -> u64 {
+    if let Ok(value) = std::env::var(plugin_var) {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            if let Ok(parsed) = trimmed.parse::<u64>() {
+                return parsed;
+            }
+        }
+    }
+    std::env::var(operator_var)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(default)
+}
+
 /// Base fire cap for `Nudge`/`Block` modes when the operator did not set a custom
 /// `…_MAX_BLOCKS`. One fire per session: the model gets a single reminder (a
 /// non-blocking nudge under `=nudge`, or one hard block under `=block`), after
@@ -2268,10 +2320,61 @@ const REVIEW_GATE_MAX_BLOCKS_ENV_VAR: &str = "CLAUDE_SKILLS_REVIEW_GATE_MAX_BLOC
 /// of 0 disables firing entirely (a second escape hatch alongside the off-switch).
 const GATE_DEFAULT_MAX_BLOCKS: u64 = 1;
 
-/// Exposed for bridge `gate-status` so callers can compare counter values
-/// against the cap without importing the private `default_max_blocks_for`.
-pub(crate) fn default_max_blocks() -> u64 {
-    GATE_DEFAULT_MAX_BLOCKS
+/// One row per PostToolBatch gate, for the bridge `gate-status` surface. Each
+/// row carries the counter directory name, a display label, and the gate's
+/// env-aware max-blocks cap (the real cap, not the flat default). This is the
+/// single source the native hook path and the bridge host path must both use so
+/// `keel bridge gate-status` reports the same 8 gates the native PostToolBatch
+/// fires — previously the bridge hardcoded 3 of 8 and compared against a flat 1.
+pub(crate) struct GateStatusRow {
+    pub dir: &'static str,
+    pub label: &'static str,
+    pub max_blocks: u64,
+}
+
+pub(crate) fn gate_status_rows() -> Vec<GateStatusRow> {
+    vec![
+        GateStatusRow {
+            dir: "review-gate-blocks",
+            label: "review",
+            max_blocks: review_gate_max_blocks(),
+        },
+        GateStatusRow {
+            dir: "brief-gate-blocks",
+            label: "working-brief",
+            max_blocks: brief_gate_max_blocks(),
+        },
+        GateStatusRow {
+            dir: "story-closeout-gate-blocks",
+            label: "story-closeout",
+            max_blocks: story_closeout_gate_max_blocks(),
+        },
+        GateStatusRow {
+            dir: "memory-gate-blocks",
+            label: "memory",
+            max_blocks: memory_gate_max_blocks(),
+        },
+        GateStatusRow {
+            dir: "sprint-start-gate-blocks",
+            label: "sprint-start",
+            max_blocks: sprint_start_gate_max_blocks(),
+        },
+        GateStatusRow {
+            dir: "learned-skill-gate-blocks",
+            label: "learned-skill",
+            max_blocks: learned_skill_gate_max_blocks(),
+        },
+        GateStatusRow {
+            dir: "research-gate-blocks",
+            label: "research",
+            max_blocks: research_gate_max_blocks(),
+        },
+        GateStatusRow {
+            dir: "story-first-gate-blocks",
+            label: "story-first",
+            max_blocks: story_first_gate_max_blocks(),
+        },
+    ]
 }
 
 /// Default per-session fire cap for a gate, chosen by mode. `Escalate` needs at
@@ -2331,21 +2434,32 @@ enum GateMode {
 /// failure direction for a gate whose whole point is to make the requirement
 /// progressively harder to skip without ever wedging the session.
 fn gate_mode(env_var: &str) -> GateMode {
-    match std::env::var(env_var).ok().as_deref().map(str::trim) {
-        Some(value) => match value.to_ascii_lowercase().as_str() {
-            "off" | "0" | "false" | "no" => GateMode::Off,
-            "nudge" => GateMode::Nudge,
-            "block" => GateMode::Block,
-            _ => GateMode::Escalate,
-        },
+    match std::env::var(env_var).ok().as_deref() {
+        Some(value) => gate_mode_value(value),
         None => GateMode::Escalate,
     }
 }
 
-/// Review-gate behavior. Default `Nudge`; `CLAUDE_SKILLS_REVIEW_GATE=block`
-/// restores the hard stop; `=off` (or `0`/`false`/`no`) disables it entirely.
+/// Review-gate behavior. Precedence: an explicit `CLAUDE_SKILLS_REVIEW_GATE`
+/// wins (operator escape hatch); otherwise the harness userConfig
+/// `review_strictness` (`advisory`→Nudge, `strict`→Block, `off`→Off); otherwise
+/// the default `Escalate` (warn-once-then-block).
 fn review_gate_mode() -> GateMode {
-    gate_mode(REVIEW_GATE_ENV_VAR)
+    if let Ok(value) = std::env::var(REVIEW_GATE_ENV_VAR) {
+        return gate_mode_value(&value);
+    }
+    user_config_review_strictness().unwrap_or(GateMode::Escalate)
+}
+
+/// `gate_mode` split out so a value already read from a specific env var can be
+/// resolved without re-reading the environment.
+fn gate_mode_value(value: &str) -> GateMode {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "off" | "0" | "false" | "no" => GateMode::Off,
+        "nudge" => GateMode::Nudge,
+        "block" => GateMode::Block,
+        _ => GateMode::Escalate,
+    }
 }
 
 fn review_gate_max_blocks() -> u64 {
@@ -3668,10 +3782,11 @@ fn emit_gate_decision(
 }
 
 fn prune_raw_output_store(standard_error: &mut dyn Write) {
-    let retention_days = std::env::var("CLAUDE_SKILLS_RAW_RETENTION_DAYS")
-        .ok()
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .unwrap_or(RAW_OUTPUT_DEFAULT_RETENTION_DAYS);
+    let retention_days = user_config_or_env_u64(
+        PLUGIN_MEMORY_RETENTION_DAYS,
+        "CLAUDE_SKILLS_RAW_RETENTION_DAYS",
+        RAW_OUTPUT_DEFAULT_RETENTION_DAYS,
+    );
     if retention_days == 0 {
         return;
     }
@@ -3694,10 +3809,11 @@ fn prune_raw_output_store(standard_error: &mut dyn Write) {
 /// `with_isolated_claude_home` test harness without duplicating the
 /// `CLAUDE_TARGET_OVERRIDE` plumbing here.
 pub(crate) fn prune_tool_timings_store(standard_error: &mut dyn Write) {
-    let retention_days = std::env::var("CLAUDE_SKILLS_TIMINGS_RETENTION_DAYS")
-        .ok()
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .unwrap_or(TIMINGS_DEFAULT_RETENTION_DAYS);
+    let retention_days = user_config_or_env_u64(
+        PLUGIN_MEMORY_RETENTION_DAYS,
+        "CLAUDE_SKILLS_TIMINGS_RETENTION_DAYS",
+        TIMINGS_DEFAULT_RETENTION_DAYS,
+    );
     if retention_days == 0 {
         return;
     }
@@ -3710,10 +3826,11 @@ pub(crate) fn prune_tool_timings_store(standard_error: &mut dyn Write) {
 /// SessionEnd-only, env-var override, errors swallowed — same housekeeping
 /// contract as the timings and raw-output prunes.
 fn prune_observations_store(standard_error: &mut dyn Write) {
-    let retention_days = std::env::var("CLAUDE_SKILLS_OBSERVATION_RETENTION_DAYS")
-        .ok()
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .unwrap_or(OBSERVATION_DEFAULT_RETENTION_DAYS);
+    let retention_days = user_config_or_env_u64(
+        PLUGIN_MEMORY_RETENTION_DAYS,
+        "CLAUDE_SKILLS_OBSERVATION_RETENTION_DAYS",
+        OBSERVATION_DEFAULT_RETENTION_DAYS,
+    );
     if retention_days == 0 {
         return;
     }

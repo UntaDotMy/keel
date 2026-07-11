@@ -315,6 +315,102 @@ fn audit_flagged_commands_are_documented() {
 /// staging omits them, install silently reports "plugin source absent" /
 /// "source absent" for every adapter — the exact bug that shipped. This test
 /// pins the staging so the gap cannot recur: remove the staging and CI fails.
+///
+/// Bridge subcommand parity: the `keel bridge <event>` match arms in
+/// `runner/bridge.rs` are the single source of truth for which subcommands
+/// exist. CLAUDE.md's OpenCode-host section and the in-binary `render_bridge_help`
+/// text must each mention every wired arm — otherwise a maintainer reading either
+/// the docs or the `keel bridge help` output would not know the full surface.
+/// This was the exact drift a competitive audit flagged (CLAUDE.md enumerated six
+/// subcommands while the match surface had eight, omitting `pre-tool-use` and
+/// `rewrite`, both actively called by the OpenCode/Codex/Pi/Cursor adapters).
+/// Add or rename a bridge arm and this test fails CI until the docs and help
+/// text are updated together.
+#[test]
+fn bridge_subcommands_are_documented_and_in_help() {
+    let repo_root = repository_root();
+    let bridge_src = fs::read_to_string(
+        repo_root
+            .join("rust")
+            .join("crates")
+            .join("keel")
+            .join("src")
+            .join("runner")
+            .join("bridge.rs"),
+    )
+    .expect("read bridge.rs");
+
+    // Derive the wired subcommand set from the `match arguments[0].as_str()` arms.
+    // Each arm looks like `"session-start" => run_bridge_session_start(...)`; we
+    // capture the quoted slug before ` =>`. This is the dispatch surface, not the
+    // hand-maintained help text, so it cannot itself drift.
+    let mut wired: BTreeSet<String> = BTreeSet::new();
+    for line in bridge_src.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix('"') {
+            if let Some(end) = rest.find('"') {
+                let slug = &rest[..end];
+                if slug.chars().all(|c| c.is_ascii_lowercase() || c == '-') && !slug.is_empty() {
+                    // Only collect arms inside the dispatch match (the help renderer
+                    // also has quoted strings, but those are indented differently and
+                    // are not `"<slug>" =>` arms). Confirm the ` =>` follows.
+                    let after = rest[end + 1..].trim_start();
+                    if after.starts_with("=>") {
+                        wired.insert(slug.to_string());
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        !wired.is_empty(),
+        "failed to parse any bridge match arms from bridge.rs — the parser is stale"
+    );
+    // Sanity: the known bridge subcommands must all be present; if this fails,
+    // the arm-parsing logic above drifted, not the docs.
+    for expected in [
+        "session-start",
+        "user-prompt",
+        "observe",
+        "session-end",
+        "post-compact",
+        "gate-status",
+        "pre-tool-use",
+        "rewrite",
+    ] {
+        assert!(
+            wired.contains(expected),
+            "expected `{expected}` to be a wired bridge arm; the test parser may need updating \
+             if the match shape changed"
+        );
+    }
+
+    let claude_md = fs::read_to_string(repo_root.join("CLAUDE.md")).expect("read CLAUDE.md");
+
+    // The help text is rendered by `render_bridge_help` inside bridge.rs itself.
+    for slug in &wired {
+        assert!(
+            bridge_src.contains(&format!(" {slug} ")),
+            "`render_bridge_help` in bridge.rs must list the `{slug}` subcommand in its \
+             Subcommands block; it is a wired match arm but missing from the help text"
+        );
+        assert!(
+            claude_md.contains(slug.as_str()),
+            "CLAUDE.md must document the `{slug}` bridge subcommand (it is a wired match arm in \
+             bridge.rs but missing from the OpenCode-host bridge section — the exact drift the \
+             competitive audit flagged). Add it to the `keel bridge <event>` enumeration."
+        );
+    }
+}
+
+/// The release bundle must stage the cross-agent adapter source directories
+/// (opencode/codex/pi/cursor/cowork) so `keel install` run from a release-bundle
+/// extract can wire non-Claude-Code targets. `maybe_wire_opencode` /
+/// `maybe_wire_codex` / `maybe_wire_pi` / `maybe_wire_cursor` / `maybe_wire_cowork` in
+/// `manager/install.rs` read these dirs from `repository_root`; if the release
+/// staging omits them, install silently reports "plugin source absent" /
+/// "source absent" for every adapter — the exact bug that shipped. This test
+/// pins the staging so the gap cannot recur: remove the staging and CI fails.
 #[test]
 fn release_bundle_stages_adapter_source_dirs() {
     let repo_root = repository_root();
@@ -338,4 +434,94 @@ fn release_bundle_stages_adapter_source_dirs() {
              Add the adapter to the staging loop or as an explicit `cp -R`."
         );
     }
+}
+
+/// H5/H6 guard: docs and host-bridge READMEs must not hardcode a literal
+/// specialist-skill count or MCP-tool count. The counts are asserted from disk
+/// (manifest + mcp/tools.rs) by other tests in this file; a literal number in
+/// prose rots the moment a skill or tool is added or removed. This test scans
+/// the known stale-count surfaces and fails if any literal count reappears.
+#[test]
+fn no_stale_literal_counts_in_docs_or_host_readmes() {
+    let repo_root = repository_root();
+    // Files that previously carried stale "24 specialist" / "31 tools" literals.
+    let surfaces = [
+        "AGENTS.md",
+        "AGENTS/references/99-source-anchors.md",
+        "AGENTS/references/20-skill-routing.md",
+        "00-skill-routing-and-escalation.md",
+        "using-keel/SKILL.md",
+        "README.md",
+        "pi/README.md",
+        "cowork/README.md",
+        ".githooks/README.md",
+        ".claude-plugin/marketplace.json",
+        "codex/.codex-plugin/plugin.json",
+    ];
+    // Regex would be cleaner, but a substring scan keeps this dependency-free and
+    // matches the line-based style of the rest of this test file. We flag a
+    // literal count adjacent to specialist/tool language.
+    let forbidden_patterns = [
+        "24 specialist",
+        "24 managed",
+        "24 delegation",
+        "24 profiles",
+        "31 tools",
+        "31 MCP",
+    ];
+    for surface in &surfaces {
+        let path = repo_root.join(surface);
+        let text = match fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(_) => continue, // a surface may not exist on every checkout
+        };
+        for pattern in &forbidden_patterns {
+            assert!(
+                !text.contains(pattern),
+                "{surface} still hardcodes the stale literal \"{pattern}\". \
+                 The specialist/tool counts are asserted from disk by doc_parity_test; \
+                 a literal number in prose rots when a skill or tool is added/removed. \
+                 Replace it with a reference to the test-asserted roster.",
+            );
+        }
+    }
+}
+
+/// H5 guard: every specialist agent file in .claude/agents/ must have a matching
+/// managed profile at <name>/agents/claude.yaml, and vice versa. Pins the
+/// 1:1 agent⇄profile correspondence the docs now describe count-free.
+#[test]
+fn specialist_agent_and_profile_sets_match() {
+    let repo_root = repository_root();
+    let agents_dir = repo_root.join(".claude").join("agents");
+    let agent_files: BTreeSet<String> = fs::read_dir(&agents_dir)
+        .unwrap_or_else(|e| panic!("read {}: {e}", agents_dir.display()))
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("md") {
+                path.file_stem()?.to_str().map(|s| s.to_string())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // Profiles live at <name>/agents/claude.yaml — collect the parent dir name.
+    let mut profile_dirs: BTreeSet<String> = BTreeSet::new();
+    for skill in manifest_skills(&repo_root) {
+        let profile = repo_root.join(&skill).join("agents").join("claude.yaml");
+        if profile.is_file() {
+            profile_dirs.insert(skill);
+        }
+    }
+
+    let agents_only: Vec<_> = agent_files.difference(&profile_dirs).collect();
+    let profiles_only: Vec<_> = profile_dirs.difference(&agent_files).collect();
+    assert!(
+        agents_only.is_empty() && profiles_only.is_empty(),
+        "agent⇄profile mismatch:\n  agents without a profile: {agents_only:?}\n  \
+         profiles without an agent: {profiles_only:?}\n  \
+         Every specialist must ship all three artifacts (SKILL.md + subagent + profile)."
+    );
 }

@@ -18,6 +18,7 @@
 //! doing it natively makes MCP survive installs/updates that never run the
 //! shell script (manual release install, `keel update`, `repair`).
 
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Map, Value};
@@ -28,6 +29,78 @@ use crate::runtime::{display_path, installed_executable_path, read_text_if_exist
 /// MCP server reports during `initialize` and the `.claude-plugin/plugin.json`
 /// `mcpServers` key, so the plugin path and the native path agree.
 pub const MCP_SERVER_KEY: &str = "keel";
+
+/// Max age (seconds) of a lock file before it is considered stale (the holder
+/// crashed) and reclaimed. Long enough that a normal registration (parse +
+/// mutate + atomic write, well under a second) never trips it, short enough
+/// that a crashed holder does not wedge subsequent registrations for long.
+const CONFIG_LOCK_MAX_AGE_SECS: u64 = 30;
+
+/// A best-effort cross-process lock for the read-modify-write of `~/.claude.json`.
+///
+/// `register_mcp_server` does read → parse → mutate → write without a lock, so
+/// two concurrent writers (e.g. SessionStart self-heal racing a manual
+/// `keel repair`) could both read the pre-mutation state and the later write
+/// would clobber the earlier one's changes to unrelated keys. This lock uses an
+/// O_EXCL sibling lockfile (`.claude.json.keel-lock`) for mutual exclusion.
+///
+/// Best-effort: a crash mid-registration leaves a stale lockfile, reclaimed
+/// after `CONFIG_LOCK_MAX_AGE_SECS`. On any I/O error acquiring the lock, the
+/// caller proceeds WITHOUT the lock (fail-open) rather than blocking the
+/// install — the write itself is still atomic (temp+rename), so the worst case
+/// is a lost update to unrelated keys under rare concurrency, not corruption.
+struct ConfigLock {
+    lock_path: PathBuf,
+    held: bool,
+}
+
+impl ConfigLock {
+    /// Acquire a lock for `config_path` (a sibling `.keel-lock` file). Returns a
+    /// guard that releases on drop. If the lock is held by another process, this
+    /// busy-waits briefly; if acquisition fails after the timeout, returns a
+    /// non-holding guard (fail-open).
+    fn acquire(config_path: &Path) -> Self {
+        let lock_path = config_path.with_extension("json.keel-lock");
+        // Try to reclaim a stale lock first.
+        if let Ok(metadata) = fs::metadata(&lock_path) {
+            if let Ok(modified) = metadata.modified() {
+                if let Ok(elapsed) = modified.elapsed() {
+                    if elapsed.as_secs() > CONFIG_LOCK_MAX_AGE_SECS {
+                        let _ = fs::remove_file(&lock_path);
+                    }
+                }
+            }
+        }
+        // Busy-wait up to ~2 seconds for the lock.
+        let mut held = false;
+        for _ in 0..40 {
+            use std::io::ErrorKind;
+            match fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&lock_path)
+            {
+                Ok(_) => {
+                    held = true;
+                    break;
+                }
+                Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                Err(_) => break, // fail-open on unexpected I/O error
+            }
+        }
+        ConfigLock { lock_path, held }
+    }
+}
+
+impl Drop for ConfigLock {
+    fn drop(&mut self) {
+        if self.held {
+            let _ = fs::remove_file(&self.lock_path);
+        }
+    }
+}
 
 /// Outcome of a registration attempt, for caller-facing reporting.
 #[derive(Debug, PartialEq, Eq)]
@@ -87,6 +160,11 @@ pub fn mcp_server_entry(claude_home: &Path) -> Value {
 /// `AlreadyCurrent` no-op that does not rewrite the file.
 pub fn register_mcp_server(claude_home: &Path) -> Result<McpRegistration, String> {
     let config_path = mcp_config_path(claude_home);
+    // Hold a cross-process lock for the read-modify-write so two concurrent
+    // keel processes (SessionStart self-heal racing a manual `keel repair`)
+    // cannot both read the pre-mutation state and clobber each other's changes
+    // to unrelated keys. Fail-open if the lock cannot be acquired.
+    let _lock = ConfigLock::acquire(&config_path);
     let existing_text = read_text_if_exists(&config_path)?;
 
     // Parse the existing config, or start a fresh object. A corrupt/non-object
@@ -203,6 +281,9 @@ pub enum McpUnregistration {
 /// clobbering a user's `~/.claude.json` would be destructive.
 pub fn unregister_mcp_server(claude_home: &Path) -> Result<McpUnregistration, String> {
     let config_path = mcp_config_path(claude_home);
+    // Same cross-process lock as register_mcp_server: the read-modify-write of
+    // ~/.claude.json must not race a concurrent writer.
+    let _lock = ConfigLock::acquire(&config_path);
     let existing_text = read_text_if_exists(&config_path)?;
     if existing_text.trim().is_empty() {
         return Ok(McpUnregistration::NotPresent);

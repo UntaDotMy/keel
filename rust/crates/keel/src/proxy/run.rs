@@ -16,7 +16,7 @@ use crate::proxy::event_log::record_compaction_event;
 use crate::proxy::injection_guard::{neutralize_injection, InjectionFinding};
 use crate::proxy::raw_store::{RawRun, RawStore, RunMeta};
 use crate::proxy::token_meter::TokenMeter;
-use crate::runtime::{display_path, run_command, ProcessResult};
+use crate::runtime::{display_path, run_command, ProcessResult, MAX_CAPTURED_OUTPUT_BYTES};
 
 /// Decide whether the proxy should run in capture mode (with compaction, raw
 /// recovery, gain analytics) or fall back to a transparent passthrough.
@@ -72,6 +72,27 @@ pub fn run_proxy(
         let _ = writeln!(standard_error, "{}", parse_error.message);
         return 1;
     }
+
+    // Validate --max-lines: a non-numeric or negative value previously parsed to
+    // 0 (via unwrap_or(0)) and silently meant "no cap" — the opposite of what a
+    // user typing --max-lines garbage expects. Reject it explicitly. A value of
+    // 0 (the default) still means "no cap".
+    let max_lines_raw = flag_set.string_value("max-lines");
+    let max_lines: usize = if max_lines_raw.trim() == "0" || max_lines_raw.trim().is_empty() {
+        0
+    } else {
+        match max_lines_raw.trim().parse::<usize>() {
+            Ok(value) => value,
+            Err(_) => {
+                let _ = writeln!(
+                    standard_error,
+                    "keel run: --max-lines expects a non-negative integer, got {:?}",
+                    max_lines_raw
+                );
+                return 1;
+            }
+        }
+    };
 
     let registry = crate::proxy::adapters::build_adapter_registry();
 
@@ -176,8 +197,10 @@ pub fn run_proxy(
                     .or_else(|_| std::env::var("CLAUDE_AGENT"))
                     .unwrap_or_else(|_| "claude-code".to_string()),
                 workspace: cwd.clone(),
-                stdout_bytes: result.stdout.len(),
-                stderr_bytes: result.stderr.len(),
+                // Use the original (pre-cap) byte counts so gain analytics stay
+                // honest when a runaway command's output was capped.
+                stdout_bytes: result.original_stdout_bytes,
+                stderr_bytes: result.original_stderr_bytes,
                 compact_stdout_bytes: 0,
                 compact_stderr_bytes: 0,
                 estimated_tokens_before: TokenMeter::estimate_bytes(&result.stdout)
@@ -211,7 +234,7 @@ pub fn run_proxy(
                 neutralize_compact_result(compact_result, &meta.raw_id);
             let rendered = cap_lines(
                 &crate::proxy::render::render_compact_result(&compact_result),
-                flag_set.string_value("max-lines").parse().unwrap_or(0),
+                max_lines,
             );
             // Break-even guard: never emit compacted output that is larger than
             // the raw it replaces. On small or already-terse command output the
@@ -478,6 +501,8 @@ fn run_command_streaming_proxy(
 
     let mut stdout_bytes = Vec::new();
     let mut stderr_bytes = Vec::new();
+    let mut stdout_original = 0usize;
+    let mut stderr_original = 0usize;
     let mut stdout_live = 0usize;
     let mut stderr_live = 0usize;
     let mut stdout_high_signal = 0usize;
@@ -486,11 +511,30 @@ fn run_command_streaming_proxy(
     let mut stderr_capped = false;
     for chunk in receiver {
         // Always capture the raw bytes for post-run compaction (which neutralizes
-        // the captured copy). The captured stream is the source of truth.
+        // the captured copy). The captured stream is the source of truth — but
+        // cap it at MAX_CAPTURED_OUTPUT_BYTES so a runaway command cannot exhaust
+        // memory. CRITICAL: keep draining the receiver even after the cap (discard
+        // bytes) so the child does not deadlock on a full OS pipe.
         if chunk.label == "stdout" {
-            stdout_bytes.extend_from_slice(&chunk.bytes);
+            stdout_original += chunk.bytes.len();
+            if stdout_bytes.len() < MAX_CAPTURED_OUTPUT_BYTES {
+                let room = MAX_CAPTURED_OUTPUT_BYTES - stdout_bytes.len();
+                if chunk.bytes.len() <= room {
+                    stdout_bytes.extend_from_slice(&chunk.bytes);
+                } else {
+                    stdout_bytes.extend_from_slice(&chunk.bytes[..room]);
+                }
+            }
         } else {
-            stderr_bytes.extend_from_slice(&chunk.bytes);
+            stderr_original += chunk.bytes.len();
+            if stderr_bytes.len() < MAX_CAPTURED_OUTPUT_BYTES {
+                let room = MAX_CAPTURED_OUTPUT_BYTES - stderr_bytes.len();
+                if chunk.bytes.len() <= room {
+                    stderr_bytes.extend_from_slice(&chunk.bytes);
+                } else {
+                    stderr_bytes.extend_from_slice(&chunk.bytes[..room]);
+                }
+            }
         }
 
         let (live_count, high_signal_count) = if chunk.label == "stdout" {
@@ -506,6 +550,12 @@ fn run_command_streaming_proxy(
         if should_show {
             if show_high_signal {
                 *high_signal_count += 1;
+            } else {
+                // Only non-high-signal lines consume the normal live cap. A
+                // high-signal line showed via its own budget (STREAM_HIGH_SIGNAL_CAP)
+                // and must not also count against STREAM_LIVE_CAP, or output that
+                // tags every line with "error"/"warning" would exhaust both caps.
+                *live_count += 1;
             }
             // Neutralize prompt-injection before the chunk reaches the live
             // display — the live path is agent-visible just like the captured one.
@@ -529,7 +579,6 @@ fn run_command_streaming_proxy(
             );
             stderr_capped = true;
         }
-        *live_count += 1;
     }
     let status = child.wait().map_err(|error| format!("wait: {error}"))?;
     let _ = stdout_handle.join();
@@ -538,6 +587,8 @@ fn run_command_streaming_proxy(
         code: status.code().unwrap_or(1),
         stdout: stdout_bytes,
         stderr: stderr_bytes,
+        original_stdout_bytes: stdout_original,
+        original_stderr_bytes: stderr_original,
     })
 }
 
@@ -756,6 +807,179 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&recovery_dir);
+        restore_signals(&snapshot);
+    }
+
+    /// Regression: the compact-ON branch of `run_proxy` (use_compact_output ==
+    /// true) was never exercised end-to-end. The sole existing test passes
+    /// `--no-compact`, so it only walks the neutralized-raw passthrough. This
+    /// test runs a real command whose output is large enough to trip the
+    /// generic adapter's head/tail reducer AND the break-even guard
+    /// (`rendered_tokens < raw_tokens`), then asserts the four pieces of
+    /// wiring that only the compact branch touches:
+    ///   1. the agent sees the rendered wrapper (PASS/FAIL + `raw: keel raw`),
+    ///      not the raw bytes;
+    ///   2. `save_compact` wrote the rendered wrapper to `compact.txt`
+    ///      (not the neutralized raw the --no-compact path writes);
+    ///   3. `record_compaction_event` appended a JSONL line with
+    ///      `compacted: true` to the event log that feeds `keel gain`;
+    ///   4. the persisted `meta.json` carries `compacted: true`.
+    /// A regression in the break-even comparison, the compact-branch save, or
+    /// the event-log write would fail one of these.
+    #[test]
+    fn compact_on_path_emits_rendered_wrapper_and_records_compacted_event() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let snapshot = snapshot_signals();
+        clear_signals();
+        std::env::set_var("CLAUDE_SKILLS_HOOK", "test");
+
+        // Redirect resolve_claude_home (used by record_compaction_event) to a
+        // private temp dir so the event-log write is isolated and observable,
+        // mirroring runner/tool_timings.rs' with_isolated_claude_home.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let claude_home = std::env::temp_dir().join(format!(
+            "keel-compact-on-home-{}-{nanos}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&claude_home);
+        std::fs::create_dir_all(&claude_home).expect("create test claude home");
+        let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
+        std::env::set_var("CLAUDE_TARGET_OVERRIDE", &claude_home);
+
+        let recovery_dir = std::env::temp_dir().join(format!(
+            "keel-compact-on-recovery-{}-{nanos}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&recovery_dir);
+
+        // 200 repetitive lines exceeds the generic adapter's LINE_LIMIT (80),
+        // so compact_stream reduces it to ~20 head + omission notice + 20 tail.
+        // That rendered wrapper is far smaller than the raw 200 lines, so the
+        // break-even guard (rendered_tokens < raw_tokens) selects the compact
+        // branch. The generator command is shell-specific: cmd.exe has no
+        // printf/seq, so branch on the platform the way the existing
+        // shell_command_parts test does. platform_shell_command_parts already
+        // selects cmd /C vs bash -lc, so we hand it native syntax.
+        let generator = if cfg!(windows) {
+            // `for /L %i in (start,step,end)` is the cmd.exe counted loop; the
+            // leading @ suppresses per-iteration command echo so only the
+            // `line N` text reaches stdout.
+            "for /L %i in (1,1,200) do @echo line %i"
+        } else {
+            // bash brace expansion needs no external tool (seq/jot are not
+            // guaranteed on macOS), so this works on bash 3.2+ everywhere.
+            "for i in {1..200}; do echo \"line $i\"; done"
+        };
+        let (program, shell_args) = crate::runtime::platform_shell_command_parts(generator);
+        let mut arguments = vec![
+            "--recovery-dir".to_string(),
+            recovery_dir.to_string_lossy().to_string(),
+            "--".to_string(),
+            program,
+        ];
+        arguments.extend(shell_args);
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let exit = run_proxy(&arguments, &mut stdout, &mut stderr);
+        // The generator (for-loop printing lines) exits 0; if it failed to run
+        // the rendered-output assertions below would also fail, but asserting
+        // the exit code up front gives a clearer signal when the command itself
+        // did not execute (e.g. a shell-syntax portability regression).
+        assert_eq!(
+            exit,
+            0,
+            "generator command must exit 0, got {exit} (stderr: {})",
+            String::from_utf8_lossy(&stderr)
+        );
+        // Normalize CRLF (Windows cmd output) to LF so line-sensitive contains
+        // checks behave identically on ubuntu/windows/macos CI.
+        let rendered = String::from_utf8_lossy(&stdout).replace("\r\n", "\n");
+
+        // (1) The compact branch emits render_compact_result's wrapper, which
+        // always carries the `raw: keel raw <id>` footer and a `saved:` line.
+        // The raw command output is 200 `line N` lines; if the compact branch
+        // were NOT taken, stdout would contain `line 100` (a middle line the
+        // head/tail reducer drops) and lack the wrapper footer.
+        assert!(
+            rendered.contains("raw: keel raw "),
+            "compact branch must emit the rendered wrapper footer, got: {rendered} (stderr: {})",
+            String::from_utf8_lossy(&stderr)
+        );
+        assert!(
+            rendered.contains("saved: "),
+            "compact branch must emit the token-savings line, got: {rendered}"
+        );
+        assert!(
+            !rendered.contains("line 100\n"),
+            "a middle raw line must NOT survive compaction, got: {rendered}"
+        );
+        // `line 1` survives as a head edge line.
+        assert!(
+            rendered.contains("line 1\n"),
+            "a head edge line must survive compaction, got: {rendered}"
+        );
+
+        // (2) save_compact wrote the rendered wrapper to compact.txt. The
+        // --no-compact path writes the neutralized raw instead, so asserting
+        // the wrapper footer is present distinguishes the branches.
+        let store = RawStore::with_root(recovery_dir.clone());
+        let entries = store.list().expect("list raw entries");
+        let entry = entries
+            .first()
+            .expect("at least one raw entry must be persisted");
+        let compact = String::from_utf8(
+            std::fs::read(entry.path.join("compact.txt")).expect("compact.txt written"),
+        )
+        .unwrap();
+        assert!(
+            compact.contains("raw: keel raw "),
+            "save_compact must persist the rendered wrapper, got: {compact}"
+        );
+
+        // (4) The persisted meta.json carries compacted: true — the field
+        // record_compaction_event reads and that keel gain surfaces. The
+        // --no-compact path writes compacted: false here.
+        let meta = store.load_meta(&entry.raw_id).expect("load meta");
+        assert!(
+            meta.compacted,
+            "meta.compacted must be true on the compact branch, got false (meta: {meta:?})"
+        );
+
+        // (3) record_compaction_event appended a JSONL line with
+        // compacted: true to the event log. This is the line keel gain reads
+        // (gain.rs joins COMMAND_COMPACTION_EVENTS_FILE_NAME); a broken
+        // compact-branch write would starve gain reporting.
+        let event_path = claude_home.join("command-compaction-events.jsonl");
+        let log = std::fs::read_to_string(&event_path)
+            .expect("event log must be written on the compact branch");
+        let last_line = log
+            .lines()
+            .last()
+            .expect("at least one event line must be appended");
+        let payload: serde_json::Value =
+            serde_json::from_str(last_line).expect("event line is valid JSON");
+        assert_eq!(
+            payload["compacted"],
+            serde_json::json!(true),
+            "event log must record compacted: true on the compact branch, got: {last_line}"
+        );
+        assert_eq!(
+            payload["adapter_name"],
+            serde_json::json!("generic"),
+            "event log must record the resolved adapter, got: {last_line}"
+        );
+
+        let _ = std::fs::remove_dir_all(&recovery_dir);
+        let _ = std::fs::remove_dir_all(&claude_home);
+        match previous_home {
+            Some(value) => std::env::set_var("CLAUDE_TARGET_OVERRIDE", value),
+            None => std::env::remove_var("CLAUDE_TARGET_OVERRIDE"),
+        }
         restore_signals(&snapshot);
     }
 }

@@ -78,7 +78,7 @@ The cast file ships in this repo. Render to GIF with `agg docs/demos/quickstart.
 | Review gates | Native `.claude/review.json`, `review pre-pr`, and CI-ready artifacts so non-trivial code never self-reviews. |
 | Memory | Working briefs, completion ledgers, scoped `SYSTEM_MAP.md`, and durable recovery state under `~/.claude/memories/`. |
 | Command compaction | `keel run -- <cmd>` produces compact output for noisy test/build/lint/log/search commands without dropping diagnostic signal. |
-| MCP server | `keel mcp serve` is registered through the plugin manifest so the harness auto-discovers 31 tools — `recall`, `system_map`, `run_command`, `recall_status`, `skill_route`, `skill_get`, `skill_list`, `memory_status`, `brief_list`, `brief_get`, `brief_create`, `system_map_refresh`, `context_brief`, `cli`, `sprint`, `user_story_lint`, `review`, `workflow`, `git_workflow`, `memory`, `gain`, `raw`, `config_audit`, `skill_lint`, `telemetry`, `orchestration`, `checkpoint`, `session`, `doctor`, `code_search`, `user_story` — plus the system-map and recall-status resources. |
+| MCP server | `keel mcp serve` is registered through the plugin manifest so the harness auto-discovers the keel MCP tool surface (tool count asserted by `tests/doc_parity_test.rs`, which counts `"inputSchema":` definitions in `mcp/tools.rs`) — `recall`, `system_map`, `run_command`, `recall_status`, `skill_route`, `skill_get`, `skill_list`, `memory_status`, `brief_list`, `brief_get`, `brief_create`, `system_map_refresh`, `context_brief`, `cli`, `sprint`, `user_story_lint`, `review`, `workflow`, `git_workflow`, `memory`, `gain`, `raw`, `config_audit`, `skill_lint`, `telemetry`, `orchestration`, `checkpoint`, `session`, `doctor`, `code_search`, `user_story` — plus the system-map and recall-status resources. |
 | Slash commands | `/keel:workflow`, `/keel:review`, `/keel:recall`, `/keel:gain` — discoverable `/`-menu wrappers over the implemented CLI surfaces. Shipped via the plugin manifest `commands` key. |
 | Specialist skills | Manifest-driven specialist profiles synced into `~/.claude/agent-profiles/*.toml`, invokable via the Skill tool. Run `keel skill-lint` for the live verified count. |
 
@@ -683,7 +683,7 @@ Claude Code is the primary target (hooks, full lifecycle). Claude Desktop (Cowor
 
 ## Managed Agent Profiles
 
-The managed install mirrors these 24 specialist lanes into `~/.claude/agent-profiles/*.toml`:
+The managed install mirrors the specialist lanes (one profile per specialist, roster asserted by `tests/doc_parity_test.rs`) into `~/.claude/agent-profiles/*.toml`:
 
 `api-contract-design`, `authentication-and-identity`, `backend-and-data-architecture`, `cloud-and-devops-expert`, `cloud-cost-and-finops`, `data-and-ml-engineering`, `dependency-and-supply-chain`, `git-expert`, `internationalization-and-localization`, `memory-status-reporter`, `mobile-development-life-cycle`, `observability-and-incident-response`, `postgres-migration-safety`, `preserve-existing-flow`, `qa-and-automation-engineer`, `react-performance-audit`, `reviewer`, `security-and-compliance-auditor`, `software-development-life-cycle`, `stripe-integration`, `ui-design-systems-and-responsive-interfaces`, `ux-research-and-experience-strategy`, `web-development-life-cycle`, and `websocket-realtime-design`.
 

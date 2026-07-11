@@ -219,4 +219,112 @@ mod tests {
             vec!["orchestration", "runtime-preflight"]
         );
     }
+
+    /// H9 inverse guard: every top-level command dispatched in commands.rs must
+    /// appear in one of the help surfaces. The forward tests above check
+    /// advertised -> routes; this checks the inverse (routes -> advertised) so a
+    /// dispatched-but-undocumented command cannot silently disappear from help
+    /// again. The 8 commands this catches (bridge, code-graph, skill-eval,
+    /// user-story, sprint, dispatch, observe, eval) were all dispatched but
+    /// missing from help before this test existed.
+    #[test]
+    fn every_dispatched_top_level_command_is_advertised() {
+        // Curated list of user-facing top-level match arms from commands.rs,
+        // excluding short aliases (st, v, remove) and the internal __self-replace.
+        let dispatched = [
+            "help",
+            "version",
+            "platform",
+            "bootstrap-info",
+            "all",
+            "install",
+            "update",
+            "status",
+            "doctor",
+            "repair",
+            "validate",
+            "verify",
+            "uninstall",
+            "menu",
+            "review",
+            "git-workflow",
+            "run",
+            "rewrite",
+            "raw",
+            "replay",
+            "hook",
+            "bridge",
+            "learn",
+            "code-search",
+            "code-graph",
+            "skill-lint",
+            "skill-eval",
+            "config-audit",
+            "checkpoint",
+            "work",
+            "user-story",
+            "sprint",
+            "dispatch",
+            "telemetry",
+            "observe",
+            "design-intelligence",
+            "memory",
+            "orchestration",
+            "workflow",
+            "gain",
+            "session",
+            "bench",
+            "eval",
+            "flow",
+            "team",
+            "mcp",
+        ];
+        let combined_help = format!(
+            "{}\n{}",
+            OPERATOR_HELP_COMMAND_LINES, ADVANCED_HELP_COMMAND_LINES
+        );
+        for command in &dispatched {
+            // A command is "advertised" if it appears as the first token of some
+            // help line (so `hook` matches `  hook install|...` but not a flag).
+            let advertised = combined_help.lines().any(|line| {
+                let tokens = parse_command_tokens(line);
+                tokens.first().is_some_and(|first| first == command)
+            });
+            assert!(
+                advertised,
+                "dispatched top-level command `{command}` is missing from both help surfaces. \
+                 Add it to help_operator.txt (or help_advanced.txt for orchestration/memory internals)."
+            );
+        }
+    }
+
+    /// H9 guard: the hook admin verbs in the static help_operator.txt line must
+    /// match the verbs render_hook_help advertises (the dynamic help), so the two
+    /// hook help surfaces cannot drift. Catches the missing diagnose|git-hooks.
+    #[test]
+    fn help_operator_advertises_every_hook_admin_verb() {
+        // The hook verbs are advertised in a single pipe-separated line in
+        // help_operator.txt. Extract them and assert the known admin verbs appear.
+        let hook_line = OPERATOR_HELP_COMMAND_LINES
+            .lines()
+            .find(|line| {
+                let tokens = parse_command_tokens(line);
+                tokens.first().is_some_and(|first| first == "hook")
+            })
+            .expect("help_operator.txt must have a `hook` command line");
+        for verb in [
+            "install",
+            "uninstall",
+            "list",
+            "show",
+            "instructions",
+            "diagnose",
+            "git-hooks",
+        ] {
+            assert!(
+                hook_line.contains(verb),
+                "help_operator.txt hook line must advertise the `{verb}` verb; got: {hook_line}"
+            );
+        }
+    }
 }

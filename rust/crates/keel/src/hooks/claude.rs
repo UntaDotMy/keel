@@ -198,7 +198,7 @@ pub const HOOK_EVENTS: &[HookEvent] = &[
         matcher: "",
         status: "Task lifecycle hook (reserved; dispatch is currently a no-op)",
         supports_hook_specific_output: false,
-        installs_in_settings: true,
+        installs_in_settings: false,
     },
     HookEvent {
         name: "TaskCompleted",
@@ -206,7 +206,7 @@ pub const HOOK_EVENTS: &[HookEvent] = &[
         matcher: "",
         status: "Task lifecycle hook (reserved; dispatch is currently a no-op)",
         supports_hook_specific_output: false,
-        installs_in_settings: true,
+        installs_in_settings: false,
     },
     HookEvent {
         name: "TeammateIdle",
@@ -214,7 +214,7 @@ pub const HOOK_EVENTS: &[HookEvent] = &[
         matcher: "",
         status: "Teammate-idle hook (reserved; dispatch is currently a no-op)",
         supports_hook_specific_output: false,
-        installs_in_settings: true,
+        installs_in_settings: false,
     },
     HookEvent {
         name: "WorktreeCreate",
@@ -222,7 +222,7 @@ pub const HOOK_EVENTS: &[HookEvent] = &[
         matcher: "",
         status: "Worktree lifecycle hook (reserved; dispatch is currently a no-op)",
         supports_hook_specific_output: false,
-        installs_in_settings: true,
+        installs_in_settings: false,
     },
     HookEvent {
         name: "WorktreeRemove",
@@ -230,7 +230,7 @@ pub const HOOK_EVENTS: &[HookEvent] = &[
         matcher: "",
         status: "Worktree lifecycle hook (reserved; dispatch is currently a no-op)",
         supports_hook_specific_output: false,
-        installs_in_settings: true,
+        installs_in_settings: false,
     },
     HookEvent {
         name: "CwdChanged",
@@ -278,7 +278,7 @@ pub const HOOK_EVENTS: &[HookEvent] = &[
         matcher: "",
         status: "Setup hook (reserved; dispatch is currently a no-op)",
         supports_hook_specific_output: true,
-        installs_in_settings: true,
+        installs_in_settings: false,
     },
     HookEvent {
         name: "InstructionsLoaded",
@@ -286,7 +286,7 @@ pub const HOOK_EVENTS: &[HookEvent] = &[
         matcher: "",
         status: "Instructions-loaded hook (reserved; dispatch is currently a no-op)",
         supports_hook_specific_output: false,
-        installs_in_settings: true,
+        installs_in_settings: false,
     },
     HookEvent {
         name: "ConfigChange",
@@ -294,7 +294,7 @@ pub const HOOK_EVENTS: &[HookEvent] = &[
         matcher: "",
         status: "Config-change hook (reserved; dispatch is currently a no-op)",
         supports_hook_specific_output: false,
-        installs_in_settings: true,
+        installs_in_settings: false,
     },
     // FileChanged: per code.claude.com/docs/en/hooks the `matcher` value
     // doubles as the watch list — segments split on `|` are registered as
@@ -317,7 +317,7 @@ pub const HOOK_EVENTS: &[HookEvent] = &[
         matcher: "",
         status: "Elicitation-prompt hook (reserved; dispatch is currently a no-op)",
         supports_hook_specific_output: false,
-        installs_in_settings: true,
+        installs_in_settings: false,
     },
     HookEvent {
         name: "ElicitationResult",
@@ -325,7 +325,7 @@ pub const HOOK_EVENTS: &[HookEvent] = &[
         matcher: "",
         status: "Elicitation-result hook (reserved; dispatch is currently a no-op)",
         supports_hook_specific_output: false,
-        installs_in_settings: true,
+        installs_in_settings: false,
     },
     // MessageDisplay fires while assistant message text is displayed. Per the
     // official docs it has no matcher (always fires on every occurrence),
@@ -511,15 +511,25 @@ mod tests {
 
     #[test]
     fn only_known_events_opt_out_of_install() {
-        // Pins the install-allowlist invariant. Two rows opt out of
-        // settings.json install, each for a distinct documented reason:
-        //   - FileChanged: its matcher value IS the per-repo watch list per the
-        //     official docs, so an empty matcher ships dead config.
-        //   - MessageDisplay: it has no matcher and emits `displayContent` to
-        //     rewrite on-screen text on every assistant message. A no-op handler
-        //     is pointless and a displayContent handler would silently rewrite
-        //     what the user sees, so it is opt-in, not auto-installed.
-        // If you intentionally flip another row's `installs_in_settings` to false,
+        // Pins the install-allowlist invariant. Rows opt out of settings.json
+        // install for one of two reasons:
+        //   1. Reserved events whose dispatch is currently a no-op
+        //      (TaskCreated, TaskCompleted, TeammateIdle, WorktreeCreate,
+        //       WorktreeRemove, Setup, InstructionsLoaded, ConfigChange,
+        //       Elicitation, ElicitationResult). Installing these would ship a
+        //      stanza that fires `keel hook <slug>` on every occurrence for no
+        //      effect — dead config. They stay in HOOK_EVENTS so ad-hoc
+        //      invocation (`keel hook task-created`) and forward-compat dispatch
+        //      still work, but `keel hook install` does not write them. When a
+        //      handler is implemented for one, flip it back to true here.
+        //   2. Structurally opt-out events:
+        //      - FileChanged: its matcher value IS the per-repo watch list per
+        //        the official docs, so an empty matcher ships dead config.
+        //      - MessageDisplay: no matcher, fires every assistant message,
+        //        emits displayContent to rewrite on-screen text. A no-op handler
+        //        is pointless and a displayContent handler would silently rewrite
+        //        what the user sees, so it is opt-in.
+        // If you intentionally flip another row's `installs_in_settings`,
         // update this test deliberately so the regression is reviewed.
         let opt_outs: Vec<&'static str> = HOOK_EVENTS
             .iter()
@@ -528,7 +538,20 @@ mod tests {
             .collect();
         assert_eq!(
             opt_outs,
-            ["FileChanged", "MessageDisplay"],
+            [
+                "TaskCreated",
+                "TaskCompleted",
+                "TeammateIdle",
+                "WorktreeCreate",
+                "WorktreeRemove",
+                "Setup",
+                "InstructionsLoaded",
+                "ConfigChange",
+                "FileChanged",
+                "Elicitation",
+                "ElicitationResult",
+                "MessageDisplay",
+            ],
             "unexpected installs_in_settings=false rows; update this test if intentional"
         );
     }

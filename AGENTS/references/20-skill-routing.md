@@ -1,7 +1,7 @@
 <!--
 Purpose: Capture skill routing rules, the specialist roster, skill-focused execution, and agent profiles previously inline in AGENTS.md.
 Caller: AGENTS.md when picking a primary skill, deciding whether to compose, or wiring agent-profile TOMLs.
-Dependencies: The 24 specialist SKILL.md files and the matching .claude/agents/<name>.md subagent files.
+Dependencies: The specialist SKILL.md files and the matching .claude/agents/<name>.md subagent files (roster asserted by tests/doc_parity_test.rs).
 Main Functions: Define routing defaults, the specialist matrix, composition discipline, and agent-profile expectations.
 Side Effects: None — this file is informational.
 -->
@@ -66,7 +66,7 @@ Load specialist skills when the task clearly requires domain expertise:
 
 ### Agent Profiles
 
-keel ships 24 managed profiles under `~/.claude/skills/<name>/agents/claude.yaml`
+keel ships a managed profile per specialist under `~/.claude/skills/<name>/agents/claude.yaml`
 (`<name>/agents/claude.yaml` in the repo, synced to the install path by `keel
 install`). Each YAML wires the `keel` runtime to specific reasoning effort and
 tool policy. Supported fields: `agent` (default subagent type: `Explore`, `Plan`,
@@ -91,7 +91,7 @@ background task), `effort`, `isolation` (`worktree` for isolated git checkout),
 `initialPrompt` (auto-submitted as first user turn). Note: scoped tool patterns like
 `Bash(git diff:*)` work in SKILL.md `allowed-tools` but NOT in subagent `tools`.
 
-The 24 profiles mirror the 24 specialist skills:
+The profiles mirror the specialist skills one-to-one:
 
 - **backend-and-data-architecture**: Backend systems, APIs, data models, caching, and messaging
 - **cloud-and-devops-expert**: Infrastructure, CI/CD, containers, and IaC
@@ -118,7 +118,7 @@ The 24 profiles mirror the 24 specialist skills:
 - **cloud-cost-and-finops**: Cost estimation before deploy, rightsizing, commitment planning, autoscaling and spot strategy, cost allocation and tagging, budget guardrails, and unit economics
 - **internationalization-and-localization**: Message-catalog design and extraction, ICU MessageFormat and plurals, locale-aware number/date/currency formatting, RTL/bidi, translation workflows and fallback chains, and Unicode correctness
 
-The old generic `default`, `explorer`, `worker`, `architect`, and `awaiter` TOMLs are not the repo-managed profile surface anymore. Runtime helper roles may still exist inside the harness, but the managed install should mirror these 24 specialist skill profiles instead.
+The old generic `default`, `explorer`, `worker`, `architect`, and `awaiter` TOMLs are not the repo-managed profile surface anymore. Runtime helper roles may still exist inside the harness, but the managed install should mirror these specialist skill profiles instead.
 
 ## Routing Principles (Detailed)
 

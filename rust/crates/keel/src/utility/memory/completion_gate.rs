@@ -274,7 +274,6 @@ fn run_completion_gate_record_requirement(
     }
 
     let now_millis = crate::utility::workflow_ledger::current_timestamp_millis();
-    let requirement_id = format!("cgr-{now_millis:x}");
     let dir = claude_home
         .join(command_group)
         .join("completion-gate-requirements");
@@ -286,6 +285,23 @@ fn run_completion_gate_record_requirement(
         );
         return 1;
     }
+    // Allocate a collision-free requirement ID. Two requirements created in the
+    // same millisecond would otherwise overwrite each other (same cgr-<hex> id).
+    // Mirrors workflow_ledger::allocate_unique_entry_id's counter-suffix approach.
+    let base = format!("cgr-{now_millis:x}");
+    let requirement_id = if !dir.join(format!("{base}.json")).exists() {
+        base
+    } else {
+        let mut chosen = base.clone();
+        for counter in 1..1000u32 {
+            let candidate = format!("{base}-{counter}");
+            if !dir.join(format!("{candidate}.json")).exists() {
+                chosen = candidate;
+                break;
+            }
+        }
+        chosen
+    };
     let file_path = dir.join(format!("{requirement_id}.json"));
     let payload = Value::Object(vec![
         (
