@@ -293,9 +293,18 @@ fn describe_value(value: &serde_json::Value, depth: usize) -> serde_json::Value 
     }
     match value {
         serde_json::Value::Object(map) => {
+            const MAX_KEYS: usize = 32;
             let mut description = serde_json::Map::new();
-            for (key, val) in map.iter().take(32) {
+            for (key, val) in map.iter().take(MAX_KEYS) {
                 description.insert(key.clone(), describe_value(val, depth + 1));
+            }
+            if map.len() > MAX_KEYS {
+                // Mirrors the array branch's "... N more items" marker so a
+                // truncated object advertises how many keys were dropped.
+                description.insert(
+                    format!("... {} more keys", map.len() - MAX_KEYS),
+                    serde_json::Value::String("<truncated>".to_string()),
+                );
             }
             serde_json::Value::Object(description)
         }
@@ -329,7 +338,7 @@ fn describe_value(value: &serde_json::Value, depth: usize) -> serde_json::Value 
 
 #[cfg(test)]
 mod tests {
-    use super::redact_possible_secret;
+    use super::{compact_json_structure, redact_possible_secret};
 
     const REDACTED: &str = "[redacted possible secret; see raw output locally]";
 
@@ -361,5 +370,36 @@ mod tests {
     fn redacts_35_char_alphanumeric_token() {
         let line = "token: abcdefghijklmnopqrstuvwxyz12345678";
         assert_eq!(redact_possible_secret(line), REDACTED);
+    }
+
+    #[test]
+    fn compact_json_marks_truncated_object_keys() {
+        // An object with more than 32 keys must advertise how many were
+        // dropped, mirroring the array branch's "... N more items" marker.
+        let mut entries = Vec::new();
+        for i in 0..40 {
+            entries.push(format!("\"k{i}\": {i}"));
+        }
+        let payload = format!("{{{}}}", entries.join(", "));
+        let compacted = compact_json_structure(&payload);
+        assert!(
+            compacted.contains("... 8 more keys"),
+            "missing truncation marker for 8 dropped keys: {compacted}"
+        );
+    }
+
+    #[test]
+    fn compact_json_leaves_small_object_without_truncation_marker() {
+        // Exactly at the cap (32 keys) the marker must NOT appear.
+        let mut entries = Vec::new();
+        for i in 0..32 {
+            entries.push(format!("\"k{i}\": {i}"));
+        }
+        let payload = format!("{{{}}}", entries.join(", "));
+        let compacted = compact_json_structure(&payload);
+        assert!(
+            !compacted.contains("more keys"),
+            "spurious truncation marker at the cap: {compacted}"
+        );
     }
 }

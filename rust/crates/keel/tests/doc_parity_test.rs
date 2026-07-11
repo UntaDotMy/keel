@@ -315,6 +315,104 @@ fn audit_flagged_commands_are_documented() {
 /// staging omits them, install silently reports "plugin source absent" /
 /// "source absent" for every adapter — the exact bug that shipped. This test
 /// pins the staging so the gap cannot recur: remove the staging and CI fails.
+///
+/// Bridge subcommand parity: the `keel bridge <event>` match arms in
+/// `runner/bridge.rs` are the single source of truth for which subcommands
+/// exist. CLAUDE.md's OpenCode-host section and the in-binary `render_bridge_help`
+/// text must each mention every wired arm — otherwise a maintainer reading either
+/// the docs or the `keel bridge help` output would not know the full surface.
+/// This was the exact drift a competitive audit flagged (CLAUDE.md enumerated six
+/// subcommands while the match surface had eight, omitting `pre-tool-use` and
+/// `rewrite`, both actively called by the OpenCode/Codex/Pi/Cursor adapters).
+/// Add or rename a bridge arm and this test fails CI until the docs and help
+/// text are updated together.
+#[test]
+fn bridge_subcommands_are_documented_and_in_help() {
+    let repo_root = repository_root();
+    let bridge_src = fs::read_to_string(
+        repo_root
+            .join("rust")
+            .join("crates")
+            .join("keel")
+            .join("src")
+            .join("runner")
+            .join("bridge.rs"),
+    )
+    .expect("read bridge.rs");
+
+    // Derive the wired subcommand set from the `match arguments[0].as_str()` arms.
+    // Each arm looks like `"session-start" => run_bridge_session_start(...)`; we
+    // capture the quoted slug before ` =>`. This is the dispatch surface, not the
+    // hand-maintained help text, so it cannot itself drift.
+    let mut wired: BTreeSet<String> = BTreeSet::new();
+    for line in bridge_src.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix('"') {
+            if let Some(end) = rest.find('"') {
+                let slug = &rest[..end];
+                if slug.chars().all(|c| c.is_ascii_lowercase() || c == '-')
+                    && !slug.is_empty()
+                {
+                    // Only collect arms inside the dispatch match (the help renderer
+                    // also has quoted strings, but those are indented differently and
+                    // are not `"<slug>" =>` arms). Confirm the ` =>` follows.
+                    let after = rest[end + 1..].trim_start();
+                    if after.starts_with("=>") {
+                        wired.insert(slug.to_string());
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        !wired.is_empty(),
+        "failed to parse any bridge match arms from bridge.rs — the parser is stale"
+    );
+    // Sanity: the known bridge subcommands must all be present; if this fails,
+    // the arm-parsing logic above drifted, not the docs.
+    for expected in [
+        "session-start",
+        "user-prompt",
+        "observe",
+        "session-end",
+        "post-compact",
+        "gate-status",
+        "pre-tool-use",
+        "rewrite",
+    ] {
+        assert!(
+            wired.contains(expected),
+            "expected `{expected}` to be a wired bridge arm; the test parser may need updating \
+             if the match shape changed"
+        );
+    }
+
+    let claude_md = fs::read_to_string(repo_root.join("CLAUDE.md")).expect("read CLAUDE.md");
+
+    // The help text is rendered by `render_bridge_help` inside bridge.rs itself.
+    for slug in &wired {
+        assert!(
+            bridge_src.contains(&format!(" {slug} ")),
+            "`render_bridge_help` in bridge.rs must list the `{slug}` subcommand in its \
+             Subcommands block; it is a wired match arm but missing from the help text"
+        );
+        assert!(
+            claude_md.contains(slug.as_str()),
+            "CLAUDE.md must document the `{slug}` bridge subcommand (it is a wired match arm in \
+             bridge.rs but missing from the OpenCode-host bridge section — the exact drift the \
+             competitive audit flagged). Add it to the `keel bridge <event>` enumeration."
+        );
+    }
+}
+
+/// The release bundle must stage the cross-agent adapter source directories
+/// (opencode/codex/pi/cursor/cowork) so `keel install` run from a release-bundle
+/// extract can wire non-Claude-Code targets. `maybe_wire_opencode` /
+/// `maybe_wire_codex` / `maybe_wire_pi` / `maybe_wire_cursor` / `maybe_wire_cowork` in
+/// `manager/install.rs` read these dirs from `repository_root`; if the release
+/// staging omits them, install silently reports "plugin source absent" /
+/// "source absent" for every adapter — the exact bug that shipped. This test
+/// pins the staging so the gap cannot recur: remove the staging and CI fails.
 #[test]
 fn release_bundle_stages_adapter_source_dirs() {
     let repo_root = repository_root();

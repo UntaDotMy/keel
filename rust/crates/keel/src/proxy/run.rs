@@ -758,4 +758,172 @@ mod tests {
         let _ = std::fs::remove_dir_all(&recovery_dir);
         restore_signals(&snapshot);
     }
+
+    /// Regression: the compact-ON branch of `run_proxy` (use_compact_output ==
+    /// true) was never exercised end-to-end. The sole existing test passes
+    /// `--no-compact`, so it only walks the neutralized-raw passthrough. This
+    /// test runs a real command whose output is large enough to trip the
+    /// generic adapter's head/tail reducer AND the break-even guard
+    /// (`rendered_tokens < raw_tokens`), then asserts the four pieces of
+    /// wiring that only the compact branch touches:
+    ///   1. the agent sees the rendered wrapper (PASS/FAIL + `raw: keel raw`),
+    ///      not the raw bytes;
+    ///   2. `save_compact` wrote the rendered wrapper to `compact.txt`
+    ///      (not the neutralized raw the --no-compact path writes);
+    ///   3. `record_compaction_event` appended a JSONL line with
+    ///      `compacted: true` to the event log that feeds `keel gain`;
+    ///   4. the persisted `meta.json` carries `compacted: true`.
+    /// A regression in the break-even comparison, the compact-branch save, or
+    /// the event-log write would fail one of these.
+    #[test]
+    fn compact_on_path_emits_rendered_wrapper_and_records_compacted_event() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let snapshot = snapshot_signals();
+        clear_signals();
+        std::env::set_var("CLAUDE_SKILLS_HOOK", "test");
+
+        // Redirect resolve_claude_home (used by record_compaction_event) to a
+        // private temp dir so the event-log write is isolated and observable,
+        // mirroring runner/tool_timings.rs' with_isolated_claude_home.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let claude_home = std::env::temp_dir()
+            .join(format!("keel-compact-on-home-{}-{nanos}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&claude_home);
+        std::fs::create_dir_all(&claude_home).expect("create test claude home");
+        let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
+        std::env::set_var("CLAUDE_TARGET_OVERRIDE", &claude_home);
+
+        let recovery_dir = std::env::temp_dir().join(format!(
+            "keel-compact-on-recovery-{}-{nanos}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&recovery_dir);
+
+        // 200 repetitive lines exceeds the generic adapter's LINE_LIMIT (80),
+        // so compact_stream reduces it to ~20 head + omission notice + 20 tail.
+        // That rendered wrapper is far smaller than the raw 200 lines, so the
+        // break-even guard (rendered_tokens < raw_tokens) selects the compact
+        // branch. The generator command is shell-specific: cmd.exe has no
+        // printf/seq, so branch on the platform the way the existing
+        // shell_command_parts test does. platform_shell_command_parts already
+        // selects cmd /C vs bash -lc, so we hand it native syntax.
+        let generator = if cfg!(windows) {
+            // `for /L %i in (start,step,end)` is the cmd.exe counted loop; the
+            // leading @ suppresses per-iteration command echo so only the
+            // `line N` text reaches stdout.
+            "for /L %i in (1,1,200) do @echo line %i"
+        } else {
+            // bash brace expansion needs no external tool (seq/jot are not
+            // guaranteed on macOS), so this works on bash 3.2+ everywhere.
+            "for i in {1..200}; do echo \"line $i\"; done"
+        };
+        let (program, shell_args) = crate::runtime::platform_shell_command_parts(generator);
+        let mut arguments = vec![
+            "--recovery-dir".to_string(),
+            recovery_dir.to_string_lossy().to_string(),
+            "--".to_string(),
+            program,
+        ];
+        arguments.extend(shell_args);
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let exit = run_proxy(&arguments, &mut stdout, &mut stderr);
+        // The generator (for-loop printing lines) exits 0; if it failed to run
+        // the rendered-output assertions below would also fail, but asserting
+        // the exit code up front gives a clearer signal when the command itself
+        // did not execute (e.g. a shell-syntax portability regression).
+        assert_eq!(
+            exit, 0,
+            "generator command must exit 0, got {exit} (stderr: {})",
+            String::from_utf8_lossy(&stderr)
+        );
+        // Normalize CRLF (Windows cmd output) to LF so line-sensitive contains
+        // checks behave identically on ubuntu/windows/macos CI.
+        let rendered = String::from_utf8_lossy(&stdout).replace("\r\n", "\n");
+
+        // (1) The compact branch emits render_compact_result's wrapper, which
+        // always carries the `raw: keel raw <id>` footer and a `saved:` line.
+        // The raw command output is 200 `line N` lines; if the compact branch
+        // were NOT taken, stdout would contain `line 100` (a middle line the
+        // head/tail reducer drops) and lack the wrapper footer.
+        assert!(
+            rendered.contains("raw: keel raw "),
+            "compact branch must emit the rendered wrapper footer, got: {rendered} (stderr: {})",
+            String::from_utf8_lossy(&stderr)
+        );
+        assert!(
+            rendered.contains("saved: "),
+            "compact branch must emit the token-savings line, got: {rendered}"
+        );
+        assert!(
+            !rendered.contains("line 100\n"),
+            "a middle raw line must NOT survive compaction, got: {rendered}"
+        );
+        // `line 1` survives as a head edge line.
+        assert!(
+            rendered.contains("line 1\n"),
+            "a head edge line must survive compaction, got: {rendered}"
+        );
+
+        // (2) save_compact wrote the rendered wrapper to compact.txt. The
+        // --no-compact path writes the neutralized raw instead, so asserting
+        // the wrapper footer is present distinguishes the branches.
+        let store = RawStore::with_root(recovery_dir.clone());
+        let entries = store.list().expect("list raw entries");
+        let entry = entries
+            .first()
+            .expect("at least one raw entry must be persisted");
+        let compact = String::from_utf8(
+            std::fs::read(entry.path.join("compact.txt")).expect("compact.txt written"),
+        )
+        .unwrap();
+        assert!(
+            compact.contains("raw: keel raw "),
+            "save_compact must persist the rendered wrapper, got: {compact}"
+        );
+
+        // (4) The persisted meta.json carries compacted: true — the field
+        // record_compaction_event reads and that keel gain surfaces. The
+        // --no-compact path writes compacted: false here.
+        let meta = store.load_meta(&entry.raw_id).expect("load meta");
+        assert!(
+            meta.compacted,
+            "meta.compacted must be true on the compact branch, got false (meta: {meta:?})"
+        );
+
+        // (3) record_compaction_event appended a JSONL line with
+        // compacted: true to the event log. This is the line keel gain reads
+        // (gain.rs joins COMMAND_COMPACTION_EVENTS_FILE_NAME); a broken
+        // compact-branch write would starve gain reporting.
+        let event_path = claude_home.join("command-compaction-events.jsonl");
+        let log = std::fs::read_to_string(&event_path)
+            .expect("event log must be written on the compact branch");
+        let last_line = log
+            .lines()
+            .last()
+            .expect("at least one event line must be appended");
+        let payload: serde_json::Value =
+            serde_json::from_str(last_line).expect("event line is valid JSON");
+        assert_eq!(
+            payload["compacted"], serde_json::json!(true),
+            "event log must record compacted: true on the compact branch, got: {last_line}"
+        );
+        assert_eq!(
+            payload["adapter_name"], serde_json::json!("generic"),
+            "event log must record the resolved adapter, got: {last_line}"
+        );
+
+        let _ = std::fs::remove_dir_all(&recovery_dir);
+        let _ = std::fs::remove_dir_all(&claude_home);
+        match previous_home {
+            Some(value) => std::env::set_var("CLAUDE_TARGET_OVERRIDE", value),
+            None => std::env::remove_var("CLAUDE_TARGET_OVERRIDE"),
+        }
+        restore_signals(&snapshot);
+    }
 }

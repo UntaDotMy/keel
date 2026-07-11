@@ -256,6 +256,10 @@ pub fn scan_prose_diff(diff: &str) -> Vec<FileCommentFinding> {
             continue;
         }
         if line.starts_with("@@") {
+            // Flush the prior hunk before resetting the cursor, so each hunk
+            // lints with its own base line. Mirrors scan_unified_diff above.
+            flush(&current_file, &added_lines, &mut findings);
+            added_lines.clear();
             if let Some(rest) = line.split("@@").nth(1) {
                 if let Some(start) = parse_hunk_new_start(rest) {
                     new_line_cursor = start;
@@ -424,5 +428,37 @@ mod tests {
             ids.contains(&"prose-first-person"),
             "first-person not caught: {findings:?}"
         );
+    }
+
+    #[test]
+    fn prose_diff_flushes_at_hunk_boundaries() {
+        // Two non-contiguous hunks in one markdown file. Before the fix the
+        // @@ handler did not flush, so both hunks joined into one block linted
+        // with the first hunk's base line. A finding in hunk 2 was reported at
+        // line 11 (hunk1 start + offset) instead of line 100.
+        let diff = "\
++++ b/docs/guide.md
+@@ -0,0 +10,2 @@
++Some plain intro text.
++Let's delve into this.
+@@ -0,0 +100,1 @@
++Let's streamline the process.
+";
+        let findings = scan_prose_diff(diff);
+        // First hunk: slop at line 11 (line 10 is clean intro).
+        let hunk1 = findings
+            .iter()
+            .find(|f| f.id == "prose-ai-slop")
+            .expect("first hunk slop not caught");
+        assert_eq!(hunk1.line, 11, "first hunk slop line: {findings:?}");
+        // Second hunk: slop at line 100.
+        let hunk2 = findings
+            .iter()
+            .filter(|f| f.id == "prose-ai-slop")
+            .find(|f| f.line == 100)
+            .unwrap_or_else(|| {
+                panic!("second hunk slop must report at line 100, got: {findings:?}")
+            });
+        assert_eq!(hunk2.line, 100);
     }
 }

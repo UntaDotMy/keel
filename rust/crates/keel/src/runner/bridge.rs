@@ -4,7 +4,11 @@
 //! Dependencies: crate::runner::hook_lifecycle, crate::utility::skill_match,
 //!   crate::runner::observation, crate::runtime.
 //! Main Functions: run_bridge_command dispatching subcommands (session-start,
-//!   user-prompt, observe, session-end, post-compact, gate-status).
+//!   user-prompt, observe, session-end, post-compact, gate-status, pre-tool-use,
+//!   rewrite). pre-tool-use emits the Iron Law edit-gate decision
+//!   (KEEL_GATE_ALLOW / KEEL_GATE_DENY) as text; rewrite reroutes shell commands
+//!   through compaction (KEEL_REWRITE) by reading the command on stdin. Both
+//!   exit 0 — the host adapter enforces the deny, never the bridge itself.
 //! Side Effects: Prints plain text to stdout; observe writes observation files.
 
 use std::io::{Read, Write};
