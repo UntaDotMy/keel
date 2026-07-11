@@ -8,7 +8,6 @@ use crate::proxy::adapter::CompactResult;
 use crate::proxy::injection_guard::InjectionFinding;
 use crate::proxy::raw_store::RunMeta;
 use crate::runtime::{display_path, resolve_claude_home, COMMAND_COMPACTION_EVENTS_FILE_NAME};
-use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Write;
 
@@ -16,13 +15,6 @@ use std::io::Write;
 const MAX_EVENT_LOG_BYTES: u64 = 5 * 1024 * 1024;
 /// Number of most-recent lines to keep after rotation.
 const EVENT_LOG_KEEP_LINES: usize = 10_000;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CompactionEvent {
-    pub timestamp: String,
-    #[serde(flatten)]
-    pub meta: RunMeta,
-}
 
 /// Rotate the event log when it exceeds MAX_EVENT_LOG_BYTES by keeping only
 /// the most recent EVENT_LOG_KEEP_LINES lines. Silently skips on any I/O error

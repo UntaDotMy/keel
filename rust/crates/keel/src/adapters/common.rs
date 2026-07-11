@@ -1,7 +1,7 @@
 //! Purpose: Share compact-output helpers across command-specific adapters.
 //! Caller: Built-in adapters for tests, git, search, files, build, lint, logs, and configured filters.
 //! Dependencies: proxy adapter contracts, RunMeta, and TokenMeter.
-//! Main Functions: make_result, compact_edges, signal_lines, command_program.
+//! Main Functions: make_result, compact_edges, signal_lines, normalized_command.
 //! Side Effects: None; callers own persistence through the proxy.
 
 use crate::proxy::adapter::CompactResult;
@@ -9,7 +9,6 @@ use crate::proxy::raw_store::RunMeta;
 use crate::proxy::token_meter::TokenMeter;
 
 pub const DEFAULT_EDGE_LINES: usize = 20;
-pub const DEFAULT_LINE_LIMIT: usize = 80;
 
 pub fn make_result(
     adapter_name: &str,
@@ -158,21 +157,6 @@ fn render_lines(lines: &[&str]) -> String {
         .map(|line| redact_possible_secret(line))
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-pub fn command_program(command: &str) -> String {
-    command
-        .split_whitespace()
-        .next()
-        .unwrap_or("command")
-        .replace('\\', "/")
-        .rsplit('/')
-        .next()
-        .unwrap_or("command")
-        .trim_end_matches(".exe")
-        .trim_end_matches(".cmd")
-        .trim_end_matches(".bat")
-        .to_ascii_lowercase()
 }
 
 pub fn normalized_command(program: &str, args: &[String]) -> String {
