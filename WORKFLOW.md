@@ -16,49 +16,206 @@ Before running raw shell, broad search, or patching existing source, route throu
 
 The managed `PreToolUse` hook may return a harness denial whose reason begins with `Rerun that as:`. This is expected behavior, not a failure. Copy the suggested command, run it exactly once, preserve the exit code and output, and continue from the compacted output. Only ask the user when the suggested command itself is destructive or outside the requested task.
 
-## Branch Model
+## Git Workflow
 
-Four tiers, promoted one direction only. Three tiers are permanent; work branches carry day-to-day commits:
+▎ Durable reference. Consulted before any branch/commit decision. Applies to all features going forward.
+
+### Branch structure
 
 ```
-main  (final stable — verified after dev passes staging)
-dev  (active development — verified when testing new features, staging)
-feat  (new features, fixes, subtasks — development branch)
-<category>/<FEATURE>  (work branch — all hands-on commits, branch off feat)
+main           Final stable, verified. Only after dev passes staging. Nothing committed directly — receives merges only.
+dev            Active development / staging. Daily commits land here via merge from feat. A feature set is tested here before promotion to main.
+feat           Feature development base. New features and fixes branch off here. Merges from feature/<name> sub-branches.
+feature/<name> One feature or subtask. Short-lived. One MR each. The actual work commits.
 ```
 
-**Promotion flow:** `work branch` → `feat` → `dev` → `main`
+▎ **Namespace note:** feature branches use `feature/<name>`, NOT `feat/<name>`. Git stores branches as files under `refs/heads/`, so `feat` (a file) and `feat/x` (needs `feat` to be a directory) collide. `feature/` avoids this. The integration branch stays `feat`.
 
-**Fixes stay on the same work branch.** If you commit `Add: RGB: synchronize all` and later find a problem during verification, commit the `Fix: RGB: ...` on that **same** work branch. Do **not** open a new branch for the fix. A work branch accumulates every commit for its feature until verified, then merges up to `feat`. A new branch is only for a genuinely new, separate feature.
+**Flow direction:** `feature/<name>` → `feat` → `dev` → `main`. Work moves only upward, via merge. Never commit directly to `main`, `dev`, or `feat`.
 
-**Never delete a branch.** After pushing or merging — at any tier — leave the branch in place. No `git branch -d/-D` or `git push origin --delete`. Branches are permanent.
+**Verification gates:**
+- A feature set ready for staging test → `feat` merges into `dev`.
+- Staging passes → `dev` merges into `main`.
+- `dev` is not a daily commit target — it's the staging layer features merge into for testing.
 
-**Commit locally first.** Always commit to local branch before pushing to the server. Avoid direct commits to the server.
+**Hard rule:** When pushing and merging, NEVER DELETE ANY BRANCH. Merged branches stay as permanent references.
 
-## Feature Branch and Merge Request Rules
+### Commit convention
 
-- One feature = one `<category>/<FEATURE>` work branch = one merge request into `feat`.
-- Do not mix multiple features in the same branch or merge request.
-- Create a new work branch off `feat` only for a genuinely new, separate feature — never for a fix to in-flight work.
-- Fixes, retries, and subtasks for an in-flight feature commit to that feature's existing work branch.
-- If unrelated work is already in the working tree, split it before committing.
-- Use patch staging (`git add -p`) to stage only the required feature.
-- Review `git diff --cached` before every commit.
-- If a change belongs to another feature, move it to that feature's work branch.
-- Do not open a merge request with mixed feature scopes.
-- Rebase remaining open work branches onto `feat` after another work branch merges.
-- Never delete a branch after pushing or merging it.
+```
+<Category>: <FEATURE_CATEGORY> : <short info>
+```
 
-## Required Naming
+- **Category** (capitalized first letter): `Add`, `Config`, `Refactor`, `Wip`, `Fix`, `Docs`
+- **FEATURE_CATEGORY** (uppercase): `RGB`, `LED`, `ARGB`, `SENSOR`, `PROTOCOL`, `UI`, `HID`, `WATCHER`, `CATALOG`, `DEVICE`
+- Spaces around all colons.
+- Examples:
+  - `Add : PROTOCOL : rgb sync ask and ack parse`
+  - `Wip : RGB : Build light effect mode (multi color)`
+  - `Fix : UI : show rgb sync state on device card`
 
-- Permanent tiers: `main` (stable), `dev` (staging), `feat` (integration). Hands-on work uses `<category>/<FEATURE>` off `feat` (e.g. `add/RGB`, `Fix/SENSOR`, `Wip/ARGB`).
-- **Commit subjects strictly follow `[category]: [feature_category]: short information`**:
-  - `[category]` — one of: `Add`, `Config`, `Refactor`, `Wip`, `Fix`, `Docs`
-  - `[feature_category]` — what you are working on, uppercase: `RGB`, `LED`, `ARGB`, `SENSOR`
-  - `short information` — concise description
-  - Example: `Wip: RGB: Build light effect mode (multi color)`
-- **Colon vs slash:** commit subject uses colons (`Add: RGB: sync all`); branch name uses a slash (`add/RGB`). Never write a commit with a slash or a branch with a colon.
-- When a commit body is needed: `Problem`, `Solution`, `Summary`, `Notes`, `What Changed`, `Test Result` — in that order when present. Omit `Problem` and `Solution` for additive/preventive/housekeeping commits.
+▎ The existing repo history mixes casing for older areas (`protocol`, `docs`, `watcher`, `catalog` lowercase; `UI`/`HID` uppercase). Going forward use UPPERCASE for FEATURE_CATEGORY. Legacy commits are not rewritten.
+
+Keep commits small — one layer/concern per commit.
+
+### Core rules
+
+1. Never delete branches — local or remote. Ever.
+2. Commit locally first. Never push or open an MR until the work is correct and verified, and wait for explicit user request before pushing or opening a merge request. Do not push or open an MR on your own initiative — "do the work" is not "publish the work." Local first, always.
+3. Fixes stay on the same branch. If `Add : RGB : synchronize all` has a bug found in testing, the fix commits to the same `feature/RGB` branch — not a new branch. The branch is the unit of the feature; fixes extend it.
+4. No self-merge without review. Self-merging was an old habit — it's done. Features get an MR.
+5. Work moves only upward: `feature/<name>` → `feat` → `dev` → `main`.
+
+### Starting a new feature
+
+Every new feature starts from one of two points, decided by a single question: does this feature need code from another feature that is not yet merged?
+
+**Case 1 — Independent feature (the default).** The feature does not depend on any unmerged work. Branch off `feat`.
+
+```bash
+git checkout feat && git pull && git checkout -b feature/<name>
+```
+
+**Case 2 — Dependent feature (stacked).** The feature needs code from a `feature/<parent>` branch that is finished but not yet merged (sitting in review/testing). You don't want to wait for the merge. Branch off the parent's tip so the new branch inherits the parent's code.
+
+```bash
+git checkout feature/<parent>          # the finished, unmerged feature
+git checkout -b feature/<name>         # new branch has the parent's code
+```
+
+Do not branch off `feat` here — it wouldn't have the parent's code and won't compile.
+
+**When NOT to stack:** if the parent is unstable and likely to change a lot during review, don't stack on it yet. Wait until it stabilizes, or merge it first. Stacking on heavily-churning work causes repeated rebase conflicts.
+
+### Branch naming
+
+`feature/<short-kebab-name>` — describes the feature, not the dependency. Example: `feature/rgb-sync`.
+
+### Working on a feature (both cases)
+
+```bash
+# commit per layer, e.g.:
+#   Add : PROTOCOL : rgb sync ask and ack parse
+#   Add : UI : show rgb sync state on device card
+git push -u origin feature/<name>
+# open MR: feature/<name> → feat
+```
+
+### Keeping a stacked branch in sync
+
+A dependent (stacked) branch must track its parent. The parent can change in two ways — handle each:
+
+**When the parent gets fixes (still unmerged).** Rule 3 guarantees this happens: bugs found in testing get fixed on the parent's own branch. After the parent gets new commits, absorb them into the child:
+
+```bash
+git checkout feature/<child>
+git fetch origin
+git rebase feature/<parent>            # absorb the parent's new commits
+git push --force-with-lease            # update the child MR
+```
+
+Rebase onto the parent's current tip (`feature/<parent>`), not onto `feat`.
+
+**When the parent merges into feat.** Once the parent is merged, `feat` contains its commits. Rebase the child onto `feat` so the parent's commits drop out and the child keeps only its own:
+
+```bash
+git checkout feature/<child>
+git fetch origin
+git rebase origin/feat                 # drops parent's now-merged commits
+git push --force-with-lease            # updates the child MR
+```
+
+Git detects the parent's commits are already in `feat` and drops them automatically.
+
+**The two rebase triggers (reference):**
+
+| Trigger | Rebase target | Effect |
+|---|---|---|
+| Parent gets fixes, still unmerged | `feature/<parent>` | Child absorbs the parent's new commits |
+| Parent merges into `feat` | `origin/feat` | Parent's commits drop out; child keeps only its own |
+
+### Deep stacks — rebase bottom-up
+
+When multiple branches are stacked and a lower one changes (fixes or merge):
+
+```
+feat ─── feature/a (got fixes, or merged)
+          └── feature/b (has a+b)
+               └── feature/c (has a+b+c)
+```
+
+Rebase lowest first, each onto the one below it:
+
+```bash
+# if feature/a got fixes (unmerged):
+git checkout feature/b && git rebase feature/a && git push --force-with-lease
+git checkout feature/c && git rebase feature/b && git push --force-with-lease
+
+# if feature/a merged into feat:
+git checkout feature/b && git fetch origin && git rebase origin/feat && git push --force-with-lease
+git checkout feature/c && git rebase feature/b && git push --force-with-lease
+```
+
+Never rebase the top before the middle — the middle goes stale and must be rebased again.
+
+### When a feature merges
+
+Leave the branch. Never delete. It stays as a permanent reference. If the branch had stacked children, rebase them (per the triggers above) before or after the merge.
+
+### Rollback reference
+
+| State | Command | Scope |
+|---|---|---|
+| Before push | `git reset --hard <commit>` | current branch only |
+| After push (solo branch) | `git reset --hard <commit> && git push --force-with-lease` | current branch only |
+| Before any rebase | `git tag pre-rebase <branch>`; undo with `git reset --hard pre-rebase` | that branch |
+| Parent merged, found bad | `git revert -m 1 <merge-sha>` on the integration branch | reverts parent; rebase children afterward |
+
+### Invariants
+
+1. A dependent feature branches off its parent's tip, never off `feat`.
+2. Fixes to the parent are expected. After fixing the parent, rebase the child onto the parent's new tip.
+3. Rebase a stacked child whenever its parent changes (fixes or merge) — don't let it drift.
+4. Rebase bottom-up in deep stacks.
+5. Tag known-good points before rebases.
+6. Never delete branches.
+7. One MR per branch.
+
+### Anti-patterns
+
+- ❌ Branching a dependent feature off `feat` instead of the parent → won't compile.
+- ❌ Letting a stacked child drift after its parent changes → stale child, bigger conflicts later.
+- ❌ Merging the parent into the child instead of rebasing the child → merge bubbles, noisy history.
+- ❌ Rebasing the top of a stack before the middle → stale middle.
+- ❌ Self-merging without review.
+- ❌ Committing directly to `main`, `dev`, or `feat`.
+- ❌ Pushing before committing locally.
+- ❌ Pushing or opening an MR before the work is verified correct, or without an explicit user request to do so. Local first — "do the work" ≠ "publish the work."
+
+### Agent execution checklist
+
+Before starting a feature:
+1. Determine dependency: does this feature need code from an unmerged `feature/<name>`?
+   - NO → `git checkout feat && git pull && git checkout -b feature/<name>`.
+   - YES (stable parent) → `git checkout feature/<parent> && git checkout -b feature/<name>`.
+   - YES (unstable parent) → wait; don't stack on churning work.
+2. Work + commit per layer: `<Category>: <FEATURE_CATEGORY> : <info>`. Commit locally first.
+3. Verify locally: run the app, test the behavior, confirm the work is correct. Fix on the same branch if not.
+4. Push + open MR — only on explicit user request, and only after verified. Do NOT push or open an MR automatically. Target `feat`. Do not delete on merge.
+5. If stacked — on parent fixes (still unmerged):
+   - `git checkout feature/<child>`
+   - `git fetch origin`
+   - `git rebase feature/<parent>` ← absorb fixes
+   - Resolve conflicts if any → `git rebase --continue`.
+   - `git push --force-with-lease`
+   - For deeper stacks, repeat bottom-up.
+6. If stacked — on parent merge into `feat`:
+   - `git checkout feature/<child>`
+   - `git fetch origin`
+   - `git rebase origin/feat` ← drop merged parent commits
+   - `git push --force-with-lease`
+   - For deeper stacks, repeat bottom-up.
+7. On own merge: leave the branch. Never delete.
 
 ## Required Preflight
 
@@ -73,27 +230,6 @@ Reject or request a split when:
 - the branch includes unrelated changes
 - docs belong to a different feature
 - the diff cannot be described as one cohesive feature
-
-## Practical Branch Flow
-
-1. Start from `feat`. Pull it current.
-2. If the request is still broad, run `keel workflow route --request "..."` first so the lane choice is explicit. See [docs/first-success-path.md](docs/first-success-path.md) when an operator wants the named end-to-end path before widening into custom flows.
-3. Create one new work branch off `feat` (e.g. `git switch -c add/RGB`). Use a `<category>/<FEATURE>` name.
-4. Implement only that feature. Fixes and retries for it stay on this same branch.
-5. Keep `keel workflow cockpit`, `keel workflow status`, or `keel workflow watch` visible.
-6. Use `git add -p` when selective staging is required.
-7. Review `git diff --cached`.
-8. Commit using the `[category]: [feature_category]: short information` format (categories: `Add`, `Config`, `Refactor`, `Wip`, `Fix`, `Docs`; feature_category uppercase, e.g. `Wip: RGB: Build light effect mode`).
-   Commit body when needed: `Problem`, `Solution`, `Summary`, `Notes`, `What Changed`, `Test Result` — in that order when present. Omit `Problem` and `Solution` for additive/preventive/housekeeping commits. Do not mention the harness or keel in commit text unless the change is about those surfaces.
-9. Run `keel workflow status` or `keel workflow cockpit`.
-10. Run `keel git-workflow preflight --base-ref origin/feat`.
-11. Commit locally, then push the work branch. Open one merge request into `feat`. Never delete the branch after pushing or merging.
-12. Once the feature is verified, promote `feat` into `dev` and verify on staging; after staging passes, promote `dev` into `main`. Repeat on a new work branch for the next feature.
-
-If another, separate feature appears during implementation:
-- do not keep it in the same branch
-- stash it or leave it unstaged
-- create another `<category>/<FEATURE>` work branch for it later
 
 ## Automation Boundaries
 
