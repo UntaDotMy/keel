@@ -824,10 +824,11 @@ fn run_hook_pre_tool_use(standard_output: &mut dyn Write, standard_error: &mut d
         .and_then(JsonDocument::as_str)
         .unwrap_or_default();
 
-    let analysis = crate::runner::shell_rewrite::analyze_command_text(command);
-    if let Some(finding) =
-        crate::runner::shell_rewrite::detect_destructive_command(&analysis.effective_fields)
-    {
+    // Inspect EVERY segment of a compound command, not just the first supported
+    // noisy segment that `analyze_command_text`'s `effective_fields` surfaces.
+    // Without this, a destructive payload in a later segment
+    // (`cargo test && rm -rf /`) bypasses the guard entirely.
+    if let Some(finding) = crate::runner::shell_rewrite::detect_destructive_in_command(command) {
         let reason = match finding.severity {
             crate::runner::shell_rewrite::DestructiveSeverity::Block => format!(
                 "[keel] Destructive command blocked: {}. This command is almost certainly unsafe. \

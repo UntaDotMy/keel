@@ -791,8 +791,10 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        let claude_home = std::env::temp_dir()
-            .join(format!("keel-compact-on-home-{}-{nanos}", std::process::id()));
+        let claude_home = std::env::temp_dir().join(format!(
+            "keel-compact-on-home-{}-{nanos}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&claude_home);
         std::fs::create_dir_all(&claude_home).expect("create test claude home");
         let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
@@ -838,7 +840,8 @@ mod tests {
         // the exit code up front gives a clearer signal when the command itself
         // did not execute (e.g. a shell-syntax portability regression).
         assert_eq!(
-            exit, 0,
+            exit,
+            0,
             "generator command must exit 0, got {exit} (stderr: {})",
             String::from_utf8_lossy(&stderr)
         );
@@ -910,11 +913,13 @@ mod tests {
         let payload: serde_json::Value =
             serde_json::from_str(last_line).expect("event line is valid JSON");
         assert_eq!(
-            payload["compacted"], serde_json::json!(true),
+            payload["compacted"],
+            serde_json::json!(true),
             "event log must record compacted: true on the compact branch, got: {last_line}"
         );
         assert_eq!(
-            payload["adapter_name"], serde_json::json!("generic"),
+            payload["adapter_name"],
+            serde_json::json!("generic"),
             "event log must record the resolved adapter, got: {last_line}"
         );
 

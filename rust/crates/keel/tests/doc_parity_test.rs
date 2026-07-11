@@ -350,9 +350,7 @@ fn bridge_subcommands_are_documented_and_in_help() {
         if let Some(rest) = trimmed.strip_prefix('"') {
             if let Some(end) = rest.find('"') {
                 let slug = &rest[..end];
-                if slug.chars().all(|c| c.is_ascii_lowercase() || c == '-')
-                    && !slug.is_empty()
-                {
+                if slug.chars().all(|c| c.is_ascii_lowercase() || c == '-') && !slug.is_empty() {
                     // Only collect arms inside the dispatch match (the help renderer
                     // also has quoted strings, but those are indented differently and
                     // are not `"<slug>" =>` arms). Confirm the ` =>` follows.

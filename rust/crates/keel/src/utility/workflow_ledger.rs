@@ -321,7 +321,10 @@ fn parse_string_literal(bytes: &[u8], index: &mut usize) -> Result<String, Strin
                     // The pair combines into one astral-plane scalar.
                     if (0xD800..=0xDBFF).contains(&code_point) {
                         let high = code_point;
-                        if *index + 10 >= bytes.len() || bytes[*index + 5] != b'\\' || bytes[*index + 6] != b'u' {
+                        if *index + 10 >= bytes.len()
+                            || bytes[*index + 5] != b'\\'
+                            || bytes[*index + 6] != b'u'
+                        {
                             return Err("lone high surrogate in \\u escape".into());
                         }
                         let low_hex = std::str::from_utf8(&bytes[*index + 7..*index + 11])
