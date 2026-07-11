@@ -19,6 +19,14 @@ const EVENT_LOG_KEEP_LINES: usize = 10_000;
 /// Rotate the event log when it exceeds MAX_EVENT_LOG_BYTES by keeping only
 /// the most recent EVENT_LOG_KEEP_LINES lines. Silently skips on any I/O error
 /// so a rotation failure never blocks event recording.
+///
+/// Concurrency: the rotate-then-append sequence in `record_compaction_event`
+/// has no cross-process lock, so two concurrent `keel run` processes could both
+/// rotate. To avoid a half-written log under that race, rotation writes to a
+/// sibling temp file and renames it into place (atomic on the same filesystem),
+/// mirroring the `write_text` pattern used elsewhere. A concurrent appender
+/// opening the old inode during the rename window at worst appends to a stale
+/// file that the next rotation reclaims — no corruption, at most a lost line.
 fn rotate_event_log_if_needed(event_path: &std::path::Path) {
     let size = match fs::metadata(event_path) {
         Ok(metadata) => metadata.len(),
@@ -40,7 +48,16 @@ fn rotate_event_log_if_needed(event_path: &std::path::Path) {
         .rev()
         .collect();
     let trimmed = kept_lines.join("\n") + "\n";
-    let _ = fs::write(event_path, trimmed);
+    // Atomic rotate: write a sibling temp file, then rename over the log so a
+    // concurrent reader/appender never sees a truncated or half-written file.
+    let temp_path = event_path.with_extension("log.rotate-tmp");
+    if fs::write(&temp_path, &trimmed).is_err() {
+        let _ = fs::remove_file(&temp_path);
+        return;
+    }
+    if fs::rename(&temp_path, event_path).is_err() {
+        let _ = fs::remove_file(&temp_path);
+    }
 }
 
 pub fn record_compaction_event(
