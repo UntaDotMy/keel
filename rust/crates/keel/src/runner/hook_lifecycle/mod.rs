@@ -2320,10 +2320,61 @@ fn user_config_or_env_u64(plugin_var: &str, operator_var: &str, default: u64) ->
 /// of 0 disables firing entirely (a second escape hatch alongside the off-switch).
 const GATE_DEFAULT_MAX_BLOCKS: u64 = 1;
 
-/// Exposed for bridge `gate-status` so callers can compare counter values
-/// against the cap without importing the private `default_max_blocks_for`.
-pub(crate) fn default_max_blocks() -> u64 {
-    GATE_DEFAULT_MAX_BLOCKS
+/// One row per PostToolBatch gate, for the bridge `gate-status` surface. Each
+/// row carries the counter directory name, a display label, and the gate's
+/// env-aware max-blocks cap (the real cap, not the flat default). This is the
+/// single source the native hook path and the bridge host path must both use so
+/// `keel bridge gate-status` reports the same 8 gates the native PostToolBatch
+/// fires — previously the bridge hardcoded 3 of 8 and compared against a flat 1.
+pub(crate) struct GateStatusRow {
+    pub dir: &'static str,
+    pub label: &'static str,
+    pub max_blocks: u64,
+}
+
+pub(crate) fn gate_status_rows() -> Vec<GateStatusRow> {
+    vec![
+        GateStatusRow {
+            dir: "review-gate-blocks",
+            label: "review",
+            max_blocks: review_gate_max_blocks(),
+        },
+        GateStatusRow {
+            dir: "brief-gate-blocks",
+            label: "working-brief",
+            max_blocks: brief_gate_max_blocks(),
+        },
+        GateStatusRow {
+            dir: "story-closeout-gate-blocks",
+            label: "story-closeout",
+            max_blocks: story_closeout_gate_max_blocks(),
+        },
+        GateStatusRow {
+            dir: "memory-gate-blocks",
+            label: "memory",
+            max_blocks: memory_gate_max_blocks(),
+        },
+        GateStatusRow {
+            dir: "sprint-start-gate-blocks",
+            label: "sprint-start",
+            max_blocks: sprint_start_gate_max_blocks(),
+        },
+        GateStatusRow {
+            dir: "learned-skill-gate-blocks",
+            label: "learned-skill",
+            max_blocks: learned_skill_gate_max_blocks(),
+        },
+        GateStatusRow {
+            dir: "research-gate-blocks",
+            label: "research",
+            max_blocks: research_gate_max_blocks(),
+        },
+        GateStatusRow {
+            dir: "story-first-gate-blocks",
+            label: "story-first",
+            max_blocks: story_first_gate_max_blocks(),
+        },
+    ]
 }
 
 /// Default per-session fire cap for a gate, chosen by mode. `Escalate` needs at
