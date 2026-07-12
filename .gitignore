@@ -59,6 +59,11 @@ todo.md
 todo.local.md
 .scratch/
 
+# Local session / agent continuation scratch (never ship)
+.omo/
+**/tmp-keel-*.txt
+**/* - Copy/
+
 # Local validation and flow artifacts
 VALIDATION_REPORT.md
 flow-check.json

@@ -171,13 +171,13 @@ The user asked about Headroom. Not identical to `headroom` on GitHub by headroom
 
 **G-1: Multi-harness adapters.** Every competitor ships Codex/Cursor/Gemini/Copilot support. Keel is harness-only by choice. This is the single biggest adoption blocker for any team that doesn't use Claude Code exclusively. The existing competitive-gap doc calls this a "product decision" — it's worth acknowledging that it's also a distribution strategy gap. **Status:** acknowledged but not acted on.
 
-**G-2: Ultra-compact output mode.** RTK's `-u` flag produces ASCII icons and inline format for extra token savings. Keel has `--stream` for live output but no ultra-compact tier. The break-even guard already measures savings; an ultra-compact flag could use the same measurement pipeline with a higher compression aggressiveness setting. **Status:** unacknowledged gap.
+**G-2: Ultra-compact output mode.** **Shipped (2026-07):** `keel run --ultra -- <cmd>` uses `render_ultra_compact_result` (short status, failure-first body, tight line cap) with the existing break-even guard.
 
-**G-3: Generic "errors only" wrapper.** RTK's `rtk err <cmd>` pipes any command through error-only filtering. Keel's adapters handle error detection per-adapter (the test adapter shows FAILED lines, build adapter shows errors-first). A generic error filter that works on commands with no dedicated adapter would cover the long tail of unclassified tools. **Status:** unacknowledged gap.
+**G-3: Generic "errors only" wrapper.** **Shipped (2026-07):** `keel run --errors-only -- <cmd>` filters any command's streams to error/failure-class lines via `error_only_lines` (adapter-agnostic).
 
 ### Medium gaps (worth shipping)
 
-**G-4: `rtk err`-like generic filter.** Same as G-3. Could be a generic adapter fallback or a `--errors-only` flag on `keel run`.
+**G-4: `rtk err`-like generic filter.** Closed by G-3 (`--errors-only`).
 
 **G-5: Session replay/resume.** ECC's session persistence hooks save and restore context across sessions. Keel's `keel checkpoint` saves code snapshots but doesn't serialize conversation state. The harness has native `/rewind` for conversation, but keel doesn't bridge the two. **Status:** partially addressed by checkpoint + recall index.
 

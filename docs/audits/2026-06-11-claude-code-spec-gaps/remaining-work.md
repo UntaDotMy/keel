@@ -61,10 +61,9 @@ warned; `config-audit` 0 high / 0 medium / 0 low; `review pre-commit` gate=pass.
   is genuinely exercised without inventing infrastructure the repo does not have.
 - **Finding 17 scope.** Shipped the two highest-value, lowest-risk manifest keys
   (`lspServers` for live Rust diagnostics, `outputStyles` for a terse delivery
-  style). `experimental.monitors`, `userConfig`, and `channels` were not added —
-  monitors/userConfig overlap existing CLI surfaces and channels is out of scope
-  for a delivery harness; adding them would be speculative config the project does
-  not need.
+  style). `userConfig` and `experimental.monitors` were added later; the
+  build-watcher monitor must stay a bare argv command (no shell pipes or
+  redirects) so `keel config-audit` stays clean. `channels` remains out of scope.
 
 ## Follow-up
 

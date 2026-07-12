@@ -63,6 +63,10 @@ pub fn run_proxy(
     flag_set.bool_flag("full", false);
     flag_set.bool_flag("no-compact", false);
     flag_set.bool_flag("no-raw", false);
+    // Audit G-3/G-4: generic error-only filter (works without a dedicated adapter).
+    flag_set.bool_flag("errors-only", false);
+    // Audit G-2: ultra-compact tier — shorter body, failure-first line keep.
+    flag_set.bool_flag("ultra", false);
     flag_set.string_flag("max-lines", "0");
     flag_set.string_flag("recovery-dir", "");
     flag_set.string_flag("adapter", "");
@@ -115,10 +119,11 @@ pub fn run_proxy(
     // (or our own opt-in marker) launched us. A developer typing
     // `keel run -- cargo test` in a plain shell expects to see their
     // command's output, not a "[keel] compacted command output" wrapper
-    // and a recovery artifact they never asked for. The token-saver is only
-    // valuable when the consumer is the agent transcript; when it is the
-    // human terminal, passthrough is the correct behaviour.
-    if !running_under_claude_code() {
+    // and a recovery artifact they never asked for. Explicit filter modes
+    // (`--errors-only`, `--ultra`) are intentional opt-ins and always capture.
+    let force_capture =
+        flag_set.bool_value("errors-only") || flag_set.bool_value("ultra");
+    if !running_under_claude_code() && !force_capture {
         return run_proxy_passthrough(&command_arguments, standard_error);
     }
 
@@ -228,14 +233,25 @@ pub fn run_proxy(
                 let _ = store.save(&mut meta, &raw_run);
             }
 
-            let compact_result =
-                adapter.compact(&raw_run.stdout, &raw_run.stderr, raw_run.exit_code, &meta);
+            let compact_result = if flag_set.bool_value("errors-only") {
+                errors_only_compact(&raw_run, &meta)
+            } else {
+                adapter.compact(&raw_run.stdout, &raw_run.stderr, raw_run.exit_code, &meta)
+            };
             let (compact_result, compact_findings) =
                 neutralize_compact_result(compact_result, &meta.raw_id);
-            let rendered = cap_lines(
-                &crate::proxy::render::render_compact_result(&compact_result),
-                max_lines,
-            );
+            let rendered_base = if flag_set.bool_value("ultra") {
+                crate::proxy::render::render_ultra_compact_result(&compact_result)
+            } else {
+                crate::proxy::render::render_compact_result(&compact_result)
+            };
+            // Ultra defaults to a tight line cap when the caller did not set one.
+            let effective_max_lines = if max_lines == 0 && flag_set.bool_value("ultra") {
+                40
+            } else {
+                max_lines
+            };
+            let rendered = cap_lines(&rendered_base, effective_max_lines);
             // Break-even guard: never emit compacted output that is larger than
             // the raw it replaces. On small or already-terse command output the
             // fixed wrapper overhead (the PASS/FAIL prefix + the raw-recovery
@@ -370,6 +386,44 @@ fn run_proxy_passthrough(command_arguments: &[String], standard_error: &mut dyn 
             1
         }
     }
+}
+
+/// Build a compact result that keeps only error/failure-class lines from the
+/// raw streams. Adapter-agnostic — closes the `rtk err` gap for any command.
+fn errors_only_compact(
+    raw: &RawRun,
+    meta: &RunMeta,
+) -> crate::proxy::adapter::CompactResult {
+    use crate::adapters::common::{error_only_lines, make_result, merge_streams};
+
+    let merged = merge_streams(&raw.stdout, &raw.stderr);
+    let lines = error_only_lines(&merged, 80);
+    let body = if lines.is_empty() {
+        if raw.exit_code == 0 {
+            "(no error lines; exit 0)".to_string()
+        } else {
+            format!(
+                "(no error-class lines matched; exit {})\nsee: keel raw {}",
+                raw.exit_code, meta.raw_id
+            )
+        }
+    } else {
+        lines.join("\n")
+    };
+    let summary = format!(
+        "[keel] errors-only\ncommand: {}\nreducer: errors-only; lines: {}",
+        meta.command,
+        body.lines().count()
+    );
+    make_result(
+        "errors-only",
+        summary,
+        body,
+        String::new(),
+        raw.exit_code,
+        meta,
+        true,
+    )
 }
 
 fn neutralize_compact_result(

@@ -27,8 +27,10 @@
 //! the hook layer without rewriting it.
 
 use std::env;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
@@ -43,6 +45,17 @@ use crate::utility::workflow_ledger::{current_timestamp_millis, format_timestamp
 use crate::utility::working_brief::{create_brief, list_briefs, read_brief, write_brief, Brief};
 
 use super::{recall_status_payload, system_map_text, MethodError, JSON_RPC_INVALID_PARAMS};
+
+/// Default wall-clock budget for MCP tools that spawn a child (`cli`,
+/// `run_command`, `sprint`, …). Without this, a hung child freezes the MCP
+/// stdio loop and Grok/Claude report the tool as "stuck". Override with
+/// `KEEL_MCP_TOOL_TIMEOUT_SECS` (seconds, min 5, max 3600).
+const DEFAULT_MCP_CHILD_TIMEOUT_SECS: u64 = 120;
+
+/// Soft cap for large text tool results (system_map, skill bodies). Hosts like
+/// Grok also cap MCP output (~20KB); returning a bounded body keeps the stdio
+/// pipe from filling and the agent from waiting on megabyte maps.
+const MAX_MCP_TEXT_CHARS: usize = 48_000;
 
 /// Default cap for `recall` matches when the caller does not supply one. The
 /// CLI uses the same default (see `utility::recall::DEFAULT_RECALL_LIMIT`).
@@ -656,7 +669,9 @@ fn tool_system_map(arguments: &Value) -> Result<String, String> {
     // Prefix at the call site, not inside system_map_text — that helper is also
     // the backing for the keel://system-map resource, which should keep
     // its bare error message.
-    system_map_text(workspace_override.as_deref()).map_err(|error| format!("system_map: {error}"))
+    let text = system_map_text(workspace_override.as_deref())
+        .map_err(|error| format!("system_map: {error}"))?;
+    Ok(truncate_mcp_text(&text))
 }
 
 fn tool_run_command(arguments: &Value) -> Result<String, String> {
@@ -688,12 +703,8 @@ fn tool_run_command(arguments: &Value) -> Result<String, String> {
     child.stdin(Stdio::null());
     child.stdout(Stdio::piped());
     child.stderr(Stdio::piped());
-    let output = child
-        .output()
-        .map_err(|error| format!("run_command: spawn: {error}"))?;
-    let stdout_text = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr_text = String::from_utf8_lossy(&output.stderr).to_string();
-    let exit_code = output.status.code().unwrap_or(-1);
+    let (exit_code, stdout_text, stderr_text) =
+        run_command_with_timeout(child, mcp_child_timeout(), "run_command")?;
     // `json` mode returns a structured object; default text report keeps real
     // newlines so multi-line build/test logs stay legible in the tool-result view.
     if Some(true) == optional_bool_arg(arguments, "json") {
@@ -1108,14 +1119,11 @@ fn tool_cli(arguments: &Value) -> Result<String, String> {
     child.stdin(Stdio::null());
     child.stdout(Stdio::piped());
     child.stderr(Stdio::piped());
-    let output = child
-        .output()
-        .map_err(|error| format!("cli: spawn: {error}"))?;
-    let stdout_text = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr_text = String::from_utf8_lossy(&output.stderr).to_string();
+    let (exit_code, stdout_text, stderr_text) =
+        run_command_with_timeout(child, mcp_child_timeout(), "cli")?;
     Ok(render_run_command_report(
         &format!("keel {}", args.join(" ")),
-        output.status.code().unwrap_or(-1),
+        exit_code,
         &stdout_text,
         &stderr_text,
     ))
@@ -1150,14 +1158,11 @@ fn tool_sprint(arguments: &Value) -> Result<String, String> {
     child.stdin(Stdio::null());
     child.stdout(Stdio::piped());
     child.stderr(Stdio::piped());
-    let output = child
-        .output()
-        .map_err(|error| format!("sprint: spawn: {error}"))?;
-    let stdout_text = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr_text = String::from_utf8_lossy(&output.stderr).to_string();
+    let (exit_code, stdout_text, stderr_text) =
+        run_command_with_timeout(child, mcp_child_timeout(), "sprint")?;
     Ok(render_run_command_report(
         &format!("keel sprint {} {}", action, args.join(" ")),
-        output.status.code().unwrap_or(-1),
+        exit_code,
         &stdout_text,
         &stderr_text,
     ))
@@ -1251,11 +1256,8 @@ fn run_keel_subcommand<S: AsRef<str>>(
     child.stdin(Stdio::null());
     child.stdout(Stdio::piped());
     child.stderr(Stdio::piped());
-    let output = child
-        .output()
-        .map_err(|error| format!("{subcommand}: spawn: {error}"))?;
-    let stdout_text = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr_text = String::from_utf8_lossy(&output.stderr).to_string();
+    let (exit_code, stdout_text, stderr_text) =
+        run_command_with_timeout(child, mcp_child_timeout(), subcommand)?;
     let label = format!(
         "keel {subcommand} {}",
         extra_args
@@ -1266,10 +1268,136 @@ fn run_keel_subcommand<S: AsRef<str>>(
     );
     Ok(render_run_command_report(
         &label,
-        output.status.code().unwrap_or(-1),
+        exit_code,
         &stdout_text,
         &stderr_text,
     ))
+}
+
+fn mcp_child_timeout() -> Duration {
+    let secs = env::var("KEEL_MCP_TOOL_TIMEOUT_SECS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_MCP_CHILD_TIMEOUT_SECS)
+        .clamp(5, 3_600);
+    Duration::from_secs(secs)
+}
+
+/// Run a prepared `Command` with piped stdio, draining stdout/stderr on
+/// helper threads so a full pipe cannot deadlock, and kill the child if it
+/// exceeds `timeout`. Returns `(exit_code, stdout, stderr)`.
+fn run_command_with_timeout(
+    mut command: Command,
+    timeout: Duration,
+    label: &str,
+) -> Result<(i32, String, String), String> {
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("{label}: spawn: {error}"))?;
+    let stdout_pipe = child
+        .stdout
+        .take()
+        .ok_or_else(|| format!("{label}: missing stdout pipe"))?;
+    let stderr_pipe = child
+        .stderr
+        .take()
+        .ok_or_else(|| format!("{label}: missing stderr pipe"))?;
+
+    let stdout_handle = std::thread::spawn(move || {
+        let mut buf = String::new();
+        let mut reader = stdout_pipe;
+        let _ = reader.read_to_string(&mut buf);
+        buf
+    });
+    let stderr_handle = std::thread::spawn(move || {
+        let mut buf = String::new();
+        let mut reader = stderr_pipe;
+        let _ = reader.read_to_string(&mut buf);
+        buf
+    });
+
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = stdout_handle.join();
+                    let _ = stderr_handle.join();
+                    return Err(format!(
+                        "{label}: timed out after {}s (set KEEL_MCP_TOOL_TIMEOUT_SECS to raise; kill orphan `keel mcp serve` processes if tools keep hanging)",
+                        timeout.as_secs()
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(error) => {
+                let _ = child.kill();
+                return Err(format!("{label}: wait: {error}"));
+            }
+        }
+    };
+
+    let stdout_text = stdout_handle
+        .join()
+        .unwrap_or_else(|_| String::from("(stdout reader panicked)"));
+    let stderr_text = stderr_handle
+        .join()
+        .unwrap_or_else(|_| String::from("(stderr reader panicked)"));
+    Ok((status.code().unwrap_or(-1), stdout_text, stderr_text))
+}
+
+fn truncate_mcp_text(text: &str) -> String {
+    if text.chars().count() <= MAX_MCP_TEXT_CHARS {
+        return text.to_string();
+    }
+    let kept: String = text.chars().take(MAX_MCP_TEXT_CHARS).collect();
+    format!(
+        "{kept}\n\n… truncated for MCP (>{MAX_MCP_TEXT_CHARS} chars). Use `keel memory system-map show` or `system_map_refresh` for the full map."
+    )
+}
+
+#[cfg(test)]
+mod mcp_timeout_tests {
+    use super::*;
+
+    #[test]
+    fn truncate_mcp_text_leaves_small_input() {
+        assert_eq!(truncate_mcp_text("hello"), "hello");
+    }
+
+    #[test]
+    fn truncate_mcp_text_caps_large_input() {
+        let big = "x".repeat(MAX_MCP_TEXT_CHARS + 5_000);
+        let out = truncate_mcp_text(&big);
+        assert!(out.contains("truncated for MCP"));
+        assert!(out.chars().count() < big.chars().count());
+        assert!(out.chars().count() <= MAX_MCP_TEXT_CHARS + 200);
+    }
+
+    #[test]
+    fn run_command_with_timeout_kills_long_child() {
+        let mut command = if cfg!(windows) {
+            let mut c = Command::new("cmd");
+            c.args(["/C", "ping -n 30 127.0.0.1 >nul"]);
+            c
+        } else {
+            let mut c = Command::new("sleep");
+            c.arg("30");
+            c
+        };
+        command.stdin(Stdio::null());
+        command.stdout(Stdio::piped());
+        command.stderr(Stdio::piped());
+        let err = run_command_with_timeout(command, Duration::from_secs(1), "timeout-test")
+            .expect_err("must time out");
+        assert!(
+            err.contains("timed out"),
+            "expected timeout error, got: {err}"
+        );
+    }
 }
 
 fn optional_string_arg<'a>(arguments: &'a Value, key: &str) -> Option<&'a str> {

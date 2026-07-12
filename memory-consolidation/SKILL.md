@@ -1,4 +1,5 @@
 ---
+name: memory-consolidation
 description: Consolidates recent tool-call observations into durable memory notes by extracting patterns, decisions, and solutions. Use when the agent should review recent work, distill what was learned, and write structured notes to keel's memory store so future sessions start ahead. Triggered by the agent at session-end, compaction, or when the user says "consolidate", "what did we learn", or "save what we did".
 when_to_use: |
   Use when consolidating recent work into durable memory:
@@ -11,6 +12,8 @@ when_to_use: |
   - Capturing a single solved problem (use compounding-knowledge instead)
   - Writing working briefs (use the brief tools instead)
   - System map refresh (use keel memory system-map refresh)
+allowed-tools: Read, Grep, Glob, Bash(keel learn:*), Bash(keel memory:*), Bash(keel run:*)
+effort: medium
 ---
 
 # Memory Consolidation

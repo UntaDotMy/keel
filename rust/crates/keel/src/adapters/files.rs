@@ -131,34 +131,6 @@ mod tests {
         assert!(!result.stdout.contains("src/lib.rs'"));
     }
 
-    #[allow(dead_code)]
-    fn meta(command: &str, stdout_bytes: usize) -> RunMeta {
-        RunMeta {
-            raw_id: "raw".to_string(),
-            command: command.to_string(),
-            program: "cat".to_string(),
-            args: vec!["src/lib.rs".to_string()],
-            cwd: PathBuf::from("."),
-            started_at: 1,
-            duration_ms: 1,
-            exit_code: 0,
-            adapter_name: "files".to_string(),
-            raw_path: PathBuf::from("/tmp/raw"),
-            compact_path: PathBuf::new(),
-            agent: "test".to_string(),
-            workspace: PathBuf::from("."),
-            stdout_bytes,
-            stderr_bytes: 0,
-            compact_stdout_bytes: 0,
-            compact_stderr_bytes: 0,
-            estimated_tokens_before: stdout_bytes / 4,
-            estimated_tokens_after: 0,
-            estimated_tokens_saved: 0,
-            savings_pct: 0.0,
-            compacted: false,
-        }
-    }
-
     fn wrapped_meta(command: &str, program: &str, args: &[&str], stdout_bytes: usize) -> RunMeta {
         RunMeta {
             raw_id: "raw".to_string(),
