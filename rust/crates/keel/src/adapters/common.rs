@@ -64,6 +64,54 @@ pub fn compact_edges(text: &str, label: &str, max_lines: usize) -> String {
 }
 
 pub fn signal_lines(text: &str, max_lines: usize) -> Vec<String> {
+    filter_lines(text, max_lines, SIGNAL_NEEDLES)
+}
+
+/// Stricter than `signal_lines`: keeps only error/failure class lines, not
+/// warnings or soft "expected/actual" noise. Used by `keel run --errors-only`.
+pub fn error_only_lines(text: &str, max_lines: usize) -> Vec<String> {
+    filter_lines(text, max_lines, ERROR_ONLY_NEEDLES)
+}
+
+const SIGNAL_NEEDLES: &[&str] = &[
+    "error",
+    "failed",
+    "failure",
+    "fatal",
+    "panic",
+    "exception",
+    "traceback",
+    "assert",
+    "warning",
+    "denied",
+    "not found",
+    "cannot",
+    "undefined",
+    "mismatched",
+    "expected",
+    "actual",
+    "timeout",
+    "timed out",
+];
+
+const ERROR_ONLY_NEEDLES: &[&str] = &[
+    "error",
+    "failed",
+    "failure",
+    "fatal",
+    "panic",
+    "exception",
+    "traceback",
+    "assert",
+    "denied",
+    "timeout",
+    "timed out",
+    "cannot",
+    "undefined",
+    "not found",
+];
+
+fn filter_lines(text: &str, max_lines: usize, needles: &[&str]) -> Vec<String> {
     let mut seen = std::collections::BTreeSet::new();
     let mut selected = Vec::new();
     for line in text.lines() {
@@ -72,29 +120,8 @@ pub fn signal_lines(text: &str, max_lines: usize) -> Vec<String> {
             continue;
         }
         let normalized = trimmed.to_ascii_lowercase();
-        let is_signal = [
-            "error",
-            "failed",
-            "failure",
-            "fatal",
-            "panic",
-            "exception",
-            "traceback",
-            "assert",
-            "warning",
-            "denied",
-            "not found",
-            "cannot",
-            "undefined",
-            "mismatched",
-            "expected",
-            "actual",
-            "timeout",
-            "timed out",
-        ]
-        .iter()
-        .any(|needle| normalized.contains(needle));
-        if is_signal && seen.insert(trimmed.to_string()) {
+        let is_match = needles.iter().any(|needle| normalized.contains(needle));
+        if is_match && seen.insert(trimmed.to_string()) {
             selected.push(redact_possible_secret(trimmed));
         }
         if selected.len() >= max_lines {
@@ -176,6 +203,22 @@ pub fn merge_streams(stdout: &[u8], stderr: &[u8]) -> String {
         stderr.to_string()
     } else {
         format!("{stdout}\n{stderr}")
+    }
+}
+
+#[cfg(test)]
+mod error_only_tests {
+    use super::{error_only_lines, signal_lines};
+
+    #[test]
+    fn error_only_keeps_failure_drops_warning_only() {
+        let text = "ok line\nWARNING: soft\nERROR: hard fail\nnoise\n";
+        let errors = error_only_lines(text, 40);
+        assert!(errors.iter().any(|line| line.contains("ERROR")));
+        assert!(!errors.iter().any(|line| line.contains("WARNING")));
+        // signal_lines still keeps warnings
+        let signals = signal_lines(text, 40);
+        assert!(signals.iter().any(|line| line.contains("WARNING")));
     }
 }
 

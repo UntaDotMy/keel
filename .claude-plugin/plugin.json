@@ -137,7 +137,7 @@
     "monitors": [
       {
         "name": "build-watcher",
-        "command": "cargo check --message-format short 2>&1 | tail -20",
+        "command": "cargo check --message-format=short",
         "description": "Watches for Rust compilation errors after edits",
         "when": "on-skill-invoke:keel:review"
       }

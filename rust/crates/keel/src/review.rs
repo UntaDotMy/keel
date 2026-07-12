@@ -476,11 +476,12 @@ fn tally_gate_results(gate_results: &[GateResult]) -> (i32, i32) {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-#[allow(dead_code)]
 enum GateStatus {
     Pass,
     Fail,
     Warn,
+    /// Reserved for gates that intentionally no-op; matched in status renderers.
+    #[allow(dead_code)]
     Skipped,
     Blocked,
 }

@@ -23,15 +23,15 @@ use crate::runner::tool_timings::iter_day_files;
 
 /// One parsed JSONL row. Only the fields the aggregator needs are kept; the
 /// rest of the row is discarded so a future schema addition does not break
-/// the reader. `session_id` is preserved on the row even though the
-/// aggregator does not key on it: callers in `read_rows` need the value
-/// to apply the optional `--session` filter, and downstream tooling (a
-/// future `tail` subcommand, debugging) benefits from carrying it through.
+/// the reader. `session_id` is preserved for the optional `--session` filter
+/// and for tests that assert per-session aggregation.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct TimingRow {
     pub tool_name: String,
     pub duration_ms: u64,
+    /// Kept on the row for `--session` filtering callers and tests; the
+    /// summary aggregator keys by tool_name only.
+    #[allow(dead_code)]
     pub session_id: String,
 }
 
