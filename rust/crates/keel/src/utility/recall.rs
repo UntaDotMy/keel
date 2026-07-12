@@ -851,7 +851,10 @@ fn open_recall_connection(database_path: &Path) -> Result<Connection, String> {
     connection
         .busy_timeout(std::time::Duration::from_millis(5_000))
         .map_err(|database_error| {
-            recall_open_error_hint(database_path, &format!("set busy_timeout: {database_error}"))
+            recall_open_error_hint(
+                database_path,
+                &format!("set busy_timeout: {database_error}"),
+            )
         })?;
     ensure_recall_schema(&connection)
         .map_err(|schema_error| recall_open_error_hint(database_path, &schema_error))?;

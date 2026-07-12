@@ -57,7 +57,13 @@ pub fn render_ultra_compact_result(result: &CompactResult) -> String {
             .filter(|line| {
                 let lower = line.to_ascii_lowercase();
                 [
-                    "error", "fail", "panic", "fatal", "exception", "denied", "timeout",
+                    "error",
+                    "fail",
+                    "panic",
+                    "fatal",
+                    "exception",
+                    "denied",
+                    "timeout",
                 ]
                 .iter()
                 .any(|n| lower.contains(n))
