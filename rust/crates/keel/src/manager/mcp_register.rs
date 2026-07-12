@@ -202,7 +202,13 @@ pub fn register_mcp_server(claude_home: &Path) -> Result<McpRegistration, String
         None => McpRegistration::Added,
     };
 
-    if outcome == McpRegistration::AlreadyCurrent {
+    // Drop sibling MCP servers whose command binary is missing. A dead
+    // registration (e.g. leftover `claude_core` pointing at a removed
+    // `claude-skills.exe`) makes Grok/Claude hang or fail MCP connect while
+    // waiting on a process that can never start.
+    let pruned = prune_missing_command_servers(servers);
+
+    if outcome == McpRegistration::AlreadyCurrent && !pruned {
         return Ok(outcome);
     }
 
@@ -211,7 +217,43 @@ pub fn register_mcp_server(claude_home: &Path) -> Result<McpRegistration, String
     let rendered = serde_json::to_string_pretty(&document)
         .map_err(|error| format!("render {}: {error}", display_path(&config_path)))?;
     write_text(&config_path, &format!("{rendered}\n"))?;
-    Ok(outcome)
+    Ok(if outcome == McpRegistration::AlreadyCurrent && pruned {
+        McpRegistration::Updated
+    } else {
+        outcome
+    })
+}
+
+/// Remove mcpServers entries whose `command` path does not exist on disk.
+/// Returns true when at least one entry was removed. Bare commands on PATH
+/// (no path separator) are left alone — they resolve via PATH at spawn time.
+fn prune_missing_command_servers(servers: &mut Map<String, Value>) -> bool {
+    let dead: Vec<String> = servers
+        .iter()
+        .filter(|(name, entry)| {
+            if name.as_str() == MCP_SERVER_KEY {
+                return false;
+            }
+            let Some(command) = entry.get("command").and_then(Value::as_str) else {
+                return false;
+            };
+            let command = command.trim();
+            if command.is_empty() {
+                return false;
+            }
+            // PATH-only basenames: do not prune (we cannot know PATH here).
+            if !command.contains('/') && !command.contains('\\') && !command.contains(':') {
+                return false;
+            }
+            !Path::new(command).is_file()
+        })
+        .map(|(name, _)| name.clone())
+        .collect();
+    let changed = !dead.is_empty();
+    for name in dead {
+        servers.remove(&name);
+    }
+    changed
 }
 
 /// True when `claude_home` is a real `~/.claude` directory (its final path
@@ -529,6 +571,52 @@ mod tests {
             unregister_mcp_server(&claude_home).is_err(),
             "must not overwrite a non-object config"
         );
+        let _ = fs::remove_dir_all(claude_home.parent().unwrap());
+    }
+
+    #[test]
+    fn register_prunes_sibling_server_with_missing_binary() {
+        let claude_home = unique_home("prune-dead");
+        let config_path = mcp_config_path(&claude_home);
+        // Seed a dead sibling pointing at a non-existent absolute path, plus a
+        // PATH-only basename that must survive (we cannot know PATH here).
+        fs::write(
+            &config_path,
+            r#"{
+              "mcpServers": {
+                "dead-core": {
+                  "type": "stdio",
+                  "command": "C:\\nonexistent\\missing-mcp.exe",
+                  "args": ["mcp", "serve"],
+                  "env": {}
+                },
+                "path-tool": {
+                  "type": "stdio",
+                  "command": "npx",
+                  "args": ["-y", "some-mcp"],
+                  "env": {}
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+        let outcome = register_mcp_server(&claude_home).unwrap();
+        assert!(matches!(
+            outcome,
+            McpRegistration::Added | McpRegistration::Updated
+        ));
+        let text = fs::read_to_string(&config_path).unwrap();
+        let parsed: Value = serde_json::from_str(&text).unwrap();
+        assert!(
+            parsed["mcpServers"].get("dead-core").is_none(),
+            "missing-binary sibling must be pruned: {parsed}"
+        );
+        assert_eq!(
+            parsed["mcpServers"]["path-tool"]["command"],
+            json!("npx"),
+            "PATH basenames must not be pruned"
+        );
+        assert!(parsed["mcpServers"].get(MCP_SERVER_KEY).is_some());
         let _ = fs::remove_dir_all(claude_home.parent().unwrap());
     }
 
