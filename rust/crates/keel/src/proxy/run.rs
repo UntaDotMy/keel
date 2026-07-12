@@ -121,8 +121,7 @@ pub fn run_proxy(
     // command's output, not a "[keel] compacted command output" wrapper
     // and a recovery artifact they never asked for. Explicit filter modes
     // (`--errors-only`, `--ultra`) are intentional opt-ins and always capture.
-    let force_capture =
-        flag_set.bool_value("errors-only") || flag_set.bool_value("ultra");
+    let force_capture = flag_set.bool_value("errors-only") || flag_set.bool_value("ultra");
     if !running_under_claude_code() && !force_capture {
         return run_proxy_passthrough(&command_arguments, standard_error);
     }
@@ -390,10 +389,7 @@ fn run_proxy_passthrough(command_arguments: &[String], standard_error: &mut dyn 
 
 /// Build a compact result that keeps only error/failure-class lines from the
 /// raw streams. Adapter-agnostic — closes the `rtk err` gap for any command.
-fn errors_only_compact(
-    raw: &RawRun,
-    meta: &RunMeta,
-) -> crate::proxy::adapter::CompactResult {
+fn errors_only_compact(raw: &RawRun, meta: &RunMeta) -> crate::proxy::adapter::CompactResult {
     use crate::adapters::common::{error_only_lines, make_result, merge_streams};
 
     let merged = merge_streams(&raw.stdout, &raw.stderr);
