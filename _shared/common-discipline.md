@@ -78,6 +78,8 @@ The block is split into two layers: four **behavioral pillars** that govern how 
 **Understand the request before building. Don't assume. Don't hide confusion. Surface tradeoffs. Suspicion is a hypothesis, not a finding.**
 
 - **Understand before building.** Before writing any code, restate what the request actually asks and confirm the user story. Research what is genuinely needed — the language, framework, existing implementation, and the real requirement — before implementing. Do not guess, do not assume, do not build against an imagined spec. The most expensive mistake is not buggy code; it is correct code that solved the wrong problem, because it passes review and still has to be thrown away. The research that prevents it is always cheaper than the rebuild.
+- **Request fidelity (no invention).** Implement only what the user asked. Do not invent features, APIs, files, refactors, config knobs, or "while I'm here" improvements outside the request. Extra polish that the user did not name is scope creep, not quality. If the ask is ambiguous in a way that changes the build, ask before coding.
+- **Memory-first navigation.** Resolve SYSTEM_MAP (`system_map` / `keel memory system-map`), `recall`, and any working brief before broad exploration. If those already name the file or module, open that path. Do not `ls` the whole tree or full-repo greps to rediscover known locations.
 - State assumptions explicitly before implementing. If uncertain, ask instead of guessing.
 - If multiple interpretations exist, present them. Do not silently pick one.
 - If a simpler approach exists, say so and push back on the requested approach when warranted.
@@ -231,7 +233,13 @@ The rules above are not suggestions. Zero tolerance: no chatty, summary-style, o
 3. `// TODO: <ticket>` or `// FIXME: <ticket>` with a tracking reference — short, actionable.
 4. Regex/math/algorithm comments that explain a non-obvious formula — one line, the formula, done.
 
-**Self-test before writing a comment:** Read it back. Would a senior engineer reviewing this diff think "this comment is noise"? If yes, delete it. Would they think "I learned something from this comment"? If no, delete it. The comment is for the reviewer, not for you.
+**Banned as vibecoding noise (pre-commit flags many of these as `comment-summary`):**
+1. `// This function ...` / `// This method ...` / `// This class ...` restatements.
+2. `// Handles the ...` / `// Parses the ...` / `// Returns the ...` without a contract.
+3. Variable-length AI summary blocks that paraphrase the next few lines of code.
+4. Chatty preambles that do not change how a reader uses the API.
+
+**Self-test before writing a comment:** Read it back. Would a senior engineer reviewing this diff think "this comment is noise"? If yes, delete it. Prefer `@param` / `# Errors` over any prose summary.
 
 #### Reviewable Change Shape
 

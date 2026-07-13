@@ -53,6 +53,9 @@ checking. The cost of skipping a skill that did apply is shipping a regression.
 | "The user story is clear" | Stories are summaries, not specs. Find the root cause. |
 | "I get the gist, I'll start building" | The gist is not the spec. Restate the request, confirm the user story, research what's needed. Building on a guess is how you ship the wrong thing. |
 | "I'll assume they meant X and proceed" | Assuming is guessing with confidence. If the assumption changes what you build, confirm it first — do not build then apologize. |
+| "While I'm here I'll also add..." | Request fidelity failed. That is invention, not quality. Stay on the asked scope. |
+| "I'll list the repo to find where X is" | Memory-first failed. Call `system_map`/`recall` (or reuse this turn's result) and open the known path. |
+| "I'll add a short summary comment" | Comments are contracts (`@param` / `# Errors` / `// why:`), never summaries of the code. |
 | "Research is slower than just coding it" | Research is slower than starting; it is far faster than finishing the wrong thing twice. The hour you save guessing, you pay back with interest. |
 | "I'll just code this quickly" | Skills tell you HOW. Check first. |
 | "This is just a simple question" | Questions are tasks. Check for skills before answering. |

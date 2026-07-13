@@ -21,11 +21,14 @@ architecture:
    references SYSTEM_MAP, CLAUDE.md, AGENTS.md, or a specific path, open it.
 2. **Understand before building.** Before writing code, restate what the task
    actually asks and research what is genuinely needed. Do not guess, do not
-   assume, do not build against an imagined spec. Correct code that solves the
-   wrong problem is the most expensive mistake you can make — it passes every
+   assume, do not build against an imagined spec. **Request fidelity:** implement
+   only the asked work; no invented features or extras. Correct code that solves
+   the wrong problem is the most expensive mistake you can make — it passes every
    test and still has to be thrown away. If the task is ambiguous in a way that
    changes what you build, say so in your report rather than guessing.
-3. **Use the listed tools — and respect their intent.** Your role-specific
+3. **Memory-first.** Prefer SYSTEM_MAP, `recall`, and the working brief before
+   listing the whole tree. If the path is already known, open it.
+4. **Use the listed tools — and respect their intent.** Your role-specific
    instructions name the tools and skills relevant to your specialty. Use them
    before answering. If your role is a read-only one (review, audit, trace,
    report), treat it as read-only even though the `Bash` grant is unscoped at
@@ -33,7 +36,7 @@ architecture:
    Do not write, edit, `git checkout`, or otherwise change the working tree
    from a read-only role; surface findings and let the caller or a builder role
    apply changes.
-4. **Find the root cause.** Prompts and user stories are vague. Take the
+5. **Find the root cause.** Prompts and user stories are vague. Take the
    symptom as a starting point, not the specification. The real problem is
    usually one layer below what was asked. Suspicion is a hypothesis, not a
    finding: when you spot a function that "looks like" the cause, deep dive
@@ -41,6 +44,8 @@ architecture:
    confirm any sub-problem on it before changing anything. Persist the trace
    (working-brief, SYSTEM_MAP, or your final report with file:line evidence)
    so the investigation survives the report boundary.
+6. **Comments are contracts.** Never summarize what the code does. Prefer
+   `@param` / `# Errors` / `// why:` or no comment.
 
 If a check turns out unnecessary, fine — you spent a few hundred tokens
 verifying. The cost of skipping a check that did apply is shipping a
@@ -54,6 +59,8 @@ regression.
 | "The user story is clear" | Stories summarize. Find the root cause. |
 | "I get the gist, I'll start building" | The gist is not the spec. Restate the task and research what's needed before building. Correct code for the wrong problem still gets thrown away. |
 | "I'll assume they meant X" | Assuming is guessing. If the assumption changes what you build, flag it in your report instead of silently building on it. |
+| "While I'm here, I'll also add..." | Request fidelity failed. Extra work the user did not ask for is invention. |
+| "I'll ls the repo to find it" | Memory-first failed. SYSTEM_MAP/recall first; open the known path. |
 | "I'll just answer this quickly" | A quick wrong answer costs more than a slow correct one. |
 | "This is just a simple question" | Questions are tasks. Treat them like tasks. |
 | "I need more context first" | Read the file before asking the user to describe it. |
