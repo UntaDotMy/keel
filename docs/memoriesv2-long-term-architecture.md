@@ -82,7 +82,7 @@ In the planned shape these become compatibility mirrors of canonical `memoriesv2
 
 ### 1. Deterministic Retrieval Packets
 
-The native `memory retrieve` / `memoriesv2 retrieve` command is **implemented** as a cross-family lexical search (`--query`). Richer ranking remains a product direction; the live shape:
+The native `keel memory retrieve` command is **implemented** as a cross-family lexical search (`--query`). Richer ranking remains a product direction; the live shape:
 
 - read scoped artifacts in canonical order
 - append incremental memory-index matches after the stable artifact prefix
@@ -128,7 +128,7 @@ Purpose:
 
 ### 3. Consolidation Rules
 
-Consolidation **status scanning** is implemented via `memory|memoriesv2 consolidate`: it walks family directories under the command group and reports record counts plus short previews. It does **not** yet promote or rewrite artifacts into durable workstream/workspace summaries. That promotion step remains a product direction, not a silent merge.
+Consolidation **status scanning** is implemented via `keel memory consolidate` (unified memory CLI only; the old `memoriesv2` command group was removed in #150). It walks family directories and reports record counts plus short previews. It does **not** yet promote or rewrite artifacts into durable workstream/workspace summaries. That promotion step remains a product direction, not a silent merge.
 
 Promotion targets:
 

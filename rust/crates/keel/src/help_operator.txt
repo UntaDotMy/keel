@@ -50,7 +50,6 @@
   memory consolidate [--window <days>] [--claude-home <path>] [--format json|compact]
   memory report [--claude-home <path>] [--format json|compact]
   memory instincts|research-cache|maintenance|agent-registry|agent-packets|loop-guard|entity|graph|retrieve|status
-  memoriesv2 scope|system-map|working-brief|completion-gate|recall|consolidate|report|instincts|research-cache|maintenance|agent-registry|agent-packets|loop-guard|entity|graph|retrieve|status
   orchestration runtime-preflight|resume-status|task|checkpoint
   workflow route|start|cockpit|status|dashboard|watch|finish|resume
   gain [reset]

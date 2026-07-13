@@ -93,12 +93,12 @@ below was implemented and verified with `cargo build` + `cargo test --workspace`
    `utility/memory_families.rs` module:
    - `orchestration task begin|progress|complete|list` and `orchestration checkpoint`
      (JSONL task ledger + snapshot), in `utility/memory.rs`.
-   - `memory|memoriesv2 research-cache|maintenance|agent-registry|agent-packets|loop-guard|entity|graph|retrieve|status`.
+   - `memory research-cache|maintenance|agent-registry|agent-packets|loop-guard|entity|graph|retrieve|status`.
    The two command groups are isolated on disk (`<group>/<family>/`). `memory
    report` now aliases the family status summary, `memory index` rebuilds the
    FTS5 recall index, and `memory hook` redirects to the real `keel
    hook` lifecycle surface (it was never a memory concept).
-4. **Learning loop (ECC Instincts-style).** `memory|memoriesv2 instincts
+4. **Learning loop (ECC Instincts-style).** `memory instincts
    record|reinforce|penalize|list|promote` in `memory_families.rs`:
    confidence-scored patterns keyed by trigger that reinforce/penalize over time
    and promote (optionally writing a markdown digest) once they meet a confidence
