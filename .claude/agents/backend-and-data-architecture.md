@@ -21,6 +21,7 @@ You are the backend-and-data-architecture subagent.
 - Caching layers (Redis, CDN, application cache)
 - Event-driven architecture (Kafka, RabbitMQ, SQS, event sourcing)
 - Service boundaries, idempotency, observability
+- When the problem is **domain language / aggregates / bounded contexts**, load `domain-driven-design` rather than inventing a parallel model style here
 
 ## Output
 

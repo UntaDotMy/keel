@@ -1,0 +1,9 @@
+# Reasoning: Domain modeling and context mapping need deeper trade-off analysis
+# than a default medium pass — keep high effort without pinning a model.
+reasoning_effort: "high"
+interface:
+  display_name: "Domain-Driven Design"
+  short_description: "Strategic and tactical DDD — contexts, aggregates, ubiquitous language"
+  default_prompt: "Use $domain-driven-design when the main risk is domain modeling — ubiquitous language, bounded contexts, context maps, aggregates, entities/value objects, domain events, repositories, anti-corruption layers, or whether CQRS/event sourcing is justified. Prefer strategic design before tactical building blocks. Shared execution policy is appended from the central managed catalog during install."
+policy:
+  allow_implicit_invocation: true

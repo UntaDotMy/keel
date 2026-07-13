@@ -62,6 +62,7 @@ checking. The cost of skipping a skill that did apply is shipping a regression.
 - `web-development-life-cycle` — Web frontend and full-stack delivery
 - `mobile-development-life-cycle` — Mobile app development (iOS/Android)
 - `backend-and-data-architecture` — Server-side, APIs, and data systems
+- `domain-driven-design` — DDD strategic/tactical domain modeling (full specialist)
 - `cloud-and-devops-expert` — Infrastructure, deployment, and operations
 - `qa-and-automation-engineer` — Testing strategy and automation
 - `security-and-compliance-auditor` — Security review and compliance checks

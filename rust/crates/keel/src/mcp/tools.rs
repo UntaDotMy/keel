@@ -27,9 +27,10 @@
 //! the hook layer without rewriting it.
 
 use std::env;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -47,15 +48,18 @@ use crate::utility::working_brief::{create_brief, list_briefs, read_brief, write
 use super::{recall_status_payload, system_map_text, MethodError, JSON_RPC_INVALID_PARAMS};
 
 /// Default wall-clock budget for MCP tools that spawn a child (`cli`,
-/// `run_command`, `sprint`, …). Without this, a hung child freezes the MCP
-/// stdio loop and Grok/Claude report the tool as "stuck". Override with
-/// `KEEL_MCP_TOOL_TIMEOUT_SECS` (seconds, min 5, max 3600).
-const DEFAULT_MCP_CHILD_TIMEOUT_SECS: u64 = 120;
+/// `run_command`, `sprint`, …) **and** for in-process tools that can block
+/// (SQLite recall, skill catalog scan, system map render). Without this, a hung
+/// tool freezes the single-threaded MCP stdio loop and hosts report the call as
+/// "stuck" / cancelled. Override with `KEEL_MCP_TOOL_TIMEOUT_SECS` (seconds,
+/// min 5, max 3600). Web guidance: MCP clients often time out around 50–60s;
+/// keep the default under typical host patience while still allowing real builds.
+const DEFAULT_MCP_CHILD_TIMEOUT_SECS: u64 = 90;
 
-/// Soft cap for large text tool results (system_map, skill bodies). Hosts like
-/// Grok also cap MCP output (~20KB); returning a bounded body keeps the stdio
-/// pipe from filling and the agent from waiting on megabyte maps.
-const MAX_MCP_TEXT_CHARS: usize = 48_000;
+/// Soft cap for large text tool results (system_map, skill bodies, context_brief).
+/// Hosts like Grok also cap MCP output (~20KB); returning a bounded body keeps the
+/// stdio pipe from filling and the agent from waiting on megabyte maps.
+const MAX_MCP_TEXT_CHARS: usize = 32_000;
 
 /// Default cap for `recall` matches when the caller does not supply one. The
 /// CLI uses the same default (see `utility::recall::DEFAULT_RECALL_LIMIT`).
@@ -145,7 +149,7 @@ pub(super) fn handle_tools_list() -> Value {
             },
             {
                 "name": "skill_list",
-                "description": "List every installed keel skill with its name, description, and when_to_use. Use to discover what skills exist before routing or loading one.",
+                "description": "List every installed keel skill with its name, description, and when_to_use. Prefer skill_route(prompt) when you already have a task — it is smaller and faster. Use skill_list only for discovery. Results are size-capped and time-budgeted so the MCP call cannot hang.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {}
@@ -205,7 +209,7 @@ pub(super) fn handle_tools_list() -> Value {
             },
             {
                 "name": "context_brief",
-                "description": "Call this FIRST when starting a session or task — one call that makes you aware of what this toolkit offers, even when no skill loaded automatically. Returns the iron law, the full installed skill catalog (name + when_to_use), durable-memory health, and the newest working brief. After reading it, use skill_route to pick a skill, skill_get to load one, recall for memory, and cli for any other keel surface. Read-only.",
+                "description": "Call this FIRST when starting a session or task — one call that makes you aware of what this toolkit offers, even when no skill loaded automatically. Returns the iron law, the full installed skill catalog (name + when_to_use), durable-memory health, and the newest working brief. After reading it, use skill_route to pick a skill, skill_get to load one, recall for memory, and cli for any other keel surface. Read-only. Time-budgeted and size-capped so it cannot hang the MCP stdio loop.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {}
@@ -501,63 +505,147 @@ pub(super) fn handle_tools_call(params: &Value) -> Result<Value, MethodError> {
         })?;
     let arguments = object.get("arguments").cloned().unwrap_or(Value::Null);
 
-    let outcome = match tool_name {
-        "recall" => tool_recall(&arguments),
-        "system_map" => tool_system_map(&arguments),
-        "run_command" => tool_run_command(&arguments),
-        "recall_status" => tool_recall_status(&arguments),
-        "skill_route" => tool_skill_route(&arguments),
-        "skill_get" => tool_skill_get(&arguments),
-        "skill_list" => tool_skill_list(&arguments),
-        "memory_status" => tool_memory_status(&arguments),
-        "brief_list" => tool_brief_list(&arguments),
-        "brief_get" => tool_brief_get(&arguments),
-        "brief_create" => tool_brief_create(&arguments),
-        "system_map_refresh" => tool_system_map_refresh(&arguments),
-        "context_brief" => tool_context_brief(&arguments),
-        "cli" => tool_cli(&arguments),
-        "sprint" => tool_sprint(&arguments),
-        "user_story_lint" => tool_user_story_lint(&arguments),
-        "review" => tool_review(&arguments),
-        "workflow" => tool_workflow(&arguments),
-        "git_workflow" => tool_git_workflow(&arguments),
-        "memory" => tool_memory(&arguments),
-        "gain" => tool_gain(&arguments),
-        "raw" => tool_raw(&arguments),
-        "config_audit" => tool_config_audit(&arguments),
-        "skill_lint" => tool_skill_lint(&arguments),
-        "telemetry" => tool_telemetry(&arguments),
-        "orchestration" => tool_orchestration(&arguments),
-        "checkpoint" => tool_checkpoint(&arguments),
-        "session" => tool_session(&arguments),
-        "doctor" => tool_doctor(&arguments),
-        "code_search" => tool_code_search(&arguments),
-        "user_story" => tool_user_story(&arguments),
-        "flow" => tool_flow(&arguments),
-        "work" => tool_work(&arguments),
-        "code_graph" => tool_code_graph(&arguments),
-        "learn" => tool_learn(&arguments),
-        other => {
-            return Err(MethodError {
-                code: JSON_RPC_INVALID_PARAMS,
-                message: format!("Unknown tool: {other}"),
-            });
-        }
-    };
+    // Unknown tools fail fast without starting the deadline worker.
+    if !is_known_mcp_tool(tool_name) {
+        return Err(MethodError {
+            code: JSON_RPC_INVALID_PARAMS,
+            message: format!("Unknown tool: {tool_name}"),
+        });
+    }
+
+    // Every tools/call runs under a wall-clock deadline so a blocked SQLite
+    // lock, hung child, or slow catalog scan cannot freeze the stdio loop.
+    // Child-spawning tools also apply an inner kill timeout (same budget).
+    let name = tool_name.to_string();
+    let name_for_worker = name.clone();
+    let outcome = run_tool_with_deadline(mcp_child_timeout(), &name, move || {
+        dispatch_mcp_tool(&name_for_worker, &arguments)
+    });
 
     match outcome {
         Ok(text) => Ok(json!({
             "content": [
-                { "type": "text", "text": text }
+                { "type": "text", "text": truncate_mcp_text(&text) }
             ],
             "isError": false,
         })),
         Err(message) => Ok(json!({
             "content": [
-                { "type": "text", "text": message }
+                { "type": "text", "text": truncate_mcp_text(&message) }
             ],
             "isError": true,
         })),
+    }
+}
+
+fn is_known_mcp_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "recall"
+            | "system_map"
+            | "run_command"
+            | "recall_status"
+            | "skill_route"
+            | "skill_get"
+            | "skill_list"
+            | "memory_status"
+            | "brief_list"
+            | "brief_get"
+            | "brief_create"
+            | "system_map_refresh"
+            | "context_brief"
+            | "cli"
+            | "sprint"
+            | "user_story_lint"
+            | "review"
+            | "workflow"
+            | "git_workflow"
+            | "memory"
+            | "gain"
+            | "raw"
+            | "config_audit"
+            | "skill_lint"
+            | "telemetry"
+            | "orchestration"
+            | "checkpoint"
+            | "session"
+            | "doctor"
+            | "code_search"
+            | "user_story"
+            | "flow"
+            | "work"
+            | "code_graph"
+            | "learn"
+    )
+}
+
+fn dispatch_mcp_tool(tool_name: &str, arguments: &Value) -> Result<String, String> {
+    match tool_name {
+        "recall" => tool_recall(arguments),
+        "system_map" => tool_system_map(arguments),
+        "run_command" => tool_run_command(arguments),
+        "recall_status" => tool_recall_status(arguments),
+        "skill_route" => tool_skill_route(arguments),
+        "skill_get" => tool_skill_get(arguments),
+        "skill_list" => tool_skill_list(arguments),
+        "memory_status" => tool_memory_status(arguments),
+        "brief_list" => tool_brief_list(arguments),
+        "brief_get" => tool_brief_get(arguments),
+        "brief_create" => tool_brief_create(arguments),
+        "system_map_refresh" => tool_system_map_refresh(arguments),
+        "context_brief" => tool_context_brief(arguments),
+        "cli" => tool_cli(arguments),
+        "sprint" => tool_sprint(arguments),
+        "user_story_lint" => tool_user_story_lint(arguments),
+        "review" => tool_review(arguments),
+        "workflow" => tool_workflow(arguments),
+        "git_workflow" => tool_git_workflow(arguments),
+        "memory" => tool_memory(arguments),
+        "gain" => tool_gain(arguments),
+        "raw" => tool_raw(arguments),
+        "config_audit" => tool_config_audit(arguments),
+        "skill_lint" => tool_skill_lint(arguments),
+        "telemetry" => tool_telemetry(arguments),
+        "orchestration" => tool_orchestration(arguments),
+        "checkpoint" => tool_checkpoint(arguments),
+        "session" => tool_session(arguments),
+        "doctor" => tool_doctor(arguments),
+        "code_search" => tool_code_search(arguments),
+        "user_story" => tool_user_story(arguments),
+        "flow" => tool_flow(arguments),
+        "work" => tool_work(arguments),
+        "code_graph" => tool_code_graph(arguments),
+        "learn" => tool_learn(arguments),
+        other => Err(format!("Unknown tool: {other}")),
+    }
+}
+
+/// Run an in-process tool body on a worker thread and return by `timeout`.
+/// Prevents a blocked handler from freezing the MCP stdio serve loop forever
+/// (hosts then cancel the call and report "stuck"). The worker may outlive the
+/// deadline if it is stuck in a native lock; the stdio loop still recovers.
+fn run_tool_with_deadline<F>(timeout: Duration, label: &str, work: F) -> Result<String, String>
+where
+    F: FnOnce() -> Result<String, String> + Send + 'static,
+{
+    let (tx, rx) = mpsc::channel();
+    std::thread::Builder::new()
+        .name(format!("keel-mcp-{label}"))
+        .spawn(move || {
+            let _ = tx.send(work());
+        })
+        .map_err(|error| format!("{label}: spawn tool worker: {error}"))?;
+
+    match rx.recv_timeout(timeout) {
+        Ok(result) => result,
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(format!(
+            "{label}: timed out after {}s (set KEEL_MCP_TOOL_TIMEOUT_SECS to raise; \
+             prefer skill_route over skill_list; kill orphan `keel mcp serve` if calls keep hanging)",
+            timeout.as_secs()
+        )),
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            Err(format!("{label}: tool worker disconnected without a result"))
+        }
     }
 }
 
@@ -1169,7 +1257,8 @@ fn tool_sprint(arguments: &Value) -> Result<String, String> {
 }
 
 /// User story lint tool: validate user stories against strict Agile/Jira format.
-/// Thin wrapper over the CLI user-story lint command.
+/// Thin wrapper over the CLI user-story lint command. Always uses a kill timeout
+/// so a hung lint child cannot freeze MCP (hosts report that as "stuck").
 fn tool_user_story_lint(arguments: &Value) -> Result<String, String> {
     let file = arguments
         .get("file")
@@ -1192,48 +1281,30 @@ fn tool_user_story_lint(arguments: &Value) -> Result<String, String> {
     let mut child = Command::new(&executable);
     child.arg("user-story");
     child.arg("lint");
-
-    if let Some(file_path) = file {
-        child.arg("--file");
-        child.arg(file_path);
-    } else if let Some(stdin_text) = stdin {
-        child.arg("--stdin");
-        child.stdin(Stdio::piped());
-        child.stdout(Stdio::piped());
-        child.stderr(Stdio::piped());
-        let mut child_proc = child
-            .spawn()
-            .map_err(|error| format!("user_story_lint: spawn: {error}"))?;
-        if let Some(stdin_pipe) = child_proc.stdin.as_mut() {
-            use std::io::Write;
-            stdin_pipe
-                .write_all(stdin_text.as_bytes())
-                .map_err(|error| format!("user_story_lint: write stdin: {error}"))?;
-        }
-        let output = child_proc
-            .wait_with_output()
-            .map_err(|error| format!("user_story_lint: wait: {error}"))?;
-        let stdout_text = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr_text = String::from_utf8_lossy(&output.stderr).to_string();
-        return Ok(render_run_command_report(
-            "keel user-story lint --stdin",
-            output.status.code().unwrap_or(-1),
-            &stdout_text,
-            &stderr_text,
-        ));
-    }
-
-    child.stdin(Stdio::null());
+    child.env("CLAUDE_SKILLS_HOOK", "mcp");
     child.stdout(Stdio::piped());
     child.stderr(Stdio::piped());
-    let output = child
-        .output()
-        .map_err(|error| format!("user_story_lint: spawn: {error}"))?;
-    let stdout_text = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr_text = String::from_utf8_lossy(&output.stderr).to_string();
+
+    let label;
+    let stdin_bytes = if let Some(file_path) = file {
+        child.arg("--file");
+        child.arg(file_path);
+        child.stdin(Stdio::null());
+        label = format!("keel user-story lint --file {file_path}");
+        None
+    } else {
+        let text = stdin.unwrap_or_default();
+        child.arg("--stdin");
+        child.stdin(Stdio::piped());
+        label = "keel user-story lint --stdin".to_string();
+        Some(text.as_bytes().to_vec())
+    };
+
+    let (exit_code, stdout_text, stderr_text) =
+        run_command_with_timeout_stdin(child, stdin_bytes, mcp_child_timeout(), "user_story_lint")?;
     Ok(render_run_command_report(
-        &format!("keel user-story lint --file {}", file.unwrap_or("")),
-        output.status.code().unwrap_or(-1),
+        &label,
+        exit_code,
         &stdout_text,
         &stderr_text,
     ))
@@ -1287,13 +1358,34 @@ fn mcp_child_timeout() -> Duration {
 /// helper threads so a full pipe cannot deadlock, and kill the child if it
 /// exceeds `timeout`. Returns `(exit_code, stdout, stderr)`.
 fn run_command_with_timeout(
+    command: Command,
+    timeout: Duration,
+    label: &str,
+) -> Result<(i32, String, String), String> {
+    run_command_with_timeout_stdin(command, None, timeout, label)
+}
+
+/// Same as [`run_command_with_timeout`], optionally feeding `stdin_bytes` on a
+/// writer thread so a slow consumer cannot block the kill path.
+fn run_command_with_timeout_stdin(
     mut command: Command,
+    stdin_bytes: Option<Vec<u8>>,
     timeout: Duration,
     label: &str,
 ) -> Result<(i32, String, String), String> {
     let mut child = command
         .spawn()
         .map_err(|error| format!("{label}: spawn: {error}"))?;
+
+    if let Some(bytes) = stdin_bytes {
+        if let Some(mut stdin_pipe) = child.stdin.take() {
+            std::thread::spawn(move || {
+                let _ = stdin_pipe.write_all(&bytes);
+                let _ = stdin_pipe.flush();
+            });
+        }
+    }
+
     let stdout_pipe = child
         .stdout
         .take()
@@ -1355,7 +1447,7 @@ fn truncate_mcp_text(text: &str) -> String {
     }
     let kept: String = text.chars().take(MAX_MCP_TEXT_CHARS).collect();
     format!(
-        "{kept}\n\n… truncated for MCP (>{MAX_MCP_TEXT_CHARS} chars). Use `keel memory system-map show` or `system_map_refresh` for the full map."
+        "{kept}\n\n… truncated for MCP (>{MAX_MCP_TEXT_CHARS} chars). Prefer skill_route over skill_list, or CLI for full output."
     )
 }
 
@@ -1375,6 +1467,36 @@ mod mcp_timeout_tests {
         assert!(out.contains("truncated for MCP"));
         assert!(out.chars().count() < big.chars().count());
         assert!(out.chars().count() <= MAX_MCP_TEXT_CHARS + 200);
+    }
+
+    #[test]
+    fn run_tool_with_deadline_returns_timeout_error() {
+        let err = run_tool_with_deadline(Duration::from_millis(200), "slow-tool", || {
+            std::thread::sleep(Duration::from_secs(5));
+            Ok("should not return".into())
+        })
+        .expect_err("must time out");
+        assert!(
+            err.contains("timed out"),
+            "expected timeout error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn run_tool_with_deadline_returns_fast_ok() {
+        let out = run_tool_with_deadline(Duration::from_secs(2), "fast-tool", || {
+            Ok("ok-result".into())
+        })
+        .expect("fast tool");
+        assert_eq!(out, "ok-result");
+    }
+
+    #[test]
+    fn is_known_mcp_tool_covers_core_surface() {
+        assert!(is_known_mcp_tool("skill_list"));
+        assert!(is_known_mcp_tool("context_brief"));
+        assert!(is_known_mcp_tool("recall"));
+        assert!(!is_known_mcp_tool("not_a_real_tool"));
     }
 
     #[test]

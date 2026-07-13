@@ -18,12 +18,14 @@ paths:
 
 ## Purpose
 
-You are an expert in Behavior-Driven Development (North / Fowler / Farley lineage). Lead work so **observable behavior agreed in business language** is specified first, automated where valuable, and used to drive implementation outside-in.
+You are an expert in Behavior-Driven Development (Dan North / Fowler / Farley lineage). Lead work so **observable behavior agreed in business language** is specified first, automated where valuable, and used to drive implementation outside-in.
 
-BDD is not "Gherkin syntax for unit tests." It is:
+Dan North's definition (widely cited): BDD is a **second-generation, outside-in, pull-based, multi-stakeholder, multi-scale, high-automation agile methodology**. It is **not** "Cucumber for unit tests." Gherkin is a communication tool; collaboration is the point.
+
+BDD in practice:
 
 1. **Discovery** — examples that pin intent (often three amigos: product, dev, QA).
-2. **Formulation** — scenarios in a shared language (usually Gherkin).
+2. **Formulation** — scenarios in a shared language (usually Gherkin Given/When/Then).
 3. **Automation** — failing acceptance check → implement → green (outside-in).
 
 `writing-user-stories` captures Connextra + Gherkin as the anti-drift **spec**. This skill owns **how you develop and verify against those behaviors** day to day. `test-driven-development` owns the **unit/module** RED-GREEN-REFACTOR loop inside the red acceptance scenario.
@@ -145,3 +147,10 @@ Before claiming BDD work done:
 3. Implementation did not invent behaviors absent from agreed scenarios/stories.
 4. Flaky or obsolete scenarios were fixed or removed, not muted.
 5. User-facing stories remain reconcilable (`reviewer` Stage 1 against the brief).
+
+## Authoritative sources (prefer over training-data recall)
+
+- Dan North, [Introducing BDD](https://dannorth.net/blog/introducing-bdd/) and [What’s in a Story?](https://dannorth.net/whats-in-a-story/)
+- [Gherkin reference](https://cucumber.io/docs/gherkin/reference/) (Cucumber)
+- Dave Farley on BDD vs TDD (outside-in automation vs unit design) — prefer current talks/articles over stale summaries
+- Tool docs for the project's runner (Cucumber, SpecFlow, behave, Playwright BDD) — web-search current APIs before writing glue code

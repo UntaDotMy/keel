@@ -130,3 +130,12 @@ Before claiming a DDD design done:
 4. Domain layer has no infrastructure imports on the critical model path.
 5. Complexity is concentrated in the **core** subdomain; supporting areas stayed simple.
 6. Assumptions about expert rules are confirmed or listed as open questions — never invented as fact.
+
+## Authoritative sources (prefer over training-data recall)
+
+- Eric Evans, *Domain-Driven Design* (2003) and the [DDD Reference glossary](https://www.domainlanguage.com/wp-content/uploads/2016/05/DDD_Reference_2015-03.pdf) (Domain Language)
+- Vaughn Vernon, *Implementing Domain-Driven Design* (aggregates, domain events, context mapping practice)
+- Martin Fowler, [Domain Driven Design](https://martinfowler.com/bliki/DomainDrivenDesign.html) and [Evans Classification](https://martinfowler.com/bliki/EvansClassification.html)
+- Community glossary patterns: [dddcommunity.org terms](https://www.dddcommunity.org/resources/ddd_terms/)
+
+When framework APIs or library docs matter to the model boundary, run web search — do not trust memory alone.
