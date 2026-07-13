@@ -171,8 +171,10 @@ impl Application {
                 standard_output,
                 standard_error,
             ),
-            "memory" => utility::run_memory_command(
-                "memory",
+            // `memoriesv2` is a same-surface alias that isolates family records under
+            // `<claude-home>/memoriesv2/` instead of `<claude-home>/memory/`.
+            "memory" | "memoriesv2" => utility::run_memory_command(
+                command_name.as_str(),
                 command_arguments,
                 standard_output,
                 standard_error,

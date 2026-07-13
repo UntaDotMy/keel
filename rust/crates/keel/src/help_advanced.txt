@@ -8,3 +8,6 @@
   memory working-brief list [--claude-home <path>] [--json]
   memory completion-gate check --id <entry-id> [--brief-id <id>] [--proof <text>] [--claude-home <path>] [--json]
   memory recall <query> [--limit <count>] [--json] [--claude-home <path>]
+  memoriesv2 scope resolve [--workspace-root <path>] [--format text|json] [--create-missing] [--refresh-system-map]
+  memoriesv2 retrieve [--query <text>] [--claude-home <path>] [--json]
+  memoriesv2 consolidate [--claude-home <path>] [--json]

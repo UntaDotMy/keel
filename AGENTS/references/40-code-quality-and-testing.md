@@ -105,10 +105,10 @@ Side Effects: None — this file is informational.
 
 ## Feature Flags
 
-Your harness CLI has these features enabled:
-- `unified_exec`: Unified execution mode
-- `js_repl`: JavaScript REPL for complex operations
-- `js_repl_tools_only`: Route tools through js_repl
-- `memories`: Persistent memory across sessions
+Harness/host feature flags vary by product version. Prefer the live host docs over
+a static list in this file. keel itself does not require experimental host flags
+for its core path: PreToolUse Bash rewrite, MCP (`keel mcp serve`), and the
+bridge adapters are the supported interception surfaces.
 
-Use features when they provide clear value, not by default.
+When a host exposes optional modes (for example unified execution or a JS REPL),
+use them only when they provide clear value for the current task, not by default.

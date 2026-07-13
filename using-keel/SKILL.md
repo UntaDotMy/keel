@@ -252,10 +252,11 @@ context window. To keep them aligned with the same research-first contract, ever
 form so subagents do not fall back to memory-based defaults.
 
 - `software-development-life-cycle`, `web-development-life-cycle`,
-  `mobile-development-life-cycle`, `backend-and-data-architecture`,
-  `cloud-and-devops-expert`, `qa-and-automation-engineer`,
-  `security-and-compliance-auditor`, `git-expert`, `preserve-existing-flow`,
-  `reviewer`, `ui-design-systems-and-responsive-interfaces`,
+  `mobile-development-life-cycle`, `dart-and-flutter-expert`,
+  `backend-and-data-architecture`, `cloud-and-devops-expert`,
+  `qa-and-automation-engineer`, `security-and-compliance-auditor`,
+  `git-expert`, `preserve-existing-flow`, `reviewer`,
+  `ui-design-systems-and-responsive-interfaces`,
   `ux-research-and-experience-strategy`, `memory-status-reporter`,
   `api-contract-design`, `react-performance-audit`,
   `postgres-migration-safety`, `stripe-integration`,
@@ -329,7 +330,7 @@ Your working memory only lives in the current context window. Anything you want 
 | `keel memory working-brief write` | `~/.claude/working-briefs/<id>.json` | starting non-trivial work. Capture the user's request, acceptance criteria, and the files you expect to touch *before* coding so completion can be reconciled against it. Update with `working-brief write` again as scope shifts. |
 | `keel memory completion-gate check` | nothing (probe-only) | before claiming a task complete. Returns the gate's verdict; failures point at the requirement that has no evidence yet. |
 
-Beyond the four writers above, these `keel memory <verb>` arms are implemented (under both `memory` and `memoriesv2`): `research-cache`, `maintenance`, `agent-registry`, `agent-packets`, `loop-guard`, `entity`, `graph`, `retrieve`, `instincts`, and `status`. `report` is an alias for `status`, and `index` rebuilds the FTS5 recall index — both work. The `orchestration` group adds `task begin|progress|complete|list` and `checkpoint`. The only `memory` verb that does not run is `hook`: it exits with a pointer to `keel hook install|list|instructions|diagnose`, which owns the harness lifecycle hooks. Do not pretend a command exists by trying it; check the dispatcher in `rust/crates/keel/src/utility/memory.rs` (and `memory_families.rs`) if you are unsure.
+Beyond the four writers above, these `keel memory <verb>` arms are implemented (under both `memory` and `memoriesv2`): `research-cache`, `maintenance`, `agent-registry`, `agent-packets`, `loop-guard`, `entity`, `graph`, `retrieve`, `instincts`, `status`, and `consolidate` (family-directory status scan: counts/previews, not a merge). `report` is an alias for `status`, and `index` rebuilds the FTS5 recall index; both work. `working-brief record-summary` and `completion-gate record-requirement` are implemented. The `orchestration` group adds `task begin|progress|complete|list` and `checkpoint`. The only `memory` verb that does not run is `hook`: it exits with a pointer to `keel hook install|list|instructions|diagnose`, which owns the harness lifecycle hooks. Do not invent subcommands; check `keel help advanced` or the dispatcher in `rust/crates/keel/src/utility/memory/` if unsure.
 
 **Relationship to the harness's native Auto memory.** Recent the harness ships its own *Auto memory* — notes the model writes itself to `~/.claude/projects/<project>/memory/MEMORY.md` based on your corrections, loaded automatically each session. The two are complementary, not competing: native Auto memory is *passive* (the model decides what to jot, machine-local, per-repo), while keel's surfaces above are *explicit and structured* — a deterministic SYSTEM_MAP, reconcilable working briefs, a completion gate, an FTS5-searchable recall index, and the durable `memoriesv2` families. Use native Auto memory for incidental learnings; use these commands when you need a structured artifact that survives compaction and can be reconciled against the request. Do not duplicate the same fact into both.
 

@@ -674,10 +674,10 @@ keel works with multiple AI coding agents through dedicated adapters. Each adapt
 | **Claude Desktop** (Cowork) | TypeScript plugin | `cowork/keel.ts` — lifecycle bridge with `bridge` subcommands per event | `cowork/` |
 | **OpenCode** | TypeScript plugin | `opencode/keel.ts` — lifecycle bridge with `bridge` subcommands per event | `opencode/` |
 | **Codex CLI** | Plugin + hooks + script | `codex/.codex-plugin/plugin.json` + `hooks/hooks.json` + `keel-codex.ts` | `codex/` |
-| **Cursor IDE** | Static rules file | `cursor/.cursorrules` — iron law + skill catalog injected via Cursor's rules system | `cursor/` |
-| **Pi Agent** | Static rules + MCP config | `pi/AGENTS.md` + `pi/.mcp.json` — loaded at startup, MCP server for direct tool access | `pi/` |
+| **Cursor IDE** | Rules + hooks + MCP | `cursor/.cursorrules` + `cursor/hooks/` + `cursor/mcp.json`: iron law, lifecycle bridge (`keel bridge`), MCP tools. Install with `keel install --with cursor` (Cursor is not always auto-detected) | `cursor/` |
+| **Pi Agent** | Rules + hooks + MCP | `pi/AGENTS.md` + `pi/hooks.json` + `pi/keel-pi.ts` + `pi/.mcp.json`: iron law, lifecycle bridge, MCP tools | `pi/` |
 
-Claude Code is the primary target (hooks, full lifecycle). Claude Desktop (Cowork) and OpenCode have runtime bridges that auto-inject context on every session and prompt. Cursor and Pi Agent use static instruction files — simpler but no automatic observation recording.
+Claude Code is the primary target (native hooks, full lifecycle). OpenCode, Codex, Cowork, Cursor, and Pi ship runtime bridges that map host events to `keel bridge` (edit gate, rewrite, observe, session-end learn). Cursor often needs `--with cursor` because desktop IDEs are not always detected.
 
 `keel install` auto-detects which AI CLIs are installed (via config dirs, env vars, and binary-on-PATH) and wires only the matching adapters. Use `--with <name>` to force an adapter even when not detected (e.g. `--with cursor`), and `--without <name>` to skip a detected adapter (e.g. `--without opencode`). Names: `opencode`, `codex`, `pi`, `cursor`, `cowork`. Manual file copying is no longer required.
 
@@ -685,7 +685,7 @@ Claude Code is the primary target (hooks, full lifecycle). Claude Desktop (Cowor
 
 The managed install mirrors the specialist lanes (one profile per specialist, roster asserted by `tests/doc_parity_test.rs`) into `~/.claude/agent-profiles/*.toml`:
 
-`api-contract-design`, `authentication-and-identity`, `backend-and-data-architecture`, `cloud-and-devops-expert`, `cloud-cost-and-finops`, `data-and-ml-engineering`, `dependency-and-supply-chain`, `git-expert`, `internationalization-and-localization`, `memory-status-reporter`, `mobile-development-life-cycle`, `observability-and-incident-response`, `postgres-migration-safety`, `preserve-existing-flow`, `qa-and-automation-engineer`, `react-performance-audit`, `reviewer`, `security-and-compliance-auditor`, `software-development-life-cycle`, `stripe-integration`, `ui-design-systems-and-responsive-interfaces`, `ux-research-and-experience-strategy`, `web-development-life-cycle`, and `websocket-realtime-design`.
+`api-contract-design`, `authentication-and-identity`, `backend-and-data-architecture`, `cloud-and-devops-expert`, `cloud-cost-and-finops`, `dart-and-flutter-expert`, `data-and-ml-engineering`, `dependency-and-supply-chain`, `git-expert`, `internationalization-and-localization`, `memory-status-reporter`, `mobile-development-life-cycle`, `observability-and-incident-response`, `postgres-migration-safety`, `preserve-existing-flow`, `qa-and-automation-engineer`, `react-performance-audit`, `reviewer`, `security-and-compliance-auditor`, `software-development-life-cycle`, `stripe-integration`, `ui-design-systems-and-responsive-interfaces`, `ux-research-and-experience-strategy`, `web-development-life-cycle`, and `websocket-realtime-design`.
 
 Routine work stays in the main lane. Specialist profiles are for the moments where domain ownership or independent verification is worth the extra context.
 
@@ -735,7 +735,7 @@ keel/
 |- cowork/                    Claude Desktop (Cowork) adapter (TypeScript plugin with lifecycle bridge)
 |- opencode/                 OpenCode adapter (TypeScript plugin with lifecycle bridge)
 |- codex/                    Codex CLI adapter (plugin + hooks + TypeScript bridge)
-|- cursor/                   Cursor IDE adapter (static .cursorrules)
+|- cursor/                   Cursor IDE adapter (rules + hooks + MCP)
 |- pi/                       Pi Agent adapter (static AGENTS.md + MCP config)
 |- .claude-plugin/           Native Claude Code plugin manifest
 |- .github/workflows/        Native Rust CI and release pipelines

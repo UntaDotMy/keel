@@ -2200,7 +2200,15 @@ fn write_install_metadata(
     claude_home: &Path,
 ) -> Result<(), String> {
     let repo_version = repo_version_for_source(build_version, repository_root);
-    let manager_version = format!("{}-{}", build_version, git_short_head(repository_root));
+    // Avoid `-unknown` suffixes; reuse build_version when git head is missing or already embedded.
+    let manager_version = {
+        let short_head = git_short_head(repository_root);
+        if short_head == "unknown" || short_head.is_empty() || build_version.contains(&short_head) {
+            build_version.to_string()
+        } else {
+            format!("{build_version}-{short_head}")
+        }
+    };
     let metadata = format!("repo_version={repo_version}\nmanager_version={manager_version}\n");
     write_text(
         &super::verify::install_metadata_path(claude_home),

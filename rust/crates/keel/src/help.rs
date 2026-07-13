@@ -107,7 +107,7 @@ mod tests {
             let mut stdout: Vec<u8> = Vec::new();
             let mut stderr: Vec<u8> = Vec::new();
             let _ = match group.as_str() {
-                "memory" => {
+                "memory" | "memoriesv2" => {
                     run_memory_command(group.as_str(), &subcommand_args, &mut stdout, &mut stderr)
                 }
                 "orchestration" => {
@@ -155,7 +155,10 @@ mod tests {
                 continue;
             }
             let group = tokens[0].clone();
-            if !matches!(group.as_str(), "memory" | "orchestration" | "workflow") {
+            if !matches!(
+                group.as_str(),
+                "memory" | "memoriesv2" | "orchestration" | "workflow"
+            ) {
                 continue;
             }
             assert!(
@@ -176,7 +179,7 @@ mod tests {
                 let mut stdout: Vec<u8> = Vec::new();
                 let mut stderr: Vec<u8> = Vec::new();
                 let _ = match group.as_str() {
-                    "memory" => run_memory_command(
+                    "memory" | "memoriesv2" => run_memory_command(
                         group.as_str(),
                         &subcommand_args,
                         &mut stdout,
@@ -269,6 +272,7 @@ mod tests {
             "observe",
             "design-intelligence",
             "memory",
+            "memoriesv2",
             "orchestration",
             "workflow",
             "gain",

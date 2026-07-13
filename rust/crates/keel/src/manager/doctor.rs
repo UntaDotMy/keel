@@ -114,10 +114,21 @@ pub fn run_doctor_command(
     report_mcp_registration(standard_output, &claude_home);
     probe_mcp_launch(standard_output, &claude_home);
     report_bridge_host_wiring(standard_output, &claude_home);
-    let _ = writeln!(
-        standard_output,
-        "[warn] unified_exec interception incomplete in current the harness"
-    );
+    // Primary interception path is PreToolUse Bash rewrite (probed above).
+    // Do not emit a permanent false-warn for optional UnifiedExec surfaces.
+    if dry_run_rewrites {
+        write_doctor_check(
+            standard_output,
+            true,
+            "shell interception path: PreToolUse rewrite healthy",
+        );
+    } else {
+        write_doctor_check(
+            standard_output,
+            false,
+            "shell interception path: PreToolUse rewrite probe failed",
+        );
+    }
     let _ = writeln!(
         standard_output,
         "Run `keel validate --profile smoke` for local proof."

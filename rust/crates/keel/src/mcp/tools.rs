@@ -288,7 +288,7 @@ pub(super) fn handle_tools_list() -> Value {
             },
             {
                 "name": "memory",
-                "description": "Durable memory operations under ~/.claude/memories/. `scope` resolves the workspace memory lane; `system-map` shows/refreshes the workspace structural map; `recall` FTS5-searches memory; `instincts` lists distilled learning instincts; `consolidate` merges recent observations into durable notes; `report` summarizes memory state; `research-cache` saves/retrieves research answers; `retrieve` cross-family search; `maintenance` prunes stale records; `status` reports family counts. Use the dedicated brief_* tools for working briefs.",
+                "description": "Durable memory operations under ~/.claude/memories/. `scope` resolves the workspace memory lane; `system-map` shows/refreshes the workspace structural map; `recall` FTS5-searches memory; `instincts` lists distilled learning instincts; `consolidate` scans memory family directories and reports record counts/previews (status summary, not a merge); `report` summarizes memory state; `research-cache` saves/retrieves research answers; `retrieve` cross-family search; `maintenance` prunes stale records; `status` reports family counts. Use the dedicated brief_* tools for working briefs.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -402,7 +402,7 @@ pub(super) fn handle_tools_list() -> Value {
             },
             {
                 "name": "code_search",
-                "description": "Search codebase semantically via keel's native code-search. Returns matching files and snippets with relevance scores.",
+                "description": "Lexical substring search of the workspace via keel code-search (not embedding/semantic search). Returns matching file:line:snippet rows; optional path filter is cross-platform (/ and \\\\).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {

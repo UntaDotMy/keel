@@ -1,45 +1,53 @@
+<!--
+Purpose: Honest code-search surface and remaining gaps versus fuller indexing tools.
+Caller: Operators and agents choosing how to search the workspace.
+Dependencies: keel code-search search (Rust utility/code_search.rs).
+Main Functions: Document the live command, path filters, skip list, and explicit non-goals.
+Side Effects: None. Documentation only.
+-->
 # Code Search Demo And Gap Map
 
-This page documents the honest native indexing demo surface and the remaining apples-to-apples gap versus indexing comparator.
+## Live surface (implemented)
 
-## Native Demo Surface
+```bash
+keel code-search search --workspace-root "$PWD" --query "incremental lineage proof"
+keel code-search search --workspace-root "$PWD" --query "FlagSet" --path "rust/crates/keel"
+```
 
-Use the shared native demo command when the operator needs one proof surface that exercises both index creation and query execution:
+Flags:
 
-~~~bash
-keel code-search demo --workspace-root "$PWD" --query "incremental lineage proof" --format markdown
-~~~
+| Flag | Purpose |
+| --- | --- |
+| `--query` | Required substring to match (lexical, case-sensitive `contains`) |
+| `--workspace-root` | Root directory to walk (defaults to resolved repo root) |
+| `--path` | Optional path filter; `/` and `\` are treated equivalently on Windows/macOS/Linux |
 
-The demo is intentionally not a second indexing engine. It reuses the same native owners as the shipped search path:
+What it does today:
 
-- `code-search index` builds the local persisted index
-- `code-search search` reuses that local index for retrieval
-- `code-search demo` calls the same index and search owners, then adds notes and explicit gap framing
+- Walks the tree with a fixed skip list (`target`, `node_modules`, `.git`, research clones like `hermes-agent`, …)
+- Matches **literal substrings** in text files (not embeddings / semantic ranking)
+- Prints `relative/path:line:snippet` rows (capped)
+- Does **not** build or query a persisted index
 
-That keeps the demo apples-to-apples with the real runtime surface instead of relying on a synthetic benchmark-only path.
+There is **no** `code-search index`, `demo`, `status`, or `reset` subcommand. Older docs that named those verbs are obsolete; use `search` only.
 
-## What The Demo Proves
+## Related surfaces
 
-- the index is local and zero-hosted
-- index lineage is visible through build ids, parent build ids, reuse counts, and recompute counts
-- search results expose the chunk lineage that explains whether a result came from reused or recomputed data
-- one command can show the exact shared index-plus-query path that the native runtime actually uses
+| Need | Command |
+| --- | --- |
+| Structural import graph / reverse impact | `keel code-graph build`, `keel code-graph impact --changed a,b` |
+| Durable memory search | `keel memory recall <query>` |
+| Compaction of noisy `rg`/`grep` | `keel run -- rg …` |
 
-## Current Gap Notes Versus indexing comparator
+## Current gap notes
 
-The current native gap notes stay intentionally narrow:
+- Search is lexical, not embedding-backed semantic retrieval
+- No persisted index, lineage DAG, or multi-target export
+- Skip list is name-based (not a full `.gitignore` parser); large unlisted trees can still be walked
+- Relevance scores are not produced; MCP `code_search` is the same lexical path
 
-- search is still lexical and symbol-aware rather than embedding-backed semantic retrieval
-- the local engine does not yet expose a transformation DAG, target database sync, or multi-target export graph like a full indexing comparator flow
-- incremental reuse currently operates at the file and chunk cache layer and does not yet support field-level recomputation planning
-- the current surface stays zero-hosted and local-first by design
+## Why the local-first posture stays
 
-## Why The Zero-Hosted Posture Stays
-
-This repository is intentionally keeping indexing local and repo-owned:
-
-- no hosted dependency is required to build or query the index
-- agents can inspect the build lineage directly from the persisted local index
-- review and closure proof can stay inside the same native CLI workflow
-
-That posture keeps the runtime simpler and more inspectable, while the missing indexing comparator-style features are documented as real gaps instead of being implied away.
+- No hosted dependency to search the workspace
+- Agents can inspect results directly in the CLI transcript
+- Review and closeout proof stay inside the same native workflow

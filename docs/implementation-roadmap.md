@@ -1,15 +1,17 @@
 <!--
-Purpose: Expand the active todo roadmap into a concise implementation direction for contributors.
-Caller: Contributors and AI agents translating todo.md into concrete delivery lanes.
-Dependencies: todo.md, native memory scope, managed prompt surfaces, and Rust tests.
-Main Functions: Summarize the objective, baseline, delivery lanes, and validation targets for the current initiative.
+Purpose: Implementation direction for contributors (startup context, memory, review).
+Caller: Contributors and AI agents sequencing delivery work.
+Dependencies: native memory scope, managed prompt surfaces, Rust tests, competitive-gap-closure.md.
+Main Functions: Summarize the objective, baseline, delivery lanes, and validation targets.
 Side Effects: Guides current implementation sequencing for the repository.
 -->
-# Implementation Roadmap From `todo.md`
+# Implementation Roadmap
 
 ## Objective
 
-Turn the active roadmap in [todo.md](../todo.md) into a delivery plan that makes global startup context deterministic: scoped memory first, scoped `SYSTEM_MAP.md` second, then targeted repository analysis without dirtying the user workspace.
+Keep global startup context deterministic: scoped memory first, scoped `SYSTEM_MAP.md` second, then targeted repository analysis without dirtying the user workspace.
+
+> Note: local `todo.md` is gitignored planning scratch and is not a shipped source of truth. Use this doc, `docs/competitive-gap-closure.md`, and the working brief for active work.
 
 ## Current baseline
 

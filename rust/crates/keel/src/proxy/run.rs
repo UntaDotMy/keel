@@ -874,6 +874,7 @@ mod tests {
     ///   3. `record_compaction_event` appended a JSONL line with
     ///      `compacted: true` to the event log that feeds `keel gain`;
     ///   4. the persisted `meta.json` carries `compacted: true`.
+    ///
     /// A regression in the break-even comparison, the compact-branch save, or
     /// the event-log write would fail one of these.
     #[test]
