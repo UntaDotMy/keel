@@ -28,12 +28,19 @@ The goal is to prevent noisy raw command output from entering the harness contex
 - It cannot force the harness to *think* well; it can deny edit-class tools until evidence exists, inject `additionalContext`, and feed-forward closeout requirements.
 - Closeout gates (working-brief, review, and others) ride `PostToolBatch`. **Harder defaults:** `CLAUDE_SKILLS_BRIEF_GATE` and `CLAUDE_SKILLS_REVIEW_GATE` default to **`block`** mode (imperative feed-forward via `additionalContext` when code changed without a brief / reviewer marker; Block cap defaults to 3 fires per session, then advisory). Opt-down with `=nudge`, `=escalate`, or `=off`. They do not run the heavy gate commands themselves.
 
-## Iron Law edit gate (PreToolUse)
+## Iron Law hard gate (PreToolUse) — how compliance is settled
 
-- **Default `KEEL_IRON_LAW_GATE=strict`:** edit-class tools (`Edit` / `Write` / `MultiEdit` / `apply_patch` / …) are **denied** until this session has evidence of a **keel research tool** — MCP `system_map` / `recall` / `context_brief` / `skill_route` / `skill_get` / `code_search` (or matching `keel …` CLI). Plain `Read`/`Grep` alone does **not** clear the gate.
-- Satisfaction is written under `~/.claude/state/iron-law-satisfied/<session>` only when PostToolUse/observe sees a qualifying tool — **not** on deny (the old one-shot acknowledge-on-deny path is gone).
-- Modes: unset/`strict`/`on` → strict; `balanced` → keel **or** host Read/Grep/Glob; `off` → disabled.
-- Bridge hosts (OpenCode / Codex / Pi / Cursor) share the same Rust decision via `keel bridge pre-tool-use` and the same marker directory.
+Text reminders are ignoreable. **Settlement is a tool deny**, not hope:
+
+- **Default `KEEL_IRON_LAW_GATE=strict`:** these tools are **denied** until the session used a **keel research tool** (`system_map` / `recall` / `context_brief` / `skill_*` / `code_search` or matching CLI):
+  - edit-class (`Edit` / `Write` / `MultiEdit` / `apply_patch` / …)
+  - **shell** (`Bash` / …) unless the command is itself a keel research command
+  - **Agent / Task** fan-out
+- **Still allowed** while blocked: `Read` / `Grep` / `Glob`, and shell `keel doctor` / `keel memory …` / etc.
+- Plain `Read` alone does **not** clear STRICT mode.
+- Marker: `~/.claude/state/iron-law-satisfied/<session>` — written only when research is observed (PostToolUse/observe), never on deny.
+- Modes: unset/`strict` → strict; `balanced` → keel **or** host Read/Grep; `off` → disabled.
+- **UserPromptSubmit** also **pushes** a bounded workspace map/brief dump every turn so the agent has keel data without choosing to call tools, plus an `ENFORCED THIS TURN` strip naming the deny.
 
 ## Transparent Rewrite Handling
 

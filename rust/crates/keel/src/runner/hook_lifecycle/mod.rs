@@ -721,24 +721,23 @@ const IRON_LAW_SATISFIED_DIR: &str = "iron-law-satisfied";
 const IRON_LAW_LEGACY_GATE_DIR: &str = "iron-law-gate";
 
 const IRON_LAW_GATE_DENIAL_STRICT: &str =
-    "[keel] Iron Law gate (STRICT): code edits are blocked until this session \
-        has evidence of a keel research tool. The Iron Law is NOT optional.\n\
-        Before retrying this edit you MUST (any one is enough):\n\
-        1. Call MCP `context_brief` or `system_map` (or `keel memory system-map` / \
-        `keel doctor`).\n\
-        2. Call MCP `recall` or `skill_route` / `skill_get` (or `keel memory recall`).\n\
-        3. Call MCP `code_search` (or `keel code-search search ...`).\n\
-        Plain Read/Grep alone does NOT clear this gate. After a keel tool runs, \
-        retry the edit. Set KEEL_IRON_LAW_GATE=balanced to accept any research tool, \
-        or =off to disable.";
+    "[keel] Iron Law gate (STRICT): Edit/Write/Bash (non-keel) and Agent/Task are \
+        BLOCKED until this session used a keel research tool. Text reminders are not \
+        enough — this is a hard deny.\n\
+        Do ONE of these, then retry:\n\
+        1. MCP `context_brief` or `system_map` (or `keel memory system-map` / `keel doctor`)\n\
+        2. MCP `recall` or `skill_route` / `skill_get` (or `keel memory recall`)\n\
+        3. MCP `code_search` (or `keel code-search search ...`)\n\
+        Allowed while blocked: Read/Grep/Glob, and shell only if the command is a \
+        keel research command. Plain Read alone does NOT clear STRICT. \
+        Set KEEL_IRON_LAW_GATE=balanced or =off to relax.";
 
 const IRON_LAW_GATE_DENIAL_BALANCED: &str =
-    "[keel] Iron Law gate: code edits are blocked until this session has research \
-        evidence. Prefer keel tools first:\n\
-        1. MCP `context_brief` / `system_map` / `recall` / `skill_route` (or \
-        matching `keel ...` CLI).\n\
-        2. Or a host Read/Grep/Glob of the owning file after you know the path.\n\
-        Retry the edit after researching. Set KEEL_IRON_LAW_GATE=off to disable.";
+    "[keel] Iron Law gate: Edit/Write/Bash (non-keel) and Agent/Task are blocked \
+        until this session has research evidence. Prefer keel tools first:\n\
+        1. MCP `context_brief` / `system_map` / `recall` / `skill_route` (or CLI).\n\
+        2. Or host Read/Grep/Glob of the owning file.\n\
+        Retry after researching. Set KEEL_IRON_LAW_GATE=off to disable.";
 
 /// Iron-law edit-gate mode. Default is **Strict** (keel tool required).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1043,7 +1042,35 @@ fn session_has_iron_law_evidence(
     false
 }
 
-/// Decide whether to deny an edit-class tool. Returns `Some(reason)` to deny.
+/// Whether this tool call is subject to the iron-law hard gate when the session
+/// is not yet satisfied.
+///
+/// Gated: edit-class tools, shell commands that are **not** keel research, and
+/// Agent/Task fan-out. Not gated: Read/Grep/Glob, keel research MCP/CLI, Skill.
+pub(crate) fn tool_is_iron_law_gated(tool_name: &str, command: Option<&str>) -> bool {
+    if is_edit_class_tool(tool_name) {
+        return true;
+    }
+    let lower = tool_name.to_ascii_lowercase();
+    if matches!(
+        lower.as_str(),
+        "agent" | "task" | "teammate" | "taskcreate" | "task_create"
+    ) {
+        return true;
+    }
+    if is_shell_tool_name(tool_name) {
+        // Keel research shell is the path that *clears* the gate — never block it.
+        if let Some(cmd) = command {
+            if is_keel_research_command(cmd) {
+                return false;
+            }
+        }
+        return true;
+    }
+    false
+}
+
+/// Decide whether to deny a gated tool. Returns `Some(reason)` to deny.
 ///
 /// Evidence-based: does **not** write a satisfaction marker on deny. The marker
 /// is written only when PostToolUse/observe sees a qualifying research tool.
@@ -1140,19 +1167,30 @@ fn run_hook_pre_tool_use(standard_output: &mut dyn Write, standard_error: &mut d
         .and_then(JsonDocument::as_str)
         .unwrap_or_default();
 
-    if is_edit_class_tool(tool_name) {
-        return run_iron_law_gate(&input, standard_output, standard_error);
+    let command = tool_input_command(&input).unwrap_or("");
+    let command_opt = if command.is_empty() {
+        None
+    } else {
+        Some(command)
+    };
+
+    // Hard Iron Law: block Edit/Write, non-keel Bash, and Agent/Task until the
+    // session has used a keel research tool. Text reminders alone are ignoreable;
+    // this deny is what settles compliance.
+    if tool_is_iron_law_gated(tool_name, command_opt) {
+        let session_id = input
+            .get("session_id")
+            .and_then(JsonDocument::as_str)
+            .unwrap_or("default");
+        if iron_law_gate_decision(session_id).is_some() {
+            return run_iron_law_gate(&input, standard_output, standard_error);
+        }
     }
 
-    if tool_name != "Bash" {
+    // Compaction rewrite only applies to shell tools.
+    if !is_shell_tool_name(tool_name) {
         return 0;
     }
-
-    let command = input
-        .get("tool_input")
-        .and_then(|tool_input| tool_input.get("command"))
-        .and_then(JsonDocument::as_str)
-        .unwrap_or_default();
 
     // Inspect EVERY segment of a compound command, not just the first supported
     // noisy segment that `analyze_command_text`'s `effective_fields` surfaces.
@@ -2096,8 +2134,26 @@ fn user_prompt_submit_core() -> String {
     )
 }
 
+/// Per-prompt action strip: what is enforced this turn (not optional prose).
+const USER_PROMPT_ENFORCEMENT_STRIP: &str = "\
+ENFORCED THIS TURN (not optional):\n\
+• Follow the Iron Law. Use keel tools — do not guess from training data.\n\
+• PreToolUse DENIES Edit/Write, non-keel Bash, and Agent/Task until a keel research \
+tool runs this session (context_brief / system_map / recall / skill_route / skill_get / \
+code_search, or matching `keel …` CLI).\n\
+• Read/Grep/Glob stay allowed; they do not clear STRICT mode by themselves.\n\
+• Memory: recall before claiming prior work; write a working brief before non-trivial \
+coding; save durable learnings to disk when you learn something worth keeping.";
+
+/// Max bytes of workspace digest to push on every UserPromptSubmit (on top of
+/// the iron-law text). Keeps per-prompt cost bounded while still *pushing* map
+/// and brief content so the agent does not have to choose to call system_map.
+const USER_PROMPT_DIGEST_MAX_BYTES: usize = 1400;
+
 pub(crate) fn user_prompt_submit_context(prompt_text: &str) -> String {
-    let mut base_context = user_prompt_submit_core();
+    // Build optional mid-body pointers first, then force the enforcement strip
+    // as the absolute first lines of additionalContext so models cannot miss it.
+    let mut body = user_prompt_submit_core();
     let claude_home = resolve_claude_home("").ok();
 
     // Inline the matched skill's own guidance when the prompt distinctively
@@ -2111,25 +2167,39 @@ pub(crate) fn user_prompt_submit_context(prompt_text: &str) -> String {
                 Some(brief) => skill_pointer_text(&matched.name, &brief),
                 None => skill_pointer_fallback(&matched.name),
             };
-            base_context = format!("{pointer}\n\n{base_context}");
+            body = format!("{pointer}\n\n{body}");
         }
     }
 
     // Point repo/structure and memory questions at the MCP tools.
     if !prompt_text.trim().is_empty() {
         if let Some(pointer) = mcp_tool_pointer_for_prompt(prompt_text) {
-            base_context = format!("{pointer}\n\n{base_context}");
+            body = format!("{pointer}\n\n{body}");
         }
     }
 
     // Point code-CHANGE prompts at the read-map/recall front.
     if !prompt_text.trim().is_empty() {
         if let Some(pointer) = work_intent_pointer_for_prompt(prompt_text) {
-            base_context = format!("{pointer}\n\n{base_context}");
+            body = format!("{pointer}\n\n{body}");
         }
     }
 
-    base_context
+    // PUSH workspace map/brief content every prompt (not only SessionStart).
+    // Agents ignore "call system_map"; they cannot ignore content already in
+    // context. Bounded so it does not blow the per-prompt budget.
+    let digest = workspace_memory_digest();
+    if !digest.trim().is_empty() {
+        let pushed = truncate_on_line_boundary(&digest, USER_PROMPT_DIGEST_MAX_BYTES);
+        body.push_str(
+            "\n\n--- keel workspace push (already loaded — use this; do not re-guess the repo) ---\n",
+        );
+        body.push_str(&pushed);
+        body.push_str("\n--- end keel workspace push ---");
+    }
+
+    // Absolute lead: hard enforcement strip (must be first bytes of context).
+    format!("{USER_PROMPT_ENFORCEMENT_STRIP}\n\n{body}")
 }
 
 /// Concrete per-prompt skill guidance. Emitted only when the prompt
