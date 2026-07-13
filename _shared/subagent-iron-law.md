@@ -101,15 +101,13 @@ or exact value, persist it before responding. The writable surfaces:
   workspace scope and SYSTEM_MAP.
 - `keel memory system-map refresh` — regenerate SYSTEM_MAP for the
   current workspace.
-- `keel memoriesv2 ...` — same surface, persists under
-  `~/.claude/memoriesv2/` for the durable global tier.
 
 Other `keel memory <verb>` subcommands are implemented and safe to
 use: `status`, `research-cache`, `maintenance`, `agent-registry`,
 `agent-packets`, `loop-guard`, `retrieve`, `entity`, `graph`, `instincts`,
 plus `report` (alias for `status`) and `index` (rebuilds the recall index).
-The same verbs work under `keel memoriesv2 ...`. The only verb that is
-not a memory subcommand is `hook`: it exits with a pointer to
+There is a single unified memory CLI (`keel memory` only). The only verb that
+is not a memory subcommand is `hook`: it exits with a pointer to
 `keel hook install|list|instructions|diagnose`, which owns the harness
 lifecycle hooks.
 

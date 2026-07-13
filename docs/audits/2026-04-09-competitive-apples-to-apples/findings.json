@@ -15,7 +15,7 @@
   },
   {
     "id": "memory-product-gap-vs-memory-product-comparator",
-    "title": "The current memoriesv2 product is durable but not yet benchmarked or as semantically rich as memory-product comparator",
+    "title": "The current durable-memory product is durable but not yet benchmarked or as semantically rich as memory-product comparator",
     "severity": "high",
     "status": "open",
     "resolution": "Track under todo priority 4 and add benchmarked recall, deeper semantic retrieval, and deliberate memory-product features."

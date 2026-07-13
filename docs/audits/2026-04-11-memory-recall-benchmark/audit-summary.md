@@ -3,7 +3,7 @@
 - Audit date: 2026-04-11
 - Audited repo: `UntaDotMy/keel` at `bc6dad0`
 - Comparator: the memory-product comparator source
-- Evidence sources: `docs/memoriesv2-long-term-architecture.md`, `docs/open-source-memory-patterns.md`, `docs/memory-recall-benchmark-bundle.md`, and anonymized peer-audit snapshots for the memory-product comparator class.
+- Evidence sources (historical): unified memory is now `keel memory` + `docs/memory-families-usage.md` and `docs/open-source-memory-patterns.md`; older dual-layer architecture and benchmark-bundle docs were removed.
 
 ## Current score
 

@@ -20,7 +20,7 @@ Use a write-ahead pattern for volatile-but-critical context:
 - The durable write path is:
   - `~/.claude/memories/workspaces/<workspace-slug>/workstreams/<workstream-key>/memory/SESSION-STATE.md`
   - `~/.claude/memories/workspaces/<workspace-slug>/workstreams/<workstream-key>/memory/session-wal.jsonl`
-- The native memory writer must also keep the mirrored second-layer path under `~/.claude/memoriesv2/workspaces/<workspace-slug>/workstreams/<workstream-key>/` usable for retrieval, scope resolution, and future resume work.
+- The native memory writer keeps durable state under the unified layout (`~/.claude/memories/workspaces/<workspace-slug>/workstreams/<workstream-key>/…`) for retrieval, scope resolution, and future resume work.
 - Treat the markdown file as the readable current state and the JSONL file as the append-only recovery log.
 - The urge to answer first is a failure mode. Write first, then respond.
 
@@ -66,7 +66,7 @@ Treat compaction as a normal lifecycle event, not as a surprise failure:
 Use one home per fact. Information flows downward; it should not be duplicated blindly across layers.
 
 - **L1 (Brain)**: small always-read workspace guidance, summaries, session state, and working buffer. Keep each file around 500 to 1,000 tokens and keep the actively loaded total under about 7,000 tokens.
-- **L2 (Memory)**: scoped memory lanes under `~/.claude/memories/workspaces/<workspace-slug>/...` plus the mirrored second-layer store under `~/.claude/memoriesv2/workspaces/<workspace-slug>/...`; store daily notes, workstream breadcrumbs, bounded working context, graph entities, and memoriesv2 retrieval hooks here.
+- **L2 (Memory)**: scoped memory lanes under `~/.claude/memories/workspaces/<workspace-slug>/...`; store daily notes, workstream breadcrumbs, bounded working context, and family records here.
 - **L3 (Reference)**: deeper playbooks, SOPs, and research under scoped `reference/` lanes and repo docs; open them on demand, never blindly.
 
 ## Trim Protocol

@@ -260,20 +260,20 @@
     },
     {
       "scenario_id": "stateful_bug_fix_trace_drift",
-      "title": "Repair memoriesv2 execution-trace ownership and surface compatibility drift",
+      "title": "Repair durable memory execution-trace ownership and surface compatibility drift",
       "style_targets": ["runtime-shell comparator", "workflow-teaching comparator"],
       "category": "stateful_bug_fix",
       "source_pr": 27,
       "source_url": "https://github.com/UntaDotMy/keel/pull/27",
       "merged_at": "2026-04-06T03:48:40Z",
-      "head_branch": "feat/memoriesv2-hardening",
+      "head_branch": "feat/memory-ownership-hardening",
       "final_outcome": "merged_green",
       "success_metrics": {
         "local_validation_passed": true,
         "hosted_checks_total": 6,
         "hosted_checks_passed": 6,
         "fix_commits": 0,
-        "root_cause_scope": "canonical memoriesv2 artifact ownership and compatibility drift reporting"
+        "root_cause_scope": "canonical durable memory artifact ownership and compatibility drift reporting"
       },
       "required_commands": [
         "cargo test --workspace",
@@ -282,7 +282,7 @@
         "cargo run --bin keel -- review pre-commit --repo-root . --format markdown",
         "cargo run --bin keel -- review pre-pr --repo-root . --base-ref origin/main --format markdown"
       ],
-      "demo_doc": "docs/demo-stateful-bug-fix-flow.md"
+      "demo_doc": "(removed)"
     },
     {
       "scenario_id": "pr_fix_windows_hosted_check",

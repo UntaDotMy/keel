@@ -1,5 +1,5 @@
 <!--
-Purpose: Honest inventory of memoriesv2 / memory family surfaces and when they are empty vs used.
+Purpose: Honest inventory of unified memory family surfaces and when they are empty vs used.
 Caller: Agents deciding whether a zero-record family is dead code or intentional scaffold.
 -->
 # Memory family usage

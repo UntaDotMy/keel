@@ -71,5 +71,5 @@ warned; `config-audit` 0 high / 0 medium / 0 low; `review pre-commit` gate=pass.
   is opt-in and degrades to "executable not found" in `/plugin` Errors if absent.
 - Subagent `memory: project` writes to `.claude/agent-memory/<name>/`. Keep the
   non-duplication rule in mind: native subagent memory is for incidental
-  per-agent learnings; keel's `memoriesv2`/working-briefs remain the
+  per-agent learnings; keel's unified `memory` surfaces and working-briefs remain the
   structured, reconcilable store.
