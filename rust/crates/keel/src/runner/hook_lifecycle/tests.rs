@@ -550,6 +550,20 @@ fn user_prompt_submit_emits_research_first_pointer() {
         .and_then(JsonDocument::as_str)
         .expect("UserPromptSubmit must emit additionalContext");
 
+    // Always-on banner: every prompt must lead with mandatory iron law + keel.
+    assert!(
+        context.contains("FOLLOW THE IRON LAW"),
+        "UserPromptSubmit must lead with FOLLOW THE IRON LAW"
+    );
+    assert!(
+        context.contains("USE KEEL"),
+        "UserPromptSubmit must require USE KEEL every turn"
+    );
+    assert!(
+        context.contains("mandatory on every turn"),
+        "UserPromptSubmit must state the contract is mandatory, not optional"
+    );
+
     assert!(context.contains("Research-first"));
     assert!(context.contains("SYSTEM_MAP"));
     assert!(context.contains("trust the codebase"));
@@ -573,6 +587,36 @@ fn user_prompt_submit_emits_research_first_pointer() {
     assert!(
         context.contains("run_command"),
         "UserPromptSubmit must advertise the run_command MCP tool"
+    );
+    assert!(
+        context.contains("context_brief"),
+        "UserPromptSubmit must advertise context_brief"
+    );
+
+    // Memory & learning loop — iron law is incomplete without durable memory.
+    assert!(
+        context.contains("Memory & learning"),
+        "UserPromptSubmit must name the Memory & learning section"
+    );
+    assert!(
+        context.contains("Recall first"),
+        "UserPromptSubmit must require recall before claiming memory"
+    );
+    assert!(
+        context.contains("Working brief"),
+        "UserPromptSubmit must require a working brief on non-trivial work"
+    );
+    assert!(
+        context.contains("Save durable learnings"),
+        "UserPromptSubmit must require saving durable learnings to disk"
+    );
+    assert!(
+        context.contains("Learn loop"),
+        "UserPromptSubmit must mention the learn loop"
+    );
+    assert!(
+        context.contains("completion-gate"),
+        "UserPromptSubmit must mention completion-gate before close"
     );
 
     // Understand-before-building — the per-prompt hook must require the
@@ -1058,6 +1102,98 @@ fn gate_fires_unsatisfied_edits_once() {
         GateDecision::Block,
         "block mode must restore the opt-in hard stop"
     );
+}
+
+#[test]
+fn iron_law_tool_classification_strict_requires_keel() {
+    // STRICT: keel MCP/CLI yes; plain Read no.
+    assert!(tool_satisfies_iron_law(
+        IronLawGateMode::Strict,
+        "mcp__keel__system_map",
+        None
+    ));
+    assert!(tool_satisfies_iron_law(
+        IronLawGateMode::Strict,
+        "mcp__keel__recall",
+        None
+    ));
+    assert!(tool_satisfies_iron_law(
+        IronLawGateMode::Strict,
+        "Bash",
+        Some("keel memory system-map refresh")
+    ));
+    assert!(
+        !tool_satisfies_iron_law(IronLawGateMode::Strict, "Read", None),
+        "plain Read must not clear STRICT gate"
+    );
+    assert!(
+        !tool_satisfies_iron_law(IronLawGateMode::Strict, "Grep", None),
+        "plain Grep must not clear STRICT gate"
+    );
+    // BALANCED: host Read counts.
+    assert!(tool_satisfies_iron_law(
+        IronLawGateMode::Balanced,
+        "Read",
+        None
+    ));
+    assert!(is_keel_research_command("keel doctor"));
+    assert!(is_keel_research_command(
+        "keel run -- keel code-search search --query x"
+    ));
+    assert!(!is_keel_research_command("cargo test"));
+}
+
+#[test]
+fn iron_law_gate_denies_without_evidence_and_does_not_ack_on_deny() {
+    // Evidence-based gate: deny does NOT write a satisfaction marker; only a
+    // qualifying research tool does. Retry without research still denies.
+    let _guard = crate::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let claude_home = temp_brief_gate_home("iron-law-deny");
+    let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
+    let previous_mode = std::env::var(IRON_LAW_GATE_ENV_VAR).ok();
+    std::env::set_var("CLAUDE_TARGET_OVERRIDE", &claude_home);
+    std::env::remove_var(IRON_LAW_GATE_ENV_VAR); // default → strict
+
+    let session = "sess-iron-law-strict";
+    let first = iron_law_gate_decision(session);
+    assert!(first.is_some(), "first edit with no research must DENY");
+    assert!(
+        first.unwrap().contains("STRICT"),
+        "default denial must name STRICT: {:?}",
+        first
+    );
+
+    // Critical: deny must not self-clear (the old one-shot acknowledge bug).
+    let second = iron_law_gate_decision(session);
+    assert!(
+        second.is_some(),
+        "retry without research must still DENY (no acknowledge-on-deny)"
+    );
+
+    // Marker write after a keel tool → allow.
+    mark_iron_law_satisfied(session);
+    assert!(
+        iron_law_gate_decision(session).is_none(),
+        "after mark_iron_law_satisfied, edits must ALLOW"
+    );
+
+    // Off disables.
+    std::env::set_var(IRON_LAW_GATE_ENV_VAR, "off");
+    // Fresh session, still off.
+    assert!(iron_law_gate_decision("sess-other").is_none());
+
+    match previous_home {
+        Some(value) => std::env::set_var("CLAUDE_TARGET_OVERRIDE", value),
+        None => std::env::remove_var("CLAUDE_TARGET_OVERRIDE"),
+    }
+    match previous_mode {
+        Some(value) => std::env::set_var(IRON_LAW_GATE_ENV_VAR, value),
+        None => std::env::remove_var(IRON_LAW_GATE_ENV_VAR),
+    }
+    let _ = std::fs::remove_dir_all(&claude_home);
 }
 
 #[test]
@@ -1638,18 +1774,18 @@ fn run_hook_post_tool_batch_brief_gate_nudges_in_nudge_mode_then_falls_through()
 }
 
 #[test]
-fn run_hook_post_tool_batch_brief_gate_escalates_by_default_nudge_then_block() {
-    // END-TO-END proof of the ESCALATE DEFAULT through the real dispatcher:
+fn run_hook_post_tool_batch_brief_gate_blocks_by_default() {
+    // END-TO-END proof of the harder closeout DEFAULT through the real dispatcher:
     // with BRIEF_GATE unset, a session that edited code with no working brief
-    // gets a NON-BLOCKING nudge on the first end-of-turn, then a real
-    // `decision:block` on the second (the requirement is still unmet), then
-    // falls through to the generic advisory once the cap (2) is spent. This is
-    // the "not optional" behavior — ignoring the nudge is no longer free.
+    // gets the imperative "hard stop" feed-forward on the first end-of-turn
+    // (Block mode), then again until the Block cap (3) is spent, then falls
+    // through to the generic advisory. Opt-down remains CLAUDE_SKILLS_BRIEF_GATE=nudge
+    // or =escalate.
     let _guard = crate::test_support::ENV_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-    let claude_home = temp_brief_gate_home("e2e-escalate");
+    let claude_home = temp_brief_gate_home("e2e-block-default");
     let _silenced = NewGatesSilenced::new();
     let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
     let previous_review = std::env::var(REVIEW_GATE_ENV_VAR).ok();
@@ -1658,18 +1794,13 @@ fn run_hook_post_tool_batch_brief_gate_escalates_by_default_nudge_then_block() {
     let previous_story_first = std::env::var(STORY_FIRST_GATE_ENV_VAR).ok();
     let previous_closeout = std::env::var(STORY_CLOSEOUT_GATE_ENV_VAR).ok();
     std::env::set_var("CLAUDE_TARGET_OVERRIDE", &claude_home);
-    std::env::set_var(REVIEW_GATE_ENV_VAR, "off");
-    std::env::set_var(RESEARCH_GATE_ENV_VAR, "off");
-    std::env::set_var(STORY_FIRST_GATE_ENV_VAR, "off");
-    std::env::set_var(STORY_CLOSEOUT_GATE_ENV_VAR, "off");
-    std::env::set_var("CLAUDE_TARGET_OVERRIDE", &claude_home);
     std::env::set_var(REVIEW_GATE_ENV_VAR, "off"); // isolate the brief gate
-    std::env::remove_var(BRIEF_GATE_ENV_VAR); // default → escalate
+    std::env::remove_var(BRIEF_GATE_ENV_VAR); // default → Block
     std::env::set_var(RESEARCH_GATE_ENV_VAR, "off");
     std::env::set_var(STORY_FIRST_GATE_ENV_VAR, "off");
     std::env::set_var(STORY_CLOSEOUT_GATE_ENV_VAR, "off");
 
-    let session_id = "sess-e2e-escalate";
+    let session_id = "sess-e2e-block-default";
     let date = chrono::Local::now().format("%Y-%m-%d").to_string();
     let timings_dir = claude_home.join("state").join("tool-timings");
     std::fs::create_dir_all(&timings_dir).expect("create timings dir");
@@ -1679,7 +1810,7 @@ fn run_hook_post_tool_batch_brief_gate_escalates_by_default_nudge_then_block() {
         "tool_name": "Edit",
         "duration_ms": 5u64,
         "session_id": session_id,
-        "cwd": "D:/Nasri/Project/escalate-e2e",
+        "cwd": "D:/Nasri/Project/block-default-e2e",
         "effort_level": "",
     });
     std::fs::write(
@@ -1690,7 +1821,7 @@ fn run_hook_post_tool_batch_brief_gate_escalates_by_default_nudge_then_block() {
 
     let stdin_json = format!("{{\"session_id\":\"{session_id}\"}}");
 
-    // First call: non-blocking nudge (no decision field).
+    // First call: imperative hard-stop feed-forward (Block default).
     let mut out1 = Vec::new();
     let mut err1 = Vec::new();
     let code1 = run_hook_post_tool_batch(&mut stdin_json.as_bytes(), &mut out1, &mut err1);
@@ -1698,37 +1829,45 @@ fn run_hook_post_tool_batch_brief_gate_escalates_by_default_nudge_then_block() {
     assert_eq!(code1, 0, "stderr: {}", String::from_utf8_lossy(&err1));
     assert!(
         !out1_text.contains("\"decision\""),
-        "escalate first fire must NUDGE, not block: {out1_text}"
+        "block mode is feed-forward (no decision field): {out1_text}"
     );
     assert!(
-        out1_text.contains("additionalContext") && out1_text.contains("CLAUDE_SKILLS_BRIEF_GATE"),
-        "escalate first fire must emit a non-blocking nudge: {out1_text}"
+        out1_text.contains("additionalContext")
+            && out1_text.contains("now a hard stop")
+            && out1_text.contains("CLAUDE_SKILLS_BRIEF_GATE"),
+        "default brief gate must emit hard-stop feed-forward: {out1_text}"
     );
 
-    // Second call (still no brief): escalate to a real hard block.
+    // Cap is 3 for Block: second and third fires still hard-stop.
     let mut out2 = Vec::new();
     let mut err2 = Vec::new();
     let code2 = run_hook_post_tool_batch(&mut stdin_json.as_bytes(), &mut out2, &mut err2);
     let out2_text = String::from_utf8_lossy(&out2);
     assert_eq!(code2, 0, "stderr: {}", String::from_utf8_lossy(&err2));
     assert!(
-        out2_text.contains("additionalContext") && out2_text.contains("now a hard stop"),
-        "escalate second fire must emit the feed-forward hard stop: {out2_text}"
+        out2_text.contains("now a hard stop"),
+        "second fire still hard-stop under Block cap: {out2_text}"
     );
 
-    // Third call: cap (2) spent → generic advisory, no decision field.
     let mut out3 = Vec::new();
     let mut err3 = Vec::new();
     let code3 = run_hook_post_tool_batch(&mut stdin_json.as_bytes(), &mut out3, &mut err3);
     let out3_text = String::from_utf8_lossy(&out3);
     assert_eq!(code3, 0, "stderr: {}", String::from_utf8_lossy(&err3));
     assert!(
-        !out3_text.contains("\"decision\""),
-        "third call must fall through to advisory (cap spent): {out3_text}"
+        out3_text.contains("now a hard stop"),
+        "third fire still hard-stop under Block cap: {out3_text}"
     );
+
+    // Fourth call: cap (3) spent → generic advisory.
+    let mut out4 = Vec::new();
+    let mut err4 = Vec::new();
+    let code4 = run_hook_post_tool_batch(&mut stdin_json.as_bytes(), &mut out4, &mut err4);
+    let out4_text = String::from_utf8_lossy(&out4);
+    assert_eq!(code4, 0, "stderr: {}", String::from_utf8_lossy(&err4));
     assert!(
-        out3_text.contains("Closeout check"),
-        "third call must be the generic advisory: {out3_text}"
+        out4_text.contains("Closeout check"),
+        "fourth call must be the generic advisory: {out4_text}"
     );
 
     match previous_home {
@@ -4650,14 +4789,16 @@ fn user_config_review_strictness_loses_to_explicit_operator_var() {
 }
 
 #[test]
-fn user_config_review_strictness_default_escalate_when_unset() {
+fn user_config_review_strictness_default_block_when_unset() {
+    // Harder closeout: unset review_strictness + unset env → Block (imperative
+    // feed-forward until a reviewer marker exists or the Block cap is spent).
     with_env_vars(
         &[
             ("CLAUDE_PLUGIN_OPTION_REVIEW_STRICTNESS", None),
             (REVIEW_GATE_ENV_VAR, None),
         ],
         || {
-            assert_eq!(review_gate_mode(), GateMode::Escalate);
+            assert_eq!(review_gate_mode(), GateMode::Block);
         },
     );
 }

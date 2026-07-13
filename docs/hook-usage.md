@@ -24,9 +24,16 @@ The goal is to prevent noisy raw command output from entering the harness contex
 
 ## What the hook does not do
 
-- It does not cover `apply_patch` or other file-edit tool surfaces. Existing-source edits stay governed by Preserve Existing Flow and review gates (`~/.claude/memories/workspaces/<workspace-slug>/flow/flow-check.json`, `keel review pre-pr`, `keel review gates check`).
-- It cannot force the harness to execute a tool; it injects authoritative `additionalContext` reminders and refreshes lightweight memory artifacts, while the harness still owns reasoning and tool selection.
-- It does not run expensive review gates automatically on every stop event; closeout hooks remind the harness to run the gates before claiming completion. Two PostToolBatch gates are on by default, each fires at most once per session, and each defaults to a **non-blocking nudge** (the gate's reminder is injected via `hookSpecificOutput.additionalContext`, so the agent is told to act but the turn is never halted) — the working-brief gate (`CLAUDE_SKILLS_BRIEF_GATE`, nudges once when a session edits code with no working brief written this session) and the review gate (`CLAUDE_SKILLS_REVIEW_GATE`, nudges once when a session edits code with no reviewer pass since the last edit). Each env var takes three values: unset/anything else → the non-blocking nudge (default); `block` → restore the opt-in hard stop (`decision: "block"`, refuses closeout until the artifact exists); `off` (or `…_MAX_BLOCKS=0`) → disabled. Whichever mode is selected, each gate is bounded to at most `…_MAX_BLOCKS` fires per session (default 1) by a monotonic counter so it can neither loop nor spam, and it fails open to the generic advisory on any telemetry error. They do not run the heavy gate commands themselves; they surface (nudge) or enforce (block) the requirement that the artifact — a brief, a review marker — exist.
+- Existing-source ownership still requires Preserve Existing Flow and review gates (`keel review pre-pr`, `keel review gates check`). The Iron Law edit gate only proves research happened before the first edit class tool.
+- It cannot force the harness to *think* well; it can deny edit-class tools until evidence exists, inject `additionalContext`, and feed-forward closeout requirements.
+- Closeout gates (working-brief, review, and others) ride `PostToolBatch`. **Harder defaults:** `CLAUDE_SKILLS_BRIEF_GATE` and `CLAUDE_SKILLS_REVIEW_GATE` default to **`block`** mode (imperative feed-forward via `additionalContext` when code changed without a brief / reviewer marker; Block cap defaults to 3 fires per session, then advisory). Opt-down with `=nudge`, `=escalate`, or `=off`. They do not run the heavy gate commands themselves.
+
+## Iron Law edit gate (PreToolUse)
+
+- **Default `KEEL_IRON_LAW_GATE=strict`:** edit-class tools (`Edit` / `Write` / `MultiEdit` / `apply_patch` / …) are **denied** until this session has evidence of a **keel research tool** — MCP `system_map` / `recall` / `context_brief` / `skill_route` / `skill_get` / `code_search` (or matching `keel …` CLI). Plain `Read`/`Grep` alone does **not** clear the gate.
+- Satisfaction is written under `~/.claude/state/iron-law-satisfied/<session>` only when PostToolUse/observe sees a qualifying tool — **not** on deny (the old one-shot acknowledge-on-deny path is gone).
+- Modes: unset/`strict`/`on` → strict; `balanced` → keel **or** host Read/Grep/Glob; `off` → disabled.
+- Bridge hosts (OpenCode / Codex / Pi / Cursor) share the same Rust decision via `keel bridge pre-tool-use` and the same marker directory.
 
 ## Transparent Rewrite Handling
 
@@ -39,7 +46,7 @@ Example: a raw `cargo test --workspace` is transparently rewritten to `keel run 
 Lifecycle hooks return `hookSpecificOutput.additionalContext`. The harness adds that text to context as a system reminder at the hook firing point:
 
 - `SessionStart`: injects the operating contract and refreshes the workspace memory scope/system map.
-- `UserPromptSubmit`: reminds the harness to route work through skills, consult/save memory, maintain workflow proof, and run review closeout.
+- `UserPromptSubmit`: **always** injects `FOLLOW THE IRON LAW. USE KEEL.` plus the research-first contract, keel MCP tools, and the memory loop (recall first, working brief, save durable learnings, learn loop, completion-gate / review before close).
 - `PostToolUse`: reminds the harness to update proof state after tool results and save durable facts.
 - `PreCompact`/`PostCompact`: preserve and restore workflow, memory, validation, and review continuity around compaction.
 - `Stop`/`SubagentStop`/`SessionEnd`: enforce closeout reminders before final responses or session end.

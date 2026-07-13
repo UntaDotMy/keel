@@ -127,11 +127,24 @@ const BRIDGE_BIN: string = resolveBinary();
 
 const STATE_DIR = path.join(os.homedir(), ".claude", "state");
 const STARTED_DIR = path.join(STATE_DIR, "pi-session-started");
-// Per-session Iron Law satisfaction marker (mirrors the OpenCode adapter).
-const IRONLAW_DIR = path.join(STATE_DIR, "pi-iron-law-satisfied");
+// Shared with Rust core / OpenCode / Codex (STRICT keel-required).
+const IRONLAW_DIR = path.join(STATE_DIR, "iron-law-satisfied");
+
+/** Match Rust `sanitize_memory_key`: lowercase alnum, other runs → single `-`. */
+function sanitizeSessionKey(sessionID: string): string {
+  const raw = (sessionID || "default").trim() || "default";
+  return (
+    raw
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "") || "default"
+  );
+}
 
 function markerPath(dir: string, sessionID: string): string {
-  return path.join(dir, sessionID);
+  const key =
+    dir === IRONLAW_DIR ? sanitizeSessionKey(sessionID) : sessionID || "default";
+  return path.join(dir, key);
 }
 
 function ensureDir(dir: string): void {
@@ -185,7 +198,12 @@ function ironLawSatisfied(sessionID: string): boolean {
 }
 
 function markIronLawSatisfied(sessionID: string): void {
-  setMarker(IRONLAW_DIR, sessionID);
+  ensureDir(IRONLAW_DIR);
+  try {
+    fs.writeFileSync(markerPath(IRONLAW_DIR, sessionID), "satisfied", "utf-8");
+  } catch {
+    /* best-effort */
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -218,15 +236,8 @@ function bridgeRewrite(command: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Iron Law classification. Kept in sync with opencode/keel.ts so the gate
-// fires identically across hosts. Edit this set in both files.
+// Iron Law classification. STRICT: keel research tools only (sync with OpenCode).
 // ---------------------------------------------------------------------------
-
-const READING_TOOL_NAMES = new Set([
-  "read", "glob", "grep",
-  "lsp", "lsp_diagnostics", "lsp_goto_definition",
-  "lsp_find_references", "lsp_symbols", "lsp_prepare_rename",
-]);
 
 const EDIT_CLASS_TOOL_NAMES = new Set([
   "edit", "write", "multiedit", "notebookedit",
@@ -237,22 +248,26 @@ const SHELL_TOOL_NAMES = new Set([
   "bash", "shell", "sh", "zsh", "fish", "powershell", "pwsh", "cmd",
 ]);
 
-const KEEL_READING_COMMANDS = [
-  "keel system-map",
-  "keel recall",
-  "keel doctor",
-  "keel code-search",
-  "keel observe",
-  "keel workflow cockpit",
-  "keel workflow status",
-];
-
-function isReadingTool(toolName: string): boolean {
-  return READING_TOOL_NAMES.has(toolName.toLowerCase());
-}
-
 function isEditClassTool(toolName: string): boolean {
   return EDIT_CLASS_TOOL_NAMES.has(toolName.toLowerCase());
+}
+
+function isKeelResearchTool(toolName: string): boolean {
+  const lower = toolName.toLowerCase();
+  if (
+    lower.includes("install") ||
+    lower.includes("uninstall") ||
+    lower.includes("self-replace") ||
+    lower.includes("self_replace")
+  ) {
+    return false;
+  }
+  return (
+    lower.includes("mcp__keel__") ||
+    lower.includes("keel__") ||
+    lower.startsWith("keel_") ||
+    lower === "keel"
+  );
 }
 
 function isShellTool(toolName: string): boolean {
@@ -260,8 +275,27 @@ function isShellTool(toolName: string): boolean {
 }
 
 function isKeelReadingCommand(command: string): boolean {
-  const c = command.trim();
-  return KEEL_READING_COMMANDS.some((k) => c.startsWith(k));
+  const trimmed = command.trim().toLowerCase();
+  const body = trimmed.startsWith("keel run -- ")
+    ? trimmed.slice("keel run -- ".length)
+    : trimmed;
+  if (!(body.startsWith("keel ") || body.includes("keel.exe"))) {
+    return false;
+  }
+  return (
+    body.includes("system-map") ||
+    body.includes("system_map") ||
+    body.includes("recall") ||
+    body.includes("doctor") ||
+    body.includes("code-search") ||
+    body.includes("code_search") ||
+    body.includes("skill") ||
+    body.includes("context") ||
+    body.includes("memory") ||
+    body.includes("status") ||
+    body.includes("help") ||
+    body.includes("brief")
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -358,13 +392,11 @@ function handleToolCall(
     const sessionID = resolveSessionId(event as PiSessionLikeEvent, ctx);
     const toolName = (event?.toolName || "").toLowerCase();
 
-    // --- Iron Law: reading tools satisfy the gate and are always allowed. ---
-    if (isReadingTool(toolName)) {
+    // STRICT: only keel research tools clear the shared marker (not plain Read).
+    if (isKeelResearchTool(toolName)) {
       markIronLawSatisfied(sessionID);
       return undefined;
     }
-
-    // --- Iron Law: shell tools running keel reading commands satisfy the gate. ---
     if (isShellTool(toolName)) {
       const cmd = event?.input?.command;
       if (typeof cmd === "string" && isKeelReadingCommand(cmd)) {
@@ -372,25 +404,32 @@ function handleToolCall(
       }
     }
 
-    // --- Iron Law: block edit-class tools until the gate is satisfied. ---
-    if (isEditClassTool(toolName) && !ironLawSatisfied(sessionID)) {
-      return {
-        block: true,
-        reason:
-          "IRON LAW ENFORCED: Read first. Use Read/Glob/Grep or keel tools (system-map, recall, doctor, code-search) BEFORE editing. The iron law is enforced — you cannot skip it.",
-      };
-    }
-
-    // --- Iron Law edit-class gate for tools that have already satisfied reading. ---
+    // Edit-class: prefer Rust core decision; also block when local marker absent.
     if (isEditClassTool(toolName)) {
-      // pre-tool-use emits the per-edit gate reminder / decision. It is the
-      // host-neutral Iron Law edit gate wired in wb-19f01d1d0a1. It does not
-      // block (keel bridge always exits 0); the real block is the marker
-      // check above. Running it records the gate state for session-end review.
-      runBridge(
-        "pre-tool-use",
-        ["--session", sessionID, "--cwd", resolveCwd(ctx), "--tool", toolName],
-      );
+      const gate = runBridge("pre-tool-use", [
+        "--session",
+        sessionID,
+        "--cwd",
+        resolveCwd(ctx),
+        "--tool",
+        toolName,
+      ]);
+      if (gate.startsWith("KEEL_GATE_DENY")) {
+        const reason = gate.split("\n").slice(1).join("\n").trim();
+        return {
+          block: true,
+          reason:
+            reason ||
+            "keel Iron Law gate: call system_map/recall/context_brief before editing.",
+        };
+      }
+      if (!ironLawSatisfied(sessionID)) {
+        return {
+          block: true,
+          reason:
+            "IRON LAW ENFORCED (STRICT): Use a keel tool first (MCP system_map, recall, context_brief, skill_route, or `keel doctor` / `keel code-search`). Plain Read does not clear the gate.",
+        };
+      }
     }
 
     // --- Compaction reroute for shell tools. ---
