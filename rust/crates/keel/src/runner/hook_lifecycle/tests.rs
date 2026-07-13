@@ -552,6 +552,14 @@ fn user_prompt_submit_emits_research_first_pointer() {
 
     // Always-on banner: every prompt must lead with mandatory iron law + keel.
     assert!(
+        context.contains("ENFORCED THIS TURN"),
+        "UserPromptSubmit must lead with hard ENFORCED THIS TURN strip"
+    );
+    assert!(
+        context.contains("PreToolUse DENIES"),
+        "UserPromptSubmit must state PreToolUse denies until keel research"
+    );
+    assert!(
         context.contains("FOLLOW THE IRON LAW"),
         "UserPromptSubmit must lead with FOLLOW THE IRON LAW"
     );
@@ -1141,6 +1149,19 @@ fn iron_law_tool_classification_strict_requires_keel() {
         "keel run -- keel code-search search --query x"
     ));
     assert!(!is_keel_research_command("cargo test"));
+
+    // Hard gate coverage: what PreToolUse will block while unsatisfied.
+    assert!(tool_is_iron_law_gated("Edit", None));
+    assert!(tool_is_iron_law_gated("Bash", Some("cargo test")));
+    assert!(tool_is_iron_law_gated("Agent", None));
+    assert!(
+        !tool_is_iron_law_gated("Bash", Some("keel doctor")),
+        "keel research shell must not be gated"
+    );
+    assert!(
+        !tool_is_iron_law_gated("Read", None),
+        "Read must stay available while blocked"
+    );
 }
 
 #[test]

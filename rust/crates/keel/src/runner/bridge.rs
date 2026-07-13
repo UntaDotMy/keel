@@ -305,13 +305,27 @@ fn run_bridge_pre_tool_use(
 ) -> u8 {
     let mut flags = bridge_flag_set("bridge pre-tool-use");
     flags.string_flag("tool", "");
+    flags.string_flag("command", "");
     if let Err(parse_error) = flags.parse(arguments) {
         let _ = writeln!(standard_error, "{}", parse_error.message);
     }
     let (session, _cwd) = resolve_bridge_args(&flags, standard_error);
     let tool_name = flags.string_value("tool");
+    let command_flag = flags.string_value("command");
+    // Optional command on stdin when --command empty (shell adapters).
+    let mut stdin_command = String::new();
+    if command_flag.trim().is_empty() {
+        let _ = std::io::stdin().read_to_string(&mut stdin_command);
+    }
+    let command = if !command_flag.trim().is_empty() {
+        Some(command_flag.trim())
+    } else if !stdin_command.trim().is_empty() {
+        Some(stdin_command.trim())
+    } else {
+        None
+    };
 
-    if !hook_lifecycle::is_edit_class_tool(tool_name) {
+    if !hook_lifecycle::tool_is_iron_law_gated(tool_name, command) {
         let _ = writeln!(standard_output, "KEEL_GATE_ALLOW");
         return 0;
     }
