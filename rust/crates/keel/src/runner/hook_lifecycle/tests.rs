@@ -633,10 +633,19 @@ fn user_prompt_submit_emits_research_first_pointer() {
         "UserPromptSubmit must name the Goal-Driven Execution pillar"
     );
 
-    // Vibecoding guards — request fidelity, memory-first navigation, useful comments.
+    // Vibecoding guards — request fidelity, ask-when-unclear, knowledge-base distrust,
+    // memory-first navigation, useful comments.
     assert!(
         context.contains("Request fidelity"),
         "UserPromptSubmit must name request fidelity (no invented extras)"
+    );
+    assert!(
+        context.contains("Ask when unclear"),
+        "UserPromptSubmit must require asking the user when unclear or drift-risk"
+    );
+    assert!(
+        context.contains("Never trust knowledge-base alone"),
+        "UserPromptSubmit must forbid treating training data as this project's truth"
     );
     assert!(
         context.contains("Memory-first navigation"),
@@ -762,6 +771,15 @@ fn work_intent_pointer_fires_on_code_change_prompts() {
         assert!(
             pointer.contains("Memory-first") && pointer.contains("Request fidelity"),
             "work pointer must name memory-first and request fidelity: {prompt:?}"
+        );
+        assert!(
+            pointer.contains("Ask when unclear"),
+            "work pointer must require asking when unclear/drift-risk: {prompt:?}"
+        );
+        assert!(
+            pointer.contains("Never trust knowledge-base alone")
+                || pointer.contains("knowledge-base alone"),
+            "work pointer must forbid knowledge-base-as-project-truth: {prompt:?}"
         );
         assert!(
             pointer.contains("Comments: contracts only") || pointer.contains("contracts only"),

@@ -22,10 +22,12 @@ architecture:
 2. **Understand before building.** Before writing code, restate what the task
    actually asks and research what is genuinely needed. Do not guess, do not
    assume, do not build against an imagined spec. **Request fidelity:** implement
-   only the asked work; no invented features or extras. Correct code that solves
+   only the asked work; no invented features or extras. **Ask when unclear:** if
+   confused, incomplete, or drift-risk, stop and ask (or report the question) —
+   never invent the answer. **Never trust knowledge-base alone** as this
+   project's structure or stories — read this repo. Correct code that solves
    the wrong problem is the most expensive mistake you can make — it passes every
-   test and still has to be thrown away. If the task is ambiguous in a way that
-   changes what you build, say so in your report rather than guessing.
+   test and still has to be thrown away.
 3. **Memory-first.** Prefer SYSTEM_MAP, `recall`, and the working brief before
    listing the whole tree. If the path is already known, open it.
 4. **Use the listed tools — and respect their intent.** Your role-specific
@@ -60,6 +62,8 @@ regression.
 | "I get the gist, I'll start building" | The gist is not the spec. Restate the task and research what's needed before building. Correct code for the wrong problem still gets thrown away. |
 | "I'll assume they meant X" | Assuming is guessing. If the assumption changes what you build, flag it in your report instead of silently building on it. |
 | "While I'm here, I'll also add..." | Request fidelity failed. Extra work the user did not ask for is invention. |
+| "It's unclear but I'll pick one and go" | Ask when unclear. Silent choice is drift. |
+| "I know how projects usually do this" | Never trust knowledge-base alone. This project has its own structure and stories. |
 | "I'll ls the repo to find it" | Memory-first failed. SYSTEM_MAP/recall first; open the known path. |
 | "I'll just answer this quickly" | A quick wrong answer costs more than a slow correct one. |
 | "This is just a simple question" | Questions are tasks. Treat them like tasks. |

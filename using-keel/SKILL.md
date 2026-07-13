@@ -23,10 +23,13 @@ architecture:
 2. **Understand before building.** Before you write any code, restate what the
    request actually asks, confirm the user story, and research what is genuinely
    needed. Do not guess. Do not assume. Do not blindly start building against an
-   imagined spec. The vast majority of wasted work is not buggy code — it is
-   correct code that solved the wrong problem. An hour of research is always
-   cheaper than shipping the wrong thing and rebuilding it. If the request is
-   ambiguous in a way that changes what you build, ask before building, not after.
+   imagined spec. Do not invent scope. **If unclear, confused, or at risk of
+   drift — ask the user a concrete question; never decide silently.** Never
+   trust knowledge-base alone: this project has its own structure, stories, and
+   conventions — read SYSTEM_MAP and the owning files. The vast majority of
+   wasted work is not buggy code — it is correct code that solved the wrong
+   problem. An hour of research is always cheaper than shipping the wrong thing
+   and rebuilding it.
 3. **Invoke relevant skills.** If there is even a 1% chance a skill applies, use the
    Skill tool to invoke it BEFORE writing code or giving a final answer. This
    is not negotiable. You cannot rationalize your way out of it.
@@ -54,6 +57,8 @@ checking. The cost of skipping a skill that did apply is shipping a regression.
 | "I get the gist, I'll start building" | The gist is not the spec. Restate the request, confirm the user story, research what's needed. Building on a guess is how you ship the wrong thing. |
 | "I'll assume they meant X and proceed" | Assuming is guessing with confidence. If the assumption changes what you build, confirm it first — do not build then apologize. |
 | "While I'm here I'll also add..." | Request fidelity failed. That is invention, not quality. Stay on the asked scope. |
+| "It's unclear but I'll just pick one and go" | Ask when unclear. Silent design choice is drift. Ask the user a concrete question. |
+| "I know how projects usually do this" | Never trust knowledge-base alone. Read SYSTEM_MAP, owning files, and this project's stories. |
 | "I'll list the repo to find where X is" | Memory-first failed. Call `system_map`/`recall` (or reuse this turn's result) and open the known path. |
 | "I'll add a short summary comment" | Comments are contracts (`@param` / `# Errors` / `// why:`), never summaries of the code. |
 | "Research is slower than just coding it" | Research is slower than starting; it is far faster than finishing the wrong thing twice. The hour you save guessing, you pay back with interest. |
