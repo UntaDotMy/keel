@@ -195,6 +195,8 @@ separate skill directory — it routes to `reviewer`.
 - `mobile-development-life-cycle` — Mobile architecture, quality, and release (Android/iOS lifecycle, store submission).
 - `dart-and-flutter-expert` — Dart & Flutter: widget architecture (pure `build`, `const` constructors), state management (Provider/Riverpod/Bloc), jank diagnosis (`ListView.builder`, `RepaintBoundary`), isolates for >16ms work, null-safety without `!`, pubspec hygiene, platform channels, Flutter web/desktop.
 - `backend-and-data-architecture` — Backend systems, API design, and data engineering (schemas, messaging, microservice boundaries).
+- `domain-driven-design` — Domain-Driven Design (DDD): ubiquitous language, bounded contexts, aggregates, entities/value objects, domain events, context maps, strategic vs tactical design, optional CQRS/event sourcing. Use for complex domain models and service boundaries.
+- `behavior-driven-development` — Behavior-Driven Development (BDD): shared Gherkin examples, outside-in delivery, living documentation. Bridges product language to automated acceptance checks (pairs with writing-user-stories + TDD).
 - `cloud-and-devops-expert` — Cloud infrastructure, CI/CD, and DevOps (IaC, container orchestration, progressive delivery).
 - `qa-and-automation-engineer` — QA, automated testing, and release reliability (Smoke → Functional → Integration → UI → Load → Stress → Security ladder).
 - `security-and-compliance-auditor` — Security reviews, threat modeling, compliance (SOC2, GDPR), remediation quality.
@@ -219,7 +221,7 @@ separate skill directory — it routes to `reviewer`.
 - `compounding-knowledge` — Capture each solved problem as a durable, deduped, discoverable solution note (problem/root-cause/solution/evidence) wired into the project's CLAUDE.md/AGENTS.md pointers so future work starts ahead. The deliberate, human-readable counterpart to the automatic learn loop.
 - `adversarial-security-review` — Red-team / blue-team / adjudicator pass that chains static findings into concrete attacker scenarios and adjudicates each to confirmed/refuted/needs-proof with evidence. The reasoning layer above keel config-audit's deterministic scan.
 - `ui-design-systems-and-responsive-interfaces` — UI systems, responsive design, accessibility (WCAG 2.1 AA).
-- `component-driven-development` — Component-Driven Development (CDD): build UI component-first (atomic → composite → page, each proven in isolation) instead of page-first. Use when scaffolding/restructuring a UI, building a component library, or setting up Storybook/widgetbook.
+- `component-driven-development` — Component-Driven Development (CDD) + Atomic Design: build UI component-first (atom → molecule → organism → page, each proven in isolation / Storybook visual TDD) instead of page-first.
 - `ux-research-and-experience-strategy` — UX research and evidence-based experience design (journeys, funnels, usability).
 - `memory-status-reporter` — Human-style memory health and learning reports.
 - `api-contract-design` — REST, GraphQL, and gRPC contract evolution; breaking-change classification, error taxonomy, idempotency, pagination, and SDK migration windows.

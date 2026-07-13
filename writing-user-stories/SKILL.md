@@ -165,7 +165,9 @@ the user ratifies them.
 Once stories are confirmed and captured, hand to:
 
 - `brainstorming` if *how* to build is still open (the stories are now its input).
-- `test-driven-development` to turn each Gherkin scenario into a failing test.
+- `behavior-driven-development` to keep outside-in automation and living docs aligned with the Gherkin scenarios.
+- `test-driven-development` to turn each scenario's inner units into a failing test (RED-GREEN-REFACTOR).
+- `domain-driven-design` when the stories imply complex domain rules, language, or bounded contexts.
 - the relevant lifecycle skill for domain implementation.
 - `preserve-existing-flow` first if the change touches existing behavior.
 

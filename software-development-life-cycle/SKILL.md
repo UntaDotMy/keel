@@ -97,7 +97,12 @@ See `_shared/common-discipline.md` for the canonical rules. Apply them to all wo
 | Web development | `web-development-life-cycle` |
 | Mobile development | `mobile-development-life-cycle` |
 | UI/design systems | `ui-design-systems-and-responsive-interfaces` |
+| UI component-first / Atomic Design | `component-driven-development` |
+| Domain model / bounded contexts (DDD) | `domain-driven-design` |
+| Acceptance scenarios / BDD outside-in | `behavior-driven-development` |
+| Unit test-first loop | `test-driven-development` |
 | UX research | `ux-research-and-experience-strategy` |
+| Backend contracts / data / messaging ops | `backend-and-data-architecture` |
 | Git operations | `git-expert` |
 | GitHub Actions / deployment internals | `cloud-and-devops-expert` |
 

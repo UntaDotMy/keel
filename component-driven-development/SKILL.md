@@ -1,7 +1,7 @@
 ---
 name: component-driven-development
-description: Component-Driven Development (CDD) specialist. Build UI component-first — atomic components in isolation, composed up to pages — instead of page-first. Use when scaffolding or restructuring a UI (React/Flutter/Vue/Svelte/web), designing a component library or design system, breaking a monolithic page into reusable parts, or setting up Storybook/component-sandbox workflows. Catches the "build the whole page, extract later" anti-pattern early.
-when_to_use: Building or restructuring any UI; creating a component library or design system; scaffolding Storybook/widgetbook; decomposing a monolithic page/screen into reusable components; deciding component boundaries, props, and composition hierarchy; any UI work where reusability and isolated testability matter.
+description: Component-Driven Development (CDD) / Atomic Design specialist. Build UI component-first — atoms → molecules/composites → organisms → templates/pages — each proven in isolation (Storybook/Widgetbook) instead of page-first. Use when scaffolding or restructuring a UI, design systems, visual TDD, or decomposing a monolithic screen. Catches "build the page, extract later."
+when_to_use: Building or restructuring any UI; Atomic Design hierarchy; component library or design system; Storybook/widgetbook/visual tests; decomposing a monolithic page; component boundaries and composition; reusability and isolated testability.
 allowed-tools: Read, Grep, Glob, Edit, Write, Bash(keel memory:*), Bash(git diff:*), Bash(git status), Bash(npm:*), Bash(yarn:*), Bash(pnpm:*), Bash(npx:*), Bash(dart:*), Bash(flutter:*)
 effort: medium
 paths:
@@ -30,15 +30,21 @@ CDD inverts the page-first habit ("build the screen, extract components later").
 
 See `_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill. The Expert Posture and "Resolving the `keel` binary" sections apply to every command this skill instructs.
 
-## The CDD workflow (bottom-up)
+## The CDD workflow (bottom-up) · Atomic Design map
 
-| Level | What | Built in isolation? |
-|---|---|---|
-| **Atomic** | A single UI primitive with no dependencies on other components (a button, an input, a badge, an icon wrapper). Self-contained: styles + behavior + types. | Yes — sandboxed |
-| **Composite / Molecular** | 2+ atoms composed (a search field = input + button; a form field = label + input + error). Owns layout between its children, nothing else. | Yes |
-| **Page / Template** | Composites + atoms arranged into a full screen or route. Pages wire data fetching and routing; they hold almost no presentational logic. | Verified last |
+CDD is the *process* (build and prove in isolation, compose upward). **Atomic Design** (Brad Frost) is the common *naming* for the levels. Use both:
 
-Work strictly bottom-up: atoms must exist and be proven before a composite uses them; composites before a page. A page that defines an atom inline is a CDD violation — extract it first.
+| Atomic Design | CDD level | What | Built in isolation? |
+|---|---|---|---|
+| **Atom** | Atomic | UI primitive with no component deps (button, input, badge, icon wrapper). Styles + behavior + types. | Yes — sandboxed |
+| **Molecule** | Composite | 2+ atoms (search field = input + button; form field = label + input + error). Owns local layout only. | Yes |
+| **Organism** | Composite (larger) | Distinct section (header, product card grid, checkout summary) composing molecules/atoms. | Yes |
+| **Template** | Page shell | Layout slots without real product data — structure only. | Yes when useful |
+| **Page** | Page / route | Templates filled with real (or fixture) data; routing + data fetch live here; almost no presentational logic. | Verified last |
+
+Work strictly bottom-up: atoms before molecules, molecules before organisms, organisms before pages. A page that defines an atom inline is a CDD violation — extract it first.
+
+**Visual TDD:** a story/state matrix (default, loading, error, empty, disabled) is the UI equivalent of a failing test. Add the story for a new state **before** implementing that state when practical; watch the sandbox show the gap, then make it pass.
 
 ## Component boundaries (the hard rules)
 
@@ -73,6 +79,17 @@ Never test a component's internals through its parent. If you must mount a paren
 **Use CDD** for: any product UI, a component library, a design-system implementation, multi-platform UIs sharing logic (Flutter mobile+web), any screen with ≥3 reusable parts.
 
 **Don't force CDD** for: a single throwaway landing page, a script-generated report, a one-off internal tool with no reuse intent. CDD's overhead pays off through reuse and isolated testability — if neither applies, a single component is fine.
+
+## Pairing with other keel skills
+
+| Need | Skill |
+|---|---|
+| Tokens, responsive layout, a11y, design-system governance | `ui-design-systems-and-responsive-interfaces` |
+| React render cost / virtualization | `react-performance-audit` |
+| Domain model (not UI atoms) | `domain-driven-design` |
+| Acceptance behavior of a screen flow | `behavior-driven-development` |
+| Unit RED-GREEN-REFACTOR for pure logic | `test-driven-development` |
+| Flutter widgets / Widgetbook | `dart-and-flutter-expert` |
 
 ## Anti-patterns to refuse
 

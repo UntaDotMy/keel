@@ -43,6 +43,8 @@ See `_shared/common-discipline.md` for the canonical rules. Apply them to all wo
 - The work depends on translating a product-family benchmark into concrete screens, states, and system rules.
 - Brownfield design quality is blocked by weak layout, inconsistent components, vague theming, or generic-looking output.
 
+For **component-first build order** (atoms → molecules → pages, Storybook isolation, visual TDD), also invoke `component-driven-development`. This skill owns tokens, a11y, responsive systems, and visual quality; CDD owns the bottom-up construction process.
+
 ## Core Principles
 
 | # | Principle | What it means in practice |
