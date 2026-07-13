@@ -64,31 +64,34 @@ CWD=$(printf '%s' "$INPUT" | "$JQ_BIN" -r '.cwd // empty' 2>/dev/null) || CWD=""
 SESSION_ID=$(printf '%s' "$INPUT" | "$JQ_BIN" -r '.conversation_id // empty' 2>/dev/null) || SESSION_ID=""
 [ -z "$SESSION_ID" ] && SESSION_ID="default"
 
-# --- Iron Law marker dir (mirrors opencode/keel.ts iron-law-satisfied). ---
-MARKER_DIR="$HOME/.claude/state/cursor-iron-law-satisfied"
+# --- Iron Law marker dir (SHARED with Rust: iron-law-satisfied). ---
+# Session key matches Rust sanitize_memory_key (lowercase alnum, else '-').
+SESSION_KEY=$(printf '%s' "$SESSION_ID" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g; s/-\+/-/g; s/^-//; s/-$//')
+[ -z "$SESSION_KEY" ] && SESSION_KEY="default"
+MARKER_DIR="$HOME/.claude/state/iron-law-satisfied"
 mkdir -p "$MARKER_DIR" 2>/dev/null || true
-MARKER="$MARKER_DIR/$SESSION_ID"
+MARKER="$MARKER_DIR/$SESSION_KEY"
 STARTED_DIR="$HOME/.claude/state/cursor-session-started"
 mkdir -p "$STARTED_DIR" 2>/dev/null || true
 STARTED_MARKER="$STARTED_DIR/$SESSION_ID"
 
-is_reading_tool() {
+is_edit_class_tool() {
   case "$1" in
-    Read|Grep|Glob) return 0 ;;
+    Write|Edit|Delete|StrReplace|MultiEdit|NotebookEdit) return 0 ;;
     *) return 1 ;;
   esac
 }
 
-is_edit_class_tool() {
+is_keel_research_tool() {
   case "$1" in
-    Write|Edit|Delete) return 0 ;;
+    *keel*|*KEEL*) return 0 ;;
     *) return 1 ;;
   esac
 }
 
 is_keel_reading_command() {
   case "$1" in
-    "keel system-map"*|"keel recall"*|"keel doctor"*|"keel code-search"*|"keel observe"*|"keel workflow cockpit"*|"keel workflow status"*) return 0 ;;
+    "keel system-map"*|"keel recall"*|"keel doctor"*|"keel code-search"*|"keel observe"*|"keel memory"*|"keel workflow cockpit"*|"keel workflow status"*|"keel run -- keel "*) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -127,30 +130,33 @@ if [ ! -f "$STARTED_MARKER" ]; then
   : > "$STARTED_MARKER" 2>/dev/null || true
 fi
 
-# Reading tools satisfy the gate.
-if is_reading_tool "$TOOL_NAME"; then
-  : > "$MARKER" 2>/dev/null || true
+# STRICT: only keel research tools clear the shared marker (not plain Read).
+if is_keel_research_tool "$TOOL_NAME"; then
+  printf 'satisfied' > "$MARKER" 2>/dev/null || true
 fi
 
 # Shell tools running keel reading commands also satisfy the gate.
 if [ "$TOOL_NAME" = "Shell" ] && [ -n "$CMD" ]; then
   if is_keel_reading_command "$CMD"; then
-    : > "$MARKER" 2>/dev/null || true
+    printf 'satisfied' > "$MARKER" 2>/dev/null || true
   fi
 fi
 
-# Iron Law: deny edit-class tools until the gate is satisfied.
+# Iron Law: deny edit-class tools via Rust core (evidence-based; no ack-on-deny).
 if is_edit_class_tool "$TOOL_NAME"; then
-  if [ ! -f "$MARKER" ]; then
-    "$JQ_BIN" -n --arg msg "IRON LAW ENFORCED: Read first. Use Read/Grep or keel tools (system-map, recall, doctor, code-search) BEFORE editing. The iron law is enforced — you cannot skip it." '{
-      "permission": "deny",
-      "user_message": $msg,
-      "agent_message": $msg
-    }'
-    exit 0
-  fi
-  # Gate satisfied — record gate state via keel bridge pre-tool-use (non-blocking).
-  "$KEEL_BIN" bridge pre-tool-use --session "$SESSION_ID" --cwd "$CWD" --tool "$TOOL_NAME" >/dev/null 2>&1 || true
+  GATE=$("$KEEL_BIN" bridge pre-tool-use --session "$SESSION_ID" --cwd "$CWD" --tool "$TOOL_NAME" 2>/dev/null) || GATE=""
+  case "$GATE" in
+    KEEL_GATE_DENY*)
+      REASON=$(printf '%s' "$GATE" | sed '1d')
+      [ -z "$REASON" ] && REASON="IRON LAW ENFORCED (STRICT): Use a keel tool first (MCP system_map, recall, context_brief, skill_route, or keel doctor / code-search). Plain Read does not clear the gate."
+      "$JQ_BIN" -n --arg msg "$REASON" '{
+        "permission": "deny",
+        "user_message": $msg,
+        "agent_message": $msg
+      }'
+      exit 0
+      ;;
+  esac
 fi
 
 # --- Compaction reroute for Shell tools. ---

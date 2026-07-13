@@ -111,23 +111,20 @@ After implementation work, before claiming completion:
   cannot direct work on a defect they never learn exists. (See the decision note
   `decision-surface-out-of-scope-defects.md` in the project memory lane.)
 
-> **Default-on enforcement gates.** Two PostToolBatch gates are **on by
-> default** — they are the only model-independent backstop for the Iron Law,
-> since hooks cannot force a tool/Skill call but can inject a reminder (and,
-> opt-in, refuse to let a turn close) when a required artifact is missing. By
-> default each fires as a **non-blocking nudge**: the reminder is injected via
-> `hookSpecificOutput.additionalContext`, so you are told to act but the turn is
-> **not** halted.
-> - **Working-brief gate** (front of the law) — if a session changes code but no
->   working brief was written this session, the hook nudges once to write one
->   (`keel memory working-brief write --request "..." --acceptance-criteria "..."`,
->   which clears the gate). Set `CLAUDE_SKILLS_BRIEF_GATE=block` for the opt-in
->   hard stop, or `=off` to disable.
-> - **Review gate** (back of the law) — if a session changed code but recorded no
->   reviewer pass since the last edit, the hook nudges once to run a review
->   (invoke the `reviewer` skill, or run `keel review pre-pr`, which
->   clears the gate). Set `CLAUDE_SKILLS_REVIEW_GATE=block` for the opt-in hard
->   stop, or `=off` to disable.
+> **Default-on enforcement (Iron Law is not optional prose).**
+> - **PreToolUse edit gate (STRICT by default)** — edit-class tools are **denied**
+>   until this session has evidence of a **keel research tool** (`system_map`,
+>   `recall`, `context_brief`, `skill_route`/`skill_get`, `code_search`, or the
+>   matching `keel …` CLI). Plain Read/Grep does **not** clear it. Marker path:
+>   `~/.claude/state/iron-law-satisfied/<session>`. Set `KEEL_IRON_LAW_GATE=balanced`
+>   to accept host Read/Grep, or `=off` to disable.
+> - **PostToolBatch closeout gates** — working-brief and review gates default to
+>   **`block`** mode (imperative feed-forward via `additionalContext` when code
+>   changed without a brief / reviewer marker; Block fires up to 3 times per
+>   session, then advisory). Write a brief with
+>   `keel memory working-brief write --request "..." --acceptance-criteria "..."`.
+>   Clear review with the `reviewer` skill or `keel review pre-pr`. Opt-down with
+>   `CLAUDE_SKILLS_BRIEF_GATE=nudge` / `CLAUDE_SKILLS_REVIEW_GATE=nudge`, or `=off`.
 >
 > Each gate fires **at most `…_MAX_BLOCKS` time(s) per session (default 1)** via
 > a strictly-increasing counter — whether nudging or blocking — and then

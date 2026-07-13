@@ -130,7 +130,7 @@ The `preToolUse` matcher filters by tool **name** (regex): `Write|Edit|Delete|Mu
 
 ### Iron Law enforcement
 
-The Cursor adapter enforces keel's Iron Law — **read before editing** — using Cursor's native `preToolUse` `permission: "deny"` mechanism (the same enforcement the OpenCode/Codex/Pi adapters deliver). On the first edit-class tool call in a fresh conversation, the hook denies until the model has used a reading tool (Read/Grep) or a keel reading command (`keel system-map`, `keel recall`, `keel doctor`, `keel code-search`). Per-conversation satisfaction is tracked via an on-disk marker at `~/.claude/state/cursor-iron-law-satisfied/<conversation_id>`, cleaned on `sessionEnd`.
+The Cursor adapter enforces keel's Iron Law — **keel research before editing** (STRICT default) — using Cursor's native `preToolUse` `permission: "deny"` mechanism and `keel bridge pre-tool-use` (same Rust core as OpenCode/Codex/Pi/Claude). Edit-class tools are denied until the session has evidence of a keel research tool (`system_map` / `recall` / `context_brief` / `skill_*` / `code_search`, or matching `keel …` CLI). Plain Read/Grep does **not** clear the gate. Satisfaction is tracked at the shared path `~/.claude/state/iron-law-satisfied/<sanitized-session>`, cleaned on `sessionEnd`.
 
 ## Differences from Other Adapters
 

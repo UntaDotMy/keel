@@ -117,19 +117,31 @@ function clearMarker(sessionID: string): void {
 }
 
 // ---------------------------------------------------------------------------
-// Iron Law markers — track per-session reading-before-editing satisfaction
-// (mirrors the OpenCode adapter's iron-law enforcement via tool.execute.before)
+// Iron Law markers — SHARED with Rust core:
+// ~/.claude/state/iron-law-satisfied/<sanitized-session>
+// STRICT default: only keel research tools clear the marker (not plain Read).
 // ---------------------------------------------------------------------------
 
 const IRONLAW_DIR = path.join(
   os.homedir(),
   ".claude",
   "state",
-  "codex-iron-law-satisfied",
+  "iron-law-satisfied",
 );
 
+/** Match Rust `sanitize_memory_key`: lowercase alnum, other runs → single `-`. */
+function sanitizeSessionKey(sessionID: string): string {
+  const raw = (sessionID || "default").trim() || "default";
+  return (
+    raw
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "") || "default"
+  );
+}
+
 function ironLawMarkerPath(sessionID: string): string {
-  return path.join(IRONLAW_DIR, sessionID);
+  return path.join(IRONLAW_DIR, sanitizeSessionKey(sessionID));
 }
 
 function ensureIronLawDir(): void {
@@ -152,57 +164,65 @@ function ironLawSatisfied(sessionID: string): boolean {
 function markIronLawSatisfied(sessionID: string): void {
   ensureIronLawDir();
   try {
-    fs.writeFileSync(ironLawMarkerPath(sessionID), "", "utf-8");
-  } catch {
-    /* best-effort */
-  }
-}
-
-function clearIronLawMarker(sessionID: string): void {
-  try {
-    fs.rmSync(ironLawMarkerPath(sessionID), { force: true });
+    fs.writeFileSync(ironLawMarkerPath(sessionID), "satisfied", "utf-8");
   } catch {
     /* best-effort */
   }
 }
 
 // ---------------------------------------------------------------------------
-// Tool classification — Iron Law gate. Kept in sync with opencode/keel.ts so
-// the gate fires identically across hosts. Edit this set in both files.
+// Tool classification — Iron Law gate. Kept in sync with opencode/keel.ts.
 // ---------------------------------------------------------------------------
-
-const READING_TOOL_NAMES = new Set([
-  "read", "glob", "grep",
-  "lsp", "lsp_diagnostics", "lsp_goto_definition",
-  "lsp_find_references", "lsp_symbols", "lsp_prepare_rename",
-]);
 
 const EDIT_CLASS_TOOL_NAMES = new Set([
   "edit", "write", "multiedit", "notebookedit",
   "apply_patch", "str_replace", "patch",
 ]);
 
-const KEEL_READING_COMMANDS = [
-  "keel system-map",
-  "keel recall",
-  "keel doctor",
-  "keel code-search",
-  "keel observe",
-  "keel workflow cockpit",
-  "keel workflow status",
-];
-
-function isReadingTool(toolName: string): boolean {
-  return READING_TOOL_NAMES.has(toolName.toLowerCase());
-}
-
 function isEditClassTool(toolName: string): boolean {
   return EDIT_CLASS_TOOL_NAMES.has(toolName.toLowerCase());
 }
 
+function isKeelResearchTool(toolName: string): boolean {
+  const lower = toolName.toLowerCase();
+  if (
+    lower.includes("install") ||
+    lower.includes("uninstall") ||
+    lower.includes("self-replace") ||
+    lower.includes("self_replace")
+  ) {
+    return false;
+  }
+  return (
+    lower.includes("mcp__keel__") ||
+    lower.includes("keel__") ||
+    lower.startsWith("keel_") ||
+    lower === "keel"
+  );
+}
+
 function isKeelReadingCommand(command: string): boolean {
-  const c = command.trim();
-  return KEEL_READING_COMMANDS.some((k) => c.startsWith(k));
+  const trimmed = command.trim().toLowerCase();
+  const body = trimmed.startsWith("keel run -- ")
+    ? trimmed.slice("keel run -- ".length)
+    : trimmed;
+  if (!(body.startsWith("keel ") || body.includes("keel.exe"))) {
+    return false;
+  }
+  return (
+    body.includes("system-map") ||
+    body.includes("system_map") ||
+    body.includes("recall") ||
+    body.includes("doctor") ||
+    body.includes("code-search") ||
+    body.includes("code_search") ||
+    body.includes("skill") ||
+    body.includes("context") ||
+    body.includes("memory") ||
+    body.includes("status") ||
+    body.includes("help") ||
+    body.includes("brief")
+  );
 }
 
 // Codex PreToolUse deny output: a hookSpecificOutput with permissionDecision
@@ -331,12 +351,10 @@ function handlePreToolUse(input: CodexHookInput, isPre: boolean): string {
   const cwd = input.cwd ?? process.cwd();
   const toolName = input.tool ?? "";
 
-  // Reading tools satisfy the Iron Law gate and are always allowed.
-  if (isReadingTool(toolName)) {
+  // STRICT: only keel research tools clear the shared session marker.
+  if (isKeelResearchTool(toolName)) {
     markIronLawSatisfied(sessionID);
   }
-
-  // Shell tools running keel reading commands also satisfy the gate.
   if (isShellTool(toolName)) {
     const command = extractCommand(input.tool_input);
     if (command && isKeelReadingCommand(command)) {
@@ -344,18 +362,7 @@ function handlePreToolUse(input: CodexHookInput, isPre: boolean): string {
     }
   }
 
-  // Iron Law enforcement: edit-class tools are DENIED until the model has
-  // demonstrated reading behavior this session. This is the enforcement
-  // mechanism — not just text injection, but an actual block. Mirrors the
-  // OpenCode adapter's tool.execute.before deny-on-throw behavior.
-  if (isEditClassTool(toolName) && !ironLawSatisfied(sessionID)) {
-    return denyOutput(
-      "IRON LAW ENFORCED: Read first. You must use Read, Glob, Grep, or keel tools (system-map, recall, doctor, code-search) BEFORE editing. The iron law is enforced — you cannot skip it.",
-    );
-  }
-
-  // Fire-and-forget observation (PreToolUse). Codex hooks are synchronous, so
-  // we call observe with a short timeout and discard the result.
+  // Fire-and-forget observation (also marks iron-law in Rust on keel tools).
   const stdin = input.tool_input != null
     ? JSON.stringify(input.tool_input)
     : "{}";
@@ -363,10 +370,7 @@ function handlePreToolUse(input: CodexHookInput, isPre: boolean): string {
   if (input.failed) observeArgs.push("--failed");
   runBridgeWithStdin("observe", observeArgs, stdin);
 
-  // Iron Law edit-class gate for tools that have already satisfied reading.
-  // keel bridge pre-tool-use is the host-neutral edit gate (wired in
-  // wb-19f01d1d0a1). It returns "KEEL_GATE_DENY\n<reason>" to deny; on deny
-  // we block the edit via Codex's permissionDecision: "deny".
+  // Edit-class: Rust core is source of truth (evidence-based deny).
   if (isEditClassTool(toolName)) {
     const gate = runBridge("pre-tool-use", [
       "--session", sessionID,
@@ -377,7 +381,7 @@ function handlePreToolUse(input: CodexHookInput, isPre: boolean): string {
       const reason = gate.split("\n").slice(1).join("\n").trim();
       return denyOutput(
         reason ||
-          "keel Iron Law gate: read context + load a skill before editing.",
+          "keel Iron Law gate: call system_map/recall/context_brief before editing.",
       );
     }
   }

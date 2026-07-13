@@ -150,6 +150,18 @@ fn run_bridge_observe(
         }
     };
 
+    // Iron Law evidence (strict: keel research tools; balanced: host reads too).
+    // Mark even when observation write fails — gate satisfaction is independent.
+    if !failed {
+        let command = extract_command_from_observe_payload(&tool_input_json);
+        let session_id = if session.is_empty() {
+            "default"
+        } else {
+            session.as_str()
+        };
+        hook_lifecycle::maybe_mark_iron_law_from_parts(session_id, tool_name, command.as_deref());
+    }
+
     match observation::record_observation_from_parts(
         &claude_home,
         tool_name,
@@ -167,6 +179,30 @@ fn run_bridge_observe(
             0
         }
     }
+}
+
+/// Best-effort extract of a shell `command` field from bridge observe stdin.
+fn extract_command_from_observe_payload(payload: &str) -> Option<String> {
+    let trimmed = payload.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    // Full tool_input JSON object.
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        if let Some(cmd) = value.get("command").and_then(|v| v.as_str()) {
+            return Some(cmd.to_string());
+        }
+        if let Some(cmd) = value
+            .get("tool_input")
+            .and_then(|ti| ti.get("command"))
+            .and_then(|v| v.as_str())
+        {
+            return Some(cmd.to_string());
+        }
+        return None;
+    }
+    // Raw command string on stdin (some adapters send just the command).
+    Some(trimmed.to_string())
 }
 
 fn run_bridge_session_end(

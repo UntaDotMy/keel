@@ -711,35 +711,357 @@ fn run_hook_instructions(
 
 const IRON_LAW_GATE_ENV_VAR: &str = "KEEL_IRON_LAW_GATE";
 
-const IRON_LAW_GATE_DENIAL_REASON: &str =
-    "[keel] Iron Law gate: This is your first code edit this session. \
-        The Iron Law is NOT optional — it is a hard gate. Before retrying this edit, you MUST:\n\
-        1. Call keel_context_brief (or keel system_map) to read the workspace structure.\n\
-        2. Load any relevant skill via skill_route / skill_get.\n\
-        3. If editing existing code, trace ownership first (preserve-existing-flow).\n\
-        If you skip these steps, you are violating the Iron Law. Retry your edit after complying.";
+/// Shared satisfaction marker dir used by Claude PreToolUse, bridge hosts, and
+/// PostToolUse/observe (one source of truth across hosts).
+const IRON_LAW_SATISFIED_DIR: &str = "iron-law-satisfied";
 
-pub(crate) fn iron_law_gate_decision(session_id: &str) -> Option<&'static str> {
-    if std::env::var(IRON_LAW_GATE_ENV_VAR)
-        .map(|v| v.eq_ignore_ascii_case("off"))
-        .unwrap_or(false)
+/// Legacy one-shot acknowledge dir from the old "deny once then always allow"
+/// gate. Still checked for back-compat so in-flight sessions mid-upgrade are not
+/// re-blocked after they already cleared the old gate.
+const IRON_LAW_LEGACY_GATE_DIR: &str = "iron-law-gate";
+
+const IRON_LAW_GATE_DENIAL_STRICT: &str =
+    "[keel] Iron Law gate (STRICT): code edits are blocked until this session \
+        has evidence of a keel research tool. The Iron Law is NOT optional.\n\
+        Before retrying this edit you MUST (any one is enough):\n\
+        1. Call MCP `context_brief` or `system_map` (or `keel memory system-map` / \
+        `keel doctor`).\n\
+        2. Call MCP `recall` or `skill_route` / `skill_get` (or `keel memory recall`).\n\
+        3. Call MCP `code_search` (or `keel code-search search ...`).\n\
+        Plain Read/Grep alone does NOT clear this gate. After a keel tool runs, \
+        retry the edit. Set KEEL_IRON_LAW_GATE=balanced to accept any research tool, \
+        or =off to disable.";
+
+const IRON_LAW_GATE_DENIAL_BALANCED: &str =
+    "[keel] Iron Law gate: code edits are blocked until this session has research \
+        evidence. Prefer keel tools first:\n\
+        1. MCP `context_brief` / `system_map` / `recall` / `skill_route` (or \
+        matching `keel ...` CLI).\n\
+        2. Or a host Read/Grep/Glob of the owning file after you know the path.\n\
+        Retry the edit after researching. Set KEEL_IRON_LAW_GATE=off to disable.";
+
+/// Iron-law edit-gate mode. Default is **Strict** (keel tool required).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IronLawGateMode {
+    /// Disabled entirely.
+    Off,
+    /// Require keel MCP/CLI research evidence this session.
+    Strict,
+    /// Require any research evidence (keel tools OR host Read/Grep/Glob).
+    Balanced,
+}
+
+fn iron_law_gate_mode() -> IronLawGateMode {
+    match std::env::var(IRON_LAW_GATE_ENV_VAR)
+        .ok()
+        .as_deref()
+        .map(str::trim)
+        .map(|v| v.to_ascii_lowercase())
+        .as_deref()
     {
+        Some("off") | Some("0") | Some("false") | Some("no") => IronLawGateMode::Off,
+        Some("balanced") | Some("balance") | Some("any") => IronLawGateMode::Balanced,
+        // unset, "on", "strict", "true", typos → strict (fail closed toward enforcement)
+        _ => IronLawGateMode::Strict,
+    }
+}
+
+fn iron_law_satisfied_path(claude_home: &Path, session_id: &str) -> PathBuf {
+    let key = if session_id.trim().is_empty() {
+        "default".to_string()
+    } else {
+        sanitize_memory_key(session_id)
+    };
+    claude_home
+        .join("state")
+        .join(IRON_LAW_SATISFIED_DIR)
+        .join(key)
+}
+
+fn iron_law_legacy_path(claude_home: &Path, session_id: &str) -> PathBuf {
+    // Legacy files used the raw session_id (not sanitized). Keep that shape.
+    let name = if session_id.trim().is_empty() {
+        "default"
+    } else {
+        session_id
+    };
+    claude_home
+        .join("state")
+        .join(IRON_LAW_LEGACY_GATE_DIR)
+        .join(name)
+}
+
+/// Mark the session as iron-law satisfied (keel research evidence observed).
+/// Best-effort: failures are silent so a disk error never wedges a tool hook.
+pub(crate) fn mark_iron_law_satisfied(session_id: &str) {
+    let Ok(claude_home) = crate::runtime::resolve_claude_home("") else {
+        return;
+    };
+    let path = iron_law_satisfied_path(&claude_home, session_id);
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(&path, "satisfied");
+}
+
+/// Whether the session already has a satisfaction marker (or legacy clear).
+fn iron_law_marker_present(claude_home: &Path, session_id: &str) -> bool {
+    iron_law_satisfied_path(claude_home, session_id).exists()
+        || iron_law_legacy_path(claude_home, session_id).exists()
+}
+
+/// Substrings that identify a keel *research* tool name (MCP or host-neutral).
+/// Management/install tools are excluded so installing keel does not clear the gate.
+fn is_keel_research_tool_name(tool_name: &str) -> bool {
+    let lower = tool_name.to_ascii_lowercase();
+    // Namespaced MCP: mcp__keel__system_map, keel__system_map, etc.
+    let looks_keel = lower.contains("mcp__keel__")
+        || lower.contains("keel__")
+        || lower == "keel"
+        || lower.starts_with("keel_");
+    if !looks_keel {
+        return false;
+    }
+    // Exclude pure management surfaces.
+    if lower.contains("install")
+        || lower.contains("uninstall")
+        || lower.contains("self-replace")
+        || lower.contains("self_replace")
+        || (lower.contains("repair") && lower.contains("hook"))
+    {
+        return false;
+    }
+    // Prefer research-shaped names; also accept generic keel MCP tools that
+    // agents use to orient (status, doctor, cli, memory, skill_*, brief_*).
+    true
+}
+
+/// Host tools that count as research under Balanced mode only.
+fn is_host_research_tool_name(tool_name: &str) -> bool {
+    let lower = tool_name.to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "read"
+            | "glob"
+            | "grep"
+            | "search"
+            | "semanticsearch"
+            | "lsp_diagnostics"
+            | "lsp_goto_definition"
+            | "lsp_find_references"
+            | "lsp_symbols"
+            | "lsp_prepare_rename"
+            | "websearch"
+            | "web_search"
+            | "webfetch"
+            | "web_fetch"
+            | "context7"
+    ) || lower.contains("websearch")
+        || lower.contains("web_fetch")
+        || lower.contains("context7")
+}
+
+/// Shell tools that may carry a `keel ...` research command.
+fn is_shell_tool_name(tool_name: &str) -> bool {
+    matches!(
+        tool_name.to_ascii_lowercase().as_str(),
+        "bash" | "shell" | "sh" | "zsh" | "fish" | "powershell" | "pwsh" | "cmd"
+    )
+}
+
+/// Whether a shell command is a keel research/read surface (not install/mutate).
+pub(crate) fn is_keel_research_command(command: &str) -> bool {
+    let trimmed = command.trim().to_ascii_lowercase();
+    if trimmed.is_empty() {
+        return false;
+    }
+    // Strip common wrappers: keel run -- <cmd>, env prefixes left to contains checks.
+    let body = trimmed
+        .strip_prefix("keel run -- ")
+        .or_else(|| trimmed.strip_prefix("keel.exe run -- "))
+        .unwrap_or(trimmed.as_str());
+    let has_keel = body.starts_with("keel ")
+        || body.starts_with("keel.exe ")
+        || body.contains("\\keel.exe ")
+        || body.contains("/keel ")
+        || body.contains("\\keel ");
+    if !has_keel {
+        return false;
+    }
+    // Research / orientation subcommands.
+    const HITS: &[&str] = &[
+        "system-map",
+        "system_map",
+        "recall",
+        "doctor",
+        "code-search",
+        "code_search",
+        "skill-route",
+        "skill_route",
+        "skill-list",
+        "skill_list",
+        "skill-get",
+        "skill_get",
+        "context-brief",
+        "context_brief",
+        "memory status",
+        "memory recall",
+        "memory system-map",
+        "memory scope",
+        "working-brief",
+        "brief",
+        "status",
+        "help",
+        "workflow status",
+        "workflow cockpit",
+        "sprint status",
+        "sprint list",
+        "review pre-",
+        "gain",
+        "observe",
+        "hook list",
+        "hook diagnose",
+        "hook instructions",
+    ];
+    HITS.iter().any(|h| body.contains(h))
+}
+
+/// True when this tool call is evidence that clears the iron-law gate under `mode`.
+pub(crate) fn tool_satisfies_iron_law(
+    mode: IronLawGateMode,
+    tool_name: &str,
+    command: Option<&str>,
+) -> bool {
+    if mode == IronLawGateMode::Off {
+        return false;
+    }
+    if is_keel_research_tool_name(tool_name) {
+        return true;
+    }
+    if is_shell_tool_name(tool_name) {
+        if let Some(cmd) = command {
+            if is_keel_research_command(cmd) {
+                return true;
+            }
+        }
+    }
+    if mode == IronLawGateMode::Balanced && is_host_research_tool_name(tool_name) {
+        return true;
+    }
+    false
+}
+
+/// Extract a shell command string from a hook tool_input object when present.
+fn tool_input_command(input: &JsonDocument) -> Option<&str> {
+    input
+        .get("tool_input")
+        .and_then(|tool_input| tool_input.get("command"))
+        .and_then(JsonDocument::as_str)
+        .or_else(|| {
+            // Some hosts nest under `input.command`.
+            input
+                .get("input")
+                .and_then(|inner| inner.get("command"))
+                .and_then(JsonDocument::as_str)
+        })
+}
+
+/// If this PostToolUse/observe event is keel research evidence, mark the session.
+pub(crate) fn maybe_mark_iron_law_from_tool_event(input: &JsonDocument) {
+    let mode = iron_law_gate_mode();
+    if mode == IronLawGateMode::Off {
+        return;
+    }
+    let tool_name = input
+        .get("tool_name")
+        .and_then(JsonDocument::as_str)
+        .unwrap_or_default();
+    let command = tool_input_command(input);
+    if !tool_satisfies_iron_law(mode, tool_name, command) {
+        return;
+    }
+    let session_id = input
+        .get("session_id")
+        .and_then(JsonDocument::as_str)
+        .unwrap_or("default");
+    mark_iron_law_satisfied(session_id);
+}
+
+/// Mark from bridge observe (tool name + optional stdin command JSON / raw).
+pub(crate) fn maybe_mark_iron_law_from_parts(session_id: &str, tool_name: &str, command: Option<&str>) {
+    let mode = iron_law_gate_mode();
+    if mode == IronLawGateMode::Off {
+        return;
+    }
+    if tool_satisfies_iron_law(mode, tool_name, command) {
+        mark_iron_law_satisfied(session_id);
+    }
+}
+
+/// Scan today's tool-timings for keel (or balanced host) research tools.
+/// Fail-closed for the gate: returns false when timings are missing (no free pass).
+fn session_has_iron_law_evidence(claude_home: &Path, session_id: &str, mode: IronLawGateMode) -> bool {
+    if mode == IronLawGateMode::Off {
+        return true;
+    }
+    let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let path = claude_home
+        .join("state")
+        .join("tool-timings")
+        .join(format!("{date}.jsonl"));
+    let Ok(body) = fs::read_to_string(&path) else {
+        return false;
+    };
+    for line in body.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(row) = serde_json::from_str::<JsonDocument>(line) else {
+            continue;
+        };
+        if row.get("session_id").and_then(JsonDocument::as_str) != Some(session_id) {
+            continue;
+        }
+        let tool = row
+            .get("tool_name")
+            .and_then(JsonDocument::as_str)
+            .unwrap_or_default();
+        // Timings rows may not carry the shell command; tool name alone is enough
+        // for MCP keel tools. Shell keel commands rely on the live marker write.
+        if tool_satisfies_iron_law(mode, tool, None) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Decide whether to deny an edit-class tool. Returns `Some(reason)` to deny.
+///
+/// Evidence-based: does **not** write a satisfaction marker on deny. The marker
+/// is written only when PostToolUse/observe sees a qualifying research tool.
+pub(crate) fn iron_law_gate_decision(session_id: &str) -> Option<&'static str> {
+    let mode = iron_law_gate_mode();
+    if mode == IronLawGateMode::Off {
         return None;
     }
 
     let claude_home = crate::runtime::resolve_claude_home("").ok()?;
 
-    let gate_dir = claude_home.join("state").join("iron-law-gate");
-    let gate_file = gate_dir.join(session_id);
-
-    if gate_file.exists() {
+    if iron_law_marker_present(&claude_home, session_id) {
         return None;
     }
 
-    let _ = std::fs::create_dir_all(&gate_dir);
-    let _ = std::fs::write(&gate_file, "acknowledged");
+    // Recover if the marker write failed earlier but timings prove research ran.
+    if session_has_iron_law_evidence(&claude_home, session_id, mode) {
+        mark_iron_law_satisfied(session_id);
+        return None;
+    }
 
-    Some(IRON_LAW_GATE_DENIAL_REASON)
+    Some(match mode {
+        IronLawGateMode::Strict => IRON_LAW_GATE_DENIAL_STRICT,
+        IronLawGateMode::Balanced => IRON_LAW_GATE_DENIAL_BALANCED,
+        IronLawGateMode::Off => return None,
+    })
 }
 
 fn run_iron_law_gate(
@@ -976,6 +1298,10 @@ fn run_hook_post_tool_use(standard_error: &mut dyn Write) -> u8 {
             "keel post-tool-use: observation record failed: {error}"
         );
     }
+
+    // Iron Law evidence: mark session satisfied when a keel research tool
+    // (or balanced-mode host research tool) completes successfully.
+    maybe_mark_iron_law_from_tool_event(&input);
 
     if !is_edit_class_tool(tool_name) {
         return 0;
@@ -1610,7 +1936,9 @@ This contract governs **every project you work in**, not just keel itself.
 4. **Find the root cause.** Suspicion is a hypothesis, not a finding. Take the symptom as a starting point, trace it end-to-end against the running code with file:line evidence, and confirm the suspected target sits on that path before changing anything.
 5. **Preserve existing data.** Never remove or replace an existing field, column, output, or record to fit a new format — ADD alongside, and ASK before dropping anything the user did not name. Data loss in an edit is destructive like `DROP TABLE`. Autonomy covers reversible choices, never data deletion or a changed data contract; when a request could mean "add" or "replace", ask before acting.
 
-This is the **Iron Law** of keel. It is loaded into your context at SessionStart and applies to every prompt thereafter — if asked whether the Iron Law is in your context, the answer is yes: it is the four rules above.
+This is the **Iron Law** of keel. It is loaded into your context at SessionStart and applies to every prompt thereafter — if asked whether the Iron Law is in your context, the answer is yes: it is the rules above.
+
+**Hard enforcement:** PreToolUse **denies** edit-class tools until this session has used a **keel research tool** (`system_map` / `recall` / `context_brief` / `skill_route` / `skill_get` / `code_search`, or matching `keel …` CLI). Plain Read alone does not clear the gate (`KEEL_IRON_LAW_GATE=strict` default). Working-brief and review closeout gates default to hard feed-forward until satisfied.
 </EXTREMELY_IMPORTANT>
 
 ## Red Flags (rationalizations to ignore)
@@ -1726,25 +2054,36 @@ pub(crate) fn post_compact_context() -> String {
 
 /// Per-prompt research-first iron law.
 ///
-/// Compact by design: the schema lets us inject as much text as we want, but
-/// every byte lands per prompt and is paid as input tokens. The full
-/// bootstrap (skill catalog, Red Flags table, decision flow, four
-/// implementation-discipline pillars) is delivered once via SessionStart;
-/// this hook only restates the iron law, names the four pillars, advertises the
-/// always-available keel MCP tools (so the model reaches for
-/// `system_map`/`recall` instead of guessing about the repo or its memory),
-/// adds the understand-before-building rule (research the request before writing
-/// code — the lever that stops the model building the wrong thing), and the
-/// one-line parallel-fan-out independence test so they stay top-of-mind on each
-/// turn. Body weight is roughly 320 tokens before `memory_scope_summary()` —
-/// within budget for a per-prompt injection but expensive enough that adding
-/// more text needs a deliberate reason.
-/// Per-prompt iron-law base text (no skill match, no compression hint).
+/// Compact by design: every byte lands per prompt as input tokens. The full
+/// bootstrap rides SessionStart; this hook **always** restates the mandatory
+/// contract so it cannot drop out of the working window:
+///   * lead with FOLLOW THE IRON LAW + USE KEEL (not optional prose)
+///   * research-first + skill invoke + MCP tools
+///   * memory loop: recall → brief → save durable learnings → learn
+///   * discipline pillars + parallel fan-out guard
+///
 /// Kept separate so the bridge `user-prompt` subcommand can compose the full
 /// per-prompt context from flat fields without needing stdin parsing.
 fn user_prompt_submit_core() -> String {
     format!(
-        "Research-first: trust the codebase, not your knowledge base. Read SYSTEM_MAP and the owning module before claiming behavior. Invoke any relevant skill via the Skill tool BEFORE responding — even a 1% chance it applies means use it. Native keel MCP tools are always available — prefer them over guessing: `system_map` returns the workspace structural map (call it once per turn when you lack the layout — e.g. \"what is this project\" or \"where does X live\" — then reuse the result; call it again only if you have since created, moved, or deleted files and the in-context map is stale), `recall` runs full-text search over your saved memories and working briefs (call it once per turn when you need a prior decision or learning — then reuse the result; call it again only if you wrote new memory this turn and need to confirm it landed), and `run_command` routes noisy shell output through the compaction proxy. No tool-call loops: re-calling `system_map` or `recall` with no intervening change is a loop — re-read the result already in your context. Memory-first navigation: if SYSTEM_MAP, recall, or a working brief already names the file or module, go there — do not `ls`/list the whole tree or broad-scan the repo to rediscover known paths. Understand before building: restate what the request actually asks, confirm the user story, and research what is genuinely needed before writing code — no guessing, no assuming, no building against an imagined spec. Request fidelity: implement only what the user asked; do not invent features, refactors, files, APIs, or \"improvements\" outside the request. Ask when unclear: if the request is unclear, conflicting, incomplete, or you fear drift into inventing scope, stop and ask the user a concrete question before coding — never decide silently and never \"just pick one and go.\" Never trust knowledge-base alone: training data is not this project's structure, stories, or implementation path; read SYSTEM_MAP, owning files, and the user's stories here — each project has its own conventions, nothing is hardcoded in your memory as truth for this repo. Researching first is what stops you building the wrong thing; the cost of an hour's research is always less than the cost of shipping the wrong feature. Code comments: never summarize what the code does; write contracts only (`@param`/`@returns`/`# Errors`/`// why:`) or omit. Preserve existing data: never remove or replace a field, column, output, or record to fit a new format — ADD alongside and ASK before dropping anything the user did not name; data loss in an edit is destructive, and autonomy covers reversible choices, not data deletion. Find the root cause, not just the surface symptom: suspicion is a hypothesis, not a finding — trace the symptom end-to-end with file:line evidence and confirm the suspect is on that path before changing it. No assumptions. No jumping from \"this may be the case\" to a patch. Implementation discipline applies on every code-touching turn — Think Before Coding (state assumptions, deep-dive any suspected target before changing it), Simplicity First (minimum code, no speculative features or abstractions), Surgical Changes (every changed line traces to the request), Goal-Driven Execution (reproduce or trace the symptom before naming a root cause; turn the task into a verifiable goal before coding). Parallel fan-out: only batch agents in the same message when all four hold — no shared inputs, no shared file or git-index writes, no need to cancel/steer one based on another's interim result, and the work fits the current task scope. If any check fails, dispatch sequentially. {}",
+        "FOLLOW THE IRON LAW. USE KEEL. These are mandatory on every turn — not optional reminders.\n\
+         \n\
+         Iron Law (every turn):\n\
+         1. Research-first: trust the codebase, not your knowledge base. Read SYSTEM_MAP and the owning module before claiming behavior.\n\
+         2. Use keel before guessing: native keel MCP tools are always available — prefer them over ad-hoc shell or invented paths: `system_map` (workspace layout — call once per turn when you lack the map, then reuse; call again only if you created/moved/deleted files), `recall` (prior decisions/learnings — call once when you need memory, then reuse; call again only if you wrote new memory this turn), `context_brief` (iron law + skill catalog + memory health + newest brief — call first when starting a task), `skill_route`/`skill_get` (pick and load skills), `run_command` (noisy shell through compaction), `code_search` (live tree search). CLI forms (`keel memory …`, `keel doctor`, `keel code-search …`) count the same. No tool-call loops: re-calling system_map/recall with no intervening change is a loop — re-read context.\n\
+         3. Invoke any relevant skill via the Skill tool BEFORE responding — even a 1% chance it applies means use it.\n\
+         4. Understand before building: restate what the request actually asks, confirm the user story, and research what is genuinely needed before writing code — no guessing, no assuming, no building against an imagined spec. Researching first is what stops you building the wrong thing.\n\
+         5. Find the root cause, not just the surface symptom: suspicion is a hypothesis, not a finding — trace the symptom end-to-end with file:line evidence and confirm the suspect is on that path before changing it. No assumptions. No jumping from \"this may be the case\" to a patch.\n\
+         6. Edit gate (STRICT): code edits are blocked until this session used a keel research tool (system_map/recall/context_brief/skill_*/code_search or matching keel CLI). Plain Read alone does not clear it.\n\
+         \n\
+         Memory & learning (part of the Iron Law — do not skip):\n\
+         - Recall first: before claiming what you remember, decided earlier, or how this project works, call `recall` (or `keel memory recall`). Memory-first navigation: if SYSTEM_MAP, recall, or a working brief already names the file or module, go there — do not `ls`/list the whole tree or broad-scan the repo to rediscover known paths.\n\
+         - Working brief: on non-trivial work, write or update a brief BEFORE coding (`brief_create` / `keel memory working-brief write --request \"...\" --acceptance-criteria \"...\"`) so completion can be reconciled.\n\
+         - Save durable learnings: when you discover a decision, root cause, convention, or fix worth keeping across sessions, write it now — do not wait for \"later\" or SessionEnd. Use `keel memory research-cache`, working-brief updates, or the project's memory write path. Compaction wipes chat; disk does not.\n\
+         - Learn loop: after non-trivial solved problems, capture with compounding-knowledge / memory-consolidation patterns; instincts and learned skills promote at session end — feed them by recording observations (hooks do this on tool use) and by writing explicit notes when something should stick.\n\
+         - Before close: `keel memory completion-gate check` when claiming done; run reviewer / `keel review pre-pr` for non-trivial code.\n\
+         \n\
+         Request fidelity: implement only what the user asked; do not invent features, refactors, files, APIs, or \"improvements\" outside the request. Ask when unclear: if the request is unclear, conflicting, incomplete, or you fear drift into inventing scope, stop and ask the user a concrete question before coding — never decide silently and never \"just pick one and go.\" Never trust knowledge-base alone: training data is not this project's structure, stories, or implementation path; read SYSTEM_MAP, owning files, and the user's stories here. Code comments: never summarize what the code does; write contracts only (`@param`/`@returns`/`# Errors`/`// why:`) or omit. Preserve existing data: never remove or replace a field, column, output, or record to fit a new format — ADD alongside and ASK before dropping anything the user did not name. Implementation discipline applies on every code-touching turn — Think Before Coding, Simplicity First, Surgical Changes, Goal-Driven Execution. Parallel fan-out: only batch agents in the same message when all four hold — no shared inputs, no shared file or git-index writes, no need to cancel/steer one based on another's interim result, and the work fits the current task scope. If any check fails, dispatch sequentially. {}",
         memory_scope_summary()
     )
 }
@@ -2383,7 +2722,10 @@ pub(crate) fn gate_status_rows() -> Vec<GateStatusRow> {
 /// `…_MAX_BLOCKS` env var always overrides this.
 fn default_max_blocks_for(mode: GateMode) -> u64 {
     match mode {
+        // Escalate needs 2 (nudge then block). Block defaults to 3 so harder
+        // closeout keeps insisting a few times before falling to advisory.
         GateMode::Escalate => 2,
+        GateMode::Block => 3,
         _ => GATE_DEFAULT_MAX_BLOCKS,
     }
 }
@@ -2443,12 +2785,13 @@ fn gate_mode(env_var: &str) -> GateMode {
 /// Review-gate behavior. Precedence: an explicit `CLAUDE_SKILLS_REVIEW_GATE`
 /// wins (operator escape hatch); otherwise the harness userConfig
 /// `review_strictness` (`advisory`→Nudge, `strict`→Block, `off`→Off); otherwise
-/// the default `Escalate` (warn-once-then-block).
+/// the default **`Block`** (harder closeout: imperative feed-forward until the
+/// reviewer marker exists or the per-session cap is spent).
 fn review_gate_mode() -> GateMode {
     if let Ok(value) = std::env::var(REVIEW_GATE_ENV_VAR) {
         return gate_mode_value(&value);
     }
-    user_config_review_strictness().unwrap_or(GateMode::Escalate)
+    user_config_review_strictness().unwrap_or(GateMode::Block)
 }
 
 /// `gate_mode` split out so a value already read from a specific env var can be
@@ -2730,10 +3073,18 @@ const BRIEF_GATE_MAX_BLOCKS_ENV_VAR: &str = "CLAUDE_SKILLS_BRIEF_GATE_MAX_BLOCKS
 /// the generous side is deliberate: the gate fails open toward NOT blocking.
 const BRIEF_GATE_SESSION_GRACE_MS: u64 = 60_000;
 
-/// Working-brief gate behavior. Default `Nudge`; `CLAUDE_SKILLS_BRIEF_GATE=block`
-/// restores the hard stop; `=off` (or `0`/`false`/`no`) disables it entirely.
+/// Working-brief gate behavior. Default **`Block`** (harder closeout: imperative
+/// feed-forward when code changed with no working brief). Opt-down with
+/// `CLAUDE_SKILLS_BRIEF_GATE=nudge` or `=escalate`; `=off` disables.
 fn brief_gate_mode() -> GateMode {
-    gate_mode(BRIEF_GATE_ENV_VAR)
+    match std::env::var(BRIEF_GATE_ENV_VAR) {
+        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "escalate" => GateMode::Escalate,
+            other => gate_mode_value(other),
+        },
+        // Unset → Block (stricter than the generic gate_mode default of Escalate).
+        Err(_) => GateMode::Block,
+    }
 }
 
 fn brief_gate_max_blocks() -> u64 {
