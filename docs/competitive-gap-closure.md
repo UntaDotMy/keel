@@ -93,12 +93,12 @@ below was implemented and verified with `cargo build` + `cargo test --workspace`
    `utility/memory_families.rs` module:
    - `orchestration task begin|progress|complete|list` and `orchestration checkpoint`
      (JSONL task ledger + snapshot), in `utility/memory.rs`.
-   - `memory|memoriesv2 research-cache|maintenance|agent-registry|agent-packets|loop-guard|entity|graph|retrieve|status`.
+   - `memory research-cache|maintenance|agent-registry|agent-packets|loop-guard|entity|graph|retrieve|status`.
    The two command groups are isolated on disk (`<group>/<family>/`). `memory
    report` now aliases the family status summary, `memory index` rebuilds the
    FTS5 recall index, and `memory hook` redirects to the real `keel
    hook` lifecycle surface (it was never a memory concept).
-4. **Learning loop (ECC Instincts-style).** `memory|memoriesv2 instincts
+4. **Learning loop (ECC Instincts-style).** `memory instincts
    record|reinforce|penalize|list|promote` in `memory_families.rs`:
    confidence-scored patterns keyed by trigger that reinforce/penalize over time
    and promote (optionally writing a markdown digest) once they meet a confidence
@@ -373,11 +373,11 @@ N = absent.
 
 **Where we still lose (honest), updated after the breadth + prose pass:**
 - **Cross-harness depth** — every comparator runs deeply on Codex/Cursor/Gemini
-  as first-class targets. keel is Claude Code-primary with lighter adapter
-  support for OpenCode, Codex CLI, Cursor (static rules), and Pi Agent (static
-  rules + MCP). The adapters exist (see README § Cross-Agent Adapters) but are
-  shallower than the Claude Code integration — no full lifecycle hooks on the
-  non-primary targets. This is a depth gap, not a presence gap.
+  as first-class targets. keel is Claude Code-primary with bridge adapters for
+  OpenCode, Codex CLI, Cursor (rules + hooks + MCP), and Pi Agent (rules + hooks
+  + MCP). The adapters exist (see README § Cross-Agent Adapters) but are
+  shallower than the Claude Code integration on some hosts (detection/install
+  depth, host API limits). This is a depth gap, not a presence gap.
 - ~~RTK filter breadth~~ **(closed this pass).** Two real defects were found and
   fixed, not just breadth added:
   1. The PreToolUse auto-rewrite gate (`is_supported_noisy_command`) had drifted
@@ -645,7 +645,7 @@ tests:
 ## Remaining work (deliberately out of scope)
 
 - **Cross-harness adapter depth.** keel ships adapters for OpenCode, Codex CLI,
-  Cursor (static rules), and Pi Agent (static rules + MCP), but Claude Code is
+  Cursor (rules + hooks + MCP), and Pi Agent (rules + hooks + MCP), but Claude Code is
   the only target with full lifecycle hooks and deep integration. Every
   comparator ships deeper integration across more providers. Closing the
   depth gap on existing adapters (or adding new ones) is a distribution

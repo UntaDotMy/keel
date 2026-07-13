@@ -23,12 +23,12 @@
 
 - `memory-product-gap-vs-memory-product-comparator`
   - [todo.md](../../../todo.md)
-  - [docs/memoriesv2-long-term-architecture.md](../../memoriesv2-long-term-architecture.md)
+  - [docs/memory-families-usage.md](../../memory-families-usage.md)
   - [docs/open-source-memory-patterns.md](../../open-source-memory-patterns.md)
 
 ## Indexing gap
 
 - `indexing-gap-vs-indexing-comparator`
   - [todo.md](../../../todo.md)
-  - [docs/memoriesv2-long-term-architecture.md](../../memoriesv2-long-term-architecture.md)
+  - [docs/code-search-demo-and-gap-map.md](../../code-search-demo-and-gap-map.md)
   - [docs/benchmark-comparison-scorecard.md](../../benchmark-comparison-scorecard.md)

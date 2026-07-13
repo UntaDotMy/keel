@@ -41,7 +41,7 @@
       "Confirm the scoped job is 100% complete for the active layer before advancing or closing, not just partially green.",
       "Confirm every applicable rung in the mandatory test ladder passed in order, and no required rung is being waived without explicit justification.",
       "Confirm the fix changes the authoritative owner or transition contract, not only one suspicious consumer branch.",
-      "Confirm the workflow memory writes land in the writable second-layer memoriesv2 store, not only in transient chat context."
+      "Confirm the workflow memory writes land in the unified durable memory store (keel memory / ~/.claude/memories), not only in transient chat context."
     ]
   },
   "rules": [

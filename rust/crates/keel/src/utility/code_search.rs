@@ -95,8 +95,9 @@ fn run_code_search_search(
 fn search_files_for_query(root: &Path, query: &str, path_filter: &str, matches: &mut Vec<String>) {
     let mut candidates = Vec::new();
     collect_search_candidates(root, &mut candidates);
+    let normalized_filter = normalize_path_filter(path_filter);
     for path in candidates {
-        if !path_filter.is_empty() && !path.to_string_lossy().contains(path_filter) {
+        if !path_matches_filter(&path, root, &normalized_filter) {
             continue;
         }
         let text = match fs::read_to_string(&path) {
@@ -118,6 +119,22 @@ fn search_files_for_query(root: &Path, query: &str, path_filter: &str, matches: 
             }
         }
     }
+}
+
+/// Normalize path filters so `rust/crates/keel` matches Windows `rust\crates\keel`.
+fn normalize_path_filter(path_filter: &str) -> String {
+    path_filter.replace('\\', "/")
+}
+
+/// Cross-platform path filter: compare with `/` separators against relative and absolute forms.
+fn path_matches_filter(path: &Path, root: &Path, normalized_filter: &str) -> bool {
+    if normalized_filter.is_empty() {
+        return true;
+    }
+    let relative = path.strip_prefix(root).unwrap_or(path);
+    let relative_norm = relative.to_string_lossy().replace('\\', "/");
+    let absolute_norm = path.to_string_lossy().replace('\\', "/");
+    relative_norm.contains(normalized_filter) || absolute_norm.contains(normalized_filter)
 }
 
 fn collect_search_candidates(root: &Path, candidates: &mut Vec<PathBuf>) {
@@ -168,6 +185,7 @@ fn should_skip_search_entry(name: &str, path: &Path) -> bool {
                 | "env"
                 | "vendor"
                 | "target"
+                | "target-test"
                 | ".gradle"
                 | "bin"
                 | "obj"
@@ -183,6 +201,9 @@ fn should_skip_search_entry(name: &str, path: &Path) -> bool {
                 | ".next"
                 | ".nuxt"
                 | ".cache"
+                // Local research / comparison clones (gitignored, not product source).
+                | "hermes-agent"
+                | "karpathy-skills-cmp"
         )
     } else {
         name.ends_with(".log")
@@ -235,4 +256,72 @@ fn is_probably_binary(path: &Path) -> bool {
 
 fn is_help_argument(argument: &str) -> bool {
     argument == "--help" || argument == "-h" || argument == "help"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn path_filter_matches_forward_and_backslash_forms() {
+        let root = PathBuf::from("workspace");
+        let path = root
+            .join("rust")
+            .join("crates")
+            .join("keel")
+            .join("src")
+            .join("main.rs");
+        assert!(path_matches_filter(
+            &path,
+            &root,
+            &normalize_path_filter("rust/crates/keel")
+        ));
+        assert!(path_matches_filter(
+            &path,
+            &root,
+            &normalize_path_filter(r"rust\crates\keel")
+        ));
+        assert!(!path_matches_filter(
+            &path,
+            &root,
+            &normalize_path_filter("docs/only")
+        ));
+    }
+
+    #[test]
+    fn normalize_path_filter_unifies_separators() {
+        assert_eq!(
+            normalize_path_filter(r"rust\crates\keel"),
+            "rust/crates/keel"
+        );
+        assert_eq!(
+            normalize_path_filter("rust/crates/keel"),
+            "rust/crates/keel"
+        );
+    }
+
+    #[test]
+    fn skip_list_covers_research_clones() {
+        let root =
+            std::env::temp_dir().join(format!("keel-code-search-skip-{}", std::process::id()));
+        // Best-effort cleanup of a prior crashed run; ignore missing dir.
+        fs::remove_dir_all(&root).ok();
+        fs::create_dir_all(root.join("hermes-agent")).expect("create hermes-agent");
+        fs::create_dir_all(root.join("karpathy-skills-cmp")).expect("create karpathy");
+        fs::create_dir_all(root.join("target-test")).expect("create target-test");
+        assert!(should_skip_search_entry(
+            "hermes-agent",
+            &root.join("hermes-agent")
+        ));
+        assert!(should_skip_search_entry(
+            "karpathy-skills-cmp",
+            &root.join("karpathy-skills-cmp")
+        ));
+        assert!(should_skip_search_entry(
+            "target-test",
+            &root.join("target-test")
+        ));
+        fs::remove_dir_all(&root).expect("cleanup temp skip-list fixture");
+    }
 }

@@ -109,9 +109,9 @@ Use a human-style engineering analogy:
 
 - **working memory** = active brief, current files, immediate validation target
 - **workspace memory** = shared repo notes keyed by workspace slug
-- **workstream memory** = focused branch, feature, or task notes under `~/.claude/memories/workspaces/<workspace-slug>/workstreams/<workstream-key>/` and mirrored second-layer notes under `~/.claude/memoriesv2/workspaces/<workspace-slug>/workstreams/<workstream-key>/`
-- **role memory** = reviewer, worker, architect, or other role-local notes under scoped role or lane folders, with memoriesv2 lanes used for reusable second-layer retrieval when available
-- **agent-instance memory** = one bounded lane under the scoped workstream or memoriesv2 lane path so reused sub-agents keep local context without loading every same-role note
+- **workstream memory** = focused branch, feature, or task notes under `~/.claude/memories/workspaces/<workspace-slug>/workstreams/<workstream-key>/`
+- **role memory** = reviewer, worker, architect, or other role-local notes under scoped role or lane folders in the unified memory layout
+- **agent-instance memory** = one bounded lane under the scoped workstream so reused sub-agents keep local context without loading every same-role note
 - **episodic memory** = rollout summaries and recent task outcomes
 - **durable memory** = indexed lessons and persistent user preferences
 - **research cache** = freshness-aware reusable findings shared across agents in the same workspace
@@ -152,9 +152,9 @@ Use the smallest acceptable step for classification, routing, candidate filterin
 - `AGENTS.md` requires a context retrieval ladder before broad context loading
 - The Rust-native `keel install` command injects the shared execution-policy lines, including the cache-first research reuse gate, into `~/.claude/config.toml`
 - The Rust-native `keel install` command scaffolds workspace, workstream, role, agent-instance, research-cache, archive, and report directories under `~/.claude/memories/`
-- `keel code-search status|index|search|demo|reset` provides a native local retrieval surface with incremental lineage and an honest shared demo path so agents can search the repo before widening to full-file reads
+- `keel code-search search` provides a native local **lexical** retrieval surface so agents can search the repo before widening to full-file reads (path filters accept `/` and `\`; there is no `index|demo|status|reset` subcommand)
 - `keel memory scope resolve` resolves scoped search order and write targets for the active workspace
-- `keel memoriesv2 scope resolve` proves where the mirrored second-layer workspace, workstream, lane, graph, and hook artifacts live
+- `keel memory scope resolve` proves where the unified workspace, workstream, lane, and reference artifacts live
 - `keel memory research-cache record|lookup|stale|reward|list` provides shared record, freshness-aware lookup, stale/reward marking, and listing for reusable research (scoped per command group on disk)
 - `keel memory report` is implemented as an alias for `keel memory status` — a compact per-family record-count summary. The `memory-status-reporter` skill produces the richer human-readable narrative status report on top of the scoped files; use `memory report`/`status` for the structured family snapshot.
 - `README.md` documents the setup and operational workflow

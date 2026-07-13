@@ -2,7 +2,7 @@
 
 - Audit date: 2026-04-09
 - Audited repo: `UntaDotMy/keel` at `6832b0e70bd76861c3cdf5db4883427783dc7f3e`
-- Evidence sources: `README.md`, `todo.md`, `docs/benchmark-comparison-scorecard.md`, `docs/memoriesv2-long-term-architecture.md`, `docs/open-source-memory-patterns.md`, and anonymized peer-audit snapshots for runtime-shell, workflow-teaching, memory-product, and indexing comparator classes.
+- Evidence sources: `README.md`, `todo.md`, `docs/benchmark-comparison-scorecard.md`, `docs/memory-families-usage.md`, `docs/open-source-memory-patterns.md`, and anonymized peer-audit snapshots for runtime-shell, workflow-teaching, memory-product, and indexing comparator classes.
 
 ## Scoring rule
 
@@ -28,6 +28,6 @@ No single overall /10 is claimed because the comparison is intentionally apples-
 ## Main findings
 
 - The current growth path is not more governance prose. The real gaps are operator shell polish, phase-teaching ergonomics, memory recall depth, and indexing depth.
-- `docs/memoriesv2-long-term-architecture.md` already frames the indexing comparator class as the target shape for local incremental indexing and lineage, but that posture is still roadmap, not shipped parity.
+- `docs/memory-families-usage.md` already frames the indexing comparator class as the target shape for local incremental indexing and lineage, but that posture is still roadmap, not shipped parity.
 - The current public workflow-teaching comparator used for this audit is anonymized by capability class so future benchmark claims stay honest without hardcoded project names.
 - `keel` should protect its current strength: proof and closeout discipline already beats the workflow peers. The roadmap should extend that advantage into daily UX, memory quality, and indexing depth rather than weaken it.

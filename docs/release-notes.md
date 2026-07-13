@@ -40,4 +40,4 @@ That means each published release note has:
 - [Compatibility matrix](./compatibility-matrix.md)
 - [Benchmark and demo suite](./benchmark-suite.md)
 - [README](../README.md)
-- [Implementation roadmap](./implementation-roadmap.md)
+- Implementation direction: see `docs/competitive-gap-closure.md` and working briefs

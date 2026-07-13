@@ -252,10 +252,11 @@ context window. To keep them aligned with the same research-first contract, ever
 form so subagents do not fall back to memory-based defaults.
 
 - `software-development-life-cycle`, `web-development-life-cycle`,
-  `mobile-development-life-cycle`, `backend-and-data-architecture`,
-  `cloud-and-devops-expert`, `qa-and-automation-engineer`,
-  `security-and-compliance-auditor`, `git-expert`, `preserve-existing-flow`,
-  `reviewer`, `ui-design-systems-and-responsive-interfaces`,
+  `mobile-development-life-cycle`, `dart-and-flutter-expert`,
+  `backend-and-data-architecture`, `cloud-and-devops-expert`,
+  `qa-and-automation-engineer`, `security-and-compliance-auditor`,
+  `git-expert`, `preserve-existing-flow`, `reviewer`,
+  `ui-design-systems-and-responsive-interfaces`,
   `ux-research-and-experience-strategy`, `memory-status-reporter`,
   `api-contract-design`, `react-performance-audit`,
   `postgres-migration-safety`, `stripe-integration`,
@@ -284,7 +285,7 @@ Each command file maps only to commands that actually ship in the Rust runtime.
 
 - `/keel:workflow [route|start|cockpit|finish] <args>` — drive a proof-first workstream over the JSONL ledger.
 - `/keel:review [pre-commit|pre-pr|gates] [base-ref]` — run the native review gates on the current diff.
-- `/keel:recall <terms>` — FTS5 search over durable memory (working briefs, system maps, memoriesv2).
+- `/keel:recall <terms>`: FTS5 search over durable memory (working briefs, system maps, memories).
 - `/keel:gain [since]` — report command-output compaction token savings.
 - `/keel:sprint [plan|status|advance|review|list] [story-id]` — drive a Scrum-style sprint loop over confirmed user stories (fail-closed: loops until every story is Done).
 - `/keel:user-story [lint] [file-path]` — validate user stories against strict Agile/Jira format (Connextra + Gherkin + INVEST).
@@ -298,7 +299,7 @@ matcher or raw CLI. They never invoke planned-but-unimplemented commands.
 
 - Tool `context_brief` (full name `mcp__keel__context_brief`) — **call this first when you start a session or task.** One call returns the iron law, the full installed skill catalog (name + when_to_use), durable-memory health, and the newest working brief. This is how you become aware of what the toolkit offers when no skill loaded automatically. After reading it, route with `skill_route`, load with `skill_get`, and reach anything else through `cli`.
 - Tool `system_map` (full name `mcp__keel__system_map`) — **call this before any claim about the current repo's structure or layout** ("what is this project", "how is this organized", "where does X live") instead of guessing or spelunking files blind. Returns the workspace SYSTEM_MAP.md (auto-refreshed copy preferred, freshly rendered fallback).
-- Tool `recall` (full name `mcp__keel__recall`) — **call this before claiming what you remember or previously learned.** Full-text search over `~/.claude/memories`, `memoriesv2`, `working-briefs` via the FTS5 index. Same code path as `keel memory recall`.
+- Tool `recall` (full name `mcp__keel__recall`): **call this before claiming what you remember or previously learned.** Full-text search over `~/.claude/memories`, `working-briefs`, and related lanes via the FTS5 index. Same code path as `keel memory recall`.
 - Tool `run_command` (full name `mcp__keel__run_command`) — run a noisy shell command through the proxy capture+compaction pipeline so the compacted output lands in context instead of the raw stream. Prefer it for test/build/lint/log/search commands.
 - Tool `recall_status` (full name `mcp__keel__recall_status`) — recall index health snapshot (document count, schema version, last-sync timestamp).
 - Tool `skill_route` (full name `mcp__keel__skill_route`) — **the on-demand equivalent of the per-prompt skill router.** Pass a prompt; get the single distinctive skill match plus a bounded inline brief of its guidance. Use this when the lifecycle hook that normally injects the brief did not fire (it is unreliable on some platforms) or whenever you are unsure which skill applies.
@@ -329,9 +330,9 @@ Your working memory only lives in the current context window. Anything you want 
 | `keel memory working-brief write` | `~/.claude/working-briefs/<id>.json` | starting non-trivial work. Capture the user's request, acceptance criteria, and the files you expect to touch *before* coding so completion can be reconciled against it. Update with `working-brief write` again as scope shifts. |
 | `keel memory completion-gate check` | nothing (probe-only) | before claiming a task complete. Returns the gate's verdict; failures point at the requirement that has no evidence yet. |
 
-Beyond the four writers above, these `keel memory <verb>` arms are implemented (under both `memory` and `memoriesv2`): `research-cache`, `maintenance`, `agent-registry`, `agent-packets`, `loop-guard`, `entity`, `graph`, `retrieve`, `instincts`, and `status`. `report` is an alias for `status`, and `index` rebuilds the FTS5 recall index — both work. The `orchestration` group adds `task begin|progress|complete|list` and `checkpoint`. The only `memory` verb that does not run is `hook`: it exits with a pointer to `keel hook install|list|instructions|diagnose`, which owns the harness lifecycle hooks. Do not pretend a command exists by trying it; check the dispatcher in `rust/crates/keel/src/utility/memory.rs` (and `memory_families.rs`) if you are unsure.
+Beyond the four writers above, these `keel memory <verb>` arms are implemented on the **single unified memory surface**: `research-cache`, `maintenance`, `agent-registry`, `agent-packets`, `loop-guard`, `entity`, `graph`, `retrieve`, `instincts`, `status`, and `consolidate` (family-directory status scan: counts/previews, not a merge). `report` is an alias for `status`, and `index` rebuilds the FTS5 recall index; both work. `working-brief record-summary` and `completion-gate record-requirement` are implemented. The `orchestration` group adds `task begin|progress|complete|list` and `checkpoint`. The only `memory` verb that does not run is `hook`: it exits with a pointer to `keel hook install|list|instructions|diagnose`, which owns the harness lifecycle hooks. There is no second memory CLI group; do not invent dual command groups. Check `keel help advanced` or `rust/crates/keel/src/utility/memory/` if unsure.
 
-**Relationship to the harness's native Auto memory.** Recent the harness ships its own *Auto memory* — notes the model writes itself to `~/.claude/projects/<project>/memory/MEMORY.md` based on your corrections, loaded automatically each session. The two are complementary, not competing: native Auto memory is *passive* (the model decides what to jot, machine-local, per-repo), while keel's surfaces above are *explicit and structured* — a deterministic SYSTEM_MAP, reconcilable working briefs, a completion gate, an FTS5-searchable recall index, and the durable `memoriesv2` families. Use native Auto memory for incidental learnings; use these commands when you need a structured artifact that survives compaction and can be reconciled against the request. Do not duplicate the same fact into both.
+**Relationship to the harness's native Auto memory.** Recent the harness ships its own *Auto memory* (notes the model writes to `~/.claude/projects/<project>/memory/MEMORY.md`). The two are complementary: native Auto memory is passive and machine-local; keel's unified `memory` surface is explicit and structured (SYSTEM_MAP, working briefs, completion gate, FTS5 recall, family records under `~/.claude/memories/` and related lanes). Use native Auto memory for incidental notes; use `keel memory ...` when an artifact must survive compaction and be reconcilable. Do not duplicate the same fact into both.
 
 | Thought | Reality |
 |---|---|

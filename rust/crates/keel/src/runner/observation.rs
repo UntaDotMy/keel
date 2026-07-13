@@ -216,23 +216,44 @@ fn derive_signature(tool_name: &str, input: &JsonDocument) -> Option<(String, St
 ///
 /// Stops at the first shell operator (`|`, `&&`, `;`, redirects) so a pipeline's
 /// signature is its first stage. Returns `None` for an empty command.
+///
+/// Cross-platform hygiene for Windows PowerShell rewrite forms:
+/// strips call-operator and quotes, normalizes `keel.exe`, peels `keel run --` and `bash -lc`.
 fn command_signature(command: &str) -> Option<String> {
-    let head = command
-        .split(['|', '&', ';', '>', '<', '\n'])
-        .next()
-        .unwrap_or("")
-        .trim();
-    let mut tokens = head.split_whitespace();
-    let program = tokens.next()?;
-    // Strip a leading path so `/usr/bin/git` and `git` share one signature.
-    let program = program.rsplit(['/', '\\']).next().unwrap_or(program);
+    command_signature_depth(command, 0)
+}
+
+fn command_signature_depth(command: &str, depth: u8) -> Option<String> {
+    // Bound peel recursion (keel run → bash -lc → cargo test).
+    if depth > 3 {
+        return None;
+    }
+    let head = first_command_stage(command)?;
+    let tokens = split_command_tokens(head);
+    let tokens: Vec<&str> = tokens
+        .iter()
+        .map(String::as_str)
+        .filter(|token| !token.is_empty() && *token != "&")
+        .collect();
+    if tokens.is_empty() {
+        return None;
+    }
+    let program = normalize_program_name(tokens[0]);
     if program.is_empty() {
         return None;
     }
+
+    // Peeled wrappers yield the inner command's signature (low-cardinality work).
+    if let Some(inner) = peel_wrappers_owned(&program, &tokens) {
+        if let Some(inner_signature) = command_signature_depth(&inner, depth + 1) {
+            return Some(inner_signature);
+        }
+    }
+
     // A subcommand is the next bare word (not a flag, not an assignment) for the
     // small set of multiplexer tools where the subcommand is the real verb.
     let take_subcommand = matches!(
-        program,
+        program.as_str(),
         "git"
             | "cargo"
             | "npm"
@@ -248,15 +269,180 @@ fn command_signature(command: &str) -> Option<String> {
             | "gh"
             | "terraform"
             | "dotnet"
+            | "keel"
     );
     if take_subcommand {
-        if let Some(subcommand) = tokens.find(|token| {
+        if let Some(subcommand) = tokens.iter().skip(1).copied().find(|token| {
             !token.starts_with('-') && !token.contains('=') && token.chars().all(is_signature_char)
         }) {
             return Some(format!("{program} {subcommand}"));
         }
     }
-    Some(program.to_string())
+    Some(program)
+}
+
+/// Quote-aware tokenizer so `bash -lc 'cargo test --workspace'` keeps the
+/// script argument as one token (whitespace split alone breaks it).
+fn split_command_tokens(stage: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    for ch in stage.chars() {
+        match ch {
+            '\'' if !in_double => {
+                in_single = !in_single;
+            }
+            '"' if !in_single => {
+                in_double = !in_double;
+            }
+            c if c.is_whitespace() && !in_single && !in_double => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+            }
+            c => current.push(c),
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
+}
+
+/// First pipeline/list stage, ignoring a leading PowerShell call operator.
+fn first_command_stage(command: &str) -> Option<&str> {
+    let mut rest = command.trim();
+    if rest.is_empty() {
+        return None;
+    }
+    // PowerShell: `& 'C:\path\keel.exe' run -- ...`
+    if let Some(stripped) = rest.strip_prefix('&') {
+        rest = stripped.trim_start();
+    }
+    // Split on shell operators. Leading `&` already removed so it cannot empty the stage.
+    let head = rest
+        .split(['|', '&', ';', '>', '<', '\n'])
+        .next()
+        .unwrap_or("")
+        .trim();
+    if head.is_empty() {
+        None
+    } else {
+        Some(head)
+    }
+}
+
+/// Strip one layer of matching single or double quotes from a token.
+fn strip_matching_quotes(token: &str) -> &str {
+    let trimmed = token.trim();
+    let bytes = trimmed.as_bytes();
+    if bytes.len() >= 2 {
+        let first = bytes[0];
+        let last = bytes[bytes.len() - 1];
+        if (first == b'\'' && last == b'\'') || (first == b'"' && last == b'"') {
+            return &trimmed[1..trimmed.len() - 1];
+        }
+    }
+    trimmed
+}
+
+/// Basename + lowercase + drop Windows executable suffixes (`.exe`, `.cmd`, …).
+fn normalize_program_name(program: &str) -> String {
+    let program = strip_matching_quotes(program);
+    let base = program.rsplit(['/', '\\']).next().unwrap_or(program);
+    let base = strip_matching_quotes(base);
+    let lower = base.to_ascii_lowercase();
+    lower
+        .strip_suffix(".exe")
+        .or_else(|| lower.strip_suffix(".cmd"))
+        .or_else(|| lower.strip_suffix(".bat"))
+        .or_else(|| lower.strip_suffix(".ps1"))
+        .unwrap_or(lower.as_str())
+        .to_string()
+}
+
+/// Peel known wrappers to the inner command string for re-signature.
+fn peel_wrappers_owned(program: &str, tokens: &[&str]) -> Option<String> {
+    match program {
+        "keel" => {
+            let mut index = 1usize;
+            while index < tokens.len() {
+                let token = strip_matching_quotes(tokens[index]);
+                if token == "run" {
+                    break;
+                }
+                if token.starts_with('-') {
+                    index += 1;
+                    continue;
+                }
+                // Different keel subcommand: do not peel.
+                return None;
+            }
+            if index >= tokens.len() {
+                return None;
+            }
+            index += 1; // past `run`
+            while index < tokens.len() && strip_matching_quotes(tokens[index]) != "--" {
+                index += 1;
+            }
+            if index >= tokens.len() || strip_matching_quotes(tokens[index]) != "--" {
+                return None;
+            }
+            index += 1; // past `--`
+            if index >= tokens.len() {
+                return None;
+            }
+            Some(join_tokens_for_reparse(&tokens[index..]))
+        }
+        "bash" | "sh" | "zsh" | "dash" => {
+            let mut index = 1usize;
+            while index < tokens.len() {
+                let token = strip_matching_quotes(tokens[index]);
+                // Combined login+command flags: -lc / -cl
+                if token == "-c" || token == "-lc" || token == "-cl" {
+                    if index + 1 < tokens.len() {
+                        // Script body is already one token from quote-aware split.
+                        return Some(tokens[index + 1].to_string());
+                    }
+                    return None;
+                }
+                if token == "-l" {
+                    index += 1;
+                    continue;
+                }
+                if token.starts_with('-') {
+                    index += 1;
+                    continue;
+                }
+                break;
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// Re-join tokens so a later `split_command_tokens` pass keeps multi-word args intact.
+fn join_tokens_for_reparse(tokens: &[&str]) -> String {
+    tokens
+        .iter()
+        .map(|token| {
+            if token.is_empty() {
+                "''".to_string()
+            } else if token.chars().any(char::is_whitespace)
+                || token.contains('\'')
+                || token.contains('"')
+            {
+                // Prefer single quotes; escape embedded singles by ending/restarting.
+                let escaped = token.replace('\'', "'\"'\"'");
+                format!("'{escaped}'")
+            } else {
+                (*token).to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn is_signature_char(character: char) -> bool {
@@ -494,6 +680,42 @@ mod tests {
         assert_eq!(
             command_signature("git log && git status").as_deref(),
             Some("git log")
+        );
+    }
+
+    #[test]
+    fn command_signature_strips_powershell_quotes_and_exe_suffix() {
+        assert_eq!(
+            command_signature(r#"& 'C:\Users\HP\.claude\keel.exe' review pre-commit"#).as_deref(),
+            Some("keel review")
+        );
+        assert_eq!(
+            command_signature(r#"'C:\Users\HP\.claude\keel.exe' sprint status"#).as_deref(),
+            Some("keel sprint")
+        );
+        assert_eq!(
+            command_signature(r#""C:\tools\keel.cmd" doctor"#).as_deref(),
+            Some("keel doctor")
+        );
+    }
+
+    #[test]
+    fn command_signature_peels_keel_run_and_bash_lc_wrappers() {
+        assert_eq!(
+            command_signature(r#"'C:\Users\HP\.claude\keel.exe' run -- cargo test --workspace"#)
+                .as_deref(),
+            Some("cargo test")
+        );
+        assert_eq!(
+            command_signature(
+                r#"'C:\Users\HP\.claude\keel.exe' run -- bash -lc 'cargo test --workspace'"#
+            )
+            .as_deref(),
+            Some("cargo test")
+        );
+        assert_eq!(
+            command_signature(r#"& 'C:\Users\HP\.claude\keel.exe' run -- git status"#).as_deref(),
+            Some("git status")
         );
     }
 

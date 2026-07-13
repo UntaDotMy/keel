@@ -13,7 +13,7 @@ effort: low
 
 Turn the harness memory artifacts into a human-readable status report that feels like a check-in, not a raw dump.
 
-Use this skill only when the user explicitly wants a memory-health report, learning recap, mistake ledger, user-needs summary, or heuristic growth report. Routine durable memory, planning, progress, and closure updates belong to the main lane through the Rust-native `keel memory ...` commands, which should keep the writable global second-layer store under `~/.claude/memoriesv2/` synchronized.
+Use this skill only when the user explicitly wants a memory-health report, learning recap, mistake ledger, user-needs summary, or heuristic growth report. Routine durable memory, planning, progress, and closure updates belong to the main lane through the Rust-native `keel memory ...` commands against the unified store under `~/.claude/memories/`.
 
 ## Research Reuse Defaults · Completion Discipline · Memory and Security Boundaries · Code Implementation Discipline
 
@@ -41,7 +41,7 @@ See `_shared/common-discipline.md` for the canonical rules. Apply them to all wo
 ## Memory Layer Map
 
 - **L1 (Brain)**: the small always-read scoped summaries plus `SESSION-STATE.md` and `working-buffer.md`; keep each file roughly 500 to 1,000 tokens and the active L1 total under about 7,000 tokens.
-- **L2 (Memory)**: scoped second-layer lanes under `~/.claude/memoriesv2/workspaces/<workspace-slug>/...` and optional lane folders under `~/.claude/memoriesv2/workspaces/<workspace-slug>/workstreams/<workstream-key>/lanes/<agent-instance>/` for daily notes and workstream breadcrumbs.
+- **L2 (Memory)**: scoped lanes under `~/.claude/memories/workspaces/<workspace-slug>/...` and optional lane folders under `~/.claude/memories/workspaces/<workspace-slug>/workstreams/<workstream-key>/lanes/<agent-instance>/` for daily notes and workstream breadcrumbs.
 - **L3 (Reference)**: deeper playbooks, SOPs, and scoped `reference/` material opened on demand instead of loaded every turn.
 - One home per fact: information flows downward through the layers instead of being duplicated blindly.
 

@@ -43,7 +43,7 @@ The keel MCP server provides these tools. Use them via the `mcp` proxy tool or d
 
 | Tool | Description |
 |---|---|
-| `recall` | Full-text search over durable memory: working briefs, system maps, memoriesv2 |
+| `recall` | Full-text search over durable memory: working briefs, system maps, memories |
 | `system_map` | Read the workspace SYSTEM_MAP.md (call before any claim about repo structure) |
 | `run_command` | Run shell commands through the compaction proxy (preferred for noisy commands) |
 | `recall_status` | Check recall index health: document count, schema version, last-sync |

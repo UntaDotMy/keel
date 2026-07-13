@@ -1,5 +1,5 @@
 ---
-description: Search durable keel memory (working briefs, system maps, memoriesv2) by keyword via the native FTS5 recall index. Use to recover prior decisions, traces, and context before re-researching.
+description: Search durable keel memory (working briefs, system maps, memories) by keyword via the native FTS5 recall index. Use to recover prior decisions, traces, and context before re-researching.
 argument-hint: "[search terms]"
 allowed-tools: Read, Bash(keel memory recall:*)
 ---
@@ -24,6 +24,6 @@ count, schema version, last-sync timestamp) so the user knows whether the index
 is populated. The index refreshes automatically on every call.
 
 Summarize the matches found — do not paste the raw index. Cite which working
-brief, system map, or memoriesv2 artifact each hit came from so the user can
+brief, system map, or memories artifact each hit came from so the user can
 open it. If the recall index is empty or stale, say so plainly instead of
 implying memory exists.

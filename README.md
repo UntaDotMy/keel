@@ -635,19 +635,18 @@ The project-scoped global `SYSTEM_MAP.md` target lives under the harness-managed
 Useful memory commands:
 
 ```bash
+keel memory scope resolve --workspace-root "$PWD" --create-missing --refresh-system-map
 keel memory working-brief write --request "Ship the native workflow layer" --constraints "no Go fallback" --acceptance-criteria "tests green"
 keel memory working-brief list
 keel memory completion-gate check --id <entry-id> --proof "tests green"
-keel memoriesv2 scope resolve --workspace-root "$PWD" --create-missing --refresh-system-map
-keel memoriesv2 working-brief list
 ```
 
 Advanced memory and search surfaces:
 
-- The Rust runtime implements `scope`, `system-map`, `working-brief`, `completion-gate check`, and `recall` for both `memory` and `memoriesv2` command groups, plus the family commands `research-cache` (record/lookup/stale/reward/list), `maintenance` (append-working-buffer/trim/recalibrate), `agent-registry` (register/list), `agent-packets` (build/show/list), `loop-guard` (record/check), `entity` (upsert/list/query), `graph` (add/list/query), `retrieve` (cross-family lexical search), and `status`. Each family persists flat-JSON records under `<claude-home>/<group>/<family>/`, isolated per command group.
+- The unified `keel memory` group implements `scope`, `system-map`, `working-brief`, `completion-gate check`, and `recall`, plus family commands `research-cache` (record/lookup/stale/reward/list), `maintenance` (append-working-buffer/trim/recalibrate), `agent-registry` (register/list), `agent-packets` (build/show/list), `loop-guard` (record/check), `entity` (upsert/list/query), `graph` (add/list/query), `retrieve` (cross-family lexical search), and `status`. Family records live under the unified memory layout (see `docs/memory-families-usage.md`).
 - The `orchestration` group implements `runtime-preflight`, `resume-status`, `task` (begin/progress/complete/list), and `checkpoint`.
-- `memory report` (alias for `status`), `memory index` (rebuilds the recall index), and `instincts` are also implemented. `memory hook` is intentionally not a memory subcommand — it points to `keel hook ...`, which owns the harness lifecycle hooks. `memory working-brief record-summary`, `memory completion-gate record-requirement`, and `consolidate` are also implemented — they append records to their respective family stores, and `consolidate` scans the family directories for a status summary.
-- Code-search demo details live at [./docs/code-search-demo-and-gap-map.md](./docs/code-search-demo-and-gap-map.md).
+- `memory report` (alias for `status`), `memory index` (rebuilds the recall index), and `instincts` are also implemented. `memory hook` is intentionally not a memory subcommand; it points to `keel hook ...`. `memory working-brief record-summary`, `memory completion-gate record-requirement`, and `consolidate` are also implemented.
+- Code-search details: [./docs/code-search-demo-and-gap-map.md](./docs/code-search-demo-and-gap-map.md).
 
 ## Manager and Operator Surfaces
 
@@ -674,10 +673,10 @@ keel works with multiple AI coding agents through dedicated adapters. Each adapt
 | **Claude Desktop** (Cowork) | TypeScript plugin | `cowork/keel.ts` — lifecycle bridge with `bridge` subcommands per event | `cowork/` |
 | **OpenCode** | TypeScript plugin | `opencode/keel.ts` — lifecycle bridge with `bridge` subcommands per event | `opencode/` |
 | **Codex CLI** | Plugin + hooks + script | `codex/.codex-plugin/plugin.json` + `hooks/hooks.json` + `keel-codex.ts` | `codex/` |
-| **Cursor IDE** | Static rules file | `cursor/.cursorrules` — iron law + skill catalog injected via Cursor's rules system | `cursor/` |
-| **Pi Agent** | Static rules + MCP config | `pi/AGENTS.md` + `pi/.mcp.json` — loaded at startup, MCP server for direct tool access | `pi/` |
+| **Cursor IDE** | Rules + hooks + MCP | `cursor/.cursorrules` + `cursor/hooks/` + `cursor/mcp.json`: iron law, lifecycle bridge (`keel bridge`), MCP tools. Install with `keel install --with cursor` (Cursor is not always auto-detected) | `cursor/` |
+| **Pi Agent** | Rules + hooks + MCP | `pi/AGENTS.md` + `pi/hooks.json` + `pi/keel-pi.ts` + `pi/.mcp.json`: iron law, lifecycle bridge, MCP tools | `pi/` |
 
-Claude Code is the primary target (hooks, full lifecycle). Claude Desktop (Cowork) and OpenCode have runtime bridges that auto-inject context on every session and prompt. Cursor and Pi Agent use static instruction files — simpler but no automatic observation recording.
+Claude Code is the primary target (native hooks, full lifecycle). OpenCode, Codex, Cowork, Cursor, and Pi ship runtime bridges that map host events to `keel bridge` (edit gate, rewrite, observe, session-end learn). Cursor often needs `--with cursor` because desktop IDEs are not always detected.
 
 `keel install` auto-detects which AI CLIs are installed (via config dirs, env vars, and binary-on-PATH) and wires only the matching adapters. Use `--with <name>` to force an adapter even when not detected (e.g. `--with cursor`), and `--without <name>` to skip a detected adapter (e.g. `--without opencode`). Names: `opencode`, `codex`, `pi`, `cursor`, `cowork`. Manual file copying is no longer required.
 
@@ -685,13 +684,13 @@ Claude Code is the primary target (hooks, full lifecycle). Claude Desktop (Cowor
 
 The managed install mirrors the specialist lanes (one profile per specialist, roster asserted by `tests/doc_parity_test.rs`) into `~/.claude/agent-profiles/*.toml`:
 
-`api-contract-design`, `authentication-and-identity`, `backend-and-data-architecture`, `cloud-and-devops-expert`, `cloud-cost-and-finops`, `data-and-ml-engineering`, `dependency-and-supply-chain`, `git-expert`, `internationalization-and-localization`, `memory-status-reporter`, `mobile-development-life-cycle`, `observability-and-incident-response`, `postgres-migration-safety`, `preserve-existing-flow`, `qa-and-automation-engineer`, `react-performance-audit`, `reviewer`, `security-and-compliance-auditor`, `software-development-life-cycle`, `stripe-integration`, `ui-design-systems-and-responsive-interfaces`, `ux-research-and-experience-strategy`, `web-development-life-cycle`, and `websocket-realtime-design`.
+`api-contract-design`, `authentication-and-identity`, `backend-and-data-architecture`, `cloud-and-devops-expert`, `cloud-cost-and-finops`, `dart-and-flutter-expert`, `data-and-ml-engineering`, `dependency-and-supply-chain`, `git-expert`, `internationalization-and-localization`, `memory-status-reporter`, `mobile-development-life-cycle`, `observability-and-incident-response`, `postgres-migration-safety`, `preserve-existing-flow`, `qa-and-automation-engineer`, `react-performance-audit`, `reviewer`, `security-and-compliance-auditor`, `software-development-life-cycle`, `stripe-integration`, `ui-design-systems-and-responsive-interfaces`, `ux-research-and-experience-strategy`, `web-development-life-cycle`, and `websocket-realtime-design`.
 
 Routine work stays in the main lane. Specialist profiles are for the moments where domain ownership or independent verification is worth the extra context.
 
 ## Legacy Command Compatibility
 
-The native CLI is the primary surface. Most subcommand shapes earlier docs referenced are now implemented: `orchestration task begin|progress|complete|list`, `orchestration checkpoint`, and `memory|memoriesv2 research-cache|maintenance|agent-registry|agent-packets|loop-guard|entity|graph|retrieve|status|instincts` all work today, as do `memory report` (an alias for `status`) and `memory index` (rebuilds the recall index) — see [Memory and System Map](#memory-and-system-map) above. `memory working-brief record-summary`, `memory completion-gate record-requirement`, and `consolidate` are also implemented — they append records to their respective family stores, and `consolidate` scans the family directories for a status summary. `memory hook` is intentionally not a memory subcommand — it points you to `keel hook ...`, which owns the harness lifecycle hooks. The full working surface is listed above and in `keel help advanced`.
+The native CLI is the primary surface. Most subcommand shapes earlier docs referenced are now implemented: `orchestration task begin|progress|complete|list`, `orchestration checkpoint`, and unified `memory` family verbs (`research-cache|maintenance|agent-registry|agent-packets|loop-guard|entity|graph|retrieve|status|instincts`) all work today, as do `memory report` (alias for `status`) and `memory index`. `memory working-brief record-summary`, `memory completion-gate record-requirement`, and `consolidate` are also implemented. `memory hook` points you to `keel hook ...`. The full working surface is listed above and in `keel help advanced`.
 
 ## Documentation Map
 
@@ -710,10 +709,10 @@ The native CLI is the primary surface. Most subcommand shapes earlier docs refer
 | Benchmark suite | [./docs/benchmark-suite.md](./docs/benchmark-suite.md) |
 | Shared benchmark harness | [./docs/shared-benchmark-harness.md](./docs/shared-benchmark-harness.md), the shared benchmark harness contract and common evidence format |
 | Benchmark comparison scorecard | [./docs/benchmark-comparison-scorecard.md](./docs/benchmark-comparison-scorecard.md) |
-| Memory recall benchmark bundle | [./docs/memory-recall-benchmark-bundle.md](./docs/memory-recall-benchmark-bundle.md) |
-| Memory recall audit | [./docs/audits/2026-04-11-memory-recall-benchmark/audit-summary.md](./docs/audits/2026-04-11-memory-recall-benchmark/audit-summary.md) |
-| Benchmark posture audit | [./docs/audits/2026-04-09-benchmark-posture/audit-summary.md](./docs/audits/2026-04-09-benchmark-posture/audit-summary.md) |
-| Competitive apples-to-apples audit | [./docs/audits/2026-04-09-competitive-apples-to-apples/audit-summary.md](./docs/audits/2026-04-09-competitive-apples-to-apples/audit-summary.md) |
+| Memory families inventory | [./docs/memory-families-usage.md](./docs/memory-families-usage.md) |
+| Memory recall audit (historical) | [./docs/audits/2026-04-11-memory-recall-benchmark/audit-summary.md](./docs/audits/2026-04-11-memory-recall-benchmark/audit-summary.md) |
+| Benchmark posture audit (historical) | [./docs/audits/2026-04-09-benchmark-posture/audit-summary.md](./docs/audits/2026-04-09-benchmark-posture/audit-summary.md) |
+| Competitive apples-to-apples audit (historical) | [./docs/audits/2026-04-09-competitive-apples-to-apples/audit-summary.md](./docs/audits/2026-04-09-competitive-apples-to-apples/audit-summary.md) |
 | Demo: PR-fix flow | [./docs/demo-pr-fix-flow.md](./docs/demo-pr-fix-flow.md) |
 | Demo: branch-closeout flow | [./docs/demo-branch-closeout-flow.md](./docs/demo-branch-closeout-flow.md) |
 | Runtime guardrails and memory protocols | [./docs/runtime-guardrails-and-memory-protocols.md](./docs/runtime-guardrails-and-memory-protocols.md) |
@@ -735,7 +734,7 @@ keel/
 |- cowork/                    Claude Desktop (Cowork) adapter (TypeScript plugin with lifecycle bridge)
 |- opencode/                 OpenCode adapter (TypeScript plugin with lifecycle bridge)
 |- codex/                    Codex CLI adapter (plugin + hooks + TypeScript bridge)
-|- cursor/                   Cursor IDE adapter (static .cursorrules)
+|- cursor/                   Cursor IDE adapter (rules + hooks + MCP)
 |- pi/                       Pi Agent adapter (static AGENTS.md + MCP config)
 |- .claude-plugin/           Native Claude Code plugin manifest
 |- .github/workflows/        Native Rust CI and release pipelines
