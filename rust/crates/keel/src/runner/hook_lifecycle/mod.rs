@@ -3855,16 +3855,25 @@ pub(crate) fn run_session_end_learning(standard_error: &mut dyn Write) {
         Ok(path) => path,
         Err(_) => return,
     };
-    let report = learning::run_learning_cycle(
-        &claude_home,
-        &learning::CycleOptions::default(),
-        standard_error,
-    );
-    if report.skills_generated > 0 || report.agents_generated > 0 {
+    // synthesize: true so SessionStart can surface refinement briefs for any
+    // template-state skills (growth without an LLM inside the binary).
+    let options = learning::CycleOptions {
+        synthesize: true,
+        ..learning::CycleOptions::default()
+    };
+    let report = learning::run_learning_cycle(&claude_home, &options, standard_error);
+    if report.skills_generated > 0
+        || report.agents_generated > 0
+        || report.instincts_recorded > 0
+        || report.skills_rolled_back > 0
+    {
         let _ = writeln!(
             standard_error,
-            "keel learn: recorded {} instinct(s), generated {} skill(s) and {} agent(s)",
-            report.instincts_recorded, report.skills_generated, report.agents_generated
+            "keel learn: recorded {} instinct(s), generated {} skill(s), {} agent(s), rolled back {}",
+            report.instincts_recorded,
+            report.skills_generated,
+            report.agents_generated,
+            report.skills_rolled_back
         );
     }
 }
@@ -4025,8 +4034,8 @@ fn maybe_capture_session_summary_with_id(
 /// did, then writes it through `memory research-cache record` — the path that
 /// now syncs the recall index (s4), so the summary is immediately recallable.
 ///
-/// Silent on sessions that did no edit-class work: a pure research or question
-/// turn produces no summary, so the memory store is not polluted with noise.
+/// Silent on pure no-op sessions (no edits, no failures, fewer than three
+/// commands): research/question turns stay out of the memory store.
 ///
 /// Best-effort by contract: every failure path returns without writing and
 /// without changing the caller's exit code. The SessionEnd prunes and learning
@@ -4098,21 +4107,19 @@ struct SessionSummary {
     answer: String,
 }
 
-/// Build a work summary for `session_id` from this session's edit-class
-/// behavioral observations, or `None` when the session edited nothing.
+/// Build a work summary for `session_id` from this session's behavioral
+/// observations, or `None` when the session did no durable work.
 ///
-/// Reads today's observation rows (the learning loop's source), filters to this
-/// session's edit/command signatures, and renders a compact "what changed"
-/// line: the working directory, the count of edits, the distinct file
-/// extensions touched, and the distinct command signatures run. This is
-/// deliberately low-cardinality (extensions and command verbs, not full paths)
-/// so the note is a useful recall anchor without leaking long arguments.
+/// Captures edits, successful commands, and failed command outcomes so recall
+/// and the learning loop share the same episodic signal ("what happened today").
 fn build_session_summary(session_id: &str) -> Option<SessionSummary> {
     let rows = crate::runner::observation::iter_recent_rows(1).ok()?;
     let mut edit_count = 0usize;
     let mut command_count = 0usize;
+    let mut failed_count = 0usize;
     let mut extensions: Vec<String> = Vec::new();
     let mut commands: Vec<String> = Vec::new();
+    let mut failures: Vec<String> = Vec::new();
     let mut cwd = String::new();
     for row in rows {
         if row.session_id != session_id {
@@ -4127,6 +4134,14 @@ fn build_session_summary(session_id: &str) -> Option<SessionSummary> {
             if !extensions.contains(&extension) {
                 extensions.push(extension);
             }
+        } else if row
+            .signature
+            .ends_with(crate::runner::observation::FAILURE_SIGNATURE_SUFFIX)
+        {
+            failed_count += 1;
+            if !failures.contains(&row.signature) {
+                failures.push(row.signature.clone());
+            }
         } else {
             command_count += 1;
             if !commands.contains(&row.signature) {
@@ -4135,16 +4150,13 @@ fn build_session_summary(session_id: &str) -> Option<SessionSummary> {
         }
     }
 
-    // Only capture when the session actually edited code. Command-only sessions
-    // (ran tests, browsed git) are not durable "work done" worth a memory note.
-    if edit_count == 0 {
+    // Capture when the session edited code, recorded failures, or ran a
+    // meaningful number of commands (tests/builds). Pure no-op sessions stay silent.
+    if edit_count == 0 && command_count < 3 && failed_count == 0 {
         return None;
     }
 
-    // Use only the final path component, not the full cwd: the full path can
-    // carry a username or other sensitive directory names, and the doc contract
-    // promises low-cardinality anchors, not full paths. `file_name` handles
-    // both `/` and `\` separators via the OS path parser.
+    // Final path component only: low-cardinality anchor, no full-path leakage.
     let workspace = if cwd.is_empty() {
         "unknown workspace".to_string()
     } else {
@@ -4155,20 +4167,30 @@ fn build_session_summary(session_id: &str) -> Option<SessionSummary> {
             .unwrap_or_else(|| "unknown workspace".to_string())
     };
     let question = format!("What was done in {workspace} on {}?", today_date_string());
-    let mut answer = format!(
-        "Edited {edit_count} file(s) ({}).",
-        if extensions.is_empty() {
-            "no recorded extension".to_string()
-        } else {
-            extensions.join(", ")
-        }
-    );
+    let mut parts: Vec<String> = Vec::new();
+    if edit_count > 0 {
+        parts.push(format!(
+            "Edited {edit_count} file(s) ({}).",
+            if extensions.is_empty() {
+                "no recorded extension".to_string()
+            } else {
+                extensions.join(", ")
+            }
+        ));
+    }
     if command_count > 0 {
-        answer.push_str(&format!(
-            " Ran {command_count} command(s): {}.",
+        parts.push(format!(
+            "Ran {command_count} command(s): {}.",
             commands.join(", ")
         ));
     }
+    if failed_count > 0 {
+        parts.push(format!(
+            "Recorded {failed_count} failed outcome(s): {}.",
+            failures.join(", ")
+        ));
+    }
+    let answer = parts.join(" ");
     Some(SessionSummary { question, answer })
 }
 

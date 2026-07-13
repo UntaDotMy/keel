@@ -33,7 +33,7 @@ use crate::utility::record_store::{field, Record, RecordStore};
 /// Rolling window of observation history the cycle distills each run. Older
 /// signal naturally ages out of the window, giving confidence an implicit decay
 /// without a separate decay pass: a habit the user dropped stops being counted.
-const OBSERVE_WINDOW_DAYS: u64 = 7;
+const OBSERVE_WINDOW_DAYS: u64 = 14;
 
 /// Minimum observations of a signature within the window before it is worth
 /// recording as an instinct at all. Below this it is a one-off, not a pattern.
@@ -44,10 +44,15 @@ const INSTINCT_MIN_COUNT: u64 = 3;
 /// windowed observation count, clamped here.
 const INSTINCT_CONFIDENCE_CAP: i64 = 20;
 
-/// An instinct must reach this confidence AND have been seen across more than one
-/// session before it can contribute to a generated skill. Cross-session recurrence
-/// is what separates a durable habit from a single long sitting.
-const SKILL_MIN_CONFIDENCE: i64 = 5;
+/// Base confidence bar for a signature to contribute to a generated skill.
+const SKILL_MIN_CONFIDENCE: i64 = 4;
+
+/// Preferred bar: seen across this many sessions (durable habit).
+const SKILL_MIN_SESSIONS: usize = 2;
+
+/// Strong single-session bar: enough volume in one long sitting can still promote
+/// when multi-session evidence is not yet available (common on a new machine).
+const SKILL_SINGLE_SESSION_CONFIDENCE: i64 = 8;
 
 /// A project needs at least this many trusted instincts before a skill is worth
 /// generating — one lone instinct does not justify a whole skill file.
@@ -179,7 +184,7 @@ pub fn run_learning_cycle(
         }
         report.instincts_recorded += 1;
 
-        if confidence >= SKILL_MIN_CONFIDENCE && cluster.distinct_sessions >= 2 {
+        if is_trusted_habit(confidence, cluster.distinct_sessions) {
             trusted_by_project
                 .entry(cluster.project.clone())
                 .or_default()
@@ -373,11 +378,24 @@ fn count_trusted_predicted_signatures(
         let sessions: usize = field(record, "sessions")
             .and_then(|value| value.parse().ok())
             .unwrap_or(0);
-        if confidence >= SKILL_MIN_CONFIDENCE && sessions >= 2 {
+        if is_trusted_habit(confidence, sessions) {
             trusted.insert(trigger.to_string());
         }
     }
     trusted.len()
+}
+
+/// Whether a signature is trusted enough to promote into a skill (or keep one).
+/// Multi-session recurrence is preferred; strong single-session volume also qualifies
+/// so learning works on a fresh machine without waiting for many calendar days.
+fn is_trusted_habit(confidence: i64, distinct_sessions: usize) -> bool {
+    if confidence < SKILL_MIN_CONFIDENCE {
+        return false;
+    }
+    if distinct_sessions >= SKILL_MIN_SESSIONS {
+        return true;
+    }
+    confidence >= SKILL_SINGLE_SESSION_CONFIDENCE
 }
 
 /// Render a compact, always-on digest of the trusted instincts for the project
@@ -769,11 +787,14 @@ fn cluster_observations(observations: &[Observation]) -> BTreeMap<String, Cluste
     let mut clusters: BTreeMap<String, Cluster> = BTreeMap::new();
     let mut sessions: BTreeMap<String, std::collections::BTreeSet<String>> = BTreeMap::new();
     for observation in observations {
+        let Some(signature) = normalize_learning_signature(&observation.signature) else {
+            continue; // noise (quote pollution, pure navigation) — never learn
+        };
         let project = project_name(&observation.cwd);
-        let key = format!("{project}\u{1f}{}", observation.signature);
+        let key = format!("{project}\u{1f}{signature}");
         let cluster = clusters.entry(key.clone()).or_insert_with(|| Cluster {
             project: project.clone(),
-            signature: observation.signature.clone(),
+            signature: signature.clone(),
             count: 0,
             distinct_sessions: 0,
             sample_detail: String::new(),
@@ -792,6 +813,72 @@ fn cluster_observations(observations: &[Observation]) -> BTreeMap<String, Cluste
         cluster.distinct_sessions = sessions.get(key).map(|set| set.len()).unwrap_or(0);
     }
     clusters
+}
+
+/// Normalize and filter signatures before learning so polluted Windows wrappers
+/// (`keel.exe'`) and pure navigation noise never become "conventions".
+fn normalize_learning_signature(raw: &str) -> Option<String> {
+    let failed = raw.ends_with(crate::runner::observation::FAILURE_SIGNATURE_SUFFIX);
+    let base = raw
+        .strip_suffix(crate::runner::observation::FAILURE_SIGNATURE_SUFFIX)
+        .unwrap_or(raw)
+        .trim()
+        .trim_matches(['\'', '"', '`', '&', ' ']);
+    if base.is_empty() {
+        return None;
+    }
+    // Drop trailing quote pollution left by older PowerShell rewrite forms.
+    let mut cleaned = base.trim_end_matches(['\'', '"']).to_string();
+    // Strip Windows executable suffixes for stable program names.
+    let lower = cleaned.to_ascii_lowercase();
+    if let Some(stem) = lower
+        .strip_suffix(".exe")
+        .or_else(|| lower.strip_suffix(".cmd"))
+        .or_else(|| lower.strip_suffix(".bat"))
+        .or_else(|| lower.strip_suffix(".ps1"))
+    {
+        // Preserve path basename only when the whole token was a path to the binary.
+        let stem = stem.rsplit(['/', '\\']).next().unwrap_or(stem);
+        cleaned = stem.to_string();
+    }
+    if is_noise_learning_signature(&cleaned) {
+        return None;
+    }
+    if failed {
+        Some(format!(
+            "{cleaned}{}",
+            crate::runner::observation::FAILURE_SIGNATURE_SUFFIX
+        ))
+    } else {
+        Some(cleaned)
+    }
+}
+
+fn is_noise_learning_signature(signature: &str) -> bool {
+    matches!(
+        signature,
+        "cd" | "echo"
+            | "pwd"
+            | "ls"
+            | "dir"
+            | "clear"
+            | "cls"
+            | "true"
+            | "false"
+            | "wc"
+            | "cat"
+            | "type"
+            | "head"
+            | "tail"
+            | "which"
+            | "where"
+            | "bash"
+            | "sh"
+            | "zsh"
+            | "cmd"
+            | "powershell"
+            | "pwsh"
+    )
 }
 
 /// Derive a project name from an absolute cwd. The last path component is a
@@ -834,24 +921,28 @@ fn instinct_id(project: &str, signature: &str) -> String {
 }
 
 fn guidance_for(cluster: &Cluster) -> String {
-    // A recurring FAILURE (signature suffixed by observation::FAILURE_SIGNATURE_SUFFIX)
-    // is a "what reliably goes wrong here" warning, not a habit to repeat — phrase
-    // it so the SessionStart digest reads as a caution.
+    // A recurring FAILURE is a caution (outcome learning), not a habit to repeat.
     if let Some(base) = cluster
         .signature
         .strip_suffix(crate::runner::observation::FAILURE_SIGNATURE_SUFFIX)
     {
         return format!(
-            "`{base}` has failed repeatedly in this project — check the known failure mode before relying on it"
+            "OUTCOME/WATCHOUT: `{base}` fails often here — diagnose before relying on a green run"
         );
     }
     match cluster.tool_name.as_str() {
-        "Bash" => format!("Frequently runs `{}` in this project", cluster.signature),
+        "Bash" => format!(
+            "PROCEDURE: when verifying or building in this project, run `{}`",
+            cluster.signature
+        ),
         "Edit" | "Write" | "MultiEdit" | "NotebookEdit" => {
             let extension = cluster.signature.strip_prefix("edit:").unwrap_or("files");
-            format!("Most edits in this project target `.{extension}` files")
+            format!("PROCEDURE: primary work surfaces are `.{extension}` files in this project")
         }
-        _ => format!("Repeated `{}` in this project", cluster.signature),
+        _ => format!(
+            "PROCEDURE: repeated action `{sig}` — prefer this path unless the task says otherwise",
+            sig = cluster.signature
+        ),
     }
 }
 
@@ -1051,15 +1142,19 @@ fn synthesis_brief(
     }
     let prompt = format!(
         "Refine the generated skill `{skill_name}` at {path}.\n\
-         It currently holds a deterministic template. Rewrite its prose so it reads like a \
-         hand-authored skill for the `{project}` project, using these observed conventions as the \
-         source of truth:\n{observed}\
-         Requirements: keep the YAML frontmatter intact (name, description, when_to_use, \
-         generated: true, provenance: learned must all remain); keep the body factual and specific \
-         to these conventions; do not invent commands or files that are not implied by the \
-         observations above; prefer concrete \"when X, do Y\" guidance over generic advice. \
-         Your edit is protected — the learning loop detects the content change by hash and will \
-         not overwrite it.",
+         It currently holds a deterministic template. Rewrite it into a real project skill for \
+         `{project}` using ONLY these observed conventions as the source of truth:\n{observed}\
+         Requirements:\n\
+         - Keep YAML frontmatter intact (name, description, when_to_use, generated: true, \
+         provenance: learned must remain; improve description/when_to_use wording only).\n\
+         - Structure body as: ## Procedures (do this), ## Watchouts (failed outcomes), \
+         ## Operating rules.\n\
+         - Write concrete \"when X, do Y\" steps — not summaries of the list above.\n\
+         - Separate successful commands from failure watchouts.\n\
+         - Do not invent commands, files, frameworks, or APIs not implied by the observations.\n\
+         - Do not invent features outside what the observations support.\n\
+         Your edit is protected — the learning loop detects content-hash changes and will not \
+         overwrite it.",
         path = display_path(&skill_path),
     );
     SynthesisBrief {
@@ -1087,15 +1182,31 @@ fn predicted_signatures(instincts: &[TrustedInstinct]) -> Vec<String> {
 }
 
 /// Render the deterministic SKILL.md body for a project's trusted instincts.
+/// Action-oriented: procedures and watchouts first so a matcher-loaded skill
+/// changes agent behavior, not only lists statistics.
 fn render_skill(skill_name: &str, project: &str, instincts: &[TrustedInstinct]) -> String {
+    let mut procedures: Vec<&TrustedInstinct> = Vec::new();
+    let mut watchouts: Vec<&TrustedInstinct> = Vec::new();
+    for instinct in instincts {
+        if instinct
+            .signature
+            .ends_with(crate::runner::observation::FAILURE_SIGNATURE_SUFFIX)
+            || instinct.guidance.contains("WATCHOUT")
+        {
+            watchouts.push(instinct);
+        } else {
+            procedures.push(instinct);
+        }
+    }
+
     let mut body = String::new();
     body.push_str("---\n");
     body.push_str(&format!("name: {skill_name}\n"));
     body.push_str(&format!(
-        "description: Learned workflow conventions for the {project} project — repeated command and edit patterns observed by keel. Auto-generated from your behavior; safe for the agent to refine.\n"
+        "description: Learned procedures for the {project} project from observed command and edit patterns. Prefer these defaults before inventing a new workflow.\n"
     ));
     body.push_str(&format!(
-        "when_to_use: When working in the {project} project, to follow its established command and file conventions without re-deriving them.\n"
+        "when_to_use: When working in the {project} project (or a path under it) — apply learned procedures and watchouts instead of re-deriving the local workflow from scratch.\n"
     ));
     body.push_str("generated: true\n");
     body.push_str("generator: keel-learning\n");
@@ -1103,20 +1214,48 @@ fn render_skill(skill_name: &str, project: &str, instincts: &[TrustedInstinct]) 
     body.push_str("---\n\n");
     body.push_str(&format!("# Learned workflow: {project}\n\n"));
     body.push_str(
-        "This skill was generated automatically by observing repeated actions in this project. \
-It is safe to refine or replace: the keel learning loop detects manual edits by content \
-hash and will not overwrite them. Built-in skills are never modified by the loop.\n\n",
+        "Auto-generated from repeated actions in this project. Safe to refine: the learning loop \
+detects content-hash changes and will not overwrite your edits. Built-in skills are never modified.\n\n",
     );
-    body.push_str("## Observed conventions\n\n");
-    for instinct in instincts {
-        body.push_str(&format!(
-            "- {} (observed {}× across {} session(s), confidence {})\n",
-            instinct.guidance, instinct.count, instinct.distinct_sessions, instinct.confidence
-        ));
+
+    body.push_str("## Procedures (do this)\n\n");
+    if procedures.is_empty() {
+        body.push_str("- (no successful recurring procedures yet)\n");
+    } else {
+        for instinct in &procedures {
+            let line = instinct
+                .guidance
+                .strip_prefix("PROCEDURE: ")
+                .unwrap_or(instinct.guidance.as_str());
+            body.push_str(&format!(
+                "- {line} (evidence: {}× / {} session(s), confidence {})\n",
+                instinct.count, instinct.distinct_sessions, instinct.confidence
+            ));
+        }
     }
+
+    body.push_str("\n## Watchouts (outcomes that failed)\n\n");
+    if watchouts.is_empty() {
+        body.push_str("- (no recurring failure patterns recorded)\n");
+    } else {
+        for instinct in &watchouts {
+            let line = instinct
+                .guidance
+                .strip_prefix("OUTCOME/WATCHOUT: ")
+                .unwrap_or(instinct.guidance.as_str());
+            body.push_str(&format!(
+                "- {line} (evidence: {}× / {} session(s), confidence {})\n",
+                instinct.count, instinct.distinct_sessions, instinct.confidence
+            ));
+        }
+    }
+
     body.push_str(
-        "\n## How to use\n\nWhen acting in this project, prefer the conventions above unless the \
-current task calls for something different. Treat them as defaults, not constraints.\n",
+        "\n## Operating rules\n\n\
+- Prefer the procedures above as defaults for this project.\n\
+- Treat watchouts as pre-flight checks before relying on those commands.\n\
+- If the user request conflicts with a learned default, follow the user request.\n\
+- Do not invent extra workflow steps that are not listed here or asked for.\n",
     );
     body
 }
@@ -1295,13 +1434,10 @@ fn trusted_instincts_for_project(
         let confidence: i64 = field(record, "confidence")
             .and_then(|value| value.parse().ok())
             .unwrap_or(0);
-        if confidence < SKILL_MIN_CONFIDENCE {
-            continue;
-        }
         let distinct_sessions: usize = field(record, "sessions")
             .and_then(|value| value.parse().ok())
             .unwrap_or(0);
-        if distinct_sessions < 2 {
+        if !is_trusted_habit(confidence, distinct_sessions) {
             continue;
         }
         let count: u64 = field(record, "observations")
@@ -1485,7 +1621,7 @@ mod tests {
             let record = store.read_record(&id).expect("read").expect("exists");
             let guidance = field(&record, "guidance").unwrap_or("");
             assert!(
-                guidance.contains("failed repeatedly"),
+                guidance.contains("WATCHOUT") || guidance.contains("fails often"),
                 "failure instinct must read as a caution, got: {guidance}"
             );
         });
@@ -1648,15 +1784,109 @@ mod tests {
     }
 
     #[test]
-    fn cycle_needs_two_sessions_to_trust_for_skill() {
+    fn cycle_weak_single_session_does_not_promote_skill() {
         isolated_home("one-session", |root| {
-            // 8 observations but all one session -> instinct yes, skill no.
-            seed_bash("delta", "cargo test", 8, 1);
-            seed_bash("delta", "git commit", 8, 1);
+            // Below single-session bar (conf 7 < 8) and only one session → instinct yes, skill no.
+            seed_bash("delta", "cargo test", 7, 1);
+            seed_bash("delta", "git commit", 7, 1);
             let mut log = Vec::new();
             let report = run_learning_cycle(root, &CycleOptions::default(), &mut log);
             assert_eq!(report.skills_generated, 0);
             assert!(report.instincts_recorded >= 2);
+        });
+    }
+
+    #[test]
+    fn cycle_strong_single_session_promotes_skill() {
+        isolated_home("strong-one-session", |root| {
+            // conf >= SKILL_SINGLE_SESSION_CONFIDENCE with one session still promotes
+            // so a fresh machine can learn without waiting for a second day.
+            seed_bash("strongdelta", "cargo test", 8, 1);
+            seed_bash("strongdelta", "git commit", 8, 1);
+            let mut log = Vec::new();
+            let report = run_learning_cycle(root, &CycleOptions::default(), &mut log);
+            assert_eq!(
+                report.skills_generated, 1,
+                "strong single-session habits promote: {:?}",
+                report.notes
+            );
+            let body = fs::read_to_string(
+                skills_directory(root)
+                    .join("learned-strongdelta")
+                    .join("SKILL.md"),
+            )
+            .expect("skill");
+            assert!(body.contains("## Procedures (do this)"));
+            assert!(body.contains("## Watchouts (outcomes that failed)"));
+            assert!(body.contains("## Operating rules"));
+        });
+    }
+
+    #[test]
+    fn normalize_drops_noise_and_strips_exe_pollution() {
+        assert_eq!(normalize_learning_signature("cd"), None);
+        assert_eq!(normalize_learning_signature("ls"), None);
+        assert_eq!(normalize_learning_signature("pwsh"), None);
+        assert_eq!(
+            normalize_learning_signature("keel.exe'").as_deref(),
+            Some("keel")
+        );
+        assert_eq!(
+            normalize_learning_signature("cargo test").as_deref(),
+            Some("cargo test")
+        );
+        assert_eq!(
+            normalize_learning_signature(&format!(
+                "cargo test{}",
+                observation::FAILURE_SIGNATURE_SUFFIX
+            ))
+            .as_deref(),
+            Some("cargo test (failed)")
+        );
+    }
+
+    #[test]
+    fn noise_signatures_never_become_instincts() {
+        isolated_home("noise", |root| {
+            seed_bash("noisep", "cd", 10, 2);
+            seed_bash("noisep", "ls -la", 10, 2);
+            let mut log = Vec::new();
+            let report = run_learning_cycle(root, &CycleOptions::default(), &mut log);
+            assert_eq!(report.instincts_recorded, 0);
+            assert_eq!(report.skills_generated, 0);
+        });
+    }
+
+    #[test]
+    fn skill_template_separates_procedures_and_failure_watchouts() {
+        isolated_home("skill-sections", |root| {
+            seed_bash("sect", "cargo test", 6, 2);
+            seed_bash("sect", "git commit", 6, 2);
+            for index in 0..4 {
+                let session = format!("s{}", index % 2);
+                let input = json!({
+                    "tool_name": "Bash",
+                    "session_id": session,
+                    "cwd": "/work/sect",
+                    "tool_input": { "command": "cargo clippy" },
+                });
+                observation::record_failure_observation(&input).expect("fail");
+            }
+            // Need the failure to reach trust as a third instinct (≥2 trusted).
+            // conf 4 across 2 sessions is enough for multi-session trust.
+            let mut log = Vec::new();
+            let report = run_learning_cycle(root, &CycleOptions::default(), &mut log);
+            assert_eq!(report.skills_generated, 1, "notes: {:?}", report.notes);
+            let body =
+                fs::read_to_string(skills_directory(root).join("learned-sect").join("SKILL.md"))
+                    .expect("skill");
+            assert!(body.contains("## Procedures (do this)"));
+            assert!(body.contains("## Watchouts (outcomes that failed)"));
+            assert!(
+                body.contains("WATCHOUT") || body.contains("fails often"),
+                "failure guidance in watchouts: {body}"
+            );
+            assert!(body.contains("cargo test") || body.contains("PROCEDURE"));
         });
     }
 
