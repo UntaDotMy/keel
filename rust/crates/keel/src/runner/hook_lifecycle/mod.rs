@@ -988,7 +988,11 @@ pub(crate) fn maybe_mark_iron_law_from_tool_event(input: &JsonDocument) {
 }
 
 /// Mark from bridge observe (tool name + optional stdin command JSON / raw).
-pub(crate) fn maybe_mark_iron_law_from_parts(session_id: &str, tool_name: &str, command: Option<&str>) {
+pub(crate) fn maybe_mark_iron_law_from_parts(
+    session_id: &str,
+    tool_name: &str,
+    command: Option<&str>,
+) {
     let mode = iron_law_gate_mode();
     if mode == IronLawGateMode::Off {
         return;
@@ -1000,7 +1004,11 @@ pub(crate) fn maybe_mark_iron_law_from_parts(session_id: &str, tool_name: &str, 
 
 /// Scan today's tool-timings for keel (or balanced host) research tools.
 /// Fail-closed for the gate: returns false when timings are missing (no free pass).
-fn session_has_iron_law_evidence(claude_home: &Path, session_id: &str, mode: IronLawGateMode) -> bool {
+fn session_has_iron_law_evidence(
+    claude_home: &Path,
+    session_id: &str,
+    mode: IronLawGateMode,
+) -> bool {
     if mode == IronLawGateMode::Off {
         return true;
     }

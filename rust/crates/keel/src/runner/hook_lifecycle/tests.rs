@@ -1137,7 +1137,9 @@ fn iron_law_tool_classification_strict_requires_keel() {
         None
     ));
     assert!(is_keel_research_command("keel doctor"));
-    assert!(is_keel_research_command("keel run -- keel code-search search --query x"));
+    assert!(is_keel_research_command(
+        "keel run -- keel code-search search --query x"
+    ));
     assert!(!is_keel_research_command("cargo test"));
 }
 
@@ -1157,10 +1159,7 @@ fn iron_law_gate_denies_without_evidence_and_does_not_ack_on_deny() {
 
     let session = "sess-iron-law-strict";
     let first = iron_law_gate_decision(session);
-    assert!(
-        first.is_some(),
-        "first edit with no research must DENY"
-    );
+    assert!(first.is_some(), "first edit with no research must DENY");
     assert!(
         first.unwrap().contains("STRICT"),
         "default denial must name STRICT: {:?}",
