@@ -23,10 +23,13 @@ architecture:
 2. **Understand before building.** Before you write any code, restate what the
    request actually asks, confirm the user story, and research what is genuinely
    needed. Do not guess. Do not assume. Do not blindly start building against an
-   imagined spec. The vast majority of wasted work is not buggy code — it is
-   correct code that solved the wrong problem. An hour of research is always
-   cheaper than shipping the wrong thing and rebuilding it. If the request is
-   ambiguous in a way that changes what you build, ask before building, not after.
+   imagined spec. Do not invent scope. **If unclear, confused, or at risk of
+   drift — ask the user a concrete question; never decide silently.** Never
+   trust knowledge-base alone: this project has its own structure, stories, and
+   conventions — read SYSTEM_MAP and the owning files. The vast majority of
+   wasted work is not buggy code — it is correct code that solved the wrong
+   problem. An hour of research is always cheaper than shipping the wrong thing
+   and rebuilding it.
 3. **Invoke relevant skills.** If there is even a 1% chance a skill applies, use the
    Skill tool to invoke it BEFORE writing code or giving a final answer. This
    is not negotiable. You cannot rationalize your way out of it.
@@ -53,6 +56,11 @@ checking. The cost of skipping a skill that did apply is shipping a regression.
 | "The user story is clear" | Stories are summaries, not specs. Find the root cause. |
 | "I get the gist, I'll start building" | The gist is not the spec. Restate the request, confirm the user story, research what's needed. Building on a guess is how you ship the wrong thing. |
 | "I'll assume they meant X and proceed" | Assuming is guessing with confidence. If the assumption changes what you build, confirm it first — do not build then apologize. |
+| "While I'm here I'll also add..." | Request fidelity failed. That is invention, not quality. Stay on the asked scope. |
+| "It's unclear but I'll just pick one and go" | Ask when unclear. Silent design choice is drift. Ask the user a concrete question. |
+| "I know how projects usually do this" | Never trust knowledge-base alone. Read SYSTEM_MAP, owning files, and this project's stories. |
+| "I'll list the repo to find where X is" | Memory-first failed. Call `system_map`/`recall` (or reuse this turn's result) and open the known path. |
+| "I'll add a short summary comment" | Comments are contracts (`@param` / `# Errors` / `// why:`), never summaries of the code. |
 | "Research is slower than just coding it" | Research is slower than starting; it is far faster than finishing the wrong thing twice. The hour you save guessing, you pay back with interest. |
 | "I'll just code this quickly" | Skills tell you HOW. Check first. |
 | "This is just a simple question" | Questions are tasks. Check for skills before answering. |
@@ -187,6 +195,8 @@ separate skill directory — it routes to `reviewer`.
 - `mobile-development-life-cycle` — Mobile architecture, quality, and release (Android/iOS lifecycle, store submission).
 - `dart-and-flutter-expert` — Dart & Flutter: widget architecture (pure `build`, `const` constructors), state management (Provider/Riverpod/Bloc), jank diagnosis (`ListView.builder`, `RepaintBoundary`), isolates for >16ms work, null-safety without `!`, pubspec hygiene, platform channels, Flutter web/desktop.
 - `backend-and-data-architecture` — Backend systems, API design, and data engineering (schemas, messaging, microservice boundaries).
+- `domain-driven-design` — Domain-Driven Design (DDD): ubiquitous language, bounded contexts, aggregates, entities/value objects, domain events, context maps, strategic vs tactical design, optional CQRS/event sourcing. Use for complex domain models and service boundaries.
+- `behavior-driven-development` — Behavior-Driven Development (BDD): shared Gherkin examples, outside-in delivery, living documentation. Bridges product language to automated acceptance checks (pairs with writing-user-stories + TDD).
 - `cloud-and-devops-expert` — Cloud infrastructure, CI/CD, and DevOps (IaC, container orchestration, progressive delivery).
 - `qa-and-automation-engineer` — QA, automated testing, and release reliability (Smoke → Functional → Integration → UI → Load → Stress → Security ladder).
 - `security-and-compliance-auditor` — Security reviews, threat modeling, compliance (SOC2, GDPR), remediation quality.
@@ -211,7 +221,7 @@ separate skill directory — it routes to `reviewer`.
 - `compounding-knowledge` — Capture each solved problem as a durable, deduped, discoverable solution note (problem/root-cause/solution/evidence) wired into the project's CLAUDE.md/AGENTS.md pointers so future work starts ahead. The deliberate, human-readable counterpart to the automatic learn loop.
 - `adversarial-security-review` — Red-team / blue-team / adjudicator pass that chains static findings into concrete attacker scenarios and adjudicates each to confirmed/refuted/needs-proof with evidence. The reasoning layer above keel config-audit's deterministic scan.
 - `ui-design-systems-and-responsive-interfaces` — UI systems, responsive design, accessibility (WCAG 2.1 AA).
-- `component-driven-development` — Component-Driven Development (CDD): build UI component-first (atomic → composite → page, each proven in isolation) instead of page-first. Use when scaffolding/restructuring a UI, building a component library, or setting up Storybook/widgetbook.
+- `component-driven-development` — Component-Driven Development (CDD) + Atomic Design: build UI component-first (atom → molecule → organism → page, each proven in isolation / Storybook visual TDD) instead of page-first.
 - `ux-research-and-experience-strategy` — UX research and evidence-based experience design (journeys, funnels, usability).
 - `memory-status-reporter` — Human-style memory health and learning reports.
 - `api-contract-design` — REST, GraphQL, and gRPC contract evolution; breaking-change classification, error taxonomy, idempotency, pagination, and SDK migration windows.
@@ -253,10 +263,10 @@ form so subagents do not fall back to memory-based defaults.
 
 - `software-development-life-cycle`, `web-development-life-cycle`,
   `mobile-development-life-cycle`, `dart-and-flutter-expert`,
-  `backend-and-data-architecture`, `cloud-and-devops-expert`,
-  `qa-and-automation-engineer`, `security-and-compliance-auditor`,
-  `git-expert`, `preserve-existing-flow`, `reviewer`,
-  `ui-design-systems-and-responsive-interfaces`,
+  `backend-and-data-architecture`, `domain-driven-design`,
+  `cloud-and-devops-expert`, `qa-and-automation-engineer`,
+  `security-and-compliance-auditor`, `git-expert`, `preserve-existing-flow`,
+  `reviewer`, `ui-design-systems-and-responsive-interfaces`,
   `ux-research-and-experience-strategy`, `memory-status-reporter`,
   `api-contract-design`, `react-performance-audit`,
   `postgres-migration-safety`, `stripe-integration`,

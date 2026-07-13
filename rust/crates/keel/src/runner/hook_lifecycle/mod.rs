@@ -1744,7 +1744,7 @@ pub(crate) fn post_compact_context() -> String {
 /// per-prompt context from flat fields without needing stdin parsing.
 fn user_prompt_submit_core() -> String {
     format!(
-        "Research-first: trust the codebase, not your knowledge base. Read SYSTEM_MAP and the owning module before claiming behavior. Invoke any relevant skill via the Skill tool BEFORE responding — even a 1% chance it applies means use it. Native keel MCP tools are always available — prefer them over guessing: `system_map` returns the workspace structural map (call it once per turn when you lack the layout — e.g. \"what is this project\" or \"where does X live\" — then reuse the result; call it again only if you have since created, moved, or deleted files and the in-context map is stale), `recall` runs full-text search over your saved memories and working briefs (call it once per turn when you need a prior decision or learning — then reuse the result; call it again only if you wrote new memory this turn and need to confirm it landed), and `run_command` routes noisy shell output through the compaction proxy. No tool-call loops: re-calling `system_map` or `recall` with no intervening change is a loop — re-read the result already in your context. Understand before building: restate what the request actually asks, confirm the user story, and research what is genuinely needed before writing code — no guessing, no assuming, no building against an imagined spec. Researching first is what stops you building the wrong thing; the cost of an hour's research is always less than the cost of shipping the wrong feature. Preserve existing data: never remove or replace a field, column, output, or record to fit a new format — ADD alongside and ASK before dropping anything the user did not name; data loss in an edit is destructive, and autonomy covers reversible choices, not data deletion. Find the root cause, not just the surface symptom: suspicion is a hypothesis, not a finding — trace the symptom end-to-end with file:line evidence and confirm the suspect is on that path before changing it. No assumptions. No jumping from \"this may be the case\" to a patch. Implementation discipline applies on every code-touching turn — Think Before Coding (state assumptions, deep-dive any suspected target before changing it), Simplicity First (minimum code, no speculative features or abstractions), Surgical Changes (every changed line traces to the request), Goal-Driven Execution (reproduce or trace the symptom before naming a root cause; turn the task into a verifiable goal before coding). Parallel fan-out: only batch agents in the same message when all four hold — no shared inputs, no shared file or git-index writes, no need to cancel/steer one based on another's interim result, and the work fits the current task scope. If any check fails, dispatch sequentially. {}",
+        "Research-first: trust the codebase, not your knowledge base. Read SYSTEM_MAP and the owning module before claiming behavior. Invoke any relevant skill via the Skill tool BEFORE responding — even a 1% chance it applies means use it. Native keel MCP tools are always available — prefer them over guessing: `system_map` returns the workspace structural map (call it once per turn when you lack the layout — e.g. \"what is this project\" or \"where does X live\" — then reuse the result; call it again only if you have since created, moved, or deleted files and the in-context map is stale), `recall` runs full-text search over your saved memories and working briefs (call it once per turn when you need a prior decision or learning — then reuse the result; call it again only if you wrote new memory this turn and need to confirm it landed), and `run_command` routes noisy shell output through the compaction proxy. No tool-call loops: re-calling `system_map` or `recall` with no intervening change is a loop — re-read the result already in your context. Memory-first navigation: if SYSTEM_MAP, recall, or a working brief already names the file or module, go there — do not `ls`/list the whole tree or broad-scan the repo to rediscover known paths. Understand before building: restate what the request actually asks, confirm the user story, and research what is genuinely needed before writing code — no guessing, no assuming, no building against an imagined spec. Request fidelity: implement only what the user asked; do not invent features, refactors, files, APIs, or \"improvements\" outside the request. Ask when unclear: if the request is unclear, conflicting, incomplete, or you fear drift into inventing scope, stop and ask the user a concrete question before coding — never decide silently and never \"just pick one and go.\" Never trust knowledge-base alone: training data is not this project's structure, stories, or implementation path; read SYSTEM_MAP, owning files, and the user's stories here — each project has its own conventions, nothing is hardcoded in your memory as truth for this repo. Researching first is what stops you building the wrong thing; the cost of an hour's research is always less than the cost of shipping the wrong feature. Code comments: never summarize what the code does; write contracts only (`@param`/`@returns`/`# Errors`/`// why:`) or omit. Preserve existing data: never remove or replace a field, column, output, or record to fit a new format — ADD alongside and ASK before dropping anything the user did not name; data loss in an edit is destructive, and autonomy covers reversible choices, not data deletion. Find the root cause, not just the surface symptom: suspicion is a hypothesis, not a finding — trace the symptom end-to-end with file:line evidence and confirm the suspect is on that path before changing it. No assumptions. No jumping from \"this may be the case\" to a patch. Implementation discipline applies on every code-touching turn — Think Before Coding (state assumptions, deep-dive any suspected target before changing it), Simplicity First (minimum code, no speculative features or abstractions), Surgical Changes (every changed line traces to the request), Goal-Driven Execution (reproduce or trace the symptom before naming a root cause; turn the task into a verifiable goal before coding). Parallel fan-out: only batch agents in the same message when all four hold — no shared inputs, no shared file or git-index writes, no need to cancel/steer one based on another's interim result, and the work fits the current task scope. If any check fails, dispatch sequentially. {}",
         memory_scope_summary()
     )
 }
@@ -1962,7 +1962,7 @@ fn work_intent_pointer_for_prompt(prompt: &str) -> Option<&'static str> {
 /// The read-map / recall / write-brief / preserve-flow reminder injected for
 /// code-change prompts. A `const` so both match arms above return the exact same
 /// text and the test asserting its content has a single source of truth.
-const WORK_INTENT_REMINDER: &str = "This prompt asks you to change the codebase. Before editing: (1) read the workspace SYSTEM_MAP and the owning file — if you have not already this turn, call the keel MCP `system_map` tool to get it; never edit against an imagined version (if you already called `system_map` this turn, reuse that result; call again only if you have since created, moved, or deleted files); (2) if you have not already this turn, call `recall` to surface any prior work, decisions, or conventions on this topic (reuse the result if you already called it this turn; call again only if you wrote new memory since); (3) write a working brief with `keel memory working-brief write --request \"...\" --acceptance-criteria \"...\"` capturing what the task actually asks and how completion is judged BEFORE you start (this also clears the default-on working-brief gate); (4) if you are about to edit existing code, invoke the `preserve-existing-flow` skill first. Understand before building — correct code that solved the wrong problem is the most expensive failure.";
+const WORK_INTENT_REMINDER: &str = "This prompt asks you to change the codebase. Before editing: (1) read the workspace SYSTEM_MAP and the owning file — if you have not already this turn, call the keel MCP `system_map` tool to get it; never edit against an imagined version (if you already called `system_map` this turn, reuse that result; call again only if you have since created, moved, or deleted files); (2) if you have not already this turn, call `recall` to surface any prior work, decisions, or conventions on this topic (reuse the result if you already called it this turn; call again only if you wrote new memory since); (3) write a working brief with `keel memory working-brief write --request \"...\" --acceptance-criteria \"...\"` capturing what the task actually asks and how completion is judged BEFORE you start (this also clears the default-on working-brief gate); (4) if you are about to edit existing code, invoke the `preserve-existing-flow` skill first. Memory-first: if map/recall/brief already names the path, open that file — do not list the whole tree or broad-scan to rediscover known locations. Request fidelity: implement only the asked work; no invented extras. Ask when unclear: if confused, incomplete, or drift-risk, stop and ask the user before coding — do not invent the answer yourself. Never trust knowledge-base alone as this project's structure or stories — read this repo. Comments: contracts only (`@param`/`# Errors`/`// why:`), never summary restatements of the code. Understand before building — correct code that solved the wrong problem is the most expensive failure.";
 
 /// True when `cue` (e.g. `"fix "`) appears in `lowered` used as a verb rather
 /// than a noun — that is, at least one occurrence is NOT immediately preceded by
@@ -3855,16 +3855,25 @@ pub(crate) fn run_session_end_learning(standard_error: &mut dyn Write) {
         Ok(path) => path,
         Err(_) => return,
     };
-    let report = learning::run_learning_cycle(
-        &claude_home,
-        &learning::CycleOptions::default(),
-        standard_error,
-    );
-    if report.skills_generated > 0 || report.agents_generated > 0 {
+    // synthesize: true so SessionStart can surface refinement briefs for any
+    // template-state skills (growth without an LLM inside the binary).
+    let options = learning::CycleOptions {
+        synthesize: true,
+        ..learning::CycleOptions::default()
+    };
+    let report = learning::run_learning_cycle(&claude_home, &options, standard_error);
+    if report.skills_generated > 0
+        || report.agents_generated > 0
+        || report.instincts_recorded > 0
+        || report.skills_rolled_back > 0
+    {
         let _ = writeln!(
             standard_error,
-            "keel learn: recorded {} instinct(s), generated {} skill(s) and {} agent(s)",
-            report.instincts_recorded, report.skills_generated, report.agents_generated
+            "keel learn: recorded {} instinct(s), generated {} skill(s), {} agent(s), rolled back {}",
+            report.instincts_recorded,
+            report.skills_generated,
+            report.agents_generated,
+            report.skills_rolled_back
         );
     }
 }
@@ -4025,8 +4034,8 @@ fn maybe_capture_session_summary_with_id(
 /// did, then writes it through `memory research-cache record` — the path that
 /// now syncs the recall index (s4), so the summary is immediately recallable.
 ///
-/// Silent on sessions that did no edit-class work: a pure research or question
-/// turn produces no summary, so the memory store is not polluted with noise.
+/// Silent on pure no-op sessions (no edits, no failures, fewer than three
+/// commands): research/question turns stay out of the memory store.
 ///
 /// Best-effort by contract: every failure path returns without writing and
 /// without changing the caller's exit code. The SessionEnd prunes and learning
@@ -4098,21 +4107,19 @@ struct SessionSummary {
     answer: String,
 }
 
-/// Build a work summary for `session_id` from this session's edit-class
-/// behavioral observations, or `None` when the session edited nothing.
+/// Build a work summary for `session_id` from this session's behavioral
+/// observations, or `None` when the session did no durable work.
 ///
-/// Reads today's observation rows (the learning loop's source), filters to this
-/// session's edit/command signatures, and renders a compact "what changed"
-/// line: the working directory, the count of edits, the distinct file
-/// extensions touched, and the distinct command signatures run. This is
-/// deliberately low-cardinality (extensions and command verbs, not full paths)
-/// so the note is a useful recall anchor without leaking long arguments.
+/// Captures edits, successful commands, and failed command outcomes so recall
+/// and the learning loop share the same episodic signal ("what happened today").
 fn build_session_summary(session_id: &str) -> Option<SessionSummary> {
     let rows = crate::runner::observation::iter_recent_rows(1).ok()?;
     let mut edit_count = 0usize;
     let mut command_count = 0usize;
+    let mut failed_count = 0usize;
     let mut extensions: Vec<String> = Vec::new();
     let mut commands: Vec<String> = Vec::new();
+    let mut failures: Vec<String> = Vec::new();
     let mut cwd = String::new();
     for row in rows {
         if row.session_id != session_id {
@@ -4127,6 +4134,14 @@ fn build_session_summary(session_id: &str) -> Option<SessionSummary> {
             if !extensions.contains(&extension) {
                 extensions.push(extension);
             }
+        } else if row
+            .signature
+            .ends_with(crate::runner::observation::FAILURE_SIGNATURE_SUFFIX)
+        {
+            failed_count += 1;
+            if !failures.contains(&row.signature) {
+                failures.push(row.signature.clone());
+            }
         } else {
             command_count += 1;
             if !commands.contains(&row.signature) {
@@ -4135,16 +4150,13 @@ fn build_session_summary(session_id: &str) -> Option<SessionSummary> {
         }
     }
 
-    // Only capture when the session actually edited code. Command-only sessions
-    // (ran tests, browsed git) are not durable "work done" worth a memory note.
-    if edit_count == 0 {
+    // Capture when the session edited code, recorded failures, or ran a
+    // meaningful number of commands (tests/builds). Pure no-op sessions stay silent.
+    if edit_count == 0 && command_count < 3 && failed_count == 0 {
         return None;
     }
 
-    // Use only the final path component, not the full cwd: the full path can
-    // carry a username or other sensitive directory names, and the doc contract
-    // promises low-cardinality anchors, not full paths. `file_name` handles
-    // both `/` and `\` separators via the OS path parser.
+    // Final path component only: low-cardinality anchor, no full-path leakage.
     let workspace = if cwd.is_empty() {
         "unknown workspace".to_string()
     } else {
@@ -4155,20 +4167,30 @@ fn build_session_summary(session_id: &str) -> Option<SessionSummary> {
             .unwrap_or_else(|| "unknown workspace".to_string())
     };
     let question = format!("What was done in {workspace} on {}?", today_date_string());
-    let mut answer = format!(
-        "Edited {edit_count} file(s) ({}).",
-        if extensions.is_empty() {
-            "no recorded extension".to_string()
-        } else {
-            extensions.join(", ")
-        }
-    );
+    let mut parts: Vec<String> = Vec::new();
+    if edit_count > 0 {
+        parts.push(format!(
+            "Edited {edit_count} file(s) ({}).",
+            if extensions.is_empty() {
+                "no recorded extension".to_string()
+            } else {
+                extensions.join(", ")
+            }
+        ));
+    }
     if command_count > 0 {
-        answer.push_str(&format!(
-            " Ran {command_count} command(s): {}.",
+        parts.push(format!(
+            "Ran {command_count} command(s): {}.",
             commands.join(", ")
         ));
     }
+    if failed_count > 0 {
+        parts.push(format!(
+            "Recorded {failed_count} failed outcome(s): {}.",
+            failures.join(", ")
+        ));
+    }
+    let answer = parts.join(" ");
     Some(SessionSummary { question, answer })
 }
 

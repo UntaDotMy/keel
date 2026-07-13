@@ -1,7 +1,7 @@
 ---
 name: backend-and-data-architecture
-description: Designs backend systems and data models: API contracts, microservice boundaries, database schemas, caching, messaging, and event-driven patterns. Use when changing APIs, evolving schemas, planning migrations, deciding service boundaries, or hardening retries, idempotency, and operational readiness.
-when_to_use: Backend systems, API design, and data engineering.
+description: Designs backend systems and data models: API contracts, microservice boundaries, database schemas, caching, messaging, and event-driven patterns. Use when changing APIs, evolving schemas, planning migrations, deciding service boundaries, or hardening retries, idempotency, and operational readiness. For rich domain modeling (ubiquitous language, aggregates, bounded contexts) pair with domain-driven-design.
+when_to_use: Backend systems, API design, and data engineering. Route pure DDD model work to domain-driven-design.
 allowed-tools: Read, Grep, Glob, Edit, Write, Bash(keel memory:*), Bash(git diff:*), Bash(git status), Bash(git log:*), Bash(cargo:*), Bash(npm:*), Bash(yarn:*), Bash(pnpm:*), Bash(go:*), Bash(python:*), Bash(uv:*), Bash(pytest:*)
 effort: medium
 paths:
@@ -53,6 +53,7 @@ See `_shared/common-discipline.md` for the canonical rules. Apply them to all wo
 - Separate contracts, services or use cases, repositories or data access code, background jobs or consumers, and external clients so each layer has a clear ownership boundary.
 - Prefer modular-monolith boundaries before service splits when one deployable unit remains the safer operational choice, but keep module interfaces explicit and testable.
 - Align tests to these layers and add one realistic integration or contract confirmation for critical paths, migrations, retries, and failure handling.
+- When the problem is **domain modeling** (ubiquitous language, bounded contexts, aggregates, domain events, anemic vs rich models, context maps), route to `domain-driven-design` for the model and keep this skill on contracts, persistence, messaging ops, and change safety.
 
 ## Reference Map
 
@@ -71,6 +72,7 @@ Start with the smallest reference set that answers the task:
 ### Service Boundaries
 - Prefer a monolith or modular monolith until you have proven reasons to split ownership, scaling, or deployment.
 - Extract a service boundary only when you can name the contract, ownership, operational need, and data authority clearly.
+- Prefer **bounded-context** boundaries (`domain-driven-design`) over technical-layer splits when business language diverges across modules.
 - Do not create a service just to mirror org charts or framework fashion.
 
 ### API Design

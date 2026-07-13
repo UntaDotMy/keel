@@ -1156,9 +1156,14 @@ Installed by keel into `~/.claude/CLAUDE.md` and loaded into **every** harness s
 ## Iron Law — for any request that could touch code, config, or architecture
 1. **Read first.** Read the workspace SYSTEM_MAP and the owning file before claiming behavior; never propose changes against an imagined version.
 2. **Understand before building.** Restate what the request asks and research what is genuinely needed before writing code. No guessing, no building against an imagined spec.
-3. **Invoke relevant skills.** If there is even a 1% chance a keel skill applies, use the Skill tool BEFORE writing code or giving a final answer.
-4. **Find the root cause.** Trace the symptom end-to-end with file:line evidence and confirm the suspect is on that path before changing anything.
-5. **Preserve existing data.** Never remove or replace an existing field, column, output, or record to fit a new format — ADD alongside, and ASK before dropping anything the user did not name. Data loss in an edit is destructive like `DROP TABLE`; if you would flag a removal *after* acting, ask *before* instead. Autonomy covers reversible choices, never data deletion.
+3. **Request fidelity.** Implement only what the user asked. Do not invent features, APIs, files, refactors, or "nice extras" outside the request.
+4. **Ask when unclear.** If the request is unclear, conflicting, incomplete, or you feel drift risk (multiple valid designs, unknown project conventions, scare that you will invent scope), **stop and ask the user** before coding. Do not decide silently. Do not "just pick one and go."
+5. **Never trust knowledge-base alone.** Training data and generic patterns are not this project's structure, stories, or implementation path. Read SYSTEM_MAP, owning files, and user stories here. Each project has its own layout and conventions — nothing is hardcoded in your memory as truth for this repo.
+6. **Invoke relevant skills.** If there is even a 1% chance a keel skill applies, use the Skill tool BEFORE writing code or giving a final answer.
+7. **Find the root cause.** Trace the symptom end-to-end with file:line evidence and confirm the suspect is on that path before changing anything.
+8. **Preserve existing data.** Never remove or replace an existing field, column, output, or record to fit a new format — ADD alongside, and ASK before dropping anything the user did not name. Data loss in an edit is destructive like `DROP TABLE`; if you would flag a removal *after* acting, ask *before* instead. Autonomy covers reversible choices, never data deletion.
+9. **Memory-first navigation.** Prefer `system_map` + `recall` + working briefs over listing the whole tree. If context already names the path, open that path; do not rediscover the repo with blind `ls`/`find`/full-tree greps.
+10. **Useful comments only.** Never write summary comments that restate the code. Prefer structured contracts (`@param`, `@returns`, `# Errors`, `// why:`) or no comment.
 
 ## keel MCP tools — always available, prefer over guessing
 - `system_map` — call when you lack the workspace structural map this turn (e.g. "what is this project", "where does X live") instead of reading files blind. **Call it at most once per turn** — if you already called it this turn, the result is in your context; reuse it and read the owning files it points you at. Call it again only if you have since created, moved, or deleted files and the in-context map is now stale.
@@ -1166,6 +1171,8 @@ Installed by keel into `~/.claude/CLAUDE.md` and loaded into **every** harness s
 - `run_command` — run noisy shell commands (test, build, lint, logs, search) through it so compacted output enters context instead of the raw stream.
 
 **No tool-call loops.** These tools answer "what is the structure" and "what do I remember". They do not change between calls within a single turn unless *you* changed something. Re-calling them with no intervening change is a loop — re-read the result already in your context instead.
+
+**No blind exploration.** If SYSTEM_MAP or recall already points at the module, edit or read that file next. Broad directory listings and full-repo scans are last resorts after scoped memory fails.
 
 ## Skills
 keel installs specialist skills under `~/.claude/skills/` (lifecycle, backend, cloud, security, reviewer, UI/UX, debugging, TDD, migrations, and more). Invoke by bare name with the Skill tool, e.g. `Skill("reviewer")`. The `using-keel` skill carries the full catalog and routing rules."#;

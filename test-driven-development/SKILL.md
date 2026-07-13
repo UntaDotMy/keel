@@ -16,6 +16,9 @@ exists. The test is the executable form of the requirement: it states what
 it after. This skill governs the tight per-change loop. `qa-and-automation-engineer`
 governs the broader coverage strategy and the release ladder; `reviewer` governs
 the final fail-closed verdict. Use this one while you are actually writing code.
+For **shared acceptance behavior** in product language (Gherkin, outside-in), use
+`behavior-driven-development` at the outer seam and keep this skill for the
+inner unit/module loop.
 
 ## Code Implementation Discipline
 

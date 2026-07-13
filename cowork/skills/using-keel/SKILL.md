@@ -62,6 +62,7 @@ checking. The cost of skipping a skill that did apply is shipping a regression.
 - `web-development-life-cycle` — Web frontend and full-stack delivery
 - `mobile-development-life-cycle` — Mobile app development (iOS/Android)
 - `backend-and-data-architecture` — Server-side, APIs, and data systems
+- `domain-driven-design` — DDD strategic/tactical domain modeling (full specialist)
 - `cloud-and-devops-expert` — Infrastructure, deployment, and operations
 - `qa-and-automation-engineer` — Testing strategy and automation
 - `security-and-compliance-auditor` — Security review and compliance checks
@@ -89,6 +90,8 @@ checking. The cost of skipping a skill that did apply is shipping a regression.
 - `writing-user-stories` — User story creation with Connextra + Gherkin
 - `running-a-sprint` — Scrum sprint management
 - `test-driven-development` — TDD workflow
+- `behavior-driven-development` — BDD outside-in scenarios and living docs
+- `domain-driven-design` — DDD strategic/tactical domain modeling
 - `systematic-debugging` — Root-cause debugging methodology
 - `writing-plans` — Project planning and sequencing
 - `executing-plans` — Plan execution and adaptation
@@ -107,7 +110,7 @@ checking. The cost of skipping a skill that did apply is shipping a regression.
 - `deliberation` — Deliberative decision-making
 - `research-enforcement` — Research-first enforcement
 - `memory-consolidation` — Memory consolidation practice
-- `component-driven-development` — Component-based development
+- `component-driven-development` — CDD + Atomic Design (component-first UI)
 
 ## Keel CLI Commands (use `keel run -- <command>` for compaction)
 

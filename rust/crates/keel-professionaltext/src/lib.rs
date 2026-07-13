@@ -206,6 +206,63 @@ fn dangling_dash_pattern() -> &'static Regex {
     })
 }
 
+/// Summary-style / restating comments: AI-vibecoding tells that restate what the
+/// code already says instead of a contract (why, @param, invariant, safety).
+/// High severity so pre-commit and PostToolUse treat them as blockers.
+fn summary_comment_pattern() -> &'static Regex {
+    static PATTERN: OnceLock<Regex> = OnceLock::new();
+    PATTERN.get_or_init(|| {
+        // (?x) ignores whitespace/comments so the alternation stays readable.
+        Regex::new(
+            r"(?ix)^(
+                this\s+(function|method|class|file|code|block|module|struct|helper|utility|section|component|type|enum|trait)\b
+                |this\s+(ensures|allows|enables|makes\s+sure|is\s+used|handles|checks|validates|creates|initializes|sets\s+up)\b
+                |handles\s+the\b
+                |parses\s+the\b
+                |returns\s+the\b
+                |gets\s+the\b
+                |sets\s+the\b
+                |used\s+to\s+\w+
+                |responsible\s+for\s+\w+
+                |the\s+following\s+\w+
+                |here\s+we\s+\w+
+                |we\s+(then|now|just|simply)\s+\w+
+                |simple\s+helper\b
+                |helper\s+function\b
+                |utility\s+function\b
+                |main\s+entry\s+point\b
+                |entry\s+point\s+for\b
+                |wrapper\s+around\b
+                |thin\s+wrapper\b
+            )",
+        )
+        .expect("summary_comment pattern compiles")
+    })
+}
+
+/// Structured contract markers that exempt a doc/impl comment from summary lint.
+fn has_contract_marker(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("@param")
+        || lower.contains("@returns")
+        || lower.contains("@return")
+        || lower.contains("@throws")
+        || lower.contains("@remarks")
+        || lower.contains("# errors")
+        || lower.contains("# panics")
+        || lower.contains("# safety")
+        || lower.contains("why:")
+        || lower.contains("purpose:")
+        || lower.contains("caller:")
+        || lower.contains("invariant")
+        || lower.contains("safety:")
+        || lower.contains("must not")
+        || lower.contains("must be")
+        || lower.contains("otherwise")
+        || lower.contains("avoids ")
+        || lower.contains("required by")
+}
+
 /// Apply professional-wording rules to a single comment's joined text. Shared by
 /// implementation comments and doc headers so wording stays consistent.
 fn comment_wording_findings(line: usize, text: &str) -> Vec<CommentFinding> {
@@ -248,6 +305,16 @@ fn comment_wording_findings(line: usize, text: &str) -> Vec<CommentFinding> {
             id: "comment-hype".into(),
             severity: "medium".into(),
             message: "Drop hype words; describe the behavior plainly.".into(),
+        });
+    }
+    // Summary-style restatement (vibecoding): "This function does X" with no
+    // contract marker. Prefer `@param` / `# Errors` / `// why:` or delete.
+    if !has_contract_marker(text) && summary_comment_pattern().is_match(text.trim()) {
+        findings.push(CommentFinding {
+            line,
+            id: "comment-summary".into(),
+            severity: "high".into(),
+            message: "Summary-style comment restates the code; use a contract (@param/# Errors/why:) or delete.".into(),
         });
     }
     findings
@@ -499,6 +566,37 @@ mod tests {
         let seen = ids(&findings);
         assert!(seen.contains("comment-first-person"));
         assert!(seen.contains("comment-chatty"));
+    }
+
+    #[test]
+    fn summary_style_comment_is_blocking() {
+        let source = "// This function parses the config and returns a map\nfoo();";
+        let findings = lint_code_comments(source, CommentSyntax::SlashSlash, 1);
+        assert!(
+            ids(&findings).contains("comment-summary"),
+            "summary restatement not caught: {findings:?}"
+        );
+        assert!(has_blocking_comment_findings(&findings));
+    }
+
+    #[test]
+    fn contract_comment_is_not_summary() {
+        let source = "/// # Errors\n/// Returns Io when the path is missing.\nfn load() {}";
+        let findings = lint_code_comments(source, CommentSyntax::SlashSlash, 1);
+        assert!(
+            !ids(&findings).contains("comment-summary"),
+            "contract doc should pass: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn why_comment_is_not_summary() {
+        let source = "// why: kernel requires page-aligned buffers on this path\nfoo();";
+        let findings = lint_code_comments(source, CommentSyntax::SlashSlash, 1);
+        assert!(
+            !ids(&findings).contains("comment-summary"),
+            "why-comment should pass: {findings:?}"
+        );
     }
 
     #[test]
