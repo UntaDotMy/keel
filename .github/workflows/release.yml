@@ -1,13 +1,16 @@
 name: Release
 
 # Artifact publish only — quality gate lives in validate.yml (not re-run here).
-# Triggers intentionally exclude bare `push` to `main`: every merge used to
-# rebuild 9 release-LTO targets (thin LTO + codegen-units=1) even when Validate
-# already covered the commit. Publish via version/bootstrap tags or manual
-# workflow_dispatch. Installers resolve `releases/latest` from real tags.
+# Publish on:
+#   - every main merge that touches product/code (bootstrap-*),
+#   - version/bootstrap tags,
+#   - manual workflow_dispatch.
+# Docs-only main merges skip the multi-target release matrix.
 
 on:
   push:
+    branches:
+      - "main"
     tags:
       - "v*"
       - "bootstrap-*"
@@ -31,8 +34,76 @@ env:
   CARGO_INCREMENTAL: "0"
 
 jobs:
+  # Decide whether this event should build/publish artifacts.
+  changes:
+    name: Release scope
+    runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.decide.outputs.release }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+      - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4.0.2
+        id: filter
+        # Only meaningful on branch pushes; tags/dispatch ignore the result.
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        with:
+          filters: |
+            code:
+              - 'rust/**'
+              - '**/Cargo.toml'
+              - '**/Cargo.lock'
+              - 'audit.toml'
+              - '**/*.rs'
+              - '.github/workflows/**'
+              - 'install.sh'
+              - 'install.ps1'
+              - 'install.cmd'
+              - '.claude-plugin/**'
+              - '.claude/**'
+              - 'commands/**'
+              - 'opencode/**'
+              - 'codex/**'
+              - 'cursor/**'
+              - 'pi/**'
+              - 'cowork/**'
+              - 'statusline/**'
+              - 'hermes-agent/**'
+              - '_shared/**'
+              - 'using-keel/**'
+              - '**/SKILL.md'
+              - '**/agents/**'
+              - 'AGENTS.md'
+              - 'AGENTS/**'
+              - 'CLAUDE.md'
+              - 'Claude.md'
+              - 'Agents.md'
+              - '00-skill-routing-and-escalation.md'
+              - 'WORKFLOW.md'
+              - 'README.md'
+              - 'templates/**'
+              - '.githooks/**'
+      - name: Decide whether to release
+        id: decide
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "release=true" >> "$GITHUB_OUTPUT"
+            echo "Release: workflow_dispatch — always publish."
+          elif [[ "${{ github.ref_type }}" == "tag" ]]; then
+            echo "release=true" >> "$GITHUB_OUTPUT"
+            echo "Release: tag ${{ github.ref_name }} — always publish."
+          elif [[ "${{ github.ref }}" == "refs/heads/main" && "${{ steps.filter.outputs.code }}" == "true" ]]; then
+            echo "release=true" >> "$GITHUB_OUTPUT"
+            echo "Release: main push with product/code paths — publish bootstrap."
+          else
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            echo "Release: skipped (docs-only or non-product main push)."
+          fi
+
   release-preflight:
     name: Release preflight
+    needs: changes
+    if: needs.changes.outputs.release == 'true'
     runs-on: ubuntu-latest
     outputs:
       release_tag: ${{ steps.release-metadata.outputs.release_tag }}
@@ -79,7 +150,8 @@ jobs:
 
   build:
     name: Build ${{ matrix.target }}
-    needs: release-preflight
+    needs: [changes, release-preflight]
+    if: needs.changes.outputs.release == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -249,8 +321,10 @@ jobs:
   publish:
     name: Publish GitHub Release
     needs:
+      - changes
       - release-preflight
       - build
+    if: needs.changes.outputs.release == 'true'
     runs-on: ubuntu-latest
     env:
       GH_REPO: ${{ github.repository }}
