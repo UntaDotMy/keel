@@ -49,11 +49,12 @@ use super::{recall_status_payload, system_map_text, MethodError, JSON_RPC_INVALI
 
 /// Default wall-clock budget for MCP tools that spawn a child (`cli`,
 /// `run_command`, `sprint`, …) **and** for in-process tools that can block
-/// (SQLite recall, skill catalog scan, system map render). Without this, a hung
-/// tool freezes the single-threaded MCP stdio loop and hosts report the call as
-/// "stuck" / cancelled. Override with `KEEL_MCP_TOOL_TIMEOUT_SECS` (seconds,
-/// min 5, max 3600). Web guidance: MCP clients often time out around 50–60s;
-/// keep the default under typical host patience while still allowing real builds.
+/// (SQLite recall, skill catalog scan, system map render). The serve loop runs
+/// concurrent workers, but a single hung tool still burns an in-flight slot and
+/// can exhaust host patience — deadline so hosts get `isError` instead of a
+/// permanent stall. Override with `KEEL_MCP_TOOL_TIMEOUT_SECS` (seconds, min 5,
+/// max 3600). Default stays under typical host MCP timeouts (~50–60s) while
+/// allowing real builds.
 const DEFAULT_MCP_CHILD_TIMEOUT_SECS: u64 = 90;
 
 /// Soft cap for large text tool results (system_map, skill bodies, context_brief).
@@ -621,9 +622,9 @@ fn dispatch_mcp_tool(tool_name: &str, arguments: &Value) -> Result<String, Strin
 }
 
 /// Run an in-process tool body on a worker thread and return by `timeout`.
-/// Prevents a blocked handler from freezing the MCP stdio serve loop forever
-/// (hosts then cancel the call and report "stuck"). The worker may outlive the
-/// deadline if it is stuck in a native lock; the stdio loop still recovers.
+/// Per-call safety net: the serve loop is concurrent, but one stuck tool would
+/// still hold an in-flight slot until this deadline fires. The worker may
+/// outlive the deadline if stuck in a native lock; the caller still recovers.
 fn run_tool_with_deadline<F>(timeout: Duration, label: &str, work: F) -> Result<String, String>
 where
     F: FnOnce() -> Result<String, String> + Send + 'static,
