@@ -58,9 +58,22 @@ use super::{recall_status_payload, system_map_text, MethodError, JSON_RPC_INVALI
 const DEFAULT_MCP_CHILD_TIMEOUT_SECS: u64 = 90;
 
 /// Soft cap for large text tool results (system_map, skill bodies, context_brief).
-/// Hosts like Grok also cap MCP output (~20KB); returning a bounded body keeps the
-/// stdio pipe from filling and the agent from waiting on megabyte maps.
-const MAX_MCP_TEXT_CHARS: usize = 32_000;
+///
+/// Hosts like Grok default to ~20KB MCP tool-result caps and parse stdio as
+/// newline-delimited JSON-RPC. Oversized single-line frames are the main cause of
+/// `mcp_transport_decode_error` followed by a full host tool timeout (the server
+/// already answered; the host discarded the frame and waited). Keep the *text*
+/// payload well under that budget so the JSON-RPC envelope still fits.
+/// Override with `KEEL_MCP_MAX_TEXT_CHARS` (min 2_000, max 200_000).
+const DEFAULT_MAX_MCP_TEXT_CHARS: usize = 12_000;
+
+/// Cap for a skill body's embedded text inside `skill_get`. Leaves room for the
+/// name/path envelope and the outer tools/call JSON-RPC frame.
+const MAX_SKILL_BODY_CHARS: usize = 10_000;
+
+/// Cap for each skill_list description / when_to_use field so a large catalog
+/// cannot blow the wire budget (full catalog was ~33KB pretty-printed).
+const MAX_SKILL_LIST_FIELD_CHARS: usize = 240;
 
 /// Default cap for `recall` matches when the caller does not supply one. The
 /// CLI uses the same default (see `utility::recall::DEFAULT_RECALL_LIMIT`).
@@ -139,7 +152,7 @@ pub(super) fn handle_tools_list() -> Value {
             },
             {
                 "name": "skill_get",
-                "description": "Load the full SKILL.md body for an installed keel skill by name. Use after skill_route (or skill_list) when you need the complete skill, not just the brief. Returns the entire file including frontmatter.",
+                "description": "Load an installed skill's SKILL.md by name (frontmatter included). Size-capped for MCP hosts: large skills may set truncated=true and include path so you can Read the file for the remainder. Prefer skill_route when a brief is enough.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -150,7 +163,7 @@ pub(super) fn handle_tools_list() -> Value {
             },
             {
                 "name": "skill_list",
-                "description": "List every installed keel skill with its name, description, and when_to_use. Prefer skill_route(prompt) when you already have a task — it is smaller and faster. Use skill_list only for discovery. Results are size-capped and time-budgeted so the MCP call cannot hang.",
+                "description": "List every installed keel skill with its name, description, and when_to_use. Prefer skill_route(prompt) when you already have a task — it is smaller and faster. Use skill_list only for discovery. Results are size-capped and compact so the MCP call cannot hang or blow host frame limits.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {}
@@ -911,12 +924,19 @@ fn tool_skill_get(arguments: &Value) -> Result<String, String> {
     let claude_home = tool_claude_home("skill_get")?;
     match skill_full_body(&claude_home, &name) {
         Some((path, body)) => {
+            // Compact JSON (not pretty): pretty multi-line inner payloads inflate
+            // the outer tools/call frame and have triggered host transport decode
+            // failures that surface as 120s MCP tool timeouts.
+            let body_chars = body.chars().count();
+            let (body_out, truncated) = truncate_chars(&body, MAX_SKILL_BODY_CHARS);
             let payload = json!({
                 "name": name,
                 "path": display_path(&path),
-                "body": body,
+                "body": body_out,
+                "bodyChars": body_chars,
+                "truncated": truncated,
             });
-            serde_json::to_string_pretty(&payload)
+            serde_json::to_string(&payload)
                 .map_err(|error| format!("skill_get: serialize: {error}"))
         }
         None => Err(format!(
@@ -931,10 +951,12 @@ fn tool_skill_list(_arguments: &Value) -> Result<String, String> {
     let skills: Vec<Value> = catalog
         .iter()
         .map(|entry| {
+            let (description, _) = truncate_chars(&entry.description, MAX_SKILL_LIST_FIELD_CHARS);
+            let (when_to_use, _) = truncate_chars(&entry.when_to_use, MAX_SKILL_LIST_FIELD_CHARS);
             json!({
                 "name": entry.name,
-                "description": entry.description,
-                "whenToUse": entry.when_to_use,
+                "description": description,
+                "whenToUse": when_to_use,
                 "useCount": entry.use_count,
                 "relatedSkills": entry.related_skills,
             })
@@ -944,8 +966,8 @@ fn tool_skill_list(_arguments: &Value) -> Result<String, String> {
         "count": skills.len(),
         "skills": skills,
     });
-    serde_json::to_string_pretty(&payload)
-        .map_err(|error| format!("skill_list: serialize: {error}"))
+    // Compact: pretty catalog was ~33KB and blew host MCP frame budgets.
+    serde_json::to_string(&payload).map_err(|error| format!("skill_list: serialize: {error}"))
 }
 
 fn tool_memory_status(_arguments: &Value) -> Result<String, String> {
@@ -1442,13 +1464,34 @@ fn run_command_with_timeout_stdin(
     Ok((status.code().unwrap_or(-1), stdout_text, stderr_text))
 }
 
-fn truncate_mcp_text(text: &str) -> String {
-    if text.chars().count() <= MAX_MCP_TEXT_CHARS {
-        return text.to_string();
+fn max_mcp_text_chars() -> usize {
+    env::var("KEEL_MCP_MAX_TEXT_CHARS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .unwrap_or(DEFAULT_MAX_MCP_TEXT_CHARS)
+        .clamp(2_000, 200_000)
+}
+
+/// Truncate on a char boundary. Returns `(text, truncated)`.
+fn truncate_chars(text: &str, max_chars: usize) -> (String, bool) {
+    if text.chars().count() <= max_chars {
+        return (text.to_string(), false);
     }
-    let kept: String = text.chars().take(MAX_MCP_TEXT_CHARS).collect();
+    let kept: String = text.chars().take(max_chars).collect();
+    (kept, true)
+}
+
+fn truncate_mcp_text(text: &str) -> String {
+    let max_chars = max_mcp_text_chars();
+    let (kept, truncated) = truncate_chars(text, max_chars);
+    if !truncated {
+        return kept;
+    }
+    // why: never insert raw newlines into tool text — if a host ever treats the
+    // content as a bare frame (or mis-buffers), interior newlines desync
+    // newline-delimited JSON-RPC and surface as transport decode timeouts.
     format!(
-        "{kept}\n\n… truncated for MCP (>{MAX_MCP_TEXT_CHARS} chars). Prefer skill_route over skill_list, or CLI for full output."
+        "{kept} … truncated for MCP (>{max_chars} chars). Prefer skill_route over skill_list; Read the skill path from skill_get when truncated=true; CLI for full output."
     )
 }
 
@@ -1463,11 +1506,47 @@ mod mcp_timeout_tests {
 
     #[test]
     fn truncate_mcp_text_caps_large_input() {
-        let big = "x".repeat(MAX_MCP_TEXT_CHARS + 5_000);
+        let max_chars = max_mcp_text_chars();
+        let big = "x".repeat(max_chars + 5_000);
         let out = truncate_mcp_text(&big);
         assert!(out.contains("truncated for MCP"));
         assert!(out.chars().count() < big.chars().count());
-        assert!(out.chars().count() <= MAX_MCP_TEXT_CHARS + 200);
+        assert!(out.chars().count() <= max_chars + 200);
+        assert!(
+            !out.contains('\n'),
+            "truncated tool text must not insert raw newlines (breaks NDJSON framing if mishandled)"
+        );
+    }
+
+    #[test]
+    fn truncate_chars_reports_flag() {
+        let (small, flag) = truncate_chars("abc", 10);
+        assert_eq!(small, "abc");
+        assert!(!flag);
+        let (big, flag) = truncate_chars("abcdefghij", 4);
+        assert_eq!(big, "abcd");
+        assert!(flag);
+    }
+
+    #[test]
+    fn skill_get_payload_is_compact_single_line() {
+        // The tools/call wrapper embeds this string; pretty multi-line payloads
+        // bloat the outer frame and have caused host transport timeouts.
+        let body = "line1\nline2\n".repeat(100);
+        let (body_out, truncated) = truncate_chars(&body, MAX_SKILL_BODY_CHARS);
+        let payload = json!({
+            "name": "demo",
+            "path": "/tmp/demo/SKILL.md",
+            "body": body_out,
+            "bodyChars": body.chars().count(),
+            "truncated": truncated,
+        });
+        let text = serde_json::to_string(&payload).expect("serialize");
+        assert!(
+            !text.contains('\n'),
+            "skill_get payload must be one JSON line"
+        );
+        assert!(text.contains("\"truncated\":"));
     }
 
     #[test]
