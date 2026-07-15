@@ -1,13 +1,13 @@
 name: Release
 
 # Artifact publish only — quality gate lives in validate.yml (not re-run here).
-# Triggers intentionally exclude bare `push` to `main`: every merge used to
-# rebuild 9 release-LTO targets (thin LTO + codegen-units=1) even when Validate
-# already covered the commit. Publish via version/bootstrap tags or manual
-# workflow_dispatch. Installers resolve `releases/latest` from real tags.
+# Publish on every main merge (bootstrap-*), version/bootstrap tags, or manual
+# workflow_dispatch. Installers can resolve releases/latest from published assets.
 
 on:
   push:
+    branches:
+      - "main"
     tags:
       - "v*"
       - "bootstrap-*"
