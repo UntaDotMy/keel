@@ -44,9 +44,10 @@ were validated where executable.
    `docs/context-efficiency-playbook.md`.
 2. **Custom slash commands (discoverability gap vs. the whole field).** Added
    `/keel:workflow`, `/keel:review`, `/keel:recall`,
-   `/keel:gain` at the plugin root `commands/`, registered via the
-   manifest `commands` key. Each wraps only implemented CLI surfaces with the
-   verified flag names. Frontmatter validated.
+   `/keel:gain`, `/keel:sprint`, `/keel:user-story` at the plugin root
+   `commands/` (six total), registered via the manifest `commands` key. Each
+   wraps only implemented CLI surfaces with the verified flag names.
+   Frontmatter validated.
 3. **Statusline savings badge (caveman/RTK-style ROI surface).**
    `statusline/statusline-keel.sh` and `.ps1` render model + context + a
    `gain`-sourced `saved N tok` badge, pinned to the real `tokensSaved` field,
@@ -187,7 +188,7 @@ below was implemented and verified with `cargo build` + `cargo test --workspace`
     skill-creation-from-behavior; superpowers does it as an offline batch, and
     the harness/caveman/RTK/ohmyclaude do not do it at all.
 
-Prior non-Rust work (doc/impl drift fixes, the four slash commands, the
+Prior non-Rust work (doc/impl drift fixes, the six slash commands, the
 cross-platform statusline savings badge, and hook-count doc accuracy) shipped
 earlier in the same pass and remains in place; the doctrine docs were then
 reconciled to describe these commands as implemented rather than planned.

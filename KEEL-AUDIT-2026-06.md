@@ -222,16 +222,16 @@ The existing competitive-gap doc correctly flags star counts as unreliable. My v
 
 ### Ship immediately
 1. **Multi-harness depth + remaining hosts** — OpenCode/Codex/Cursor/Pi/Cowork bridges exist; close Claude-depth gaps on those hosts and decide whether Gemini/Copilot adapters are in scope. Methodology skills remain mostly host-agnostic in content.
-2. **Ultra-compact mode** — add `--ultra` flag to `keel run` that enables higher compression aggressiveness in all adapters. The measurement pipeline already exists in `eval.rs`.
-3. **Generic error filter** — `keel run --errors-only -- <command>` that strips all non-error/non-failure output. Works on any command without a dedicated adapter.
+2. ~~**Ultra-compact mode**~~ — **Shipped (2026-07):** `keel run --ultra -- <cmd>` (see G-2).
+3. ~~**Generic error filter**~~ — **Shipped (2026-07):** `keel run --errors-only -- <cmd>` (see G-3).
 
 ### Ship medium-term
-4. **Homebrew formula** for macOS/Linux adoption. RTK's Homebrew install is its primary distribution channel.
+4. **Homebrew formula** for macOS/Linux adoption. RTK's Homebrew install is its primary distribution channel. (Product non-goal until distribution strategy is chosen.)
 5. **Public documentation site** with installation guide, architecture docs, and capability comparison. ECC has `ecc.tools`, RTK has `rtk-ai.app`. A keel docs site would give external evaluators something to read.
 
 ### Don't ship (deliberate scope)
 6. **GUI dashboard** — contradicts the terminal-native, CLI-first posture. CLI output is already structured JSON for tooling.
-7. **271-skill breadth** — the curated 41-skill approach with lint validation is superior to ECC's unenforced volume. Quality over quantity is a defensible moat.
+7. **271-skill breadth** — the curated skill pack with lint validation (live count via `keel skill-lint`; do not hardcode) is superior to ECC's unenforced volume. Quality over quantity is a defensible moat.
 8. **Dark Factory remote agents** — SAW's tmux-based remote agents are useful but outside keel's single-binary stance. The dispatch system (`keel dispatch`) handles parallel worktree isolation locally.
 
 ### Investigate
@@ -243,4 +243,4 @@ The existing competitive-gap doc correctly flags star counts as unreliable. My v
 
 This audit was conducted by reading the actual source code and README of each competitor repository on 2026-06-24. No blog posts, X threads, or third-party reviews were used as evidence. Savings claims were classified by engineering tier. Star counts are reported with caveats. Existing competitive analysis in `docs/competitive-gap-closure.md` was consulted but not trusted — every claim was independently re-verified.
 
-The three gaps keel should actually close (multi-harness, ultra-compact, error filter) are all small-scope additions to existing Rust code. The one gap keel cannot close within its single-binary stance is multi-harness distribution — that's a packaging and strategy question, not a code gap.
+As of 2026-07: G-2 (ultra-compact) and G-3 (errors-only) are shipped. The remaining strategic gap is multi-harness **depth** plus optional Gemini/Copilot adapters — packaging and distribution choices more than missing core code.

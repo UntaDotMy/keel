@@ -1,5 +1,17 @@
 name: Validate
 
+# PR + main quality gate. Release (artifacts) is a separate workflow and does
+# not re-run this suite — only multi-target `cargo build --release` + publish.
+# Speed notes (2026-07 audit):
+# - Prefer dev-profile tests: Cargo.toml [profile.release] uses thin LTO +
+#   codegen-units=1, which makes --release CI several× slower without catching
+#   extra correctness bugs that clippy + tests miss.
+# - Drop a standalone `cargo build --release`; `cargo test` already compiles
+#   what it needs. Release binaries stay the job of release.yml.
+# - CARGO_INCREMENTAL=0 + CARGO_PROFILE_TEST_DEBUG=0 shrink cache/target (corrode.dev).
+# - cargo-audit via taiki-e/install-action (cached tool binary), not `cargo install`.
+# - security-audit path filter: skip when lockfile/manifests unchanged.
+
 on:
   push:
     branches: [main]
@@ -13,6 +25,8 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
 
 jobs:
   validate-linux:
@@ -27,7 +41,7 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Lint
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --locked -- -D warnings
       - name: Check MSRV
         shell: bash
         run: |
@@ -45,12 +59,10 @@ jobs:
             echo "::error::rustc $RUSTC_VERSION is below MSRV $MSRV"
             exit 1
           fi
-      - name: Build
-        run: cargo build --release
       - name: Run tests
-        run: cargo test --release
+        run: cargo test --locked
       - name: Run tests (semantic feature)
-        run: cargo test --workspace --features semantic
+        run: cargo test --workspace --locked --features semantic
 
   validate-windows:
     runs-on: windows-latest
@@ -62,13 +74,11 @@ jobs:
           cache-on-failure: true
           key: validate-windows
       - name: Lint
-        run: cargo clippy -- -D warnings
-      - name: Build
-        run: cargo build --release
+        run: cargo clippy --locked -- -D warnings
       - name: Run tests
-        run: cargo test --release
+        run: cargo test --locked
       - name: Run tests (semantic feature)
-        run: cargo test --workspace --features semantic
+        run: cargo test --workspace --locked --features semantic
 
   validate-macos:
     runs-on: macos-latest
@@ -80,20 +90,34 @@ jobs:
           cache-on-failure: true
           key: validate-macos
       - name: Lint
-        run: cargo clippy -- -D warnings
-      - name: Build
-        run: cargo build --release
+        run: cargo clippy --locked -- -D warnings
       - name: Run tests
-        run: cargo test --release
+        run: cargo test --locked
       - name: Run tests (semantic feature)
-        run: cargo test --workspace --features semantic
+        run: cargo test --workspace --locked --features semantic
 
   security-audit:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+      - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4.0.2
+        id: filter
+        with:
+          filters: |
+            deps:
+              - '**/Cargo.toml'
+              - '**/Cargo.lock'
+              - 'audit.toml'
       - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1
-      - name: Install cargo-audit
-        run: cargo install cargo-audit
+        if: steps.filter.outputs.deps == 'true' || github.event_name != 'pull_request'
+      - name: Install cargo-audit (cached tool binary)
+        if: steps.filter.outputs.deps == 'true' || github.event_name != 'pull_request'
+        uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
+        with:
+          tool: cargo-audit
       - name: Run cargo audit
+        if: steps.filter.outputs.deps == 'true' || github.event_name != 'pull_request'
         run: cargo audit
+      - name: Skip audit (no dependency changes on PR)
+        if: steps.filter.outputs.deps != 'true' && github.event_name == 'pull_request'
+        run: echo "No Cargo.toml/Cargo.lock/audit.toml changes — skipping cargo audit on this PR."

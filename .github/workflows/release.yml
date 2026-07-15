@@ -1,9 +1,13 @@
 name: Release
 
+# Artifact publish only — quality gate lives in validate.yml (not re-run here).
+# Triggers intentionally exclude bare `push` to `main`: every merge used to
+# rebuild 9 release-LTO targets (thin LTO + codegen-units=1) even when Validate
+# already covered the commit. Publish via version/bootstrap tags or manual
+# workflow_dispatch. Installers resolve `releases/latest` from real tags.
+
 on:
   push:
-    branches:
-      - "main"
     tags:
       - "v*"
       - "bootstrap-*"
@@ -24,6 +28,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
+  CARGO_INCREMENTAL: "0"
 
 jobs:
   release-preflight:
@@ -36,11 +41,7 @@ jobs:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
         with:
           fetch-depth: 0
-      - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1
-        with:
-          toolchain: stable
-          components: clippy, rustfmt
-
+      # Metadata only — no rustc needed for tag normalization.
       - name: Resolve release metadata
         id: release-metadata
         shell: bash
@@ -63,6 +64,7 @@ jobs:
           elif [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
             release_tag="$(normalize_release_tag "${GITHUB_REF_NAME}")"
           else
+            # Fallback for unexpected triggers; prefer explicit tag or dispatch input.
             release_tag="bootstrap-${GITHUB_SHA::12}"
           fi
 
