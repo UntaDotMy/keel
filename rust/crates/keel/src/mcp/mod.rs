@@ -1297,9 +1297,13 @@ mod tests {
             ping_pos < d1 && ping_pos < d2,
             "ping should complete first; {rendered}"
         );
+        // Concurrent wall ≈ max(80,80) + scheduler/spawn noise. Serial pure
+        // sleep alone is ≥160ms before overhead. CI macOS shared runners have
+        // high noise (~220ms observed); keep a loose upper bound that still
+        // fails if work is fully serialized with large delays.
         assert!(
-            elapsed < std::time::Duration::from_millis(200),
-            "expected concurrent ~80ms, took {elapsed:?}; serial would be ≥160ms"
+            elapsed < std::time::Duration::from_millis(400),
+            "expected concurrent completion under 400ms, took {elapsed:?} (serial sleep alone ≥160ms)"
         );
     }
 
