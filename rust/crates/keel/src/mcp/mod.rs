@@ -96,10 +96,7 @@ pub fn run_mcp_command(
 fn render_mcp_help(standard_output: &mut dyn Write) {
     let _ = writeln!(standard_output, "Usage:");
     let _ = writeln!(standard_output, "  keel mcp serve");
-    let _ = writeln!(
-        standard_output,
-        "  keel mcp serve-http [--bind HOST:PORT]"
-    );
+    let _ = writeln!(standard_output, "  keel mcp serve-http [--bind HOST:PORT]");
     let _ = writeln!(standard_output);
     let _ = writeln!(
         standard_output,
@@ -277,10 +274,7 @@ pub fn serve_stdio(
 
 /// Production entry: stdin reader runs on its own thread so the event loop can
 /// write tool responses while still accepting new frames (true full-duplex).
-fn serve_stdio_owned_stdin(
-    standard_output: &mut dyn Write,
-    standard_error: &mut dyn Write,
-) -> u8 {
+fn serve_stdio_owned_stdin(standard_output: &mut dyn Write, standard_error: &mut dyn Write) -> u8 {
     let max_inflight = max_inflight();
     let (event_tx, event_rx) = mpsc::channel::<ServeEvent>();
     let reader_tx = event_tx.clone();
@@ -341,7 +335,10 @@ fn read_frames_into(input: &mut dyn Read, event_tx: mpsc::Sender<ServeEvent>) {
         if trimmed.is_empty() {
             continue;
         }
-        if event_tx.send(ServeEvent::Frame(trimmed.to_string())).is_err() {
+        if event_tx
+            .send(ServeEvent::Frame(trimmed.to_string()))
+            .is_err()
+        {
             return;
         }
     }
@@ -427,11 +424,9 @@ fn run_serve_event_loop(
             ServeEvent::Response { value, batch } => {
                 in_flight = in_flight.saturating_sub(1);
                 if let Some(member) = batch {
-                    if let Some(finished) = complete_batch_slot(
-                        &mut batches,
-                        member,
-                        BatchSlot::Response(value),
-                    ) {
+                    if let Some(finished) =
+                        complete_batch_slot(&mut batches, member, BatchSlot::Response(value))
+                    {
                         if let Err(write_error) =
                             write_framed_response(standard_output, standard_error, &finished)
                         {
@@ -480,19 +475,20 @@ fn run_serve_event_loop(
             let request_id = job.request.get("id").cloned().unwrap_or(Value::Null);
             let batch = job.batch;
             let request = job.request;
-            let spawn_result = thread::Builder::new()
-                .name("keel-mcp-req".into())
-                .spawn(move || match dispatch(&request) {
-                    Some(response) => {
-                        let _ = worker_tx.send(ServeEvent::Response {
-                            value: response,
-                            batch,
-                        });
-                    }
-                    None => {
-                        let _ = worker_tx.send(ServeEvent::WorkerDone { batch });
-                    }
-                });
+            let spawn_result =
+                thread::Builder::new()
+                    .name("keel-mcp-req".into())
+                    .spawn(move || match dispatch(&request) {
+                        Some(response) => {
+                            let _ = worker_tx.send(ServeEvent::Response {
+                                value: response,
+                                batch,
+                            });
+                        }
+                        None => {
+                            let _ = worker_tx.send(ServeEvent::WorkerDone { batch });
+                        }
+                    });
             if let Err(error) = spawn_result {
                 in_flight = in_flight.saturating_sub(1);
                 let _ = writeln!(standard_error, "[keel mcp] spawn request worker: {error}");
@@ -502,11 +498,9 @@ fn run_serve_event_loop(
                     &format!("failed to spawn request worker: {error}"),
                 );
                 if let Some(member) = batch {
-                    if let Some(finished) = complete_batch_slot(
-                        &mut batches,
-                        member,
-                        BatchSlot::Response(response),
-                    ) {
+                    if let Some(finished) =
+                        complete_batch_slot(&mut batches, member, BatchSlot::Response(response))
+                    {
                         if write_framed_response(standard_output, standard_error, &finished)
                             .is_err()
                         {
@@ -516,8 +510,7 @@ fn run_serve_event_loop(
                             break;
                         }
                     }
-                } else if write_framed_response(standard_output, standard_error, &response)
-                    .is_err()
+                } else if write_framed_response(standard_output, standard_error, &response).is_err()
                 {
                     exit_code = 1;
                     reader_done = true;
@@ -1212,7 +1205,11 @@ mod tests {
             .expect("one batch response line");
         let parsed: Value = serde_json::from_str(line).expect("batch response is JSON");
         let arr = parsed.as_array().expect("JSON-RPC batch returns an array");
-        assert_eq!(arr.len(), 2, "notification omitted; two pings remain: {line}");
+        assert_eq!(
+            arr.len(),
+            2,
+            "notification omitted; two pings remain: {line}"
+        );
         let ids: Vec<_> = arr.iter().map(|r| r.get("id").cloned()).collect();
         assert!(ids.contains(&Some(json!(1))), "line={line}");
         assert!(ids.contains(&Some(json!(2))), "line={line}");

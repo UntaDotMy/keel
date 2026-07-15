@@ -16,9 +16,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
-use super::{
-    dispatch_body, DispatchBodyResult, JSON_RPC_INVALID_REQUEST, JSON_RPC_PARSE_ERROR,
-};
+use super::{dispatch_body, DispatchBodyResult, JSON_RPC_INVALID_REQUEST, JSON_RPC_PARSE_ERROR};
 
 const DEFAULT_BIND: &str = "127.0.0.1:3920";
 const MAX_HTTP_BODY: usize = 8 * 1024 * 1024;
@@ -134,10 +132,7 @@ fn handle_connection(
         if let Some(header_end) = find_header_end(&buffer) {
             let header_text = String::from_utf8_lossy(&buffer[..header_end]);
             let headers = parse_headers(&header_text);
-            let content_length = headers
-                .content_length
-                .unwrap_or(0)
-                .min(MAX_HTTP_BODY);
+            let content_length = headers.content_length.unwrap_or(0).min(MAX_HTTP_BODY);
             let total_needed = header_end + content_length;
             while buffer.len() < total_needed {
                 let n = stream.read(&mut chunk)?;
@@ -244,13 +239,7 @@ fn respond(
             "error": { "code": -32000, "message": "Origin not allowed" }
         });
         let bytes = serde_json::to_vec(&err).unwrap_or_default();
-        return write_http(
-            stream,
-            403,
-            "application/json",
-            None,
-            &bytes,
-        );
+        return write_http(stream, 403, "application/json", None, &bytes);
     }
 
     let path = headers.path.split('?').next().unwrap_or("/");
@@ -305,10 +294,7 @@ fn handle_post(
     sessions: &Arc<Mutex<HashSet<String>>>,
 ) -> std::io::Result<()> {
     if let Some(id) = headers.session_id.as_ref() {
-        let known = sessions
-            .lock()
-            .map(|g| g.contains(id))
-            .unwrap_or(false);
+        let known = sessions.lock().map(|g| g.contains(id)).unwrap_or(false);
         if !known {
             return write_http(
                 stream,
@@ -351,10 +337,7 @@ fn handle_post(
         return write_http(stream, 202, "text/plain; charset=utf-8", None, b"");
     }
 
-    let is_initialize = value
-        .get("method")
-        .and_then(Value::as_str)
-        == Some("initialize");
+    let is_initialize = value.get("method").and_then(Value::as_str) == Some("initialize");
 
     // Concurrent dispatch for batch arrays is sequential here for HTTP body
     // simplicity; multi-client concurrency is via parallel TCP connections.
@@ -490,9 +473,7 @@ mod tests {
     use std::time::Duration;
 
     fn read_http_response(client: &mut TcpStream) -> String {
-        client
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .ok();
+        client.set_read_timeout(Some(Duration::from_secs(2))).ok();
         let mut response = Vec::new();
         let mut buf = [0u8; 4096];
         loop {
