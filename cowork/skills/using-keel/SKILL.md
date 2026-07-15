@@ -91,7 +91,6 @@ checking. The cost of skipping a skill that did apply is shipping a regression.
 - `running-a-sprint` — Scrum sprint management
 - `test-driven-development` — TDD workflow
 - `behavior-driven-development` — BDD outside-in scenarios and living docs
-- `domain-driven-design` — DDD strategic/tactical domain modeling
 - `systematic-debugging` — Root-cause debugging methodology
 - `writing-plans` — Project planning and sequencing
 - `executing-plans` — Plan execution and adaptation
@@ -100,6 +99,7 @@ checking. The cost of skipping a skill that did apply is shipping a regression.
 - `using-git-worktrees` — Git worktree workflow
 - `finishing-a-development-branch` — Branch completion and cleanup
 - `receiving-code-review` — Receiving review feedback
+- `requesting-code-review` — Thin alias to `reviewer` (not a separate review behavior)
 - `writing-skills` — Skill authoring
 - `designing-agent-teams` — Agent team design
 - `compounding-knowledge` — Knowledge accumulation

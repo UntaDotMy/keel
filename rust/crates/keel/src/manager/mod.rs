@@ -31,7 +31,10 @@ use install::{
     install_from_flags, repo_version_for_source, repo_version_from_metadata_or_build,
     write_install_summary,
 };
-use verify::{count_installed_skills, count_managed_skills, install_metadata_path, metadata_value};
+use verify::{
+    count_installed_skills, count_learned_skills, count_managed_skills, install_metadata_path,
+    metadata_value,
+};
 
 pub fn run_install_command(
     build_version: &str,
@@ -231,7 +234,10 @@ pub fn run_status_command(
             return 1;
         }
     };
+    // Managed installed only — excludes learned-* so loop-generated skills
+    // never force "refresh recommended" against the source pack size.
     let installed_skill_count = count_installed_skills(&claude_home);
+    let learned_skill_count = count_learned_skills(&claude_home);
     let metadata = read_text_if_exists(&install_metadata_path(&claude_home)).unwrap_or_default();
     let layout = crate::runtime::discover_repository_layout(&repository_root);
     let source_skill_count = layout
@@ -294,6 +300,7 @@ pub fn run_status_command(
     );
     let _ = writeln!(standard_output, "  Platform: {target}");
     let _ = writeln!(standard_output, "  Synced skills: {synced_skills}");
+    let _ = writeln!(standard_output, "  Learned skills: {learned_skill_count}");
     let _ = writeln!(standard_output);
     let _ = writeln!(standard_output, "Runtime:");
     let _ = writeln!(standard_output, "  implementation: rust");

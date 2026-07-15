@@ -185,6 +185,92 @@ fn status_uses_installed_inventory_when_source_is_unavailable() {
     let _ = fs::remove_dir_all(non_repository_directory);
 }
 
+/// Learned skills under `skills/learned-*` are loop-generated and must not
+/// inflate the managed sync numerator. Status compares managed installed vs
+/// source/inventory; learned count is reported separately (or omitted when 0).
+#[test]
+fn status_excludes_learned_skills_from_managed_sync_count() {
+    let repository_root = repository_root();
+    let claude_home = unique_temp_dir("keel-status-learned");
+    let _ = fs::remove_dir_all(&claude_home);
+
+    let install_output = Command::new(env!("CARGO_BIN_EXE_keel"))
+        .arg("install")
+        .arg("--repo-root")
+        .arg(&repository_root)
+        .arg("--claude-home")
+        .arg(&claude_home)
+        .output()
+        .expect("run keel install");
+    assert!(
+        install_output.status.success(),
+        "install failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&install_output.stdout),
+        String::from_utf8_lossy(&install_output.stderr)
+    );
+
+    let managed_skill_count = fs::read_to_string(
+        claude_home
+            .join(".claude-skill-manager")
+            .join("managed-skills.txt"),
+    )
+    .expect("read managed skill inventory")
+    .lines()
+    .filter(|line| !line.trim().is_empty())
+    .count();
+
+    // Three loop-generated skills that would previously make status report
+    // (managed+3)/managed and "refresh recommended".
+    for name in ["learned-alpha", "learned-beta", "learned-gamma"] {
+        let skill_dir = claude_home.join("skills").join(name);
+        fs::create_dir_all(&skill_dir).expect("create learned skill dir");
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: test learned skill\n---\n\nbody\n"),
+        )
+        .expect("write learned SKILL.md");
+    }
+
+    let status_output = Command::new(env!("CARGO_BIN_EXE_keel"))
+        .arg("status")
+        .arg("--repo-root")
+        .arg(&repository_root)
+        .arg("--claude-home")
+        .arg(&claude_home)
+        .output()
+        .expect("run keel status");
+    assert!(
+        status_output.status.success(),
+        "status failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&status_output.stdout),
+        String::from_utf8_lossy(&status_output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&status_output.stdout);
+    assert!(
+        stdout.contains("Skill pack update status: current"),
+        "learned-* must not force refresh recommended:\n{stdout}"
+    );
+    assert!(
+        stdout.contains(&format!(
+            "Synced skills: {managed_skill_count}/{managed_skill_count}"
+        )),
+        "synced skills must count managed only, not learned-*:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains(&format!(
+            "Synced skills: {}/{managed_skill_count}",
+            managed_skill_count + 3
+        )),
+        "synced skills must not include learned-* in the numerator:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("Learned skills: 3"),
+        "status should report learned skill count separately:\n{stdout}"
+    );
+
+    let _ = fs::remove_dir_all(claude_home);
+}
+
 fn repository_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()

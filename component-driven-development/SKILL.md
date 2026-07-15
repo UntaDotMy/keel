@@ -1,6 +1,6 @@
 ---
 name: component-driven-development
-description: Component-Driven Development (CDD) / Atomic Design specialist. Build UI component-first — atoms → molecules/composites → organisms → templates/pages — each proven in isolation (Storybook/Widgetbook) instead of page-first. Use when scaffolding or restructuring a UI, design systems, visual TDD, or decomposing a monolithic screen. Catches "build the page, extract later."
+description: Component-Driven Development (CDD) / Atomic Design technique. Build UI component-first — atoms → molecules/composites → organisms → templates/pages — each proven in isolation (Storybook/Widgetbook) instead of page-first. Use when scaffolding or restructuring a UI, design systems, visual TDD, or decomposing a monolithic screen. Catches "build the page, extract later."
 when_to_use: Building or restructuring any UI; Atomic Design hierarchy; component library or design system; Storybook/widgetbook/visual tests; decomposing a monolithic page; component boundaries and composition; reusability and isolated testability.
 allowed-tools: Read, Grep, Glob, Edit, Write, Bash(keel memory:*), Bash(git diff:*), Bash(git status), Bash(npm:*), Bash(yarn:*), Bash(pnpm:*), Bash(npx:*), Bash(dart:*), Bash(flutter:*)
 effort: medium

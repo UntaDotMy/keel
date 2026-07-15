@@ -215,7 +215,7 @@ Manual prune (any time):
 
 ## Slash Commands
 
-When installed as a plugin, keel registers four namespaced slash commands
+When installed as a plugin, keel registers six namespaced slash commands
 (see the `commands` key in `.claude-plugin/plugin.json`). Each is a thin,
 discoverable `/`-menu wrapper over an **implemented** `keel` CLI surface
 — none of them invoke planned-but-unimplemented commands.
@@ -226,6 +226,8 @@ discoverable `/`-menu wrapper over an **implemented** `keel` CLI surface
 | `/keel:review [pre-commit\|pre-pr\|gates] [base-ref]` | `review` gates | Deterministic local quality gate on the diff. |
 | `/keel:recall <terms>` | `memory recall` | FTS5 search over durable memory. |
 | `/keel:gain [since]` | `gain` | Report command-output compaction savings. |
+| `/keel:sprint [plan\|status\|advance\|review\|list] <args>` | `sprint` ledger | Drive a Scrum-style sprint over confirmed stories. |
+| `/keel:user-story [lint] <args>` | `user-story lint` | Validate Connextra + Gherkin + INVEST story format. |
 
 Command files live at the plugin root `commands/`. They ship through the plugin
 install path, and the native `keel install` also syncs them into

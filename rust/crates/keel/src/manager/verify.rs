@@ -1,7 +1,7 @@
 //! Purpose: Verify and validate install logic for keel manager.
 //! Caller: commands.rs via run_verify_command, run_validate_command, run_all_command, run_menu_command.
 //! Dependencies: std::fs, std::io, std::path, crate::args, crate::runtime.
-//! Main Functions: run_verify_command, verify_install, compare_skill, compare_directory_subset, compare_file_bytes, verify_installed_markdown_dir, count_installed_skills, count_managed_skills, install_metadata_path, read_inventory_lines, metadata_value, run_validate_command, run_all_command, run_menu_command.
+//! Main Functions: run_verify_command, verify_install, compare_skill, compare_directory_subset, compare_file_bytes, verify_installed_markdown_dir, count_installed_skills, count_learned_skills, is_learned_skill_name, count_managed_skills, install_metadata_path, read_inventory_lines, metadata_value, run_validate_command, run_all_command, run_menu_command.
 //! Side Effects: Reads installed files and compares against source; runs cargo/git validation commands.
 
 use std::fs;
@@ -241,12 +241,47 @@ fn verify_installed_markdown_dir(
     Ok(())
 }
 
+/// Name prefix for loop-generated skills written by the learning cycle
+/// (`~/.claude/skills/learned-*`). These must never inflate the managed
+/// skill-pack sync numerator used by `status` / `doctor`.
+const LEARNED_SKILL_PREFIX: &str = "learned-";
+
+/// True when `name` is a learning-loop skill directory (`learned-*`).
+pub fn is_learned_skill_name(name: &str) -> bool {
+    name.starts_with(LEARNED_SKILL_PREFIX)
+}
+
+/// Count of managed installed skills: directories under `skills/` that contain
+/// `SKILL.md` and are **not** `learned-*`. Used as the sync numerator so
+/// loop-generated skills do not force "refresh recommended".
 pub fn count_installed_skills(claude_home: &Path) -> usize {
+    count_skill_dirs(claude_home, SkillCountKind::Managed)
+}
+
+/// Count of loop-generated `learned-*` skill directories with a `SKILL.md`.
+pub fn count_learned_skills(claude_home: &Path) -> usize {
+    count_skill_dirs(claude_home, SkillCountKind::Learned)
+}
+
+enum SkillCountKind {
+    Managed,
+    Learned,
+}
+
+fn count_skill_dirs(claude_home: &Path, kind: SkillCountKind) -> usize {
     fs::read_dir(skills_directory(claude_home))
         .ok()
         .into_iter()
         .flat_map(|entries| entries.filter_map(Result::ok))
         .filter(|entry| entry.path().join("SKILL.md").is_file())
+        .filter(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            match kind {
+                SkillCountKind::Managed => !is_learned_skill_name(&name),
+                SkillCountKind::Learned => is_learned_skill_name(&name),
+            }
+        })
         .count()
 }
 
