@@ -184,8 +184,8 @@ skill matcher fires. The full text and the tactical rules they imply live in
 Source: each `<name>/SKILL.md` in this repo. Use the Skill tool with the bare
 name (e.g. `Skill("reviewer")`). The count excludes this bootstrap skill itself
 (`using-keel`), which is always loaded at SessionStart rather than
-invoked on demand. `requesting-code-review` below is an alias pointer, not a
-separate skill directory — it routes to `reviewer`.
+invoked on demand. `requesting-code-review` is a real thin-alias directory that
+routes to `reviewer` (not a separate review behavior).
 
 - `software-development-life-cycle` — Cross-domain planning, architecture framing, multi-phase delivery sequencing.
 - `web-development-life-cycle` — Web architecture, quality, and production delivery (Core Web Vitals, SEO, accessibility).
@@ -234,6 +234,10 @@ separate skill directory — it routes to `reviewer`.
 - `internationalization-and-localization` — i18n/l10n: message-catalog design and extraction, ICU MessageFormat, pluralization, locale-aware number/date/currency formatting, RTL/bidi, translation workflows and fallback chains, pseudo-localization, and Unicode correctness. The message/locale layer beneath ui-design-systems-and-responsive-interfaces.
 - `compression-discipline` — Per-turn output-compression playbook (narrower line ranges, search before reading, summarize logs). Auto-loaded by the UserPromptSubmit hint when a session crosses the per-day tool-call threshold.
 - `output-economy` — Per-response output-token economy: cut reply verbosity (no preamble, no re-narration of tool output, length tracks the task) without dropping technical signal. The output-side counterpart to compression-discipline's input-side rules.
+- `critic` — In-flight critique during/before implementation: catch blind code, missing tests, missing memory capture, and skipped workflow early. Distinct from `reviewer` (post-implementation gate).
+- `deliberation` — Structured disagreement when experts or subagents conflict: surface consensus, contradictions, unique insights, and blind spots before architecture or review decisions.
+- `memory-consolidation` — Distill recent observations into durable memory notes (patterns, decisions, solutions) at session-end, compaction, or on "what did we learn".
+- `research-enforcement` — Require fresh research (web/docs/recall) before implementing against external libraries, APIs, or frameworks so training data is not treated as current fact.
 
 ## Subagent catalog (delegation targets in .claude/agents/, roster asserted by tests/doc_parity_test.rs)
 

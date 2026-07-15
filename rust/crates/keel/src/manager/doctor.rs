@@ -170,8 +170,14 @@ fn hook_accepts_wrapped_command() -> bool {
 
 fn run_hook_probe(command: &str) -> Option<String> {
     let executable = std::env::current_exe().ok()?;
+    // Isolate the rewrite-contract probe from Iron Law STRICT. Doctor's
+    // sample payload is a plain `cargo test` Bash command; under the default
+    // gate that is hard-denied before compaction rewrite runs, which makes
+    // the rewrite health check always fail even when rewrite itself is fine.
+    // Disabling the gate for this child only measures rewrite allow/updatedInput.
     let mut child = Command::new(executable)
         .args(["hook", "pre-tool-use"])
+        .env("KEEL_IRON_LAW_GATE", "off")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

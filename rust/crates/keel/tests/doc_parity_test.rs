@@ -53,8 +53,8 @@ fn manifest_skills(repo_root: &Path) -> Vec<String> {
 }
 
 /// First-party skill directories: a `<name>/SKILL.md` directly under the repo
-/// root. Excludes hidden dirs and the vendored `karpathy-skills-cmp/` tree,
-/// which holds a benchmark-artifact SKILL.md that is not a keel skill.
+/// root. Excludes hidden dirs and an optional vendored `karpathy-skills-cmp/`
+/// tree (historical benchmark artifact; may be absent; never a keel skill).
 fn first_party_skill_dirs(repo_root: &Path) -> BTreeSet<String> {
     let mut dirs = BTreeSet::new();
     for entry in fs::read_dir(repo_root).expect("read repo root") {
@@ -63,6 +63,7 @@ fn first_party_skill_dirs(repo_root: &Path) -> BTreeSet<String> {
             continue;
         }
         let name = entry.file_name().to_string_lossy().to_string();
+        // Keep the skip so a reintroduced vendor tree is not treated as a skill.
         if name.starts_with('.') || name == "karpathy-skills-cmp" {
             continue;
         }

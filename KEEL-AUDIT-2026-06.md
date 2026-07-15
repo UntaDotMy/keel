@@ -158,7 +158,7 @@ The user asked about Headroom. Not identical to `headroom` on GitHub by headroom
 | Skill lint / eval harness | ✅ `keel skill-lint`, structural validation | ❌ | ❌ | ❌ |
 | Brownfield preserve-existing-flow gate | ✅ `preserve-existing-flow` skill | ❌ | ❌ | ❌ |
 | **Developer Experience** | | | | |
-| Multi-harness support | ❌ (by design) | ✅ 14 tools | ✅ 10+ harnesses | ✅ 4 providers |
+| Multi-harness support | ✅ partial (OpenCode/Codex/Cursor/Pi/Cowork bridges; depth + Gemini/Copilot open) | ✅ 14 tools | ✅ 10+ harnesses | ✅ 4 providers |
 | Dashboard GUI | ❌ | ❌ | ✅ Tkinter dashboard | ❌ |
 | Package manager distribution | ❌ | ✅ Homebrew, cargo, curl | ✅ npm, GitHub App | ❌ |
 | Star count | Private repo | 65.7k | 221k | 100 |
@@ -169,7 +169,7 @@ The user asked about Headroom. Not identical to `headroom` on GitHub by headroom
 
 ### Critical gaps (should ship)
 
-**G-1: Multi-harness adapters.** Every competitor ships Codex/Cursor/Gemini/Copilot support. Keel is harness-only by choice. This is the single biggest adoption blocker for any team that doesn't use Claude Code exclusively. The existing competitive-gap doc calls this a "product decision" — it's worth acknowledging that it's also a distribution strategy gap. **Status:** acknowledged but not acted on.
+**G-1: Multi-harness adapters.** Every competitor ships Codex/Cursor/Gemini/Copilot support. Keel originally looked harness-only; **OpenCode, Codex, Cursor, Pi, and Cowork bridge adapters now ship** (`opencode/`, `codex/`, `pi/`, `cursor/`, `cowork/` + `keel bridge`). Remaining gap is **depth parity** with Claude Code hooks and **missing** Gemini/Copilot (and similar) adapters — still a distribution strategy choice, not "zero multi-harness." **Status:** partially closed (adapters exist); depth + Gemini/Copilot still open product questions.
 
 **G-2: Ultra-compact output mode.** **Shipped (2026-07):** `keel run --ultra -- <cmd>` uses `render_ultra_compact_result` (short status, failure-first body, tight line cap) with the existing break-even guard.
 
@@ -221,7 +221,7 @@ The existing competitive-gap doc correctly flags star counts as unreliable. My v
 ## 6. Recommendations
 
 ### Ship immediately
-1. **Multi-harness adapters** — even a minimal Codex + Cursor adapter pair would close the biggest adoption gap. The existing `adversarial-security-review`, `designing-agent-teams`, and other methodology skills are harness-agnostic in content but claude-specific in packaging.
+1. **Multi-harness depth + remaining hosts** — OpenCode/Codex/Cursor/Pi/Cowork bridges exist; close Claude-depth gaps on those hosts and decide whether Gemini/Copilot adapters are in scope. Methodology skills remain mostly host-agnostic in content.
 2. **Ultra-compact mode** — add `--ultra` flag to `keel run` that enables higher compression aggressiveness in all adapters. The measurement pipeline already exists in `eval.rs`.
 3. **Generic error filter** — `keel run --errors-only -- <command>` that strips all non-error/non-failure output. Works on any command without a dedicated adapter.
 
