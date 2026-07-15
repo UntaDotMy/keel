@@ -126,6 +126,10 @@ fn render_mcp_help(standard_output: &mut dyn Write) {
         standard_output,
         "  Tool wall-clock: KEEL_MCP_TOOL_TIMEOUT_SECS (default 90)."
     );
+    let _ = writeln!(
+        standard_output,
+        "  Text size: KEEL_MCP_MAX_TEXT_CHARS (default 12000); stdio frame cap 24KB."
+    );
     let _ = writeln!(standard_output);
     let _ = writeln!(
         standard_output,
@@ -634,6 +638,12 @@ pub(crate) enum DispatchBodyResult {
     Accepted,
 }
 
+/// Soft ceiling for one newline-delimited JSON-RPC response frame on stdio.
+/// Hosts (notably Grok) have been observed to drop/desync on very large single
+/// frames and then wait out the full tool timeout. Prefer truncating tool text
+/// earlier; this is a last-resort guard so the peer always sees a parseable line.
+const MAX_STDIO_FRAME_BYTES: usize = 24_000;
+
 fn write_framed_response(
     standard_output: &mut dyn Write,
     standard_error: &mut dyn Write,
@@ -652,7 +662,72 @@ fn write_framed_response(
             "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32603,\"message\":\"internal serialization error\"}}".to_string()
         }
     };
-    standard_output.write_all(serialized.as_bytes())?;
+    // NDJSON framing: the frame body must not contain raw newlines. serde_json
+    // escapes them; if that ever changes, fail closed with a short error frame
+    // rather than desyncing the host's line reader for every subsequent call.
+    let id = response.get("id").cloned().unwrap_or(Value::Null);
+    let fallback = |value: Value| -> String {
+        match serde_json::to_string(&value) {
+            Ok(text)
+                if !text.as_bytes().contains(&b'\n')
+                    && !text.as_bytes().contains(&b'\r')
+                    && text.len() <= MAX_STDIO_FRAME_BYTES =>
+            {
+                text
+            }
+            _ => {
+                "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32603,\"message\":\"internal framing error\"}}".to_string()
+            }
+        }
+    };
+    let frame = if serialized.as_bytes().contains(&b'\n') || serialized.as_bytes().contains(&b'\r')
+    {
+        let _ = writeln!(
+            standard_error,
+            "[keel mcp] refusing frame with interior newline ({} bytes)",
+            serialized.len()
+        );
+        fallback(error_response(
+            id,
+            JSON_RPC_INTERNAL_ERROR,
+            "internal error: response frame contained a raw newline",
+        ))
+    } else if serialized.len() > MAX_STDIO_FRAME_BYTES {
+        let _ = writeln!(
+            standard_error,
+            "[keel mcp] response frame {} bytes exceeds {MAX_STDIO_FRAME_BYTES}; returning error frame",
+            serialized.len()
+        );
+        // Prefer a tools/call-shaped error so hosts complete the pending call
+        // instead of waiting out a full tool timeout on a dropped frame.
+        if response.get("result").is_some() {
+            fallback(success_response(
+                id,
+                json!({
+                    "content": [{
+                        "type": "text",
+                        "text": format!(
+                            "MCP response truncated: frame was {} bytes (limit {MAX_STDIO_FRAME_BYTES}). Prefer skill_route / narrower tools, or CLI for full output.",
+                            serialized.len()
+                        )
+                    }],
+                    "isError": true,
+                }),
+            ))
+        } else {
+            fallback(error_response(
+                id,
+                JSON_RPC_INTERNAL_ERROR,
+                &format!(
+                    "response frame too large ({} bytes; limit {MAX_STDIO_FRAME_BYTES})",
+                    serialized.len()
+                ),
+            ))
+        }
+    } else {
+        serialized
+    };
+    standard_output.write_all(frame.as_bytes())?;
     standard_output.write_all(b"\n")?;
     standard_output.flush()
 }
