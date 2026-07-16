@@ -1,7 +1,7 @@
 ---
 name: ui-design-systems-and-responsive-interfaces
-description: Designs and implements production-ready UI with design-system tokens, responsive layouts, accessibility (WCAG 2.2 AA), and clear visual hierarchy. Use when building or hardening UI: component composition, responsive behavior, theming, interaction states, or brownfield design quality.
-when_to_use: UI systems, responsive design, and accessibility.
+description: Designs and implements production-ready UI with design-system tokens, responsive layouts, accessibility (WCAG 2.2 AA), and clear visual hierarchy. Use when building, designing, polishing, or reviewing UI: landing pages, dashboards, glassmorphism or visual polish, button/focus/contrast states, layout, color palette, typography, theming, component composition, or brownfield design quality.
+when_to_use: Use for landing page, dashboard, glassmorphism, polish UI, button states, layout, palette, typography, design tokens, responsive UI, WCAG, or visual craft. Not for pure UX research or backend-only work.
 allowed-tools: Read, Grep, Glob, Edit, Write, Bash(npm run:*), Bash(yarn:*), Bash(pnpm:*), Bash(npx storybook:*), Bash(npx playwright:*), Bash(keel design-intelligence:*), Bash(keel memory:*)
 effort: medium
 paths:
@@ -24,6 +24,7 @@ paths:
   - "**/tokens/**"
   - "**/design-tokens/**"
   - "**/figma.config.*"
+  - "**/design-system/**"
 ---
 
 # UI Design Systems and Responsive Interfaces
@@ -124,15 +125,26 @@ When producing UI guidance, provide concrete design direction rather than vague 
 - Prefer one strong default direction with rationale over multiple vague options unless the user asked for alternatives.
 - End with an implementation-ready summary that names what was validated, what still needs coded proof, and what should stay unchanged in a brownfield surface.
 
-## Generator Workflow
+## Generator Workflow (required for net-new UI)
 
-When you need a structured starting point instead of freeform design guessing, use:
+**Net-new UI** (new page, screen, product surface, or greenfield visual system) **must** start with a design-intelligence packet before inventing colors, type, or style freehand:
 
 ```bash
 keel design-intelligence recommend "fintech banking dashboard with secure transfers"
+keel design-intelligence recommend "beauty spa landing page" --density 3 --variance 4 --format json
+keel design-intelligence recommend "ops dashboard" --persist --project-name "MyApp" --page "Dashboard"
 ```
 
-Variants and persistence flags are documented in `references/57-claude-design-intelligence-generator.md`. Use the generator to produce a first-pass packet, then refine it with repo evidence, brownfield constraints, real validation signals, polish checks, and recovery-state review before implementing.
+| Situation | Required action |
+|---|---|
+| Net-new page/screen/product UI | Run `design-intelligence recommend` first; base direction on the packet |
+| Confidence is `low` or the prompt is too vague to classify | Stop and clarify product type, audience, primary CTA, and brand/trust posture before freestyle visuals |
+| Brownfield polish only (e.g. focus ring / contrast on one control) | DI optional; still apply WCAG 2.2 and polish checks |
+| Persist for multi-session consistency | `--persist --project-name <name>` writes `design-system/<slug>/MASTER.md`; `--page` adds a page override |
+
+Dials: `--density 1-10` (spacious → dense dashboard), `--variance 1-10` (minimal/centered → bold/asymmetric). Motion posture ships in the packet (`motion_guidance`); respect `prefers-reduced-motion`.
+
+Full flags and catalog notes: `references/57-claude-design-intelligence-generator.md`. After the packet: refine with repo evidence, brownfield constraints, polish/recovery checks, then implement.
 
 ## Benchmarking for Better Taste
 

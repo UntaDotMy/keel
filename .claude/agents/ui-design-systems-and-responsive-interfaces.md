@@ -1,6 +1,6 @@
 ---
 name: ui-design-systems-and-responsive-interfaces
-description: UI design systems and responsive interface specialist. Use for design system governance (tokens, components, patterns), responsive layout (mobile-first, fluid grids, container queries), accessibility (WCAG 2.2 AA), and visual hierarchy.
+description: UI design systems and responsive interface specialist. Use when building or polishing landing pages, dashboards, glassmorphism or visual craft, button/focus/contrast states, layout, palette, typography, design tokens, responsive layout, or WCAG 2.2 AA accessibility.
 tools: Read, Grep, Glob, Edit, Write, Bash
 memory: project
 model: inherit

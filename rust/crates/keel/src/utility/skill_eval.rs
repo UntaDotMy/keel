@@ -78,6 +78,27 @@ const TRIGGER_FIXTURES: &[TriggerFixture] = &[
         prompt: "the test is failing intermittently, help me find the root cause",
         accept: &["systematic-debugging"],
     },
+    // UI visual-craft: must activate the UI specialist (not silent IDF ties).
+    TriggerFixture {
+        prompt: "build a landing page for my beauty spa",
+        accept: &["ui-design-systems-and-responsive-interfaces"],
+    },
+    TriggerFixture {
+        prompt: "create a dashboard for healthcare analytics with clear visual hierarchy",
+        accept: &["ui-design-systems-and-responsive-interfaces"],
+    },
+    TriggerFixture {
+        prompt: "make this React page look better with glassmorphism and visual polish",
+        accept: &["ui-design-systems-and-responsive-interfaces"],
+    },
+    TriggerFixture {
+        prompt: "fix the contrast and focus states on this button for accessible ui",
+        accept: &["ui-design-systems-and-responsive-interfaces"],
+    },
+    TriggerFixture {
+        prompt: "choose a color palette and typography for the product dashboard layout",
+        accept: &["ui-design-systems-and-responsive-interfaces"],
+    },
     // should-NOT-trigger: ordinary requests with no distinctive skill vocabulary.
     TriggerFixture {
         prompt: "can you help me write a small helper function",
