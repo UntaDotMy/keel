@@ -332,12 +332,12 @@ fn tools_list_catalog() -> Value {
             },
             {
                 "name": "memory",
-                "description": "Durable memory operations under ~/.claude/memories/. `scope` resolves the workspace memory lane; `system-map` shows/refreshes the workspace structural map; `recall` FTS5-searches memory; `instincts` lists distilled learning instincts; `consolidate` scans memory family directories and reports record counts/previews (status summary, not a merge); `report` summarizes memory state; `research-cache` saves/retrieves research answers; `retrieve` cross-family search; `maintenance` prunes stale records; `status` reports family counts. Use the dedicated brief_* tools for working briefs.",
+                "description": "Durable memory operations. Prefer short calls. research-cache RECORD needs args [\"record\",\"--question\",\"...\",\"--answer\",\"...\"] (not --query/--result; those are aliases only). LOOKUP: [\"lookup\",\"--query\",\"...\"]. status/instincts/consolidate are fast. Use brief_* for working briefs; dedicated recall tool for FTS search.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "action": { "type": "string", "enum": ["scope", "system-map", "recall", "instincts", "consolidate", "report", "research-cache", "retrieve", "maintenance", "status"], "description": "Memory operation to perform." },
-                        "args": { "type": "array", "items": { "type": "string" }, "description": "Additional CLI arguments (e.g. [\"--query\",\"terms\"] for recall, [\"--create-missing\",\"--refresh-system-map\"] for scope)." }
+                        "action": { "type": "string", "enum": ["scope", "system-map", "recall", "instincts", "consolidate", "report", "research-cache", "retrieve", "maintenance", "status"], "description": "Memory operation." },
+                        "args": { "type": "array", "items": { "type": "string" }, "description": "CLI args AFTER action. research-cache record: [\"record\",\"--question\",\"q\",\"--answer\",\"a\",\"--source\",\"url\"]. lookup: [\"lookup\",\"--query\",\"q\"]. scope: [\"--create-missing\",\"--refresh-system-map\"]. Do not pass huge blobs." }
                     },
                     "required": ["action"]
                 }
