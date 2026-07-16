@@ -2472,13 +2472,13 @@ fn tool_dispatch(arguments: &Value) -> Result<String, String> {
             }
         }
     }
-    if confirm && matches!(action, "merge" | "abandon") {
-        if !owned
+    if confirm
+        && matches!(action, "merge" | "abandon")
+        && !owned
             .iter()
             .any(|a| a == "--confirm" || a.starts_with("--confirm="))
-        {
-            owned.push("--confirm".to_string());
-        }
+    {
+        owned.push("--confirm".to_string());
     }
     if Some(true) == optional_bool_arg(arguments, "json") {
         owned.push("--json".to_string());
