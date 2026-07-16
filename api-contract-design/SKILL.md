@@ -59,7 +59,7 @@ See `_shared/common-discipline.md` for the canonical rules. Apply them to all wo
 
 ## Reference Map
 
-Reference materials live alongside this SKILL.md as they are filled in over subsequent releases. Until then, treat the heuristics, delivery workflow, and real-world scenarios sections below as the canonical guidance.
+This skill is self-contained (no `references/` library). The heuristics, delivery workflow, scenarios, and release blockers below are the canonical guidance. Prefer OpenAPI, GraphQL, and gRPC official docs for schema syntax; keep idempotency and pagination rules explicit in the contract.
 
 ## Contract Heuristics
 

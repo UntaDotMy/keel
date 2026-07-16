@@ -49,7 +49,7 @@ See `_shared/common-discipline.md` for the canonical rules. Apply them to all wo
 
 ## Reference Map
 
-Reference materials live alongside this SKILL.md as they are filled in over subsequent releases. Until then, treat the heuristics, delivery workflow, and real-world scenarios sections below as the canonical guidance.
+This skill is self-contained (no `references/` library). The heuristics, delivery workflow, scenarios, and release blockers below are the canonical guidance. Prefer https://react.dev and https://web.dev/articles/vitals for current APIs and Core Web Vitals thresholds.
 
 ## Performance Heuristics
 
@@ -57,6 +57,7 @@ Reference materials live alongside this SKILL.md as they are filled in over subs
 - A re-render is expensive only if (a) the render function does heavy work or (b) it cascades to many descendants. Measure both.
 - Stable references (keys, props, context values) reduce cascades. Wrap context provider values in `useMemo` only when descendants check identity.
 - `React.memo` helps only when the parent re-renders with stable props. If props change every render, `memo` adds overhead and saves nothing.
+- React Compiler (when enabled) can insert memoization at build time; do not assume every codebase uses it. Without the compiler, deliberate `memo`/`useMemo`/`useCallback` still apply after profiling proves the win.
 - `key` on a list item drives reconciliation. Index-based keys break memoization on insert/delete.
 
 ### Bundle Size

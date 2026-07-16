@@ -53,13 +53,13 @@ See `_shared/common-discipline.md` for the canonical rules. Apply them to all wo
 
 ## Reference Map
 
-Reference materials live alongside this SKILL.md as they are filled in over subsequent releases. Until then, treat the heuristics, delivery workflow, and real-world scenarios sections below as the canonical guidance.
+This skill is self-contained (no `references/` library). The heuristics, delivery workflow, scenarios, and release blockers below are the canonical guidance. Prefer live Stripe docs for API field names and version-specific behavior: https://docs.stripe.com/api/idempotent_requests and https://docs.stripe.com/webhooks.
 
 ## Stripe Heuristics
 
 ### Idempotency
 - Set `Idempotency-Key` on every `POST` to Stripe. Use a stable key derived from the business operation (e.g., `order:{order_id}:create_pi`).
-- Stripe retains idempotency keys for 24 hours; long-running retry queues need a stable key beyond that, plus your own dedup.
+- Stripe may remove keys after they are at least 24 hours old (official API docs). Long-running retry queues need a stable business key plus your own durable dedup beyond that window.
 - The same key with a different request body returns an error. Hash the request body if that situation is possible.
 
 ### Webhook Processing
