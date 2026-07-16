@@ -956,14 +956,42 @@ fn persist_design_system(
             .map_err(|error| format!("create {}: {error}", display_path(parent)))?;
     }
 
-    let mut markdown = String::new();
-    markdown.push_str(&format!("# {project}\n\n"));
-    if !page.trim().is_empty() {
-        markdown.push_str(&format!("## {}\n\n", page.trim()));
-        markdown.push_str(
-            "Page override: when building this page, apply these rules over MASTER.md.\n\n",
-        );
+    // Shared body without page-only heading/boilerplate so MASTER seeds cleanly.
+    let body = design_system_markdown_body(packet, request);
+    let master_md = format!("# {project}\n\n{body}");
+    let page_md = if page.trim().is_empty() {
+        master_md.clone()
+    } else {
+        format!(
+            "# {project}\n\n## {}\n\nPage override: when building this page, apply these rules over MASTER.md.\n\n{body}",
+            page.trim()
+        )
+    };
+
+    // When writing a page override and MASTER is missing, seed MASTER first
+    // without page heading or override boilerplate.
+    if page_path.is_some() && !master_path.exists() {
+        if let Some(parent) = master_path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| format!("create {}: {error}", display_path(parent)))?;
+        }
+        fs::write(&master_path, &master_md)
+            .map_err(|error| format!("write {}: {error}", display_path(&master_path)))?;
     }
+
+    let markdown = if page_path.is_some() {
+        page_md
+    } else {
+        master_md
+    };
+    fs::write(&write_target, markdown)
+        .map_err(|error| format!("write {}: {error}", display_path(&write_target)))?;
+    Ok(PersistOutcome::Wrote(write_target))
+}
+
+/// Packet fields shared by MASTER and page override files (no page heading).
+fn design_system_markdown_body(packet: &Value, request: &str) -> String {
+    let mut markdown = String::new();
     markdown.push_str(&format!("Request: {request}\n\n"));
     let archetype = &packet["product_archetype"];
     markdown.push_str(&format!(
@@ -1021,25 +1049,7 @@ fn persist_design_system(
         "Decision rules (context-specific, non-negotiable)",
         &str_array(packet, "decision_rules"),
     );
-
-    // When writing a page override and MASTER is missing, seed MASTER first.
-    if page_path.is_some() && !master_path.exists() {
-        if let Some(parent) = master_path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|error| format!("create {}: {error}", display_path(parent)))?;
-        }
-        let mut master_md = markdown.clone();
-        // Drop page heading from MASTER seed.
-        if let Some(rest) = master_md.split_once("\n\n") {
-            master_md = format!("{}\n\n{}", rest.0, rest.1);
-        }
-        fs::write(&master_path, &master_md)
-            .map_err(|error| format!("write {}: {error}", display_path(&master_path)))?;
-    }
-
-    fs::write(&write_target, markdown)
-        .map_err(|error| format!("write {}: {error}", display_path(&write_target)))?;
-    Ok(PersistOutcome::Wrote(write_target))
+    markdown
 }
 
 fn density_label_from_dial(dial: Option<u8>, catalog_default: &str) -> String {
@@ -1639,6 +1649,68 @@ mod tests {
     }
 
     #[test]
+    fn persist_page_seeds_master_without_page_heading() {
+        // --persist --page when MASTER is missing must seed MASTER as global
+        // source of truth: no ## Page heading and no "Page override" boilerplate.
+        let catalog = repo_catalog_path();
+        let temp = std::env::temp_dir().join(format!(
+            "keel-di-page-seed-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = fs::remove_dir_all(&temp); // best-effort pre-clean
+        fs::create_dir_all(&temp).expect("temp");
+        let master = temp.join("MASTER.md");
+        let page_file = temp.join("pages").join("overview.md");
+        let (code, out, err) = run(&[
+            "recommend",
+            "ops dashboard for monitoring",
+            "--catalog",
+            catalog.to_str().unwrap(),
+            "--persist",
+            "--out",
+            master.to_str().unwrap(),
+            "--project-name",
+            "SeedApp",
+            "--page",
+            "Overview",
+        ]);
+        assert_eq!(code, 0, "stderr: {err} stdout: {out}");
+        assert!(master.is_file(), "MASTER seeded: {out}");
+        assert!(page_file.is_file(), "page override written: {out}");
+        let master_text = fs::read_to_string(&master).expect("read master");
+        assert!(
+            !master_text.contains("## Overview"),
+            "MASTER must not contain page heading: {master_text}"
+        );
+        assert!(
+            !master_text.contains("Page override"),
+            "MASTER must not contain page override boilerplate: {master_text}"
+        );
+        assert!(
+            master_text.contains("# SeedApp"),
+            "MASTER keeps project title: {master_text}"
+        );
+        assert!(
+            master_text.contains("Request:"),
+            "MASTER has request body: {master_text}"
+        );
+        let page_text = fs::read_to_string(&page_file).expect("read page");
+        assert!(
+            page_text.contains("## Overview"),
+            "page file keeps heading: {page_text}"
+        );
+        assert!(
+            page_text.contains("Page override"),
+            "page file keeps override note: {page_text}"
+        );
+        let _ = fs::remove_dir_all(&temp); // best-effort test cleanup
+    }
+
+    #[test]
     fn dashboard_request_recommends_charts() {
         let catalog = repo_catalog_path();
         let (code, out, _) = run(&[
@@ -1757,7 +1829,18 @@ mod tests {
     #[test]
     fn persist_writes_master_markdown() {
         let catalog = repo_catalog_path();
-        let temp = std::env::temp_dir().join(format!("di-test-{}.md", std::process::id()));
+        let temp_dir = std::env::temp_dir().join(format!(
+            "keel-di-master-md-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = fs::remove_dir_all(&temp_dir); // best-effort pre-clean
+        fs::create_dir_all(&temp_dir).expect("temp dir");
+        let master = temp_dir.join("MASTER.md");
+        let page_file = temp_dir.join("pages").join("checkout-flow.md");
         let (code, out, err) = run(&[
             "recommend",
             "ecommerce storefront checkout",
@@ -1767,17 +1850,23 @@ mod tests {
             "--page",
             "Checkout Flow",
             "--out",
-            temp.to_str().unwrap(),
+            master.to_str().unwrap(),
             "--catalog",
             catalog.to_str().unwrap(),
         ]);
         assert_eq!(code, 0, "stderr: {err}");
         assert!(out.contains("Persisted design system"), "out: {out}");
-        let written = fs::read_to_string(&temp).unwrap();
-        assert!(written.contains("# Storefront Revamp"));
-        assert!(written.contains("## Checkout Flow"));
-        assert!(written.contains("Anti-patterns to avoid"));
-        let _ = fs::remove_file(&temp);
+        // Page file is the primary write target when --page is set.
+        let page_text = fs::read_to_string(&page_file).expect("page file");
+        assert!(page_text.contains("# Storefront Revamp"));
+        assert!(page_text.contains("## Checkout Flow"));
+        assert!(page_text.contains("Anti-patterns to avoid"));
+        // MASTER is seeded without page-only boilerplate.
+        let master_text = fs::read_to_string(&master).expect("master");
+        assert!(master_text.contains("# Storefront Revamp"));
+        assert!(!master_text.contains("## Checkout Flow"));
+        assert!(!master_text.contains("Page override"));
+        let _ = fs::remove_dir_all(&temp_dir); // best-effort test cleanup
     }
 
     #[test]
