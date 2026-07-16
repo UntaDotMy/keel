@@ -377,6 +377,19 @@ fn lint_skill(skill_path: &Path) -> SkillReport {
             .push("no `allowed-tools` — skill inherits all tools (consider scoping)".to_string());
     }
 
+    // paths: scopes host auto-activation by cwd/file globs. Several hosts also
+    // omit path-scoped skills from the Skill() catalog unless the cwd matches,
+    // which surfaces as `Error: Unknown skill: <name>` for valid on-disk skills
+    // (e.g. authentication-and-identity). Prefer description/when_to_use routing
+    // so Skill("name") always resolves after install. Warn so reintroduction is
+    // deliberate and reviewed.
+    if field(&fields, "paths").is_some() {
+        report.warnings.push(
+            "`paths:` present — some hosts hide path-scoped skills from Skill() unless cwd matches (Unknown skill). Prefer description/when_to_use triggers only"
+                .to_string(),
+        );
+    }
+
     // Dangling references: every `references/<file>` mentioned in the body must
     // exist on disk, or progressive disclosure loads a broken path.
     if let Some(parent) = skill_path.parent() {
@@ -918,6 +931,47 @@ mod tests {
         assert!(
             report.warnings.iter().any(|w| w.contains("trigger phrase")),
             "expected a trigger-language warning, got: {:?}",
+            report.warnings
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn paths_frontmatter_warns_for_skill_tool_discoverability() {
+        let (root, skill_path) = temp_skill(
+            "path-scoped",
+            "---\nname: path-scoped\ndescription: Auth specialist. Use when building login flows.\nwhen_to_use: Auth work.\nallowed-tools: Read\npaths:\n  - \"**/auth/**\"\n---\nbody\n",
+        );
+        let report = lint_skill(&skill_path);
+        assert!(
+            report.ok(),
+            "paths is a warning, not an error: {:?}",
+            report.errors
+        );
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.contains("`paths:` present") && w.contains("Unknown skill")),
+            "expected paths discoverability warning, got: {:?}",
+            report.warnings
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn no_paths_frontmatter_has_no_paths_warning() {
+        let (root, skill_path) = temp_skill(
+            "open-skill",
+            "---\nname: open-skill\ndescription: Auth specialist. Use when building login flows.\nwhen_to_use: Auth work.\nallowed-tools: Read\n---\nbody\n",
+        );
+        let report = lint_skill(&skill_path);
+        assert!(
+            !report
+                .warnings
+                .iter()
+                .any(|w| w.contains("`paths:` present")),
+            "skills without paths must not get the paths warning: {:?}",
             report.warnings
         );
         let _ = fs::remove_dir_all(&root);

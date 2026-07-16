@@ -4,28 +4,6 @@ description: Designs and evolves API contracts (REST, GraphQL, gRPC, OpenAPI, JS
 when_to_use: API contract design, schema evolution, and breaking-change review.
 allowed-tools: Read, Grep, Glob, Edit, Write, Bash(keel memory:*), Bash(git diff:*), Bash(git status), Bash(git log:*), Bash(npx:*), Bash(npm:*), Bash(yarn:*), Bash(pnpm:*), Bash(curl:*), Bash(jq:*)
 effort: medium
-paths:
-  - "**/openapi.yaml"
-  - "**/openapi.yml"
-  - "**/openapi.json"
-  - "**/swagger.yaml"
-  - "**/swagger.yml"
-  - "**/swagger.json"
-  - "**/asyncapi.yaml"
-  - "**/asyncapi.yml"
-  - "**/*.proto"
-  - "**/*.graphql"
-  - "**/*.gql"
-  - "**/schema.graphql"
-  - "**/api/**/*.ts"
-  - "**/api/**/*.js"
-  - "**/api/**/*.py"
-  - "**/api/**/*.go"
-  - "**/api/**/*.rs"
-  - "**/routes/**"
-  - "**/handlers/**"
-  - "**/controllers/**"
-  - "**/json-schema/**"
 ---
 
 # API Contract Design

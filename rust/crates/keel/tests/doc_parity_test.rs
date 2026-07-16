@@ -552,3 +552,45 @@ fn web_performance_reference_does_not_list_fid_as_current_cwv() {
         path.display()
     );
 }
+
+/// First-party SKILL.md files must not ship a top-level `paths:` frontmatter key.
+/// Path-scoped skills are hidden from some hosts' Skill() catalog unless the
+/// cwd matches the globs, which surfaces as `Error: Unknown skill: <name>` even
+/// when `~/.claude/skills/<name>/SKILL.md` exists (seen with authentication-
+/// and-identity). Routing must use description/when_to_use only so Skill(name)
+/// always resolves after install. skill-lint warns on reintroduction; this test
+/// fails closed so the pack cannot ship path-gated specialists again.
+#[test]
+fn first_party_skills_do_not_use_paths_frontmatter() {
+    let repo_root = repository_root();
+    let mut offenders: Vec<String> = Vec::new();
+    for name in first_party_skill_dirs(&repo_root) {
+        let path = repo_root.join(&name).join("SKILL.md");
+        let text =
+            fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        // Only the leading frontmatter block — a body mention of "paths:" is fine.
+        let mut in_frontmatter = false;
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if !in_frontmatter {
+                if trimmed == "---" {
+                    in_frontmatter = true;
+                }
+                continue;
+            }
+            if trimmed == "---" {
+                break;
+            }
+            // Top-level key only (not indented list items under something else).
+            if !line.starts_with(char::is_whitespace) && trimmed.starts_with("paths:") {
+                offenders.push(name.clone());
+                break;
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "first-party skills must not use `paths:` frontmatter (breaks Skill() on some hosts): {offenders:?}. \
+         Use description/when_to_use for routing; fall back to MCP skill_get if the host still reports Unknown skill."
+    );
+}

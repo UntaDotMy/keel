@@ -4,28 +4,6 @@ description: Builds and ships production-ready websites and web applications wit
 when_to_use: Web architecture, quality, and production delivery.
 allowed-tools: Read, Grep, Glob, Edit, Write, Bash(npm:*), Bash(yarn:*), Bash(pnpm:*), Bash(npx:*), Bash(node:*), Bash(vite:*), Bash(next:*), Bash(keel memory:*)
 effort: medium
-paths:
-  - "**/*.html"
-  - "**/*.css"
-  - "**/*.scss"
-  - "**/*.sass"
-  - "**/*.less"
-  - "**/*.js"
-  - "**/*.mjs"
-  - "**/*.cjs"
-  - "**/*.ts"
-  - "**/*.jsx"
-  - "**/*.tsx"
-  - "**/*.vue"
-  - "**/*.svelte"
-  - "**/*.astro"
-  - "**/package.json"
-  - "**/next.config.*"
-  - "**/nuxt.config.*"
-  - "**/vite.config.*"
-  - "**/remix.config.*"
-  - "**/svelte.config.*"
-  - "**/astro.config.*"
 ---
 
 # Web Development Life Cycle

@@ -4,23 +4,6 @@ description: Designs and reviews internationalization and localization (i18n, l1
 when_to_use: i18n/l10n message catalogs, ICU MessageFormat, locale-aware formatting, RTL/bidi, and translation workflows.
 allowed-tools: Read, Grep, Glob, Edit, Write, Bash(keel memory:*), Bash(git diff:*), Bash(git status), Bash(npx:*), Bash(npm:*), Bash(node:*), Bash(python:*), Bash(jq:*)
 effort: medium
-paths:
-  - "**/locales/**"
-  - "**/i18n/**"
-  - "**/translations/**"
-  - "**/*.po"
-  - "**/*.pot"
-  - "**/*.mo"
-  - "**/*.xliff"
-  - "**/*.xlf"
-  - "**/messages*.json"
-  - "**/*.arb"
-  - "**/*.ftl"
-  - "**/lang/**"
-  - "**/*.resx"
-  - "**/i18next*.json"
-  - "**/formatjs*.json"
-  - "**/*.strings"
 ---
 
 # Internationalization and Localization

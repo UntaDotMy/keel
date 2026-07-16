@@ -4,12 +4,6 @@ description: Dart & Flutter specialist. Use for widget-tree architecture, state 
 when_to_use: Dart/Flutter app work — widget architecture, state management selection, render/jank diagnosis, isolate/background work, null-safety and sound typing, pub dependency management, platform channels, Flutter web/desktop, or Dart backend (shelf/dart_frog). Any prompt mentioning Dart, Flutter, pub, widget, Riverpod, Bloc, or pubspec.
 allowed-tools: Read, Grep, Glob, Edit, Write, Bash(keel memory:*), Bash(git diff:*), Bash(git status), Bash(dart:*), Bash(flutter:*), Bash(dart-format:*), Bash(dart-analyze:*), Bash(dart-test:*), Bash(flutter-test:*)
 effort: medium
-paths:
-  - "**/*.dart"
-  - "**/pubspec.yaml"
-  - "**/pubspec.lock"
-  - "**/analysis_options.yaml"
-  - "**/build.yaml"
 ---
 
 # Dart & Flutter Expert

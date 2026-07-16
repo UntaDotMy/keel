@@ -4,21 +4,6 @@ description: Designs and audits Stripe integrations: Checkout, Payment Intents, 
 when_to_use: Stripe payment integration, webhook reconciliation, and PCI-scope decisions.
 allowed-tools: Read, Grep, Glob, Edit, Write, Bash(keel memory:*), Bash(git diff:*), Bash(git status), Bash(stripe:*), Bash(npx:*), Bash(npm:*), Bash(curl:*), Bash(jq:*)
 effort: medium
-paths:
-  - "**/*stripe*.ts"
-  - "**/*stripe*.js"
-  - "**/*stripe*.py"
-  - "**/*stripe*.go"
-  - "**/*stripe*.rb"
-  - "**/payments/**"
-  - "**/billing/**"
-  - "**/checkout/**"
-  - "**/webhooks/**"
-  - "**/subscriptions/**"
-  - "**/refunds/**"
-  - "**/.env.example"
-  - "**/api/**"
-  - "**/handlers/**"
 ---
 
 # Stripe Integration

@@ -4,22 +4,6 @@ description: Designs and reviews data engineering and ML/MLOps systems: ETL/ELT 
 when_to_use: Data pipelines, ETL/ELT, dbt, orchestration, warehouse and lakehouse modeling, and the ML lifecycle from feature engineering to model serving and drift monitoring.
 allowed-tools: Read, Grep, Glob, Edit, Write, Bash(keel memory:*), Bash(git diff:*), Bash(git status), Bash(python:*), Bash(uv:*), Bash(dbt:*), Bash(pytest:*), Bash(jq:*)
 effort: medium
-paths:
-  - "**/dbt_project.yml"
-  - "**/models/**/*.sql"
-  - "**/dags/**"
-  - "**/*_dag.py"
-  - "**/dagster*.py"
-  - "**/pipelines/**"
-  - "**/*.ipynb"
-  - "**/feature_store*.y?ml"
-  - "**/mlflow*.y?ml"
-  - "**/dvc.yaml"
-  - "**/*.dvc"
-  - "**/great_expectations/**"
-  - "**/airflow*.cfg"
-  - "**/spark*.conf"
-  - "**/transformations/**"
 ---
 # Data and ML Engineering
 

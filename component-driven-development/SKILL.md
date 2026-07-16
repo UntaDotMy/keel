@@ -4,18 +4,6 @@ description: Component-Driven Development (CDD) / Atomic Design technique. Build
 when_to_use: Building or restructuring any UI; Atomic Design hierarchy; component library or design system; Storybook/widgetbook/visual tests; decomposing a monolithic page; component boundaries and composition; reusability and isolated testability.
 allowed-tools: Read, Grep, Glob, Edit, Write, Bash(keel memory:*), Bash(git diff:*), Bash(git status), Bash(npm:*), Bash(yarn:*), Bash(pnpm:*), Bash(npx:*), Bash(dart:*), Bash(flutter:*)
 effort: medium
-paths:
-  - "**/*.tsx"
-  - "**/*.jsx"
-  - "**/*.vue"
-  - "**/*.svelte"
-  - "**/*.dart"
-  - "**/*.stories.tsx"
-  - "**/*.stories.jsx"
-  - "**/*.stories.ts"
-  - "**/storybook.config.*"
-  - "**/widgetbook.yaml"
-  - "**/pubspec.yaml"
 ---
 
 # Component-Driven Development

@@ -4,22 +4,6 @@ description: Designs and implements authentication and identity flows: OAuth2 an
 when_to_use: Building login, session, token, OAuth2/OIDC, SSO, MFA, or password-storage flows.
 allowed-tools: Read, Grep, Glob, Edit, Write, Bash(keel memory:*), Bash(git diff:*), Bash(git status), Bash(npm:*), Bash(node:*), Bash(npx:*), Bash(python:*), Bash(curl:*), Bash(openssl:*)
 effort: medium
-paths:
-  - "**/auth/**"
-  - "**/*auth*.ts"
-  - "**/*auth*.js"
-  - "**/*auth*.py"
-  - "**/*auth*.go"
-  - "**/oauth*/**"
-  - "**/oidc*/**"
-  - "**/*.well-known/**"
-  - "**/passport*.js"
-  - "**/*session*.ts"
-  - "**/*jwt*.ts"
-  - "**/middleware/auth*"
-  - "**/login/**"
-  - "**/sso/**"
-  - "**/webauthn*/**"
 ---
 
 # Authentication and Identity

@@ -4,27 +4,6 @@ description: Designs and implements production-ready UI with design-system token
 when_to_use: Use for landing page, dashboard, glassmorphism, polish UI, button states, layout, palette, typography, design tokens, responsive UI, WCAG, or visual craft. Not for pure UX research or backend-only work.
 allowed-tools: Read, Grep, Glob, Edit, Write, Bash(npm run:*), Bash(yarn:*), Bash(pnpm:*), Bash(npx storybook:*), Bash(npx playwright:*), Bash(keel design-intelligence:*), Bash(keel memory:*)
 effort: medium
-paths:
-  - "**/*.html"
-  - "**/*.css"
-  - "**/*.scss"
-  - "**/*.sass"
-  - "**/*.less"
-  - "**/*.styl"
-  - "**/*.jsx"
-  - "**/*.tsx"
-  - "**/*.vue"
-  - "**/*.svelte"
-  - "**/*.astro"
-  - "**/*.stories.*"
-  - "**/*.story.*"
-  - "**/tailwind.config.*"
-  - "**/postcss.config.*"
-  - "**/.storybook/**"
-  - "**/tokens/**"
-  - "**/design-tokens/**"
-  - "**/figma.config.*"
-  - "**/design-system/**"
 ---
 
 # UI Design Systems and Responsive Interfaces

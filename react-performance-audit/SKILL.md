@@ -4,18 +4,6 @@ description: Audits and fixes React performance regressions: render storms, miss
 when_to_use: React/Next.js performance regressions, render audits, and bundle-size triage.
 allowed-tools: Read, Grep, Glob, Edit, Write, Bash(keel memory:*), Bash(git diff:*), Bash(git status), Bash(npm:*), Bash(yarn:*), Bash(pnpm:*), Bash(npx:*), Bash(node:*)
 effort: medium
-paths:
-  - "**/*.tsx"
-  - "**/*.jsx"
-  - "**/next.config.js"
-  - "**/next.config.mjs"
-  - "**/next.config.ts"
-  - "**/vite.config.ts"
-  - "**/vite.config.js"
-  - "**/webpack.config.js"
-  - "**/rollup.config.js"
-  - "**/.babelrc"
-  - "**/babel.config.js"
 ---
 
 # React Performance Audit

@@ -4,25 +4,6 @@ description: Plans and performs dependency management and supply-chain actions â
 when_to_use: Dependency upgrades, lockfile hygiene, major-version migrations, transitive triage, and supply-chain provenance.
 allowed-tools: Read, Grep, Glob, Edit, Write, Bash(keel memory:*), Bash(git diff:*), Bash(git status), Bash(npm:*), Bash(pnpm:*), Bash(yarn:*), Bash(cargo:*), Bash(pip:*), Bash(uv:*), Bash(go:*), Bash(npx:*)
 effort: medium
-paths:
-  - "**/package.json"
-  - "**/package-lock.json"
-  - "**/pnpm-lock.yaml"
-  - "**/yarn.lock"
-  - "**/Cargo.toml"
-  - "**/Cargo.lock"
-  - "**/go.mod"
-  - "**/go.sum"
-  - "**/requirements.txt"
-  - "**/requirements*.txt"
-  - "**/pyproject.toml"
-  - "**/poetry.lock"
-  - "**/uv.lock"
-  - "**/Gemfile"
-  - "**/Gemfile.lock"
-  - "**/renovate.json"
-  - "**/.github/dependabot.yml"
-  - "**/.github/dependabot.yaml"
 ---
 
 # Dependency and Supply Chain

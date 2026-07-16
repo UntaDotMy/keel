@@ -4,20 +4,6 @@ description: Plans and reviews PostgreSQL migrations with explicit lock analysis
 when_to_use: PostgreSQL schema changes, migrations, backfills, and lock-sensitive deploys.
 allowed-tools: Read, Grep, Glob, Edit, Write, Bash(keel memory:*), Bash(git diff:*), Bash(git status), Bash(psql:*), Bash(pg_dump:*), Bash(npx:*), Bash(prisma:*), Bash(npm:*)
 effort: medium
-paths:
-  - "**/migrations/**"
-  - "**/migrate/**"
-  - "**/db/migrate/**"
-  - "**/prisma/schema.prisma"
-  - "**/prisma/migrations/**"
-  - "**/sqlx/migrations/**"
-  - "**/diesel/migrations/**"
-  - "**/alembic/versions/**"
-  - "**/atlas.hcl"
-  - "**/sqitch.plan"
-  - "**/*.sql"
-  - "**/schema.sql"
-  - "**/schema.rb"
 ---
 
 # PostgreSQL Migration Safety

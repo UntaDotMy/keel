@@ -4,20 +4,6 @@ description: Designs and reviews observability and incident response — metrics
 when_to_use: Telemetry design, SLO and error-budget definition, alert and paging rules, runbooks, and incident response or postmortem review.
 allowed-tools: Read, Grep, Glob, Edit, Write, Bash(keel memory:*), Bash(git diff:*), Bash(git status), Bash(kubectl:*), Bash(curl:*), Bash(promtool:*), Bash(jq:*)
 effort: medium
-paths:
-  - "**/*.alerts.yaml"
-  - "**/*alerting*.y?ml"
-  - "**/prometheus*.y?ml"
-  - "**/grafana/**"
-  - "**/dashboards/**"
-  - "**/otel*.y?ml"
-  - "**/opentelemetry*.y?ml"
-  - "**/*slo*.y?ml"
-  - "**/runbooks/**"
-  - "**/*runbook*.md"
-  - "**/alertmanager*.y?ml"
-  - "**/loki*.y?ml"
-  - "**/*.rules.yml"
 ---
 
 # Observability and Incident Response
