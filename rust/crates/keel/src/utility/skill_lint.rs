@@ -390,6 +390,15 @@ fn lint_skill(skill_path: &Path) -> SkillReport {
         }
     }
 
+    // Typo guard: densify/edit scripts that break a line mid-word have produced
+    // `eferences/` (missing leading `r`). That path never matches on-disk
+    // `references/`, and agents cannot open taxonomies. Fail closed.
+    if body_has_broken_references_typo(&body) {
+        report.errors.push(
+            "body contains `eferences/` (missing leading `r`) — progressive-disclosure path is broken; write `references/`".to_string(),
+        );
+    }
+
     // Quality score: a deterministic, graded view that complements the binary
     // pass/fail above. Computed from the SAME signals the checks inspected, so
     // the grade can never disagree with the lint findings.
@@ -598,6 +607,32 @@ fn referenced_files(body: &str) -> Vec<String> {
         }
     }
     found
+}
+
+/// True when the body has the densify-corruption typo `eferences/` (missing
+/// the leading `r` of `references/`). Matches bare and backticked forms.
+fn body_has_broken_references_typo(body: &str) -> bool {
+    // Reject `eferences/` when not preceded by `r` (so `references/` is fine).
+    let bytes = body.as_bytes();
+    let needle = b"eferences/";
+    let mut start = 0;
+    while let Some(rel) = body[start..].find("eferences/") {
+        let abs = start + rel;
+        let prev_ok = if abs == 0 {
+            true
+        } else {
+            // previous char is not 'r'/'R' → broken typo (e.g. space/newline/` before eferences/)
+            !matches!(bytes[abs - 1], b'r' | b'R')
+        };
+        if prev_ok {
+            return true;
+        }
+        start = abs + needle.len();
+        if start >= body.len() {
+            break;
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -820,6 +855,34 @@ mod tests {
         fs::write(references.join("10-present.md"), "content").unwrap();
         let report = lint_skill(&skill_path);
         assert!(report.ok(), "errors: {:?}", report.errors);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn broken_eferences_typo_is_an_error() {
+        // Regression: densify scripts broke a line mid-word into `eferences/`.
+        let (root, skill_path) = temp_skill(
+            "typoskill",
+            "---\nname: typoskill\ndescription: ok trigger when reviewing\nallowed-tools: Read\n---\nLoad matching \neferences/*.md for taxonomies.\n",
+        );
+        let report = lint_skill(&skill_path);
+        assert!(!report.ok(), "must fail on eferences/ typo");
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.contains("eferences/") && e.contains("references/")),
+            "errors: {:?}",
+            report.errors
+        );
+        assert!(
+            body_has_broken_references_typo("load matching \neferences/*.md"),
+            "detector must fire on newline-split eferences/"
+        );
+        assert!(
+            !body_has_broken_references_typo("load matching `references/*.md`"),
+            "correct references/ must not fire"
+        );
         let _ = fs::remove_dir_all(&root);
     }
 
