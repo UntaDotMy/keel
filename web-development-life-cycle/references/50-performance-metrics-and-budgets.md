@@ -24,11 +24,12 @@ Measures loading performance - when the largest content element becomes visible.
 - Implement server-side rendering or static generation
 - Optimize server response time (TTFB < 600ms)
 
-### 2. First Input Delay (FID) / Interaction to Next Paint (INP)
-**FID Target: < 100ms**
-**INP Target: < 200ms**
+### 2. Interaction to Next Paint (INP)
+**Target: ≤ 200ms** (good, 75th percentile of page loads)
 
-Measures interactivity - how quickly the page responds to user input.
+Current Core Web Vital for interactivity (stable). Measures how quickly the page responds to user input across the full lifetime of a page, not only the first interaction.
+
+**Historical note:** First Input Delay (FID) was the prior CWV for interactivity. INP replaced FID as a Core Web Vital in 2024 ([web.dev/blog/inp-cwv-launch](https://web.dev/blog/inp-cwv-launch)). Do not treat FID as a current CWV target; use INP in field tools, RUM, and release gates.
 
 **How to improve:**
 - Break up long JavaScript tasks (< 50ms each)
@@ -37,6 +38,7 @@ Measures interactivity - how quickly the page responds to user input.
 - Code splitting and lazy loading
 - Minimize third-party script impact
 - Use `requestIdleCallback` for non-urgent work
+- In the lab, Total Blocking Time (TBT) is a useful proxy when no real user input exists
 
 ### 3. Cumulative Layout Shift (CLS)
 **Target: < 0.1**

@@ -526,3 +526,29 @@ fn specialist_agent_and_profile_sets_match() {
          Every specialist must ship all three artifacts (SKILL.md + subagent + profile)."
     );
 }
+
+/// Core Web Vitals in the web specialist must not list FID as a current target.
+/// INP replaced FID as a Core Web Vital (web.dev, March 2024).
+#[test]
+fn web_performance_reference_does_not_list_fid_as_current_cwv() {
+    let path = repository_root()
+        .join("web-development-life-cycle")
+        .join("references")
+        .join("50-performance-metrics-and-budgets.md");
+    let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    assert!(
+        !text.contains("FID Target:"),
+        "FID is no longer a Core Web Vital target; use INP (≤200ms). File: {}",
+        path.display()
+    );
+    assert!(
+        text.contains("Interaction to Next Paint (INP)"),
+        "must name INP as the current interactivity Core Web Vital: {}",
+        path.display()
+    );
+    assert!(
+        text.contains("≤ 200ms") || text.contains("< 200ms"),
+        "must state the INP good threshold (200ms): {}",
+        path.display()
+    );
+}
