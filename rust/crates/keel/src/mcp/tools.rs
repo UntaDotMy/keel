@@ -1545,6 +1545,7 @@ fn truncate_mcp_text(text: &str) -> String {
 #[cfg(test)]
 mod mcp_timeout_tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn truncate_mcp_text_leaves_small_input() {
@@ -1723,6 +1724,34 @@ mod mcp_timeout_tests {
         let text = mcp_json_compact(&payload).expect("serialize");
         assert!(!text.contains('\n'));
         assert!(text.starts_with('{'));
+    }
+
+    #[test]
+    fn using_keel_skill_fits_mcp_skill_get_body_cap() {
+        // Bootstrap skill must fit skill_get's body budget so hosts receive the
+        // full operative contract, not a truncated=true stub that drops rules.
+        let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .join("using-keel")
+            .join("SKILL.md");
+        let text = std::fs::read_to_string(&repo)
+            .unwrap_or_else(|e| panic!("read {}: {e}", repo.display()));
+        // Body after frontmatter (frontmatter is small); whole file is the
+        // practical wire cost when skill_get embeds `body`.
+        assert!(
+            text.chars().count() <= MAX_SKILL_BODY_CHARS,
+            "using-keel/SKILL.md is {} chars; MCP skill_get caps body at {} — densify the skill or raise the cap with frame-size proof",
+            text.chars().count(),
+            MAX_SKILL_BODY_CHARS
+        );
+        assert!(
+            text.contains("Iron Law") || text.contains("EXTREMELY_IMPORTANT"),
+            "using-keel must still carry the iron-law contract after densification"
+        );
+        assert!(
+            text.contains("preserve-existing-flow") || text.contains("Skill("),
+            "using-keel must still point at skill invocation"
+        );
     }
 
     #[test]

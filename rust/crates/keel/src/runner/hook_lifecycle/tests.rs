@@ -3044,15 +3044,16 @@ fn session_start_context_stays_under_truncation_cap() {
 
     // Major-3 guard: in a fresh test env `workspace_memory_digest()` is
     // empty, so the line above only certifies the base context. But at
-    // runtime the digest is appended and is independently bounded by
-    // WORKSPACE_DIGEST_MAX_BYTES. Certify the WORST CASE — base context plus
-    // a maxed-out digest — still clears the ceiling, so a future bootstrap
-    // growth that would overflow once the digest is present fails loudly
-    // here instead of silently truncating in production.
-    let worst_case = byte_len + WORKSPACE_DIGEST_MAX_BYTES;
+    // runtime workspace digest + instinct + synthesis are appended and each
+    // is independently bounded. Certify the WORST CASE still clears the
+    // ceiling so append growth cannot silently truncate the iron law.
+    let worst_case = byte_len
+        + WORKSPACE_DIGEST_MAX_BYTES
+        + INSTINCT_DIGEST_MAX_BYTES
+        + SYNTHESIS_NUDGE_MAX_BYTES;
     assert!(
             worst_case < TRUNCATION_CEILING_BYTES,
-            "SessionStart base ({byte_len} B) + a maxed workspace digest ({WORKSPACE_DIGEST_MAX_BYTES} B) = {worst_case} B would cross the {TRUNCATION_CEILING_BYTES}-byte ceiling. Shrink the bootstrap or WORKSPACE_DIGEST_MAX_BYTES so the pushed digest can never truncate the iron law."
+            "SessionStart base ({byte_len} B) + max workspace digest ({WORKSPACE_DIGEST_MAX_BYTES}) + max instinct ({INSTINCT_DIGEST_MAX_BYTES}) + max synthesis ({SYNTHESIS_NUDGE_MAX_BYTES}) = {worst_case} B would cross the {TRUNCATION_CEILING_BYTES}-byte ceiling. Shrink the bootstrap or the append caps so the iron law always lands in full."
         );
 }
 

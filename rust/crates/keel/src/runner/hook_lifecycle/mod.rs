@@ -2057,10 +2057,16 @@ pub(crate) fn session_start_context() -> String {
     }
     if let (Ok(claude_home), Ok(cwd)) = (resolve_claude_home(""), std::env::current_dir()) {
         let cwd = cwd.to_string_lossy();
+        // Instinct + synthesis are append-only extras. Cap each so a large
+        // project home cannot push SessionStart past the ~10KB host truncation
+        // ceiling (full text would be replaced by a 2KB unread preview).
         let instinct_digest = learning::project_instinct_digest(&claude_home, &cwd);
         if !instinct_digest.trim().is_empty() {
             context.push_str("\n\n");
-            context.push_str(&instinct_digest);
+            context.push_str(&truncate_on_line_boundary(
+                &instinct_digest,
+                INSTINCT_DIGEST_MAX_BYTES,
+            ));
         }
         let synthesis = learning::project_synthesis_nudge(&claude_home, &cwd);
         // Synthesis nudge: refine a template-state skill's prose. Gated by
@@ -2069,7 +2075,10 @@ pub(crate) fn session_start_context() -> String {
             std::env::var("CLAUDE_SKILLS_LEARNED_SKILL_ENRICH").as_deref() != Ok("off");
         if enrichment_enabled && !synthesis.trim().is_empty() {
             context.push_str("\n\n");
-            context.push_str(&synthesis);
+            context.push_str(&truncate_on_line_boundary(
+                &synthesis,
+                SYNTHESIS_NUDGE_MAX_BYTES,
+            ));
         }
     }
     context
@@ -4689,14 +4698,20 @@ fn memory_scope_summary() -> String {
 /// bootstrap + memory pointer already spend most of that, so the digest gets a
 /// deliberately small slice. Sections are capped individually below this so the
 /// digest degrades gracefully (drop the tail) rather than blowing the ceiling.
-const WORKSPACE_DIGEST_MAX_BYTES: usize = 2200;
+const WORKSPACE_DIGEST_MAX_BYTES: usize = 1700;
+/// Cap for learned-instinct lines appended at SessionStart. Without this, a
+/// busy project's instinct store can grow SessionStart past the host
+/// additionalContext truncation ceiling even when the compact bootstrap is fine.
+const INSTINCT_DIGEST_MAX_BYTES: usize = 400;
+/// Cap for the learned-skill synthesis nudge appended at SessionStart.
+const SYNTHESIS_NUDGE_MAX_BYTES: usize = 200;
 /// Per-section caps inside the digest. The system-map head is the most valuable
 /// (it answers "what is this repo" without a tool call), so it gets the largest
 /// share; the brief and memory note are one-liners pointing the model at detail
 /// it can pull with `recall`/`brief_get` if needed.
-const DIGEST_MAP_HEAD_MAX_BYTES: usize = 1400;
-const DIGEST_BRIEF_MAX_BYTES: usize = 500;
-const DIGEST_MEMORY_MAX_BYTES: usize = 300;
+const DIGEST_MAP_HEAD_MAX_BYTES: usize = 1000;
+const DIGEST_BRIEF_MAX_BYTES: usize = 400;
+const DIGEST_MEMORY_MAX_BYTES: usize = 250;
 
 /// Build a bounded digest of ACTUAL workspace memory content to PUSH into
 /// context at session start and post-compact — so the agent does not have to
