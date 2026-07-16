@@ -2727,6 +2727,16 @@ mod tests {
 
     #[test]
     fn iron_law_orientation_tools_call_succeed() {
+        // Isolate claude-home so parallel suite tests cannot lock our recall SQLite.
+        let _env = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let home = std::env::temp_dir().join(format!("keel-mcp-iron-law-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).expect("temp claude home");
+        let previous = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
+        std::env::set_var("CLAUDE_TARGET_OVERRIDE", &home);
+
         // Shipped handle_tools_call path — protocol envelope isError:false.
         for (name, args) in [
             ("context_brief", json!({})),
@@ -2763,6 +2773,12 @@ mod tests {
             "recall isError: {}",
             recall
         );
+
+        match previous {
+            Some(v) => std::env::set_var("CLAUDE_TARGET_OVERRIDE", v),
+            None => std::env::remove_var("CLAUDE_TARGET_OVERRIDE"),
+        }
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
