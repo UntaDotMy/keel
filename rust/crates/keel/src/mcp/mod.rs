@@ -124,7 +124,7 @@ fn render_mcp_help(standard_output: &mut dyn Write) {
     );
     let _ = writeln!(
         standard_output,
-        "  Tool wall-clock: KEEL_MCP_TOOL_TIMEOUT_SECS (default 90)."
+        "  Tool wall-clock: KEEL_MCP_TOOL_TIMEOUT_SECS (default 25, under typical host ~30s)."
     );
     let _ = writeln!(
         standard_output,
@@ -896,7 +896,8 @@ fn handle_resources_read(params: &Value) -> Result<Value, MethodError> {
                 code: JSON_RPC_INTERNAL_ERROR,
                 message,
             })?;
-            let text = serde_json::to_string_pretty(&payload).map_err(|error| MethodError {
+            // Compact JSON: pretty multi-line resource text bloats the stdio frame.
+            let text = serde_json::to_string(&payload).map_err(|error| MethodError {
                 code: JSON_RPC_INTERNAL_ERROR,
                 message: format!("serialize recall status: {error}"),
             })?;
@@ -1394,5 +1395,72 @@ mod tests {
             }
             _ => panic!("expected batch array"),
         }
+    }
+
+    #[test]
+    fn tools_list_framed_response_under_stdio_ceiling_with_headroom() {
+        // Drive real dispatch → handle_tools_list (slimmed). Pins the wire
+        // budget so discovery cannot fill the 24KB frame and trip hosts.
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/list"
+        });
+        let response = dispatch(&request).expect("response present");
+        let serialized = serde_json::to_string(&response).expect("serialize");
+        assert!(
+            serialized.len() <= MAX_STDIO_FRAME_BYTES,
+            "framed tools/list {} exceeds {}",
+            serialized.len(),
+            MAX_STDIO_FRAME_BYTES
+        );
+        assert!(
+            serialized.len() <= MAX_STDIO_FRAME_BYTES.saturating_sub(4_000),
+            "framed tools/list {} needs ≥4KB headroom under {}",
+            serialized.len(),
+            MAX_STDIO_FRAME_BYTES
+        );
+        assert!(
+            !serialized.contains('\n'),
+            "tools/list must be one NDJSON line"
+        );
+    }
+
+    #[test]
+    fn write_framed_response_replaces_oversized_result_with_is_error() {
+        // Oversized tools/call-shaped result must become isError text, not a
+        // silent drop that leaves the host waiting out its full timeout.
+        let mut huge_text = String::from("pad-");
+        while huge_text.len() < MAX_STDIO_FRAME_BYTES + 2_000 {
+            huge_text.push_str("x");
+        }
+        let response = success_response(
+            json!(42),
+            json!({
+                "content": [{ "type": "text", "text": huge_text }],
+                "isError": false,
+            }),
+        );
+        let mut output: Vec<u8> = Vec::new();
+        let mut error_output: Vec<u8> = Vec::new();
+        write_framed_response(&mut output, &mut error_output, &response).expect("write");
+        let rendered = String::from_utf8_lossy(&output);
+        assert!(rendered.ends_with('\n'));
+        let line = rendered.trim_end();
+        assert!(
+            line.len() <= MAX_STDIO_FRAME_BYTES,
+            "fallback frame {} must fit ceiling",
+            line.len()
+        );
+        let parsed: Value = serde_json::from_str(line).expect("json");
+        assert_eq!(parsed["id"], json!(42));
+        assert_eq!(parsed["result"]["isError"], json!(true));
+        let text = parsed["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or("");
+        assert!(
+            text.contains("truncated") || text.contains("frame"),
+            "text={text}"
+        );
     }
 }
