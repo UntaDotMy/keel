@@ -566,8 +566,8 @@ fn first_party_skills_do_not_use_paths_frontmatter() {
     let mut offenders: Vec<String> = Vec::new();
     for name in first_party_skill_dirs(&repo_root) {
         let path = repo_root.join(&name).join("SKILL.md");
-        let text = fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let text =
+            fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
         // Only the leading frontmatter block — a body mention of "paths:" is fine.
         let mut in_frontmatter = false;
         for line in text.lines() {
@@ -582,9 +582,7 @@ fn first_party_skills_do_not_use_paths_frontmatter() {
                 break;
             }
             // Top-level key only (not indented list items under something else).
-            if !line.starts_with(char::is_whitespace)
-                && trimmed.starts_with("paths:")
-            {
+            if !line.starts_with(char::is_whitespace) && trimmed.starts_with("paths:") {
                 offenders.push(name.clone());
                 break;
             }

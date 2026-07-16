@@ -967,7 +967,10 @@ mod tests {
         );
         let report = lint_skill(&skill_path);
         assert!(
-            !report.warnings.iter().any(|w| w.contains("`paths:` present")),
+            !report
+                .warnings
+                .iter()
+                .any(|w| w.contains("`paths:` present")),
             "skills without paths must not get the paths warning: {:?}",
             report.warnings
         );
