@@ -88,7 +88,7 @@ Invoke any skill below by routing through the MCP `skill_route` and `skill_get` 
 - **postgres-migration-safety** -- PostgreSQL migrations with lock analysis, expand-and-contract, backfill strategy, rollback boundaries.
 
 ### Frontend & Mobile
-- **ui-design-systems-and-responsive-interfaces** -- Design-system tokens, responsive layouts, accessibility (WCAG 2.1 AA), visual hierarchy.
+- **ui-design-systems-and-responsive-interfaces** -- Design-system tokens, responsive layouts, accessibility (WCAG 2.2 AA), visual hierarchy.
 - **react-performance-audit** -- Render storms, memoization, bundle size, hydration mismatches, Core Web Vitals.
 - **web-development-life-cycle** -- Web architecture, rendering strategy, performance, accessibility, SEO, cross-browser behavior.
 - **mobile-development-life-cycle** -- Android/iOS lifecycle, permissions, offline sync, secure storage, store-readiness.

@@ -2,12 +2,18 @@
 
 ## Accessibility Baseline
 
+Target **WCAG 2.2 Level AA** (W3C Recommendation, 12 December 2024: https://www.w3.org/TR/WCAG22/). Content that conforms to 2.2 also conforms to 2.0 and 2.1. Prefer 2.2 as the product baseline so 2.2-only criteria are not left untested.
+
 - Define target conformance level and audit criteria early.
 - Ensure full keyboard support for all interactive paths.
 - Ensure semantic structure and labeling for assistive technologies.
 - Ensure focus order is logical and visible.
-- Ensure focus is not fully obscured by sticky headers/overlays.
-- Ensure minimum target size and spacing for touch-heavy interfaces.
+- Ensure focus is not fully obscured by sticky headers/overlays (2.4.11 Focus Not Obscured (Minimum), AA).
+- Ensure minimum target size for pointer targets (2.5.8 Target Size (Minimum), AA: 24x24 CSS px with exceptions).
+- Support accessible authentication without cognitive function tests where possible (3.3.8 Accessible Authentication (Minimum), AA).
+- Prefer non-drag alternatives for drag-only operations (2.5.7 Dragging Movements, AA).
+- Keep help mechanisms in a consistent relative location when provided (3.2.6 Consistent Help, A).
+- Avoid re-asking information the user already provided in the same process when possible (3.3.7 Redundant Entry, A).
 
 ## Inclusive Interaction
 

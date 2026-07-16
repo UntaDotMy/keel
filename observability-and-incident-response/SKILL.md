@@ -64,7 +64,7 @@ See `_shared/common-discipline.md` for the canonical rules. Apply them to all wo
 - SLI = good events / valid events over a window. Define "good" and "valid" precisely before picking a number.
 - Error budget = 1 − SLO. A 99.9% SLO over 30 days allows ~43m 12s of bad time; 99.95% allows ~21m 36s.
 - Burn rate = (budget consumed) / (budget that should be consumed for the window). Burn rate of 1 exhausts the budget exactly at window end.
-- Multi-window, multi-burn-rate alerting: page on a fast burn (e.g. 14.4x over 1h, ~2% budget) and ticket on a slow burn (e.g. 3x over 6h). This catches both acute outages and slow bleeds without flapping.
+- Multi-window, multi-burn-rate alerting (Google SRE Workbook): for a typical 30-day SLO window, page on a fast burn (e.g. 14.4x over 1h ≈ 2% budget) and ticket on a slower burn (e.g. 6x over 6h ≈ 5% budget). Pair short and long windows so spikes do not page alone.
 - Tie the budget to a consequence: when it is spent, reliability work preempts features until it recovers.
 
 ### Alert Design

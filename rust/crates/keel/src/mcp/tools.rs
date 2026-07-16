@@ -103,7 +103,17 @@ const DEFAULT_MEMORY_GROUP: &str = "memory";
 /// slimmed before return so the framed JSON-RPC line stays under the stdio
 /// frame ceiling with headroom for future tools (see [`slim_tools_list_for_wire`]).
 pub(super) fn handle_tools_list() -> Value {
-    slim_tools_list_for_wire(tools_list_catalog())
+    let list = slim_tools_list_for_wire(tools_list_catalog());
+    // Keep catalog ↔ MCP_TOOL_NAMES length honest (handler table checked in unit tests).
+    debug_assert_eq!(
+        list.get("tools")
+            .and_then(Value::as_array)
+            .map(std::vec::Vec::len)
+            .unwrap_or(0),
+        MCP_TOOL_NAMES.len(),
+        "tools/list count must match MCP_TOOL_NAMES"
+    );
+    list
 }
 
 /// Raw tool catalog (full descriptions + property descriptions). Not sent on
@@ -247,7 +257,7 @@ fn tools_list_catalog() -> Value {
             },
             {
                 "name": "cli",
-                "description": "Run any keel CLI subcommand and get its compacted output — the full toolkit surface (review, git-workflow, workflow, memory, orchestration, flow, code-search, config-audit, skill-lint, checkpoint, gain, session, telemetry, status, doctor, ...). Pass the subcommand and flags as `args`. Read/inspection subcommands run directly; destructive or management subcommands (install, update, repair, uninstall, validate, all, self-replace, `checkpoint restore`, and `hook install`/`hook uninstall`) require `confirm: true`. The `mcp` subcommand is refused. Prefer the dedicated tools (recall, skill_route, brief_create, sprint, user_story_lint, ...) when one fits; use cli for everything else.",
+                "description": "Run any keel CLI subcommand and get its compacted output — the full toolkit surface including families without a dedicated tool (bridge, eval, bench, team, hook list/diagnose, status, platform, ...). Pass the subcommand and flags as `args`. Read/inspection subcommands run directly; destructive or management subcommands (install, update, repair, uninstall, validate, all, self-replace, `checkpoint restore`, and `hook install`/`hook uninstall`) require `confirm: true`. The `mcp` subcommand is refused. Prefer dedicated tools (recall, observe, rewrite, skill_eval, dispatch, design_intelligence, ...) when one fits; use cli for everything else.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -516,6 +526,67 @@ fn tools_list_catalog() -> Value {
                         "json": { "type": "boolean", "description": "Output as JSON." }
                     }
                 }
+            },
+            {
+                "name": "observe",
+                "description": "Read-only session/workspace health: recall index, working-brief count, sprint progress. Prefer this over guessing closeout readiness. Token-savings axis stays on gain/session.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "workspace_root": { "type": "string", "description": "Workspace root. Defaults to cwd." },
+                        "json": { "type": "boolean", "description": "Output as JSON. Default true on this tool when omitted? Prefer true for agents." }
+                    }
+                }
+            },
+            {
+                "name": "rewrite",
+                "description": "Inspect how keel would compact a shell command (returns the resolved `keel run -- …` wrapper). Use before trusting a raw noisy command path.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "command": { "type": "string", "description": "Shell command to rewrite, e.g. \"cargo test --workspace\"." },
+                        "json": { "type": "boolean", "description": "Machine-readable rewrite payload when supported." }
+                    },
+                    "required": ["command"]
+                }
+            },
+            {
+                "name": "skill_eval",
+                "description": "Run the deterministic skill-routing eval fixtures against the installed skill catalog (pass/fail per fixture). Use after editing skill frontmatter or routing.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "repo_root": { "type": "string", "description": "Repository root that owns skills. Defaults to cwd." },
+                        "json": { "type": "boolean", "description": "JSON report. Default true recommended." }
+                    }
+                }
+            },
+            {
+                "name": "dispatch",
+                "description": "Git-worktree-isolated parallel workers (plan|start|status|complete|merge|abandon|list). Owns worktrees + merge gate; does not spawn agents. merge/abandon require confirm:true (CLI --confirm).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["plan", "start", "status", "complete", "merge", "abandon", "list"], "description": "Dispatch operation." },
+                        "args": { "type": "array", "items": { "type": "string" }, "description": "Extra CLI args (e.g. --id, --task)." },
+                        "confirm": { "type": "boolean", "description": "Required true for merge/abandon. Default false." },
+                        "json": { "type": "boolean", "description": "JSON output when supported." }
+                    },
+                    "required": ["action"]
+                }
+            },
+            {
+                "name": "design_intelligence",
+                "description": "UI design-system recommendation packet (styles, palettes, typography, anti-patterns) for a product request. Use before implementing UI so visual choices are catalog-backed.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "request": { "type": "string", "description": "Product/UI request text." },
+                        "args": { "type": "array", "items": { "type": "string" }, "description": "Extra flags (e.g. --stack next, --format json)." },
+                        "json": { "type": "boolean", "description": "Prefer JSON when true." }
+                    },
+                    "required": ["request"]
+                }
             }
         ]
     })
@@ -606,85 +677,110 @@ pub(super) fn handle_tools_call(params: &Value) -> Result<Value, MethodError> {
     }
 }
 
+/// Canonical MCP tool name set. `tools_list_catalog`, [`is_known_mcp_tool`], and
+/// [`dispatch_mcp_tool`] must agree with this list — the unit test
+/// `mcp_tool_list_known_and_dispatch_are_one_set` fails if they drift.
+const MCP_TOOL_NAMES: &[&str] = &[
+    "recall",
+    "system_map",
+    "run_command",
+    "recall_status",
+    "skill_route",
+    "skill_get",
+    "skill_list",
+    "memory_status",
+    "brief_list",
+    "brief_get",
+    "brief_create",
+    "system_map_refresh",
+    "context_brief",
+    "cli",
+    "sprint",
+    "user_story_lint",
+    "review",
+    "workflow",
+    "git_workflow",
+    "memory",
+    "gain",
+    "raw",
+    "config_audit",
+    "skill_lint",
+    "telemetry",
+    "orchestration",
+    "checkpoint",
+    "session",
+    "doctor",
+    "code_search",
+    "user_story",
+    "flow",
+    "work",
+    "code_graph",
+    "learn",
+    "observe",
+    "rewrite",
+    "skill_eval",
+    "dispatch",
+    "design_intelligence",
+];
+
+type McpToolHandler = fn(&Value) -> Result<String, String>;
+
+/// Resolve the handler for a tool name without invoking it. Used by dispatch and
+/// by the parity test so completeness is proven without re-exec side effects.
+fn mcp_tool_handler(name: &str) -> Option<McpToolHandler> {
+    Some(match name {
+        "recall" => tool_recall,
+        "system_map" => tool_system_map,
+        "run_command" => tool_run_command,
+        "recall_status" => tool_recall_status,
+        "skill_route" => tool_skill_route,
+        "skill_get" => tool_skill_get,
+        "skill_list" => tool_skill_list,
+        "memory_status" => tool_memory_status,
+        "brief_list" => tool_brief_list,
+        "brief_get" => tool_brief_get,
+        "brief_create" => tool_brief_create,
+        "system_map_refresh" => tool_system_map_refresh,
+        "context_brief" => tool_context_brief,
+        "cli" => tool_cli,
+        "sprint" => tool_sprint,
+        "user_story_lint" => tool_user_story_lint,
+        "review" => tool_review,
+        "workflow" => tool_workflow,
+        "git_workflow" => tool_git_workflow,
+        "memory" => tool_memory,
+        "gain" => tool_gain,
+        "raw" => tool_raw,
+        "config_audit" => tool_config_audit,
+        "skill_lint" => tool_skill_lint,
+        "telemetry" => tool_telemetry,
+        "orchestration" => tool_orchestration,
+        "checkpoint" => tool_checkpoint,
+        "session" => tool_session,
+        "doctor" => tool_doctor,
+        "code_search" => tool_code_search,
+        "user_story" => tool_user_story,
+        "flow" => tool_flow,
+        "work" => tool_work,
+        "code_graph" => tool_code_graph,
+        "learn" => tool_learn,
+        "observe" => tool_observe,
+        "rewrite" => tool_rewrite,
+        "skill_eval" => tool_skill_eval,
+        "dispatch" => tool_dispatch,
+        "design_intelligence" => tool_design_intelligence,
+        _ => return None,
+    })
+}
+
 fn is_known_mcp_tool(name: &str) -> bool {
-    matches!(
-        name,
-        "recall"
-            | "system_map"
-            | "run_command"
-            | "recall_status"
-            | "skill_route"
-            | "skill_get"
-            | "skill_list"
-            | "memory_status"
-            | "brief_list"
-            | "brief_get"
-            | "brief_create"
-            | "system_map_refresh"
-            | "context_brief"
-            | "cli"
-            | "sprint"
-            | "user_story_lint"
-            | "review"
-            | "workflow"
-            | "git_workflow"
-            | "memory"
-            | "gain"
-            | "raw"
-            | "config_audit"
-            | "skill_lint"
-            | "telemetry"
-            | "orchestration"
-            | "checkpoint"
-            | "session"
-            | "doctor"
-            | "code_search"
-            | "user_story"
-            | "flow"
-            | "work"
-            | "code_graph"
-            | "learn"
-    )
+    mcp_tool_handler(name).is_some()
 }
 
 fn dispatch_mcp_tool(tool_name: &str, arguments: &Value) -> Result<String, String> {
-    match tool_name {
-        "recall" => tool_recall(arguments),
-        "system_map" => tool_system_map(arguments),
-        "run_command" => tool_run_command(arguments),
-        "recall_status" => tool_recall_status(arguments),
-        "skill_route" => tool_skill_route(arguments),
-        "skill_get" => tool_skill_get(arguments),
-        "skill_list" => tool_skill_list(arguments),
-        "memory_status" => tool_memory_status(arguments),
-        "brief_list" => tool_brief_list(arguments),
-        "brief_get" => tool_brief_get(arguments),
-        "brief_create" => tool_brief_create(arguments),
-        "system_map_refresh" => tool_system_map_refresh(arguments),
-        "context_brief" => tool_context_brief(arguments),
-        "cli" => tool_cli(arguments),
-        "sprint" => tool_sprint(arguments),
-        "user_story_lint" => tool_user_story_lint(arguments),
-        "review" => tool_review(arguments),
-        "workflow" => tool_workflow(arguments),
-        "git_workflow" => tool_git_workflow(arguments),
-        "memory" => tool_memory(arguments),
-        "gain" => tool_gain(arguments),
-        "raw" => tool_raw(arguments),
-        "config_audit" => tool_config_audit(arguments),
-        "skill_lint" => tool_skill_lint(arguments),
-        "telemetry" => tool_telemetry(arguments),
-        "orchestration" => tool_orchestration(arguments),
-        "checkpoint" => tool_checkpoint(arguments),
-        "session" => tool_session(arguments),
-        "doctor" => tool_doctor(arguments),
-        "code_search" => tool_code_search(arguments),
-        "user_story" => tool_user_story(arguments),
-        "flow" => tool_flow(arguments),
-        "work" => tool_work(arguments),
-        "code_graph" => tool_code_graph(arguments),
-        "learn" => tool_learn(arguments),
-        other => Err(format!("Unknown tool: {other}")),
+    match mcp_tool_handler(tool_name) {
+        Some(handler) => handler(arguments),
+        None => Err(format!("Unknown tool: {tool_name}")),
     }
 }
 
@@ -1545,6 +1641,7 @@ fn truncate_mcp_text(text: &str) -> String {
 #[cfg(test)]
 mod mcp_timeout_tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn truncate_mcp_text_leaves_small_input() {
@@ -1650,17 +1747,11 @@ mod mcp_timeout_tests {
 
     #[test]
     fn default_mcp_tool_timeout_under_host_budgets() {
-        // Grok observed timeout_sec=30. Default must be strictly less so hosts
-        // receive isError before they give up and look hung.
-        assert!(
-            DEFAULT_MCP_CHILD_TIMEOUT_SECS < 30,
-            "default {}s must be < 30s host budget",
-            DEFAULT_MCP_CHILD_TIMEOUT_SECS
-        );
-        assert!(
-            DEFAULT_MCP_CHILD_TIMEOUT_SECS >= 5,
-            "default must stay at/above the clamp floor"
-        );
+        // Host budgets often sit at 30s; default must stay below that floor.
+        const {
+            assert!(DEFAULT_MCP_CHILD_TIMEOUT_SECS < 30);
+            assert!(DEFAULT_MCP_CHILD_TIMEOUT_SECS >= 5);
+        }
         // With env unset, the live budget must match the constant (clamp applied).
         // Only assert when the override env is absent so parallel tests that set
         // KEEL_MCP_TOOL_TIMEOUT_SECS do not flake this pin.
@@ -1722,7 +1813,88 @@ mod mcp_timeout_tests {
         let payload = json!({"a": 1, "b": {"nested": true}});
         let text = mcp_json_compact(&payload).expect("serialize");
         assert!(!text.contains('\n'));
+        assert!(!text.contains('\r'));
         assert!(text.starts_with('{'));
+    }
+
+    #[test]
+    fn tools_call_envelope_with_multiline_text_is_single_json_line() {
+        // Multi-line tool bodies (system_map, run_command) must ride inside JSON
+        // string escapes so the NDJSON frame stays one physical line. Hosts
+        // desync when a frame embeds raw 0x0A bytes mid-line.
+        let multiline = "line1\nline2\r\nline3\n";
+        let framed = json!({
+            "jsonrpc": "2.0",
+            "id": 9,
+            "result": {
+                "content": [{ "type": "text", "text": truncate_mcp_text(multiline) }],
+                "isError": false,
+            },
+        });
+        let serialized = serde_json::to_string(&framed).expect("serialize");
+        assert!(
+            !serialized.as_bytes().contains(&b'\n'),
+            "framed tools/call must not contain raw LF"
+        );
+        assert!(
+            !serialized.as_bytes().contains(&b'\r'),
+            "framed tools/call must not contain raw CR"
+        );
+        let parsed: Value = serde_json::from_str(&serialized).expect("parse");
+        let text = parsed["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or("");
+        assert!(text.contains("line1") && text.contains("line2"));
+        // User-facing "/n" bug class: literal slash-n must not stand in for newline.
+        assert!(
+            !text.contains("/n"),
+            "tool text must not contain literal /n stand-in for newline"
+        );
+    }
+
+    #[test]
+    fn truncate_mcp_text_suffix_never_uses_literal_slash_n() {
+        let max_chars = max_mcp_text_chars();
+        let big = format!("{}\nmore\n", "y".repeat(max_chars + 100));
+        let out = truncate_mcp_text(&big);
+        assert!(out.contains("truncated for MCP"));
+        assert!(!out.contains("/n"), "suffix must not use /n");
+        // Truncation path joins a single-line suffix; multi-line input is
+        // shortened by char count but must not reintroduce raw newlines via
+        // the suffix itself. Prefer compact single-line kept+suffix when
+        // truncated.
+        assert!(
+            !out.contains('\n') && !out.contains('\r'),
+            "truncated MCP text must stay free of raw CR/LF (was: {out:?})"
+        );
+    }
+
+    #[test]
+    fn using_keel_skill_fits_mcp_skill_get_body_cap() {
+        // Bootstrap skill must fit skill_get's body budget so hosts receive the
+        // full operative contract, not a truncated=true stub that drops rules.
+        let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .join("using-keel")
+            .join("SKILL.md");
+        let text = std::fs::read_to_string(&repo)
+            .unwrap_or_else(|e| panic!("read {}: {e}", repo.display()));
+        // Body after frontmatter (frontmatter is small); whole file is the
+        // practical wire cost when skill_get embeds `body`.
+        assert!(
+            text.chars().count() <= MAX_SKILL_BODY_CHARS,
+            "using-keel/SKILL.md is {} chars; MCP skill_get caps body at {} — densify the skill or raise the cap with frame-size proof",
+            text.chars().count(),
+            MAX_SKILL_BODY_CHARS
+        );
+        assert!(
+            text.contains("Iron Law") || text.contains("EXTREMELY_IMPORTANT"),
+            "using-keel must still carry the iron-law contract after densification"
+        );
+        assert!(
+            text.contains("preserve-existing-flow") || text.contains("Skill("),
+            "using-keel must still point at skill invocation"
+        );
     }
 
     #[test]
@@ -2200,6 +2372,151 @@ fn tool_learn(arguments: &Value) -> Result<String, String> {
     run_keel_subcommand("learn", &all_args)
 }
 
+/// Capture stdout/stderr from an in-process CLI handler (same binary functions
+/// as `keel <subcommand>`). Avoids re-exec of `current_exe()`, which under
+/// `cargo test` is the test harness and can hang or recurse.
+fn run_inprocess_cli<F>(label: &str, work: F) -> Result<String, String>
+where
+    F: FnOnce(&mut Vec<u8>, &mut Vec<u8>) -> u8,
+{
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let code = i32::from(work(&mut stdout, &mut stderr));
+    let stdout_text = String::from_utf8_lossy(&stdout).into_owned();
+    let stderr_text = String::from_utf8_lossy(&stderr).into_owned();
+    Ok(render_run_command_report(
+        label,
+        code,
+        &stdout_text,
+        &stderr_text,
+    ))
+}
+
+/// Read-only aggregator: recall health + working briefs + sprint progress.
+fn tool_observe(arguments: &Value) -> Result<String, String> {
+    let mut owned: Vec<String> = Vec::new();
+    if let Some(root) = optional_string_arg(arguments, "workspace_root") {
+        owned.push(format!("--workspace-root={root}"));
+    }
+    // Agents almost always want structured health; default to JSON unless false.
+    if optional_bool_arg(arguments, "json") != Some(false) {
+        owned.push("--json".to_string());
+    }
+    run_inprocess_cli("keel observe", |out, err| {
+        crate::utility::run_observe_command(&owned, out, err)
+    })
+}
+
+/// Inspect the compaction rewrite for a shell command (no execution).
+fn tool_rewrite(arguments: &Value) -> Result<String, String> {
+    let command = arguments
+        .get("command")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if command.is_empty() {
+        return Err("rewrite: missing command".to_string());
+    }
+    let mut owned: Vec<String> = Vec::new();
+    if Some(true) == optional_bool_arg(arguments, "json") {
+        owned.push("--json".to_string());
+    }
+    owned.push(command);
+    run_inprocess_cli("keel rewrite", |out, err| {
+        crate::runner::run_rewrite_command(&owned, out, err)
+    })
+}
+
+/// Deterministic skill-routing fixture eval against the skill catalog.
+fn tool_skill_eval(arguments: &Value) -> Result<String, String> {
+    let mut owned: Vec<String> = Vec::new();
+    if let Some(root) = optional_string_arg(arguments, "repo_root") {
+        owned.push(format!("--repo-root={root}"));
+    }
+    if optional_bool_arg(arguments, "json") != Some(false) {
+        owned.push("--json".to_string());
+    }
+    run_inprocess_cli("keel skill-eval", |out, err| {
+        crate::utility::run_skill_eval_command(&owned, out, err)
+    })
+}
+
+/// Worktree-isolated parallel dispatch ledger (no agent spawn).
+fn tool_dispatch(arguments: &Value) -> Result<String, String> {
+    let action = arguments
+        .get("action")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            "dispatch: missing action (plan|start|status|complete|merge|abandon|list)".to_string()
+        })?;
+    let allowed = [
+        "plan", "start", "status", "complete", "merge", "abandon", "list",
+    ];
+    if !allowed.contains(&action) {
+        return Err(format!("dispatch: action {action:?} not recognized"));
+    }
+    let confirm = optional_bool_arg(arguments, "confirm").unwrap_or(false);
+    if matches!(action, "merge" | "abandon") && !confirm {
+        return Err(format!(
+            "dispatch: action {action:?} mutates git/worktrees — re-call with confirm:true"
+        ));
+    }
+    let mut owned: Vec<String> = vec![action.to_string()];
+    if let Some(Value::Array(items)) = arguments.get("args") {
+        for item in items {
+            if let Some(s) = item.as_str() {
+                if !s.trim().is_empty() {
+                    owned.push(s.to_string());
+                }
+            }
+        }
+    }
+    if confirm
+        && matches!(action, "merge" | "abandon")
+        && !owned
+            .iter()
+            .any(|a| a == "--confirm" || a.starts_with("--confirm="))
+    {
+        owned.push("--confirm".to_string());
+    }
+    if Some(true) == optional_bool_arg(arguments, "json") {
+        owned.push("--json".to_string());
+    }
+    run_inprocess_cli(&format!("keel dispatch {action}"), |out, err| {
+        crate::utility::run_dispatch_command(&owned, out, err)
+    })
+}
+
+/// Catalog-backed UI design recommendation packet.
+fn tool_design_intelligence(arguments: &Value) -> Result<String, String> {
+    let request = arguments
+        .get("request")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if request.is_empty() {
+        return Err("design_intelligence: missing request".to_string());
+    }
+    let mut owned: Vec<String> = vec!["recommend".to_string(), request];
+    if let Some(Value::Array(items)) = arguments.get("args") {
+        for item in items {
+            if let Some(s) = item.as_str() {
+                if !s.trim().is_empty() {
+                    owned.push(s.to_string());
+                }
+            }
+        }
+    }
+    if Some(true) == optional_bool_arg(arguments, "json") {
+        owned.push("--format=json".to_string());
+    }
+    run_inprocess_cli("keel design-intelligence", |out, err| {
+        crate::utility::run_design_intelligence_command(&owned, out, err)
+    })
+}
+
 /// Resolve the default harness home, prefixing any failure with the calling
 /// tool's name so a resolution error reads `"<tool>: <reason>"` in the
 /// tool-result envelope. Every handler resolves the same way; this keeps the
@@ -2268,44 +2585,11 @@ mod tests {
             .iter()
             .filter_map(|entry| entry.get("name").and_then(Value::as_str))
             .collect();
-        for expected in [
-            "recall",
-            "system_map",
-            "run_command",
-            "recall_status",
-            "skill_route",
-            "skill_get",
-            "skill_list",
-            "memory_status",
-            "brief_list",
-            "brief_get",
-            "brief_create",
-            "system_map_refresh",
-            "context_brief",
-            "cli",
-            "sprint",
-            "user_story_lint",
-            "review",
-            "workflow",
-            "git_workflow",
-            "memory",
-            "gain",
-            "raw",
-            "config_audit",
-            "skill_lint",
-            "telemetry",
-            "orchestration",
-            "checkpoint",
-            "session",
-            "doctor",
-            "code_search",
-            "user_story",
-            "flow",
-            "work",
-            "code_graph",
-            "learn",
-        ] {
-            assert!(names.contains(&expected), "missing {expected}: {names:?}");
+        for expected in MCP_TOOL_NAMES {
+            assert!(
+                names.contains(expected),
+                "missing {expected} from tools/list: {names:?}"
+            );
         }
         assert!(
             !names.is_empty()
@@ -2315,6 +2599,229 @@ mod tests {
                     .len()
                     == names.len(),
             "tool names must be unique: {names:?}"
+        );
+        assert_eq!(
+            names.len(),
+            MCP_TOOL_NAMES.len(),
+            "tools/list count must match MCP_TOOL_NAMES (extra names? listed={names:?})"
+        );
+    }
+
+    #[test]
+    fn mcp_tool_list_known_and_dispatch_are_one_set() {
+        // Mechanical parity without invoking handlers (handlers may re-exec CLI).
+        // list names == MCP_TOOL_NAMES == handler table.
+        let listed = handle_tools_list();
+        let tools = listed["tools"].as_array().expect("tools array");
+        let mut list_names: Vec<String> = tools
+            .iter()
+            .filter_map(|entry| {
+                entry
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .collect();
+        list_names.sort();
+        let mut known: Vec<String> = MCP_TOOL_NAMES.iter().map(|s| (*s).to_string()).collect();
+        known.sort();
+        assert_eq!(
+            list_names, known,
+            "tools/list names must equal MCP_TOOL_NAMES"
+        );
+
+        for name in MCP_TOOL_NAMES {
+            assert!(
+                is_known_mcp_tool(name),
+                "is_known_mcp_tool({name}) must be true"
+            );
+            assert!(
+                mcp_tool_handler(name).is_some(),
+                "dispatch handler table missing arm for {name}"
+            );
+            // MCP 2025-11-25: inputSchema MUST be a JSON Schema object.
+            let schema = tools
+                .iter()
+                .find(|t| t.get("name").and_then(Value::as_str) == Some(*name))
+                .and_then(|t| t.get("inputSchema"))
+                .expect("inputSchema present");
+            assert_eq!(
+                schema.get("type").and_then(Value::as_str),
+                Some("object"),
+                "{name} inputSchema.type must be object"
+            );
+        }
+        assert!(
+            mcp_tool_handler("definitely_not_a_tool").is_none(),
+            "unknown names must not resolve"
+        );
+    }
+
+    #[test]
+    fn cli_allowlist_covers_agent_critical_subcommand_families() {
+        // Policy proof (no re-exec): agent-critical families are not refused and
+        // are not whole-group confirm-gated. Live binary smoke is in mcp-smoke.log.
+        // Dedicated MCP tools cover observe/rewrite/skill_eval/dispatch/design_intelligence;
+        // bridge/eval/bench/team/hook remain via-cli.
+        for sub in [
+            "observe",
+            "rewrite",
+            "skill-eval",
+            "dispatch",
+            "design-intelligence",
+            "bridge",
+            "eval",
+            "bench",
+            "team",
+            "hook",
+        ] {
+            assert!(
+                !CLI_REFUSED_SUBCOMMANDS.contains(&sub),
+                "{sub} must not be MCP-refused"
+            );
+            assert!(
+                !CLI_CONFIRM_SUBCOMMANDS.contains(&sub),
+                "{sub} must not require confirm as a whole group (mutate via second-arg or CLI --confirm)"
+            );
+        }
+        // Destructive members still gated
+        assert!(CLI_CONFIRM_SUBCOMMANDS.contains(&"install"));
+        assert!(CLI_REFUSED_SUBCOMMANDS.contains(&"mcp"));
+    }
+
+    #[test]
+    fn dispatch_merge_requires_confirm_on_mcp_tool() {
+        let params = json!({
+            "name": "dispatch",
+            "arguments": { "action": "merge", "args": ["--id", "x"] }
+        });
+        let result = handle_tools_call(&params).expect("envelope");
+        assert_eq!(result["isError"], json!(true));
+        let text = result["content"][0]["text"].as_str().unwrap_or("");
+        assert!(
+            text.contains("confirm:true"),
+            "merge must require confirm: {text}"
+        );
+    }
+
+    #[test]
+    fn observe_and_rewrite_tools_smoke() {
+        let obs = handle_tools_call(&json!({
+            "name": "observe",
+            "arguments": { "json": true }
+        }))
+        .expect("observe envelope");
+        assert_eq!(obs["isError"], json!(false), "observe body: {}", obs);
+        let rew = handle_tools_call(&json!({
+            "name": "rewrite",
+            "arguments": { "command": "cargo test" }
+        }))
+        .expect("rewrite envelope");
+        assert_eq!(rew["isError"], json!(false), "rewrite body: {}", rew);
+        let text = rew["content"][0]["text"].as_str().unwrap_or("");
+        assert!(
+            text.contains("run") || text.contains("cargo"),
+            "rewrite should mention run/cargo: {text}"
+        );
+    }
+
+    #[test]
+    fn iron_law_orientation_tools_call_succeed() {
+        // Isolate claude-home so parallel suite tests cannot lock our recall SQLite.
+        let _env = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let home = std::env::temp_dir().join(format!("keel-mcp-iron-law-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).expect("temp claude home");
+        let previous = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
+        std::env::set_var("CLAUDE_TARGET_OVERRIDE", &home);
+
+        // Shipped handle_tools_call path — protocol envelope isError:false.
+        for (name, args) in [
+            ("context_brief", json!({})),
+            ("system_map", json!({})),
+            ("recall_status", json!({})),
+            (
+                "skill_route",
+                json!({ "prompt": "review this pull request for production readiness" }),
+            ),
+        ] {
+            let result = handle_tools_call(&json!({
+                "name": name,
+                "arguments": args
+            }))
+            .unwrap_or_else(|e| panic!("{name} protocol error: {e:?}"));
+            assert_eq!(
+                result["isError"],
+                json!(false),
+                "{name} isError true: {}",
+                result
+            );
+            let text = result["content"][0]["text"].as_str().unwrap_or("");
+            assert!(!text.trim().is_empty(), "{name} empty content");
+        }
+        // recall needs a query; empty corpus may return zero hits but not isError.
+        let recall = handle_tools_call(&json!({
+            "name": "recall",
+            "arguments": { "query": "iron law system map", "limit": 5 }
+        }))
+        .expect("recall envelope");
+        assert_eq!(
+            recall["isError"],
+            json!(false),
+            "recall isError: {}",
+            recall
+        );
+
+        match previous {
+            Some(v) => std::env::set_var("CLAUDE_TARGET_OVERRIDE", v),
+            None => std::env::remove_var("CLAUDE_TARGET_OVERRIDE"),
+        }
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn skill_eval_design_intelligence_dispatch_list_succeed() {
+        let se = handle_tools_call(&json!({
+            "name": "skill_eval",
+            "arguments": { "repo_root": ".", "json": true }
+        }))
+        .expect("skill_eval envelope");
+        assert_eq!(se["isError"], json!(false), "skill_eval failed: {}", se);
+
+        let di = handle_tools_call(&json!({
+            "name": "design_intelligence",
+            "arguments": {
+                "request": "saas analytics dashboard",
+                "json": true
+            }
+        }))
+        .expect("design_intelligence envelope");
+        assert_eq!(
+            di["isError"],
+            json!(false),
+            "design_intelligence failed: {}",
+            di
+        );
+
+        let dl = handle_tools_call(&json!({
+            "name": "dispatch",
+            "arguments": { "action": "list", "json": true }
+        }))
+        .expect("dispatch list envelope");
+        assert_eq!(dl["isError"], json!(false), "dispatch list failed: {}", dl);
+
+        let ds = handle_tools_call(&json!({
+            "name": "dispatch",
+            "arguments": { "action": "status", "json": true }
+        }))
+        .expect("dispatch status envelope");
+        assert_eq!(
+            ds["isError"],
+            json!(false),
+            "dispatch status failed: {}",
+            ds
         );
     }
 
@@ -2544,40 +3051,26 @@ mod tests {
     }
 
     #[test]
-    fn tools_list_includes_new_cli_passthrough_tools() {
+    fn tools_list_includes_every_mcp_tool_name() {
+        // Driven by MCP_TOOL_NAMES (includes observe/rewrite/skill_eval/dispatch/
+        // design_intelligence). Replaces the stale hand-maintained subset list.
         let response = handle_tools_list();
         let tools = response["tools"].as_array().expect("tools array");
         let tool_names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
-
-        for name in [
-            "review",
-            "workflow",
-            "git_workflow",
-            "memory",
-            "gain",
-            "raw",
-            "config_audit",
-            "skill_lint",
-            "telemetry",
-            "orchestration",
-            "checkpoint",
-            "session",
-            "doctor",
-            "code_search",
-            "user_story",
-            "flow",
-            "work",
-            "code_graph",
-            "learn",
-        ] {
+        for name in MCP_TOOL_NAMES {
             assert!(
-                tool_names.contains(&name),
+                tool_names.contains(name),
                 "{name} tool not in tools list: {tool_names:?}"
             );
         }
         assert!(
-            tools.iter().all(|t| t.get("inputSchema").is_some()),
-            "every advertised tool must have an inputSchema: {tool_names:?}"
+            tools.iter().all(|t| {
+                t.get("inputSchema")
+                    .and_then(|s| s.get("type"))
+                    .and_then(Value::as_str)
+                    == Some("object")
+            }),
+            "every tool inputSchema.type must be object: {tool_names:?}"
         );
     }
 

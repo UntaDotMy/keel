@@ -27,8 +27,25 @@ keel design-intelligence recommend "saas dashboard for incident response"
 keel design-intelligence recommend "portfolio redesign for a creative agency" --format json
 keel design-intelligence recommend "AI workspace for research copilots" --stack nextjs --component-library shadcn --format json
 keel design-intelligence recommend "direct messaging mobile app with unread states and voice notes" --stack flutter --format json
+keel design-intelligence recommend "ops analytics dashboard" --density 9 --variance 3 --format json
 keel design-intelligence recommend "checkout recovery improvements" --persist --project-name "Storefront Revamp" --page "Checkout Flow"
 ```
+
+## Dials
+
+| Flag | Range | Effect |
+|---|---|---|
+| `--density` | 1-10 | 1-3 airy spacing, 4-7 balanced, 8-10 data-dense |
+| `--variance` | 1-10 | 1-3 calm/minimal style bias, 4-7 catalog default order, 8-10 bold/glass/brutalist bias |
+
+Motion posture and `motion_guidance` always appear on the packet (respect `prefers-reduced-motion`).
+
+## Persist
+
+- Default root: `design-system/<project-slug>/MASTER.md`
+- `--page "Name"` writes `design-system/<project-slug>/pages/<slug>.md` (and seeds MASTER if missing)
+- Existing files are **not** overwritten unless `--force`
+- `--out <path>` sets the MASTER path explicitly
 
 ## Output Shape Highlights
 

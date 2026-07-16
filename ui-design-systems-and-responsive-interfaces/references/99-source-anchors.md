@@ -10,6 +10,8 @@
 - WCAG non-text contrast understanding: https://www.w3.org/WAI/WCAG22/Understanding/non-text-contrast.html
 - WCAG 2.2 target size understanding (W3C): https://www.w3.org/WAI/WCAG22/Understanding/target-size-minimum.html
 - WCAG 2.2 focus not obscured understanding (W3C): https://www.w3.org/WAI/WCAG22/Understanding/focus-not-obscured-minimum.html
+- WCAG 2.2 accessible authentication understanding (W3C): https://www.w3.org/WAI/WCAG22/Understanding/accessible-authentication-minimum.html
+- WCAG 2.2 what's new (W3C): https://www.w3.org/WAI/standards-guidelines/wcag/new-in-22/
 
 ## Responsive and Adaptive Design
 

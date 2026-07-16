@@ -49,7 +49,7 @@ See `_shared/common-discipline.md` for the canonical rules. Apply them to all wo
 
 1. **Progressive Enhancement**: Start with HTML, enhance with CSS/JS
 2. **Performance First**: Fast load times, smooth interactions
-3. **Accessible**: WCAG 2.1 AA compliance
+3. **Accessible**: WCAG 2.2 AA compliance
 4. **SEO-Friendly**: Semantic HTML, meta tags, structured data
 5. **Secure**: HTTPS, CSP, input validation, OWASP awareness
 6. **Cross-Browser**: Test on major browsers and versions

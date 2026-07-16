@@ -18,7 +18,9 @@ Use together with:
 ## Performance and SEO
 
 - MDN Core Web Vitals: https://developer.mozilla.org/docs/Web/Performance/Core_Web_Vitals
-- web.dev Core Web Vitals: https://web.dev/vitals/
+- web.dev Core Web Vitals (LCP, INP, CLS): https://web.dev/vitals/
+- INP became a Core Web Vital, replacing FID (2024): https://web.dev/blog/inp-cwv-launch
+- web.dev Optimize INP: https://web.dev/articles/optimize-inp
 - Google SEO Starter Guide: https://developers.google.com/search/docs/fundamentals/seo-starter-guide
 - Google JavaScript SEO basics: https://developers.google.com/search/docs/crawling-indexing/javascript/javascript-seo-basics
 - web.dev Responsive Web Design Basics: https://web.dev/articles/responsive-web-design-basics

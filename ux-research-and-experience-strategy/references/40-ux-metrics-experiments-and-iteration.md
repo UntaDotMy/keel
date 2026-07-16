@@ -13,15 +13,15 @@ Use a balanced set of UX indicators:
 
 ## HEART-Style Outcome Thinking
 
-Map UX metrics to outcomes:
+Map UX metrics to the HEART categories from Rodden, Hutchinson, and Fu (CHI 2010, Measuring the User Experience on a Large Scale):
 
-- Happiness
-- Engagement
-- Adoption
-- Retention
-- Task success
+- **Happiness**: attitudinal measures (satisfaction, NPS-style, perceived ease)
+- **Engagement**: depth/frequency of involvement over time
+- **Adoption**: new users completing a key experience in a period
+- **Retention**: users still present / returning after a period
+- **Task success**: efficiency, effectiveness, and error rates on critical tasks
 
-Pair outcome metrics with actionable product metrics and operational diagnostics.
+Pair each chosen outcome with Goals, Signals, Metrics (same paper). Do not invent a sixth letter or rename the five categories.
 
 ## Metric Hygiene
 

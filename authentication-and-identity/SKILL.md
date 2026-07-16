@@ -46,7 +46,7 @@ See `_shared/common-discipline.md` for the canonical rules. Apply them to all wo
 
 ## Operating Stance
 
-1. Authorization-code with PKCE is the default for any interactive client, and the choice is explicit, never implicit. Implicit grant is deprecated; do not reach for it.
+1. Authorization-code with PKCE is the default for any interactive client, and the choice is explicit, never implicit. RFC 9700 (OAuth 2.0 Security BCP) says clients SHOULD NOT use the implicit grant; do not reach for it.
 2. Never roll your own crypto or token format. Use a maintained library for JWT, COSE/WebAuthn, and password hashing, and let it own the primitives.
 3. Refresh tokens rotate on every use, and reuse of a retired token revokes the whole family. A refresh token that is valid twice is a replay primitive.
 4. Passwords are stored with argon2id (or bcrypt where argon2 is unavailable) at vetted parameters, never with fast or general-purpose hashes.
@@ -74,7 +74,7 @@ See `_shared/common-discipline.md` for the canonical rules. Apply them to all wo
 - On password reset or compromise, invalidate sessions, refresh-token families, and cached identity in one coordinated step.
 
 ### Credential Storage
-- argon2id with tuned memory/iterations/parallelism; bcrypt (cost >= 12) only where argon2 is unavailable.
+- Prefer argon2id (OWASP Password Storage Cheat Sheet recommends Argon2id; minimum often cited as ~19 MiB memory, t=2, p=1 — tune on production-class hardware). Use bcrypt (cost >= 12) only where argon2 is unavailable.
 - Never use MD5, SHA-1, SHA-256, or any fast hash for passwords. Pepper is optional and managed as a secret; salt is per-credential and library-managed.
 - Plan algorithm migration as rehash-on-login behind the existing verifier.
 

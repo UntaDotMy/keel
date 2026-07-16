@@ -1432,7 +1432,7 @@ mod tests {
         // silent drop that leaves the host waiting out its full timeout.
         let mut huge_text = String::from("pad-");
         while huge_text.len() < MAX_STDIO_FRAME_BYTES + 2_000 {
-            huge_text.push_str("x");
+            huge_text.push('x');
         }
         let response = success_response(
             json!(42),

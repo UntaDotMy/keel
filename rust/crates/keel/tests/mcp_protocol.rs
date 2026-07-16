@@ -127,9 +127,10 @@ fn mcp_serve_initialize_then_tools_list_round_trip() {
         "method": "tools/list"
     }));
     let tools_response = server.recv();
-    let tool_names: Vec<String> = tools_response["result"]["tools"]
+    let tools = tools_response["result"]["tools"]
         .as_array()
-        .expect("tools array")
+        .expect("tools array");
+    let tool_names: Vec<String> = tools
         .iter()
         .filter_map(|entry| {
             entry
@@ -142,6 +143,24 @@ fn mcp_serve_initialize_then_tools_list_round_trip() {
     assert!(tool_names.contains(&"system_map".to_string()));
     assert!(tool_names.contains(&"run_command".to_string()));
     assert!(tool_names.contains(&"recall_status".to_string()));
+    assert!(tool_names.contains(&"observe".to_string()));
+    assert!(tool_names.contains(&"rewrite".to_string()));
+    assert!(tool_names.contains(&"skill_eval".to_string()));
+    assert!(tool_names.contains(&"dispatch".to_string()));
+    assert!(tool_names.contains(&"design_intelligence".to_string()));
+    assert!(
+        tools.len() >= 40,
+        "expected full MCP catalog (>=40 tools), got {}: {tool_names:?}",
+        tools.len()
+    );
+    for tool in tools {
+        assert_eq!(
+            tool["inputSchema"]["type"],
+            json!("object"),
+            "inputSchema.type must be object for {:?}",
+            tool.get("name")
+        );
+    }
 
     server.close();
     let _ = std::fs::remove_dir_all(&claude_home);

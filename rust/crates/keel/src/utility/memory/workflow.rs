@@ -811,7 +811,10 @@ mod tests {
 
     #[test]
     fn route_react_targets_web() {
-        let (exit_code, stdout, _) = route("refactor the react component on the dashboard webpage");
+        // Avoid UI visual-craft tokens (dashboard/layout/palette) so this stays a
+        // pure web-stack implementation ask.
+        let (exit_code, stdout, _) =
+            route("refactor the react component tree for the marketing webpage");
         assert_eq!(exit_code, 0);
         assert!(stdout.contains("specialist: web-development-life-cycle"));
     }
@@ -830,6 +833,34 @@ mod tests {
             route("align the design system tokens for the responsive layout");
         assert_eq!(exit_code, 0);
         assert!(stdout.contains("specialist: ui-design-systems-and-responsive-interfaces"));
+    }
+
+    #[test]
+    fn route_landing_page_and_visual_polish_target_ui_not_web_or_default() {
+        // Regression: "beauty spa" used to hit web's bare "spa" token; glassmorphism
+        // + react used to hit web first; bare dashboard used to fall to SDLC default.
+        for prompt in [
+            "build a landing page for my beauty spa",
+            "create a dashboard for healthcare analytics",
+            "make this React page look better with glassmorphism",
+            "fix the contrast and focus states on this button",
+            "choose a color palette and typography for the layout",
+        ] {
+            let (exit_code, stdout, _) = route(prompt);
+            assert_eq!(exit_code, 0, "prompt: {prompt}");
+            assert!(
+                stdout.contains("specialist: ui-design-systems-and-responsive-interfaces"),
+                "UI-intent prompt must route to UI skill, got: {stdout}"
+            );
+            assert!(
+                !stdout.contains("specialist: web-development-life-cycle"),
+                "must not steal to web: {stdout}"
+            );
+            assert!(
+                !stdout.contains("default lane"),
+                "must not fall to SDLC default: {stdout}"
+            );
+        }
     }
 
     #[test]

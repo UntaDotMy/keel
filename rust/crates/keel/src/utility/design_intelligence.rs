@@ -38,7 +38,9 @@ pub fn run_design_intelligence_command(
             standard_output,
             "Usage: keel design-intelligence recommend [request...] \
              [--stack <id>] [--component-library <name>] [--format text|json] \
-             [--persist --project-name <name> --page <name>] [--catalog <path>]"
+             [--density <1-10>] [--variance <1-10>] \
+             [--persist --project-name <name> --page <name> --force] \
+             [--out <path>] [--catalog <path>]"
         );
         return if arguments.is_empty() { 1 } else { 0 };
     }
@@ -92,7 +94,14 @@ fn run_recommend(
         }
     };
 
-    let packet = build_packet(&request, &catalog, &parsed.stack, &parsed.component_library);
+    let packet = build_packet(
+        &request,
+        &catalog,
+        &parsed.stack,
+        &parsed.component_library,
+        parsed.density,
+        parsed.variance,
+    );
 
     if parsed.persist {
         match persist_design_system(
@@ -101,11 +110,19 @@ fn run_recommend(
             &parsed.project_name,
             &parsed.page,
             &parsed.out,
+            parsed.force,
         ) {
-            Ok(path) => {
+            Ok(PersistOutcome::Wrote(path)) => {
                 let _ = writeln!(
                     standard_output,
                     "Persisted design system to {}",
+                    display_path(&path)
+                );
+            }
+            Ok(PersistOutcome::SkippedExisting(path)) => {
+                let _ = writeln!(
+                    standard_output,
+                    "Persist skipped (already exists, pass --force to overwrite): {}",
                     display_path(&path)
                 );
             }
@@ -143,10 +160,15 @@ struct RecommendArgs {
     component_library: String,
     format: String,
     persist: bool,
+    force: bool,
     project_name: String,
     page: String,
     catalog: String,
     out: String,
+    /// 1-10 spacious → dense; None = catalog default.
+    density: Option<u8>,
+    /// 1-10 minimal/centered → bold/asymmetric; None = catalog default.
+    variance: Option<u8>,
 }
 
 impl RecommendArgs {
@@ -157,10 +179,13 @@ impl RecommendArgs {
             component_library: String::new(),
             format: "text".to_string(),
             persist: false,
+            force: false,
             project_name: String::new(),
             page: String::new(),
             catalog: String::new(),
             out: String::new(),
+            density: None,
+            variance: None,
         };
         let mut request_tokens: Vec<String> = Vec::new();
         let mut index = 0;
@@ -200,6 +225,26 @@ impl RecommendArgs {
                     "page" => parsed.page = take_value(&mut index)?,
                     "catalog" => parsed.catalog = take_value(&mut index)?,
                     "out" => parsed.out = take_value(&mut index)?,
+                    "density" => {
+                        parsed.density =
+                            Some(parse_dial_1_to_10(&take_value(&mut index)?, "density")?);
+                    }
+                    "variance" => {
+                        parsed.variance =
+                            Some(parse_dial_1_to_10(&take_value(&mut index)?, "variance")?);
+                    }
+                    "force" => {
+                        parsed.force = match inline_value.as_deref() {
+                            None => true,
+                            Some("true") | Some("1") => true,
+                            Some("false") | Some("0") => false,
+                            Some(other) => {
+                                return Err(format!(
+                                    "design-intelligence recommend: invalid boolean {other:?} for --force"
+                                ));
+                            }
+                        };
+                    }
                     "persist" => {
                         parsed.persist = match inline_value.as_deref() {
                             None => true,
@@ -284,7 +329,26 @@ fn resolve_catalog_path(catalog_override: &str) -> Result<PathBuf, String> {
     )
 }
 
-fn build_packet(request: &str, catalog: &Value, stack_id: &str, component_library: &str) -> Value {
+fn parse_dial_1_to_10(raw: &str, name: &str) -> Result<u8, String> {
+    let value: u8 = raw.trim().parse().map_err(|_| {
+        format!("design-intelligence recommend: --{name} must be an integer 1-10, got {raw:?}")
+    })?;
+    if !(1..=10).contains(&value) {
+        return Err(format!(
+            "design-intelligence recommend: --{name} must be 1-10, got {value}"
+        ));
+    }
+    Ok(value)
+}
+
+fn build_packet(
+    request: &str,
+    catalog: &Value,
+    stack_id: &str,
+    component_library: &str,
+    density_dial: Option<u8>,
+    variance_dial: Option<u8>,
+) -> Value {
     let request_lower = request.to_lowercase();
     let tokens = tokenize(&request_lower);
 
@@ -309,12 +373,14 @@ fn build_packet(request: &str, catalog: &Value, stack_id: &str, component_librar
         find_stack(&stack_profiles, stack_id)
     };
 
-    let style_pref = biased_preferences(
+    let mut style_pref = biased_preferences(
         archetype,
         stack,
         "recommended_style_families",
         "preferred_style_families",
     );
+    apply_variance_to_style_prefs(&mut style_pref, variance_dial, &style_families);
+
     let color_pref = biased_preferences(
         archetype,
         stack,
@@ -331,6 +397,11 @@ fn build_packet(request: &str, catalog: &Value, stack_id: &str, component_librar
     let style = choose(&style_pref, &style_families, &request_lower, &tokens);
     let color = choose(&color_pref, &color_moods, &request_lower, &tokens);
     let typography = choose(&typography_pref, &typography_moods, &request_lower, &tokens);
+
+    let density_label =
+        density_label_from_dial(density_dial, &str_field(archetype, "recommended_density"));
+    let motion_posture = str_field(archetype, "recommended_motion_posture");
+    let motion_guidance = motion_guidance_for(&motion_posture, density_dial, variance_dial);
 
     let polish_checks = checks_or_default(
         archetype,
@@ -353,7 +424,7 @@ fn build_packet(request: &str, catalog: &Value, stack_id: &str, component_librar
         "verification_checks",
         &[
             "Walk the primary task path end to end before approving the visual direction.",
-            "Verify responsive behavior and WCAG 2.1 AA contrast and keyboard access across desktop and mobile.",
+            "Verify responsive behavior and WCAG 2.2 AA contrast and keyboard access across desktop and mobile.",
         ],
     );
 
@@ -361,18 +432,23 @@ fn build_packet(request: &str, catalog: &Value, stack_id: &str, component_librar
         "request": request,
         "confidence": confidence,
         "archetype_match_score": archetype_score,
+        "dials": {
+            "density": density_dial,
+            "variance": variance_dial,
+        },
         "product_archetype": {
             "id": str_field(archetype, "id"),
             "display_name": str_field(archetype, "display_name"),
             "trust_posture": str_field(archetype, "trust_posture"),
             "content_priorities": str_array(archetype, "content_priorities"),
             "cta_guidance": str_field(archetype, "cta_guidance"),
-            "motion_posture": str_field(archetype, "recommended_motion_posture"),
-            "density": str_field(archetype, "recommended_density"),
+            "motion_posture": motion_posture,
+            "density": density_label,
         },
         "style_family": entry_summary(style, "visual_direction"),
         "color_mood": entry_summary(color, "palette_direction"),
         "typography_mood": entry_summary(typography, "direction"),
+        "motion_guidance": motion_guidance,
         "professional_polish_checks": polish_checks,
         "recovery_checks": recovery_checks,
         "verification_checks": verification_checks,
@@ -615,6 +691,26 @@ fn render_text(packet: &Value, output: &mut dyn Write) {
         str_field(archetype, "motion_posture"),
         str_field(archetype, "density")
     );
+    let motion = str_field(packet, "motion_guidance");
+    if !motion.is_empty() {
+        let _ = writeln!(output, "  Motion guidance: {motion}");
+    }
+    if let Some(dials) = packet.get("dials") {
+        let density = dials.get("density").and_then(Value::as_u64);
+        let variance = dials.get("variance").and_then(Value::as_u64);
+        if density.is_some() || variance.is_some() {
+            let _ = writeln!(
+                output,
+                "  Dials: density={} variance={}",
+                density
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "default".to_string()),
+                variance
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "default".to_string())
+            );
+        }
+    }
     let _ = writeln!(output);
 
     write_entry(
@@ -782,35 +878,120 @@ fn render_text(packet: &Value, output: &mut dyn Write) {
     }
 }
 
+enum PersistOutcome {
+    Wrote(PathBuf),
+    SkippedExisting(PathBuf),
+}
+
+fn safe_slug(raw: &str) -> String {
+    let mut out = String::new();
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+        } else if matches!(ch, '-' | '_' | ' ') && !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    let trimmed = out.trim_matches('-').to_string();
+    if trimmed.is_empty() {
+        "design-system".to_string()
+    } else {
+        trimmed
+    }
+}
+
 fn persist_design_system(
     packet: &Value,
     request: &str,
     project_name: &str,
     page: &str,
     out_override: &str,
-) -> Result<PathBuf, String> {
-    let path = if !out_override.trim().is_empty() {
-        clean_path(&PathBuf::from(out_override.trim()))
-    } else {
-        let cwd = std::env::current_dir()
-            .map_err(|error| format!("resolve current directory: {error}"))?;
-        cwd.join("design-system").join("MASTER.md")
-    };
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("create {}: {error}", display_path(parent)))?;
-    }
-
+    force: bool,
+) -> Result<PersistOutcome, String> {
+    let cwd =
+        std::env::current_dir().map_err(|error| format!("resolve current directory: {error}"))?;
     let project = if project_name.trim().is_empty() {
         "Design System"
     } else {
         project_name.trim()
     };
-    let mut markdown = String::new();
-    markdown.push_str(&format!("# {project}\n\n"));
-    if !page.trim().is_empty() {
-        markdown.push_str(&format!("## {}\n\n", page.trim()));
+    let slug = safe_slug(project);
+
+    let (master_path, page_path) = if !out_override.trim().is_empty() {
+        // Explicit --out is the MASTER path; page sibling under pages/ when set.
+        let master = clean_path(&PathBuf::from(out_override.trim()));
+        let page_path = if page.trim().is_empty() {
+            None
+        } else {
+            master
+                .parent()
+                .map(|parent| parent.join("pages").join(format!("{}.md", safe_slug(page))))
+        };
+        (master, page_path)
+    } else {
+        let root = cwd.join("design-system").join(&slug);
+        let master = root.join("MASTER.md");
+        let page_path = if page.trim().is_empty() {
+            None
+        } else {
+            Some(root.join("pages").join(format!("{}.md", safe_slug(page))))
+        };
+        (master, page_path)
+    };
+
+    if master_path.exists() && !force && page_path.is_none() {
+        return Ok(PersistOutcome::SkippedExisting(master_path));
     }
+
+    let write_target = if let Some(ref page_file) = page_path {
+        page_file.clone()
+    } else {
+        master_path.clone()
+    };
+    if write_target.exists() && !force {
+        return Ok(PersistOutcome::SkippedExisting(write_target));
+    }
+    if let Some(parent) = write_target.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("create {}: {error}", display_path(parent)))?;
+    }
+
+    // Shared body without page-only heading/boilerplate so MASTER seeds cleanly.
+    let body = design_system_markdown_body(packet, request);
+    let master_md = format!("# {project}\n\n{body}");
+    let page_md = if page.trim().is_empty() {
+        master_md.clone()
+    } else {
+        format!(
+            "# {project}\n\n## {}\n\nPage override: when building this page, apply these rules over MASTER.md.\n\n{body}",
+            page.trim()
+        )
+    };
+
+    // When writing a page override and MASTER is missing, seed MASTER first
+    // without page heading or override boilerplate.
+    if page_path.is_some() && !master_path.exists() {
+        if let Some(parent) = master_path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| format!("create {}: {error}", display_path(parent)))?;
+        }
+        fs::write(&master_path, &master_md)
+            .map_err(|error| format!("write {}: {error}", display_path(&master_path)))?;
+    }
+
+    let markdown = if page_path.is_some() {
+        page_md
+    } else {
+        master_md
+    };
+    fs::write(&write_target, markdown)
+        .map_err(|error| format!("write {}: {error}", display_path(&write_target)))?;
+    Ok(PersistOutcome::Wrote(write_target))
+}
+
+/// Packet fields shared by MASTER and page override files (no page heading).
+fn design_system_markdown_body(packet: &Value, request: &str) -> String {
+    let mut markdown = String::new();
     markdown.push_str(&format!("Request: {request}\n\n"));
     let archetype = &packet["product_archetype"];
     markdown.push_str(&format!(
@@ -819,25 +1000,30 @@ fn persist_design_system(
         str_field(archetype, "trust_posture")
     ));
     markdown.push_str(&format!(
-        "- Style family: {} — {}\n",
+        "- Style family: {}. {}\n",
         str_field(&packet["style_family"], "display_name"),
         str_field(&packet["style_family"], "visual_direction")
     ));
     markdown.push_str(&format!(
-        "- Color mood: {} — {}\n",
+        "- Color mood: {}. {}\n",
         str_field(&packet["color_mood"], "display_name"),
         str_field(&packet["color_mood"], "palette_direction")
     ));
     markdown.push_str(&format!(
-        "- Typography: {} — {}\n",
+        "- Typography: {}. {}\n",
         str_field(&packet["typography_mood"], "display_name"),
         str_field(&packet["typography_mood"], "direction")
     ));
     markdown.push_str(&format!(
-        "- Motion: {}   Density: {}\n\n",
+        "- Motion: {}   Density: {}\n",
         str_field(archetype, "motion_posture"),
         str_field(archetype, "density")
     ));
+    let motion = str_field(packet, "motion_guidance");
+    if !motion.is_empty() {
+        markdown.push_str(&format!("- Motion guidance: {motion}\n"));
+    }
+    markdown.push('\n');
     append_markdown_list(
         &mut markdown,
         "Professional polish checks",
@@ -863,10 +1049,94 @@ fn persist_design_system(
         "Decision rules (context-specific, non-negotiable)",
         &str_array(packet, "decision_rules"),
     );
+    markdown
+}
 
-    fs::write(&path, markdown)
-        .map_err(|error| format!("write {}: {error}", display_path(&path)))?;
-    Ok(path)
+fn density_label_from_dial(dial: Option<u8>, catalog_default: &str) -> String {
+    match dial {
+        Some(v) if v <= 3 => "airy".to_string(),
+        Some(v) if v <= 7 => "balanced".to_string(),
+        Some(_) => "data-dense".to_string(),
+        None if !catalog_default.is_empty() => catalog_default.to_string(),
+        None => "balanced".to_string(),
+    }
+}
+
+fn motion_guidance_for(
+    motion_posture: &str,
+    density_dial: Option<u8>,
+    variance_dial: Option<u8>,
+) -> String {
+    let base = if motion_posture.is_empty() {
+        "Use purposeful transitions (150-300ms) that reinforce hierarchy; never animate without meaning."
+            .to_string()
+    } else {
+        format!(
+            "Motion posture: {motion_posture}. Prefer 150-300ms transitions; respect prefers-reduced-motion."
+        )
+    };
+    let density_note = match density_dial {
+        Some(v) if v >= 8 => " Dense UIs: shorter motion (120-200ms), no large layout shifts.",
+        Some(v) if v <= 3 => " Spacious UIs: slightly longer reveals (200-400ms) are acceptable.",
+        _ => "",
+    };
+    let variance_note = match variance_dial {
+        Some(v) if v >= 8 => {
+            " Higher variance: allow bolder entrance choreography; keep exits faster than enters."
+        }
+        Some(v) if v <= 3 => " Lower variance: micro-interactions only; avoid decorative motion.",
+        _ => "",
+    };
+    format!("{base}{density_note}{variance_note}")
+}
+
+/// Bias style preference list by variance dial: low → minimal/trust first, high → bold/glass/brutalist first.
+fn apply_variance_to_style_prefs(
+    prefs: &mut Vec<String>,
+    variance: Option<u8>,
+    style_families: &[Value],
+) {
+    let Some(v) = variance else {
+        return;
+    };
+    let bold_ids = [
+        "neo-brutalist",
+        "glassmorphism-depth",
+        "signal-rich-premium",
+        "conversion-showcase",
+        "hero-storytelling",
+        "expressive-maximal",
+    ];
+    let calm_ids = [
+        "minimal-trust",
+        "accessible-calm",
+        "data-dense-clarity",
+        "structured-guidance",
+        "editorial-showcase",
+    ];
+    let boost: &[&str] = if v >= 8 {
+        &bold_ids
+    } else if v <= 3 {
+        &calm_ids
+    } else {
+        return;
+    };
+    let mut ordered: Vec<String> = Vec::new();
+    for id in boost {
+        if prefs.iter().any(|p| p == *id)
+            || style_families
+                .iter()
+                .any(|entry| str_field(entry, "id") == *id)
+        {
+            ordered.push((*id).to_string());
+        }
+    }
+    for existing in prefs.iter() {
+        if !ordered.iter().any(|o| o == existing) {
+            ordered.push(existing.clone());
+        }
+    }
+    *prefs = ordered;
 }
 
 // --- selection helpers ---------------------------------------------------
@@ -1267,6 +1537,180 @@ mod tests {
     }
 
     #[test]
+    fn density_and_variance_dials_change_packet_observably() {
+        let catalog = repo_catalog_path();
+        let cat = catalog.to_str().unwrap();
+        let (code_low, out_low, err_low) = run(&[
+            "recommend",
+            "product dashboard",
+            "--format",
+            "json",
+            "--density",
+            "2",
+            "--variance",
+            "2",
+            "--catalog",
+            cat,
+        ]);
+        assert_eq!(code_low, 0, "stderr: {err_low}");
+        let low: Value = serde_json::from_str(&out_low).expect("json");
+        assert_eq!(low["dials"]["density"], 2);
+        assert_eq!(low["dials"]["variance"], 2);
+        assert_eq!(low["product_archetype"]["density"], "airy");
+        assert!(
+            low["motion_guidance"]
+                .as_str()
+                .unwrap_or("")
+                .contains("prefers-reduced-motion"),
+            "motion_guidance missing: {}",
+            low["motion_guidance"]
+        );
+
+        let (code_high, out_high, err_high) = run(&[
+            "recommend",
+            "product dashboard",
+            "--format",
+            "json",
+            "--density",
+            "9",
+            "--variance",
+            "9",
+            "--catalog",
+            cat,
+        ]);
+        assert_eq!(code_high, 0, "stderr: {err_high}");
+        let high: Value = serde_json::from_str(&out_high).expect("json");
+        assert_eq!(high["product_archetype"]["density"], "data-dense");
+        assert_ne!(
+            low["product_archetype"]["density"], high["product_archetype"]["density"],
+            "density dial must change density label"
+        );
+        // High variance should prefer a different style family when catalog allows.
+        assert!(
+            high["style_family"]["id"].is_string() && low["style_family"]["id"].is_string(),
+            "style family present on both dialed runs"
+        );
+        let high_motion = high["motion_guidance"].as_str().unwrap_or("");
+        assert!(
+            high_motion.contains("Dense") || high_motion.contains("Higher variance"),
+            "high dials must enrich motion_guidance: {high_motion}"
+        );
+    }
+
+    #[test]
+    fn persist_writes_master_and_skips_without_force() {
+        let catalog = repo_catalog_path();
+        let temp = std::env::temp_dir().join(format!(
+            "keel-di-persist-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = fs::remove_dir_all(&temp); // best-effort pre-clean
+        fs::create_dir_all(&temp).expect("temp");
+        let master = temp.join("MASTER.md");
+        let (code, out, err) = run(&[
+            "recommend",
+            "fintech banking dashboard",
+            "--catalog",
+            catalog.to_str().unwrap(),
+            "--persist",
+            "--out",
+            master.to_str().unwrap(),
+            "--project-name",
+            "DialApp",
+        ]);
+        assert_eq!(code, 0, "stderr: {err}");
+        assert!(master.is_file(), "MASTER should exist: {out}");
+        let first = fs::read_to_string(&master).expect("read");
+        assert!(first.contains("Archetype"), "content: {first}");
+        // Second persist without --force must skip.
+        let (code2, out2, err2) = run(&[
+            "recommend",
+            "fintech banking dashboard rewritten",
+            "--catalog",
+            catalog.to_str().unwrap(),
+            "--persist",
+            "--out",
+            master.to_str().unwrap(),
+            "--project-name",
+            "DialApp",
+        ]);
+        assert_eq!(code2, 0, "stderr: {err2}");
+        assert!(
+            out2.contains("Persist skipped") || out2.to_lowercase().contains("skip"),
+            "expected skip: {out2}"
+        );
+        let second = fs::read_to_string(&master).expect("read2");
+        assert_eq!(first, second, "MASTER must not clobber without --force");
+        let _ = fs::remove_dir_all(&temp); // best-effort test cleanup
+    }
+
+    #[test]
+    fn persist_page_seeds_master_without_page_heading() {
+        // --persist --page when MASTER is missing must seed MASTER as global
+        // source of truth: no ## Page heading and no "Page override" boilerplate.
+        let catalog = repo_catalog_path();
+        let temp = std::env::temp_dir().join(format!(
+            "keel-di-page-seed-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = fs::remove_dir_all(&temp); // best-effort pre-clean
+        fs::create_dir_all(&temp).expect("temp");
+        let master = temp.join("MASTER.md");
+        let page_file = temp.join("pages").join("overview.md");
+        let (code, out, err) = run(&[
+            "recommend",
+            "ops dashboard for monitoring",
+            "--catalog",
+            catalog.to_str().unwrap(),
+            "--persist",
+            "--out",
+            master.to_str().unwrap(),
+            "--project-name",
+            "SeedApp",
+            "--page",
+            "Overview",
+        ]);
+        assert_eq!(code, 0, "stderr: {err} stdout: {out}");
+        assert!(master.is_file(), "MASTER seeded: {out}");
+        assert!(page_file.is_file(), "page override written: {out}");
+        let master_text = fs::read_to_string(&master).expect("read master");
+        assert!(
+            !master_text.contains("## Overview"),
+            "MASTER must not contain page heading: {master_text}"
+        );
+        assert!(
+            !master_text.contains("Page override"),
+            "MASTER must not contain page override boilerplate: {master_text}"
+        );
+        assert!(
+            master_text.contains("# SeedApp"),
+            "MASTER keeps project title: {master_text}"
+        );
+        assert!(
+            master_text.contains("Request:"),
+            "MASTER has request body: {master_text}"
+        );
+        let page_text = fs::read_to_string(&page_file).expect("read page");
+        assert!(
+            page_text.contains("## Overview"),
+            "page file keeps heading: {page_text}"
+        );
+        assert!(
+            page_text.contains("Page override"),
+            "page file keeps override note: {page_text}"
+        );
+        let _ = fs::remove_dir_all(&temp); // best-effort test cleanup
+    }
+
+    #[test]
     fn dashboard_request_recommends_charts() {
         let catalog = repo_catalog_path();
         let (code, out, _) = run(&[
@@ -1385,7 +1829,18 @@ mod tests {
     #[test]
     fn persist_writes_master_markdown() {
         let catalog = repo_catalog_path();
-        let temp = std::env::temp_dir().join(format!("di-test-{}.md", std::process::id()));
+        let temp_dir = std::env::temp_dir().join(format!(
+            "keel-di-master-md-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = fs::remove_dir_all(&temp_dir); // best-effort pre-clean
+        fs::create_dir_all(&temp_dir).expect("temp dir");
+        let master = temp_dir.join("MASTER.md");
+        let page_file = temp_dir.join("pages").join("checkout-flow.md");
         let (code, out, err) = run(&[
             "recommend",
             "ecommerce storefront checkout",
@@ -1395,17 +1850,23 @@ mod tests {
             "--page",
             "Checkout Flow",
             "--out",
-            temp.to_str().unwrap(),
+            master.to_str().unwrap(),
             "--catalog",
             catalog.to_str().unwrap(),
         ]);
         assert_eq!(code, 0, "stderr: {err}");
         assert!(out.contains("Persisted design system"), "out: {out}");
-        let written = fs::read_to_string(&temp).unwrap();
-        assert!(written.contains("# Storefront Revamp"));
-        assert!(written.contains("## Checkout Flow"));
-        assert!(written.contains("Anti-patterns to avoid"));
-        let _ = fs::remove_file(&temp);
+        // Page file is the primary write target when --page is set.
+        let page_text = fs::read_to_string(&page_file).expect("page file");
+        assert!(page_text.contains("# Storefront Revamp"));
+        assert!(page_text.contains("## Checkout Flow"));
+        assert!(page_text.contains("Anti-patterns to avoid"));
+        // MASTER is seeded without page-only boilerplate.
+        let master_text = fs::read_to_string(&master).expect("master");
+        assert!(master_text.contains("# Storefront Revamp"));
+        assert!(!master_text.contains("## Checkout Flow"));
+        assert!(!master_text.contains("Page override"));
+        let _ = fs::remove_dir_all(&temp_dir); // best-effort test cleanup
     }
 
     #[test]
