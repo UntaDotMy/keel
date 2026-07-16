@@ -2732,7 +2732,10 @@ mod tests {
             ("context_brief", json!({})),
             ("system_map", json!({})),
             ("recall_status", json!({})),
-            ("skill_route", json!({ "prompt": "review this pull request for production readiness" })),
+            (
+                "skill_route",
+                json!({ "prompt": "review this pull request for production readiness" }),
+            ),
         ] {
             let result = handle_tools_call(&json!({
                 "name": name,
@@ -2769,12 +2772,7 @@ mod tests {
             "arguments": { "repo_root": ".", "json": true }
         }))
         .expect("skill_eval envelope");
-        assert_eq!(
-            se["isError"],
-            json!(false),
-            "skill_eval failed: {}",
-            se
-        );
+        assert_eq!(se["isError"], json!(false), "skill_eval failed: {}", se);
 
         let di = handle_tools_call(&json!({
             "name": "design_intelligence",
@@ -2796,12 +2794,7 @@ mod tests {
             "arguments": { "action": "list", "json": true }
         }))
         .expect("dispatch list envelope");
-        assert_eq!(
-            dl["isError"],
-            json!(false),
-            "dispatch list failed: {}",
-            dl
-        );
+        assert_eq!(dl["isError"], json!(false), "dispatch list failed: {}", dl);
 
         let ds = handle_tools_call(&json!({
             "name": "dispatch",
