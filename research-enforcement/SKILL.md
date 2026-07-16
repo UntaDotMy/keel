@@ -72,10 +72,12 @@ Save the research findings to the `research-cache` memory family so future sessi
 do not re-research the same dependency at the same version:
 
 ```bash
-keel memory research-cache record --query "<dependency> <version>" --result "<findings>" --source "<url>"
+keel memory research-cache record --question "<dependency> <version>" --answer "<findings>" --source "<url>"
+# lookup later:
+keel memory research-cache lookup --query "<dependency>"
 ```
 
-Include the timestamp so staleness checks work.
+`--question` and `--answer` are required for **record**. (`--query` / `--result` are accepted as aliases for record only; **lookup** uses `--query`.)
 
 ### Step 5 — Implement with verified knowledge
 
@@ -97,11 +99,10 @@ to change.
 
 This skill uses the `research-cache` memory family under `keel memory`:
 
-- `keel memory research-cache record` — store research findings with timestamp.
-- `keel memory research-cache lookup` — retrieve prior research for a dependency.
+- `keel memory research-cache record --question "..." --answer "..." [--source ...]` — store findings.
+- `keel memory research-cache lookup --query "..."` — retrieve prior research.
 - `keel memory research-cache stale` — list entries older than 30 days.
-- `keel memory research-cache reward` — mark an entry as still valid (refreshes
-  the timestamp when re-verified).
+- `keel memory research-cache reward --id <id>` — mark an entry still valid.
 
 Research-cache entries live under `<claude-home>/<group>/research-cache/` and are
 isolated per memory group.

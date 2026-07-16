@@ -102,7 +102,14 @@ fn run_research_cache(
     if arguments.is_empty() || is_help(&arguments[0]) {
         let _ = writeln!(
             standard_output,
-            "Usage: keel {command_group} research-cache [record|lookup|stale|reward|list] ..."
+            "Usage: keel {command_group} research-cache <subcommand> [flags]\n\
+             \n\
+             record   --question \"...\" --answer \"...\" [--source ...] [--freshness ...]\n\
+                      aliases: --query = --question, --result = --answer\n\
+             lookup   --query \"...\"\n\
+             stale    [--days N]\n\
+             reward   --id <id>\n\
+             list"
         );
         return if arguments.is_empty() { 1 } else { 0 };
     }
@@ -111,6 +118,9 @@ fn run_research_cache(
             let mut flags = FlagSet::new(format!("{label} record"));
             flags.string_flag("question", "");
             flags.string_flag("answer", "");
+            // Agent-facing aliases (stale skill text taught --query/--result).
+            flags.string_flag("query", "");
+            flags.string_flag("result", "");
             flags.string_flag("source", "");
             flags.string_flag("freshness", "");
             flags.string_flag("claude-home", "");
@@ -119,12 +129,27 @@ fn run_research_cache(
                 let _ = writeln!(standard_error, "{}", error.message);
                 return 1;
             }
-            let question = flags.string_value("question").trim().to_string();
-            let answer = flags.string_value("answer").trim().to_string();
+            let question = {
+                let q = flags.string_value("question").trim().to_string();
+                if q.is_empty() {
+                    flags.string_value("query").trim().to_string()
+                } else {
+                    q
+                }
+            };
+            let answer = {
+                let a = flags.string_value("answer").trim().to_string();
+                if a.is_empty() {
+                    flags.string_value("result").trim().to_string()
+                } else {
+                    a
+                }
+            };
             if question.is_empty() || answer.is_empty() {
                 let _ = writeln!(
                     standard_error,
-                    "{label} record: --question and --answer are required"
+                    "{label} record: --question and --answer are required \
+                     (aliases: --query for --question, --result for --answer)"
                 );
                 return 1;
             }
@@ -1812,6 +1837,38 @@ mod tests {
         );
         assert_eq!(code, 0, "stderr: {err}");
         assert!(out.contains("expand-contract"), "stdout: {out}");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn research_cache_record_accepts_query_result_aliases() {
+        // Agents/skills historically taught --query/--result for record.
+        // Accept them as aliases so MCP/CLI stops fail-looping on stale flags.
+        let home = temp_home("rc-alias");
+        let h = home.to_string_lossy().to_string();
+        let (code, _, err) = run(
+            "memory",
+            "research-cache",
+            &[
+                "record",
+                "--query",
+                "alias question",
+                "--result",
+                "alias answer body",
+                "--source",
+                "unit-test",
+                "--claude-home",
+                &h,
+            ],
+        );
+        assert_eq!(code, 0, "aliases must succeed; stderr: {err}");
+        let (code, out, err) = run(
+            "memory",
+            "research-cache",
+            &["lookup", "--query", "alias question", "--claude-home", &h],
+        );
+        assert_eq!(code, 0, "stderr: {err}");
+        assert!(out.contains("alias answer body"), "stdout: {out}");
         let _ = std::fs::remove_dir_all(&home);
     }
 

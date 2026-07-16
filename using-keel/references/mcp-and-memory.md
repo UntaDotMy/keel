@@ -40,6 +40,23 @@ Your working memory only lives in the current context window. Anything you want 
 
 Beyond the four writers above, these `keel memory <verb>` arms are implemented on the **single unified memory surface**: `research-cache`, `maintenance`, `agent-registry`, `agent-packets`, `loop-guard`, `entity`, `graph`, `retrieve`, `instincts`, `status`, and `consolidate` (family-directory status scan: counts/previews, not a merge). `report` is an alias for `status`, and `index` rebuilds the FTS5 recall index; both work. `working-brief record-summary` and `completion-gate record-requirement` are implemented. The `orchestration` group adds `task begin|progress|complete|list` and `checkpoint`. The only `memory` verb that does not run is `hook`: it exits with a pointer to `keel hook install|list|instructions|diagnose`, which owns the harness lifecycle hooks. There is no second memory CLI group; do not invent dual command groups. Check `keel help advanced` or `rust/crates/keel/src/utility/memory/` if unsure.
 
+### research-cache flag shapes (agents get this wrong often)
+
+```bash
+# RECORD (save findings) — --question and --answer are required
+keel memory research-cache record --question "stripe webhook verify" --answer "use constructEvent + raw body" --source "https://..."
+# aliases accepted: --query ≈ --question, --result ≈ --answer (record only)
+
+# LOOKUP (search cache) — uses --query
+keel memory research-cache lookup --query "stripe webhook"
+
+# MCP memory tool equivalent:
+# action=research-cache, args=["record","--question","...","--answer","..."]
+# action=research-cache, args=["lookup","--query","..."]
+```
+
+Prefer small payloads. Prefer MCP `memory_status` / dedicated `recall` over giant `memory` args.
+
 **Relationship to the harness's native Auto memory.** Recent the harness ships its own *Auto memory* (notes the model writes to `~/.claude/projects/<project>/memory/MEMORY.md`). The two are complementary: native Auto memory is passive and machine-local; keel's unified `memory` surface is explicit and structured (SYSTEM_MAP, working briefs, completion gate, FTS5 recall, family records under `~/.claude/memories/` and related lanes). Use native Auto memory for incidental notes; use `keel memory ...` when an artifact must survive compaction and be reconcilable. Do not duplicate the same fact into both.
 
 | Thought | Reality |
