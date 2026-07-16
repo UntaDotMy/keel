@@ -39,7 +39,9 @@ irm https://raw.githubusercontent.com/UntaDotMy/keel/main/install.ps1 | iex
 curl -fsSL https://raw.githubusercontent.com/UntaDotMy/keel/main/install.cmd -o install.cmd && install.cmd && del install.cmd
 ```
 
-The installer detects your OS and architecture, pulls the matching prebuilt binary from [GitHub Releases](https://github.com/UntaDotMy/keel/releases/latest), runs `keel install`, verifies `status`, and cleans up. No Rust toolchain required. Pin a version with `CLAUDE_SKILLS_VERSION=vX.Y.Z`.
+The installer detects your OS and architecture, pulls the matching prebuilt binary from [GitHub Releases](https://github.com/UntaDotMy/keel/releases/latest), runs `keel install`, verifies `status`, and cleans up temp downloads only. No Rust toolchain required. Pin a version with `CLAUDE_SKILLS_VERSION=vX.Y.Z`.
+
+**Data safety:** install writes under `%USERPROFILE%\.claude` / `~/.claude` (skills, agents, `keel` binary, hook/MCP merge). It does **not** touch `~/.grok` sessions. It does **not** delete chat `sessions/`, `projects/`, `file-history/`, `memories/`, or `history.jsonl`. Orphan cleanup of old managed skills is **off by default**; use `keel install --purge-stale` only when you want pack hygiene deletes (still never touches those protected paths).
 
 **Semantic (vector-recall) build.** The default binary is lexical-only (FTS5). To install the variant with built-in vector semantic recall (sqlite-vec + a 33MB BERT model baked in), pass `--semantic`:
 
