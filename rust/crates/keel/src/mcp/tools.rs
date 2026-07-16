@@ -1723,7 +1723,60 @@ mod mcp_timeout_tests {
         let payload = json!({"a": 1, "b": {"nested": true}});
         let text = mcp_json_compact(&payload).expect("serialize");
         assert!(!text.contains('\n'));
+        assert!(!text.contains('\r'));
         assert!(text.starts_with('{'));
+    }
+
+    #[test]
+    fn tools_call_envelope_with_multiline_text_is_single_json_line() {
+        // Multi-line tool bodies (system_map, run_command) must ride inside JSON
+        // string escapes so the NDJSON frame stays one physical line. Hosts
+        // desync when a frame embeds raw 0x0A bytes mid-line.
+        let multiline = "line1\nline2\r\nline3\n";
+        let framed = json!({
+            "jsonrpc": "2.0",
+            "id": 9,
+            "result": {
+                "content": [{ "type": "text", "text": truncate_mcp_text(multiline) }],
+                "isError": false,
+            },
+        });
+        let serialized = serde_json::to_string(&framed).expect("serialize");
+        assert!(
+            !serialized.as_bytes().contains(&b'\n'),
+            "framed tools/call must not contain raw LF"
+        );
+        assert!(
+            !serialized.as_bytes().contains(&b'\r'),
+            "framed tools/call must not contain raw CR"
+        );
+        let parsed: Value = serde_json::from_str(&serialized).expect("parse");
+        let text = parsed["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or("");
+        assert!(text.contains("line1") && text.contains("line2"));
+        // User-facing "/n" bug class: literal slash-n must not stand in for newline.
+        assert!(
+            !text.contains("/n"),
+            "tool text must not contain literal /n stand-in for newline"
+        );
+    }
+
+    #[test]
+    fn truncate_mcp_text_suffix_never_uses_literal_slash_n() {
+        let max_chars = max_mcp_text_chars();
+        let big = format!("{}\nmore\n", "y".repeat(max_chars + 100));
+        let out = truncate_mcp_text(&big);
+        assert!(out.contains("truncated for MCP"));
+        assert!(!out.contains("/n"), "suffix must not use /n");
+        // Truncation path joins a single-line suffix; multi-line input is
+        // shortened by char count but must not reintroduce raw newlines via
+        // the suffix itself. Prefer compact single-line kept+suffix when
+        // truncated.
+        assert!(
+            !out.contains('\n') && !out.contains('\r'),
+            "truncated MCP text must stay free of raw CR/LF (was: {out:?})"
+        );
     }
 
     #[test]
