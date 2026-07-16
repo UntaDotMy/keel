@@ -53,9 +53,13 @@ use super::{recall_status_payload, system_map_text, MethodError, JSON_RPC_INVALI
 /// concurrent workers, but a single hung tool still burns an in-flight slot and
 /// can exhaust host patience — deadline so hosts get `isError` instead of a
 /// permanent stall. Override with `KEEL_MCP_TOOL_TIMEOUT_SECS` (seconds, min 5,
-/// max 3600). Default stays under typical host MCP timeouts (~50–60s) while
-/// allowing real builds.
-const DEFAULT_MCP_CHILD_TIMEOUT_SECS: u64 = 90;
+/// max 3600).
+///
+/// **Must stay strictly under observed host MCP tool timeouts.** Grok has been
+/// measured at `timeout_sec=30`; a 90s server budget made the host look hung
+/// even when the server would eventually answer. Prefer CLI for multi-minute
+/// builds; raise via env only when the host budget is known to be higher.
+const DEFAULT_MCP_CHILD_TIMEOUT_SECS: u64 = 25;
 
 /// Soft cap for large text tool results (system_map, skill bodies, context_brief).
 ///
@@ -75,6 +79,10 @@ const MAX_SKILL_BODY_CHARS: usize = 10_000;
 /// cannot blow the wire budget (full catalog was ~33KB pretty-printed).
 const MAX_SKILL_LIST_FIELD_CHARS: usize = 240;
 
+/// Cap for each tool's top-level description on the wire `tools/list` frame.
+/// Full prose stays in source; hosts only need a short trigger line.
+const MAX_TOOLS_LIST_DESCRIPTION_CHARS: usize = 160;
+
 /// Default cap for `recall` matches when the caller does not supply one. The
 /// CLI uses the same default (see `utility::recall::DEFAULT_RECALL_LIMIT`).
 const DEFAULT_RECALL_LIMIT: usize = 20;
@@ -91,8 +99,16 @@ const MAX_RECALL_LIMIT: usize = 100;
 const DEFAULT_MEMORY_GROUP: &str = "memory";
 
 /// The `tools/list` response. Schemas are hand-written JSON so the descriptions
-/// double as the model-facing usage hints the harness renders.
+/// double as the model-facing usage hints the harness renders. The payload is
+/// slimmed before return so the framed JSON-RPC line stays under the stdio
+/// frame ceiling with headroom for future tools (see [`slim_tools_list_for_wire`]).
 pub(super) fn handle_tools_list() -> Value {
+    slim_tools_list_for_wire(tools_list_catalog())
+}
+
+/// Raw tool catalog (full descriptions + property descriptions). Not sent on
+/// the wire as-is — [`handle_tools_list`] always slims first.
+fn tools_list_catalog() -> Value {
     json!({
         "tools": [
             {
@@ -505,6 +521,44 @@ pub(super) fn handle_tools_list() -> Value {
     })
 }
 
+/// Shrink `tools/list` for stdio framing: truncate tool descriptions and drop
+/// per-property schema descriptions (types/enums/required stay). A full catalog
+/// with property prose was ~20KB of a 24KB frame ceiling — one more tool or a
+/// longer description would trip the hard frame guard and look hung to hosts.
+fn slim_tools_list_for_wire(mut list: Value) -> Value {
+    let Some(tools) = list.get_mut("tools").and_then(Value::as_array_mut) else {
+        return list;
+    };
+    for tool in tools.iter_mut() {
+        if let Some(desc) = tool
+            .get("description")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+        {
+            let (kept, _) = truncate_chars(&desc, MAX_TOOLS_LIST_DESCRIPTION_CHARS);
+            tool["description"] = Value::String(kept);
+        }
+        if let Some(props) = tool
+            .pointer_mut("/inputSchema/properties")
+            .and_then(Value::as_object_mut)
+        {
+            for (_key, schema) in props.iter_mut() {
+                if let Some(obj) = schema.as_object_mut() {
+                    obj.remove("description");
+                }
+            }
+        }
+    }
+    list
+}
+
+/// Compact single-line JSON for MCP tool text. Pretty multi-line payloads bloat
+/// the outer tools/call frame and have triggered host transport decode failures
+/// that surface as full host tool timeouts.
+fn mcp_json_compact(payload: &Value) -> Result<String, String> {
+    serde_json::to_string(payload).map_err(|error| format!("serialize: {error}"))
+}
+
 pub(super) fn handle_tools_call(params: &Value) -> Result<Value, MethodError> {
     let object = params.as_object().ok_or_else(|| MethodError {
         code: JSON_RPC_INVALID_PARAMS,
@@ -718,7 +772,7 @@ fn tool_recall(arguments: &Value) -> Result<String, String> {
             }
         }
     }
-    serde_json::to_string_pretty(&payload).map_err(|error| format!("recall: serialize: {error}"))
+    mcp_json_compact(&payload).map_err(|error| format!("recall: {error}"))
 }
 
 fn render_recall_payload(
@@ -816,8 +870,7 @@ fn tool_run_command(arguments: &Value) -> Result<String, String> {
             "stdout": stdout_text,
             "stderr": stderr_text,
         });
-        return serde_json::to_string_pretty(&payload)
-            .map_err(|error| format!("run_command: serialize: {error}"));
+        return mcp_json_compact(&payload).map_err(|error| format!("run_command: {error}"));
     }
     Ok(render_run_command_report(
         &command,
@@ -857,8 +910,7 @@ fn render_run_command_report(command: &str, exit_code: i32, stdout: &str, stderr
 
 fn tool_recall_status(_arguments: &Value) -> Result<String, String> {
     let payload = recall_status_payload().map_err(|message| format!("recall_status: {message}"))?;
-    serde_json::to_string_pretty(&payload)
-        .map_err(|error| format!("recall_status: serialize: {error}"))
+    mcp_json_compact(&payload).map_err(|error| format!("recall_status: {error}"))
 }
 
 fn tool_skill_route(arguments: &Value) -> Result<String, String> {
@@ -907,8 +959,7 @@ fn tool_skill_route(arguments: &Value) -> Result<String, String> {
             "brief": Value::Null,
         }),
     };
-    serde_json::to_string_pretty(&payload)
-        .map_err(|error| format!("skill_route: serialize: {error}"))
+    mcp_json_compact(&payload).map_err(|error| format!("skill_route: {error}"))
 }
 
 fn tool_skill_get(arguments: &Value) -> Result<String, String> {
@@ -936,8 +987,7 @@ fn tool_skill_get(arguments: &Value) -> Result<String, String> {
                 "bodyChars": body_chars,
                 "truncated": truncated,
             });
-            serde_json::to_string(&payload)
-                .map_err(|error| format!("skill_get: serialize: {error}"))
+            mcp_json_compact(&payload).map_err(|error| format!("skill_get: {error}"))
         }
         None => Err(format!(
             "skill_get: no installed skill named {name:?} (or name is unsafe)"
@@ -967,7 +1017,7 @@ fn tool_skill_list(_arguments: &Value) -> Result<String, String> {
         "skills": skills,
     });
     // Compact: pretty catalog was ~33KB and blew host MCP frame budgets.
-    serde_json::to_string(&payload).map_err(|error| format!("skill_list: serialize: {error}"))
+    mcp_json_compact(&payload).map_err(|error| format!("skill_list: {error}"))
 }
 
 fn tool_memory_status(_arguments: &Value) -> Result<String, String> {
@@ -987,8 +1037,7 @@ fn tool_memory_status(_arguments: &Value) -> Result<String, String> {
         "index": index,
         "families": families,
     });
-    serde_json::to_string_pretty(&payload)
-        .map_err(|error| format!("memory_status: serialize: {error}"))
+    mcp_json_compact(&payload).map_err(|error| format!("memory_status: {error}"))
 }
 
 /// Build a serde_json view of a [`Brief`] for MCP output. Mirrors
@@ -1014,8 +1063,7 @@ fn tool_brief_list(_arguments: &Value) -> Result<String, String> {
         "count": entries.len(),
         "briefs": entries,
     });
-    serde_json::to_string_pretty(&payload)
-        .map_err(|error| format!("brief_list: serialize: {error}"))
+    mcp_json_compact(&payload).map_err(|error| format!("brief_list: {error}"))
 }
 
 fn tool_brief_get(arguments: &Value) -> Result<String, String> {
@@ -1026,7 +1074,7 @@ fn tool_brief_get(arguments: &Value) -> Result<String, String> {
             Some(brief) => json!({ "found": true, "brief": brief_to_json(&brief) }),
             None => json!({ "found": false, "id": id }),
         };
-    serde_json::to_string_pretty(&payload).map_err(|error| format!("brief_get: serialize: {error}"))
+    mcp_json_compact(&payload).map_err(|error| format!("brief_get: {error}"))
 }
 
 fn tool_brief_create(arguments: &Value) -> Result<String, String> {
@@ -1073,8 +1121,7 @@ fn tool_brief_create(arguments: &Value) -> Result<String, String> {
         "path": display_path(&path),
         "brief": brief_to_json(&brief),
     });
-    serde_json::to_string_pretty(&payload)
-        .map_err(|error| format!("brief_create: serialize: {error}"))
+    mcp_json_compact(&payload).map_err(|error| format!("brief_create: {error}"))
 }
 
 fn tool_system_map_refresh(arguments: &Value) -> Result<String, String> {
@@ -1090,8 +1137,7 @@ fn tool_system_map_refresh(arguments: &Value) -> Result<String, String> {
         "path": display_path(&path),
         "workspaceRoot": display_path(&workspace_root),
     });
-    serde_json::to_string_pretty(&payload)
-        .map_err(|error| format!("system_map_refresh: serialize: {error}"))
+    mcp_json_compact(&payload).map_err(|error| format!("system_map_refresh: {error}"))
 }
 
 /// One-call awareness payload: the iron law, the installed skill catalog,
@@ -1106,9 +1152,10 @@ fn tool_context_brief(_arguments: &Value) -> Result<String, String> {
     let skills: Vec<Value> = catalog
         .iter()
         .map(|entry| {
+            let (when_to_use, _) = truncate_chars(&entry.when_to_use, MAX_SKILL_LIST_FIELD_CHARS);
             json!({
                 "name": entry.name,
-                "whenToUse": entry.when_to_use,
+                "whenToUse": when_to_use,
             })
         })
         .collect();
@@ -1139,8 +1186,8 @@ fn tool_context_brief(_arguments: &Value) -> Result<String, String> {
         "newestBrief": newest_brief,
         "next": "Use skill_route to pick a skill, skill_get to load its full body, recall for memory, and cli for any other keel surface.",
     });
-    serde_json::to_string_pretty(&payload)
-        .map_err(|error| format!("context_brief: serialize: {error}"))
+    // Compact JSON: pretty context_brief was multi-line and near frame limits.
+    mcp_json_compact(&payload).map_err(|error| format!("context_brief: {error}"))
 }
 
 /// Compact restatement of the four-rule Iron Law for the awareness payload. The
@@ -1598,6 +1645,109 @@ mod mcp_timeout_tests {
         assert!(
             err.contains("timed out"),
             "expected timeout error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn default_mcp_tool_timeout_under_host_budgets() {
+        // Grok observed timeout_sec=30. Default must be strictly less so hosts
+        // receive isError before they give up and look hung.
+        assert!(
+            DEFAULT_MCP_CHILD_TIMEOUT_SECS < 30,
+            "default {}s must be < 30s host budget",
+            DEFAULT_MCP_CHILD_TIMEOUT_SECS
+        );
+        assert!(
+            DEFAULT_MCP_CHILD_TIMEOUT_SECS >= 5,
+            "default must stay at/above the clamp floor"
+        );
+        // With env unset, the live budget must match the constant (clamp applied).
+        // Only assert when the override env is absent so parallel tests that set
+        // KEEL_MCP_TOOL_TIMEOUT_SECS do not flake this pin.
+        if env::var_os("KEEL_MCP_TOOL_TIMEOUT_SECS").is_none() {
+            assert_eq!(
+                mcp_child_timeout(),
+                Duration::from_secs(DEFAULT_MCP_CHILD_TIMEOUT_SECS)
+            );
+        }
+    }
+
+    #[test]
+    fn tools_list_wire_payload_under_stdio_ceiling_with_headroom() {
+        // Drive the real list path (slimmed catalog). Framed envelope must leave
+        // headroom under MAX_STDIO_FRAME_BYTES so adding tools does not instantly
+        // trip the hard frame guard (which hosts experience as a hang).
+        let listed = handle_tools_list();
+        let framed = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": listed,
+        });
+        let serialized = serde_json::to_string(&framed).expect("serialize tools/list frame");
+        assert!(
+            !serialized.contains('\n'),
+            "tools/list frame must be one NDJSON line"
+        );
+        const FRAME_CEILING: usize = 24_000; // keep in lockstep with mod.rs MAX_STDIO_FRAME_BYTES
+        const HEADROOM: usize = 4_000;
+        assert!(
+            serialized.len() <= FRAME_CEILING,
+            "tools/list frame {} exceeds stdio ceiling {}",
+            serialized.len(),
+            FRAME_CEILING
+        );
+        assert!(
+            serialized.len() <= FRAME_CEILING - HEADROOM,
+            "tools/list frame {} needs ≥{HEADROOM} bytes headroom under {FRAME_CEILING}",
+            serialized.len()
+        );
+        // Slimming must drop property descriptions (types/enums remain).
+        let tools = listed["tools"].as_array().expect("tools");
+        assert!(!tools.is_empty());
+        if let Some(props) = tools[0]
+            .pointer("/inputSchema/properties")
+            .and_then(Value::as_object)
+        {
+            for (key, schema) in props {
+                assert!(
+                    schema.get("description").is_none(),
+                    "property {key} must not ship description on the wire"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mcp_json_compact_is_single_line() {
+        let payload = json!({"a": 1, "b": {"nested": true}});
+        let text = mcp_json_compact(&payload).expect("serialize");
+        assert!(!text.contains('\n'));
+        assert!(text.starts_with('{'));
+    }
+
+    #[test]
+    fn slim_tools_list_truncates_long_descriptions() {
+        let raw = json!({
+            "tools": [{
+                "name": "demo",
+                "description": "x".repeat(MAX_TOOLS_LIST_DESCRIPTION_CHARS + 40),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "q": { "type": "string", "description": "should be stripped" }
+                    }
+                }
+            }]
+        });
+        let slim = slim_tools_list_for_wire(raw);
+        let desc = slim["tools"][0]["description"].as_str().unwrap_or("");
+        assert_eq!(desc.chars().count(), MAX_TOOLS_LIST_DESCRIPTION_CHARS);
+        assert!(slim["tools"][0]["inputSchema"]["properties"]["q"]
+            .get("description")
+            .is_none());
+        assert_eq!(
+            slim["tools"][0]["inputSchema"]["properties"]["q"]["type"],
+            "string"
         );
     }
 }
