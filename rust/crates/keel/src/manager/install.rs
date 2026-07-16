@@ -193,7 +193,15 @@ pub fn install_from_flags(
         flag_set.string_value("with"),
         flag_set.string_value("without"),
     );
-    install_from_paths(build_version, &repository_root, &claude_home, &overrides)
+    let no_purge = flag_set.bool_value("no-purge");
+    let purge_stale = flag_set.bool_value("purge-stale");
+    install_from_paths(
+        build_version,
+        &repository_root,
+        &claude_home,
+        &overrides,
+        install_purge_stale_enabled(no_purge, purge_stale),
+    )
 }
 
 pub fn resolve_install_repository_root(flag_value: &str) -> Result<PathBuf, String> {
@@ -225,6 +233,7 @@ pub fn install_from_paths(
     repository_root: &Path,
     claude_home: &Path,
     overrides: &InstallOverrides,
+    purge_stale: bool,
 ) -> Result<InstallSummary, String> {
     let layout = discover_repository_layout(repository_root)?;
     ensure_claude_home_directories(claude_home)?;
@@ -251,6 +260,7 @@ pub fn install_from_paths(
         &previous_shared_resources,
         &layout,
         &tracker,
+        purge_stale,
     )?;
 
     write_managed_config(claude_home)?;
@@ -1300,6 +1310,128 @@ fn managed_shared_resources_inventory_path(claude_home: &Path) -> PathBuf {
     state_directory(claude_home).join("managed-shared-resources.txt")
 }
 
+/// Top-level names under `<claude_home>` that hold **user / harness data**.
+/// Install and orphan cleanup must never delete or rewrite these as "stale".
+/// (Grok sessions live under `~/.grok/`, which install never touches.)
+const PROTECTED_USER_DATA_TOP_LEVEL: &[&str] = &[
+    "sessions",
+    "projects",
+    "file-history",
+    "memories",
+    "memory",
+    "working-briefs",
+    "orchestration",
+    "workflow",
+    "tasks",
+    "teams",
+    "backups",
+    "cache",
+    "raw-output",
+    "session-env",
+    "shell-snapshots",
+    "history.jsonl",
+    "settings.json",
+    "recall-index.sqlite3",
+    "command-compaction-events.jsonl",
+    "statsig",
+    "todos",
+    "plugins",
+    "ide",
+    "stats-cache",
+    "transcripts",
+];
+
+/// Relative paths install is allowed to remove as "stale managed" content.
+/// Anything else is refused even if it appears in an old inventory (corruption
+/// or a bug must never turn orphan cleanup into a home-directory wipe).
+fn is_allowed_managed_orphan_relative(relative: &str) -> bool {
+    let normalized = relative.replace('\\', "/");
+    let rel = normalized.trim_start_matches("./");
+    if rel.is_empty() || rel == "." {
+        return false;
+    }
+    // Path traversal or absolute-like components → refuse.
+    if rel.starts_with('/')
+        || rel.starts_with("..")
+        || rel.contains("/../")
+        || rel.ends_with("/..")
+        || rel.contains(':')
+    {
+        return false;
+    }
+    let first = rel.split('/').next().unwrap_or("");
+    if PROTECTED_USER_DATA_TOP_LEVEL
+        .iter()
+        .any(|p| first.eq_ignore_ascii_case(p) || rel.eq_ignore_ascii_case(p))
+    {
+        return false;
+    }
+    // Never orphan-delete the always-on CLAUDE.md (merge-only surface).
+    if rel.eq_ignore_ascii_case("CLAUDE.md") {
+        return false;
+    }
+    // Never remove user-learned skills (not part of the ship pack).
+    if rel.starts_with("skills/learned-") || rel == "skills/learned" {
+        return false;
+    }
+    // Managed pack surfaces only.
+    if matches!(
+        first,
+        "skills" | "agents" | "agent-profiles" | "commands" | "docs"
+    ) {
+        return true;
+    }
+    // Root guidance files from ROOT_GUIDANCE_RELATIVE_PATHS (file names only at root).
+    if !rel.contains('/') && matches!(rel, "AGENTS.md" | "00-skill-routing-and-escalation.md") {
+        return true;
+    }
+    false
+}
+
+/// Resolve `claude_home/relative` and ensure the result stays under `claude_home`.
+fn resolve_managed_path_under_home(claude_home: &Path, relative: &str) -> Option<PathBuf> {
+    if !is_allowed_managed_orphan_relative(relative) {
+        return None;
+    }
+    let candidate = claude_home.join(relative);
+    // Best-effort containment: after join, path must still start with claude_home.
+    let home_canon = claude_home
+        .canonicalize()
+        .unwrap_or_else(|_| claude_home.to_path_buf());
+    let cand_parent = candidate.parent().unwrap_or(&candidate);
+    let parent_canon = cand_parent
+        .canonicalize()
+        .unwrap_or_else(|_| cand_parent.to_path_buf());
+    if parent_canon.starts_with(&home_canon) || candidate.starts_with(claude_home) {
+        Some(candidate)
+    } else {
+        None
+    }
+}
+
+/// Whether orphan purge is enabled.
+///
+/// **Default is off** so a one-line reinstall never deletes user-adjacent data.
+/// Opt in with `--purge-stale` or `KEEL_INSTALL_PURGE_STALE=1`. Even when on,
+/// every delete still passes the protect/allowlist (sessions, projects, memories,
+/// history, settings, learned skills, path traversal, etc. are never removed).
+/// `--no-purge` always wins and disables deletes.
+fn install_purge_stale_enabled(flag_no_purge: bool, flag_purge_stale: bool) -> bool {
+    if flag_no_purge {
+        return false;
+    }
+    if flag_purge_stale {
+        return true;
+    }
+    match std::env::var("KEEL_INSTALL_PURGE_STALE") {
+        Ok(v) => {
+            let t = v.trim().to_ascii_lowercase();
+            t == "1" || t == "true" || t == "yes" || t == "on"
+        }
+        Err(_) => false,
+    }
+}
+
 fn remove_orphans(
     claude_home: &Path,
     previous_files: &BTreeSet<String>,
@@ -1307,23 +1439,46 @@ fn remove_orphans(
     previous_shared_resources: &BTreeSet<String>,
     layout: &RepositoryLayout,
     tracker: &FileTracker,
+    purge_stale: bool,
 ) -> Result<usize, String> {
+    if !purge_stale {
+        return Ok(0);
+    }
     let mut removed = 0;
     for relative in previous_files.difference(&tracker.files) {
-        let absolute = claude_home.join(relative);
+        let Some(absolute) = resolve_managed_path_under_home(claude_home, relative) else {
+            // Refuse: protected user data, traversal, or non-managed surface.
+            continue;
+        };
         if absolute.is_file() {
             removed += remove_path_if_exists_counted(&absolute)?;
         }
     }
     let current_skills: BTreeSet<String> = layout.skills.iter().map(|s| s.name.clone()).collect();
     for orphan_skill in previous_skills.difference(&current_skills) {
-        let skill_directory = skills_directory(claude_home).join(orphan_skill);
+        // Never purge user-learned skill directories.
+        if orphan_skill.starts_with("learned-") {
+            continue;
+        }
+        let rel = format!("skills/{orphan_skill}");
+        let Some(skill_directory) = resolve_managed_path_under_home(claude_home, &rel) else {
+            continue;
+        };
         removed += remove_path_if_exists_counted(&skill_directory)?;
     }
     let current_shared_resources: BTreeSet<String> =
         layout.shared_resource_directories.iter().cloned().collect();
     for orphan_shared in previous_shared_resources.difference(&current_shared_resources) {
-        let shared_directory = skills_directory(claude_home).join(orphan_shared);
+        if orphan_shared.contains("..")
+            || orphan_shared.contains('/')
+            || orphan_shared.contains('\\')
+        {
+            continue;
+        }
+        let rel = format!("skills/{orphan_shared}");
+        let Some(shared_directory) = resolve_managed_path_under_home(claude_home, &rel) else {
+            continue;
+        };
         removed += remove_path_if_exists_counted(&shared_directory)?;
     }
     Ok(removed)
@@ -1349,7 +1504,7 @@ pub fn write_install_summary(summary: &InstallSummary, output: &mut dyn Write) {
     );
     let _ = writeln!(
         output,
-        "  Removed stale files: {}",
+        "  Removed stale files: {} (managed pack only; sessions/projects/memories/history never purged; default install leaves orphans unless --purge-stale)",
         summary.removed_stale_files
     );
     let _ = writeln!(
@@ -1702,12 +1857,41 @@ fn sync_root_files(
     for root_file_name in &layout.root_files {
         let source_path = layout.root_path.join(root_file_name);
         let target_path = claude_home.join(root_file_name);
+        // If the user already has a different copy, snapshot it under backups/
+        // before overwrite so install never silently destroys their edits.
+        if target_path.is_file() {
+            let _ = backup_file_before_managed_overwrite(claude_home, &target_path, root_file_name);
+        }
         if copy_file_if_changed(&source_path, &target_path)? {
             synced_count += 1;
         }
         tracker.record(&target_path);
     }
     Ok(synced_count)
+}
+
+/// Best-effort snapshot of an existing file before managed overwrite.
+/// Writes to `<claude_home>/backups/install-<ts>/<relative>`. Errors are
+/// returned but callers treat backup as best-effort.
+fn backup_file_before_managed_overwrite(
+    claude_home: &Path,
+    target_path: &Path,
+    relative_name: &str,
+) -> Result<(), String> {
+    let existing = match fs::read(target_path) {
+        Ok(bytes) if !bytes.is_empty() => bytes,
+        _ => return Ok(()),
+    };
+    let stamp = unix_timestamp();
+    let backup_root = claude_home.join("backups").join(format!("install-{stamp}"));
+    let backup_path = backup_root.join(relative_name.replace('/', std::path::MAIN_SEPARATOR_STR));
+    if let Some(parent) = backup_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("create backup dir {}: {e}", display_path(parent)))?;
+    }
+    fs::write(&backup_path, existing)
+        .map_err(|e| format!("backup {}: {e}", display_path(&backup_path)))?;
+    Ok(())
 }
 
 fn sync_skills(
@@ -2341,6 +2525,7 @@ pub fn run_update_command(
         &repository_root,
         &claude_home,
         &InstallOverrides::default(),
+        install_purge_stale_enabled(false, false),
     ) {
         Ok(summary) => {
             write_install_summary(&summary, standard_output);
@@ -2958,7 +3143,7 @@ mod tests {
         let (repo, home) = unique_paths("rename");
         seed_repo(&repo);
         write_skill_with_reference(&repo, "reviewer", "10-old.md");
-        install_from_paths("dev", &repo, &home, &InstallOverrides::default()).unwrap();
+        install_from_paths("dev", &repo, &home, &InstallOverrides::default(), true).unwrap();
         let old_file = home.join("skills/reviewer/references/10-old.md");
         assert!(
             old_file.is_file(),
@@ -2971,7 +3156,7 @@ mod tests {
             "reference body\n",
         )
         .unwrap();
-        install_from_paths("dev", &repo, &home, &InstallOverrides::default()).unwrap();
+        install_from_paths("dev", &repo, &home, &InstallOverrides::default(), true).unwrap();
 
         assert!(
             !old_file.is_file(),
@@ -2991,12 +3176,12 @@ mod tests {
         seed_repo(&repo);
         write_skill_with_reference(&repo, "reviewer", "10-r.md");
         write_skill_with_reference(&repo, "git-expert", "10-g.md");
-        install_from_paths("dev", &repo, &home, &InstallOverrides::default()).unwrap();
+        install_from_paths("dev", &repo, &home, &InstallOverrides::default(), true).unwrap();
         let orphan_dir = home.join("skills/git-expert");
         assert!(orphan_dir.is_dir(), "second skill must install");
 
         fs::remove_dir_all(repo.join("git-expert")).unwrap();
-        install_from_paths("dev", &repo, &home, &InstallOverrides::default()).unwrap();
+        install_from_paths("dev", &repo, &home, &InstallOverrides::default(), true).unwrap();
 
         assert!(
             !orphan_dir.exists(),
@@ -3015,13 +3200,13 @@ mod tests {
         let (repo, home) = unique_paths("unchanged");
         seed_repo(&repo);
         write_skill_with_reference(&repo, "reviewer", "10-r.md");
-        install_from_paths("dev", &repo, &home, &InstallOverrides::default()).unwrap();
+        install_from_paths("dev", &repo, &home, &InstallOverrides::default(), true).unwrap();
 
         let target = home.join("skills/reviewer/references/10-r.md");
         let mtime_before = fs::metadata(&target).unwrap().modified().unwrap();
         std::thread::sleep(std::time::Duration::from_millis(50));
         let summary =
-            install_from_paths("dev", &repo, &home, &InstallOverrides::default()).unwrap();
+            install_from_paths("dev", &repo, &home, &InstallOverrides::default(), true).unwrap();
         let mtime_after = fs::metadata(&target).unwrap().modified().unwrap();
 
         assert_eq!(
@@ -3039,7 +3224,7 @@ mod tests {
         seed_repo(&repo);
         write_skill_with_reference(&repo, "reviewer", "10-r.md");
         let summary =
-            install_from_paths("dev", &repo, &home, &InstallOverrides::default()).unwrap();
+            install_from_paths("dev", &repo, &home, &InstallOverrides::default(), true).unwrap();
 
         assert_eq!(
             summary.removed_stale_files, 0,
@@ -3079,7 +3264,7 @@ mod tests {
         write_skill_with_reference(&repo, "reviewer", "10-r.md");
 
         let summary =
-            install_from_paths("dev", &repo, &home, &InstallOverrides::default()).unwrap();
+            install_from_paths("dev", &repo, &home, &InstallOverrides::default(), true).unwrap();
 
         // Summary reports the install, not a skip.
         let status = summary
@@ -3120,7 +3305,7 @@ mod tests {
             serde_json::to_string_pretty(&reparsed).unwrap(),
         )
         .unwrap();
-        install_from_paths("dev", &repo, &home, &InstallOverrides::default()).unwrap();
+        install_from_paths("dev", &repo, &home, &InstallOverrides::default(), true).unwrap();
         let after: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&settings_path).unwrap()).unwrap();
         assert_eq!(
@@ -3245,7 +3430,7 @@ mod tests {
         .unwrap();
 
         let summary =
-            install_from_paths("dev", &repo, &home, &InstallOverrides::default()).unwrap();
+            install_from_paths("dev", &repo, &home, &InstallOverrides::default(), true).unwrap();
         let status = summary
             .user_claude_md
             .expect("standard home must write user CLAUDE.md");
@@ -3268,7 +3453,7 @@ mod tests {
 
         // Re-install is idempotent.
         let resummary =
-            install_from_paths("dev", &repo, &home, &InstallOverrides::default()).unwrap();
+            install_from_paths("dev", &repo, &home, &InstallOverrides::default(), true).unwrap();
         assert_eq!(
             resummary.user_claude_md.as_deref(),
             Some("already current"),
@@ -3322,7 +3507,7 @@ mod tests {
         fs::write(shared_dir.join("common-discipline.md"), "discipline body\n").unwrap();
         fs::write(shared_dir.join("nested/extra.md"), "nested body\n").unwrap();
 
-        install_from_paths("dev", &repo, &home, &InstallOverrides::default()).unwrap();
+        install_from_paths("dev", &repo, &home, &InstallOverrides::default(), true).unwrap();
 
         let installed_shared = home.join("skills/_shared");
         assert!(
@@ -3342,7 +3527,7 @@ mod tests {
             "discipline body\n",
         )
         .unwrap();
-        install_from_paths("dev", &repo, &home, &InstallOverrides::default()).unwrap();
+        install_from_paths("dev", &repo, &home, &InstallOverrides::default(), true).unwrap();
 
         assert!(
             !installed_shared.join("common-discipline.md").is_file(),
@@ -3370,13 +3555,15 @@ mod tests {
         fs::create_dir_all(&shared_dir).unwrap();
         fs::write(shared_dir.join("common-discipline.md"), "discipline body\n").unwrap();
 
-        let first = install_from_paths("dev", &repo, &home, &InstallOverrides::default()).unwrap();
+        let first =
+            install_from_paths("dev", &repo, &home, &InstallOverrides::default(), true).unwrap();
         assert!(
             first.synced_shared_resources >= 1,
             "first install must actually write the shared resource"
         );
 
-        let second = install_from_paths("dev", &repo, &home, &InstallOverrides::default()).unwrap();
+        let second =
+            install_from_paths("dev", &repo, &home, &InstallOverrides::default(), true).unwrap();
         assert_eq!(second.synced_skills, 0, "no skill churn on no-op reinstall");
         assert_eq!(second.synced_agents, 0, "no agent churn on no-op reinstall");
         assert_eq!(
@@ -3417,13 +3604,13 @@ mod tests {
         fs::create_dir_all(&shared_dir).unwrap();
         fs::write(shared_dir.join("common-discipline.md"), "discipline body\n").unwrap();
 
-        install_from_paths("dev", &repo, &home, &InstallOverrides::default()).unwrap();
+        install_from_paths("dev", &repo, &home, &InstallOverrides::default(), true).unwrap();
         let installed_shared = home.join("skills/_shared");
         assert!(installed_shared.is_dir(), "first install seeds shared dir");
 
         // Drop the whole _shared directory from the repo and reinstall.
         fs::remove_dir_all(&shared_dir).unwrap();
-        install_from_paths("dev", &repo, &home, &InstallOverrides::default()).unwrap();
+        install_from_paths("dev", &repo, &home, &InstallOverrides::default(), true).unwrap();
 
         assert!(
             !installed_shared.exists(),
@@ -3551,7 +3738,7 @@ mod tests {
         .unwrap();
 
         let summary =
-            install_from_paths("dev", &repo, &home, &InstallOverrides::default()).unwrap();
+            install_from_paths("dev", &repo, &home, &InstallOverrides::default(), true).unwrap();
         assert_eq!(
             summary.synced_subagent_definitions, 2,
             "first install must report two newly written subagent definitions"
@@ -3570,7 +3757,7 @@ mod tests {
 
         // Reinstall with no source change must report zero writes.
         let summary =
-            install_from_paths("dev", &repo, &home, &InstallOverrides::default()).unwrap();
+            install_from_paths("dev", &repo, &home, &InstallOverrides::default(), true).unwrap();
         assert_eq!(
             summary.synced_subagent_definitions, 0,
             "no-op reinstall must not rewrite unchanged subagent definitions"
@@ -3584,7 +3771,7 @@ mod tests {
             "---\nname: git-helper\n---\nbody\n",
         )
         .unwrap();
-        install_from_paths("dev", &repo, &home, &InstallOverrides::default()).unwrap();
+        install_from_paths("dev", &repo, &home, &InstallOverrides::default(), true).unwrap();
 
         assert!(
             !installed_git.is_file(),
@@ -3624,7 +3811,7 @@ mod tests {
         fs::write(commands_source.join("notes.txt"), "ignore me\n").unwrap();
 
         let summary =
-            install_from_paths("dev", &repo, &home, &InstallOverrides::default()).unwrap();
+            install_from_paths("dev", &repo, &home, &InstallOverrides::default(), true).unwrap();
         assert_eq!(
             summary.synced_commands, 2,
             "first install must report two newly written command definitions"
@@ -3647,7 +3834,7 @@ mod tests {
 
         // Reinstall with no source change must report zero writes.
         let summary =
-            install_from_paths("dev", &repo, &home, &InstallOverrides::default()).unwrap();
+            install_from_paths("dev", &repo, &home, &InstallOverrides::default(), true).unwrap();
         assert_eq!(
             summary.synced_commands, 0,
             "no-op reinstall must not rewrite unchanged command definitions"
@@ -3661,7 +3848,7 @@ mod tests {
             "---\ndescription: report savings\n---\nbody\n",
         )
         .unwrap();
-        install_from_paths("dev", &repo, &home, &InstallOverrides::default()).unwrap();
+        install_from_paths("dev", &repo, &home, &InstallOverrides::default(), true).unwrap();
 
         assert!(
             !installed_recall.is_file(),
@@ -3673,6 +3860,99 @@ mod tests {
         );
         let _ = fs::remove_dir_all(&repo);
         let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn install_never_deletes_protected_user_data_even_if_inventory_lists_them() {
+        // Simulate a corrupted managed-files inventory that names user data.
+        // Install must refuse to delete sessions/projects/history/etc.
+        let (repo, home) = unique_paths("protect-user-data");
+        seed_repo(&repo);
+        write_skill_with_reference(&repo, "reviewer", "10-r.md");
+        install_from_paths("dev", &repo, &home, &InstallOverrides::default(), true).unwrap();
+
+        let sessions = home.join("sessions").join("important.jsonl");
+        fs::create_dir_all(sessions.parent().unwrap()).unwrap();
+        fs::write(&sessions, "user-session-data\n").unwrap();
+        let projects = home.join("projects").join("proj").join("meta.json");
+        fs::create_dir_all(projects.parent().unwrap()).unwrap();
+        fs::write(&projects, "{\"keep\":true}\n").unwrap();
+        let history = home.join("history.jsonl");
+        fs::write(&history, "chat-history\n").unwrap();
+
+        // Poison inventory with protected paths + path traversal.
+        let inventory = managed_files_inventory_path(&home);
+        let mut lines = super::super::verify::read_inventory_lines(&inventory);
+        lines.push("sessions/important.jsonl".into());
+        lines.push("projects/proj/meta.json".into());
+        lines.push("history.jsonl".into());
+        lines.push("../outside.txt".into());
+        lines.push("skills/../../history.jsonl".into());
+        crate::runtime::write_lines(&inventory, &lines).unwrap();
+
+        // Reinstall with purge on — protected paths must survive.
+        install_from_paths("dev", &repo, &home, &InstallOverrides::default(), true).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&sessions).unwrap().trim(),
+            "user-session-data",
+            "sessions must never be deleted by install purge"
+        );
+        assert_eq!(
+            fs::read_to_string(&projects).unwrap().trim(),
+            "{\"keep\":true}",
+            "projects must never be deleted by install purge"
+        );
+        assert_eq!(
+            fs::read_to_string(&history).unwrap().trim(),
+            "chat-history",
+            "history.jsonl must never be deleted by install purge"
+        );
+        let _ = fs::remove_dir_all(&repo);
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn install_default_purge_off_leaves_dropped_skill_directory() {
+        // One-line installer default: no orphan deletes (data-safety first).
+        let (repo, home) = unique_paths("no-purge-default");
+        seed_repo(&repo);
+        write_skill_with_reference(&repo, "reviewer", "10-r.md");
+        write_skill_with_reference(&repo, "git-expert", "10-g.md");
+        install_from_paths("dev", &repo, &home, &InstallOverrides::default(), true).unwrap();
+        let orphan_dir = home.join("skills/git-expert");
+        assert!(orphan_dir.is_dir());
+
+        fs::remove_dir_all(repo.join("git-expert")).unwrap();
+        // purge_stale = false (default one-line install)
+        let summary =
+            install_from_paths("dev", &repo, &home, &InstallOverrides::default(), false).unwrap();
+        assert_eq!(summary.removed_stale_files, 0);
+        assert!(
+            orphan_dir.is_dir(),
+            "without purge, dropped managed skill dir must remain"
+        );
+        let _ = fs::remove_dir_all(&repo);
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn is_allowed_managed_orphan_rejects_protected_and_traversal() {
+        assert!(!is_allowed_managed_orphan_relative("sessions/x"));
+        assert!(!is_allowed_managed_orphan_relative("projects/a/b"));
+        assert!(!is_allowed_managed_orphan_relative("history.jsonl"));
+        assert!(!is_allowed_managed_orphan_relative("memories/workspaces/x"));
+        assert!(!is_allowed_managed_orphan_relative("../etc/passwd"));
+        assert!(!is_allowed_managed_orphan_relative(
+            "skills/../../history.jsonl"
+        ));
+        assert!(!is_allowed_managed_orphan_relative("CLAUDE.md"));
+        assert!(!is_allowed_managed_orphan_relative("skills/learned-myproj"));
+        assert!(is_allowed_managed_orphan_relative(
+            "skills/reviewer/SKILL.md"
+        ));
+        assert!(is_allowed_managed_orphan_relative("agents/reviewer.md"));
+        assert!(is_allowed_managed_orphan_relative("AGENTS.md"));
     }
 
     #[test]

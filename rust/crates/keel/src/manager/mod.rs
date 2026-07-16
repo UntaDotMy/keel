@@ -48,6 +48,10 @@ pub fn run_install_command(
     flag_set.string_flag("with", "");
     flag_set.string_flag("without", "");
     flag_set.bool_flag("interactive", false);
+    // Default install never deletes orphans. Opt in to pack hygiene deletes
+    // with --purge-stale (still never touches sessions/projects/memories/etc.).
+    flag_set.bool_flag("no-purge", false);
+    flag_set.bool_flag("purge-stale", false);
     if let Err(parse_error) = flag_set.parse(arguments) {
         let _ = writeln!(standard_error, "{}", parse_error.message);
         return 1;
