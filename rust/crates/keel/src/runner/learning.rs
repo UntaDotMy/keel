@@ -931,10 +931,7 @@ fn guidance_for(cluster: &Cluster) -> String {
         );
     }
     match cluster.tool_name.as_str() {
-        "Bash" => format!(
-            "PROCEDURE: when verifying or building in this project, run `{}`",
-            cluster.signature
-        ),
+        "Bash" => format!("PROCEDURE: {}", bash_procedure_line(&cluster.signature)),
         "Edit" | "Write" | "MultiEdit" | "NotebookEdit" => {
             let extension = cluster.signature.strip_prefix("edit:").unwrap_or("files");
             format!("PROCEDURE: primary work surfaces are `.{extension}` files in this project")
@@ -944,6 +941,57 @@ fn guidance_for(cluster: &Cluster) -> String {
             sig = cluster.signature
         ),
     }
+}
+
+/// Map a Bash signature to a role-aware procedure line instead of labeling every
+/// shell habit as "verifying or building" (git commit is not a verify step).
+fn bash_procedure_line(signature: &str) -> String {
+    let sig = signature.trim();
+    let lower = sig.to_ascii_lowercase();
+    let role = if lower.starts_with("git commit")
+        || lower.starts_with("git push")
+        || lower.starts_with("git pull")
+        || lower.starts_with("git merge")
+        || lower.starts_with("git rebase")
+        || lower.starts_with("git checkout")
+        || lower.starts_with("git switch")
+        || lower.starts_with("git stash")
+        || lower.starts_with("git add")
+        || lower.starts_with("git restore")
+        || lower.starts_with("git reset")
+        || lower.starts_with("git branch")
+        || lower.starts_with("git status")
+        || lower.starts_with("git diff")
+        || lower.starts_with("git log")
+        || lower.starts_with("gh ")
+    {
+        "when doing version-control work in this project"
+    } else if lower.starts_with("cargo test")
+        || lower.starts_with("cargo check")
+        || lower.starts_with("cargo clippy")
+        || lower.starts_with("cargo fmt")
+        || lower.starts_with("cargo build")
+        || lower.starts_with("npm test")
+        || lower.starts_with("npm run test")
+        || lower.starts_with("pnpm test")
+        || lower.starts_with("yarn test")
+        || lower.starts_with("pytest")
+        || lower.starts_with("go test")
+        || lower.contains(" test")
+        || lower.ends_with(" test")
+    {
+        "when verifying or building in this project"
+    } else if lower.starts_with("docker")
+        || lower.starts_with("kubectl")
+        || lower.starts_with("helm")
+        || lower.starts_with("terraform")
+        || lower.starts_with("pulumi")
+    {
+        "when operating infrastructure in this project"
+    } else {
+        "when working in this project"
+    };
+    format!("{role}, run `{sig}`")
 }
 
 fn write_instinct(
@@ -1572,6 +1620,15 @@ mod tests {
             });
             observation::record_observation(&input).expect("record");
         }
+    }
+
+    #[test]
+    fn bash_procedure_line_roles_by_signature_family() {
+        assert!(bash_procedure_line("git commit").contains("version-control"));
+        assert!(bash_procedure_line("cargo test").contains("verifying or building"));
+        assert!(bash_procedure_line("docker compose up").contains("infrastructure"));
+        assert!(bash_procedure_line("rg TODO").contains("when working in this project"));
+        assert!(!bash_procedure_line("git commit").contains("verifying or building"));
     }
 
     #[test]

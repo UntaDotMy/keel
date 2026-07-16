@@ -45,7 +45,7 @@ routes to `reviewer` (not a separate review behavior).
 - `designing-agent-teams` — Decompose a domain or oversized task into a coordinated multi-agent team: pick an architecture pattern (pipeline, fan-out/fan-in, expert pool, producer-reviewer, supervisor, hierarchical), define each agent's role/inputs/output/verification, and wire orchestration. Hands execution to dispatching-parallel-agents and subagent-driven-development.
 - `compounding-knowledge` — Capture each solved problem as a durable, deduped, discoverable solution note (problem/root-cause/solution/evidence) wired into the project's CLAUDE.md/AGENTS.md pointers so future work starts ahead. The deliberate, human-readable counterpart to the automatic learn loop.
 - `adversarial-security-review` — Red-team / blue-team / adjudicator pass that chains static findings into concrete attacker scenarios and adjudicates each to confirmed/refuted/needs-proof with evidence. The reasoning layer above keel config-audit's deterministic scan.
-- `ui-design-systems-and-responsive-interfaces` — UI systems, responsive design, accessibility (WCAG 2.1 AA).
+- `ui-design-systems-and-responsive-interfaces`: UI systems, responsive design, accessibility (WCAG 2.2 AA).
 - `component-driven-development` — Component-Driven Development (CDD) + Atomic Design: build UI component-first (atom → molecule → organism → page, each proven in isolation / Storybook visual TDD) instead of page-first.
 - `ux-research-and-experience-strategy` — UX research and evidence-based experience design (journeys, funnels, usability).
 - `memory-status-reporter` — Human-style memory health and learning reports.

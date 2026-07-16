@@ -204,16 +204,73 @@ impl RawStore {
             .unwrap_or(UNIX_EPOCH);
         let mut removed = 0usize;
         for entry in self.list()? {
-            let modified = fs::metadata(&entry.path)
-                .and_then(|metadata| metadata.modified())
-                .unwrap_or(SystemTime::now());
-            if modified < cutoff {
+            // why: date folders age by logical day even if mtime was touched.
+            let age_signal = entry_age_signal(&entry.path).unwrap_or_else(|_| SystemTime::now());
+            if age_signal < cutoff {
                 fs::remove_dir_all(&entry.path)?;
                 removed += 1;
             }
         }
+        // why: remove empty YYYY-MM-DD shells left after entry prunes.
+        if let Ok(days) = fs::read_dir(&self.root) {
+            for day in days.flatten() {
+                if !day.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    continue;
+                }
+                if fs::read_dir(day.path())
+                    .map(|mut it| it.next().is_none())
+                    .unwrap_or(false)
+                {
+                    let _ = fs::remove_dir(day.path()); // concurrent prune race ok
+                }
+            }
+        }
         Ok(removed)
     }
+}
+
+/// Resolve an age signal for a raw entry path: parent `YYYY-MM-DD` folder midnight
+/// UTC when parseable, otherwise the path's filesystem modified time.
+fn entry_age_signal(path: &std::path::Path) -> io::Result<SystemTime> {
+    if let Some(day) = path.parent().and_then(|p| p.file_name()) {
+        let day = day.to_string_lossy();
+        if let Some(ts) = parse_yyyy_mm_dd_midnight_utc(&day) {
+            return Ok(ts);
+        }
+    }
+    fs::metadata(path)?.modified()
+}
+
+fn parse_yyyy_mm_dd_midnight_utc(day: &str) -> Option<SystemTime> {
+    // Strict `YYYY-MM-DD` only. Avoid treating raw ids as dates.
+    if day.len() != 10
+        || day.as_bytes().get(4) != Some(&b'-')
+        || day.as_bytes().get(7) != Some(&b'-')
+    {
+        return None;
+    }
+    let year: i32 = day.get(0..4)?.parse().ok()?;
+    let month: u32 = day.get(5..7)?.parse().ok()?;
+    let day_n: u32 = day.get(8..10)?.parse().ok()?;
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day_n) {
+        return None;
+    }
+    // Approximate days since Unix epoch without pulling chrono into this path
+    // (raw_store already depends on chrono for save(), but keep this pure).
+    let y = year as i64;
+    let m = month as i64;
+    let d = day_n as i64;
+    // Civil-from-days inverse (Howard Hinnant) → days since 1970-01-01.
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    if days < 0 {
+        return Some(UNIX_EPOCH);
+    }
+    Some(UNIX_EPOCH + Duration::from_secs((days as u64).saturating_mul(86_400)))
 }
 
 impl Default for RawStore {
@@ -224,7 +281,7 @@ impl Default for RawStore {
 
 #[cfg(test)]
 mod tests {
-    use super::{RawRun, RawStore, RunMeta};
+    use super::{parse_yyyy_mm_dd_midnight_utc, RawRun, RawStore, RunMeta};
     use std::path::PathBuf;
 
     #[test]
@@ -290,7 +347,34 @@ mod tests {
             assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
         }
 
-        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(root); // best-effort test cleanup
+    }
+
+    #[test]
+    fn prune_older_than_uses_date_folder_not_only_mtime() {
+        let root = std::env::temp_dir().join(format!("keel-raw-prune-date-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root); // best-effort pre-clean
+        let store = RawStore::with_root(root.clone());
+        // Logical day far in the past; mtime is "now" after create_dir_all.
+        let stale = root.join("2001-02-03").join("stale-id");
+        std::fs::create_dir_all(&stale).expect("stale dir");
+        std::fs::write(stale.join("stdout.log"), b"old").expect("stdout");
+        let fresh = root.join("2099-01-01").join("fresh-id");
+        std::fs::create_dir_all(&fresh).expect("fresh dir");
+        std::fs::write(fresh.join("stdout.log"), b"new").expect("stdout");
+        let removed = store.prune_older_than(30).expect("prune");
+        assert_eq!(removed, 1, "only the 2001 day entry should prune");
+        assert!(!stale.exists(), "stale entry removed");
+        assert!(!root.join("2001-02-03").exists(), "empty day dir removed");
+        assert!(fresh.exists(), "future-dated entry kept");
+        let _ = std::fs::remove_dir_all(&root); // best-effort test cleanup
+    }
+
+    #[test]
+    fn parse_yyyy_mm_dd_midnight_utc_rejects_garbage() {
+        assert!(parse_yyyy_mm_dd_midnight_utc("not-a-date").is_none());
+        assert!(parse_yyyy_mm_dd_midnight_utc("2026-13-01").is_none());
+        assert!(parse_yyyy_mm_dd_midnight_utc("2026-07-16").is_some());
     }
 
     #[test]

@@ -1651,17 +1651,11 @@ mod mcp_timeout_tests {
 
     #[test]
     fn default_mcp_tool_timeout_under_host_budgets() {
-        // Grok observed timeout_sec=30. Default must be strictly less so hosts
-        // receive isError before they give up and look hung.
-        assert!(
-            DEFAULT_MCP_CHILD_TIMEOUT_SECS < 30,
-            "default {}s must be < 30s host budget",
-            DEFAULT_MCP_CHILD_TIMEOUT_SECS
-        );
-        assert!(
-            DEFAULT_MCP_CHILD_TIMEOUT_SECS >= 5,
-            "default must stay at/above the clamp floor"
-        );
+        // Host budgets often sit at 30s; default must stay below that floor.
+        const {
+            assert!(DEFAULT_MCP_CHILD_TIMEOUT_SECS < 30);
+            assert!(DEFAULT_MCP_CHILD_TIMEOUT_SECS >= 5);
+        }
         // With env unset, the live budget must match the constant (clamp applied).
         // Only assert when the override env is absent so parallel tests that set
         // KEEL_MCP_TOOL_TIMEOUT_SECS do not flake this pin.

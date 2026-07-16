@@ -23,8 +23,10 @@
 
 ## UX Measurement and Product Impact
 
-- Google HEART framework publication page: https://research.google/pubs/the-heart-framework-for-measuring-ux/
-- Google HEART framework PDF: https://research.google/pubs/pub36299/
+- HEART framework publication (Rodden, Hutchinson, Fu; CHI 2010): https://research.google/pubs/pub36299/
+- HEART framework PDF (Google Research archive): https://research.google.com/pubs/archive/36299.pdf
+- HEART author overview (Kerry Rodden): https://kerryrodden.com/heart/
+- ACM DOI: https://dl.acm.org/doi/10.1145/1753326.1753687
 
 ## Public Service UX Practice References
 

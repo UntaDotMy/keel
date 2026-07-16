@@ -1,6 +1,6 @@
 ---
 name: ui-design-systems-and-responsive-interfaces
-description: Designs and implements production-ready UI with design-system tokens, responsive layouts, accessibility (WCAG 2.1 AA), and clear visual hierarchy. Use when building or hardening UI: component composition, responsive behavior, theming, interaction states, or brownfield design quality.
+description: Designs and implements production-ready UI with design-system tokens, responsive layouts, accessibility (WCAG 2.2 AA), and clear visual hierarchy. Use when building or hardening UI: component composition, responsive behavior, theming, interaction states, or brownfield design quality.
 when_to_use: UI systems, responsive design, and accessibility.
 allowed-tools: Read, Grep, Glob, Edit, Write, Bash(npm run:*), Bash(yarn:*), Bash(pnpm:*), Bash(npx storybook:*), Bash(npx playwright:*), Bash(keel design-intelligence:*), Bash(keel memory:*)
 effort: medium
@@ -49,7 +49,7 @@ For **component-first build order** (atoms → molecules → pages, Storybook is
 
 | # | Principle | What it means in practice |
 |---|---|---|
-| 1 | Accessibility First | WCAG 2.1 AA minimum, keyboard navigation, screen reader support |
+| 1 | Accessibility First | WCAG 2.2 AA minimum (W3C REC 2024-12-12), keyboard navigation, screen reader support |
 | 2 | Responsive by Default | Mobile-first, fluid layouts, appropriate breakpoints |
 | 3 | Design System Consistency | Reuse tokens, components, and patterns |
 | 4 | Visual Hierarchy | Clear information structure, appropriate contrast |
