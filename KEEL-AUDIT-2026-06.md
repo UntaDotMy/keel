@@ -20,7 +20,7 @@ I'm classifying every competitor capability by what it actually ships — compil
 | Capability | Keel | RTK | ECC | SAW |
 |---|---|---|---|---|
 | Compiled compaction proxy | **A** (Rust, 12 adapter families, o200k_base exact eval) | **A** (Rust, "100+ subcommands", self-reported savings) | **C** (no compaction proxy at all) | **D** (no code — markdown template) |
-| Auto-rewrite hook | **A** (PreToolUse, every platform including Windows) | **A** (PreToolUse, POSIX only; Windows fallback to CLAUDE.md = Tier C) | **B/C** (hook scripts in JS, depends on harness) | **C** (markdown instructions only) |
+| Auto-rewrite hook | **A** (PreToolUse, every platform including Windows) | **A** (PreToolUse; Windows native binary hook since RTK v0.37.2 via `rtk hook claude`) | **B/C** (hook scripts in JS, depends on harness) | **C** (markdown instructions only) |
 | Break-even guard | **A** (exact o200k_base comparison, never emits larger) | **D** (not claimed or present in README) | **D** | **D** |
 | Prompt-injection neutralization | **A** (neutralize_injection on all output paths) | **D** | **B** (AgentShield scans config, not output) | **D** |
 | Git worktree dispatch | **A** (real `git worktree add` + fail-closed merge coordinator with tests) | **D** | **C** (markdown instructions in continuous-learning) | **C** (SAFe agent profiles) |
@@ -49,7 +49,7 @@ The engineering tiers reveal what's actually enforceable vs what's just advice. 
 - "100+ supported commands" = roughly 8 git subcommands + 8 AWS subcommands + test runners + build/lint + containers + file commands
 - 218 releases, Homebrew install, 1,184 commits
 - Multi-harness: 14 AI tools (Claude Code, Copilot, Cursor, Gemini, Codex, Windsurf, Cline, OpenCode, OpenClaw, Pi, Hermes, Mistral Vibe planned, Kilo Code, Google Antigravity)
-- **Windows auto-rewrite: NOT supported.** Falls back to CLAUDE.md injection (Tier C) on native Windows. Recommends WSL.
+- **Windows auto-rewrite: supported since RTK v0.37.2** via the native binary hook (`rtk hook claude` / `rtk init -g`) on Command Prompt, PowerShell, and Windows Terminal. Pre-v0.37.2 installs used CLAUDE.md injection fallback; that is historical, not current.
 - **Never intercepts Read/Grep/Glob** — only Bash tool calls are rewritten. For file reading, `rtk read` must be called explicitly.
 - **No break-even guard** — the README does not claim one, and none of the architecture docs mention measuring compaction vs raw output size.
 - **No injection neutralization** — the README shows config for `exclude_commands` but no prompt-injection filtering.
@@ -57,9 +57,9 @@ The engineering tiers reveal what's actually enforceable vs what's just advice. 
 - The `rtk discover` command finds "missed savings opportunities" — similar to keel's `gain discover` which keel already ships.
 - **No learning loop, no memory, no review gates, no dispatch, no skill system.**
 
-**Keel's claims about RTK verified:**
-- ✅ "No auto-rewrite on native Windows" — confirmed from the Windows section of README
-- ✅ "Never intercepts Read/Grep/Glob" — confirmed; "Claude Code built-in tools like Read, Grep, and Glob do not pass through the Bash hook" is in the README
+**Keel's claims about RTK re-verified (2026-07):**
+- ❌ Stale Windows rewrite denial (pre-v0.37.2) is **withdrawn**. Upstream README (v0.37.2+) documents native binary auto-rewrite on Windows via `rtk hook claude`. Docs in this repo must not restate the old denial.
+- ✅ "Never intercepts Read/Grep/Glob" — confirmed; built-in file tools do not pass through the shell rewrite hook
 - ✅ "100+ commands is mostly subcommand breadth" — confirmed; 8 git subcommands counted separately
 - ✅ "No break-even guard" — confirmed absent from README and ARCHITECTURE.md
 

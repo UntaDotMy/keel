@@ -16,7 +16,7 @@ Side Effects: Sets contributor and operator expectations for the repo-managed na
 Four rules are restated to the agent on every prompt. You cannot skip them.
 
 - **Read first.** Read SYSTEM_MAP, CLAUDE.md, the owning module, and the existing implementation. Do not propose changes against an imagined version of the file.
-- **Understand before building.** Restate what the request actually asks, confirm the user story, and research what is genuinely needed before writing code. No guessing, no assuming, no building against an imagined spec. Correct code that solved the wrong problem still gets thrown away — the research that prevents it is always cheaper than the rebuild.
+- **Understand before building.** Restate what the request actually asks, confirm the user story, and research what is genuinely needed before writing code. No guessing, no assuming, no building against an imagined spec. Correct code that solved the wrong problem still gets thrown away ,  the research that prevents it is always cheaper than the rebuild.
 - **Invoke relevant skills.** If there is even a 1% chance a skill applies, use the Skill tool *before* writing code or giving a final answer. The cost of skipping a skill that did apply is shipping a regression.
 - **Find the root cause.** Take the symptom as a starting point, not the spec. The real problem is usually one layer below what was asked. Trace the symptom end-to-end against the running code with file:line evidence before changing anything.
 
@@ -74,12 +74,12 @@ The cast file ships in this repo. Render to GIF with `agg docs/demos/quickstart.
 | --- | --- |
 | Brownfield gate (unique) | `preserve-existing-flow` forces owner-path evidence before editing established source. Review gates block edits when the flow-check artifact is missing. No other harness has this. |
 | Iron-law hooks | SessionStart loads the bootstrap skill, UserPromptSubmit restates the four rules, PostToolBatch nudges a reviewer pass, PreCompact refreshes SYSTEM_MAP. |
-| Workflow CLI | `workflow start`, `workflow route`, `workflow cockpit`, `workflow finish` — proof-first delivery rails. |
+| Workflow CLI | `workflow start`, `workflow route`, `workflow cockpit`, `workflow finish` ,  proof-first delivery rails. |
 | Review gates | `review pre-pr` / `review pre-commit`, review strictness via plugin `userConfig.review_strictness`, and CI-ready artifacts so non-trivial code never self-reviews. |
 | Memory | Working briefs, completion ledgers, scoped `SYSTEM_MAP.md`, and durable recovery state under `~/.claude/memories/`. |
 | Command compaction | `keel run -- <cmd>` produces compact output for noisy test/build/lint/log/search commands without dropping diagnostic signal. |
-| MCP server | `keel mcp serve` (stdio: **one process per host session**; concurrent in-flight tools via `KEEL_MCP_MAX_INFLIGHT`, default 64; shared recall DB uses SQLite WAL + busy_timeout) and `keel mcp serve-http` (Streamable HTTP multi-client on `127.0.0.1:3920` by default). Registered through the plugin manifest so the harness auto-discovers the tool surface (count asserted by `tests/doc_parity_test.rs` via `"inputSchema":` in `mcp/tools.rs`) — `recall`, `system_map`, `run_command`, `recall_status`, `skill_route`, `skill_get`, `skill_list`, `memory_status`, `brief_list`, `brief_get`, `brief_create`, `system_map_refresh`, `context_brief`, `cli`, `sprint`, `user_story_lint`, `review`, `workflow`, `git_workflow`, `memory`, `gain`, `raw`, `config_audit`, `skill_lint`, `telemetry`, `orchestration`, `checkpoint`, `session`, `doctor`, `code_search`, `user_story` — plus system-map and recall-status resources. |
-| Slash commands | `/keel:workflow`, `/keel:review`, `/keel:recall`, `/keel:gain`, `/keel:sprint`, `/keel:user-story` — six discoverable `/`-menu wrappers over implemented CLI surfaces. Shipped via the plugin manifest `commands` key. |
+| MCP server | `keel mcp serve` (stdio: **one process per host session**; concurrent in-flight tools via `KEEL_MCP_MAX_INFLIGHT`, default 64; shared recall DB uses SQLite WAL + busy_timeout) and `keel mcp serve-http` (Streamable HTTP multi-client on `127.0.0.1:3920` by default). Registered through the plugin manifest so the harness auto-discovers the tool surface (count asserted by `tests/doc_parity_test.rs` via `"inputSchema":` in `mcp/tools.rs`) ,  `recall`, `system_map`, `run_command`, `recall_status`, `skill_route`, `skill_get`, `skill_list`, `memory_status`, `brief_list`, `brief_get`, `brief_create`, `system_map_refresh`, `context_brief`, `cli`, `sprint`, `user_story_lint`, `review`, `workflow`, `git_workflow`, `memory`, `gain`, `raw`, `config_audit`, `skill_lint`, `telemetry`, `orchestration`, `checkpoint`, `session`, `doctor`, `code_search`, `user_story` ,  plus system-map and recall-status resources. |
+| Slash commands | `/keel:workflow`, `/keel:review`, `/keel:recall`, `/keel:gain`, `/keel:sprint`, `/keel:user-story` ,  six discoverable `/`-menu wrappers over implemented CLI surfaces. Shipped via the plugin manifest `commands` key. |
 | Specialist skills | Manifest-driven specialist profiles synced into `~/.claude/agent-profiles/*.toml`, invokable via the Skill tool. Run `keel skill-lint` for the live verified count. |
 
 ## Use as a harness Plugin
@@ -95,7 +95,7 @@ That mounts the skills, agents, and hooks without running the native installer. 
 
 ---
 
-## Native Command Routing — Must Follow First
+## Native Command Routing ,  Must Follow First
 
 When a native `keel` command owns the job, use it instead of recreating the behavior with raw shell, generic search, or ad hoc instructions.
 
@@ -218,7 +218,7 @@ Manual prune (any time):
 When installed as a plugin, keel registers six namespaced slash commands
 (see the `commands` key in `.claude-plugin/plugin.json`). Each is a thin,
 discoverable `/`-menu wrapper over an **implemented** `keel` CLI surface
-— none of them invoke planned-but-unimplemented commands.
+,  none of them invoke planned-but-unimplemented commands.
 
 | Command | Wraps | Use it for |
 | --- | --- | --- |
@@ -240,7 +240,7 @@ native installer.
 A cross-platform statusline script renders the active model, context usage, and a
 **compaction-savings badge** sourced from `keel gain --json` (the badge
 is omitted when the binary or savings data is unavailable, and the line never
-errors). It is opt-in — keel does not overwrite your `statusLine` setting.
+errors). It is opt-in ,  keel does not overwrite your `statusLine` setting.
 
 `statusline/statusline-keel.sh` (macOS/Linux) and
 `statusline/statusline-keel.ps1` (Windows). To enable, point your
@@ -593,11 +593,11 @@ The one-line installer refreshes the managed harness hooks automatically, and `k
 }
 ```
 
-The hook contract is explicit rerun guidance rather than hidden command mutation. The Rust hook installer manages 28 of the 30 lifecycle events in the `HOOK_EVENTS` table (`rust/crates/keel/src/hooks/claude.rs`), writing them to `~/.claude/settings.json`: `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PostToolBatch`, `PermissionRequest`, `PermissionDenied`, `Notification`, `UserPromptSubmit`, `UserPromptExpansion`, `Stop`, `StopFailure`, `SubagentStart`, `SubagentStop`, `TaskCreated`, `TaskCompleted`, `TeammateIdle`, `WorktreeCreate`, `WorktreeRemove`, `CwdChanged`, `PreCompact`, `PostCompact`, `SessionStart`, `SessionEnd`, `Setup`, `InstructionsLoaded`, `ConfigChange`, `Elicitation`, and `ElicitationResult`. `PreToolUse` owns command compaction before noisy output exists. `SessionStart` delivers the bootstrap skill once per session, `UserPromptSubmit` injects a short research-first iron-law restatement per prompt, and `PostToolBatch` injects the reviewer-on-close reminder before each next turn. The remaining lifecycle hooks are silent checkpoint surfaces reserved for memory and recovery wiring without shell-profile wrappers. Two events are defined in the dispatch table but skipped on install: `FileChanged` (its `matcher` doubles as a per-repo file watch list, so an empty matcher would ship dead config) and `MessageDisplay` (no matcher, fires on every assistant message, and emits `hookSpecificOutput.displayContent` — auto-installing would be a no-op or would silently rewrite on-screen text, so it stays opt-in). Ad-hoc invocations like `keel hook file-changed` and `keel hook message-display` still work.
+The hook contract is explicit rerun guidance rather than hidden command mutation. The Rust hook installer manages **18 of the 30** lifecycle events in the `HOOK_EVENTS` table (`rust/crates/keel/src/hooks/claude.rs`), writing them to `~/.claude/settings.json`: `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PostToolBatch`, `PermissionRequest`, `PermissionDenied`, `Notification`, `UserPromptSubmit`, `UserPromptExpansion`, `Stop`, `StopFailure`, `SubagentStart`, `SubagentStop`, `CwdChanged`, `PreCompact`, `PostCompact`, `SessionStart`, and `SessionEnd`. `PreToolUse` owns Iron Law edit-gating plus command compaction before noisy output exists. `SessionStart` delivers the bootstrap skill once per session, `UserPromptSubmit` injects a short research-first iron-law restatement per prompt, and `PostToolBatch` injects the reviewer-on-close reminder before each next turn. Twelve events stay dispatchable but are not auto-installed: reserved no-ops (`TaskCreated`, `TaskCompleted`, `TeammateIdle`, `WorktreeCreate`, `WorktreeRemove`, `Setup`, `InstructionsLoaded`, `ConfigChange`, `Elicitation`, `ElicitationResult`) and structural opt-outs (`FileChanged` ,  matcher is the watch list; `MessageDisplay` ,  would rewrite on-screen text). Ad-hoc invocations like `keel hook file-changed` and `keel hook message-display` still work.
 
-## Preserve Existing Flow — The Brownfield Gate (Unique to keel)
+## Preserve Existing Flow ,  The Brownfield Gate (Unique to keel)
 
-This is keel's headline differentiator: **no other harness in the market forces owner-path evidence before editing established source code.** When an agent touches an existing file, `preserve-existing-flow` requires tracing who owns the current behavior, what the source of truth is, and what consumers depend on it — before any edit is made. Review gates block the edit when the flow-check artifact is missing or incomplete.
+This is keel's headline differentiator: **no other harness in the market forces owner-path evidence before editing established source code.** When an agent touches an existing file, `preserve-existing-flow` requires tracing who owns the current behavior, what the source of truth is, and what consumers depend on it ,  before any edit is made. Review gates block the edit when the flow-check artifact is missing or incomplete.
 
 Docs-only, formatting-only, generated-only, and explicitly greenfield work are exempt; established source behavior needs owner-path evidence before review gates pass.
 
@@ -671,9 +671,9 @@ keel works with multiple AI coding agents through dedicated adapters. Each adapt
 
 | Agent | Adapter Type | Mechanism | Files |
 | --- | --- | --- | --- |
-| **Claude Code** (native) | Plugin manifest + hooks | `.claude-plugin/plugin.json` + `~/.claude/settings.json` hooks — automatic via `keel install` | `.claude-plugin/` |
-| **Claude Desktop** (Cowork) | TypeScript plugin | `cowork/keel.ts` — lifecycle bridge with `bridge` subcommands per event | `cowork/` |
-| **OpenCode** | TypeScript plugin | `opencode/keel.ts` — lifecycle bridge with `bridge` subcommands per event | `opencode/` |
+| **Claude Code** (native) | Plugin manifest + hooks | `.claude-plugin/plugin.json` + `~/.claude/settings.json` hooks ,  automatic via `keel install` | `.claude-plugin/` |
+| **Claude Desktop** (Cowork) | TypeScript plugin | `cowork/keel.ts` ,  lifecycle bridge with `bridge` subcommands per event | `cowork/` |
+| **OpenCode** | TypeScript plugin | `opencode/keel.ts` ,  lifecycle bridge with `bridge` subcommands per event | `opencode/` |
 | **Codex CLI** | Plugin + hooks + script | `codex/.codex-plugin/plugin.json` + `hooks/hooks.json` + `keel-codex.ts` | `codex/` |
 | **Cursor IDE** | Rules + hooks + MCP | `cursor/.cursorrules` + `cursor/hooks/` + `cursor/mcp.json`: iron law, lifecycle bridge (`keel bridge`), MCP tools. Install with `keel install --with cursor` (Cursor is not always auto-detected) | `cursor/` |
 | **Pi Agent** | Rules + hooks + MCP | `pi/AGENTS.md` + `pi/hooks.json` + `pi/keel-pi.ts` + `pi/.mcp.json`: iron law, lifecycle bridge, MCP tools | `pi/` |

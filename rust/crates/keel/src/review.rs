@@ -402,40 +402,36 @@ fn run_review_gates_command(
         });
     }
 
-    // Python checks (if requested and Python files exist)
-    if flag_set.bool_value("python-checks") {
-        let has_python = has_python_files(&repository_root);
-        if has_python {
-            // Black formatting check
-            let black_result = check_black(&repository_root);
-            gate_results.push(black_result);
-
-            // Ruff linting check
-            let ruff_result = check_ruff(&repository_root);
-            gate_results.push(ruff_result);
-
-            // MyPy type checking
-            let mypy_result = check_mypy(&repository_root);
-            gate_results.push(mypy_result);
-
-            // Circular import check
-            let circular_result = check_circular_imports(&repository_root);
-            gate_results.push(circular_result);
-
-            // Import safety check
-            let import_safety_result = check_import_safety(&repository_root);
-            gate_results.push(import_safety_result);
+    // Language gates: root markers like .githooks; --python-checks/--js-checks force without markers.
+    let force_python = flag_set.bool_value("python-checks");
+    let force_js = flag_set.bool_value("js-checks");
+    if force_python || has_python_project(&repository_root) {
+        if force_python && !has_python_project(&repository_root) {
+            // Force path: run tools when any .py exists, else report blocked.
+            if has_python_files(&repository_root) {
+                gate_results.push(check_black(&repository_root));
+                gate_results.push(check_ruff(&repository_root));
+                gate_results.push(check_mypy(&repository_root));
+                gate_results.push(check_python_tests(&repository_root));
+            }
+        } else {
+            gate_results.extend(run_python_surface_gates(&repository_root, true));
+        }
+        gate_results.push(check_circular_imports(&repository_root));
+        gate_results.push(check_import_safety(&repository_root));
+    }
+    if force_js || has_js_project(&repository_root) {
+        if force_js && !has_js_project(&repository_root) {
+            if has_js_files(&repository_root) {
+                gate_results.push(check_prettier(&repository_root));
+                gate_results.push(check_eslint(&repository_root));
+            }
+        } else {
+            gate_results.extend(run_js_surface_gates(&repository_root, true));
         }
     }
-
-    // JavaScript/TypeScript checks (if requested and JS/TS files exist)
-    if flag_set.bool_value("js-checks") {
-        let has_js = has_js_files(&repository_root);
-        if has_js {
-            // Prettier formatting check
-            let prettier_result = check_prettier(&repository_root);
-            gate_results.push(prettier_result);
-        }
+    if has_go_project(&repository_root) {
+        gate_results.extend(run_go_surface_gates(&repository_root, true));
     }
 
     // E2E verification awareness (informational, non-blocking)
@@ -498,9 +494,47 @@ fn has_python_files(repository_root: &Path) -> bool {
     check_for_extensions(repository_root, &extensions)
 }
 
+/// Python root markers (aligned with `.githooks/pre-commit`). Root only avoids monorepo false positives.
+fn has_python_project(repository_root: &Path) -> bool {
+    repository_root.join("pyproject.toml").exists()
+        || repository_root.join("setup.py").exists()
+        || repository_root.join("setup.cfg").exists()
+}
+
 fn has_js_files(repository_root: &Path) -> bool {
     let extensions = ["js", "jsx", "ts", "tsx", "css", "scss", "less"];
     check_for_extensions(repository_root, &extensions)
+}
+
+/// JS/TS project markers aligned with `.githooks/pre-commit` (root package.json only).
+fn has_js_project(repository_root: &Path) -> bool {
+    repository_root.join("package.json").exists()
+}
+
+/// Go project markers aligned with `.githooks/pre-commit` (root go.mod only).
+fn has_go_project(repository_root: &Path) -> bool {
+    repository_root.join("go.mod").exists()
+}
+
+/// C/C++ project markers aligned with `.githooks/pre-commit` (CMakeLists or root sources).
+fn has_cpp_project(repository_root: &Path) -> bool {
+    if repository_root.join("CMakeLists.txt").exists() {
+        return true;
+    }
+    if let Ok(entries) = fs::read_dir(repository_root) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                if matches!(ext, "c" | "cc" | "cpp" | "cxx" | "h" | "hpp" | "hxx") {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 fn check_for_extensions(repository_root: &Path, extensions: &[&str]) -> bool {
@@ -1155,7 +1189,12 @@ fn run_review_surface_command(
     };
 
     let include_tests = surface_name == "pre-pr";
+    // Auto language gates (.githooks markers). Missing tools = non-blocking Blocked.
     let mut gate_results = run_rust_surface_gates(&repository_root, include_tests);
+    gate_results.extend(run_python_surface_gates(&repository_root, include_tests));
+    gate_results.extend(run_js_surface_gates(&repository_root, include_tests));
+    gate_results.extend(run_go_surface_gates(&repository_root, include_tests));
+    gate_results.extend(run_cpp_surface_gates(&repository_root, include_tests));
     gate_results.push(comment_style_gate(
         &repository_root,
         flag_set.string_value("base-ref"),
@@ -1286,6 +1325,464 @@ fn run_rust_surface_gates(repository_root: &Path, include_tests: bool) -> Vec<Ga
     }
 
     gate_results
+}
+
+/// Python fmt/lint (and on pre-pr: mypy + pytest). Skipped when no Python project.
+/// Tool missing → Blocked non-blocking; tool present and failing → Fail blocking.
+fn run_python_surface_gates(repository_root: &Path, include_tests: bool) -> Vec<GateResult> {
+    if !has_python_project(repository_root) {
+        return Vec::new();
+    }
+    let mut gate_results = vec![check_black(repository_root), check_ruff(repository_root)];
+    if include_tests {
+        gate_results.push(check_mypy(repository_root));
+        gate_results.push(check_python_tests(repository_root));
+    }
+    gate_results
+}
+
+/// JS/TS fmt/lint (and on pre-pr: tsc + npm test when present). Skipped when no JS project.
+fn run_js_surface_gates(repository_root: &Path, include_tests: bool) -> Vec<GateResult> {
+    if !has_js_project(repository_root) {
+        return Vec::new();
+    }
+    let mut gate_results = vec![
+        check_prettier(repository_root),
+        check_eslint(repository_root),
+    ];
+    if include_tests {
+        if repository_root.join("tsconfig.json").exists() {
+            gate_results.push(check_tsc(repository_root));
+        }
+        gate_results.push(check_npm_test(repository_root));
+    }
+    gate_results
+}
+
+/// Go fmt/vet (and on pre-pr: go test). Skipped when no go.mod / .go sources.
+fn run_go_surface_gates(repository_root: &Path, include_tests: bool) -> Vec<GateResult> {
+    if !has_go_project(repository_root) {
+        return Vec::new();
+    }
+    let mut gate_results = vec![check_gofmt(repository_root), check_go_vet(repository_root)];
+    if include_tests {
+        gate_results.push(check_go_test(repository_root));
+    }
+    gate_results
+}
+
+/// C/C++ format check via clang-format (aligned with `.githooks/pre-commit`).
+/// No portable unit-test auto-runner; pre-pr still reports format gate only.
+fn run_cpp_surface_gates(repository_root: &Path, _include_tests: bool) -> Vec<GateResult> {
+    if !has_cpp_project(repository_root) {
+        return Vec::new();
+    }
+    vec![check_clang_format(repository_root)]
+}
+
+fn collect_cpp_source_files(
+    repository_root: &Path,
+    out: &mut Vec<std::path::PathBuf>,
+    depth: usize,
+) {
+    if depth > 4 || out.len() >= 50 {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(repository_root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if matches!(
+                name,
+                "node_modules" | "target" | ".git" | "build" | "dist" | "out" | "venv" | ".venv"
+            ) {
+                continue;
+            }
+            collect_cpp_source_files(&path, out, depth + 1);
+        } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+            if matches!(ext, "c" | "cc" | "cpp" | "cxx" | "h" | "hpp" | "hxx") {
+                out.push(path);
+                if out.len() >= 50 {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+fn check_clang_format(repository_root: &Path) -> GateResult {
+    let mut files = Vec::new();
+    collect_cpp_source_files(repository_root, &mut files, 0);
+    if files.is_empty() {
+        return GateResult {
+            name: "clang_format".to_string(),
+            status: GateStatus::Blocked,
+            blocking: false,
+            details: Some("no C/C++ source files found for clang-format".to_string()),
+        };
+    }
+    // Probe clang-format availability with --version first.
+    if run_command(
+        "clang-format",
+        &["--version".to_string()],
+        Some(repository_root),
+    )
+    .is_err()
+    {
+        return GateResult {
+            name: "clang_format".to_string(),
+            status: GateStatus::Blocked,
+            blocking: false,
+            details: Some("clang-format not found or not applicable".to_string()),
+        };
+    }
+    let mut dirty = 0usize;
+    for file in &files {
+        let Some(path_str) = file.to_str() else {
+            continue;
+        };
+        let result = run_command(
+            "clang-format",
+            &[
+                "--dry-run".to_string(),
+                "--Werror".to_string(),
+                path_str.to_string(),
+            ],
+            Some(repository_root),
+        );
+        match result {
+            Ok(output) if output.code != 0 => dirty += 1,
+            Err(_) => {
+                return GateResult {
+                    name: "clang_format".to_string(),
+                    status: GateStatus::Blocked,
+                    blocking: false,
+                    details: Some("clang-format not found or not applicable".to_string()),
+                };
+            }
+            _ => {}
+        }
+    }
+    GateResult {
+        name: "clang_format".to_string(),
+        status: if dirty == 0 {
+            GateStatus::Pass
+        } else {
+            GateStatus::Fail
+        },
+        blocking: true,
+        details: Some(if dirty == 0 {
+            format!("clang-format --dry-run clean ({} file(s))", files.len())
+        } else {
+            format!("clang-format found {dirty} unformatted C/C++ file(s)")
+        }),
+    }
+}
+
+fn check_gofmt(repository_root: &Path) -> GateResult {
+    let result = run_command(
+        "gofmt",
+        &["-l".to_string(), ".".to_string()],
+        Some(repository_root),
+    );
+    match result {
+        Ok(output) => {
+            let unformatted = String::from_utf8_lossy(&output.stdout);
+            let dirty = unformatted.lines().any(|line| !line.trim().is_empty());
+            GateResult {
+                name: "gofmt".to_string(),
+                status: if dirty {
+                    GateStatus::Fail
+                } else {
+                    GateStatus::Pass
+                },
+                blocking: true,
+                details: Some(if dirty {
+                    format!(
+                        "gofmt found unformatted files: {}",
+                        unformatted.lines().take(5).collect::<Vec<_>>().join(", ")
+                    )
+                } else {
+                    "gofmt -l . clean".to_string()
+                }),
+            }
+        }
+        Err(_) => GateResult {
+            name: "gofmt".to_string(),
+            status: GateStatus::Blocked,
+            blocking: false,
+            details: Some("gofmt not found or not applicable".to_string()),
+        },
+    }
+}
+
+fn check_go_vet(repository_root: &Path) -> GateResult {
+    let result = run_command(
+        "go",
+        &["vet".to_string(), "./...".to_string()],
+        Some(repository_root),
+    );
+    match result {
+        Ok(output) => GateResult {
+            name: "go_vet".to_string(),
+            status: if output.code == 0 {
+                GateStatus::Pass
+            } else {
+                GateStatus::Fail
+            },
+            blocking: true,
+            details: Some(if output.code == 0 {
+                "go vet ./... passed".to_string()
+            } else {
+                "go vet ./... found issues".to_string()
+            }),
+        },
+        Err(_) => GateResult {
+            name: "go_vet".to_string(),
+            status: GateStatus::Blocked,
+            blocking: false,
+            details: Some("go not found or not applicable".to_string()),
+        },
+    }
+}
+
+fn check_go_test(repository_root: &Path) -> GateResult {
+    let result = run_command(
+        "go",
+        &["test".to_string(), "./...".to_string()],
+        Some(repository_root),
+    );
+    match result {
+        Ok(output) => GateResult {
+            name: "go_test".to_string(),
+            status: if output.code == 0 {
+                GateStatus::Pass
+            } else {
+                GateStatus::Fail
+            },
+            blocking: true,
+            details: Some(if output.code == 0 {
+                "go test ./... passed".to_string()
+            } else {
+                "go test ./... failed".to_string()
+            }),
+        },
+        Err(_) => GateResult {
+            name: "go_test".to_string(),
+            status: GateStatus::Blocked,
+            blocking: false,
+            details: Some("go not found or not applicable".to_string()),
+        },
+    }
+}
+
+fn check_eslint(repository_root: &Path) -> GateResult {
+    // Prefer local/npx eslint when package.json exists; skip when neither npx nor eslint work.
+    let npx_result = run_command(
+        "npx",
+        &[
+            "--no-install".to_string(),
+            "eslint".to_string(),
+            ".".to_string(),
+        ],
+        Some(repository_root),
+    );
+    match npx_result {
+        Ok(output) if output.code == 0 => {
+            return GateResult {
+                name: "eslint".to_string(),
+                status: GateStatus::Pass,
+                blocking: true,
+                details: Some("eslint passed".to_string()),
+            };
+        }
+        Ok(output) => {
+            // npx ran eslint and it failed (blocking). On not-found stderr, try direct binary.
+            let stderr = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
+            let not_found = stderr.contains("not found")
+                || stderr.contains("could not determine")
+                || stderr.contains("enoent");
+            if !not_found {
+                return GateResult {
+                    name: "eslint".to_string(),
+                    status: GateStatus::Fail,
+                    blocking: true,
+                    details: Some("eslint found issues".to_string()),
+                };
+            }
+        }
+        Err(_) => {}
+    }
+    match run_command("eslint", &[".".to_string()], Some(repository_root)) {
+        Ok(output) => GateResult {
+            name: "eslint".to_string(),
+            status: if output.code == 0 {
+                GateStatus::Pass
+            } else {
+                GateStatus::Fail
+            },
+            blocking: true,
+            details: Some(if output.code == 0 {
+                "eslint passed".to_string()
+            } else {
+                "eslint found issues".to_string()
+            }),
+        },
+        Err(_) => GateResult {
+            name: "eslint".to_string(),
+            status: GateStatus::Blocked,
+            blocking: false,
+            details: Some("eslint not found or not applicable".to_string()),
+        },
+    }
+}
+
+fn check_tsc(repository_root: &Path) -> GateResult {
+    let result = run_command(
+        "npx",
+        &[
+            "--no-install".to_string(),
+            "tsc".to_string(),
+            "--noEmit".to_string(),
+        ],
+        Some(repository_root),
+    );
+    match result {
+        Ok(output) => GateResult {
+            name: "tsc".to_string(),
+            status: if output.code == 0 {
+                GateStatus::Pass
+            } else {
+                GateStatus::Fail
+            },
+            blocking: true,
+            details: Some(if output.code == 0 {
+                "tsc --noEmit passed".to_string()
+            } else {
+                "tsc --noEmit found type errors".to_string()
+            }),
+        },
+        Err(_) => match run_command("tsc", &["--noEmit".to_string()], Some(repository_root)) {
+            Ok(output) => GateResult {
+                name: "tsc".to_string(),
+                status: if output.code == 0 {
+                    GateStatus::Pass
+                } else {
+                    GateStatus::Fail
+                },
+                blocking: true,
+                details: Some(if output.code == 0 {
+                    "tsc --noEmit passed".to_string()
+                } else {
+                    "tsc --noEmit found type errors".to_string()
+                }),
+            },
+            Err(_) => GateResult {
+                name: "tsc".to_string(),
+                status: GateStatus::Blocked,
+                blocking: false,
+                details: Some("tsc not found or not applicable".to_string()),
+            },
+        },
+    }
+}
+
+fn check_npm_test(repository_root: &Path) -> GateResult {
+    if !repository_root.join("package.json").exists() {
+        return GateResult {
+            name: "npm_test".to_string(),
+            status: GateStatus::Blocked,
+            blocking: false,
+            details: Some("no package.json — npm test not applicable".to_string()),
+        };
+    }
+    // --if-present: exit 0 when no test script is defined.
+    let result = run_command(
+        "npm",
+        &["test".to_string(), "--if-present".to_string()],
+        Some(repository_root),
+    );
+    match result {
+        Ok(output) => GateResult {
+            name: "npm_test".to_string(),
+            status: if output.code == 0 {
+                GateStatus::Pass
+            } else {
+                GateStatus::Fail
+            },
+            blocking: true,
+            details: Some(if output.code == 0 {
+                "npm test --if-present passed".to_string()
+            } else {
+                "npm test failed".to_string()
+            }),
+        },
+        Err(_) => GateResult {
+            name: "npm_test".to_string(),
+            status: GateStatus::Blocked,
+            blocking: false,
+            details: Some("npm not found or not applicable".to_string()),
+        },
+    }
+}
+
+/// Classify pytest/unittest exit codes for review closeout.
+/// Exit 5 = no tests collected/ran for both pytest and unittest discover
+/// (not a failure of product code; empty trees must not fail pre-pr).
+fn classify_python_test_exit(tool: &str, code: i32) -> GateResult {
+    if code == 0 {
+        return GateResult {
+            name: "python_tests".to_string(),
+            status: GateStatus::Pass,
+            blocking: true,
+            details: Some(format!("{tool} passed")),
+        };
+    }
+    // pytest and unittest discover both use exit 5 for "no tests".
+    if code == 5 {
+        return GateResult {
+            name: "python_tests".to_string(),
+            status: GateStatus::Blocked,
+            blocking: false,
+            details: Some(format!(
+                "{tool} exit 5: no tests collected/ran (not applicable)"
+            )),
+        };
+    }
+    GateResult {
+        name: "python_tests".to_string(),
+        status: GateStatus::Fail,
+        blocking: true,
+        details: Some(format!("{tool} failed (exit {code})")),
+    }
+}
+
+fn check_python_tests(repository_root: &Path) -> GateResult {
+    // Prefer pytest; fall back to unittest discover.
+    if let Ok(output) = run_command("pytest", &["-q".to_string()], Some(repository_root)) {
+        return classify_python_test_exit("pytest", output.code);
+    }
+    match run_command(
+        "python",
+        &[
+            "-m".to_string(),
+            "unittest".to_string(),
+            "discover".to_string(),
+            "-q".to_string(),
+        ],
+        Some(repository_root),
+    ) {
+        Ok(output) => classify_python_test_exit("python -m unittest discover", output.code),
+        Err(_) => GateResult {
+            name: "python_tests".to_string(),
+            status: GateStatus::Blocked,
+            blocking: false,
+            details: Some("pytest/unittest not found or not applicable".to_string()),
+        },
+    }
 }
 
 /// Build the comment-style gate result for a review surface. Lints added comment
@@ -1504,17 +2001,33 @@ fn run_review_policy_command(
         if flag_set.string_value("format") == "compact" {
             let _ = writeln!(
                 standard_output,
-                "native_rules=rust language_gates=true go_fallback=false"
+                "native_rules=rust,python,js,go,cpp language_gates=auto go_fallback=false"
             );
         } else {
             let _ = writeln!(standard_output, "# Native Review Policy");
             let _ = writeln!(standard_output, "- runtime: rust-native");
-            let _ = writeln!(standard_output, "- language_gates: enabled");
             let _ = writeln!(
                 standard_output,
-                "- python_checks: black, ruff, mypy, circular_imports, import_safety"
+                "- language_gates: auto-detect root markers (Cargo.toml, pyproject.toml/setup.py, package.json, go.mod, CMakeLists.txt / root C/C++ sources)"
             );
-            let _ = writeln!(standard_output, "- js_checks: prettier");
+            let _ = writeln!(
+                standard_output,
+                "- pre-commit: rust fmt+clippy; python black+ruff; js prettier+eslint; go gofmt+vet; c/c++ clang-format (tools missing = non-blocking)"
+            );
+            let _ = writeln!(
+                standard_output,
+                "- pre-pr: above plus unit tests (cargo test / pytest / npm test / go test) and typecheck (mypy / tsc when present); pytest exit 5 (no tests) is non-blocking"
+            );
+            let _ = writeln!(
+                standard_output,
+                "- python_checks: black, ruff, mypy, pytest, circular_imports, import_safety"
+            );
+            let _ = writeln!(
+                standard_output,
+                "- js_checks: prettier, eslint, tsc, npm test"
+            );
+            let _ = writeln!(standard_output, "- go_checks: gofmt, go vet, go test");
+            let _ = writeln!(standard_output, "- cpp_checks: clang-format");
             let _ = writeln!(standard_output, "- go_fallback: false");
         }
         return 0;
@@ -2018,7 +2531,82 @@ mod tests {
             &mut stderr,
         );
         assert_eq!(code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
-        assert!(String::from_utf8_lossy(&stdout).contains("native_rules=rust"));
+        let out = String::from_utf8_lossy(&stdout);
+        assert!(
+            out.contains("native_rules=rust,python,js,go,cpp"),
+            "compact policy should list multi-lang rules, got: {out}"
+        );
+        assert!(out.contains("language_gates=auto"));
+    }
+
+    #[test]
+    fn classify_python_test_exit_five_is_non_blocking() {
+        for tool in ["pytest", "python -m unittest discover"] {
+            let no_tests = classify_python_test_exit(tool, 5);
+            assert_eq!(
+                no_tests.status,
+                GateStatus::Blocked,
+                "{tool} exit 5 must be Blocked"
+            );
+            assert!(!no_tests.blocking, "{tool} exit 5 must be non-blocking");
+            let details = no_tests.details.as_deref().unwrap_or("");
+            assert!(
+                details.contains("no tests") && details.contains(tool),
+                "{tool} exit 5 must explain no-tests with tool name: {details}"
+            );
+        }
+
+        let pass = classify_python_test_exit("pytest", 0);
+        assert_eq!(pass.status, GateStatus::Pass);
+        assert!(pass.blocking);
+
+        let fail = classify_python_test_exit("pytest", 1);
+        assert_eq!(fail.status, GateStatus::Fail);
+        assert!(fail.blocking);
+
+        let unittest_fail = classify_python_test_exit("python -m unittest discover", 1);
+        assert_eq!(unittest_fail.status, GateStatus::Fail);
+        assert!(unittest_fail.blocking);
+    }
+
+    #[test]
+    fn language_project_markers_are_root_only() {
+        let temp = std::env::temp_dir().join(format!("keel-review-markers-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        std::fs::create_dir_all(temp.join("nested")).unwrap();
+        // Nested sources must not trigger root-marker project detection.
+        std::fs::write(temp.join("nested").join("x.py"), "print(1)").unwrap();
+        std::fs::write(temp.join("nested").join("x.go"), "package main").unwrap();
+        std::fs::write(temp.join("nested").join("x.js"), "console.log(1)").unwrap();
+        assert!(!has_python_project(&temp));
+        assert!(!has_go_project(&temp));
+        assert!(!has_js_project(&temp));
+        assert!(!has_cpp_project(&temp));
+        assert!(has_python_files(&temp));
+        assert!(has_js_files(&temp));
+
+        std::fs::write(temp.join("go.mod"), "module example\n").unwrap();
+        assert!(has_go_project(&temp));
+        std::fs::write(temp.join("package.json"), "{}").unwrap();
+        assert!(has_js_project(&temp));
+        std::fs::write(temp.join("pyproject.toml"), "[project]\nname='t'\n").unwrap();
+        assert!(has_python_project(&temp));
+        std::fs::write(temp.join("main.c"), "int main(void){return 0;}\n").unwrap();
+        assert!(has_cpp_project(&temp));
+        assert!(!run_cpp_surface_gates(&temp, false).is_empty());
+
+        // Surface gates return empty when markers absent (no cargo/go/py/js/cpp root).
+        let empty = std::env::temp_dir().join(format!("keel-review-empty-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&empty);
+        std::fs::create_dir_all(&empty).unwrap();
+        assert!(run_python_surface_gates(&empty, true).is_empty());
+        assert!(run_js_surface_gates(&empty, true).is_empty());
+        assert!(run_go_surface_gates(&empty, true).is_empty());
+        assert!(run_cpp_surface_gates(&empty, true).is_empty());
+        assert!(run_rust_surface_gates(&empty, true).is_empty());
+
+        let _ = std::fs::remove_dir_all(&temp);
+        let _ = std::fs::remove_dir_all(&empty);
     }
 
     #[test]

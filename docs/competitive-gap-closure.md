@@ -1,9 +1,9 @@
 <!--
-Purpose: Track the competitive-gap fixes for keel — what shipped in the gap-closing pass and what remains, named against the real comparators and aligned to official harness docs.
+Purpose: Track the competitive-gap fixes for keel ,  what shipped in the gap-closing pass and what remains, named against the real comparators and aligned to official harness docs.
 Caller: Contributors closing the gap between keel and peer the harness tooling (RTK, caveman, superpowers, ECC) and the native baseline.
 Dependencies: Rust runtime (utility/memory.rs, manager/install.rs, proxy adapters), plugin manifest, command files, statusline scripts.
 Main Functions: Record shipped fixes, the toolchain constraint, and the prioritized remaining work with concrete file targets.
-Side Effects: None — documentation only.
+Side Effects: None ,  documentation only.
 -->
 # Competitive Gap Closure
 
@@ -17,11 +17,11 @@ to the official harness docs at code.claude.com as of the audit date.
 | Project | Identity | License | Overlap with keel |
 | --- | --- | --- | --- |
 | Official harness | The host platform (code.claude.com/docs) | Anthropic | The baseline keel extends; ~30 hook events, skills (commands merged in), built-in subagents, checkpointing/rewind, MCP Tool Search, Agent SDK. |
-| RTK ("Rust Token Killer", `rtk-ai/rtk`) | Single-binary Rust command-output compaction proxy | Apache-2.0 | Near-identical to keel's compaction proxy; "100+ supported commands" (mostly subcommand breadth within categories we also cover — 8 git subcmds, 8 aws subcmds, etc.), `gain`/`discover`/`session`, tee recovery, TOML filter DSL (8-stage declarative user-extensible pipeline — keel lacks this), 14 agent integrations. Verified from the upstream README (as of earlier audit): **no auto-rewrite on native Windows** (falls back to CLAUDE.md injection) and **never intercepts Read/Grep/Glob** (Bash-tool-only hook). *Staleness note: this Windows claim was verified against an earlier RTK version. RTK v0.42.4 (current as of 2026-06) should be re-verified — the project has shipped 141+ releases and may have added Windows hook support since the original audit.* |
+| RTK ("Rust Token Killer", `rtk-ai/rtk`) | Single-binary Rust command-output compaction proxy | Apache-2.0 | Near-identical to keel's compaction proxy; "100+ supported commands" (mostly subcommand breadth within categories we also cover ,  8 git subcmds, 8 aws subcmds, etc.), `gain`/`discover`/`session`, tee recovery, TOML filter DSL (8-stage declarative user-extensible pipeline ,  keel lacks this), 14 agent integrations. **Web re-verified 2026-07:** since **RTK v0.37.2** native Windows has auto-rewrite via the native binary hook (`rtk hook claude` / `rtk init -g`) on Command Prompt, PowerShell, and Windows Terminal (no bash/jq required). Older "CLAUDE.md injection only on Windows" wording is stale. **Still true:** never intercepts Read/Grep/Glob (Bash/shell-tool-only hook). *Keel differentiator vs RTK remains multi-platform rewrite plus iron-law, multi-lang review, memory, and specialists, not a false "Windows unique" claim.* |
 | caveman (`JuliusBrussee/caveman`) | Skill that compresses the model's own replies (terse "caveman speak") | MIT | Token economy on the **output** side (keel only compacts command **output**); ships slash commands, statusline, MCP middleware. |
-| superpowers (`obra/superpowers`) | Opinionated TDD methodology as auto-triggering skills | MIT | Skills + workflow doctrine; `writing-skills` meta-skill with a subagent eval harness; two-stage review loop (walked back to inline self-review checklists in v5.0.6 for speed); visual brainstorming. v5.1.0 (May 2026) removed its legacy slash commands and named code-reviewer agent. Cross-harness (this host/Codex/Cursor/Gemini/Copilot) — the one axis it still leads. After the methodology-completion pass, keel ships named first-class equivalents for **all 14** of its methodology skills (see scorecard). |
+| superpowers (`obra/superpowers`) | Opinionated TDD methodology as auto-triggering skills | MIT | Skills + workflow doctrine; `writing-skills` meta-skill with a subagent eval harness; two-stage review loop (walked back to inline self-review checklists in v5.0.6 for speed); visual brainstorming. v5.1.0 (May 2026) removed its legacy slash commands and named code-reviewer agent. Cross-harness (this host/Codex/Cursor/Gemini/Copilot) ,  the one axis it still leads. After the methodology-completion pass, keel ships named first-class equivalents for **all 14** of its methodology skills (see scorecard). |
 | ECC ("Everything the harness", `affaan-m/ECC`) | Multi-harness operator framework | MIT | Whole operator posture at larger scale; **Instincts** (confidence-scored learned behaviors that evolve into skills), **AgentShield** (adversarial config security audit), advisor CLI, cross-harness adapters. |
-| UI/UX Pro Max (`nextlevelbuilder/ui-ux-pro-max-skill`) | Design-intelligence skill: a knowledge corpus + Python BM25 generator that turns a UI request into a design-system packet (style, palette, typography, anti-patterns, checklist) | MIT | Single-domain overlap with keel's **`design-intelligence` generator** + the `ui-design-systems-and-responsive-interfaces` skill. v2.5.0 **file-verified** corpus: 84 styles, 161 palettes, 73 font pairings, 99 UX rules, 161 reasoning rules/products, 25 charts, 1,923 Google-font table. After keel's **corpus-beat pass**, keel now leads on every comparable array: **170 archetypes, 90 styles, 230 palettes, 140 pairings, 37 charts, 112 UX guidelines** (plus 45 color moods / 30 typography moods / 15 stack profiles — 869 total cross-referenced entries). Both persist to `design-system/MASTER.md`. They are cross-harness (18 platforms); ours ships inside the single hook-wired Rust binary (no Python runtime). Accessibility is checklist guidance, not automated WCAG validation — same posture both sides. No command-output compaction, no review gate, no learning loop, no brownfield gate on their side. |
+| UI/UX Pro Max (`nextlevelbuilder/ui-ux-pro-max-skill`) | Design-intelligence skill: a knowledge corpus + Python BM25 generator that turns a UI request into a design-system packet (style, palette, typography, anti-patterns, checklist) | MIT | Single-domain overlap with keel's **`design-intelligence` generator** + the `ui-design-systems-and-responsive-interfaces` skill. v2.5.0 **file-verified** corpus: 84 styles, 161 palettes, 73 font pairings, 99 UX rules, 161 reasoning rules/products, 25 charts, 1,923 Google-font table. After keel's **corpus-beat pass**, keel now leads on every comparable array: **170 archetypes, 90 styles, 230 palettes, 140 pairings, 37 charts, 112 UX guidelines** (plus 45 color moods / 30 typography moods / 15 stack profiles ,  869 total cross-referenced entries). Both persist to `design-system/MASTER.md`. They are cross-harness (18 platforms); ours ships inside the single hook-wired Rust binary (no Python runtime). Accessibility is checklist guidance, not automated WCAG validation ,  same posture both sides. No command-output compaction, no review gate, no learning loop, no brownfield gate on their side. |
 | harness (`revfactory/harness`) | A single meta-skill "team-architecture factory": from a one-line domain prompt it generates a coordinated agent team plus the skills those agents use | Apache-2.0 | Niche overlap with keel's orchestration skills. Ships **1 skill + 6 reference docs, zero hooks, zero subagents, zero CLI**; depends entirely on the harness's experimental Agent Teams API (`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`). Six orchestration patterns (pipeline, fan-out/fan-in, expert pool, producer-reviewer, supervisor, hierarchical) + a Phase-0 audit / duplicate-review brownfield gate. harness-only, manual invocation. Closed by keel's `designing-agent-teams` skill (the same pattern catalog + contract discipline, without the experimental-API dependency). |
 | compound-engineering (`EveryInc/compound-engineering-plugin`) | "Compound engineering" plugin: front-load planning/review and codify each solved problem into a reusable knowledge base so future work is easier | MIT | Broadest methodology overlap. **38 skills + 43 subagents** (all markdown), installable to 10 harnesses via a TypeScript converter CLI; **zero hooks** (entirely manual/slash-driven). Signature is `ce-compound`: writes categorized, frontmatter-tagged solution docs to `docs/solutions/` and self-edits AGENTS.md/CLAUDE.md for discoverability. Has `ce-worktree`, multi-lens review fan-out, design + security reviewers. Closed by keel's `compounding-knowledge` skill (the same capture-and-wire-discoverability loop), which complements our automatic, hook-driven `learn` loop they lack. |
 
@@ -54,8 +54,7 @@ were validated where executable.
    degrading gracefully (exit 0, badge omitted when unavailable). Opt-in via
    `settings.json`. Test matrix passed on both shells.
 4. **Doc accuracy aligned to official docs.** Corrected the CLAUDE.md hook-count
-   claim (29 in `HOOK_EVENTS`, 28 install, `FileChanged` opt-out; `MessageDisplay`
-   documented upstream but not yet in the table) and the stale `::EVENTS`
+   claim (30 in `HOOK_EVENTS`, 18 install by default, 12 opt-out: reserved no-ops plus `FileChanged`/`MessageDisplay`; all 30 dispatchable ,  historical 29/28 note corrected) and the stale `::EVENTS`
    cross-reference (it is `HOOK_EVENTS`).
 
 ## Toolchain (resolved)
@@ -81,11 +80,11 @@ below was implemented and verified with `cargo build` + `cargo test --workspace`
    confirmed commands flow correctly through all stages and surfaced one gap:
    `verify` did not re-check the installed `commands/*.md` (nor the subagent
    `.claude/agents/*.md` definitions). Added `verify_installed_markdown_dir` so
-   `keel verify` now byte-compares both against source — a drifted
+   `keel verify` now byte-compares both against source ,  a drifted
    command/subagent fails verify (proven end-to-end) instead of slipping through.
 2. **`MessageDisplay` hook row.** Added to `HOOK_EVENTS` in `hooks/claude.rs` with
    `installs_in_settings: false` (no matcher, fires on every assistant message,
-   emits `displayContent` not `additionalContext` — auto-install would be a no-op
+   emits `displayContent` not `additionalContext` ,  auto-install would be a no-op
    or silently rewrite on-screen text). The opt-out invariant test was renamed to
    `only_known_events_opt_out_of_install` and pins both `FileChanged` and
    `MessageDisplay`.
@@ -103,7 +102,7 @@ below was implemented and verified with `cargo build` + `cargo test --workspace`
    record|reinforce|penalize|list|promote` in `memory_families.rs`:
    confidence-scored patterns keyed by trigger that reinforce/penalize over time
    and promote (optionally writing a markdown digest) once they meet a confidence
-   threshold. This closes the biggest *conceptual* gap — durable memory that now
+   threshold. This closes the biggest *conceptual* gap ,  durable memory that now
    learns and promotes validated patterns into reusable guidance.
 5. **`gain discover` (RTK missed-savings finder).** `utility/gain.rs` reads the
    same event log and reports passthrough (non-compacted) commands grouped by name
@@ -142,7 +141,7 @@ below was implemented and verified with `cargo build` + `cargo test --workspace`
     audits the user's application code. Runs clean against the repo's own config.
 11. **Output-economy skill (caveman axis).** New `output-economy/SKILL.md`:
     reduces the model's own reply verbosity (no preamble, no re-narration of tool
-    output, length tracks the task) without dropping technical signal — the
+    output, length tracks the task) without dropping technical signal ,  the
     output-side counterpart to `compression-discipline`'s input-side rules. The
     one axis we previously didn't address at all. Passes `skill-lint`.
 12. **Two-stage review gate (superpowers-style).** `reviewer/SKILL.md` now opens
@@ -155,24 +154,24 @@ below was implemented and verified with `cargo build` + `cargo test --workspace`
     + `keel checkpoint create|list|show|restore`: snapshots tracked
     working-tree changes via `git stash create` pinned under
     `refs/claude-checkpoints/<id>`, lists/shows them, and restores one. Restore is
-    the only destructive verb — gated behind `--confirm` and an automatic
+    the only destructive verb ,  gated behind `--confirm` and an automatic
     pre-restore safety snapshot so the restore itself is reversible. An external
     binary cannot hook the harness's edit tool the way native `/rewind` does, but git
     is the real code-undo; this exposes it as a first-class checkpoint surface.
-14. **Autonomous learning loop (Hermes/ECC headline parity — the biggest gap closed).**
+14. **Autonomous learning loop (Hermes/ECC headline parity ,  the biggest gap closed).**
     The prior `memory instincts` CLI (item 4) was the *data model* for instincts,
-    but every transition was operator-driven — nothing observed behavior or
+    but every transition was operator-driven ,  nothing observed behavior or
     created skills. This pass wired the full closed loop, the one capability only
     Hermes Agent and ECC had:
-    - `runner/observation.rs` — append-only per-day JSONL behavioral log captured
+    - `runner/observation.rs` ,  append-only per-day JSONL behavioral log captured
       automatically on PostToolUse. Secret-scrubbed, truncated, navigation-noise
       filtered, daily rotation, fail-open. Command lines collapse to stable
       low-cardinality signatures (`git commit`, `cargo test`, `edit:rs`).
-    - `runner/learning.rs` — the loop. Clusters observations per project+signature,
+    - `runner/learning.rs` ,  the loop. Clusters observations per project+signature,
       upserts confidence-scored instincts (>=3 observations), decays and prunes
       instincts whose pattern ages out, and evolves trusted instinct clusters
       (>=2 instincts at confidence >=5 across >=2 sessions) into generated
-      `SKILL.md` skills plus a paired subagent — deterministic Rust template, no
+      `SKILL.md` skills plus a paired subagent ,  deterministic Rust template, no
       inline LLM. Runs automatically on SessionEnd (no slash command);
       `keel learn [status|dry-run|run]` is the inspection/manual-trigger
       surface.
@@ -199,26 +198,26 @@ Five Rust-runtime features closing the remaining operational gaps against RTK
 and the native baseline. Implemented one at a time, each verified with unit
 tests before moving to the next.
 
-### G1: Destructive-command guard — shipped
+### G1: Destructive-command guard ,  shipped
 
 **What:** `detect_destructive_command()` in `runner/shell_rewrite.rs`
 pattern-matches irreversible shell commands before they execute and emits a
 harness `permissionDecision: "deny"` payload that blocks the tool call.
 
 **Patterns blocked (severity = Block):**
-- `rm -rf /`, `rm -rf ~`, `rm -rf $HOME` — recursive delete on root/home
-- `rm -rf /*` — root-glob recursive delete
-- `git push --force` / `git push -f` to `main`, `master`, or `dev` — protected-branch force push
-- `dd of=/dev/sdX` — raw write to block device
-- `mkfs.ext4` / `mkfs.*` — filesystem format
-- `DROP DATABASE`, `DROP TABLE` — SQL schema destruction
+- `rm -rf /`, `rm -rf ~`, `rm -rf $HOME` ,  recursive delete on root/home
+- `rm -rf /*` ,  root-glob recursive delete
+- `git push --force` / `git push -f` to `main`, `master`, or `dev` ,  protected-branch force push
+- `dd of=/dev/sdX` ,  raw write to block device
+- `mkfs.ext4` / `mkfs.*` ,  filesystem format
+- `DROP DATABASE`, `DROP TABLE` ,  SQL schema destruction
 
 **Patterns warned (severity = Warn):**
-- `rm -r` on broad targets (`/`, `~`, `*`, `.`, `..`) — recursive delete on broad scope
-- `git push --force` to non-protected branches — force push (not blocked, but flagged)
-- `chmod -R 777` — world-writable recursive permission change
-- `DELETE FROM` without `WHERE` clause — unconditional table wipe
-- `TRUNCATE TABLE` — table wipe
+- `rm -r` on broad targets (`/`, `~`, `*`, `.`, `..`) ,  recursive delete on broad scope
+- `git push --force` to non-protected branches ,  force push (not blocked, but flagged)
+- `chmod -R 777` ,  world-writable recursive permission change
+- `DELETE FROM` without `WHERE` clause ,  unconditional table wipe
+- `TRUNCATE TABLE` ,  table wipe
 
 **Wiring:** Called from `run_hook_pre_tool_use()` in `hook_lifecycle/mod.rs`
 before the rewrite step. `analyze_command_text` → `detect_destructive_command`
@@ -238,7 +237,7 @@ respected neither `--color` nor `--no-color`. Routed all four through
 The two cockpit color tests (`cockpit_with_no_color_flag_has_no_ansi_codes`,
 `cockpit_with_color_flag_has_ansi_codes`) now pass.
 
-### G2: AI-slop detector — shipped
+### G2: AI-slop detector ,  shipped
 
 **What:** `slop_detector.rs` module scans added diff lines for the 5 most common
 AI-generated code smells. Wired into `review pre-commit` and `review pre-pr` as
@@ -246,17 +245,17 @@ a Warn-level (advisory, non-blocking) gate alongside the existing
 `comment_style` gate.
 
 **Patterns detected:**
-1. **Dead defensive code** — `let _ = expr;` discarding a Result without
+1. **Dead defensive code** ,  `let _ = expr;` discarding a Result without
    explanation, empty `if let Ok(_) =` / `if let Some(_) =` arms that discard
    the matched value
-2. **Over-commenting** — 4+ consecutive comment lines for a single code line
+2. **Over-commenting** ,  4+ consecutive comment lines for a single code line
    (the model over-explaining trivial code)
-3. **Phantom flags** — function parameters prefixed with `_` (e.g.
+3. **Phantom flags** ,  function parameters prefixed with `_` (e.g.
    `fn process(data, _verbose: bool)`) indicating an unused parameter the model
    added "just in case"
-4. **Hallucinated APIs** — `.fetch_all()` on non-ORM types, `dotenv().unwrap()`
+4. **Hallucinated APIs** ,  `.fetch_all()` on non-ORM types, `dotenv().unwrap()`
    (panics on missing .env), `serde_json::from_str()` without `?` or `match`
-5. **N+1 queries** — `.find()`, `.filter()`, `.position()`, `.contains()` called
+5. **N+1 queries** ,  `.find()`, `.filter()`, `.position()`, `.contains()` called
    on a collection declared outside a loop, inside that loop body (O(n*m) bug)
 
 **Wiring:** `slop_gate()` in `review.rs` calls `lint_working_slop()` (pre-commit)
@@ -269,7 +268,7 @@ etc.
 exemptions (commented discards, handled serde, 2-comment blocks), context-line
 exclusion, and clean-code no-findings. All pass.
 
-### G3: shipped — Compaction loss visibility
+### G3: shipped ,  Compaction loss visibility
 
 **What**: Added `CompactionLossSummary` struct and `load_compaction_loss_today()`
 public function to `gain.rs`. Added `render_compaction_loss()` to `workflow.rs`
@@ -279,35 +278,35 @@ tokens before → after, tokens saved, and savings percentage. When no compactio
 events exist for today, it displays "(no compaction events today)".
 
 **Where**:
-- `rust/crates/keel/src/utility/gain.rs` — `CompactionLossSummary` struct,
+- `rust/crates/keel/src/utility/gain.rs` ,  `CompactionLossSummary` struct,
   `load_compaction_loss_today()` function (reuses `load_gain_summary` with 24h
   cutoff)
-- `rust/crates/keel/src/utility/memory/workflow.rs` — `render_compaction_loss()`
+- `rust/crates/keel/src/utility/memory/workflow.rs` ,  `render_compaction_loss()`
   function, wired into cockpit rendering after `render_team_lanes`
 
 **Tests**: 3 unit tests in `gain.rs` (savings_percent zero case, savings_percent
 calculation, from real events), 2 cockpit tests in `workflow.rs` (section
 presence, no-color no-ANSI). All 5 pass.
 
-### G4–G5: planned
+### G4, G5: planned
 
-- **G4: PM tool integration** — sync working briefs to Linear/Jira so the
+- **G4: PM tool integration** ,  sync working briefs to Linear/Jira so the
   workflow ledger stays in sync with external PM tools.
 
-### G5: shipped — TOML filter DSL
+### G5: shipped ,  TOML filter DSL
 
 **What**: Extended the existing `DeclarativeFilter` in `proxy/filters.rs` with a
 `stages` field that accepts an ordered pipeline of transformation stages. Each
 stage is a TOML table with `type` tag selecting the transformation:
 
-- `strip_ansi` — remove ANSI escape sequences
-- `strip` — remove lines matching any pattern
-- `keep` — keep only lines matching any pattern
-- `dedup` — collapse consecutive identical lines with `(Nx)` count
-- `head_tail` — keep first N + last N lines with omission marker
-- `signal` — keep only error/warning/failure signal lines
-- `json_structure` — compact JSON to type placeholders (`<str>`, `<num>`, etc.)
-- `redact` — mask lines containing secret-like patterns
+- `strip_ansi` ,  remove ANSI escape sequences
+- `strip` ,  remove lines matching any pattern
+- `keep` ,  keep only lines matching any pattern
+- `dedup` ,  collapse consecutive identical lines with `(Nx)` count
+- `head_tail` ,  keep first N + last N lines with omission marker
+- `signal` ,  keep only error/warning/failure signal lines
+- `json_structure` ,  compact JSON to type placeholders (`<str>`, `<num>`, etc.)
+- `redact` ,  mask lines containing secret-like patterns
 
 Stages run in declared order. When `stages` is empty, the legacy `keep`/`remove`
 behavior is preserved for backwards compatibility.
@@ -336,7 +335,7 @@ head = 5
 tail = 5
 ```
 
-**Where**: `rust/crates/keel/src/proxy/filters.rs` — `FilterStage` enum,
+**Where**: `rust/crates/keel/src/proxy/filters.rs` ,  `FilterStage` enum,
 `apply_stages()` function, `signal_lines()` helper, updated `compact()` method.
 
 **Tests**: 6 new tests (staged TOML parsing, strip+keep pipeline, head_tail,
@@ -353,7 +352,7 @@ N = absent.
 | Confidence-scored instincts w/ decay+prune | Y | ~ (usage counters) | Y | N | N | N | N |
 | Provenance guard (never clobber built-in/manual) | Y | Y (`write_origin`) | ~ | n/a | n/a | n/a | n/a |
 | Always-on learned-convention injection | Y (SessionStart digest) | Y (system prompt) | Y (band >=0.7) | N | N | N | N |
-| Command-output compaction proxy | Y (multi-adapter, all platforms, every tool) | N | ~ | N | Y (100+ subcmds, no native-Windows auto-rewrite) | N | N |
+| Command-output compaction proxy | Y (multi-adapter, all platforms, every tool) | N | ~ | N | Y (100+ subcmds; Windows auto-rewrite via native hook since RTK v0.37.2) | N | N |
 | Output-side verbosity economy | Y (output-economy skill) | N | N | N | N | Y | N |
 | TDD loop as a named skill (RED-GREEN-REFACTOR) | Y (test-driven-development) | N | N | Y | N | N | N |
 | Root-cause debugging as a named skill | Y (systematic-debugging) | N | N | Y | N | N | N |
@@ -370,10 +369,10 @@ N = absent.
 | Auto-refreshed system map + recall index | Y | ~ (memory) | ~ | N | N | N | N |
 | Git-backed code checkpoints | Y | N | ~ | N | N | N | N |
 | Cross-harness adapters (Codex/Cursor/Gemini) | ~ (adapters exist, shallow depth) | Y | Y | Y | Y | Y | ~ |
-| Zero-manual automation (all hook-driven) | Y | ~ (CLI agent) | ~ (opt-in) | ~ | Y (hook, POSIX only) | ~ | N |
+| Zero-manual automation (all hook-driven) | Y | ~ (CLI agent) | ~ (opt-in) | ~ | Y (hook; Windows native since RTK v0.37.2) | ~ | N |
 
 **Where we still lose (honest), updated after the breadth + prose pass:**
-- **Cross-harness depth** — every comparator runs deeply on Codex/Cursor/Gemini
+- **Cross-harness depth** ,  every comparator runs deeply on Codex/Cursor/Gemini
   as first-class targets. keel is Claude Code-primary with bridge adapters for
   OpenCode, Codex CLI, Cursor (rules + hooks + MCP), and Pi Agent (rules + hooks
   + MCP). The adapters exist (see README § Cross-Agent Adapters) but are
@@ -383,7 +382,7 @@ N = absent.
   fixed, not just breadth added:
   1. The PreToolUse auto-rewrite gate (`is_supported_noisy_command`) had drifted
      narrower than the classifier, so the `database`/`cloud`/`containers`
-     adapters we already shipped were *unreachable on the automatic path* —
+     adapters we already shipped were *unreachable on the automatic path* , 
      `psql`, `az`, `gcloud`, `helm`, `podman`, `cmake`, and others were never
      auto-wrapped, so their adapters were dead code in practice. The gate now
      covers every command the classifier routes to a dedicated adapter.
@@ -396,23 +395,25 @@ N = absent.
   yamllint/stylelint/tflint/oxlint/standard/luacheck/vale linters). A new
   drift-guard test (`every_specifically_classified_program_is_auto_wrappable`)
   makes the two surfaces unable to diverge silently again. Note RTK's "100+"
-  count is mostly *subcommand* breadth within the same categories we cover, and
-  RTK has no auto-rewrite at all on native Windows (falls back to CLAUDE.md
-  injection) and never touches Read/Grep/Glob — our PostToolUse telemetry +
-  PreToolUse rewrite fire on every tool on every platform.
+  count is mostly *subcommand* breadth within the same categories we cover.
+  RTK ships native-Windows auto-rewrite since v0.37.2 (`rtk hook claude`);
+  older "CLAUDE.md injection only" claims are stale. RTK still does not touch
+  Read/Grep/Glob (shell-tool hook only). keel's PostToolUse telemetry +
+  PreToolUse rewrite fire on every tool on every platform, and keel still
+  leads on iron-law, multi-lang review closeout, and memory/skills.
 - ~~Skill-prose polish~~ **(closed this pass).** `keel learn synthesize`
   emits a precise, agent-actionable refinement brief for every template-state
   generated skill (carrying the observed conventions as the source of truth),
   and SessionStart now surfaces that brief autonomously (no manual slash) so the
   session model upgrades the prose in the normal course of work. The agent's
   edit is protected by the content-hash no-clobber guard, and the nudge
-  self-clears once the skill is refined. The binary still never calls an LLM —
+  self-clears once the skill is refined. The binary still never calls an LLM , 
   the session model that harness already runs does the authoring. `learn run
   --synthesize` also collects briefs inline for a freshly generated skill.
 - ~~superpowers methodology-skill discoverability~~ **(closed this pass).** A
   focused re-audit against `obra/superpowers` v5.1.0 (read the actual SKILL.md
   tree, the SessionStart hook, and the marketplace manifest) confirmed parity or
-  a win on everything except the by-design cross-harness axis — **with three
+  a win on everything except the by-design cross-harness axis ,  **with three
   exceptions**: superpowers ships `test-driven-development`, `systematic-debugging`,
   and `brainstorming` as *first-class, name-triggerable* skills, while keel
   carried the same doctrine only embedded inside `_shared/common-discipline.md`
@@ -420,19 +421,19 @@ N = absent.
   a broader skill is already loaded; a named skill activates by its own matcher.
   Closed by promoting all three to standalone skills that delegate to the shared
   discipline rather than restating it:
-  - `test-driven-development` — the tight RED→GREEN→REFACTOR loop (watch it fail
+  - `test-driven-development` ,  the tight RED→GREEN→REFACTOR loop (watch it fail
     for the right reason, minimum code to green, refactor under green), plus the
     bug-fix-as-missing-test branch.
-  - `systematic-debugging` — reproduce → trace-to-root-with-file:line → fix the
+  - `systematic-debugging` ,  reproduce → trace-to-root-with-file:line → fix the
     source of truth → prove with a regression test; explicit "stop after two
     failed attempts and re-trace" rule.
-  - `brainstorming` — Socratic design exploration that converges on one agreed
+  - `brainstorming` ,  Socratic design exploration that converges on one agreed
     design and **captures it in the working brief** (so `reviewer` Stage 1 has a
     spec to check against), the generative front half of Think-Before-Coding.
   All three pass `skill-lint`, install + byte-compare-verify cleanly, and are
   registered in the plugin manifest and the `using-keel` bootstrap catalog.
   Note superpowers authors skills by a *manual* TDD-for-prompts method;
-  keel's authoring is the autonomous learning loop — different mechanism,
+  keel's authoring is the autonomous learning loop ,  different mechanism,
   both now cover the methodology surface.
 
 - ~~Remaining superpowers methodology surface (the other 11 skills + the
@@ -443,31 +444,31 @@ N = absent.
   methodology *trio*; this pass closed the rest, promoting diffuse doctrine and CLI
   surfaces into discrete name-triggerable skills and closing the one genuine
   mechanism gap. Eight new skills:
-  - `writing-skills` — **the headline gap.** superpowers' meta-skill applies TDD to
+  - `writing-skills` ,  **the headline gap.** superpowers' meta-skill applies TDD to
     skill *prose*: dispatch a fresh subagent the target situation *without* the skill
     under stacked pressure (time + sunk cost + authority), capture the wrong call and
     its rationalizations, write the minimum prose that flips it, re-test under
     pressure until the subagent decides right and cites the skill. keel had
     only `skill-lint` (structural, explicitly "without invoking the live model") and
-    the statistical `learn` loop — nothing tested whether prose changes behavior.
+    the statistical `learn` loop ,  nothing tested whether prose changes behavior.
     Now shipped as a skill plus `references/10-testing-skills-with-subagents.md`,
     framed as the behavioral gate *above* skill-lint's structural gate.
-  - `writing-plans` / `executing-plans` — the plan-authoring and step-by-step
+  - `writing-plans` / `executing-plans` ,  the plan-authoring and step-by-step
     plan-execution loop (each step names files + a verification check; stop on a
     failed check), promoting what was spread across `software-development-life-cycle`
     and the workflow/orchestration ledgers into two discrete skills.
-  - `subagent-driven-development` — delegate self-contained tasks to fresh-context
+  - `subagent-driven-development` ,  delegate self-contained tasks to fresh-context
     subagents and re-verify in the main thread (the discipline behind the 24-agent
     roster, now a named loop).
-  - `dispatching-parallel-agents` — the four-condition independence test as a
+  - `dispatching-parallel-agents` ,  the four-condition independence test as a
     name-triggerable skill (was per-prompt doctrine in `hook_lifecycle.rs`, no skill).
-  - `using-git-worktrees` — isolated checkouts, prefer-native-then-worktree, with
+  - `using-git-worktrees` ,  isolated checkouts, prefer-native-then-worktree, with
     cleanup (was `git-expert` prose + telemetry-only WorktreeCreate/Remove hooks).
-  - `finishing-a-development-branch` — verify → completion-gate → reviewer → present
+  - `finishing-a-development-branch` ,  verify → completion-gate → reviewer → present
     merge/PR/cleanup options (never unilateral force-push/merge), consolidating
     closeout that was split across `git-expert`, the workflow `finish --proof`
     ledger, and the completion gate.
-  - `receiving-code-review` — the author-side counterpart to `reviewer`: judge each
+  - `receiving-code-review` ,  the author-side counterpart to `reviewer`: judge each
     comment on merit, fix valid ones at root cause with evidence, push back on wrong
     ones with evidence, re-verify (superpowers separates requesting vs receiving;
     `requesting-code-review` maps to our `reviewer` + `/keel:review`).
@@ -490,17 +491,17 @@ superpowers gap; the eight skills (`writing-skills`, `writing-plans`, `executing
 `finishing-a-development-branch`, `receiving-code-review`) closed the rest of the
 superpowers surface; the three newest close the cross-comparator gaps found in the
 harness / compound-engineering / ECC audit:
-- `designing-agent-teams` — closes the **harness** (`revfactory/harness`) gap: the
+- `designing-agent-teams` ,  closes the **harness** (`revfactory/harness`) gap: the
   six-pattern agent-team-architecture factory (pipeline, fan-out/fan-in, expert pool,
   producer-reviewer, supervisor, hierarchical) with per-agent role/input/output/
   verification contracts, but without harness's dependency on the experimental Agent
   Teams API. Hands execution to `dispatching-parallel-agents` + `subagent-driven-development`.
-- `compounding-knowledge` — closes the **compound-engineering**
+- `compounding-knowledge` ,  closes the **compound-engineering**
   (`EveryInc/compound-engineering-plugin`) gap: the `ce-compound`-style capture loop
   (categorized, deduped, evidence-bearing solution notes wired into CLAUDE.md/AGENTS.md
   discoverability pointers), as the human-readable complement to our automatic,
   hook-driven `learn` loop that they do not have.
-- `adversarial-security-review` — closes the **ECC AgentShield** (`affaan-m/ECC`) gap:
+- `adversarial-security-review` ,  closes the **ECC AgentShield** (`affaan-m/ECC`) gap:
   the red-team / blue-team / adjudicator pass (AgentShield's `--opus` three-agent loop)
   that chains static findings into concrete attacker scenarios and adjudicates each to
   confirmed/refuted/needs-proof with evidence, as the reasoning layer above our
@@ -508,29 +509,29 @@ harness / compound-engineering / ECC audit:
 
 The three newest specialists close the operational-domain-coverage gaps the
 roster audit found (observability, supply-chain action, analytical/ML data flow):
-- `observability-and-incident-response` — promotes what was only a
+- `observability-and-incident-response` ,  promotes what was only a
   `cloud-and-devops-expert` reference into a first-class skill: metrics/logs/traces
   via OpenTelemetry, golden signals, SLO/SLI and error-budget math, burn-rate
   paging linked to runbooks, and blameless postmortems.
-- `dependency-and-supply-chain` — the action counterpart to
+- `dependency-and-supply-chain` ,  the action counterpart to
   `security-and-compliance-auditor`'s scanning: dependency upgrades, lockfile
   hygiene, semver risk tiering, major-version migration, SBOM, and provenance/signing.
-- `data-and-ml-engineering` — the analytical/ML-flow counterpart to
+- `data-and-ml-engineering` ,  the analytical/ML-flow counterpart to
   `backend-and-data-architecture`'s OLTP focus: ETL/ELT pipelines, dbt warehouse
   modeling, orchestration, data quality, and the ML lifecycle through drift.
 
 A further three specialists close the last roster-audit domain gaps
 (build-side identity, cost/FinOps, and i18n/localization):
-- `authentication-and-identity` — the build counterpart to
+- `authentication-and-identity` ,  the build counterpart to
   `security-and-compliance-auditor`'s read-only auditing: OAuth2/OIDC
   (authorization-code + PKCE), SSO/SAML, session and token lifecycles,
   refresh-token rotation with reuse detection, MFA/passkeys/WebAuthn, and
   argon2/bcrypt password storage.
-- `cloud-cost-and-finops` — the spend dimension neither `cloud-and-devops-expert`
+- `cloud-cost-and-finops` ,  the spend dimension neither `cloud-and-devops-expert`
   (mechanics) nor `observability-and-incident-response` (SLOs) owned: cost
   estimation before deploy, rightsizing, commitment planning, autoscaling/spot
   strategy, cost allocation and tagging, budget guardrails, and unit economics.
-- `internationalization-and-localization` — the message/locale layer beneath
+- `internationalization-and-localization` ,  the message/locale layer beneath
   `ui-design-systems-and-responsive-interfaces`: message-catalog design and
   extraction, ICU MessageFormat and plurals, locale-aware formatting, RTL/bidi,
   translation workflows and fallback chains, and Unicode correctness.
@@ -539,8 +540,8 @@ A further three specialists close the last roster-audit domain gaps
 
 - ~~UI/UX Pro Max corpus was smaller than theirs~~ **(closed and surpassed this
   pass).** A re-audit with **file-verified** counts (parsing their actual CSVs, not
-  README claims) showed UI/UX Pro Max v2.5.0 is bigger than previously recorded —
-  84 styles, 161 palettes, 73 font pairings, 99 UX rules, 161 reasoning rules — and
+  README claims) showed UI/UX Pro Max v2.5.0 is bigger than previously recorded , 
+  84 styles, 161 palettes, 73 font pairings, 99 UX rules, 161 reasoning rules ,  and
   bigger than its own README advertises. The catalog was expanded (via four parallel
   authoring waves, merged with strict cross-reference + duplicate-id + hex + enum
   validation) from 282 to **869 cross-referenced entries**, now leading on every
@@ -585,7 +586,7 @@ A further three specialists close the last roster-audit domain gaps
     fallback, persistence, and error paths.
 
   Honest standing vs UI/UX Pro Max, **after the corpus-expansion pass**: the
-  catalog grew from 47 to 282 cross-referenced entries — 25 product archetypes,
+  catalog grew from 47 to 282 cross-referenced entries ,  25 product archetypes,
   23 style families, 21 color moods, 15 typography moods, 15 stack profiles, plus
   four new artifact arrays the generator now emits directly: 48 named color
   palettes (light + dark, real hex + WCAG contrast notes), 50 font pairings
@@ -594,7 +595,7 @@ A further three specialists close the last roster-audit domain gaps
   `pick_font_pairing`, `pick_chart_types`, and `pick_ux_guidelines` so a
   recommendation now carries a concrete palette (dark-mode-biased when the request
   asks for it), a concrete type pairing, data-viz chart picks when the request
-  implies a dashboard, and the archetype-scoped UX rules ranked critical-first —
+  implies a dashboard, and the archetype-scoped UX rules ranked critical-first , 
   matching the artifact types UI/UX Pro Max emits. All cross-references are
   validated (every palette/pairing resolves to a real mood; every archetype's
   recommended moods resolve). 12 unit tests (4 new for the concrete artifacts:
@@ -639,7 +640,7 @@ tests:
   http://localhost:8989`, every model slot mapped to `claude-opus-4-8[1M]`),
   which is not returning the structured yes/no JSON `/goal` requires. The fix is
   environmental (point `/goal` at a model that honors the structured-output
-  contract, or set its evaluator model), not a code change in keel — our
+  contract, or set its evaluator model), not a code change in keel ,  our
   hooks already use exec form (`args` array), which is the documented immunity to
   the Windows shell-profile JSON-corruption failure mode.
 
@@ -662,7 +663,7 @@ Native harness `/rewind` auto-captures the edit tool's changes and can restore
 code *and* conversation. `keel checkpoint` is the code half: a git-backed
 working-tree snapshot/restore that an external binary can actually own. It does
 not capture conversation state (only the harness itself can), so the two are
-complementary rather than identical — use `/rewind` for conversation+code inside a
+complementary rather than identical ,  use `/rewind` for conversation+code inside a
 session, `checkpoint` for durable, named, git-pinned code snapshots that survive
 across sessions and tools.
 
@@ -672,7 +673,7 @@ Every comparator (RTK, caveman, superpowers, ECC) ships deep cross-harness
 adapters (Codex/Cursor/Gemini/Copilot). keel is Claude Code-primary with
 lighter adapters for OpenCode, Codex CLI, Cursor, and Pi Agent (see
 README § Cross-Agent Adapters). Whether to deepen the existing adapters to
-full lifecycle parity or add more provider targets is a product decision —
+full lifecycle parity or add more provider targets is a product decision , 
 recorded here so the depth-vs-breadth tradeoff is chosen, not drifted into.
 
 ## 2026-06-17 audit: high-visibility harness / workflow comparators
@@ -681,7 +682,7 @@ This section extends the capability-based comparison to **high-visibility**
 harness and workflow projects, selected by ecosystem presence (community
 discussion frequency, cross-references in other projects, and capability
 overlap with keel's surface). Star counts are deliberately excluded as a
-selection or comparison signal — multiple repos in this space show
+selection or comparison signal ,  multiple repos in this space show
 anomalous star-to-commit ratios (e.g. `obra/superpowers` returned 229,888
 stars via GitHub API, exceeding `anthropics/claude-code` at 132,832, which
 is implausible for a skills plugin). Comparisons below are capability-based
@@ -694,8 +695,8 @@ profile was built by reading the project's actual README/docs, not marketing cop
 | --- | --- | --- |
 | `obra/superpowers` | skills framework | Already in the table above. |
 | `github/spec-kit` | spec-driven dev | Spec-as-source-of-truth pipeline (constitution→specify→plan→tasks→implement), agent-agnostic across 30+ agents. Strong gate *taxonomy* (Phase-1 Simplicity/Anti-Abstraction/Integration-First) but every gate is model-self-attested in-prompt; `[P]` parallel markers are annotations, not an executor. No worktree isolation, no recall index. |
-| `ruvnet/claude-flow` | swarm orchestrator | The one comparator **ahead on memory**: HNSW vector store + knowledge graphs + neural self-learning (semantic recall we lack). Also broad: consensus topologies, GOAP A* planner, security gates (CVE/PII/injection). But benchmarks are self-reported, the lightweight plugin path is hollow (no MCP/memory tools — only the heavy npx+Docker+MongoDB path has them), and there is no worktree-isolated fail-closed merge. |
-| `bmad-code-org/BMAD-METHOD` | agentic-agile personas | Role-persona pipeline (Analyst/PM/Architect/SM/Dev/QA) with "context-engineered" story files; mature methodology, multi-IDE. Orchestration is human-in-the-loop persona-switching — no parallel execution, no merge coordinator, no indexed memory, no self-eval. |
+| `ruvnet/claude-flow` | swarm orchestrator | The one comparator **ahead on memory**: HNSW vector store + knowledge graphs + neural self-learning (semantic recall we lack). Also broad: consensus topologies, GOAP A* planner, security gates (CVE/PII/injection). But benchmarks are self-reported, the lightweight plugin path is hollow (no MCP/memory tools ,  only the heavy npx+Docker+MongoDB path has them), and there is no worktree-isolated fail-closed merge. |
+| `bmad-code-org/BMAD-METHOD` | agentic-agile personas | Role-persona pipeline (Analyst/PM/Architect/SM/Dev/QA) with "context-engineered" story files; mature methodology, multi-IDE. Orchestration is human-in-the-loop persona-switching ,  no parallel execution, no merge coordinator, no indexed memory, no self-eval. |
 | `eyaltoledano/claude-task-master` | task manager | Dependency-aware PRD→task decomposition over an MCP surface; broad editor/provider reach. **No review/quality gates documented at all**, no worktree isolation, memory is task-state only (no recall). |
 | `automazeio/ccpm` | PM workflow (GH Issues) | Closest parallel-dispatch peer: per-epic git worktrees + `conflicts_with`/`depends_on`/`parallel` task metadata. But the merge is LLM-narrated ("agents commit and coordinate via Git"), not a coded fail-closed coordinator; memory is flat markdown + grep-style bash scripts. |
 
@@ -711,18 +712,18 @@ cannot talk past**. Four differentiators hold against every comparator:
    `run_merge`): only a `complete` worker merges; conflict triggers `git merge
    --abort` leaving a provably clean tree (asserted by
    `merge_aborts_on_conflict_and_leaves_the_tree_clean`). ccpm and superpowers also
-   use worktrees but leave the merge to model narration — the guarantee lives in
+   use worktrees but leave the merge to model narration ,  the guarantee lives in
    their prompt, not their code. (Honest scope: `dispatch` owns the worktree
-   lifecycle + ledger + merge gate; it does **not** spawn agents — the main thread
+   lifecycle + ledger + merge gate; it does **not** spawn agents ,  the main thread
    still drives the subagents.)
 2. **Real, reproducible compaction eval** (`utility/eval.rs`): the genuine adapter
    pipeline over fixtures with **exact o200k_base** token deltas and measured floors
-   asserted in CI — not the self-reported speedup multipliers claude-flow/ccpm
+   asserted in CI ,  not the self-reported speedup multipliers claude-flow/ccpm
    publish. (The legacy `bench` is a runtime-provenance/feature-parity marker, now
    clearly labeled as such; `eval` is the measurement.)
 3. **Compaction break-even guard + prompt-injection neutralization** (`proxy/run.rs`):
    compacted output is emitted only when strictly fewer exact tokens than raw, and
-   tool output is neutralized before the model sees it. No comparator has either —
+   tool output is neutralized before the model sees it. No comparator has either , 
    they treat the harness as trusted and don't measure their own token effect.
 4. **Executable requirement-format gate** (`user_story.rs` Connextra+Gherkin+INVEST
    lint + the fail-closed `sprint review`). spec-kit and BMAD have richer gate
@@ -731,22 +732,22 @@ cannot talk past**. Four differentiators hold against every comparator:
 
 ### Where keel loses (honest)
 
-- **Semantic memory** — claude-flow's HNSW vector store + knowledge graphs beat our
+- **Semantic memory** ,  claude-flow's HNSW vector store + knowledge graphs beat our
   lexical FTS5 + trigram-fuzzy cascade for meaning-based recall. Mitigations: their
   memory tools are absent on the plugin path, and our lexical choice is the
   deliberate single-clean-binary / no-network / no-embeddings trade.
-- **Eval breadth** — wshobson's `plugin-eval` (Static + LLM-Judge + 50-100-run Monte
+- **Eval breadth** ,  wshobson's `plugin-eval` (Static + LLM-Judge + 50-100-run Monte
   Carlo certification) is a more sophisticated eval *framework*; ours is real and
   reproducible but narrow (compaction fidelity only).
-- **Cross-harness reach** — the standing by-design loss: every comparator runs on
+- **Cross-harness reach** ,  the standing by-design loss: every comparator runs on
   Codex/Cursor/Gemini/Copilot; we are harness-native. spec-kit (30+ agents) and
   superpowers (10+ harnesses) lead hardest here.
-- **Adoption / validation** — 8k-230k stars of battle-testing vs a private repo.
+- **Adoption / validation** ,  8k-230k stars of battle-testing vs a private repo.
 
 ### Self-inflicted gaps from the #123 merge (found and fixed this pass)
 
 The audit's skeptical re-read of our own post-merge code surfaced drift the merge
-introduced — ironic, since finding #4 was itself a doc-parity test:
+introduced ,  ironic, since finding #4 was itself a doc-parity test:
 
 - **MCP tool-count drift.** CLAUDE.md claimed the server exposes **14 tools**;
   `mcp/tools.rs` defines **16** (`sprint` + `user_story_lint` were added without
@@ -758,7 +759,7 @@ introduced — ironic, since finding #4 was itself a doc-parity test:
   `eval`) and added `audit_flagged_commands_are_documented` to pin them.
 - **`bench` mislabeled as measurement.** Its byte/savings numbers come from
   hardcoded fixtures yet read like a real run. Investigation showed `bench` is not
-  dead code — it's a deliberate runtime-provenance / feature-parity marker
+  dead code ,  it's a deliberate runtime-provenance / feature-parity marker
   (`runtime=rust`, `goFallback=false`). Kept it (it carries a real signal) but
   relabeled its output as illustrative and added a doc-comment pointing to `eval`
   for actual measurement.
@@ -777,7 +778,7 @@ are shallower than a single-purpose peer.
 ## Decided non-goals (chosen, not drifted)
 
 The audit flagged several capabilities competitors have that keel does
-not. After review these are **deliberate scope boundaries**, not defects — they
+not. After review these are **deliberate scope boundaries**, not defects ,  they
 conflict with the "single Rust binary, harness-native, discipline-over-volume"
 positioning. Recorded here so each is a chosen tradeoff:
 
