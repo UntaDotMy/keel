@@ -4,15 +4,6 @@ description: Domain-Driven Design (DDD) specialist. Model software around the bu
 when_to_use: Complex business domains; bounded-context or microservice boundary decisions; rich domain models vs anemic CRUD; aggregate design and consistency boundaries; ubiquitous language / glossary work; domain events, sagas, outbox; CQRS or event-sourced write models; event storming or context mapping; anti-corruption layers when integrating external systems.
 allowed-tools: Read, Grep, Glob, Edit, Write, Bash(keel memory:*), Bash(git diff:*), Bash(git status), Bash(git log:*)
 effort: high
-paths:
-  - "**/domain/**"
-  - "**/domains/**"
-  - "**/*Aggregate*"
-  - "**/*Entity*"
-  - "**/*ValueObject*"
-  - "**/*Repository*"
-  - "**/bounded-context*"
-  - "**/context-map*"
 ---
 
 # Domain-Driven Design

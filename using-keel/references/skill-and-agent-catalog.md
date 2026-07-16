@@ -15,6 +15,12 @@ name (e.g. `Skill("reviewer")`). The count excludes this bootstrap skill itself
 invoked on demand. `requesting-code-review` is a real thin-alias directory that
 routes to `reviewer` (not a separate review behavior).
 
+**Host `Unknown skill` fallback:** if `Skill("<name>")` fails but the name is
+in this catalog (or `skill_list`), call MCP `skill_get` with that name — keel
+loads the installed SKILL.md without the host Skill registry. Do not use
+frontmatter `paths:` on first-party skills; it can hide names from Skill() on
+some hosts until cwd matches (fixed in pack; enforced by `doc_parity_test`).
+
 - `software-development-life-cycle` — Cross-domain planning, architecture framing, multi-phase delivery sequencing.
 - `web-development-life-cycle` — Web architecture, quality, and production delivery (Core Web Vitals, SEO, accessibility).
 - `mobile-development-life-cycle` — Mobile architecture, quality, and release (Android/iOS lifecycle, store submission).

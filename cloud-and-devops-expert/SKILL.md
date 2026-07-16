@@ -4,42 +4,6 @@ description: Designs cloud infrastructure, CI/CD pipelines, container orchestrat
 when_to_use: Cloud infrastructure, CI/CD, and DevOps.
 allowed-tools: Read, Grep, Glob, Edit, Write, Bash(terraform:*), Bash(kubectl:*), Bash(helm:*), Bash(docker:*), Bash(aws:*), Bash(gcloud:*), Bash(az:*), Bash(gh workflow:*), Bash(gh run:*), Bash(keel memory:*)
 effort: medium
-paths:
-  - "**/*.tf"
-  - "**/*.tfvars"
-  - "**/*.hcl"
-  - "**/Dockerfile"
-  - "**/Dockerfile.*"
-  - "**/docker-compose.yml"
-  - "**/docker-compose.yaml"
-  - "**/docker-compose.*.yml"
-  - "**/docker-compose.*.yaml"
-  - "**/.dockerignore"
-  - "**/Containerfile"
-  - "**/k8s/**"
-  - "**/kubernetes/**"
-  - "**/helm/**"
-  - "**/charts/**"
-  - "**/Chart.yaml"
-  - "**/values.yaml"
-  - "**/values-*.yaml"
-  - "**/.github/workflows/**"
-  - "**/.gitlab-ci.yml"
-  - "**/.circleci/config.yml"
-  - "**/azure-pipelines.yml"
-  - "**/azure-pipelines-*.yml"
-  - "**/Jenkinsfile"
-  - "**/buildspec.yml"
-  - "**/cloudbuild.yaml"
-  - "**/serverless.yml"
-  - "**/serverless.yaml"
-  - "**/template.yaml"
-  - "**/template.yml"
-  - "**/cdk.json"
-  - "**/pulumi.yaml"
-  - "**/ansible.cfg"
-  - "**/playbook.yml"
-  - "**/playbook.yaml"
 ---
 
 # Cloud and DevOps Expert

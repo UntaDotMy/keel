@@ -4,28 +4,6 @@ description: Builds and ships production-ready Android and iOS apps with platfor
 when_to_use: Mobile architecture, quality, and release.
 allowed-tools: Read, Grep, Glob, Edit, Write, Bash(gradle:*), Bash(./gradlew:*), Bash(xcodebuild:*), Bash(pod:*), Bash(adb:*), Bash(flutter:*), Bash(npx react-native:*), Bash(keel memory:*)
 effort: medium
-paths:
-  - "**/*.kt"
-  - "**/*.kts"
-  - "**/*.java"
-  - "**/*.swift"
-  - "**/*.m"
-  - "**/*.mm"
-  - "**/*.h"
-  - "**/*.dart"
-  - "**/AndroidManifest.xml"
-  - "**/Info.plist"
-  - "**/Podfile"
-  - "**/Podfile.lock"
-  - "**/build.gradle"
-  - "**/build.gradle.kts"
-  - "**/settings.gradle"
-  - "**/settings.gradle.kts"
-  - "**/pubspec.yaml"
-  - "**/*.xcodeproj/**"
-  - "**/*.xcworkspace/**"
-  - "**/android/**"
-  - "**/ios/**"
 ---
 
 # Mobile Development Life Cycle

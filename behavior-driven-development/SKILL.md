@@ -4,14 +4,6 @@ description: Behavior-Driven Development (BDD) technique. Specify and verify sof
 when_to_use: Acceptance criteria as executable scenarios; Cucumber/SpecFlow/Behave/Playwright BDD; outside-in feature delivery; three-amigos collaboration; living documentation; bridging product language and automated checks; ATDD-style acceptance tests first; any "what should the system do" conversation that must stay testable.
 allowed-tools: Read, Grep, Glob, Edit, Write, Bash(keel memory:*), Bash(keel user-story:*), Bash(git diff:*), Bash(git status), Bash(npm:*), Bash(yarn:*), Bash(pnpm:*), Bash(npx:*), Bash(cargo:*), Bash(pytest:*), Bash(dotnet:*)
 effort: medium
-paths:
-  - "**/*.feature"
-  - "**/features/**"
-  - "**/specs/**"
-  - "**/*spec.ts"
-  - "**/*_test.go"
-  - "**/cucumber*"
-  - "**/gherkin*"
 ---
 
 # Behavior-Driven Development

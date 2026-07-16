@@ -73,6 +73,8 @@ Specialists live under `~/.claude/skills/` (lifecycle, backend, cloud, security,
 - About to edit brownfield code → `preserve-existing-flow` first.
 - After non-trivial work → `reviewer`.
 
+**If `Skill("…")` returns `Unknown skill`:** the file is usually still on disk (`~/.claude/skills/<name>/SKILL.md`). The host Skill catalog can lag install or omit a name. Do **not** invent a different skill. Load via MCP instead: `skill_route` (pick by prompt) then `skill_get` with the exact name, or Read that SKILL.md path. Restart the host session after `keel install` so the catalog rescan picks up new skills.
+
 ## MCP & memory (short)
 
 Always prefer tools over guessing: `context_brief`, `system_map`, `recall`, `run_command`, `skill_route`, `skill_get`, `brief_create`, `cli`. Deep tool list + deferred-MCP traps: `references/mcp-and-memory.md`.

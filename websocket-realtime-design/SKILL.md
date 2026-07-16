@@ -4,21 +4,6 @@ description: Designs WebSocket and realtime systems (Socket.IO, raw WS, SSE, Web
 when_to_use: WebSocket, Server-Sent Events, and realtime fan-out architecture.
 allowed-tools: Read, Grep, Glob, Edit, Write, Bash(keel memory:*), Bash(git diff:*), Bash(git status), Bash(npx:*), Bash(npm:*), Bash(yarn:*), Bash(pnpm:*), Bash(node:*), Bash(redis-cli:*)
 effort: medium
-paths:
-  - "**/socket*.ts"
-  - "**/socket*.js"
-  - "**/socket*.tsx"
-  - "**/socket*.jsx"
-  - "**/ws*.ts"
-  - "**/ws*.js"
-  - "**/websocket*.ts"
-  - "**/websocket*.js"
-  - "**/*.gateway.ts"
-  - "**/realtime/**"
-  - "**/sse/**"
-  - "**/streaming/**"
-  - "**/asyncapi.yaml"
-  - "**/asyncapi.yml"
 ---
 
 # WebSocket and Realtime Design

@@ -4,20 +4,6 @@ description: Designs and reviews cloud cost and FinOps work covering cost estima
 when_to_use: Cloud cost estimation, rightsizing, commitments, allocation, budgets, and unit economics.
 allowed-tools: Read, Grep, Glob, Edit, Write, Bash(keel memory:*), Bash(git diff:*), Bash(git status), Bash(terraform:*), Bash(infracost:*), Bash(aws:*), Bash(gcloud:*), Bash(az:*), Bash(jq:*)
 effort: medium
-paths:
-  - "**/infracost*.yml"
-  - "**/infracost*.yaml"
-  - "**/*.infracost.*"
-  - "**/cost-*.y?ml"
-  - "**/*budget*.y?ml"
-  - "**/*budget*.json"
-  - "**/finops/**"
-  - "**/cost/**"
-  - "**/*.tfvars"
-  - "**/autoscal*.y?ml"
-  - "**/*hpa*.y?ml"
-  - "**/tags*.y?ml"
-  - "**/cost-allocation*.json"
 ---
 
 # Cloud Cost and FinOps
