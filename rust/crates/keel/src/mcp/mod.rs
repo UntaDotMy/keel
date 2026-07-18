@@ -310,6 +310,28 @@ pub(super) fn max_inflight() -> usize {
         .unwrap_or(DEFAULT_MAX_INFLIGHT)
 }
 
+/// Default idle self-reap budget for stdio `mcp serve`. A Grok/Claude session
+/// that drops without closing stdin leaves the server blocked on `recv()`
+/// forever, holding the recall SQLite WAL and disk, which is the root cause of
+/// the intermittent Grok tool timeouts. After this long with no inbound frame
+/// the server exits 0 so the orphan reaps itself. Override with
+/// `KEEL_MCP_IDLE_TIMEOUT_SECS` (min 30, max 86400; 0 disables).
+const DEFAULT_MCP_IDLE_TIMEOUT_SECS: u64 = 300;
+
+/// Resolve the idle self-reap budget. `0` disables (legacy never-exit behavior,
+/// kept for hosts that hold a long-lived server intentionally). HTTP serve is
+/// multi-client and does not use this; only the per-session stdio loop does.
+pub(super) fn idle_timeout() -> Option<std::time::Duration> {
+    let secs = env::var("KEEL_MCP_IDLE_TIMEOUT_SECS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_MCP_IDLE_TIMEOUT_SECS);
+    if secs == 0 {
+        return None;
+    }
+    Some(std::time::Duration::from_secs(secs.clamp(30, 86_400)))
+}
+
 fn read_frames_into(input: &mut dyn Read, event_tx: mpsc::Sender<ServeEvent>) {
     let mut reader = BufReader::new(input);
     let mut raw_line: Vec<u8> = Vec::new();
@@ -361,50 +383,89 @@ fn run_serve_event_loop(
     let mut next_batch_id: u64 = 1;
     let mut reader_done = false;
     let mut exit_code: u8 = 0;
+    let idle_budget = idle_timeout();
+    let mut last_frame_at = std::time::Instant::now();
 
     loop {
-        let event = match event_rx.recv() {
-            Ok(event) => event,
-            Err(_) => break,
+        // why: block only up to the remaining idle budget so an abandoned session
+        // (orphan) exits instead of holding the recall WAL; frames reset the clock.
+        let event = match idle_budget {
+            Some(budget) => {
+                let elapsed = last_frame_at.elapsed();
+                if elapsed >= budget && in_flight == 0 && pending.is_empty() {
+                    let _ = writeln!(
+                        standard_error,
+                        "[keel mcp] idle for {}s with no inbound frame; self-reaping orphan (set KEEL_MCP_IDLE_TIMEOUT_SECS=0 to disable)",
+                        budget.as_secs()
+                    );
+                    break;
+                }
+                let remaining = budget
+                    .saturating_sub(elapsed)
+                    .max(std::time::Duration::from_millis(50));
+                match event_rx.recv_timeout(remaining) {
+                    Ok(event) => event,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        if in_flight == 0 && pending.is_empty() {
+                            let _ = writeln!(
+                                standard_error,
+                                "[keel mcp] idle for {}s with no inbound frame; self-reaping orphan (set KEEL_MCP_IDLE_TIMEOUT_SECS=0 to disable)",
+                                budget.as_secs()
+                            );
+                            break;
+                        }
+                        continue;
+                    }
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+            }
+            None => match event_rx.recv() {
+                Ok(event) => event,
+                Err(_) => break,
+            },
         };
 
         match event {
-            ServeEvent::Frame(frame) => match parse_frame(&frame) {
-                FrameParse::Single(request) => {
-                    pending.push_back(PendingJob {
-                        request,
-                        batch: None,
-                    });
-                }
-                FrameParse::Batch(items) => {
-                    let batch_id = next_batch_id;
-                    next_batch_id = next_batch_id.saturating_add(1);
-                    let len = items.len();
-                    batches.insert(
-                        batch_id,
-                        BatchCollector {
-                            slots: (0..len).map(|_| BatchSlot::Pending).collect(),
-                            remaining: len,
-                        },
-                    );
-                    for (index, request) in items.into_iter().enumerate() {
+            ServeEvent::Frame(frame) => {
+                last_frame_at = std::time::Instant::now();
+                match parse_frame(&frame) {
+                    FrameParse::Single(request) => {
                         pending.push_back(PendingJob {
                             request,
-                            batch: Some(BatchMember { batch_id, index }),
+                            batch: None,
                         });
                     }
-                }
-                FrameParse::Immediate(response) => {
-                    if let Err(write_error) =
-                        write_framed_response(standard_output, standard_error, &response)
-                    {
-                        let _ = writeln!(standard_error, "[keel mcp] write stdout: {write_error}");
-                        exit_code = 1;
-                        reader_done = true;
-                        pending.clear();
+                    FrameParse::Batch(items) => {
+                        let batch_id = next_batch_id;
+                        next_batch_id = next_batch_id.saturating_add(1);
+                        let len = items.len();
+                        batches.insert(
+                            batch_id,
+                            BatchCollector {
+                                slots: (0..len).map(|_| BatchSlot::Pending).collect(),
+                                remaining: len,
+                            },
+                        );
+                        for (index, request) in items.into_iter().enumerate() {
+                            pending.push_back(PendingJob {
+                                request,
+                                batch: Some(BatchMember { batch_id, index }),
+                            });
+                        }
+                    }
+                    FrameParse::Immediate(response) => {
+                        if let Err(write_error) =
+                            write_framed_response(standard_output, standard_error, &response)
+                        {
+                            let _ =
+                                writeln!(standard_error, "[keel mcp] write stdout: {write_error}");
+                            exit_code = 1;
+                            reader_done = true;
+                            pending.clear();
+                        }
                     }
                 }
-            },
+            }
             ServeEvent::OversizedFrame => {
                 let oversized = error_response(
                     Value::Null,
@@ -996,6 +1057,20 @@ pub(super) struct MethodError {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn idle_timeout_defaults_to_bounded_reap_window() {
+        // why: the default must be a real budget so orphans self-reap, and it
+        // must exceed any single tool deadline so an active call is not idle.
+        if std::env::var_os("KEEL_MCP_IDLE_TIMEOUT_SECS").is_none() {
+            let budget = idle_timeout().expect("default idle reap enabled");
+            assert!(budget.as_secs() >= 60, "idle window too tight: {budget:?}");
+            assert!(
+                budget.as_secs() > crate::mcp::tools::DEFAULT_MCP_CHILD_TIMEOUT_SECS_FOR_TEST,
+                "idle window must exceed the per-tool deadline"
+            );
+        }
+    }
 
     #[test]
     fn initialize_returns_protocol_and_server_info() {

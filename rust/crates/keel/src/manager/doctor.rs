@@ -22,7 +22,27 @@ pub fn run_doctor_command(
     standard_output: &mut dyn Write,
     standard_error: &mut dyn Write,
 ) -> u8 {
-    let status_code = run_status_command(build_version, arguments, standard_output, standard_error);
+    let mut flag_set = crate::args::FlagSet::new("doctor");
+    flag_set.bool_flag("fix", false);
+    flag_set.string_flag("repo-root", "");
+    flag_set.string_flag("claude-home", "");
+    let _ = flag_set.parse(arguments);
+    let fix = flag_set.bool_value("fix");
+
+    // Forward only the flags `status` understands; `status` rejects `--fix`.
+    let mut status_args: Vec<String> = Vec::new();
+    let repo_root = flag_set.string_value("repo-root").trim();
+    if !repo_root.is_empty() {
+        status_args.push("--repo-root".to_string());
+        status_args.push(repo_root.to_string());
+    }
+    let claude_home_arg = flag_set.string_value("claude-home").trim();
+    if !claude_home_arg.is_empty() {
+        status_args.push("--claude-home".to_string());
+        status_args.push(claude_home_arg.to_string());
+    }
+    let status_code =
+        run_status_command(build_version, &status_args, standard_output, standard_error);
     if status_code != 0 {
         return status_code;
     }
@@ -129,11 +149,129 @@ pub fn run_doctor_command(
             "shell interception path: PreToolUse rewrite probe failed",
         );
     }
+    let orphan_pids = find_orphan_mcp_serve_pids();
+    if orphan_pids.is_empty() {
+        write_doctor_check(
+            standard_output,
+            true,
+            "no orphaned keel mcp serve processes",
+        );
+    } else if fix {
+        let reaped = reap_processes(&orphan_pids);
+        write_doctor_check(
+            standard_output,
+            reaped == orphan_pids.len(),
+            &format!(
+                "reaped {reaped}/{} orphaned keel mcp serve process(es) (they hold the recall WAL; the idle self-reap now prevents recurrence)",
+                orphan_pids.len()
+            ),
+        );
+    } else {
+        let _ = writeln!(
+            standard_output,
+            "[warn] {} orphaned keel mcp serve process(es) detected (pids: {}); they hold the recall SQLite WAL and cause Grok MCP tool timeouts. Run `keel doctor --fix` to reap them.",
+            orphan_pids.len(),
+            orphan_pids
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
     let _ = writeln!(
         standard_output,
         "Run `keel validate --profile smoke` for local proof."
     );
     0
+}
+
+/// PIDs of running `keel mcp serve` processes other than the caller's own. A
+/// dropped Grok/Claude session leaves these as orphans; each holds the recall
+/// SQLite WAL and is the root cause of intermittent MCP tool timeouts. The
+/// caller's own PID is always excluded so `doctor` never targets the live
+/// session serving it.
+fn find_orphan_mcp_serve_pids() -> Vec<u32> {
+    let own_pid = std::process::id();
+    running_mcp_serve_pids()
+        .into_iter()
+        .filter(|pid| *pid != own_pid)
+        .collect()
+}
+
+/// Enumerate `keel mcp serve` PIDs via the OS process table. Windows uses WMIC/
+/// PowerShell CIM; Unix uses `ps`. Returns an empty vec on any probe failure; the
+/// orphan check is advisory and must never fail the doctor run.
+#[cfg(windows)]
+fn running_mcp_serve_pids() -> Vec<u32> {
+    let output = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "Get-CimInstance Win32_Process -Filter \"Name='keel.exe'\" | Where-Object { $_.CommandLine -match 'mcp serve' } | ForEach-Object { $_.ProcessId }",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output();
+    parse_pid_listing(
+        output
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string()),
+    )
+}
+
+#[cfg(not(windows))]
+fn running_mcp_serve_pids() -> Vec<u32> {
+    let output = Command::new("sh")
+        .args([
+            "-c",
+            "ps -eo pid,args | grep '[k]eel mcp serve' | awk '{print $1}'",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output();
+    parse_pid_listing(
+        output
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string()),
+    )
+}
+
+fn parse_pid_listing(listing: Option<String>) -> Vec<u32> {
+    listing
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| line.trim().parse::<u32>().ok())
+        .collect()
+}
+
+/// Terminate the given PIDs, returning how many were actually reaped. Used only
+/// by `doctor --fix`; the pids come from `find_orphan_mcp_serve_pids`, which
+/// already excludes the caller's own process.
+fn reap_processes(pids: &[u32]) -> usize {
+    pids.iter().filter(|pid| terminate_pid(**pid)).count()
+}
+
+#[cfg(windows)]
+fn terminate_pid(pid: u32) -> bool {
+    Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/F", "/T"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+#[cfg(not(windows))]
+fn terminate_pid(pid: u32) -> bool {
+    Command::new("kill")
+        .arg(pid.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
 }
 
 /// Probe the PreToolUse hook with a noisy command and confirm it produces a
@@ -549,6 +687,26 @@ mod tests {
         let mut out = Vec::new();
         report_mcp_registration(&mut out, claude_home);
         String::from_utf8(out).expect("utf8")
+    }
+
+    #[test]
+    fn parse_pid_listing_reads_numeric_lines_and_skips_noise() {
+        let pids = parse_pid_listing(Some("1234\n  5678 \nnot-a-pid\n\n90\n".to_string()));
+        assert_eq!(pids, vec![1234, 5678, 90]);
+        assert!(parse_pid_listing(None).is_empty());
+        assert!(parse_pid_listing(Some(String::new())).is_empty());
+    }
+
+    #[test]
+    fn orphan_scan_never_includes_own_pid() {
+        // why: the reaper must never target the calling process; its own PID is
+        // filtered out by construction regardless of the live process table.
+        let own = std::process::id();
+        let filtered: Vec<u32> = vec![own, 999_999]
+            .into_iter()
+            .filter(|p| *p != own)
+            .collect();
+        assert!(!filtered.contains(&own));
     }
 
     #[test]
