@@ -844,12 +844,15 @@ fn open_recall_connection(database_path: &Path) -> Result<Connection, String> {
         .map_err(|database_error| {
             recall_open_error_hint(database_path, &format!("set synchronous: {database_error}"))
         })?;
-    // Fail closed on lock contention instead of waiting forever when another
-    // orphaned `keel mcp serve` (or concurrent CLI) holds the WAL. Grok/Claude
-    // sessions that leave zombie MCP processes were hanging recall/system_map
-    // tools until the host client timed out (often minutes).
+    // why: fail fast on WAL lock contention so an orphaned `keel mcp serve`
+    // degrades to a quick error+rebuild hint. Override `KEEL_RECALL_BUSY_TIMEOUT_MS`.
+    let busy_ms = std::env::var("KEEL_RECALL_BUSY_TIMEOUT_MS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .unwrap_or(750)
+        .clamp(0, 30_000);
     connection
-        .busy_timeout(std::time::Duration::from_millis(5_000))
+        .busy_timeout(std::time::Duration::from_millis(busy_ms))
         .map_err(|database_error| {
             recall_open_error_hint(
                 database_path,

@@ -61,6 +61,11 @@ use super::{recall_status_payload, system_map_text, MethodError, JSON_RPC_INVALI
 /// builds; raise via env only when the host budget is known to be higher.
 const DEFAULT_MCP_CHILD_TIMEOUT_SECS: u64 = 25;
 
+/// Test-visible handle on the per-tool deadline so sibling modules can assert
+/// relationships against it without re-hardcoding the number.
+#[cfg(test)]
+pub(crate) const DEFAULT_MCP_CHILD_TIMEOUT_SECS_FOR_TEST: u64 = DEFAULT_MCP_CHILD_TIMEOUT_SECS;
+
 /// Soft cap for large text tool results (system_map, skill bodies, context_brief).
 ///
 /// Hosts like Grok default to ~20KB MCP tool-result caps and parse stdio as
