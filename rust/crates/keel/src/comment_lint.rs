@@ -70,6 +70,38 @@ pub fn lint_working_prose(repo_root: &Path) -> Vec<FileCommentFinding> {
     scan_prose_diff(&diff)
 }
 
+/// Lint the prose body of every tracked markdown/doc file in the tree
+/// (whole-file scan). Used by the `review pre-commit --all` / `pre-pr --all`
+/// cleanup surfaces so pre-existing AI-slop prose is caught, not just added
+/// lines. Pairs with `lint_tracked_tree` (code comments).
+pub fn lint_tracked_tree_prose(repo_root: &Path) -> Vec<FileCommentFinding> {
+    let args = vec!["ls-files".to_string()];
+    let listing = match run_command("git", &args, Some(repo_root)) {
+        Ok(result) if result.code == 0 => String::from_utf8_lossy(&result.stdout).to_string(),
+        _ => return Vec::new(),
+    };
+    let mut findings = Vec::new();
+    for rel_path in listing.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        if !is_prose_file(rel_path) {
+            continue;
+        }
+        let full = repo_root.join(rel_path);
+        let Ok(source) = std::fs::read_to_string(&full) else {
+            continue;
+        };
+        for prose_finding in lint_prose(&source, 1) {
+            findings.push(FileCommentFinding {
+                file: rel_path.to_string(),
+                line: prose_finding.line,
+                id: prose_finding.id,
+                severity: prose_finding.severity,
+                message: prose_finding.message,
+            });
+        }
+    }
+    findings
+}
+
 /// Lint every tracked source file in the tree (whole-file scan). Used by
 /// `review comments --all` for cleanup work over pre-existing comments.
 pub fn lint_tracked_tree(repo_root: &Path) -> Vec<FileCommentFinding> {
@@ -308,6 +340,56 @@ pub fn format_findings(findings: &[FileCommentFinding]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_repo(label: &str) -> std::path::PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        let dir = std::env::temp_dir().join(format!("prose-tree-{label}-{nanos}"));
+        std::fs::create_dir_all(&dir).expect("create temp repo");
+        dir
+    }
+
+    fn git(repo: &std::path::Path, args: &[&str]) {
+        let owned: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        let result = run_command("git", &owned, Some(repo)).expect("git runs");
+        assert_eq!(result.code, 0, "git {args:?} failed");
+    }
+
+    // Whole-tree prose scan: pre-existing AI-slop in markdown must be caught by
+    // --all mode (the diff scanner only sees added lines).
+
+    #[test]
+    fn tracked_tree_prose_catches_preexisting_slop() {
+        let repo = temp_repo("slop");
+        std::fs::write(
+            repo.join("guide.md"),
+            "# Guide\n\nLet's delve into how we leverage this.\n",
+        )
+        .expect("write markdown");
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["add", "guide.md"]);
+        let findings = lint_tracked_tree_prose(&repo);
+        assert!(
+            findings.iter().any(|f| f.id == "prose-ai-slop"),
+            "tree prose scan must catch pre-existing slop: {findings:?}"
+        );
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn tracked_tree_prose_skips_non_prose_files() {
+        let repo = temp_repo("skip");
+        std::fs::write(repo.join("x.rs"), "// delve into leverage\nfn main() {}\n")
+            .expect("write source");
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["add", "x.rs"]);
+        let findings = lint_tracked_tree_prose(&repo);
+        assert!(findings.is_empty(), "non-prose files skipped: {findings:?}");
+        let _ = std::fs::remove_dir_all(&repo);
+    }
 
     #[test]
     fn added_three_line_impl_comment_is_blocking() {

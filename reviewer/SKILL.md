@@ -58,6 +58,8 @@ Blocker · Major · Minor · Nit
 ## Fail-closed
 No Pass if critical applicable gate skipped/blocked. No Pass/Conditional if required ladder rung fail/blocked/unjustified skip. Missing unit tests → require lowest-layer regression + named uncovered edges.
 
+Default gates scan added diff lines only (pre-existing slop grandfathered). For a cleanup pass over the whole tree — code comments, prose AI-slop, and code slop, not just the diff — run `keel review pre-commit --all` (or `pre-pr --all`). Use it deliberately: it reports legacy findings repo-wide and blocks on them, so it is a remediation surface, not the per-commit gate.
+
 ## Route specialists when needed
 `security-and-compliance-auditor`, `qa-and-automation-engineer`, `git-expert`, lifecycle skills, UI/UX skills — keep reviewer on findings/gate.
 

@@ -10,8 +10,9 @@
 //! Dependencies: std::fs/path, crate::args::FlagSet, crate::runtime path helpers,
 //!   serde_json (already a workspace dependency).
 //! Main Functions: run_code_graph_command, build_graph, impact_of.
-//! Side Effects: Reads workspace files; `build` writes the JSON artifact under the
-//!   workspace (default `.understand/code-graph.json`, committable).
+//! Side Effects: Reads workspace files; `build` writes the JSON artifact. The
+//!   default output is the global per-workspace memory lane (never the
+//!   workspace); an explicit `--output` opts into a committable in-repo path.
 //!
 //! Determinism is the contract. Extraction is line-based (no network, no model,
 //! no global state): nodes are sorted by path, edges by (from,to,kind), and every
@@ -27,16 +28,71 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::args::FlagSet;
-use crate::runtime::{display_path, resolve_repository_root};
+use crate::runtime::{
+    display_path, resolve_claude_home, resolve_repository_root, safe_path_segment,
+};
 
 /// Schema version of the emitted artifact. Bump when the JSON shape changes so a
 /// reader can refuse an incompatible graph rather than misparse it.
 const GRAPH_VERSION: u64 = 1;
 
-/// Default committable artifact location, relative to the workspace root. Mirrors
-/// the "graph-as-code" idea: teammates and later sessions read the artifact
-/// instead of re-running the scan.
-const DEFAULT_ARTIFACT: &str = ".understand/code-graph.json";
+/// Artifact file name used for the default (global-lane) location. The default
+/// `build` output no longer lives inside the workspace: per the "never pollute
+/// the user workspace" rule, an unqualified `keel code-graph build` writes under
+/// the global per-workspace memory lane (`<claude-home>/memories/workspaces/
+/// <slug>/code-graph/<NAME>`), not `.understand/`. A caller who wants the
+/// committable "graph-as-code" artifact passes an explicit `--output <path>`,
+/// which stays workspace-relative.
+const DEFAULT_ARTIFACT_NAME: &str = "code-graph.json";
+
+/// Resolve the artifact path for `build`. Empty `--output` → the global
+/// per-workspace memory lane (never the workspace). Non-empty relative `--output`
+/// → workspace-relative (explicit opt-in to a committable in-repo artifact).
+/// Absolute `--output` → used as-is. `claude_home` is resolved from the
+/// `--claude-home` flag / env so tests can isolate it.
+fn resolve_artifact_path(
+    root: &Path,
+    output: &str,
+    claude_home_flag: &str,
+) -> Result<PathBuf, String> {
+    let trimmed = output.trim();
+    if !trimmed.is_empty() {
+        let candidate = PathBuf::from(trimmed);
+        if candidate.is_absolute() {
+            return Ok(candidate);
+        }
+        return Ok(root.join(candidate));
+    }
+    let claude_home = resolve_claude_home(claude_home_flag)?;
+    let slug = workspace_slug(&root.to_string_lossy());
+    Ok(claude_home
+        .join("memories")
+        .join("workspaces")
+        .join(slug)
+        .join("code-graph")
+        .join(DEFAULT_ARTIFACT_NAME))
+}
+
+/// Slug a workspace path into a single safe directory segment, matching the
+/// per-workspace memory-lane scheme used by SYSTEM_MAP (lowercase, non
+/// alphanumeric runs collapse to `-`). Falls back to a length-bounded segment so
+/// the join can never escape the lane.
+fn workspace_slug(raw: &str) -> String {
+    let mut slug = String::with_capacity(raw.len());
+    let mut last_was_dash = false;
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+            last_was_dash = false;
+        } else if !last_was_dash {
+            slug.push('-');
+            last_was_dash = true;
+        }
+    }
+    let trimmed = slug.trim_matches('-');
+    let bounded: String = trimmed.chars().take(64).collect();
+    safe_path_segment(&bounded).unwrap_or_else(|| "workspace".to_string())
+}
 
 /// Upper bound on files scanned, matching `code-search`'s ceiling so a pathological
 /// tree cannot make the command run unbounded.
@@ -87,7 +143,10 @@ pub fn run_code_graph_command(
              \n\
              Flags:\n\
              \x20 --workspace-root <path>  Root to scan (default: resolved repository root).\n\
-             \x20 --output <path>          Artifact path for build (default: {DEFAULT_ARTIFACT}).\n\
+             \x20 --output <path>          Artifact path for build. Default (empty) writes to the\n\
+             \x20                          global per-workspace memory lane, never the workspace.\n\
+             \x20                          Pass a relative path to opt into a committable in-repo file.\n\
+             \x20 --claude-home <path>     Harness home for the default lane (default: ~/.claude).\n\
              \x20 --changed <a,b,c>        Comma-separated changed files for impact.\n\
              \x20 --json                   Machine-readable output."
         );
@@ -137,7 +196,8 @@ fn run_build(
 ) -> u8 {
     let mut flags = FlagSet::new("code-graph build");
     flags.string_flag("workspace-root", "");
-    flags.string_flag("output", DEFAULT_ARTIFACT);
+    flags.string_flag("output", "");
+    flags.string_flag("claude-home", "");
     flags.bool_flag("json", false);
     if let Err(error) = flags.parse(arguments) {
         let _ = writeln!(standard_error, "{}", error.message);
@@ -161,8 +221,17 @@ fn run_build(
         }
     };
 
-    let output_relative = flags.string_value("output");
-    let output_path = root.join(output_relative);
+    let output_path = match resolve_artifact_path(
+        &root,
+        flags.string_value("output"),
+        flags.string_value("claude-home"),
+    ) {
+        Ok(path) => path,
+        Err(error) => {
+            let _ = writeln!(standard_error, "code-graph build: {error}");
+            return 1;
+        }
+    };
     if let Some(parent) = output_path.parent() {
         if let Err(error) = fs::create_dir_all(parent) {
             let _ = writeln!(
@@ -809,6 +878,60 @@ mod tests {
         let path = root.join(rel);
         fs::create_dir_all(path.parent().unwrap()).expect("mkdir");
         fs::write(path, content).expect("write");
+    }
+
+    #[test]
+    fn default_artifact_path_is_global_not_workspace() {
+        // why: an unqualified build must resolve its artifact under the global
+        // per-workspace memory lane, never inside the scanned root.
+        let root = tempdir("lane-root");
+        let home = tempdir("lane-home");
+        let resolved = resolve_artifact_path(&root, "", &home.to_string_lossy())
+            .expect("resolve default lane");
+        assert!(
+            !resolved.starts_with(&root),
+            "default artifact must not live in the workspace: {}",
+            display_path(&resolved)
+        );
+        assert!(
+            resolved.starts_with(&home),
+            "default artifact must live under the claude home lane: {}",
+            display_path(&resolved)
+        );
+        assert!(resolved.ends_with("code-graph.json"));
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn explicit_relative_output_stays_in_workspace() {
+        // Opting into a committable in-repo artifact: a relative --output is
+        // honored as workspace-relative.
+        let root = tempdir("explicit-root");
+        let home = tempdir("explicit-home");
+        let resolved = resolve_artifact_path(
+            &root,
+            ".understand/code-graph.json",
+            &home.to_string_lossy(),
+        )
+        .expect("resolve explicit");
+        assert!(resolved.starts_with(&root));
+        assert!(resolved.ends_with("code-graph.json"));
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn absolute_output_is_used_as_is() {
+        let root = tempdir("abs-root");
+        let home = tempdir("abs-home");
+        let absolute = tempdir("abs-out").join("graph.json");
+        let resolved =
+            resolve_artifact_path(&root, &absolute.to_string_lossy(), &home.to_string_lossy())
+                .expect("resolve absolute");
+        assert_eq!(resolved, absolute);
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&home);
     }
 
     #[test]

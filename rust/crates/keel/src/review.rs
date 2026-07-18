@@ -7,10 +7,13 @@
 use std::fs;
 use std::io::Write;
 use std::path::Path;
+use std::thread::sleep;
+use std::time::{Duration, Instant};
 
 use crate::args::FlagSet;
 use crate::json::{write_indented, Value};
-use crate::runtime::{resolve_repository_root, run_command, write_text};
+use crate::runtime::{resolve_claude_home, resolve_repository_root, run_command, write_text};
+use crate::utility::record_store::RecordStore;
 
 pub fn run_review_command(
     arguments: &[String],
@@ -73,6 +76,9 @@ pub fn run_git_workflow_command(
         }
         "lint-message" => lint_message(&arguments[1..], standard_output, standard_error),
         "preflight" => run_git_workflow_preflight(&arguments[1..], standard_output, standard_error),
+        "await-ci" => run_git_workflow_await_ci(&arguments[1..], standard_output, standard_error),
+        "configure" => run_git_workflow_configure(&arguments[1..], standard_output, standard_error),
+        "show" => run_git_workflow_show(&arguments[1..], standard_output, standard_error),
         other => {
             let _ = writeln!(standard_error, "Unknown git-workflow command: {other}");
             render_git_workflow_help(standard_output);
@@ -289,6 +295,675 @@ fn truncate_subject(subject: &str) -> String {
         let truncated: String = subject.chars().take(MAX).collect();
         format!("{truncated}…")
     }
+}
+
+// why: the "do not merge blind" rule. Wait for the head commit's CI checks to go
+// green before merging; block while any check is red or pending. No CI passes.
+
+/// Per-check status surfaced to the merge gate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CheckState {
+    Pending,
+    Green,
+    Red,
+}
+
+#[derive(Debug, Clone)]
+struct CiCheck {
+    name: String,
+    state: CheckState,
+}
+
+/// Which CI provider CLI was detected for this repo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CiProvider {
+    Glab,
+    Gh,
+}
+
+impl CiProvider {
+    fn label(self) -> &'static str {
+        match self {
+            CiProvider::Glab => "glab",
+            CiProvider::Gh => "gh",
+        }
+    }
+}
+
+/// Detect the CI provider by remote URL first (authoritative), then by CLI
+/// availability. A GitLab remote uses `glab`; a GitHub remote uses `gh`. When the
+/// remote gives no signal, fall back to whichever CLI is installed (glab first).
+/// Returns `None` when no usable provider exists; the gate then reports no-CI.
+fn detect_ci_provider(repo: Option<&Path>) -> Option<CiProvider> {
+    let remote = git_text(repo, &["config", "--get", "remote.origin.url"])
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let wants_gitlab = remote.contains("gitlab");
+    let wants_github = remote.contains("github");
+    if wants_gitlab && cli_available("glab") {
+        return Some(CiProvider::Glab);
+    }
+    if wants_github && cli_available("gh") {
+        return Some(CiProvider::Gh);
+    }
+    // Remote gave no usable signal (or its CLI is missing): fall back to
+    // whichever CLI is installed, glab first per the auto-detect order.
+    if cli_available("glab") {
+        return Some(CiProvider::Glab);
+    }
+    if cli_available("gh") {
+        return Some(CiProvider::Gh);
+    }
+    None
+}
+
+/// Whether a CLI is invocable at all (spawn succeeds). `--version` is cheap and
+/// offline-safe for both `gh` and `glab`.
+fn cli_available(program: &str) -> bool {
+    run_command(program, &["--version".to_string()], None)
+        .map(|result| result.code == 0)
+        .unwrap_or(false)
+}
+
+/// Map a free-form CI status/conclusion string onto the tri-state. Anything
+/// that is not an explicit success or an explicit still-running state is
+/// treated as red so an unknown conclusion fails closed (never merges blind).
+fn classify_check_state(raw: &str) -> CheckState {
+    let value = raw.trim().to_ascii_lowercase();
+    match value.as_str() {
+        "success" | "passed" | "pass" | "ok" => CheckState::Green,
+        "pending" | "running" | "queued" | "in_progress" | "waiting" | "requested" | "created"
+        | "" => CheckState::Pending,
+        _ => CheckState::Red,
+    }
+}
+
+/// Query the current head's checks via `glab ci status`. Output is line-based
+/// (`name: status`); it is parsed loosely and requires at least one real check so
+/// an empty or parse failure reads as "no CI" rather than "green".
+fn query_checks_glab(repo: Option<&Path>) -> Option<Vec<CiCheck>> {
+    let result = run_command(
+        "glab",
+        &["ci".to_string(), "status".to_string(), "--live".to_string()],
+        repo,
+    )
+    .ok()?;
+    if result.code != 0 {
+        return None;
+    }
+    parse_glab_status(&String::from_utf8_lossy(&result.stdout))
+}
+
+fn parse_glab_status(stdout: &str) -> Option<Vec<CiCheck>> {
+    let mut checks = Vec::new();
+    for line in stdout.lines() {
+        let line = line.trim();
+        // Typical shapes: "job-name: success" or "✓ job-name  success".
+        let cleaned = line
+            .trim_start_matches(|c: char| !c.is_alphanumeric() && c != '_')
+            .trim();
+        if cleaned.is_empty() {
+            continue;
+        }
+        if let Some((name, status)) = cleaned.rsplit_once(':') {
+            let name = name.trim();
+            if name.is_empty() {
+                continue;
+            }
+            checks.push(CiCheck {
+                name: name.to_string(),
+                state: classify_check_state(status),
+            });
+        }
+    }
+    if checks.is_empty() {
+        None
+    } else {
+        Some(checks)
+    }
+}
+
+/// Query the current head's checks via `gh pr checks` (PR-scoped). A plain
+/// (non-watch) call parses the tabular output so this gate owns the polling loop
+/// and the timeout. Requires at least one parseable check.
+fn query_checks_gh(repo: Option<&Path>) -> Option<Vec<CiCheck>> {
+    let result = run_command("gh", &["pr".to_string(), "checks".to_string()], repo).ok()?;
+    if result.code != 0 {
+        // No PR for this branch (or not a GitHub repo) -> treat as no-CI rather
+        // than green/red so the gate reports honestly.
+        return None;
+    }
+    parse_gh_checks(&String::from_utf8_lossy(&result.stdout))
+}
+
+fn parse_gh_checks(stdout: &str) -> Option<Vec<CiCheck>> {
+    let mut checks = Vec::new();
+    for line in stdout.lines() {
+        let line = line.trim();
+        if cleaned_header(line) {
+            continue;
+        }
+        // gh pr checks columns: NAME  STATUS  ... (whitespace/tab separated).
+        let mut columns = line.split_whitespace();
+        let name = match columns.next() {
+            Some(value) if !value.is_empty() => value,
+            _ => continue,
+        };
+        let status = columns.next().unwrap_or("");
+        checks.push(CiCheck {
+            name: name.to_string(),
+            state: classify_check_state(status),
+        });
+    }
+    if checks.is_empty() {
+        None
+    } else {
+        Some(checks)
+    }
+}
+
+/// Header / blank / separator detection for `gh pr checks` tabular output.
+fn cleaned_header(line: &str) -> bool {
+    if line.is_empty() {
+        return true;
+    }
+    let upper = line.to_ascii_uppercase();
+    upper.starts_with("NAME")
+        || upper.starts_with("CHECK")
+        || line
+            .chars()
+            .all(|c| c == '-' || c == '+' || c.is_whitespace())
+}
+
+/// Poll the head commit's checks until green, red, or timeout. Returns the
+/// process exit code. `--watch` keeps polling; without it the gate evaluates once
+/// and reports. On any red check the gate blocks (exit 1) and tells the caller to
+/// fix first; merge must not proceed.
+fn run_git_workflow_await_ci(
+    arguments: &[String],
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let mut flag_set = FlagSet::new("git-workflow await-ci");
+    flag_set.string_flag("repo-root", "");
+    flag_set.string_flag("provider", "auto");
+    flag_set.string_flag("timeout-secs", "600");
+    flag_set.string_flag("interval-secs", "15");
+    flag_set.bool_flag("watch", false);
+    flag_set.string_flag("format", "compact");
+    if let Err(parse_error) = flag_set.parse(arguments) {
+        let _ = writeln!(standard_error, "{}", parse_error.message);
+        return 1;
+    }
+    let repository_root = match resolve_repository_root(flag_set.string_value("repo-root")) {
+        Ok(path) => path,
+        Err(error) => {
+            let _ = writeln!(standard_error, "git-workflow await-ci: {error}");
+            return 1;
+        }
+    };
+    let repo = Some(repository_root.as_path());
+    if git_text(repo, &["rev-parse", "--is-inside-work-tree"])
+        .map(|value| value.trim() != "true")
+        .unwrap_or(true)
+    {
+        let _ = writeln!(
+            standard_error,
+            "git-workflow await-ci: {} is not a git work tree",
+            repository_root.display()
+        );
+        return 1;
+    }
+
+    let provider = match resolve_provider(flag_set.string_value("provider"), repo) {
+        Some(provider) => provider,
+        None => {
+            // No CI provider / no CI configured: not a failure. Report and pass
+            // so repos without actions are never blocked.
+            return render_await_ci_result(
+                standard_output,
+                flag_set.string_value("format"),
+                AwaitCiOutcome::NoCi,
+                "auto",
+                &[],
+                0,
+            );
+        }
+    };
+
+    let timeout_secs = flag_set
+        .string_value("timeout-secs")
+        .trim()
+        .parse::<u64>()
+        .unwrap_or(600);
+    let interval_secs = flag_set
+        .string_value("interval-secs")
+        .trim()
+        .parse::<u64>()
+        .unwrap_or(15)
+        .max(2);
+    let watch = flag_set.bool_value("watch");
+
+    let started = Instant::now();
+    let deadline = Duration::from_secs(timeout_secs);
+    let interval = Duration::from_secs(interval_secs);
+    let mut attempts = 0usize;
+
+    loop {
+        attempts += 1;
+        let checks = query_provider_checks(provider, repo);
+        match evaluate_checks(&checks) {
+            CiVerdict::Green => {
+                return render_await_ci_result(
+                    standard_output,
+                    flag_set.string_value("format"),
+                    AwaitCiOutcome::Green,
+                    provider.label(),
+                    &checks,
+                    attempts,
+                );
+            }
+            CiVerdict::Red => {
+                // Block: do NOT continue to merge on a red pipeline.
+                return render_await_ci_result(
+                    standard_output,
+                    flag_set.string_value("format"),
+                    AwaitCiOutcome::Red,
+                    provider.label(),
+                    &checks,
+                    attempts,
+                );
+            }
+            CiVerdict::NoChecks => {
+                // Provider present but this branch/PR reports no checks: treat
+                // as no-CI (pass) rather than fabricating a green.
+                return render_await_ci_result(
+                    standard_output,
+                    flag_set.string_value("format"),
+                    AwaitCiOutcome::NoCi,
+                    provider.label(),
+                    &[],
+                    attempts,
+                );
+            }
+            CiVerdict::Pending => {
+                if !watch || started.elapsed() >= deadline {
+                    let outcome = if watch {
+                        AwaitCiOutcome::Timeout
+                    } else {
+                        AwaitCiOutcome::Pending
+                    };
+                    return render_await_ci_result(
+                        standard_output,
+                        flag_set.string_value("format"),
+                        outcome,
+                        provider.label(),
+                        &checks,
+                        attempts,
+                    );
+                }
+                sleep(interval);
+            }
+        }
+    }
+}
+
+enum CiVerdict {
+    Green,
+    Red,
+    Pending,
+    NoChecks,
+}
+
+fn resolve_provider(requested: &str, repo: Option<&Path>) -> Option<CiProvider> {
+    match requested.trim().to_ascii_lowercase().as_str() {
+        "auto" | "" => detect_ci_provider(repo),
+        "glab" if cli_available("glab") => Some(CiProvider::Glab),
+        "gh" if cli_available("gh") => Some(CiProvider::Gh),
+        _ => None,
+    }
+}
+
+fn query_provider_checks(provider: CiProvider, repo: Option<&Path>) -> Vec<CiCheck> {
+    match provider {
+        CiProvider::Glab => query_checks_glab(repo).unwrap_or_default(),
+        CiProvider::Gh => query_checks_gh(repo).unwrap_or_default(),
+    }
+}
+
+fn evaluate_checks(checks: &[CiCheck]) -> CiVerdict {
+    if checks.is_empty() {
+        return CiVerdict::NoChecks;
+    }
+    if checks.iter().any(|check| check.state == CheckState::Red) {
+        return CiVerdict::Red;
+    }
+    if checks
+        .iter()
+        .any(|check| check.state == CheckState::Pending)
+    {
+        return CiVerdict::Pending;
+    }
+    CiVerdict::Green
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AwaitCiOutcome {
+    Green,
+    Red,
+    Pending,
+    Timeout,
+    NoCi,
+}
+
+impl AwaitCiOutcome {
+    /// Exit code: only a fully green pipeline (or a repo with no CI at all)
+    /// may proceed to merge. Red, pending, and timeout all block.
+    fn exit_code(self) -> u8 {
+        match self {
+            AwaitCiOutcome::Green | AwaitCiOutcome::NoCi => 0,
+            AwaitCiOutcome::Red | AwaitCiOutcome::Pending | AwaitCiOutcome::Timeout => 1,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            AwaitCiOutcome::Green => "GREEN — all checks passed, safe to merge",
+            AwaitCiOutcome::Red => {
+                "RED — fix the failing checks before merging; do NOT merge blind"
+            }
+            AwaitCiOutcome::Pending => "PENDING — checks still running; wait before merging",
+            AwaitCiOutcome::Timeout => {
+                "TIMEOUT — checks did not go green in time; do NOT merge blind"
+            }
+            AwaitCiOutcome::NoCi => {
+                "NO CI — no CI/CD checks detected for this branch; nothing to await"
+            }
+        }
+    }
+}
+
+fn render_await_ci_result(
+    standard_output: &mut dyn Write,
+    output_format: &str,
+    outcome: AwaitCiOutcome,
+    provider: &str,
+    checks: &[CiCheck],
+    attempts: usize,
+) -> u8 {
+    if output_format == "json" {
+        let payload = Value::Object(vec![
+            (
+                "command".into(),
+                Value::String("git-workflow await-ci".into()),
+            ),
+            ("passed".into(), Value::Bool(outcome.exit_code() == 0)),
+            ("outcome".into(), Value::String(format!("{outcome:?}"))),
+            ("provider".into(), Value::String(provider.into())),
+            ("attempts".into(), Value::Number(attempts.to_string())),
+            (
+                "checks".into(),
+                Value::Array(
+                    checks
+                        .iter()
+                        .map(|check| {
+                            Value::Object(vec![
+                                ("name".into(), Value::String(check.name.clone())),
+                                ("state".into(), Value::String(format!("{:?}", check.state))),
+                            ])
+                        })
+                        .collect(),
+                ),
+            ),
+        ]);
+        let _ = write_indented(standard_output, &payload);
+        return outcome.exit_code();
+    }
+    let _ = writeln!(
+        standard_output,
+        "git-workflow await-ci [{}]: {}",
+        provider,
+        outcome.label()
+    );
+    for check in checks {
+        let marker = match check.state {
+            CheckState::Green => "ok",
+            CheckState::Pending => "…",
+            CheckState::Red => "FAIL",
+        };
+        let _ = writeln!(standard_output, "  [{marker:>4}] {}", check.name);
+    }
+    if outcome == AwaitCiOutcome::Red {
+        let _ = writeln!(
+            standard_output,
+            "  fix the red checks, push, and re-run `keel git-workflow await-ci --watch` before merging"
+        );
+    }
+    outcome.exit_code()
+}
+
+// why: persist the chosen branch+commit workflow to the global per-workspace
+// memory lane so it survives sessions; this records the model, not new formats.
+
+/// The four-tier model is the supported default; `configure` records the user's
+/// choice (and notes) so `show` and later sessions recall it.
+const WORKFLOW_PREF_RECORD_ID: &str = "active";
+
+fn workflow_pref_store(repository_root: &Path, claude_home: &Path) -> RecordStore {
+    let slug = workflow_slug(&repository_root.to_string_lossy());
+    RecordStore::new(
+        claude_home,
+        &format!("memories/workspaces/{slug}/git-workflow"),
+    )
+}
+
+/// Slug a workspace path into a safe directory segment (mirrors the SYSTEM_MAP
+/// per-workspace lane naming).
+fn workflow_slug(raw: &str) -> String {
+    let mut slug = String::with_capacity(raw.len());
+    let mut last_dash = false;
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+            last_dash = false;
+        } else if !last_dash {
+            slug.push('-');
+            last_dash = true;
+        }
+    }
+    let bounded: String = slug.trim_matches('-').chars().take(64).collect();
+    if bounded.is_empty() {
+        "workspace".to_string()
+    } else {
+        bounded
+    }
+}
+
+fn run_git_workflow_configure(
+    arguments: &[String],
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let mut flag_set = FlagSet::new("git-workflow configure");
+    flag_set.string_flag("repo-root", "");
+    flag_set.string_flag("claude-home", "");
+    flag_set.string_flag("model", "four-tier");
+    flag_set.string_flag("note", "");
+    flag_set.string_flag("format", "compact");
+    if let Err(parse_error) = flag_set.parse(arguments) {
+        let _ = writeln!(standard_error, "{}", parse_error.message);
+        return 1;
+    }
+    let repository_root = match resolve_repository_root(flag_set.string_value("repo-root")) {
+        Ok(path) => path,
+        Err(error) => {
+            let _ = writeln!(standard_error, "git-workflow configure: {error}");
+            return 1;
+        }
+    };
+    let claude_home = match resolve_claude_home(flag_set.string_value("claude-home")) {
+        Ok(path) => path,
+        Err(error) => {
+            let _ = writeln!(standard_error, "git-workflow configure: {error}");
+            return 1;
+        }
+    };
+    let model = flag_set.string_value("model").trim().to_string();
+    if model.is_empty() {
+        let _ = writeln!(
+            standard_error,
+            "git-workflow configure: --model must not be empty"
+        );
+        return 1;
+    }
+    let note = flag_set.string_value("note").trim().to_string();
+    let store = workflow_pref_store(&repository_root, &claude_home);
+    let record = vec![
+        ("model".to_string(), model.clone()),
+        ("note".to_string(), note.clone()),
+        (
+            "repoRoot".to_string(),
+            repository_root.to_string_lossy().to_string(),
+        ),
+        (
+            "branchTiers".to_string(),
+            "main <- dev <- feat <- feature/<name>".to_string(),
+        ),
+        (
+            "workBranchPrefixes".to_string(),
+            SANCTIONED_BRANCH_PREFIXES.join(" "),
+        ),
+        (
+            "commitPrefixes".to_string(),
+            SANCTIONED_COMMIT_PREFIXES.join(" "),
+        ),
+    ];
+    let path = match store.write_record(WORKFLOW_PREF_RECORD_ID, &record) {
+        Ok(path) => path,
+        Err(error) => {
+            let _ = writeln!(standard_error, "git-workflow configure: {error}");
+            return 1;
+        }
+    };
+    if flag_set.string_value("format") == "json" {
+        let payload = Value::Object(vec![
+            (
+                "command".into(),
+                Value::String("git-workflow configure".into()),
+            ),
+            ("saved".into(), Value::Bool(true)),
+            ("model".into(), Value::String(model)),
+            ("note".into(), Value::String(note)),
+            (
+                "path".into(),
+                Value::String(path.to_string_lossy().to_string()),
+            ),
+        ]);
+        let _ = write_indented(standard_output, &payload);
+    } else {
+        let _ = writeln!(
+            standard_output,
+            "git-workflow configure: saved workflow preference (model={model})"
+        );
+        let _ = writeln!(standard_output, "  stored at {}", path.display());
+        let _ = writeln!(
+            standard_output,
+            "  recall later with `keel git-workflow show`"
+        );
+    }
+    0
+}
+
+fn run_git_workflow_show(
+    arguments: &[String],
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let mut flag_set = FlagSet::new("git-workflow show");
+    flag_set.string_flag("repo-root", "");
+    flag_set.string_flag("claude-home", "");
+    flag_set.string_flag("format", "compact");
+    if let Err(parse_error) = flag_set.parse(arguments) {
+        let _ = writeln!(standard_error, "{}", parse_error.message);
+        return 1;
+    }
+    let repository_root = match resolve_repository_root(flag_set.string_value("repo-root")) {
+        Ok(path) => path,
+        Err(error) => {
+            let _ = writeln!(standard_error, "git-workflow show: {error}");
+            return 1;
+        }
+    };
+    let claude_home = match resolve_claude_home(flag_set.string_value("claude-home")) {
+        Ok(path) => path,
+        Err(error) => {
+            let _ = writeln!(standard_error, "git-workflow show: {error}");
+            return 1;
+        }
+    };
+    let store = workflow_pref_store(&repository_root, &claude_home);
+    let record = match store.read_record(WORKFLOW_PREF_RECORD_ID) {
+        Ok(Some(record)) => record,
+        Ok(None) => {
+            let _ = writeln!(
+                standard_output,
+                "git-workflow show: no saved preference for this workspace (default model=four-tier). Run `keel git-workflow configure` to set one."
+            );
+            let _ = writeln!(
+                standard_output,
+                "  default tiers: main <- dev <- feat <- feature/<name>"
+            );
+            let _ = writeln!(
+                standard_output,
+                "  work-branch prefixes: {}",
+                SANCTIONED_BRANCH_PREFIXES.join(", ")
+            );
+            return 0;
+        }
+        Err(error) => {
+            let _ = writeln!(standard_error, "git-workflow show: {error}");
+            return 1;
+        }
+    };
+    // Record is a Vec<(String, String)>: look up by key with a linear scan.
+    let get = |key: &str| {
+        record
+            .iter()
+            .find(|(field, _)| field == key)
+            .map(|(_, value)| value.clone())
+            .unwrap_or_default()
+    };
+    if flag_set.string_value("format") == "json" {
+        let payload = Value::Object(vec![
+            ("command".into(), Value::String("git-workflow show".into())),
+            ("model".into(), Value::String(get("model"))),
+            ("note".into(), Value::String(get("note"))),
+            ("branchTiers".into(), Value::String(get("branchTiers"))),
+            (
+                "workBranchPrefixes".into(),
+                Value::String(get("workBranchPrefixes")),
+            ),
+            (
+                "commitPrefixes".into(),
+                Value::String(get("commitPrefixes")),
+            ),
+        ]);
+        let _ = write_indented(standard_output, &payload);
+    } else {
+        let _ = writeln!(
+            standard_output,
+            "git-workflow show: saved workflow preference"
+        );
+        let _ = writeln!(standard_output, "  model:   {}", get("model"));
+        let note = get("note");
+        if !note.is_empty() {
+            let _ = writeln!(standard_output, "  note:    {note}");
+        }
+        let _ = writeln!(standard_output, "  tiers:   {}", get("branchTiers"));
+        let _ = writeln!(standard_output, "  work:    {}", get("workBranchPrefixes"));
+        let _ = writeln!(standard_output, "  commits: {}", get("commitPrefixes"));
+    }
+    0
 }
 
 fn render_preflight_result(
@@ -1189,6 +1864,9 @@ fn run_review_surface_command(
     };
 
     let include_tests = surface_name == "pre-pr";
+    // --all scans the whole tracked tree (cleanup mode) instead of only added
+    // diff lines, so pre-existing slop/comments/prose are caught too.
+    let scan_all = flag_set.bool_value("all");
     // Auto language gates (.githooks markers). Missing tools = non-blocking Blocked.
     let mut gate_results = run_rust_surface_gates(&repository_root, include_tests);
     gate_results.extend(run_python_surface_gates(&repository_root, include_tests));
@@ -1199,16 +1877,19 @@ fn run_review_surface_command(
         &repository_root,
         flag_set.string_value("base-ref"),
         surface_name,
+        scan_all,
     ));
     gate_results.push(prose_style_gate(
         &repository_root,
         flag_set.string_value("base-ref"),
         surface_name,
+        scan_all,
     ));
     gate_results.push(slop_gate(
         &repository_root,
         flag_set.string_value("base-ref"),
         surface_name,
+        scan_all,
     ));
     if let Some(e2e_result) = check_e2e_config(&repository_root) {
         gate_results.push(e2e_result);
@@ -1789,8 +2470,15 @@ fn check_python_tests(repository_root: &Path) -> GateResult {
 /// lines only (existing comments grandfathered). pre-commit scans the working
 /// diff against HEAD; other surfaces scan against the base ref. Blocking only
 /// when a high-severity finding (over-length impl comment or em/en dash) appears.
-fn comment_style_gate(repository_root: &Path, base_ref: &str, surface_name: &str) -> GateResult {
-    let findings = if surface_name == "pre-commit" {
+fn comment_style_gate(
+    repository_root: &Path,
+    base_ref: &str,
+    surface_name: &str,
+    scan_all: bool,
+) -> GateResult {
+    let findings = if scan_all {
+        crate::comment_lint::lint_tracked_tree(repository_root)
+    } else if surface_name == "pre-commit" {
         crate::comment_lint::lint_working_comments(repository_root)
     } else {
         let base = base_ref.trim();
@@ -1831,8 +2519,15 @@ fn comment_style_gate(repository_root: &Path, base_ref: &str, surface_name: &str
 /// markdown/doc files for AI-slop vocabulary, em-dash, hype, first-person, and
 /// chatty wording. Pre-existing prose is grandfathered (added lines only).
 /// Blocking when a high-severity finding (AI-slop or em-dash) appears.
-fn prose_style_gate(repository_root: &Path, base_ref: &str, surface_name: &str) -> GateResult {
-    let findings = if surface_name == "pre-commit" {
+fn prose_style_gate(
+    repository_root: &Path,
+    base_ref: &str,
+    surface_name: &str,
+    scan_all: bool,
+) -> GateResult {
+    let findings = if scan_all {
+        crate::comment_lint::lint_tracked_tree_prose(repository_root)
+    } else if surface_name == "pre-commit" {
         crate::comment_lint::lint_working_prose(repository_root)
     } else {
         let base = base_ref.trim();
@@ -1869,8 +2564,15 @@ fn prose_style_gate(repository_root: &Path, base_ref: &str, surface_name: &str) 
     }
 }
 
-fn slop_gate(repository_root: &Path, base_ref: &str, surface_name: &str) -> GateResult {
-    let findings = if surface_name == "pre-commit" {
+fn slop_gate(
+    repository_root: &Path,
+    base_ref: &str,
+    surface_name: &str,
+    scan_all: bool,
+) -> GateResult {
+    let findings = if scan_all {
+        crate::slop_detector::lint_tracked_tree_slop(repository_root)
+    } else if surface_name == "pre-commit" {
         crate::slop_detector::lint_working_slop(repository_root)
     } else {
         crate::slop_detector::lint_added_slop(repository_root, base_ref)
@@ -2043,6 +2745,7 @@ fn review_flag_set(name: &str) -> FlagSet {
     flag_set.string_flag("surface", "diff");
     flag_set.string_flag("base-ref", "");
     flag_set.string_flag("format", "compact");
+    flag_set.bool_flag("all", false);
     flag_set
 }
 
@@ -2493,7 +3196,7 @@ fn render_review_help(standard_output: &mut dyn Write) {
 fn render_git_workflow_help(standard_output: &mut dyn Write) {
     let _ = writeln!(
         standard_output,
-        "Usage: keel git-workflow [preflight|commit-message|pr-body|lint-message] ..."
+        "Usage: keel git-workflow [preflight|await-ci|configure|show|commit-message|pr-body|lint-message] ..."
     );
 }
 
@@ -2504,6 +3207,120 @@ fn is_help_argument(argument: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- await-ci pure logic (offline-safe; no gh/glab invocation) ----
+
+    #[test]
+    fn classify_check_state_maps_statuses() {
+        assert_eq!(classify_check_state("success"), CheckState::Green);
+        assert_eq!(classify_check_state("passed"), CheckState::Green);
+        assert_eq!(classify_check_state("SUCCESS"), CheckState::Green);
+        assert_eq!(classify_check_state("running"), CheckState::Pending);
+        assert_eq!(classify_check_state("in_progress"), CheckState::Pending);
+        assert_eq!(classify_check_state("queued"), CheckState::Pending);
+        assert_eq!(classify_check_state(""), CheckState::Pending);
+        // Unknown / failure conclusions fail CLOSED to red so merge never proceeds blind.
+        assert_eq!(classify_check_state("failure"), CheckState::Red);
+        assert_eq!(classify_check_state("failed"), CheckState::Red);
+        assert_eq!(classify_check_state("cancelled"), CheckState::Red);
+        assert_eq!(classify_check_state("action_required"), CheckState::Red);
+        assert_eq!(classify_check_state("something-weird"), CheckState::Red);
+    }
+
+    #[test]
+    fn evaluate_checks_blocks_on_any_red() {
+        let checks = vec![
+            CiCheck {
+                name: "build".into(),
+                state: CheckState::Green,
+            },
+            CiCheck {
+                name: "test".into(),
+                state: CheckState::Red,
+            },
+        ];
+        assert!(matches!(evaluate_checks(&checks), CiVerdict::Red));
+    }
+
+    #[test]
+    fn evaluate_checks_pending_when_any_running() {
+        let checks = vec![
+            CiCheck {
+                name: "build".into(),
+                state: CheckState::Green,
+            },
+            CiCheck {
+                name: "deploy".into(),
+                state: CheckState::Pending,
+            },
+        ];
+        assert!(matches!(evaluate_checks(&checks), CiVerdict::Pending));
+    }
+
+    #[test]
+    fn evaluate_checks_green_only_when_all_green() {
+        let checks = vec![
+            CiCheck {
+                name: "build".into(),
+                state: CheckState::Green,
+            },
+            CiCheck {
+                name: "test".into(),
+                state: CheckState::Green,
+            },
+        ];
+        assert!(matches!(evaluate_checks(&checks), CiVerdict::Green));
+    }
+
+    #[test]
+    fn evaluate_checks_empty_is_no_checks() {
+        assert!(matches!(evaluate_checks(&[]), CiVerdict::NoChecks));
+    }
+
+    #[test]
+    fn await_ci_exit_code_blocks_everything_except_green_or_no_ci() {
+        assert_eq!(AwaitCiOutcome::Green.exit_code(), 0);
+        assert_eq!(AwaitCiOutcome::NoCi.exit_code(), 0);
+        assert_eq!(AwaitCiOutcome::Red.exit_code(), 1);
+        assert_eq!(AwaitCiOutcome::Pending.exit_code(), 1);
+        assert_eq!(AwaitCiOutcome::Timeout.exit_code(), 1);
+    }
+
+    #[test]
+    fn parse_gh_checks_reads_columns_and_skips_header() {
+        let stdout = "NAME\tSTATUS\tCONCLUSION\nbuild\tpass\t\nlint\tfail\t\n";
+        let checks = parse_gh_checks(stdout).expect("parse");
+        assert_eq!(checks.len(), 2);
+        assert_eq!(checks[0].name, "build");
+        assert_eq!(checks[0].state, CheckState::Green);
+        assert_eq!(checks[1].name, "lint");
+        assert_eq!(checks[1].state, CheckState::Red);
+    }
+
+    #[test]
+    fn parse_gh_checks_empty_is_none() {
+        assert!(parse_gh_checks("").is_none());
+        assert!(parse_gh_checks("NAME\tSTATUS\n").is_none());
+    }
+
+    #[test]
+    fn parse_glab_status_reads_name_status_pairs() {
+        let stdout = "build: success\ntest: running\n";
+        let checks = parse_glab_status(stdout).expect("parse");
+        assert_eq!(checks.len(), 2);
+        assert_eq!(checks[0].name, "build");
+        assert_eq!(checks[0].state, CheckState::Green);
+        assert_eq!(checks[1].state, CheckState::Pending);
+    }
+
+    #[test]
+    fn workflow_slug_is_safe_and_lowercase() {
+        assert_eq!(
+            workflow_slug("D:\\Nasri\\Project\\keel"),
+            "d-nasri-project-keel"
+        );
+        assert!(!workflow_slug("").is_empty());
+    }
 
     #[test]
     fn review_policy_show_succeeds_with_no_extra_args() {
