@@ -65,6 +65,11 @@ Keep commits small — one layer/concern per commit.
 3. Fixes stay on the same branch. If `Add : RGB : synchronize all` has a bug found in testing, the fix commits to the same `feature/RGB` branch — not a new branch. The branch is the unit of the feature; fixes extend it.
 4. No self-merge without review. Self-merging was an old habit — it's done. Features get an MR.
 5. Work moves only upward: `feature/<name>` → `feat` → `dev` → `main`.
+6. Never merge blind past CI. When the repo has CI/CD (GitHub Actions, GitLab CI, etc.), wait for the pipeline to go green before merging. Run `keel git-workflow await-ci --watch` (auto-detects `glab` then `gh`): it polls the head commit's checks and exits non-zero while any check is pending, red, or timed out. If a check is red, fix it first and re-run the gate. Do not merge on red. If the repo has no CI configured, the gate reports "NO CI" and passes.
+
+### Workflow preference memory
+
+`keel git-workflow configure --model four-tier [--note "..."]` saves the chosen branch+commit workflow to the global per-workspace memory lane (never the repo), so it survives sessions and can be recalled with `keel git-workflow show`. The branch/commit formats and detail above are unchanged. `configure` records *which* model you use plus your notes; it does not redefine the formats.
 
 ### Starting a new feature
 

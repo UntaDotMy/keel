@@ -320,12 +320,12 @@ fn tools_list_catalog() -> Value {
             },
             {
                 "name": "git_workflow",
-                "description": "Git workflow operations (preflight, commit-message, pr-body, lint-message). Use for professional commit/PR text generation and linting.",
+                "description": "Git workflow operations. await-ci waits for CI checks to go green and blocks (non-zero) on red/pending so you never merge blind past CI; configure/show save and recall the branch+commit workflow preference to per-workspace memory; preflight validates branch/clean state; commit-message/pr-body/lint-message generate and lint professional text.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "action": { "type": "string", "enum": ["preflight", "commit-message", "pr-body", "lint-message"], "description": "Git workflow operation." },
-                        "args": { "type": "array", "items": { "type": "string" }, "description": "Additional CLI arguments (e.g. [\"--base-ref\",\"origin/feat\"])." }
+                        "action": { "type": "string", "enum": ["preflight", "await-ci", "configure", "show", "commit-message", "pr-body", "lint-message"], "description": "Git workflow operation." },
+                        "args": { "type": "array", "items": { "type": "string" }, "description": "Additional CLI arguments (e.g. [\"--watch\"], [\"--base-ref\",\"origin/feat\"], [\"--model\",\"four-tier\"])." }
                     },
                     "required": ["action"]
                 }
@@ -509,7 +509,7 @@ fn tools_list_catalog() -> Value {
                         "action": { "type": "string", "enum": ["build", "impact"], "description": "Graph operation to perform." },
                         "changed": { "type": "string", "description": "Comma-separated list of changed files (required for impact, e.g. \"src/a.rs,src/b.rs\")." },
                         "workspace_root": { "type": "string", "description": "Workspace root path. Defaults to cwd." },
-                        "output": { "type": "string", "description": "Output artifact path (for build). Defaults to .understand/code-graph.json." },
+                        "output": { "type": "string", "description": "Output artifact path (for build). Default writes to the global per-workspace memory lane, never the workspace; pass a relative path to opt into a committable in-repo artifact." },
                         "json": { "type": "boolean", "description": "Output as JSON." }
                     },
                     "required": ["action"]
@@ -2002,7 +2002,7 @@ fn tool_git_workflow(arguments: &Value) -> Result<String, String> {
         .get("action")
         .and_then(Value::as_str)
         .ok_or_else(|| {
-            "git_workflow: missing action (preflight|commit-message|pr-body|lint-message)"
+            "git_workflow: missing action (preflight|await-ci|configure|show|commit-message|pr-body|lint-message)"
                 .to_string()
         })?;
     let extras = collect_extra_args(arguments);

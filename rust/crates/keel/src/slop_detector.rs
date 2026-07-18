@@ -95,6 +95,69 @@ pub fn scan_unified_diff_for_slop(diff: &str) -> Vec<SlopFinding> {
     findings
 }
 
+/// Scan every tracked source file in the tree for slop (whole-file scan). Used
+/// by the `review pre-commit --all` / `pre-pr --all` cleanup surfaces so
+/// pre-existing slop (not just added lines) is caught. Only files the detectors
+/// recognize are scanned; binaries and unknown extensions are skipped.
+pub fn lint_tracked_tree_slop(repo_root: &Path) -> Vec<SlopFinding> {
+    let args = vec!["ls-files".to_string()];
+    let listing = match run_command("git", &args, Some(repo_root)) {
+        Ok(result) if result.code == 0 => String::from_utf8_lossy(&result.stdout).to_string(),
+        _ => return Vec::new(),
+    };
+    let mut findings = Vec::new();
+    for rel_path in listing.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        if !is_scannable_source(rel_path) {
+            continue;
+        }
+        let full = repo_root.join(rel_path);
+        let Ok(source) = std::fs::read_to_string(&full) else {
+            continue;
+        };
+        let numbered: Vec<(usize, String)> = source
+            .lines()
+            .enumerate()
+            .map(|(index, line)| (index + 1, line.to_string()))
+            .collect();
+        detect_slop_patterns(rel_path, &numbered, &mut findings);
+    }
+    findings
+}
+
+/// True for source/text files the slop detectors can meaningfully scan. Mirrors
+/// the comment-syntax extension set plus common config/doc types the
+/// hallucinated-API and N+1 detectors reason about.
+fn is_scannable_source(path: &str) -> bool {
+    let extension = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    matches!(
+        extension.as_str(),
+        "rs" | "go"
+            | "c"
+            | "h"
+            | "cpp"
+            | "hpp"
+            | "cc"
+            | "cxx"
+            | "js"
+            | "jsx"
+            | "ts"
+            | "tsx"
+            | "java"
+            | "kt"
+            | "kts"
+            | "swift"
+            | "scala"
+            | "php"
+            | "cs"
+            | "py"
+            | "pyx"
+            | "rb"
+            | "sql"
+            | "prisma"
+            | "graphql"
+    )
+}
+
 /// Run all 5 slop detectors against a block of added lines.
 fn detect_slop_patterns(
     file: &str,
@@ -363,6 +426,57 @@ fn parse_hunk_new_start(rest: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_repo(label: &str) -> std::path::PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        let dir = std::env::temp_dir().join(format!("slop-tree-{label}-{nanos}"));
+        std::fs::create_dir_all(&dir).expect("create temp repo");
+        dir
+    }
+
+    fn git(repo: &Path, args: &[&str]) {
+        let owned: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        let result = run_command("git", &owned, Some(repo)).expect("git runs");
+        assert_eq!(result.code, 0, "git {args:?} failed");
+    }
+
+    // Whole-tree scan: pre-existing slop (no diff) must be caught by --all mode.
+
+    #[test]
+    fn tracked_tree_slop_catches_preexisting_dead_defensive() {
+        let repo = temp_repo("dead");
+        std::fs::write(
+            repo.join("x.rs"),
+            "fn main() {\n    let _ = compute();\n}\n",
+        )
+        .expect("write source");
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["add", "x.rs"]);
+        let findings = lint_tracked_tree_slop(&repo);
+        assert!(
+            findings.iter().any(|f| f.pattern == "dead-defensive-code"),
+            "tree scan must catch pre-existing slop: {findings:?}"
+        );
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn tracked_tree_slop_skips_non_source_files() {
+        let repo = temp_repo("skip");
+        std::fs::write(repo.join("logo.bin"), "let _ = not source;\n").expect("write binary");
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["add", "logo.bin"]);
+        let findings = lint_tracked_tree_slop(&repo);
+        assert!(
+            findings.is_empty(),
+            "non-source files skipped: {findings:?}"
+        );
+        let _ = std::fs::remove_dir_all(&repo);
+    }
 
     // --- Pattern 1: Dead defensive code ---
 

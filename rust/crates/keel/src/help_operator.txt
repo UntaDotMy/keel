@@ -17,6 +17,9 @@
   review hosted check|comment [--repo-root <path>] [--provider <name>] [--write-payload-file <path>] [--write-body-file <path>] [--format json|markdown|compact]
   review policy show [--format json|markdown|compact]
   git-workflow preflight [--repo-root <path>] [--base-ref <ref>]
+  git-workflow await-ci [--repo-root <path>] [--provider auto|glab|gh] [--watch] [--timeout-secs <n>] [--interval-secs <n>] [--format json|compact]
+  git-workflow configure [--repo-root <path>] [--model <name>] [--note <text>] [--format json|compact]
+  git-workflow show [--repo-root <path>] [--format json|compact]
   git-workflow commit-message --from-diff [--repo-root <path>] [--base-ref <ref>] [--test-result <text>] [--format json|markdown|compact]
   git-workflow pr-body --from-diff [--repo-root <path>] [--base-ref <ref>] [--test-result <text>] [--format json|markdown|compact]
   git-workflow lint-message [--allow-claude-code-wording] [--format json|markdown|compact] <file>
