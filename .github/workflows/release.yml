@@ -247,9 +247,14 @@ jobs:
           cp "target/${{ matrix.target }}/release/${{ matrix.executable }}" "$target_dir/"
           cp *.md "$target_dir/" || true
           cp -R docs "$target_dir/docs" || true
+          # Strip trailing slash from `*/` so cp -R preserves skill dir names
+          # (else contents flatten into target root and install fails).
+          skill_count=0
           for dir in */; do
-            if [ -f "${dir}SKILL.md" ]; then
+            dir="${dir%/}"
+            if [ -f "${dir}/SKILL.md" ]; then
               cp -R "$dir" "$target_dir/"
+              skill_count=$((skill_count + 1))
             fi
           done
           # Stage cross-skill resource directories that SKILL.md files
@@ -290,6 +295,30 @@ jobs:
               cp -R "$adapter" "$target_dir/$adapter"
             fi
           done
+          # Fail closed if staged layout cannot pass repository_layout_is_complete.
+          missing=0
+          for required in \
+            AGENTS.md \
+            README.md \
+            00-skill-routing-and-escalation.md \
+            reviewer/SKILL.md \
+            "${{ matrix.executable }}"; do
+            if [ ! -e "$target_dir/$required" ]; then
+              echo "ERROR: staged release bundle is missing required path: $required" >&2
+              missing=1
+            fi
+          done
+          staged_skills="$(find "$target_dir" -mindepth 2 -maxdepth 2 -type f -name SKILL.md | wc -l | tr -d ' ')"
+          if [ "$skill_count" -lt 1 ] || [ "$staged_skills" -lt 1 ]; then
+            echo "ERROR: staged release bundle has no skill directories (skill_count=$skill_count staged_skills=$staged_skills)" >&2
+            missing=1
+          fi
+          if [ "$missing" -ne 0 ]; then
+            echo "Staged bundle tree:" >&2
+            find "$target_dir" -maxdepth 2 | sort >&2
+            exit 1
+          fi
+          echo "Staged $skill_count skill directories ($staged_skills SKILL.md files) into $target_dir"
           cat > "$target_dir/keel-release-manifest.json" <<EOF
           {
             "package_kind": "packaged_release_bundle",
