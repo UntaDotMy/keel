@@ -96,17 +96,29 @@ const PREFERRED_BRANCH_PREFIXES: &[&str] = &["task/"];
 /// Legacy work-branch prefixes still accepted so in-flight branches keep
 /// working. Preflight warns (does not block) and asks for `task/` going forward.
 const LEGACY_BRANCH_PREFIXES: &[&str] = &[
-    "add/", "config/", "refactor/", "wip/", "fix/", "docs/", "feature/",
+    "add/",
+    "config/",
+    "refactor/",
+    "wip/",
+    "fix/",
+    "docs/",
+    "feature/",
 ];
 
 /// All prefixes preflight will allow (preferred + legacy). Unknown prefixes block.
 const SANCTIONED_BRANCH_PREFIXES: &[&str] = &[
-    "task/", "add/", "config/", "refactor/", "wip/", "fix/", "docs/", "feature/",
+    "task/",
+    "add/",
+    "config/",
+    "refactor/",
+    "wip/",
+    "fix/",
+    "docs/",
+    "feature/",
 ];
 
 /// Default hierarchy text for configure/show.
-const DEFAULT_BRANCH_TIERS: &str =
-    "main <- dev <- feat <- task/<task> [<- task/<task>/<subtask>]";
+const DEFAULT_BRANCH_TIERS: &str = "main <- dev <- feat <- task/<task> [<- task/<task>/<subtask>]";
 
 /// Conventional commit-subject prefixes the preflight expects; a subject that
 /// matches none of these (and fails the keel colon form) earns a non-blocking
@@ -856,10 +868,7 @@ fn run_git_workflow_configure(
             "repoRoot".to_string(),
             repository_root.to_string_lossy().to_string(),
         ),
-        (
-            "branchTiers".to_string(),
-            DEFAULT_BRANCH_TIERS.to_string(),
-        ),
+        ("branchTiers".to_string(), DEFAULT_BRANCH_TIERS.to_string()),
         (
             "workBranchPrefixes".to_string(),
             format!(
@@ -944,20 +953,14 @@ fn run_git_workflow_show(
                 standard_output,
                 "git-workflow show: no saved preference for this workspace (default model=four-tier). Run `keel git-workflow configure` to set one."
             );
-            let _ = writeln!(
-                standard_output,
-                "  default tiers: {DEFAULT_BRANCH_TIERS}"
-            );
+            let _ = writeln!(standard_output, "  default tiers: {DEFAULT_BRANCH_TIERS}");
             let _ = writeln!(
                 standard_output,
                 "  work-branch prefixes: preferred {} | legacy still allowed {}",
                 PREFERRED_BRANCH_PREFIXES.join(", "),
                 LEGACY_BRANCH_PREFIXES.join(", ")
             );
-            let _ = writeln!(
-                standard_output,
-                "  commit form: Add : FEATURE : short info"
-            );
+            let _ = writeln!(standard_output, "  commit form: Add : FEATURE : short info");
             return 0;
         }
         Err(error) => {
@@ -2955,8 +2958,7 @@ fn validate_commit_subject(subject: &str) -> Result<(), String> {
     let parts: Vec<&str> = trimmed.splitn(3, ':').collect();
     if parts.len() < 3 {
         return Err(
-            "expected three colon-separated parts: Add : FEATURE : short information"
-                .to_string(),
+            "expected three colon-separated parts: Add : FEATURE : short information".to_string(),
         );
     }
     let category = parts[0].trim();
@@ -3713,7 +3715,9 @@ mod tests {
     #[test]
     fn validate_commit_subject_accepts_canonical_form() {
         // Preferred form: Capitalized category, spaces around colons.
-        assert!(validate_commit_subject("Wip : RGB : Build light effect mode (multi color)").is_ok());
+        assert!(
+            validate_commit_subject("Wip : RGB : Build light effect mode (multi color)").is_ok()
+        );
         assert!(validate_commit_subject("Fix : SENSOR : Correct I2C read timeout").is_ok());
         assert!(validate_commit_subject("Add : ARGB : Add rainbow cycle preset").is_ok());
         assert!(validate_commit_subject("Config : LED : Set default brightness").is_ok());
@@ -3863,10 +3867,7 @@ mod tests {
         git_in(&repo, &["checkout", "-q", "-b", "task/widget"]);
         std::fs::write(repo.join("widget.txt"), "feature\n").unwrap();
         git_in(&repo, &["add", "."]);
-        git_in(
-            &repo,
-            &["commit", "-q", "-m", "Add : WIDGET : add widget"],
-        );
+        git_in(&repo, &["commit", "-q", "-m", "Add : WIDGET : add widget"]);
 
         let (code, stdout) = run_preflight(&repo, "main");
         assert_eq!(code, 0, "stdout: {stdout}");

@@ -958,9 +958,8 @@ fn persist_design_system(
         // inside the user project.
         let claude_home = resolve_claude_home("")
             .map_err(|error| format!("resolve claude home for default persist path: {error}"))?;
-        let workspace_root = resolve_repository_root("").unwrap_or_else(|_| {
-            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-        });
+        let workspace_root = resolve_repository_root("")
+            .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
         let ws_slug = workspace_slug(&display_path(&workspace_root));
         let root = claude_home
             .join("memories")
@@ -1915,16 +1914,10 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        let cwd = std::env::temp_dir().join(format!(
-            "keel-di-cwd-{}-{}",
-            std::process::id(),
-            nanos
-        ));
-        let home = std::env::temp_dir().join(format!(
-            "keel-di-home-{}-{}",
-            std::process::id(),
-            nanos
-        ));
+        let cwd =
+            std::env::temp_dir().join(format!("keel-di-cwd-{}-{}", std::process::id(), nanos));
+        let home =
+            std::env::temp_dir().join(format!("keel-di-home-{}-{}", std::process::id(), nanos));
         let _ = fs::remove_dir_all(&cwd);
         let _ = fs::remove_dir_all(&home);
         fs::create_dir_all(&cwd).expect("cwd");

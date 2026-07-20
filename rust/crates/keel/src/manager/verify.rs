@@ -363,8 +363,16 @@ mod tests {
         let dst_skill = skills_directory(&home).join("demo-skill");
         fs::create_dir_all(&src_skill).unwrap();
         fs::create_dir_all(&dst_skill).unwrap();
-        fs::write(src_skill.join("SKILL.md"), "---\nname: demo-skill\n---\nnew\n").unwrap();
-        fs::write(dst_skill.join("SKILL.md"), "---\nname: demo-skill\n---\nold\n").unwrap();
+        fs::write(
+            src_skill.join("SKILL.md"),
+            "---\nname: demo-skill\n---\nnew\n",
+        )
+        .unwrap();
+        fs::write(
+            dst_skill.join("SKILL.md"),
+            "---\nname: demo-skill\n---\nold\n",
+        )
+        .unwrap();
 
         let layout = RepositoryLayout {
             root_path: root.join("repo"),
@@ -381,7 +389,11 @@ mod tests {
         assert_eq!(stale, vec!["demo-skill".to_string()]);
 
         // After syncing content, drift clears.
-        fs::write(dst_skill.join("SKILL.md"), "---\nname: demo-skill\n---\nnew\n").unwrap();
+        fs::write(
+            dst_skill.join("SKILL.md"),
+            "---\nname: demo-skill\n---\nnew\n",
+        )
+        .unwrap();
         assert!(stale_managed_skill_names(&layout, &home).is_empty());
 
         let _ = fs::remove_dir_all(&root);

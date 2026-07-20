@@ -40,7 +40,8 @@ use crate::utility::memory::refresh_system_map;
 use crate::utility::memory_families::family_counts;
 use crate::utility::recall::{collapse_dashes, search_recall_index, RecallSearchResult};
 use crate::utility::skill_match::{
-    installed_skill_path, match_skill_for_prompt, skill_catalog, skill_full_body, skill_inline_brief,
+    installed_skill_path, match_skill_for_prompt, skill_catalog, skill_full_body,
+    skill_inline_brief,
 };
 use crate::utility::workflow_ledger::{current_timestamp_millis, format_timestamp_iso8601};
 use crate::utility::working_brief::{create_brief, list_briefs, read_brief, write_brief, Brief};
