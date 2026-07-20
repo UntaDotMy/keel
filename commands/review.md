@@ -15,7 +15,7 @@ Use the installed binary path (bare `keel` is not guaranteed on PATH):
 Map the surface in `$0` to the matching native subcommand:
 
 - `pre-commit` → `review pre-commit --format compact` — local pre-commit gate.
-- `pre-pr` → `review pre-pr --base-ref <ref> --format compact` — pre-PR gate (defaults base-ref to origin/feat when none given, since work branches branch off `feat`; use origin/dev when promoting `feat` to `dev`, and origin/main only when promoting `dev` to `main`).
+- `pre-pr` → `review pre-pr --base-ref <ref> --format compact` — pre-PR gate (defaults base-ref to origin/feat when none given for task branches merging into `feat`; use the parent task branch as base for a subtask; use origin/dev when promoting `feat` to `dev`, and origin/main only when promoting `dev` to `main`).
 - `gates` → `review gates check --surface pre-pr --base-ref <ref> --format compact` — explicit gate verdict.
 - `diff` → `review diff` — review the working diff.
 

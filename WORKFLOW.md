@@ -22,205 +22,254 @@ The managed `PreToolUse` hook may return a harness denial whose reason begins wi
 
 ### Branch structure
 
-```
-main           Final stable, verified. Only after dev passes staging. Nothing committed directly — receives merges only.
-dev            Active development / staging. Daily commits land here via merge from feat. A feature set is tested here before promotion to main.
-feat           Feature development base. New features and fixes branch off here. Merges from feature/<name> sub-branches.
-feature/<name> One feature or subtask. Short-lived. One MR each. The actual work commits.
-```
+| Branch | Purpose | What lands here |
+|---|---|---|
+| `main` | Final stable, verified. Only after `dev` passes staging. | Receives merges only — never direct commits. |
+| `dev` | Staging layer. Feature sets are tested here before promotion to `main`. | Verified features merged from `feat`. |
+| `feat` | Integration base. All task branches and their subtasks merge here eventually. | Merges from `task/<task>` branches. |
+| `task/<task>` | One complete task. Parent branch. Sub-branches stack off here. | Merges from `task/<task>/<subtask>` sub-branches. |
+| `task/<task>/<subtask>` | One subtask or concern within a task. Short-lived. One MR each. | The actual work commits. |
 
-▎ **Namespace note:** feature branches use `feature/<name>`, NOT `feat/<name>`. Git stores branches as files under `refs/heads/`, so `feat` (a file) and `feat/x` (needs `feat` to be a directory) collide. `feature/` avoids this. The integration branch stays `feat`.
+▎ **Namespace note (Git hard rule):** The integration branch is bare `feat` (`refs/heads/feat`). Work branches **must not** use `feat/<task>` — Git cannot store both `refs/heads/feat` and `refs/heads/feat/...` at the same time (ref lock collision). That is why work lives under `task/<task>` and `task/<task>/<subtask>`.
 
-**Flow direction:** `feature/<name>` → `feat` → `dev` → `main`. Work moves only upward, via merge. Never commit directly to `main`, `dev`, or `feat`.
+**Flow direction:** `task/<task>/<subtask>` → `task/<task>` → `feat` → `dev` → `main`. Work moves only upward, via merge. Never commit directly to `main`, `dev`, or `feat`.
 
 **Verification gates:**
-- A feature set ready for staging test → `feat` merges into `dev`.
+- A subtask done → `task/<task>/<subtask>` merges into `task/<task>`.
+- All subtasks for a task done → `task/<task>` merges into `feat`.
+- A feature set ready for staging → `feat` merges into `dev`.
 - Staging passes → `dev` merges into `main`.
-- `dev` is not a daily commit target — it's the staging layer features merge into for testing.
 
-**Hard rule:** When pushing and merging, NEVER DELETE ANY BRANCH. Merged branches stay as permanent references.
+**Hard rule:** Never delete any branch — local or remote. Merged branches stay as permanent references.
+
+**Legacy branches:** In-flight work on older prefixes (`add/`, `fix/`, `feature/`, etc.) may continue until merge. Preflight warns but does not block. **New** branches use `task/<task>` (or `task/<task>/<subtask>`).
+
+### CI / Action workflow gate
+
+This gate applies only when explicitly requested to push or merge. It never triggers automatically.
+
+**Before opening an MR or merging**
+1. Check if the repo has Action workflows: `ls .github/workflows/` (or GitHub UI → Actions).
+2. If workflows exist — read each file. Understand triggers, checks, and what must pass.
+3. Before committing, ensure the work satisfies every check the workflow will run.
+4. After pushing — wait for green before merging: push → CI runs → all checks green → then merge (if requested).
+5. If CI fails: fix on the **same** branch, push again, wait for green again. Do not merge a red branch.
+6. If CI is skipped or the repo has no workflows: proceed directly to merge (if requested).
+7. If workflows exist on `feat`, `dev`, or `main`: the same gate applies when merging upward.
+
+Use `keel git-workflow await-ci --watch` (auto-detects `glab` then `gh`). It polls the head commit and exits non-zero while pending, red, or timed out.
+
+▎ Never merge while CI is running. Never merge on a red status. If not requested to merge — stop after push and report the CI status.
 
 ### Commit convention
 
 ```
-<Category>: <FEATURE_CATEGORY> : <short info>
+<Category> : <FEATURE_CATEGORY> : <short info>
 ```
 
 - **Category** (capitalized first letter): `Add`, `Config`, `Refactor`, `Wip`, `Fix`, `Docs`
-- **FEATURE_CATEGORY** (uppercase): `RGB`, `LED`, `ARGB`, `SENSOR`, `PROTOCOL`, `UI`, `HID`, `WATCHER`, `CATALOG`, `DEVICE`
+- **FEATURE_CATEGORY** (uppercase): e.g. `RGB`, `LED`, `ARGB`, `SENSOR`, `PROTOCOL`, `UI`, `HID`, `WATCHER`, `CATALOG`, `DEVICE`
 - Spaces around all colons.
 - Examples:
   - `Add : PROTOCOL : rgb sync ask and ack parse`
-  - `Wip : RGB : Build light effect mode (multi color)`
+  - `Wip : RGB : build light effect mode (multi color)`
   - `Fix : UI : show rgb sync state on device card`
 
-▎ The existing repo history mixes casing for older areas (`protocol`, `docs`, `watcher`, `catalog` lowercase; `UI`/`HID` uppercase). Going forward use UPPERCASE for FEATURE_CATEGORY. Legacy commits are not rewritten.
+Keep commits small — one layer or concern per commit.
 
-Keep commits small — one layer/concern per commit.
+▎ Legacy history may use lowercase categories or no spaces around colons. Going forward, use the capitalized + spaced form. Do not rewrite legacy commits.
 
-### Core rules
+### Worktree discipline (parallel work)
 
-1. Never delete branches — local or remote. Ever.
-2. Commit locally first. Never push or open an MR until the work is correct and verified, and wait for explicit user request before pushing or opening a merge request. Do not push or open an MR on your own initiative — "do the work" is not "publish the work." Local first, always.
-3. Fixes stay on the same branch. If `Add : RGB : synchronize all` has a bug found in testing, the fix commits to the same `feature/RGB` branch — not a new branch. The branch is the unit of the feature; fixes extend it.
-4. No self-merge without review. Self-merging was an old habit — it's done. Features get an MR.
-5. Work moves only upward: `feature/<name>` → `feat` → `dev` → `main`.
-6. Never merge blind past CI. When the repo has CI/CD (GitHub Actions, GitLab CI, etc.), wait for the pipeline to go green before merging. Run `keel git-workflow await-ci --watch` (auto-detects `glab` then `gh`): it polls the head commit's checks and exits non-zero while any check is pending, red, or timed out. If a check is red, fix it first and re-run the gate. Do not merge on red. If the repo has no CI configured, the gate reports "NO CI" and passes.
-
-### Workflow preference memory
-
-`keel git-workflow configure --model four-tier [--note "..."]` saves the chosen branch+commit workflow to the global per-workspace memory lane (never the repo), so it survives sessions and can be recalled with `keel git-workflow show`. The branch/commit formats and detail above are unchanged. `configure` records *which* model you use plus your notes; it does not redefine the formats.
-
-### Starting a new feature
-
-Every new feature starts from one of two points, decided by a single question: does this feature need code from another feature that is not yet merged?
-
-**Case 1 — Independent feature (the default).** The feature does not depend on any unmerged work. Branch off `feat`.
+When running many tasks simultaneously, each task lives in its own worktree: **one worktree = one branch = one task**. Never mix branch work across worktrees.
 
 ```bash
-git checkout feat && git pull && git checkout -b feature/<name>
+# Task branch
+git worktree add ../project-<task> task/<task>
+
+# Subtask branch
+git worktree add ../project-<task>-<subtask> task/<task>/<subtask>
 ```
 
-**Case 2 — Dependent feature (stacked).** The feature needs code from a `feature/<parent>` branch that is finished but not yet merged (sitting in review/testing). You don't want to wait for the merge. Branch off the parent's tip so the new branch inherits the parent's code.
+Before any work, confirm identity:
 
 ```bash
-git checkout feature/<parent>          # the finished, unmerged feature
-git checkout -b feature/<name>         # new branch has the parent's code
+git worktree list
+git branch --show-current   # must match the task
+pwd                         # must be the correct worktree directory
 ```
 
-Do not branch off `feat` here — it wouldn't have the parent's code and won't compile.
+Never `git checkout` another task's branch inside a worktree — use that task's worktree. A branch can only be checked out in one worktree at a time. Commits, rebases, and pushes happen inside the worktree that owns the branch.
 
-**When NOT to stack:** if the parent is unstable and likely to change a lot during review, don't stack on it yet. Wait until it stabilizes, or merge it first. Stacking on heavily-churning work causes repeated rebase conflicts.
+### Starting a new task
 
-### Branch naming
+Single question: does this task depend on code from an unmerged `task/<other>` branch?
 
-`feature/<short-kebab-name>` — describes the feature, not the dependency. Example: `feature/rgb-sync`.
-
-### Working on a feature (both cases)
+**Case 1 — Independent task (default).** Branch off `feat`:
 
 ```bash
-# commit per layer, e.g.:
+git checkout feat && git pull
+git checkout -b task/<task>
+# optional: git worktree add ../project-<task> task/<task>
+```
+
+**Case 2 — Dependent task (stacked).** Branch off the parent task's tip:
+
+```bash
+git checkout task/<parent-task>
+git checkout -b task/<task>
+```
+
+Do not branch off `feat` when the parent is unmerged — it will not have the parent's code.
+
+**When NOT to stack:** if the parent is unstable and churning, wait.
+
+### Starting a subtask
+
+A subtask always branches off its parent task:
+
+```bash
+git checkout task/<task>
+git checkout -b task/<task>/<subtask>
+# optional: git worktree add ../project-<task>-<subtask> task/<task>/<subtask>
+```
+
+Never branch a subtask off `feat` directly.
+
+### Working on a branch
+
+```bash
+# Commit per layer, e.g.:
 #   Add : PROTOCOL : rgb sync ask and ack parse
 #   Add : UI : show rgb sync state on device card
-git push -u origin feature/<name>
-# open MR: feature/<name> → feat
+git add <files>
+git commit -m "Add : PROTOCOL : rgb sync ask and ack parse"
 ```
 
-### Keeping a stacked branch in sync
+Verify locally first. Fix on the same branch. Only push and open an MR when explicitly requested.
 
-A dependent (stacked) branch must track its parent. The parent can change in two ways — handle each:
+### Pushing and opening an MR
 
-**When the parent gets fixes (still unmerged).** Rule 3 guarantees this happens: bugs found in testing get fixed on the parent's own branch. After the parent gets new commits, absorb them into the child:
+Only on explicit user request, after local verification:
 
 ```bash
-git checkout feature/<child>
+# Subtask MR: task/<task>/<subtask> → task/<task>
+git push -u origin task/<task>/<subtask>
+
+# Task MR: task/<task> → feat
+git push -u origin task/<task>
+```
+
+Then follow the CI gate. Wait for green before merging (if requested).
+
+### Keeping stacked branches in sync
+
+**Parent gets fixes (still unmerged):**
+
+```bash
+git checkout task/<task>/<subtask>
 git fetch origin
-git rebase feature/<parent>            # absorb the parent's new commits
-git push --force-with-lease            # update the child MR
+git rebase task/<task>
+git push --force-with-lease
 ```
 
-Rebase onto the parent's current tip (`feature/<parent>`), not onto `feat`.
-
-**When the parent merges into feat.** Once the parent is merged, `feat` contains its commits. Rebase the child onto `feat` so the parent's commits drop out and the child keeps only its own:
+**Parent merges into its integration branch:**
 
 ```bash
-git checkout feature/<child>
+git checkout task/<task>/<subtask>
 git fetch origin
-git rebase origin/feat                 # drops parent's now-merged commits
-git push --force-with-lease            # updates the child MR
+git rebase origin/task/<task>   # or origin/feat if the task merged into feat
+git push --force-with-lease
 ```
 
-Git detects the parent's commits are already in `feat` and drops them automatically.
+Deep stacks: rebase bottom-up. Never rebase the top before the middle.
 
-**The two rebase triggers (reference):**
+### Review process
 
-| Trigger | Rebase target | Effect |
-|---|---|---|
-| Parent gets fixes, still unmerged | `feature/<parent>` | Child absorbs the parent's new commits |
-| Parent merges into `feat` | `origin/feat` | Parent's commits drop out; child keeps only its own |
+- One MR per branch. Subtask MR targets parent task; task MR targets `feat`.
+- Keep MRs small. One layer or concern per commit.
+- MR description: what the branch does, parent target, stack context, expected CI checks.
+- Do not open a draft/WIP MR unless asked. Open when verified and ready.
+- CI green before review is requested (if workflows exist).
+- Resolve comments on the same branch — never a new branch for review fixes.
 
-### Deep stacks — rebase bottom-up
+### When a branch merges
 
-When multiple branches are stacked and a lower one changes (fixes or merge):
-
-```
-feat ─── feature/a (got fixes, or merged)
-          └── feature/b (has a+b)
-               └── feature/c (has a+b+c)
-```
-
-Rebase lowest first, each onto the one below it:
-
-```bash
-# if feature/a got fixes (unmerged):
-git checkout feature/b && git rebase feature/a && git push --force-with-lease
-git checkout feature/c && git rebase feature/b && git push --force-with-lease
-
-# if feature/a merged into feat:
-git checkout feature/b && git fetch origin && git rebase origin/feat && git push --force-with-lease
-git checkout feature/c && git rebase feature/b && git push --force-with-lease
-```
-
-Never rebase the top before the middle — the middle goes stale and must be rebased again.
-
-### When a feature merges
-
-Leave the branch. Never delete. It stays as a permanent reference. If the branch had stacked children, rebase them (per the triggers above) before or after the merge.
+Leave the branch. Never delete. Rebase stacked children if any.
 
 ### Rollback reference
 
 | State | Command | Scope |
 |---|---|---|
-| Before push | `git reset --hard <commit>` | current branch only |
-| After push (solo branch) | `git reset --hard <commit> && git push --force-with-lease` | current branch only |
-| Before any rebase | `git tag pre-rebase <branch>`; undo with `git reset --hard pre-rebase` | that branch |
-| Parent merged, found bad | `git revert -m 1 <merge-sha>` on the integration branch | reverts parent; rebase children afterward |
+| Before push | `git reset --hard <commit>` | Current branch only |
+| After push (solo branch) | `git reset --hard <commit>` && `git push --force-with-lease` | Current branch only |
+| Before any rebase | `git tag pre-rebase-<branch>`; undo with `git reset --hard pre-rebase-<branch>` | That branch |
+| Parent merged, found bad | `git revert -m 1 <merge-sha>` on the integration branch | Reverts parent; rebase children afterward |
 
 ### Invariants
 
-1. A dependent feature branches off its parent's tip, never off `feat`.
-2. Fixes to the parent are expected. After fixing the parent, rebase the child onto the parent's new tip.
-3. Rebase a stacked child whenever its parent changes (fixes or merge) — don't let it drift.
-4. Rebase bottom-up in deep stacks.
-5. Tag known-good points before rebases.
-6. Never delete branches.
-7. One MR per branch.
+1. A subtask branches off its parent task's tip — never off `feat` directly.
+2. A dependent task branches off the parent task's tip — never off `feat` if the parent is unmerged.
+3. Fixes to a parent are expected; rebase children onto the new tip.
+4. Rebase a stacked child whenever its parent changes (fixes or merge).
+5. Rebase bottom-up in deep stacks.
+6. Tag known-good points before rebases.
+7. Never delete branches.
+8. One MR per branch.
+9. Confirm branch and worktree identity before every operation.
+10. If workflows exist, read them before pushing; wait for green before merging.
+11. Never use `feat/<task>` as a work branch while bare `feat` is the integration tier (Git ref collision).
 
 ### Anti-patterns
 
-- ❌ Branching a dependent feature off `feat` instead of the parent → won't compile.
-- ❌ Letting a stacked child drift after its parent changes → stale child, bigger conflicts later.
-- ❌ Merging the parent into the child instead of rebasing the child → merge bubbles, noisy history.
-- ❌ Rebasing the top of a stack before the middle → stale middle.
-- ❌ Self-merging without review.
-- ❌ Committing directly to `main`, `dev`, or `feat`.
-- ❌ Pushing before committing locally.
-- ❌ Pushing or opening an MR before the work is verified correct, or without an explicit user request to do so. Local first — "do the work" ≠ "publish the work."
+- Branching a subtask off `feat` instead of `task/<task>`.
+- Branching a dependent task off `feat` instead of the parent task.
+- Using `feat/<task>` while bare `feat` exists (Git cannot store both).
+- Running work for task A inside task B's worktree.
+- Checking out a different branch inside a worktree instead of using the correct worktree.
+- Letting a stacked child drift after its parent changes.
+- Merging the parent into the child instead of rebasing the child.
+- Rebasing the top of a stack before the middle.
+- Self-merging without review.
+- Committing directly to `main`, `dev`, or `feat`.
+- Pushing before committing locally.
+- Merging while CI is red or still running.
+- Pushing or opening an MR before the work is verified, or without an explicit user request.
+
+### Workflow preference memory
+
+`keel git-workflow configure --model four-tier [--note "..."]` saves the chosen branch+commit workflow to the global per-workspace memory lane (never the repo). Recall with `keel git-workflow show`.
 
 ### Agent execution checklist
 
-Before starting a feature:
-1. Determine dependency: does this feature need code from an unmerged `feature/<name>`?
-   - NO → `git checkout feat && git pull && git checkout -b feature/<name>`.
-   - YES (stable parent) → `git checkout feature/<parent> && git checkout -b feature/<name>`.
-   - YES (unstable parent) → wait; don't stack on churning work.
-2. Work + commit per layer: `<Category>: <FEATURE_CATEGORY> : <info>`. Commit locally first.
-3. Verify locally: run the app, test the behavior, confirm the work is correct. Fix on the same branch if not.
-4. Push + open MR — only on explicit user request, and only after verified. Do NOT push or open an MR automatically. Target `feat`. Do not delete on merge.
-5. If stacked — on parent fixes (still unmerged):
-   - `git checkout feature/<child>`
-   - `git fetch origin`
-   - `git rebase feature/<parent>` ← absorb fixes
-   - Resolve conflicts if any → `git rebase --continue`.
-   - `git push --force-with-lease`
-   - For deeper stacks, repeat bottom-up.
-6. If stacked — on parent merge into `feat`:
-   - `git checkout feature/<child>`
-   - `git fetch origin`
-   - `git rebase origin/feat` ← drop merged parent commits
-   - `git push --force-with-lease`
-   - For deeper stacks, repeat bottom-up.
-7. On own merge: leave the branch. Never delete.
+**Before starting**
+1. Confirm identity: `git worktree list` + `git branch --show-current` + `pwd`.
+2. Determine dependency:
+   - Independent → `git checkout feat && git pull && git checkout -b task/<task>`.
+   - Dependent (stable parent) → `git checkout task/<parent> && git checkout -b task/<task>`.
+   - Subtask → `git checkout task/<task> && git checkout -b task/<task>/<subtask>`.
+   - Dependent but parent unstable → wait.
+3. Optional worktree: `git worktree add ../<name> <branch>`.
+
+**During work**
+- Commit per layer: `Add : FEATURE : info`. Commit locally first.
+- Verify locally. Fix on the same branch.
+
+**Before pushing (only on explicit request)**
+- Check workflows; satisfy them; then `git push -u origin <branch>`.
+- Open MR targeting the correct parent. Include purpose, target, stack context, expected CI.
+
+**After pushing**
+- Wait for green if workflows exist. Fix on same branch if red. Merge only if requested and green.
+
+**If stacked — parent gets fixes (unmerged)**
+- Rebase child onto parent; deep stacks bottom-up; `--force-with-lease`.
+
+**If stacked — parent merges**
+- Rebase child onto `origin/task/<task>` or `origin/feat` as appropriate.
+
+**On merge**
+- Leave the branch. Never delete. Rebase stacked children if any.
 
 ## Required Preflight
 

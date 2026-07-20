@@ -3,7 +3,9 @@
 //! Dependencies: std::fs, std::path, serde_json, crate::args, crate::runtime.
 //! Main Functions: run_design_intelligence_command.
 //! Side Effects: Reads the design-intelligence catalog JSON; optionally writes a
-//!   persisted design-system markdown artifact when `--persist` is set.
+//!   persisted design-system markdown artifact when `--persist` is set. The
+//!   default persist path is the global per-workspace memory lane (never the
+//!   user project); `--out` opts into an explicit path.
 //!
 //! This replaces the former three-line stub in code_search.rs. The catalog
 //! (`ui-design-systems-and-responsive-interfaces/data/design_intelligence_catalog.json`)
@@ -900,6 +902,29 @@ fn safe_slug(raw: &str) -> String {
     }
 }
 
+/// Slug a workspace path into a single safe directory segment (same scheme as
+/// code-graph / SYSTEM_MAP lanes).
+fn workspace_slug(raw: &str) -> String {
+    let mut slug = String::with_capacity(raw.len());
+    let mut last_was_dash = false;
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+            last_was_dash = false;
+        } else if !last_was_dash {
+            slug.push('-');
+            last_was_dash = true;
+        }
+    }
+    let trimmed = slug.trim_matches('-');
+    let bounded: String = trimmed.chars().take(64).collect();
+    if bounded.is_empty() {
+        "workspace".to_string()
+    } else {
+        bounded
+    }
+}
+
 fn persist_design_system(
     packet: &Value,
     request: &str,
@@ -908,8 +933,6 @@ fn persist_design_system(
     out_override: &str,
     force: bool,
 ) -> Result<PersistOutcome, String> {
-    let cwd =
-        std::env::current_dir().map_err(|error| format!("resolve current directory: {error}"))?;
     let project = if project_name.trim().is_empty() {
         "Design System"
     } else {
@@ -919,6 +942,8 @@ fn persist_design_system(
 
     let (master_path, page_path) = if !out_override.trim().is_empty() {
         // Explicit --out is the MASTER path; page sibling under pages/ when set.
+        // Absolute path used as-is; relative path is cwd-relative (intentional
+        // opt-in to an in-repo or custom location).
         let master = clean_path(&PathBuf::from(out_override.trim()));
         let page_path = if page.trim().is_empty() {
             None
@@ -929,7 +954,20 @@ fn persist_design_system(
         };
         (master, page_path)
     } else {
-        let root = cwd.join("design-system").join(&slug);
+        // Default: global per-workspace memory lane — never create design-system/
+        // inside the user project.
+        let claude_home = resolve_claude_home("")
+            .map_err(|error| format!("resolve claude home for default persist path: {error}"))?;
+        let workspace_root = resolve_repository_root("").unwrap_or_else(|_| {
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+        });
+        let ws_slug = workspace_slug(&display_path(&workspace_root));
+        let root = claude_home
+            .join("memories")
+            .join("workspaces")
+            .join(ws_slug)
+            .join("design-system")
+            .join(&slug);
         let master = root.join("MASTER.md");
         let page_path = if page.trim().is_empty() {
             None
@@ -1867,6 +1905,78 @@ mod tests {
         assert!(!master_text.contains("## Checkout Flow"));
         assert!(!master_text.contains("Page override"));
         let _ = fs::remove_dir_all(&temp_dir); // best-effort test cleanup
+    }
+
+    #[test]
+    fn default_persist_writes_to_global_lane_not_cwd() {
+        // Unqualified --persist must never create design-system/ inside cwd.
+        let catalog = repo_catalog_path();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let cwd = std::env::temp_dir().join(format!(
+            "keel-di-cwd-{}-{}",
+            std::process::id(),
+            nanos
+        ));
+        let home = std::env::temp_dir().join(format!(
+            "keel-di-home-{}-{}",
+            std::process::id(),
+            nanos
+        ));
+        let _ = fs::remove_dir_all(&cwd);
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&cwd).expect("cwd");
+        fs::create_dir_all(&home).expect("home");
+        let prev = std::env::var_os("CLAUDE_TARGET_OVERRIDE");
+        std::env::set_var("CLAUDE_TARGET_OVERRIDE", &home);
+        let prev_cwd = std::env::current_dir().ok();
+        std::env::set_current_dir(&cwd).expect("chdir");
+        let (code, out, err) = run(&[
+            "recommend",
+            "fintech banking dashboard",
+            "--catalog",
+            catalog.to_str().unwrap(),
+            "--persist",
+            "--project-name",
+            "CleanLane",
+        ]);
+        if let Some(dir) = prev_cwd {
+            let _ = std::env::set_current_dir(dir);
+        }
+        match prev {
+            Some(value) => std::env::set_var("CLAUDE_TARGET_OVERRIDE", value),
+            None => std::env::remove_var("CLAUDE_TARGET_OVERRIDE"),
+        }
+        assert_eq!(code, 0, "stderr: {err}");
+        assert!(
+            !cwd.join("design-system").exists(),
+            "default persist must not create design-system/ under cwd"
+        );
+        fn find_master(dir: &std::path::Path, depth: usize) -> bool {
+            if depth > 8 {
+                return false;
+            }
+            if dir.join("MASTER.md").is_file() {
+                return true;
+            }
+            if let Ok(entries) = fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    if entry.path().is_dir() && find_master(&entry.path(), depth + 1) {
+                        return true;
+                    }
+                }
+            }
+            false
+        }
+        assert!(
+            find_master(&home, 0),
+            "expected MASTER.md under isolated claude-home; out={out} err={err}"
+        );
+        assert!(out.contains("Persisted design system"), "out: {out}");
+        let _ = fs::remove_dir_all(&cwd);
+        let _ = fs::remove_dir_all(&home);
     }
 
     #[test]

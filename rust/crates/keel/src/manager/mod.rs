@@ -33,7 +33,7 @@ use install::{
 };
 use verify::{
     count_installed_skills, count_learned_skills, count_managed_skills, install_metadata_path,
-    metadata_value,
+    metadata_value, stale_managed_skill_names,
 };
 
 pub fn run_install_command(
@@ -265,11 +265,20 @@ pub fn run_status_command(
         repo_version_from_metadata_or_build(&metadata, build_version)
             .unwrap_or_else(|| "unavailable".to_string())
     };
-    let update_status = match source_skill_count {
-        Some(expected_count) if installed_skill_count == expected_count => "current",
-        Some(_) => "refresh recommended",
-        None if installed_skill_count == 0 => "not installed",
-        None => "source unavailable",
+    // Content drift (not just count): an install that never re-ran after skill
+    // edits can still show 52/52 while SKILL.md bodies are stale. Matcher and
+    // Skill() both read the installed tree — stale means wrong guidance.
+    let stale_skills: Vec<String> = layout
+        .as_ref()
+        .ok()
+        .map(|value| stale_managed_skill_names(value, &claude_home))
+        .unwrap_or_default();
+    let update_status = match (source_skill_count, stale_skills.is_empty()) {
+        (Some(expected_count), true) if installed_skill_count == expected_count => "current",
+        (Some(_), false) => "refresh recommended (content drift)",
+        (Some(_), true) => "refresh recommended",
+        (None, _) if installed_skill_count == 0 => "not installed",
+        (None, _) => "source unavailable",
     };
     let synced_skills = match source_skill_count {
         Some(expected_count) => format!("{installed_skill_count}/{expected_count}"),
@@ -305,6 +314,24 @@ pub fn run_status_command(
     let _ = writeln!(standard_output, "  Platform: {target}");
     let _ = writeln!(standard_output, "  Synced skills: {synced_skills}");
     let _ = writeln!(standard_output, "  Learned skills: {learned_skill_count}");
+    if !stale_skills.is_empty() {
+        let preview: String = stale_skills
+            .iter()
+            .take(12)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        let more = if stale_skills.len() > 12 {
+            format!(" (+{} more)", stale_skills.len() - 12)
+        } else {
+            String::new()
+        };
+        let _ = writeln!(
+            standard_output,
+            "  Stale skills (content drift): {}{} — run `keel install` to refresh",
+            preview, more
+        );
+    }
     let _ = writeln!(standard_output);
     let _ = writeln!(standard_output, "Runtime:");
     let _ = writeln!(standard_output, "  implementation: rust");

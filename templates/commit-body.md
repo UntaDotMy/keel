@@ -12,7 +12,7 @@ Subject line (strictly enforced): `<Category>: <FEATURE>: <short information>`
 - `<FEATURE>` (uppercase component): e.g. RGB, LED, ARGB, SENSOR
 - Example: `Wip: RGB: Build light effect mode (multi color)`
 
-Note: the commit subject uses colons (`Add: RGB: sync all`); the branch name uses a slash (`add/RGB`). Never mix the two.
+Note: the commit subject uses colons with spaces (`Add : RGB : sync all`); the branch name uses a slash (`task/rgb-sync`). Never mix the two.
 
 Problem
 <Only include when the diff fixes a concrete problem.>

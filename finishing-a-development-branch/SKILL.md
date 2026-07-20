@@ -61,7 +61,7 @@ git log --oneline <base>..HEAD   # the commits that will integrate
 
 Offer the paths and let the user choose; hand the mechanics to `git-expert`:
 
-- **Open a PR/MR** against `feat` (the default integration target for work branches) — concise
+- **Open a PR/MR** against the correct parent (`feat` for `task/<task>`; the parent task for a subtask) — concise
   title under ~70 chars, description covering what changed, what was tested, and
   anything deferred. Promotion `feat` → `dev` → `main` happens separately, after the
   feature is verified on staging.
@@ -69,7 +69,7 @@ Offer the paths and let the user choose; hand the mechanics to `git-expert`:
   explicit confirmation. Work branches merge into `feat`; `feat` promotes to `dev`; `dev` promotes to `main`.
 - **Keep the branch** for more work.
 
-Push to the `<category>/<FEATURE>` work branch with upstream tracking (`git push -u`), never directly to
+Push to the `task/<task>` (or `task/<task>/<subtask>`) work branch with upstream tracking (`git push -u`), never directly to
 `main`. Fixes for in-flight work stay on the same work branch. After merge, the branch stays — this repo never deletes branches.
 
 ### 5. Confirm worktree state — do not delete the branch

@@ -199,6 +199,29 @@ fn compare_file_bytes(source_path: &Path, target_path: &Path) -> Result<(), Stri
     Ok(())
 }
 
+/// Names of managed skills whose installed `SKILL.md` is missing or not
+/// byte-identical to the source checkout. Used by `status`/`doctor` so "current"
+/// means content-fresh, not merely "same skill count". Caps listed names so a
+/// large drift does not flood the status output.
+pub fn stale_managed_skill_names(
+    layout: &crate::runtime::RepositoryLayout,
+    claude_home: &Path,
+) -> Vec<String> {
+    let mut stale = Vec::new();
+    for skill in &layout.skills {
+        let source = skill.skill_path.join("SKILL.md");
+        let target = skills_directory(claude_home)
+            .join(&skill.name)
+            .join("SKILL.md");
+        match compare_file_bytes(&source, &target) {
+            Ok(()) => {}
+            Err(_) => stale.push(skill.name.clone()),
+        }
+    }
+    stale.sort();
+    stale
+}
+
 /// Verify every `*.md` file in `source_dir` is installed byte-identical in
 /// `target_dir`. Used for subagent definitions (`.claude/agents/`) and custom
 /// slash commands (`commands/`), which install copies `.md` files verbatim. A
@@ -316,6 +339,54 @@ pub fn metadata_value<'a>(metadata: &'a str, key: &str) -> Option<&'a str> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::RepositoryLayout;
+    use std::path::PathBuf;
+
+    #[test]
+    fn stale_managed_skill_names_detects_content_drift() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let root = std::env::temp_dir().join(format!(
+            "keel-stale-skills-{}-{}",
+            std::process::id(),
+            nanos
+        ));
+        let home = root.join("claude-home");
+        let src_skill = root.join("repo").join("demo-skill");
+        let dst_skill = skills_directory(&home).join("demo-skill");
+        fs::create_dir_all(&src_skill).unwrap();
+        fs::create_dir_all(&dst_skill).unwrap();
+        fs::write(src_skill.join("SKILL.md"), "---\nname: demo-skill\n---\nnew\n").unwrap();
+        fs::write(dst_skill.join("SKILL.md"), "---\nname: demo-skill\n---\nold\n").unwrap();
+
+        let layout = RepositoryLayout {
+            root_path: root.join("repo"),
+            skills: vec![SkillDefinition {
+                name: "demo-skill".into(),
+                skill_path: src_skill.clone(),
+                agent_configs: vec![],
+            }],
+            root_files: vec![],
+            shared_resource_directories: vec![],
+            agent_names: vec![],
+        };
+        let stale = stale_managed_skill_names(&layout, &home);
+        assert_eq!(stale, vec!["demo-skill".to_string()]);
+
+        // After syncing content, drift clears.
+        fs::write(dst_skill.join("SKILL.md"), "---\nname: demo-skill\n---\nnew\n").unwrap();
+        assert!(stale_managed_skill_names(&layout, &home).is_empty());
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = PathBuf::from("."); // silence unused if any
+    }
 }
 
 pub fn run_validate_command(

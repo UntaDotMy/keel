@@ -32,7 +32,7 @@ Route requests and drive the development workflow.
 main  (final stable)
 dev   (active development)
 feat  (feature branch)
-<category>/<FEATURE>  (work branch)
+task/<task>  (work branch; optional task/<task>/<subtask>)
 ```
 
 ## Related Commands

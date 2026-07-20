@@ -40,7 +40,7 @@ use crate::utility::memory::refresh_system_map;
 use crate::utility::memory_families::family_counts;
 use crate::utility::recall::{collapse_dashes, search_recall_index, RecallSearchResult};
 use crate::utility::skill_match::{
-    match_skill_for_prompt, skill_catalog, skill_full_body, skill_inline_brief,
+    installed_skill_path, match_skill_for_prompt, skill_catalog, skill_full_body, skill_inline_brief,
 };
 use crate::utility::workflow_ledger::{current_timestamp_millis, format_timestamp_iso8601};
 use crate::utility::working_brief::{create_brief, list_briefs, read_brief, write_brief, Brief};
@@ -1027,7 +1027,22 @@ fn tool_skill_route(arguments: &Value) -> Result<String, String> {
     let claude_home = tool_claude_home("skill_route")?;
     let payload = match match_skill_for_prompt(&claude_home, &prompt) {
         Some(found) => {
+            // Present on disk is mandatory: never return a name the agent cannot
+            // open (host Skill() catalog lag → use path + skill_get / Read).
+            let Some(path) = installed_skill_path(&claude_home, &found.name) else {
+                return Err(format!(
+                    "skill_route: matched `{}` but SKILL.md is missing under installed skills — run `keel install`",
+                    found.name
+                ));
+            };
             let brief = skill_inline_brief(&claude_home, &found.name);
+            if brief.is_none() {
+                return Err(format!(
+                    "skill_route: matched `{}` but skill body is unreadable at {} — reinstall with `keel install`",
+                    found.name,
+                    display_path(&path)
+                ));
+            }
             // Surface related skills that are actually installed, so the agent
             // knows adjacent skills exist without a separate skill_list call.
             let installed: std::collections::BTreeSet<String> = skill_catalog(&claude_home)
@@ -1041,7 +1056,11 @@ fn tool_skill_route(arguments: &Value) -> Result<String, String> {
                     entry
                         .related_skills
                         .into_iter()
-                        .filter(|name| installed.contains(name) && name != &found.name)
+                        .filter(|name| {
+                            installed.contains(name)
+                                && name != &found.name
+                                && installed_skill_path(&claude_home, name).is_some()
+                        })
                         .collect()
                 })
                 .unwrap_or_default();
@@ -1049,14 +1068,19 @@ fn tool_skill_route(arguments: &Value) -> Result<String, String> {
                 "matched": true,
                 "name": found.name,
                 "score": format!("{:.4}", found.score),
+                "path": display_path(&path),
+                "present": true,
                 "brief": brief,
                 "relatedSkills": related_installed,
+                "note": "If host Skill() says Unknown skill, Read `path` or call skill_get — file is on disk.",
             })
         }
         None => json!({
             "matched": false,
             "name": Value::Null,
             "score": Value::Null,
+            "path": Value::Null,
+            "present": false,
             "brief": Value::Null,
         }),
     };
@@ -1099,18 +1123,33 @@ fn tool_skill_get(arguments: &Value) -> Result<String, String> {
 fn tool_skill_list(_arguments: &Value) -> Result<String, String> {
     let claude_home = tool_claude_home("skill_list")?;
     let catalog = skill_catalog(&claude_home);
+    let installed_names: std::collections::BTreeSet<String> =
+        catalog.iter().map(|entry| entry.name.clone()).collect();
     let skills: Vec<Value> = catalog
         .iter()
-        .map(|entry| {
+        .filter_map(|entry| {
+            // Only list skills with a readable SKILL.md (same gate as skill_get).
+            let path = installed_skill_path(&claude_home, &entry.name)?;
             let (description, _) = truncate_chars(&entry.description, MAX_SKILL_LIST_FIELD_CHARS);
             let (when_to_use, _) = truncate_chars(&entry.when_to_use, MAX_SKILL_LIST_FIELD_CHARS);
-            json!({
+            let related: Vec<String> = entry
+                .related_skills
+                .iter()
+                .filter(|name| {
+                    installed_names.contains(*name)
+                        && installed_skill_path(&claude_home, name).is_some()
+                })
+                .cloned()
+                .collect();
+            Some(json!({
                 "name": entry.name,
+                "path": display_path(&path),
+                "present": true,
                 "description": description,
                 "whenToUse": when_to_use,
                 "useCount": entry.use_count,
-                "relatedSkills": entry.related_skills,
-            })
+                "relatedSkills": related,
+            }))
         })
         .collect();
     let payload = json!({
