@@ -21,21 +21,23 @@ Never remove or replace existing data, fields, columns, outputs, or records to f
 
 ### Branch model
 
-Four tiers, promoted one direction only. The three upper tiers are permanent; work branches carry hands-on commits:
+Hierarchy, promoted one direction only. Integration tiers are permanent; task branches carry hands-on commits:
 - **`main`** — final stable, verified. Only receives merges from `dev`. Never commit directly.
 - **`dev`** — staging integration. Receives merges from `feat`; features are verified here before promotion to `main`. Never commit directly.
-- **`feat`** — feature integration. Receives merges from work branches once verified. Never commit directly.
-- **work branch** `<category>/<FEATURE>` (e.g. `add/RGB`, `fix/SENSOR`) — all hands-on commits. Branch off `feat`, one coherent feature per branch.
+- **`feat`** — feature integration. Receives merges from `task/<task>` once verified. Never commit directly. Bare `feat` only — not `feat/<task>` (Git ref collision).
+- **`task/<task>`** — one complete task; branches off `feat` (or a parent task when stacked).
+- **`task/<task>/<subtask>`** — one subtask; branches off `task/<task>`.
 
-Promotion flow: `work branch` → `feat` → `dev` → `main`.
+Promotion flow: `task/<task>/<subtask>` → `task/<task>` → `feat` → `dev` → `main`.
 
-- One feature = one `<category>/<FEATURE>` work branch = one merge request into `feat`.
-- **Fixes for in-flight work stay on the same work branch** — if `Add: RGB: synchronize all` is committed and testing surfaces a problem, commit the `Fix: RGB: ...` on that same branch, never a new one. A work branch accumulates every commit for its feature until verified, then merges up to `feat`. A new branch is only for a genuinely new, separate feature.
-- Never mix multiple features in the same branch or merge request.
+- One task = one `task/<task>` branch (optionally with subtask branches) = merge request into `feat` (or into the parent task for a subtask).
+- **Fixes for in-flight work stay on the same work branch** — never open a new branch for review or test fixes.
+- Never mix multiple unrelated tasks in the same branch or merge request.
 - **Never delete a branch after pushing or merging it** — no `git branch -d/-D`, no `git push origin --delete`. Branches are permanent in this model.
+- **Legacy prefixes** (`add/`, `fix/`, `feature/`, …) may finish in flight; preflight warns. New work uses `task/`.
 - Use `git add -p` when selective staging is required.
 - Review `git diff --cached` before each commit.
-- Commit subjects strictly follow `<category>: <FEATURE>: <short information>` (colon-separated). Categories (lowercase): `add`, `config`, `refactor`, `wip`, `fix`, `docs`. `<FEATURE>` is the component/area in uppercase (e.g. RGB, LED, ARGB, SENSOR). Example: `wip: RGB: Build light effect mode (multi color)`. The commit uses colons; the branch name uses a slash (`add/RGB`) — never conflate them.
+- Commit subjects: `Add : FEATURE : short information` — Category capitalized (`Add`, `Config`, `Refactor`, `Wip`, `Fix`, `Docs`); `FEATURE` uppercase; spaces around colons. Example: `Wip : RGB : build light effect mode (multi color)`. Branch names use slashes (`task/rgb-sync`); commit subjects use colons — never conflate them.
 - When a commit body is needed, keep it professional and non-chatty, make the title and body match the committed diff exactly, and include only the sections the change genuinely needs. Use this order when present: `Problem`, `Solution`, `Summary`, `Notes`, `What Changed`, `Test Result`. Omit `Problem` and `Solution` when the commit is additive, preventive, or housekeeping rather than fixing a concrete issue, keep `Test Result` limited to validation that directly proves the committed change, and do not mention the harness, keel, or tool-brand validation in commit or PR text unless the change itself is about those surfaces.
 - Run `keel git-workflow preflight --repo-root . --base-ref origin/feat` before push or merge-request creation (`origin/dev` when promoting `feat` to `dev`; `origin/main` only when promoting `dev` to `main`).
 - When opening a PR or MR from the CLI, never publish bodies with escaped newline sequences such as `\\n`; use a real multiline body or a `--body-file` flow instead.

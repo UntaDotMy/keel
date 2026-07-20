@@ -37,9 +37,9 @@ Empty → confirm repo root before mutating.
 6. **Local commit before server** — no direct server commits.
 
 ## Branch model (this toolkit)
-`main` ← `dev` ← `feat` ← `<category>/<FEATURE>` work branch. Never commit directly to main/dev/feat.
+`main` ← `dev` ← `feat` ← `task/<task>` [← `task/<task>/<subtask>`]. Never commit directly to main/dev/feat. Do not use `feat/<task>` (collides with bare `feat`). Legacy `add/`/`feature/` may finish in flight.
 
-Commit subject: `<category>: <FEATURE>: short info` (categories lowercase add/config/refactor/wip/fix/docs; FEATURE uppercase). Branch uses slash (`fix/SENSOR`); commit uses colons.
+Commit subject: `Add : FEATURE : short info` (Category capitalized; FEATURE uppercase; spaces around colons). Branch uses slash (`task/sensor`); commit uses colons.
 
 Preflight: `keel git-workflow preflight --repo-root . --base-ref origin/feat`
 

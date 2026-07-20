@@ -257,7 +257,9 @@ the harness's `/rewind` can), so the two are complementary.
 `keel code-graph build|impact` is a deterministic codebase-understanding
 graph ,  the structural layer the flat `SYSTEM_MAP` and the manual
 `preserve-existing-flow` owner trace lacked. `build` scans the workspace and writes
-a committable JSON artifact (default `.understand/code-graph.json`) of nodes
+a JSON artifact (default: global per-workspace memory lane under
+`<claude-home>/memories/workspaces/<slug>/code-graph/code-graph.json`; pass
+`--output` for an explicit in-repo path) of nodes
 (source files with their top-level symbol definitions and import specifiers) and
 edges (cross-file `imports` dependencies). Extraction is line-based and
 dependency-free (no tree-sitter grammar, no LLM): nodes sort by path, edges by

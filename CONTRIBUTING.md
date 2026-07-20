@@ -16,14 +16,15 @@ This repository is a managed harness skill pack, not a loose prompt collection. 
 
 ## Feature Delivery Rules
 
-- Branch model: `main` (stable) ← `dev` (staging verification) ← `feat` (feature integration) ← `<category>/<FEATURE>` work branch (all hands-on commits; branch off `feat`).
-- One feature = one `<category>/<FEATURE>` work branch = one merge request into `feat`.
+- Branch model: `main` ← `dev` ← `feat` ← `task/<task>` [← `task/<task>/<subtask>`]. Never use `feat/<task>` while bare `feat` exists (Git ref collision).
+- One task = one `task/<task>` branch (subtasks nest under it) = merge request into `feat` (or into the parent task for a subtask).
 - Fixes for in-flight work stay on the same work branch — never open a new branch for a fix to work already underway.
+- Commits: `Add : FEATURE : short info` (capitalized category, spaces around colons).
 - Do not mix unrelated features in the same branch.
 - **Never delete a branch** after pushing or merging it (`git branch -d/-D`, `git push origin --delete` are not part of the normal flow).
 - Use `git add -p` when selective staging is required.
 - Review `git diff --cached` before each commit.
-- Commit subjects strictly follow `<category>: <FEATURE>: <short information>` (colon-separated; categories lowercase: add, config, refactor, wip, fix, docs; FEATURE uppercase, e.g. `wip: RGB: Build light effect mode (multi color)`). The commit uses colons; the branch name uses a slash (`add/RGB`) — never conflate them.
+- Commit subjects: `Add : FEATURE : short information` (capitalized category; FEATURE uppercase; spaces around colons). Branch names use slashes (`task/rgb-sync`); commit subjects use colons — never conflate them.
 - Run `keel git-workflow preflight --repo-root . --base-ref origin/feat` before push or merge-request creation (`origin/dev` when promoting `feat` to `dev`; `origin/main` only when promoting `dev` to `main`).
 - When opening a PR or MR from the CLI, use a real multiline body or `--body-file` instead of embedding escaped newline sequences such as `\\n` in the published text.
 - Follow [WORKFLOW.md](WORKFLOW.md) when the change touches branching, merge-request shape, or reviewer expectations.

@@ -87,20 +87,46 @@ pub fn run_git_workflow_command(
     }
 }
 
-/// Branch-name prefixes WORKFLOW.md sanctions for work branches — the six
-/// commit categories, each usable as a `<category>/<FEATURE>` work-branch prefix
-/// (e.g. `add/RGB`, `fix/SENSOR`). `feat/` is intentionally absent: `feat` is a
-/// permanent integration tier in the four-tier model, not a work-branch prefix.
-/// `improve/` (a legacy prefix that never mapped to a commit category) was also
-/// removed in the four-tier migration — a branch named `improve/...` now blocks,
-/// which is intended: rename it to a real `<category>/<FEATURE>` work branch.
-const SANCTIONED_BRANCH_PREFIXES: &[&str] =
-    &["add/", "config/", "refactor/", "wip/", "fix/", "docs/"];
+/// Preferred work-branch prefix going forward (`task/<task>` and
+/// `task/<task>/<subtask>`). Integration stays `feat` (a bare branch name);
+/// work must NOT use `feat/` because Git cannot store both `refs/heads/feat`
+/// and `refs/heads/feat/...` at once.
+const PREFERRED_BRANCH_PREFIXES: &[&str] = &["task/"];
+
+/// Legacy work-branch prefixes still accepted so in-flight branches keep
+/// working. Preflight warns (does not block) and asks for `task/` going forward.
+const LEGACY_BRANCH_PREFIXES: &[&str] = &[
+    "add/",
+    "config/",
+    "refactor/",
+    "wip/",
+    "fix/",
+    "docs/",
+    "feature/",
+];
+
+/// All prefixes preflight will allow (preferred + legacy). Unknown prefixes block.
+const SANCTIONED_BRANCH_PREFIXES: &[&str] = &[
+    "task/",
+    "add/",
+    "config/",
+    "refactor/",
+    "wip/",
+    "fix/",
+    "docs/",
+    "feature/",
+];
+
+/// Default hierarchy text for configure/show.
+const DEFAULT_BRANCH_TIERS: &str = "main <- dev <- feat <- task/<task> [<- task/<task>/<subtask>]";
+
 /// Conventional commit-subject prefixes the preflight expects; a subject that
-/// matches none of these earns a (non-blocking) drift warning.
+/// matches none of these (and fails the keel colon form) earns a non-blocking
+/// drift warning. Includes lowercase category tokens used by both the new
+/// `Add : FEATURE : info` form and legacy `add: FEATURE: info`.
 const SANCTIONED_COMMIT_PREFIXES: &[&str] = &[
     "feat", "fix", "docs", "chore", "refactor", "test", "perf", "build", "ci", "style", "revert",
-    "improve", "add",
+    "improve", "add", "config", "wip",
 ];
 
 /// Run the native Git workflow preflight described in WORKFLOW.md: block on
@@ -154,17 +180,17 @@ fn run_git_workflow_preflight(
         }
     }
 
-    // 1. Branch naming. In the four-tier model (main ← dev ← feat ← work
-    //    branch) the current branch must be either a permitted integration tier
-    //    being promoted (`dev`/`feat`) or a `<category>/<FEATURE>` work branch.
-    //    `main`/`master` are final-stable and never pushed from directly.
+    // 1. Branch naming. Hierarchy: main ← dev ← feat ← task/<task>
+    //    [← task/<task>/<subtask>]. Hands-on work lives under task/ (preferred)
+    //    or a legacy prefix (warn). main/master never receive direct work.
+    //    Bare `feat`/`dev` are promotion tiers only.
     let branch = git_text(repo, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_default();
     let branch = branch.trim().to_string();
     if branch.is_empty() || branch == "HEAD" {
         blocking.push("detached HEAD — check out a work branch before preflight".to_string());
     } else if matches!(branch.as_str(), "main" | "master") {
         blocking.push(format!(
-            "on final-stable branch '{branch}' — never push from it directly; create a <category>/<FEATURE> work branch (e.g. add/RGB)"
+            "on final-stable branch '{branch}' — never push from it directly; create a task/<task> work branch (e.g. task/rgb-sync)"
         ));
     } else if matches!(branch.as_str(), "dev" | "feat") {
         // Integration tiers: valid to stand on only when promoting upward
@@ -173,13 +199,25 @@ fn run_git_workflow_preflight(
         warnings.push(format!(
             "on integration tier '{branch}' — only valid when promoting upward (feat→dev→main), not for hands-on work"
         ));
+    } else if PREFERRED_BRANCH_PREFIXES
+        .iter()
+        .any(|prefix| branch.starts_with(prefix))
+    {
+        // Preferred: task/<task> or task/<task>/<subtask>.
+    } else if LEGACY_BRANCH_PREFIXES
+        .iter()
+        .any(|prefix| branch.starts_with(prefix))
+    {
+        warnings.push(format!(
+            "branch '{branch}' uses a legacy work-branch prefix — keep working; new branches should use task/<task> (or task/<task>/<subtask>)"
+        ));
     } else if !SANCTIONED_BRANCH_PREFIXES
         .iter()
         .any(|prefix| branch.starts_with(prefix))
     {
         blocking.push(format!(
-            "branch '{branch}' does not use a sanctioned <category>/ prefix ({})",
-            SANCTIONED_BRANCH_PREFIXES.join(", ")
+            "branch '{branch}' does not use a sanctioned work-branch prefix (prefer task/; legacy still allowed: {})",
+            LEGACY_BRANCH_PREFIXES.join(", ")
         ));
     }
 
@@ -278,10 +316,15 @@ fn git_lines(repo: Option<&Path>, args: &[&str]) -> Option<Vec<String>> {
 }
 
 fn commit_subject_has_sanctioned_prefix(subject: &str) -> bool {
+    // Prefer the keel colon form (new or legacy spacing/casing).
+    if validate_commit_subject(subject).is_ok() {
+        return true;
+    }
     let lowered = subject.trim_start().to_ascii_lowercase();
     SANCTIONED_COMMIT_PREFIXES.iter().any(|prefix| {
-        // Match "feat:", "feat(scope):", "feat!:" — the conventional shapes.
+        // Match "feat:", "feat(scope):", "feat!:", and spaced "add :" shapes.
         lowered.starts_with(&format!("{prefix}:"))
+            || lowered.starts_with(&format!("{prefix} :"))
             || lowered.starts_with(&format!("{prefix}("))
             || lowered.starts_with(&format!("{prefix}!"))
     })
@@ -825,17 +868,18 @@ fn run_git_workflow_configure(
             "repoRoot".to_string(),
             repository_root.to_string_lossy().to_string(),
         ),
-        (
-            "branchTiers".to_string(),
-            "main <- dev <- feat <- feature/<name>".to_string(),
-        ),
+        ("branchTiers".to_string(), DEFAULT_BRANCH_TIERS.to_string()),
         (
             "workBranchPrefixes".to_string(),
-            SANCTIONED_BRANCH_PREFIXES.join(" "),
+            format!(
+                "preferred: {}; legacy: {}",
+                PREFERRED_BRANCH_PREFIXES.join(" "),
+                LEGACY_BRANCH_PREFIXES.join(" ")
+            ),
         ),
         (
             "commitPrefixes".to_string(),
-            SANCTIONED_COMMIT_PREFIXES.join(" "),
+            "Add|Config|Refactor|Wip|Fix|Docs : FEATURE : short info".to_string(),
         ),
     ];
     let path = match store.write_record(WORKFLOW_PREF_RECORD_ID, &record) {
@@ -909,15 +953,14 @@ fn run_git_workflow_show(
                 standard_output,
                 "git-workflow show: no saved preference for this workspace (default model=four-tier). Run `keel git-workflow configure` to set one."
             );
+            let _ = writeln!(standard_output, "  default tiers: {DEFAULT_BRANCH_TIERS}");
             let _ = writeln!(
                 standard_output,
-                "  default tiers: main <- dev <- feat <- feature/<name>"
+                "  work-branch prefixes: preferred {} | legacy still allowed {}",
+                PREFERRED_BRANCH_PREFIXES.join(", "),
+                LEGACY_BRANCH_PREFIXES.join(", ")
             );
-            let _ = writeln!(
-                standard_output,
-                "  work-branch prefixes: {}",
-                SANCTIONED_BRANCH_PREFIXES.join(", ")
-            );
+            let _ = writeln!(standard_output, "  commit form: Add : FEATURE : short info");
             return 0;
         }
         Err(error) => {
@@ -2884,32 +2927,44 @@ fn staged_files(repo_root: Option<&std::path::Path>) -> Option<Vec<String>> {
     Some(files)
 }
 
-/// Commit categories required by the project commit convention
-/// `<category>: <FEATURE>: <short information>` — all lowercase.
-const COMMIT_CATEGORIES: [&str; 6] = ["add", "config", "refactor", "wip", "fix", "docs"];
+/// Canonical commit categories (capitalized first letter). New generators emit
+/// these; validators also accept the legacy lowercase form.
+const COMMIT_CATEGORIES: [&str; 6] = ["Add", "Config", "Refactor", "Wip", "Fix", "Docs"];
 
-/// Validate a commit subject against `<category>: <FEATURE>: <short information>`.
+/// Map a category token (any casing) to its canonical form, or None if unknown.
+fn normalize_commit_category(raw: &str) -> Option<&'static str> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "add" => Some("Add"),
+        "config" => Some("Config"),
+        "refactor" => Some("Refactor"),
+        "wip" => Some("Wip"),
+        "fix" => Some("Fix"),
+        "docs" => Some("Docs"),
+        _ => None,
+    }
+}
+
+/// Validate a commit subject against `Add : FEATURE : short information`.
 ///
-/// The commit subject is COLON-separated (three parts). This is distinct from a
-/// branch name, which is SLASH-separated (`<category>/<FEATURE>`); same category
-/// vocabulary, different separator. Do not conflate them.
+/// The commit subject is COLON-separated (three parts), with spaces around
+/// colons preferred. Distinct from branch names (`task/<task>`). Do not conflate.
 ///
-/// - `<category>` must be one of [`COMMIT_CATEGORIES`] (lowercase).
-/// - `<FEATURE>` must be a non-empty uppercase component label (e.g. RGB, LED, ARGB, SENSOR).
-/// - `<short information>` must be a non-empty description.
+/// - Category must be one of [`COMMIT_CATEGORIES`] (case-insensitive; legacy
+///   lowercase still accepted so in-flight history keeps validating).
+/// - FEATURE must be a non-empty uppercase component label (e.g. RGB, PROTOCOL).
+/// - Short information must be non-empty.
 fn validate_commit_subject(subject: &str) -> Result<(), String> {
     let trimmed = subject.trim();
     let parts: Vec<&str> = trimmed.splitn(3, ':').collect();
     if parts.len() < 3 {
         return Err(
-            "expected three colon-separated parts: <category>: <FEATURE>: <short information>"
-                .to_string(),
+            "expected three colon-separated parts: Add : FEATURE : short information".to_string(),
         );
     }
     let category = parts[0].trim();
     let feature = parts[1].trim();
     let information = parts[2].trim();
-    if !COMMIT_CATEGORIES.contains(&category) {
+    if normalize_commit_category(category).is_none() {
         return Err(format!(
             "category '{category}' must be one of: {}",
             COMMIT_CATEGORIES.join(", ")
@@ -2929,17 +2984,17 @@ fn validate_commit_subject(subject: &str) -> Result<(), String> {
 
 fn detect_category(paths: &[String]) -> &'static str {
     if paths.is_empty() {
-        return "wip";
+        return "Wip";
     }
     let all_match = |predicate: fn(&str) -> bool| paths.iter().all(|path| predicate(path));
 
     if all_match(is_docs_path) {
-        return "docs";
+        return "Docs";
     }
     if all_match(is_config_path) {
-        return "config";
+        return "Config";
     }
-    "wip"
+    "Wip"
 }
 
 fn is_docs_path(path: &str) -> bool {
@@ -3023,17 +3078,17 @@ fn derive_scope(paths: &[String]) -> Option<String> {
 
 fn generate_commit_subject(from_diff: bool, paths: &[String]) -> String {
     if !from_diff {
-        return "wip: GENERAL: update".to_string();
+        return "Wip : GENERAL : update".to_string();
     }
     if paths.is_empty() {
-        return "wip: GENERAL: no staged changes".to_string();
+        return "Wip : GENERAL : no staged changes".to_string();
     }
     let category = detect_category(paths);
     let summary = subject_summary(paths);
     let feature = derive_scope(paths)
         .map(|scope| scope.to_uppercase())
         .unwrap_or_else(|| "GENERAL".to_string());
-    format!("{category}: {feature}: {summary}")
+    format!("{category} : {feature} : {summary}")
 }
 
 fn subject_summary(paths: &[String]) -> String {
@@ -3539,30 +3594,30 @@ mod tests {
     #[test]
     fn detect_category_classifies_docs_only() {
         let staged = paths(&["README.md", "docs/architecture.md"]);
-        assert_eq!(detect_category(&staged), "docs");
+        assert_eq!(detect_category(&staged), "Docs");
     }
 
     #[test]
     fn detect_category_classifies_ci_as_config() {
         let staged = paths(&[".github/workflows/release.yml"]);
-        assert_eq!(detect_category(&staged), "config");
+        assert_eq!(detect_category(&staged), "Config");
     }
 
     #[test]
     fn detect_category_classifies_config_files() {
         let staged = paths(&["Cargo.toml", "rustfmt.toml"]);
-        assert_eq!(detect_category(&staged), "config");
+        assert_eq!(detect_category(&staged), "Config");
     }
 
     #[test]
     fn detect_category_falls_back_to_wip_for_source() {
         let staged = paths(&["src/lib.rs", "src/main.rs"]);
-        assert_eq!(detect_category(&staged), "wip");
+        assert_eq!(detect_category(&staged), "Wip");
     }
 
     #[test]
     fn detect_category_empty_is_wip() {
-        assert_eq!(detect_category(&[]), "wip");
+        assert_eq!(detect_category(&[]), "Wip");
     }
 
     #[test]
@@ -3596,14 +3651,17 @@ mod tests {
 
     #[test]
     fn generate_commit_subject_without_diff_uses_placeholder() {
-        assert_eq!(generate_commit_subject(false, &[]), "wip: GENERAL: update");
+        assert_eq!(
+            generate_commit_subject(false, &[]),
+            "Wip : GENERAL : update"
+        );
     }
 
     #[test]
     fn generate_commit_subject_with_diff_but_no_staged_signals_empty() {
         assert_eq!(
             generate_commit_subject(true, &[]),
-            "wip: GENERAL: no staged changes"
+            "Wip : GENERAL : no staged changes"
         );
     }
 
@@ -3615,7 +3673,7 @@ mod tests {
         ]);
         assert_eq!(
             generate_commit_subject(true, &staged),
-            "wip: KEEL: update 2 files"
+            "Wip : KEEL : update 2 files"
         );
     }
 
@@ -3624,8 +3682,8 @@ mod tests {
         let staged = paths(&["docs/architecture.md"]);
         let subject = generate_commit_subject(true, &staged);
         assert!(
-            subject.starts_with("docs: "),
-            "expected docs category, got {subject}"
+            subject.starts_with("Docs : "),
+            "expected Docs category, got {subject}"
         );
         assert!(
             subject.ends_with("update architecture.md"),
@@ -3656,12 +3714,19 @@ mod tests {
 
     #[test]
     fn validate_commit_subject_accepts_canonical_form() {
+        // Preferred form: Capitalized category, spaces around colons.
+        assert!(
+            validate_commit_subject("Wip : RGB : Build light effect mode (multi color)").is_ok()
+        );
+        assert!(validate_commit_subject("Fix : SENSOR : Correct I2C read timeout").is_ok());
+        assert!(validate_commit_subject("Add : ARGB : Add rainbow cycle preset").is_ok());
+        assert!(validate_commit_subject("Config : LED : Set default brightness").is_ok());
+        assert!(validate_commit_subject("Refactor : RGB : Extract blend helper").is_ok());
+        assert!(validate_commit_subject("Docs : SENSOR : Document calibration").is_ok());
+        // Legacy lowercase / no-space form still accepted for in-flight history.
         assert!(validate_commit_subject("wip: RGB: Build light effect mode (multi color)").is_ok());
         assert!(validate_commit_subject("fix: SENSOR: Correct I2C read timeout").is_ok());
         assert!(validate_commit_subject("add: ARGB: Add rainbow cycle preset").is_ok());
-        assert!(validate_commit_subject("config: LED: Set default brightness").is_ok());
-        assert!(validate_commit_subject("refactor: RGB: Extract blend helper").is_ok());
-        assert!(validate_commit_subject("docs: SENSOR: Document calibration").is_ok());
     }
 
     #[test]
@@ -3672,7 +3737,7 @@ mod tests {
 
     #[test]
     fn validate_commit_subject_rejects_lowercase_feature() {
-        let error = validate_commit_subject("wip: rgb: do a thing").unwrap_err();
+        let error = validate_commit_subject("Wip : rgb : do a thing").unwrap_err();
         assert!(error.contains("uppercase"), "got {error}");
     }
 
@@ -3796,18 +3861,39 @@ mod tests {
     }
 
     #[test]
-    fn preflight_passes_on_clean_feature_branch_ahead_of_base() {
+    fn preflight_passes_on_clean_task_branch_ahead_of_base() {
         let repo = init_temp_repo("pass");
-        // Branch off main onto a <category>/<FEATURE> work branch, add a
-        // committed change so HEAD is ahead of main.
+        // Preferred work branch: task/<task>
+        git_in(&repo, &["checkout", "-q", "-b", "task/widget"]);
+        std::fs::write(repo.join("widget.txt"), "feature\n").unwrap();
+        git_in(&repo, &["add", "."]);
+        git_in(&repo, &["commit", "-q", "-m", "Add : WIDGET : add widget"]);
+
+        let (code, stdout) = run_preflight(&repo, "main");
+        assert_eq!(code, 0, "stdout: {stdout}");
+        assert!(stdout.contains("PASS"), "stdout: {stdout}");
+        assert!(
+            !stdout.to_lowercase().contains("legacy"),
+            "preferred task/ branch must not warn as legacy: {stdout}"
+        );
+
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn preflight_allows_legacy_branch_with_warning() {
+        let repo = init_temp_repo("legacy");
         git_in(&repo, &["checkout", "-q", "-b", "add/WIDGET"]);
         std::fs::write(repo.join("widget.txt"), "feature\n").unwrap();
         git_in(&repo, &["add", "."]);
         git_in(&repo, &["commit", "-q", "-m", "add: WIDGET: add widget"]);
 
         let (code, stdout) = run_preflight(&repo, "main");
-        assert_eq!(code, 0, "stdout: {stdout}");
-        assert!(stdout.contains("PASS"), "stdout: {stdout}");
+        assert_eq!(code, 0, "legacy must still pass: {stdout}");
+        assert!(
+            stdout.to_lowercase().contains("legacy"),
+            "legacy prefix should warn: {stdout}"
+        );
 
         let _ = std::fs::remove_dir_all(&repo);
     }

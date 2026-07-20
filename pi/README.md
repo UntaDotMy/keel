@@ -133,7 +133,7 @@ On the first edit-class tool call in a fresh session, the Iron Law gate will blo
 
 ### Branch and Commit Rules
 
-- Branch model: `main` (stable) <- `dev` (staging) <- `feat` (integration) <- `<category>/<FEATURE>` work branch (branch off `feat`)
+- Branch model: `main` <- `dev` <- `feat` <- `task/<task>` [<- `task/<task>/<subtask>`]
 - Commit format: `[category]: [feature_category]: short info` (categories: Add, Config, Refactor, Wip, Fix, Docs; feature_category uppercase)
 - Never delete a branch after push or merge
 

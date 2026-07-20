@@ -105,12 +105,34 @@ pub fn match_skill_for_prompt(claude_home: &Path, prompt: &str) -> Option<SkillM
         return None;
     }
     let resolved = resolve_skill_for_prompt(prompt, &skills);
+    // Fail closed on a dangling name: never hand the agent a skill that is not
+    // a readable SKILL.md on disk (catalog race, partial install, renamed dir).
+    let resolved = resolved.and_then(|found| {
+        let path = resolve_skill_path(claude_home, &found.name)?;
+        if path.is_file() {
+            Some(found)
+        } else {
+            None
+        }
+    });
     // Record match-usage telemetry for skill_list. Fail-open: a write error
     // inside record_skill_match never breaks the match path.
     if let Some(found) = &resolved {
         crate::utility::skill_usage::record_skill_match(claude_home, &found.name);
     }
     resolved
+}
+
+/// Public resolve of `<claude_home>/skills/<name>/SKILL.md` when the skill is
+/// installed and readable. Used by MCP skill_route/skill_get so callers always
+/// get a concrete path for Read fallback when host `Skill()` is stale.
+pub fn installed_skill_path(claude_home: &Path, skill_name: &str) -> Option<std::path::PathBuf> {
+    let path = resolve_skill_path(claude_home, skill_name)?;
+    if path.is_file() {
+        Some(path)
+    } else {
+        None
+    }
 }
 
 /// Pure two-tier resolution over an already-loaded skill corpus: the IDF
@@ -629,7 +651,7 @@ fn inline_brief_from_source(text: &str) -> Option<String> {
         truncate_on_line_boundary(
             body.trim_start(),
             INLINE_BRIEF_MAX_BYTES,
-            "\n\n[skill brief truncated — call Skill(\"<name>\") for the full body]",
+            "\n\n[skill brief truncated — call Skill(\"<name>\") or skill_get / Read the installed path for the full body]",
         )
         .trim_end(),
     );

@@ -6,30 +6,32 @@ Support optional structured collaboration flow when the user explicitly requests
 
 ## Branch Model
 
-Four tiers, promoted one direction only. The three upper tiers are permanent; work branches carry hands-on commits:
+Hierarchy, promoted one direction only. Integration tiers are permanent; task branches carry hands-on commits:
 - **`main`** — final stable, verified. Only merges from `dev`.
-- **`dev`** — active development, staging for daily commits.
-- **`feat`** — new features, fixes, subtasks. Receives merges from work branches.
-- **work branch** `<category>/<FEATURE>` — all hands-on commits. Branch off `feat`.
+- **`dev`** — staging.
+- **`feat`** — integration. Receives merges from `task/<task>`. Bare name only (not `feat/<task>`).
+- **`task/<task>`** — one task. Branch off `feat` (or a parent task when stacked).
+- **`task/<task>/<subtask>`** — one subtask. Branch off `task/<task>`.
 
-Promotion flow: `work branch` → `feat` → `dev` → `main`.
+Promotion flow: `task/<task>/<subtask>` → `task/<task>` → `feat` → `dev` → `main`.
 
 ## Flow (Optional, User-Requested)
 
 1. Create or confirm issue context.
-2. Create a `<category>/<FEATURE>` work branch from `feat`.
-3. Implement change in small, reviewable commits using the `[category]: [feature_category]: short information` commit format. Fixes for this in-flight work stay on the same branch — never a new branch. Always commit locally first, avoid direct commits to the server.
-4. Open PR against `feat` with clear rationale and validation evidence.
+2. Create a `task/<task>` work branch from `feat` (or `task/<task>/<subtask>` from the parent task).
+3. Implement in small commits using `Add : FEATURE : short information`. Fixes stay on the same branch. Commit locally first.
+4. Open PR against the correct parent (`task/<task>` for a subtask, `feat` for a task) with clear rationale and validation evidence.
 5. Address feedback and update PR.
 6. Request human review.
-7. After the feature is verified, promote `feat` → `dev` → `main` (staging verify at `dev`). Never delete the work branch.
+7. After verification, promote upward (`task` → `feat` → `dev` → `main`). Never delete the work branch.
 
 ## Issue and Branch Guidance
 
 - Keep issue scoped to a clear user problem and acceptance criteria.
-- All hands-on work uses a `<category>/<FEATURE>` work branch off `feat`:
-  - e.g. `add/RGB`, `fix/SENSOR`, or `<category>/<issue-id>-<TOPIC>`
-- Fixes and subtasks for in-flight work stay on that feature's existing work branch, regardless of commit category.
+- All hands-on work uses `task/<task>` (or `task/<task>/<subtask>`):
+  - e.g. `task/rgb-sync`, `task/sensor/i2c-timeout`
+- Fixes and subtasks for in-flight work stay on that task's branch (or a nested subtask branch), never a random new prefix.
+- Legacy `add/` / `feature/` branches may finish in flight; new work uses `task/`.
 - Never delete a branch after pushing or merging it. Branches are permanent in this model.
 - Always commit locally before pushing to the server.
 

@@ -487,13 +487,13 @@ cargo fmt --all --check
 Hosted PR discipline:
 
 1. Run local proof.
-2. Push one cohesive `<category>/<FEATURE>` work branch (branched off `feat`). Never delete the branch after push or merge.
+2. Push one cohesive `task/<task>` work branch (branched off `feat`; subtasks nest as `task/<task>/<subtask>`). Never delete the branch after push or merge.
 3. Open the PR against `feat`.
 4. Wait at least 20 seconds for hosted checks to appear. In checklists this is written as: wait at least 20 seconds.
 5. Watch `gh pr checks --watch`.
 6. If a hosted lane fails, inspect the failing logs, fix the root cause on the same PR, push again, and rerun `gh pr checks --watch`.
 
-Branch model: `main` (final stable, verified) ← `dev` (staging verification) ← `feat` (feature integration) ← `<category>/<FEATURE>` work branch (all hands-on commits; branch off `feat`). Fixes for in-flight work stay on the same work branch, never a new branch. Commit subjects strictly follow `<category>: <FEATURE>: <short information>` (categories lowercase: add, config, refactor, wip, fix, docs; FEATURE uppercase, e.g. `wip: RGB: Build light effect mode (multi color)`).
+Branch model: `main` ← `dev` ← `feat` ← `task/<task>` [← `task/<task>/<subtask>`]. Never use `feat/<task>` while bare `feat` exists (Git ref collision). Fixes stay on the same work branch. Commit subjects: `Add : FEATURE : short information` (capitalized category, uppercase FEATURE, spaces around colons).
 
 Run `keel git-workflow preflight --repo-root . --base-ref origin/feat` before push or merge-request creation (`origin/dev` when promoting `feat` to `dev`; `origin/main` only when promoting `dev` to `main`).
 

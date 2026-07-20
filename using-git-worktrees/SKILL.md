@@ -36,14 +36,14 @@ shared checkout and need a second isolated tree the host does not give you.
 ### 1. Create the worktree on a feature branch
 
 ```bash
-git worktree add ../<repo>-<feature> -b <category>/<FEATURE> feat
+git worktree add ../<repo>-<task> -b task/<task> feat
 ```
 
 - This creates a new directory `../<repo>-<feature>` checked out on a new
-  `<category>/<FEATURE>` work branch off `feat`, sharing the same `.git`. The main tree is untouched.
+  `task/<task>` work branch off `feat`, sharing the same `.git`. The main tree is untouched.
 - Name the directory and branch for the work so parallel worktrees are
-  distinguishable at a glance. All hands-on work uses `<category>/<FEATURE>`
-  work branches off `feat` (e.g. `add/RGB`, `fix/SENSOR`); fixes for in-flight
+  distinguishable at a glance. All hands-on work uses `task/<task>`
+  work branches off `feat` (e.g. `task/rgb-sync`, `task/sensor/timeout`); fixes for in-flight
   work stay on that feature's existing branch.
 
 ### 2. Work in it normally

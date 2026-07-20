@@ -31,8 +31,9 @@ When a native keel command owns the job, use it instead of recreating the behavi
 
 ## Branch and Commit Discipline
 
-- Branch model: `main` (stable) <- `dev` (staging) <- `feat` (integration) <- `<category>/<FEATURE>` work branch (branch off `feat`)
+- Branch model: `main` <- `dev` <- `feat` <- `task/<task>` [<- `task/<task>/<subtask>`] (never `feat/<task>` while bare `feat` exists)
 - Fix in-flight bugs on the same work branch, never a new branch
+- Commits: `Add : FEATURE : short info`
 - Never delete a branch after push or merge
 - Commit subjects: `[category]: [feature_category]: short info` (categories: Add, Config, Refactor, Wip, Fix, Docs; feature_category uppercase)
 - Example: `Wip: RGB: Build light effect mode (multi color)`
