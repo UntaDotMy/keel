@@ -358,10 +358,7 @@ fn run_bridge_rewrite(
     }
     let tool_name = flags.string_value("tool");
     let lower = tool_name.to_ascii_lowercase();
-    if !matches!(
-        lower.as_str(),
-        "bash" | "shell" | "sh" | "zsh" | "fish" | "powershell" | "pwsh" | "cmd"
-    ) {
+    if !shell_rewrite::is_shell_tool_name(&lower) {
         return 0;
     }
     let mut command = String::new();
@@ -370,8 +367,12 @@ fn run_bridge_rewrite(
     if command.is_empty() {
         return 0;
     }
-    let decision =
-        shell_rewrite::rewrite_command_text_for_shell(command, shell_rewrite::RewriteShell::Bash);
+    // why: the host substitutes this verbatim, and powershell/pwsh/cmd reject a
+    // Bash-shaped prefix.
+    let decision = shell_rewrite::rewrite_command_text_for_shell(
+        command,
+        shell_rewrite::rewrite_shell_for_tool(&lower),
+    );
     if decision.supported {
         let _ = writeln!(
             standard_output,

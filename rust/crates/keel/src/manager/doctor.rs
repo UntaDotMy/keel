@@ -106,6 +106,11 @@ pub fn run_doctor_command(
     );
     write_doctor_check(
         standard_output,
+        per_shell_rewrite_prefixes_are_valid(),
+        "rewrite prefix valid for every shell tool (bash/powershell/pwsh/cmd)",
+    );
+    write_doctor_check(
+        standard_output,
         claude_binary.is_some(),
         "claude binary found",
     );
@@ -336,6 +341,31 @@ fn run_hook_probe(command: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+/// Whether every shell tool the PreToolUse gate admits gets a prefix its own
+/// shell can parse.
+///
+/// The single-command probe above only covers the platform-default shape, so it
+/// reported healthy while the PowerShell tool path emitted a POSIX-quoted path
+/// with no call operator, which PowerShell rejects outright.
+fn per_shell_rewrite_prefixes_are_valid() -> bool {
+    use crate::runner::shell_rewrite::{
+        rewrite_command_text_for_shell, rewrite_shell_for_tool, RewriteShell, SHELL_TOOL_NAMES,
+    };
+    SHELL_TOOL_NAMES.iter().all(|tool| {
+        let shell = rewrite_shell_for_tool(tool);
+        let decision = rewrite_command_text_for_shell("cargo test", shell);
+        if !decision.supported {
+            return false;
+        }
+        let command = decision.rewritten_command.as_str();
+        match shell {
+            RewriteShell::PowerShell => command.starts_with("& '"),
+            RewriteShell::Cmd => command.starts_with('"'),
+            RewriteShell::Bash | RewriteShell::PlatformDefault => !command.starts_with("& "),
+        }
+    })
 }
 
 fn write_doctor_check(standard_output: &mut dyn Write, ok: bool, message: &str) {

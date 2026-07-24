@@ -15,7 +15,7 @@ use crate::args::FlagSet;
 use crate::hooks::claude::{event_by_name, event_by_slug, HookEvent, HOOK_EVENTS};
 use crate::json::{write_indented, Value};
 use crate::proxy::raw_store::RawStore;
-use crate::runner::shell_rewrite::{rewrite_command_text_for_shell, RewriteShell};
+use crate::runner::shell_rewrite::{rewrite_command_text_for_shell, rewrite_shell_for_tool};
 use crate::runner::tool_timings;
 use crate::runner::{learning, observation};
 use crate::runtime::{
@@ -860,12 +860,11 @@ fn is_host_research_tool_name(tool_name: &str) -> bool {
         || lower.contains("context7")
 }
 
-/// Shell tools that may carry a `keel ...` research command.
+/// Shell tools that may carry a `keel ...` research command. Delegates to
+/// `shell_rewrite` so the gate and the rewriter read one list, guaranteeing every
+/// admitted name has a shell mapping in `rewrite_shell_for_tool`.
 fn is_shell_tool_name(tool_name: &str) -> bool {
-    matches!(
-        tool_name.to_ascii_lowercase().as_str(),
-        "bash" | "shell" | "sh" | "zsh" | "fish" | "powershell" | "pwsh" | "cmd"
-    )
+    crate::runner::shell_rewrite::is_shell_tool_name(tool_name)
 }
 
 /// Whether a shell command is a keel research/read surface (not install/mutate).
@@ -1229,7 +1228,9 @@ fn run_hook_pre_tool_use(standard_output: &mut dyn Write, standard_error: &mut d
         return 0;
     }
 
-    let rewrite = rewrite_command_text_for_shell(command, RewriteShell::Bash);
+    // why: updatedInput.command goes back to the originating tool, and a
+    // Bash-shaped prefix is a parse error in PowerShell.
+    let rewrite = rewrite_command_text_for_shell(command, rewrite_shell_for_tool(tool_name));
 
     if !rewrite.supported {
         return 0;
@@ -1250,7 +1251,16 @@ fn run_hook_pre_tool_use(standard_output: &mut dyn Write, standard_error: &mut d
             },
 
             "allowRules": [
-                format!("Bash({}:*)", rewrite.rewritten_command.split_whitespace().next().unwrap_or("keel")),
+                // why: a rule is ToolName(pattern), so Bash(...) never matches a
+                // PowerShell call; skip the leading `&` to reach the executable.
+                format!(
+                    "{tool_name}({}:*)",
+                    rewrite
+                        .rewritten_command
+                        .split_whitespace()
+                        .find(|token| *token != "&")
+                        .unwrap_or("keel")
+                ),
             ],
 
         }
@@ -2010,7 +2020,7 @@ This is the **Iron Law** of keel. It is loaded into your context at SessionStart
 - `run_command` — run noisy shell commands (test, build, lint, logs, search) through it so compacted output enters context instead of the raw stream.
 
 ## Skills & subagents
-40 specialist skills are installed under `~/.claude/skills/` (lifecycle, backend, cloud, security, `reviewer`, UI/UX, `preserve-existing-flow`, systematic-debugging, TDD, migrations, and more) — the harness lists them natively each session. Invoke by bare name, e.g. `Skill("reviewer")`. For the full catalog and routing rules, call `Skill("using-keel")`. 24 matching subagents in `.claude/agents/` handle delegated isolated-context work via the Agent tool. About to read or edit existing code? Invoke `preserve-existing-flow` first.
+Specialist skills are installed under `~/.claude/skills/` (lifecycle, backend, cloud, security, `reviewer`, UI/UX, `preserve-existing-flow`, systematic-debugging, TDD, migrations, and more) — the harness lists them natively each session. Invoke by bare name, e.g. `Skill("reviewer")`. For the full catalog and routing rules, call `Skill("using-keel")`. Matching subagents in `.claude/agents/` handle delegated isolated-context work via the Agent tool. About to read or edit existing code? Invoke `preserve-existing-flow` first.
 
 ## Memory writes (when you learn something durable)
 Working memory dies at compaction. To persist across sessions:
