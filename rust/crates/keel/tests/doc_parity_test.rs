@@ -233,14 +233,84 @@ fn reviewer_subagent_pins_an_explicit_non_inherit_model() {
     );
 }
 
-/// The MCP server's tool count is asserted in CLAUDE.md prose ("gets N tools").
-/// Nothing mechanically tied that number to `mcp/tools.rs`, so the competitive
-/// audit caught CLAUDE.md still claiming 14 tools after `sprint` and
-/// `user_story_lint` were added (making 16). This test counts the tool
-/// definitions in code (each carries exactly one `"inputSchema":` key in
-/// `handle_tools_list`) and asserts CLAUDE.md documents that same count, so the
-/// number can no longer drift silently: add or remove an MCP tool and this fails
-/// until the prose is updated to match.
+/// Every MCP tool name defined in `mcp/tools.rs` must be listed in README's MCP
+/// row. The count-only guard below cannot catch a name going undocumented:
+/// README enumerated far fewer tools than `tools.rs` defined, leaving `flow`,
+/// `work`, `code_graph`, `learn`, `observe`, `rewrite`, `skill_eval`,
+/// `dispatch`, and `design_intelligence` invisible to anyone reading the docs.
+/// Names are derived from source (each definition pairs one `"name":` with one
+/// `"inputSchema":`), so adding a tool fails CI until README lists it.
+#[test]
+fn every_mcp_tool_is_listed_in_readme() {
+    let repo_root = repository_root();
+    let tools = mcp_tool_names(&repo_root);
+    assert!(
+        tools.len() >= 20,
+        "expected a healthy MCP tool surface, parsed {} name(s); the parser may be stale",
+        tools.len()
+    );
+
+    let readme = fs::read_to_string(repo_root.join("README.md")).expect("read README.md");
+    let missing: Vec<&String> = tools
+        .iter()
+        .filter(|name| !readme.contains(&format!("`{name}`")))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "MCP tools defined in mcp/tools.rs but absent from README: {missing:?}. \
+         Add them to the MCP server row so the documented surface matches the shipped one."
+    );
+}
+
+/// Tool names from `mcp/tools.rs`, derived by pairing each `"inputSchema":` key
+/// with the nearest preceding `"name":`, the shape every definition in
+/// `handle_tools_list` uses. Scoping to `inputSchema` keeps unrelated `"name":`
+/// literals elsewhere in the file out of the set.
+fn mcp_tool_names(repo_root: &Path) -> BTreeSet<String> {
+    let source = fs::read_to_string(
+        repo_root
+            .join("rust")
+            .join("crates")
+            .join("keel")
+            .join("src")
+            .join("mcp")
+            .join("tools.rs"),
+    )
+    .expect("read mcp/tools.rs");
+
+    let mut names = BTreeSet::new();
+    let mut pending: Option<String> = None;
+    // Scope to `handle_tools_list`: an earlier `#[cfg(test)]` module and later
+    // test fixtures both use `"name":`/`"inputSchema":` shapes without being tools.
+    let mut inside = false;
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if !inside {
+            inside = trimmed.starts_with("pub(super) fn handle_tools_list");
+            continue;
+        }
+        if trimmed.starts_with("#[cfg(test)]") {
+            break;
+        }
+        if let Some(rest) = trimmed.strip_prefix("\"name\":") {
+            let value = rest.trim().trim_end_matches(',').trim().trim_matches('"');
+            if !value.is_empty() {
+                pending = Some(value.to_string());
+            }
+        } else if trimmed.starts_with("\"inputSchema\":") {
+            if let Some(name) = pending.take() {
+                names.insert(name);
+            }
+        }
+    }
+    names
+}
+
+/// Guards the MCP tool surface against collapsing, and pins the docs contract:
+/// CLAUDE.md must point at this test rather than hardcode a number. It
+/// deliberately does not compare a documented count to the source count, because
+/// the docs policy is to state no number at all. Enforcement that a specific tool
+/// is documented lives in `every_mcp_tool_is_listed_in_readme`.
 #[test]
 fn mcp_tool_count_matches_documentation() {
     let repo_root = repository_root();
@@ -294,7 +364,19 @@ fn audit_flagged_commands_are_documented() {
     .expect("read commands.rs");
     let claude_md = fs::read_to_string(repo_root.join("CLAUDE.md")).expect("read CLAUDE.md");
 
-    for command in ["dispatch", "observe", "eval"] {
+    // why: a curated list, not every arm, since internal verbs like `raw` and
+    // `menu` are not operator-facing and requiring docs for them is noise.
+    for command in [
+        "dispatch",
+        "observe",
+        "eval",
+        "team",
+        "design-intelligence",
+        "skill-eval",
+        "telemetry",
+        "session",
+        "learn",
+    ] {
         // Confirm the command is actually wired (a match arm) before requiring docs.
         assert!(
             commands_src.contains(&format!("\"{command}\" =>")),
@@ -404,6 +486,137 @@ fn bridge_subcommands_are_documented_and_in_help() {
     }
 }
 
+/// Every long flag advertised in the operator help must actually be read by the
+/// code. Three phantom flags shipped before this guard existed: `--review-surface`
+/// and `--review-base-ref` were registered but never read, and `--repo-test-policy`
+/// was advertised in help while `gates check` ran the suite unconditionally. Two
+/// more (`--allow-claude-code-wording`, `--memory-base`) were advertised but never
+/// registered at all, so following the help produced a hard error. Flags are
+/// derived from the help text and matched against `*_value("name")` reads.
+#[test]
+fn every_help_advertised_flag_is_read_by_the_code() {
+    let repo_root = repository_root();
+    let src = repo_root
+        .join("rust")
+        .join("crates")
+        .join("keel")
+        .join("src");
+    let help = fs::read_to_string(src.join("help_operator.txt")).expect("read help_operator.txt");
+
+    // Long flags named in the help text, e.g. `[--base-ref <ref>]`.
+    let mut advertised: BTreeSet<String> = BTreeSet::new();
+    for token in help.split(|c: char| c.is_whitespace() || c == '[' || c == ']' || c == '|') {
+        if let Some(name) = token.strip_prefix("--") {
+            let name = name.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-');
+            if name.len() > 1 && name.contains(|c: char| c.is_ascii_alphabetic()) {
+                advertised.insert(name.to_string());
+            }
+        }
+    }
+    assert!(
+        advertised.len() > 20,
+        "parsed only {} help flags; the parser is stale",
+        advertised.len()
+    );
+
+    // Every `*_value("name")` read anywhere in the crate.
+    let mut read: BTreeSet<String> = BTreeSet::new();
+    for path in rust_source_files(&src) {
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let mut from = 0usize;
+        while let Some(found) = text[from..].find("_value(\"") {
+            let start = from + found + "_value(\"".len();
+            if let Some(end) = text[start..].find('"') {
+                read.insert(text[start..start + end].to_string());
+                from = start + end;
+            } else {
+                break;
+            }
+        }
+    }
+
+    let phantom: Vec<&String> = advertised.difference(&read).collect();
+    assert!(
+        phantom.is_empty(),
+        "flags advertised in help_operator.txt but never read via *_value(): {phantom:?}. \
+         Either wire the flag or remove it from the help — a documented flag that does \
+         nothing (or is not registered at all) misleads every operator who follows the help."
+    );
+}
+
+/// `keel bridge rewrite` requires `--tool`: with an empty tool name it fails the
+/// shell-tool check and prints nothing, so the caller silently gets no compaction.
+/// The Cursor hook omitted the flag and its reroute never fired once. Any adapter
+/// invoking the subcommand must pass the flag.
+#[test]
+fn adapters_calling_bridge_rewrite_pass_a_tool_flag() {
+    let repo_root = repository_root();
+    let adapters = [
+        "opencode/keel.ts",
+        "codex/keel-codex.ts",
+        "pi/keel-pi.ts",
+        "cursor/hooks/keel-cursor.sh",
+        "cowork/keel.ts",
+    ];
+    for adapter in adapters {
+        let path = repo_root.join(adapter);
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        // Only adapters that actually invoke the subcommand are constrained.
+        let invokes = text.contains("bridge rewrite") || text.contains("\"rewrite\"");
+        if !invokes {
+            continue;
+        }
+        assert!(
+            text.contains("--tool"),
+            "{adapter} invokes `bridge rewrite` without passing --tool; the bridge sees an \
+             empty tool name, fails is_shell_tool_name, and returns no rewrite, so command \
+             compaction silently never runs on that host."
+        );
+    }
+}
+
+/// The Iron Law gate decision must be read by prefix, not by substring, and deny
+/// must be tested before allow. An unanchored `includes("ALLOW")` checked first
+/// turns a deny whose reason prose contains ALLOW into an allow, failing open on
+/// a security gate. Every adapter that consumes the decision uses the prefix form.
+#[test]
+fn adapters_match_gate_decision_by_prefix_not_substring() {
+    let repo_root = repository_root();
+    for adapter in [
+        "opencode/keel.ts",
+        "codex/keel-codex.ts",
+        "pi/keel-pi.ts",
+        "cowork/keel.ts",
+    ] {
+        let path = repo_root.join(adapter);
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        if !text.contains("KEEL_GATE") {
+            continue;
+        }
+        assert!(
+            text.contains("startsWith(\"KEEL_GATE_DENY\")"),
+            "{adapter} must detect a deny with startsWith(\"KEEL_GATE_DENY\")"
+        );
+        // Comment lines are prose about the rule, not the check itself.
+        let code_only: String = text
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !code_only.contains("includes(\"ALLOW\")") && !code_only.contains("includes(\"DENY\")"),
+            "{adapter} matches the gate decision by bare substring; use the KEEL_GATE_ prefix \
+             so free-form reason text cannot flip the decision."
+        );
+    }
+}
+
 /// The release bundle must stage the cross-agent adapter source directories
 /// (opencode/codex/pi/cursor/cowork) so `keel install` run from a release-bundle
 /// extract can wire non-Claude-Code targets. `maybe_wire_opencode` /
@@ -486,6 +699,97 @@ fn no_stale_literal_counts_in_docs_or_host_readmes() {
             );
         }
     }
+}
+
+/// The literal-count guard above scans only Markdown and JSON, so the stalest
+/// counts in the product survived it. The SessionStart bootstrap string in
+/// `hook_lifecycle` baked in skill and subagent totals that no longer matched
+/// disk, and that string is injected into every session of every project. Counts
+/// belong to `skill-lint` or `keel doctor` at runtime, never to a baked string.
+/// This scans the Rust sources that build agent-facing prose.
+#[test]
+fn rust_sources_do_not_hardcode_skill_or_subagent_counts() {
+    let repo_root = repository_root();
+    // Phrases that only ever appear in agent-facing prose about the pack size.
+    let phrases = [
+        "specialist skills",
+        "specialist skill",
+        "matching subagents",
+        "subagents in",
+        "MCP tools",
+        "skills are installed",
+    ];
+
+    // Only shipped crate sources: this test file names the offending strings in
+    // its own docstring, and test prose never reaches a session.
+    let mut sources: Vec<PathBuf> = Vec::new();
+    if let Ok(crates) = fs::read_dir(repo_root.join("rust").join("crates")) {
+        for entry in crates.flatten() {
+            sources.extend(rust_source_files(&entry.path().join("src")));
+        }
+    }
+
+    let mut offenders: Vec<String> = Vec::new();
+    for path in sources {
+        let text = match fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        for phrase in &phrases {
+            let mut from = 0usize;
+            while let Some(found) = text[from..].find(phrase) {
+                let absolute = from + found;
+                // A digit immediately before the phrase means a baked count.
+                let preceding = text[..absolute].trim_end();
+                if preceding
+                    .chars()
+                    .last()
+                    .map(|c| c.is_ascii_digit())
+                    .unwrap_or(false)
+                {
+                    let number: String = preceding
+                        .chars()
+                        .rev()
+                        .take_while(|c| c.is_ascii_digit())
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                        .collect();
+                    offenders.push(format!(
+                        "{}: \"{number} {phrase}\"",
+                        path.strip_prefix(&repo_root).unwrap_or(&path).display()
+                    ));
+                }
+                from = absolute + phrase.len();
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "Rust source hardcodes a skill/subagent/tool count: {offenders:?}. \
+         These strings ship to every session and rot the moment the pack changes. \
+         State the capability without a number, or compute it at runtime."
+    );
+}
+
+/// Every `.rs` file under `dir`, recursively. Skips `target/` build output.
+fn rust_source_files(dir: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let Ok(entries) = fs::read_dir(dir) else {
+        return found;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if path.file_name().and_then(|n| n.to_str()) == Some("target") {
+                continue;
+            }
+            found.extend(rust_source_files(&path));
+        } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+            found.push(path);
+        }
+    }
+    found
 }
 
 /// H5 guard: every specialist agent file in .claude/agents/ must have a matching
