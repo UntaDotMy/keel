@@ -34,9 +34,53 @@ pub enum DestructiveSeverity {
     Warn,
 }
 
+/// Which host shell the rewritten command will be pasted back into.
+///
+/// The rewrite is fed to the host verbatim (the harness `updatedInput.command`,
+/// or the adapters' `KEEL_REWRITE` line), so the prefix must be syntactically
+/// valid in that shell. A POSIX-quoted path is a bare string in PowerShell and
+/// needs the `&` call operator to invoke, so one shape cannot serve every host.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RewriteShell {
     Bash,
+    PowerShell,
+    Cmd,
     PlatformDefault,
+}
+
+/// Host tool names that carry a shell command string.
+///
+/// Single source of truth: the PreToolUse gate, `keel bridge rewrite`, and
+/// [`rewrite_shell_for_tool`] all read this list. One list is what stops the
+/// regression this const was introduced for: the gate admitted powershell,
+/// pwsh, and cmd while the rewriter assumed every one of them was bash, which
+/// corrupted the command it handed back.
+pub const SHELL_TOOL_NAMES: &[&str] = &[
+    "bash",
+    "shell",
+    "sh",
+    "zsh",
+    "fish",
+    "powershell",
+    "pwsh",
+    "cmd",
+];
+
+/// Whether `tool_name` is a shell tool whose command text keel may rewrite.
+pub fn is_shell_tool_name(tool_name: &str) -> bool {
+    SHELL_TOOL_NAMES.contains(&tool_name.trim().to_ascii_lowercase().as_str())
+}
+
+/// Map a host tool name to the shell its command text must stay valid in.
+///
+/// Every name in [`SHELL_TOOL_NAMES`] must map to the shell that actually parses
+/// it. An unknown name falls back to `Bash`, matching the historical default.
+pub fn rewrite_shell_for_tool(tool_name: &str) -> RewriteShell {
+    match tool_name.trim().to_ascii_lowercase().as_str() {
+        "powershell" | "pwsh" => RewriteShell::PowerShell,
+        "cmd" => RewriteShell::Cmd,
+        _ => RewriteShell::Bash,
+    }
 }
 
 pub fn adapter_name_for_rewrite(command: &str) -> &'static str {
@@ -292,6 +336,18 @@ pub fn rewrite_command_text_for_shell(command: &str, shell: RewriteShell) -> Rew
             supported: false,
 
             reason: "no native keel compaction filter for command".into(),
+        };
+    }
+
+    // why: keel re-hosts shell-syntax commands through cmd /C on Windows, which
+    // cannot run PowerShell cmdlets, so rewriting would run the wrong thing.
+    if analysis.requires_shell_wrapper
+        && matches!(shell, RewriteShell::PowerShell | RewriteShell::Cmd)
+    {
+        return RewriteDecision {
+            rewritten_command: String::new(),
+            supported: false,
+            reason: "host shell syntax cannot be re-hosted through keel run".into(),
         };
     }
 
@@ -683,6 +739,19 @@ pub fn platform_default_command_for_executable_args(path: &Path, arguments: &str
     } else {
         bash_command_for_executable_args(path, arguments)
     }
+}
+
+/// PowerShell needs the `&` call operator to invoke a quoted path; without it the
+/// path is parsed as a bare string literal and the following word is a syntax
+/// error (`Unexpected token 'run'`).
+pub fn powershell_command_for_executable_args(path: &Path, arguments: &str) -> String {
+    format!("& {} {arguments}", powershell_quote(&display_path(path)))
+}
+
+/// cmd.exe invokes a double-quoted path directly, with no call operator. Single
+/// quotes are literal characters there rather than quoting.
+pub fn cmd_command_for_executable_args(path: &Path, arguments: &str) -> String {
+    format!("\"{}\" {arguments}", display_path(path))
 }
 
 pub fn is_already_compaction_wrapped(fields: &[String]) -> bool {
@@ -1182,6 +1251,10 @@ pub fn compaction_command_prefix(shell: RewriteShell) -> String {
         Ok(path) => match shell {
             RewriteShell::Bash => bash_command_for_executable_args(&path, "run --"),
 
+            RewriteShell::PowerShell => powershell_command_for_executable_args(&path, "run --"),
+
+            RewriteShell::Cmd => cmd_command_for_executable_args(&path, "run --"),
+
             RewriteShell::PlatformDefault => {
                 platform_default_command_for_executable_args(&path, "run --")
             }
@@ -1588,6 +1661,92 @@ mod tests {
                 rewrite.rewritten_command
             );
         }
+    }
+
+    /// Regression: the PreToolUse gate admitted powershell, pwsh, and cmd while
+    /// the rewriter hardcoded `RewriteShell::Bash`, so every noisy command typed
+    /// into the PowerShell tool on Windows came back as a bare quoted path
+    /// followed by a word, which PowerShell rejects with `Unexpected token 'run'`.
+    /// Driving the loop off SHELL_TOOL_NAMES means a newly admitted shell tool
+    /// cannot ship without a correct prefix here.
+    #[test]
+    fn every_shell_tool_gets_a_prefix_valid_in_its_own_shell() {
+        for tool in SHELL_TOOL_NAMES {
+            let rewrite = rewrite_command_text_for_shell(
+                "cargo test --workspace",
+                rewrite_shell_for_tool(tool),
+            );
+            assert!(rewrite.supported, "{tool} should rewrite a plain command");
+            assert!(
+                rewrite
+                    .rewritten_command
+                    .contains(" run -- cargo test --workspace"),
+                "{tool} lost the payload: {}",
+                rewrite.rewritten_command
+            );
+
+            match rewrite_shell_for_tool(tool) {
+                // PowerShell cannot invoke a quoted path without `&`.
+                RewriteShell::PowerShell => assert!(
+                    rewrite.rewritten_command.starts_with("& '"),
+                    "{tool} needs the PowerShell call operator: {}",
+                    rewrite.rewritten_command
+                ),
+                // cmd.exe has no call operator and treats '' as literal chars.
+                RewriteShell::Cmd => assert!(
+                    rewrite.rewritten_command.starts_with('"'),
+                    "{tool} needs a double-quoted path: {}",
+                    rewrite.rewritten_command
+                ),
+                // POSIX shells must not gain a PowerShell call operator.
+                RewriteShell::Bash | RewriteShell::PlatformDefault => assert!(
+                    !rewrite.rewritten_command.starts_with("& "),
+                    "{tool} must not use the PowerShell call operator: {}",
+                    rewrite.rewritten_command
+                ),
+            }
+        }
+    }
+
+    /// A command carrying host-shell syntax is re-hosted by `keel run` through
+    /// `platform_shell_command_parts` (`cmd /C` on Windows), which cannot run
+    /// PowerShell cmdlets, so rewriting `git status | Select-Object` would run
+    /// the wrong thing. Declining keeps it raw and correct.
+    #[test]
+    fn windows_shells_decline_commands_carrying_host_shell_syntax() {
+        for tool in ["powershell", "pwsh", "cmd"] {
+            let rewrite = rewrite_command_text_for_shell(
+                "git status --short | Select-Object -First 3",
+                rewrite_shell_for_tool(tool),
+            );
+            assert!(
+                !rewrite.supported,
+                "{tool} must decline host-shell syntax rather than mis-host it: {}",
+                rewrite.rewritten_command
+            );
+        }
+
+        // The bash path keeps its existing wrapper behavior unchanged.
+        let bash =
+            rewrite_command_text_for_shell("git status --short | head -3", RewriteShell::Bash);
+        assert!(bash.supported);
+        assert!(bash.rewritten_command.contains("bash -lc"));
+    }
+
+    /// The gate and the rewriter must read the same tool list. A name admitted by
+    /// one and unknown to the other is how the PowerShell corruption shipped.
+    #[test]
+    fn shell_tool_names_are_lowercase_unique_and_all_mapped() {
+        let mut seen = std::collections::BTreeSet::new();
+        for tool in SHELL_TOOL_NAMES {
+            assert_eq!(*tool, tool.to_ascii_lowercase(), "{tool} must be lowercase");
+            assert!(seen.insert(*tool), "{tool} duplicated");
+            assert!(is_shell_tool_name(tool), "{tool} must pass the gate");
+            // Case-insensitive, matching how hosts report tool names.
+            assert!(is_shell_tool_name(&tool.to_ascii_uppercase()));
+        }
+        assert!(!is_shell_tool_name("Edit"));
+        assert!(!is_shell_tool_name(""));
     }
 
     fn fields(args: &[&str]) -> Vec<String> {

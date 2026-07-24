@@ -167,7 +167,9 @@ if [ "$TOOL_NAME" = "Shell" ] && [ -n "$CMD" ]; then
   esac
 
   # Ask keel to rewrite the command (stdin = command, stdout = "KEEL_REWRITE <cmd>").
-  REWRITE=$(printf '%s' "$CMD" | "$KEEL_BIN" bridge rewrite 2>/dev/null) || REWRITE=""
+  # why: --tool is required; without it bridge rewrite sees an empty tool name,
+  # fails the shell-tool check, and returns nothing, so no command is ever rerouted.
+  REWRITE=$(printf '%s' "$CMD" | "$KEEL_BIN" bridge rewrite --tool "$TOOL_NAME" 2>/dev/null) || REWRITE=""
 
   case "$REWRITE" in
     KEEL_REWRITE\ *)

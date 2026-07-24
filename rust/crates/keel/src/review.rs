@@ -1078,7 +1078,9 @@ fn run_review_gates_command(
         return 1;
     }
     let mut flag_set = review_flag_set("review gates check");
-    flag_set.string_flag("repo-test-policy", "skip");
+    // why: "run" preserves this surface's long-standing behavior; the old "skip"
+    // default was never read, so the documented flag controlled nothing.
+    flag_set.string_flag("repo-test-policy", "run");
     flag_set.bool_flag("python-checks", false);
     flag_set.bool_flag("js-checks", false);
     if let Err(parse_error) = flag_set.parse(&arguments[1..]) {
@@ -1095,9 +1097,10 @@ fn run_review_gates_command(
 
     let mut gate_results = Vec::new();
 
-    // Rust tests (always run for Rust repos)
+    // Rust tests, unless the caller opts out with --repo-test-policy skip.
+    let skip_repo_tests = flag_set.string_value("repo-test-policy").trim() == "skip";
     let has_rust = repository_root.join("Cargo.toml").exists();
-    if has_rust {
+    if has_rust && !skip_repo_tests {
         let test_result = run_command(
             "cargo",
             &["test".to_string(), "--workspace".to_string()],
@@ -1151,6 +1154,14 @@ fn run_review_gates_command(
     if has_go_project(&repository_root) {
         gate_results.extend(run_go_surface_gates(&repository_root, true));
     }
+
+    // why: without this, `gates check` yields a green verdict without the
+    // owner-path evidence pre-commit and pre-pr require.
+    gate_results.push(flow_check_gate(
+        &repository_root,
+        flag_set.string_value("base-ref"),
+        flag_set.string_value("surface"),
+    ));
 
     // E2E verification awareness (informational, non-blocking)
     if let Some(e2e_result) = check_e2e_config(&repository_root) {
@@ -1934,6 +1945,11 @@ fn run_review_surface_command(
         surface_name,
         scan_all,
     ));
+    gate_results.push(flow_check_gate(
+        &repository_root,
+        flag_set.string_value("base-ref"),
+        surface_name,
+    ));
     if let Some(e2e_result) = check_e2e_config(&repository_root) {
         gate_results.push(e2e_result);
     }
@@ -2556,6 +2572,209 @@ fn comment_style_gate(
         blocking,
         details: Some(details),
     }
+}
+
+/// Source extensions the brownfield gate treats as established behavior. Docs,
+/// config, and data files carry no ownership flow to preserve.
+const FLOW_SOURCE_EXTENSIONS: &[&str] = &[
+    "rs", "go", "py", "js", "jsx", "ts", "tsx", "java", "kt", "kts", "swift", "c", "h", "cc",
+    "cpp", "hpp", "cs", "rb", "php", "scala", "dart", "m", "mm", "sh", "ps1", "lua", "ex", "exs",
+];
+
+/// Path segments whose contents are generated or vendored, so they are exempt.
+const FLOW_EXEMPT_SEGMENTS: &[&str] = &[
+    "target/",
+    "node_modules/",
+    "vendor/",
+    "dist/",
+    "build/",
+    ".git/",
+    "generated/",
+    "__pycache__/",
+];
+
+/// Existing source files modified in the reviewed diff, from `--name-status`.
+/// Only `M` and `R` count: an added file is greenfield and has no prior owner to
+/// preserve, which is the documented exemption.
+///
+/// `None` means the range could not be resolved (git missing, not a repository,
+/// unknown base ref). The caller must not treat that as "nothing changed": an
+/// unresolvable range once made this blocking gate report a clean pass over nine
+/// modified files.
+fn modified_existing_sources(repository_root: &Path, range: &[String]) -> Option<Vec<String>> {
+    let mut args = vec!["diff".to_string(), "--name-status".to_string()];
+    args.extend(range.iter().cloned());
+    let result = run_command("git", &args, Some(repository_root)).ok()?;
+    if result.code != 0 {
+        return None;
+    }
+    Some(
+        String::from_utf8_lossy(&result.stdout)
+            .lines()
+            .filter_map(brownfield_source_from_name_status)
+            .collect(),
+    )
+}
+
+/// Classify one `git diff --name-status` line, returning the path when it is an
+/// edit to established source. Split out from the git call so the exemption rules
+/// (greenfield, docs, generated) are unit-testable without a repository.
+fn brownfield_source_from_name_status(line: &str) -> Option<String> {
+    let mut parts = line.split('\t');
+    let status = parts.next()?.trim();
+    let first_path = parts.next()?.trim();
+    // why: a rename emits `R<score>\told\tnew`, and renaming while editing still
+    // changes established behavior, so gate it against the destination path.
+    let path = match status.chars().next()? {
+        'M' => first_path,
+        'R' => parts.next()?.trim(),
+        _ => return None,
+    };
+    let normalized = path.replace('\\', "/");
+    if FLOW_EXEMPT_SEGMENTS
+        .iter()
+        .any(|segment| normalized.contains(segment))
+    {
+        return None;
+    }
+    // why: case-fold the extension so a `Foo.RS` on a case-insensitive
+    // filesystem cannot slip past the gate.
+    let extension = normalized
+        .rsplit('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if !FLOW_SOURCE_EXTENSIONS.contains(&extension.as_str()) {
+        return None;
+    }
+    Some(normalized)
+}
+
+/// Blocking brownfield gate: modifying established source requires a complete
+/// flow-check artifact recording the owner path. This is the enforcement half of
+/// `preserve-existing-flow`; without it the contract was skill prose only.
+/// Greenfield (added files), docs, and generated trees are exempt, and a diff
+/// touching no existing source passes untouched.
+fn flow_check_gate(repository_root: &Path, base_ref: &str, surface_name: &str) -> GateResult {
+    let range: Vec<String> = if surface_name == "pre-commit" {
+        vec!["HEAD".to_string()]
+    } else {
+        let base = base_ref.trim();
+        let base = if base.is_empty() { "origin/main" } else { base };
+        vec![format!("{base}...HEAD")]
+    };
+
+    let Some(touched) = modified_existing_sources(repository_root, &range) else {
+        return GateResult {
+            name: "flow_check".to_string(),
+            status: GateStatus::Warn,
+            blocking: false,
+            details: Some(format!(
+                "could not resolve the diff range ({}); brownfield evidence was NOT checked. \
+                 Pass an existing --base-ref, or run the pre-commit surface.",
+                range.join(" ")
+            )),
+        };
+    };
+    if touched.is_empty() {
+        return GateResult {
+            name: "flow_check".to_string(),
+            status: GateStatus::Pass,
+            blocking: true,
+            details: Some(
+                "no existing source modified; brownfield gate not applicable".to_string(),
+            ),
+        };
+    }
+
+    let artifact =
+        keel_flow::resolve_artifact_path(repository_root, keel_flow::DEFAULT_ARTIFACT_PATH);
+    let (errors, target_file) =
+        match keel_flow::load_check(repository_root, keel_flow::DEFAULT_ARTIFACT_PATH) {
+            Ok(check) => {
+                let target = check.target_file.clone();
+                (keel_flow::validate_check(check), target)
+            }
+            Err(load_error) => (vec![load_error.to_string()], String::new()),
+        };
+
+    if errors.is_empty() {
+        // why: the artifact is workspace-global, so without this a single filled
+        // artifact would satisfy the gate forever regardless of what changed next.
+        if !artifact_targets_a_touched_file(&target_file, &touched) {
+            return GateResult {
+                name: "flow_check".to_string(),
+                status: GateStatus::Fail,
+                blocking: true,
+                details: Some(format!(
+                    "the flow-check artifact at {} traces {target_file:?}, which is not among the \
+                     {} modified source file(s) ({}). The artifact is stale for this change. \
+                     Re-run `keel flow start --target-file <path>` for what you are editing.",
+                    artifact.display(),
+                    touched.len(),
+                    preview_touched_paths(&touched)
+                )),
+            };
+        }
+        return GateResult {
+            name: "flow_check".to_string(),
+            status: GateStatus::Pass,
+            blocking: true,
+            details: Some(format!(
+                "{} existing source file(s) modified; flow-check artifact traces {target_file:?}",
+                touched.len()
+            )),
+        };
+    }
+
+    GateResult {
+        name: "flow_check".to_string(),
+        status: GateStatus::Fail,
+        blocking: true,
+        details: Some(format!(
+            "{} existing source file(s) modified ({}) but the flow-check artifact at {} is missing or incomplete: {}. \
+             Run `keel flow start --target-file <path>`, fill the owner path, then `keel flow check`.",
+            touched.len(),
+            preview_touched_paths(&touched),
+            artifact.display(),
+            errors.join("; ")
+        )),
+    }
+}
+
+/// First few touched paths, for a gate message that stays readable on a wide diff.
+fn preview_touched_paths(paths: &[String]) -> String {
+    paths
+        .iter()
+        .take(3)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Whether the artifact's `target_file` names one of the files under review.
+///
+/// Suffix matching in both directions tolerates repo-relative vs absolute paths
+/// and Windows separators, so a legitimate artifact is not rejected over path
+/// formatting. An empty target never matches.
+fn artifact_targets_a_touched_file(target_file: &str, touched: &[String]) -> bool {
+    let target = target_file
+        .replace('\\', "/")
+        .trim()
+        .trim_start_matches("./")
+        .to_ascii_lowercase();
+    if target.is_empty() {
+        return false;
+    }
+    touched.iter().any(|path| {
+        let candidate = path
+            .replace('\\', "/")
+            .trim_start_matches("./")
+            .to_ascii_lowercase();
+        candidate == target
+            || candidate.ends_with(&format!("/{target}"))
+            || target.ends_with(&format!("/{candidate}"))
+    })
 }
 
 /// Build the prose-style gate result for a review surface. Lints added lines in
@@ -3262,6 +3481,152 @@ fn is_help_argument(argument: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- brownfield flow gate classification (offline; no git invocation) ----
+
+    /// Modifying established source is what the gate exists to catch.
+    #[test]
+    fn brownfield_gate_flags_modified_source_files() {
+        for path in [
+            "rust/crates/keel/src/review.rs",
+            "app/main.py",
+            "web/src/App.tsx",
+            "cmd/server/main.go",
+        ] {
+            assert_eq!(
+                brownfield_source_from_name_status(&format!("M\t{path}")),
+                Some(path.to_string()),
+                "{path} should require flow evidence"
+            );
+        }
+    }
+
+    /// Greenfield, docs, and generated trees are the documented exemptions. An
+    /// added file has no prior owner, so requiring an owner trace would be wrong.
+    #[test]
+    fn brownfield_gate_exempts_added_docs_and_generated_paths() {
+        // Added and deleted files carry no established behavior to preserve.
+        assert_eq!(
+            brownfield_source_from_name_status("A\trust/crates/keel/src/new_module.rs"),
+            None
+        );
+        assert_eq!(brownfield_source_from_name_status("D\tapp/old.py"), None);
+
+        // Docs and config have no ownership flow.
+        for path in ["README.md", "CLAUDE.md", "Cargo.toml", ".github/x.yml"] {
+            assert_eq!(
+                brownfield_source_from_name_status(&format!("M\t{path}")),
+                None,
+                "{path} should be exempt"
+            );
+        }
+
+        // Generated and vendored trees are exempt even with a source extension.
+        for path in [
+            "target/debug/build/x.rs",
+            "node_modules/pkg/index.js",
+            "vendor/lib/thing.go",
+            "app/generated/schema.py",
+        ] {
+            assert_eq!(
+                brownfield_source_from_name_status(&format!("M\t{path}")),
+                None,
+                "{path} should be exempt"
+            );
+        }
+    }
+
+    /// Renaming while editing still changes established behavior. Verified against
+    /// git: `git mv old.rs new.rs` plus an edit reports `R050\told.rs\tnew.rs`, so
+    /// matching only `M` let a rename slip past the gate entirely.
+    #[test]
+    fn brownfield_gate_flags_renamed_source_using_destination_path() {
+        assert_eq!(
+            brownfield_source_from_name_status("R050\told.rs\tsrc/new.rs"),
+            Some("src/new.rs".to_string())
+        );
+        assert_eq!(
+            brownfield_source_from_name_status("R100\tsrc/a.rs\tsrc/b.rs"),
+            Some("src/b.rs".to_string())
+        );
+        // Exemptions still apply to the destination path.
+        assert_eq!(
+            brownfield_source_from_name_status("R050\tsrc/a.rs\tvendor/b.rs"),
+            None
+        );
+        assert_eq!(
+            brownfield_source_from_name_status("R050\tsrc/a.rs\tdocs/b.md"),
+            None
+        );
+        // A malformed rename line with no destination must not panic.
+        assert_eq!(brownfield_source_from_name_status("R050\tonly-one"), None);
+    }
+
+    /// The artifact is workspace-global, so relevance is what stops one filled
+    /// artifact from satisfying the gate forever regardless of what changed next.
+    #[test]
+    fn artifact_relevance_matches_touched_paths_tolerantly() {
+        let touched = vec![
+            "rust/crates/keel/src/review.rs".to_string(),
+            "app/main.py".to_string(),
+        ];
+        // Exact repo-relative match.
+        assert!(artifact_targets_a_touched_file(
+            "rust/crates/keel/src/review.rs",
+            &touched
+        ));
+        // Windows separators and a leading ./ must not cause a false stale verdict.
+        assert!(artifact_targets_a_touched_file(
+            ".\\rust\\crates\\keel\\src\\review.rs",
+            &touched
+        ));
+        // An absolute path still resolves by suffix.
+        assert!(artifact_targets_a_touched_file(
+            "D:/Nasri/Project/keel/app/main.py",
+            &touched
+        ));
+        // A stale artifact tracing an untouched file is rejected.
+        assert!(!artifact_targets_a_touched_file(
+            "rust/crates/keel/src/commands.rs",
+            &touched
+        ));
+        // An empty target never counts as evidence.
+        assert!(!artifact_targets_a_touched_file("", &touched));
+        // A bare filename must not match a different directory's same-named file.
+        assert!(!artifact_targets_a_touched_file(
+            "other/review.rs",
+            &touched
+        ));
+    }
+
+    /// Case-insensitive filesystems allow `Foo.RS`; a case-sensitive extension
+    /// check would let that edit bypass the gate entirely.
+    #[test]
+    fn brownfield_gate_matches_extensions_case_insensitively() {
+        assert_eq!(
+            brownfield_source_from_name_status("M\tsrc/Foo.RS"),
+            Some("src/Foo.RS".to_string())
+        );
+        assert_eq!(
+            brownfield_source_from_name_status("M\tsrc/App.TSX"),
+            Some("src/App.TSX".to_string())
+        );
+        // Still not a source extension regardless of case.
+        assert_eq!(brownfield_source_from_name_status("M\tREADME.MD"), None);
+    }
+
+    /// Windows checkouts report backslash paths; the exemption match is on `/`.
+    #[test]
+    fn brownfield_gate_normalizes_windows_separators() {
+        assert_eq!(
+            brownfield_source_from_name_status("M\trust\\crates\\keel\\src\\review.rs"),
+            Some("rust/crates/keel/src/review.rs".to_string())
+        );
+        assert_eq!(
+            brownfield_source_from_name_status("M\tnode_modules\\pkg\\index.js"),
+            None
+        );
+    }
 
     // ---- await-ci pure logic (offline-safe; no gh/glab invocation) ----
 

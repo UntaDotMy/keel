@@ -22,14 +22,17 @@ pub const SETTINGS_FILE_NAME: &str = "settings.json";
 ///   - `"Bash"` for the two we narrow to shell invocations so the rewriter doesn't
 ///     spawn on every tool call
 ///
-/// `supports_hook_specific_output`: events the official harness schema
-/// documents as accepting `hookSpecificOutput.additionalContext`. Per
-/// code.claude.com/docs/en/hooks that set is SessionStart, Setup,
+/// `supports_hook_specific_output`: whether this crate renders an
+/// `hookSpecificOutput.additionalContext` payload for the event. This is not a
+/// verbatim copy of the official schema. Per code.claude.com/docs/en/hooks the
+/// schema accepts additionalContext on ten events: SessionStart, Setup,
 /// SubagentStart, UserPromptSubmit, UserPromptExpansion, PreToolUse,
-/// PostToolUse, PostToolUseFailure, and PostToolBatch. Other events must use
-/// top-level fields (`systemMessage`, `decision`, etc). Keeping the flag on
-/// the row prevents `hook_lifecycle` from re-stating the rule in a parallel
-/// `matches!`.
+/// PostToolUse, PostToolUseFailure, PostToolBatch, and Stop. The flag is set on
+/// the first nine only. Stop stays false because there the field is non-error
+/// feedback that continues the turn, so an unconditional emit loops (see the
+/// Stop row below). Other events must use top-level fields (`systemMessage`,
+/// `decision`, etc). Keeping the flag on the row prevents `hook_lifecycle` from
+/// re-stating the rule in a parallel `matches!`.
 ///
 /// `installs_in_settings`: whether `keel hook install` should write
 /// a stanza for this event into `settings.json`. The dispatch table still
@@ -556,18 +559,15 @@ mod tests {
         );
     }
 
+    /// Pins the events for which this crate renders an additionalContext payload.
+    /// Stop is excluded even though the official schema permits it there, because
+    /// the field is non-error feedback that continues the turn and an
+    /// unconditional emit loops. SubagentStop is excluded because the official
+    /// schema does not list it. PermissionRequest and PermissionDenied emit
+    /// `decision` and `retry` through dedicated handlers rather than
+    /// additionalContext, so the flag that gates that render path stays false.
     #[test]
     fn hook_specific_output_flag_matches_claude_code_schema() {
-        // Per code.claude.com/docs/en/hooks, these events accept
-        // `hookSpecificOutput.additionalContext`. Everything else must use
-        // top-level fields (`systemMessage`, `decision`, etc).
-        //
-        // Stop and SubagentStop are deliberately EXCLUDED even though the
-        // schema permits additionalContext on them: emitting it forces the
-        // turn to continue, which loops. PermissionRequest/PermissionDenied
-        // are also excluded — they emit `decision`/`retry` via dedicated
-        // handlers, not additionalContext, so the flag (which gates the
-        // additionalContext render path) stays false.
         let allowed = [
             "SessionStart",
             "Setup",

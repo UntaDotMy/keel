@@ -5,7 +5,7 @@
  * - Context injection (iron law, skill catalog, working brief reminders)
  * - Observation recording (tool timing, behavioral patterns)
  * - Learning checkpoints (session-end synthesis)
- * - Command compaction (pre-tool-use rewrite)
+ * - Iron Law edit gate (pre-tool-use allow/deny)
  * - Review gates (post-tool-batch enforcement)
  *
  * This plugin enables the full keel experience in Claude Desktop, including
@@ -368,17 +368,13 @@ const KeelCoworkPlugin: CoworkPlugin = {
       ], 200);
 
       if (result) {
-        // Check if the bridge returned a rerun command
-        if (result.startsWith("Rerun that as:")) {
-          const command = result.replace("Rerun that as:", "").trim();
-          return { rerunCommand: command };
-        }
-        // Check for allow/deny
-        if (result.includes("ALLOW")) {
-          return { allow: true };
-        }
-        if (result.includes("DENY")) {
+        // why: prefix-match and test deny first, so free-form reason prose in a
+        // deny can never be read as an allow.
+        if (result.startsWith("KEEL_GATE_DENY")) {
           return { allow: false };
+        }
+        if (result.startsWith("KEEL_GATE_ALLOW")) {
+          return { allow: true };
         }
       }
     } catch (e) {
