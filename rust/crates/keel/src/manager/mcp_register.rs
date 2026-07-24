@@ -147,7 +147,14 @@ pub fn mcp_server_entry(claude_home: &Path) -> Value {
         "type": "stdio",
         "command": display_path(&executable),
         "args": ["mcp", "serve"],
-        "env": {},
+        // why: Claude Code holds stdin open for the whole session and sends no
+        // keepalive frames, so the server's default 300s idle self-reap would drop
+        // a *live attached* session's tools mid-session (they never return to model
+        // context after the reconnect). Disable idle-reap for this registration; the
+        // server still exits cleanly on stdin EOF at session end (ReaderEof). The
+        // reap default stays on for hosts that may abandon the server without
+        // closing stdin — the orphan case the reaper was added for.
+        "env": { "KEEL_MCP_IDLE_TIMEOUT_SECS": "0" },
         "alwaysLoad": true,
     })
 }
@@ -170,10 +177,15 @@ pub fn register_mcp_server(claude_home: &Path) -> Result<McpRegistration, String
     // Parse the existing config, or start a fresh object. A corrupt/non-object
     // file is a hard error rather than a silent overwrite — clobbering a user's
     // ~/.claude.json (history, project state, auth) would be destructive.
-    let mut document: Value = if existing_text.trim().is_empty() {
+    // why: a UTF-8 BOM (a common PowerShell artifact on Windows) is not ASCII
+    // whitespace, so `trim` never removes it and `serde_json` hard-errors on it —
+    // which would wedge registration and the SessionStart self-heal permanently.
+    // The opencode/cursor merge paths already strip it; do the same here.
+    let existing_trimmed = existing_text.trim_start_matches('\u{feff}');
+    let mut document: Value = if existing_trimmed.trim().is_empty() {
         Value::Object(Map::new())
     } else {
-        serde_json::from_str(&existing_text)
+        serde_json::from_str(existing_trimmed)
             .map_err(|error| format!("parse {}: {error}", display_path(&config_path)))?
     };
     let root = document.as_object_mut().ok_or_else(|| {
@@ -224,14 +236,25 @@ pub fn register_mcp_server(claude_home: &Path) -> Result<McpRegistration, String
     })
 }
 
-/// Remove mcpServers entries whose `command` path does not exist on disk.
-/// Returns true when at least one entry was removed. Bare commands on PATH
-/// (no path separator) are left alone — they resolve via PATH at spawn time.
+/// Remove *keel's own* legacy/dead sibling registrations whose `command` binary
+/// is missing — e.g. a leftover `claude_core` / `claude-skills` entry from a
+/// previous keel identity that now points at a removed binary and makes MCP
+/// connect hang. Returns true when at least one entry was removed.
+///
+/// why: this is deliberately scoped to keel-family entries. An earlier version
+/// pruned ANY sibling whose absolute command path was missing, which would
+/// permanently delete a user's unrelated third-party MCP server the moment its
+/// binary sat on an unmounted drive or was mid-rebuild — a preserve-existing-data
+/// violation done silently on every SessionStart. Third-party servers are never
+/// touched now. Bare PATH commands (no separator) are also left alone.
 fn prune_missing_command_servers(servers: &mut Map<String, Value>) -> bool {
     let dead: Vec<String> = servers
         .iter()
         .filter(|(name, entry)| {
             if name.as_str() == MCP_SERVER_KEY {
+                return false;
+            }
+            if !is_keel_family_server(name, entry) {
                 return false;
             }
             let Some(command) = entry.get("command").and_then(Value::as_str) else {
@@ -254,6 +277,37 @@ fn prune_missing_command_servers(servers: &mut Map<String, Value>) -> bool {
         servers.remove(&name);
     }
     changed
+}
+
+/// Whether a sibling mcpServers entry belongs to a *keel* identity (past or
+/// present) — matched on a known legacy server key or a keel-family command
+/// binary. Only such entries are eligible for missing-binary pruning; an
+/// unrelated third-party server is never removed by keel's self-heal.
+fn is_keel_family_server(name: &str, entry: &Value) -> bool {
+    const LEGACY_KEYS: &[&str] = &[
+        "claude_core",
+        "claude-core",
+        "claude_skills",
+        "claude-skills",
+        "claudeskills",
+        "claude-code-skills",
+    ];
+    let name_l = name.to_ascii_lowercase();
+    if LEGACY_KEYS.contains(&name_l.as_str()) {
+        return true;
+    }
+    let command = entry
+        .get("command")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    command.contains("claude-skills")
+        || command.contains("claude_skills")
+        || command.contains("claude_core")
+        || command.contains("claude-core")
+        || command.contains("keel.exe")
+        || command.ends_with("/keel")
+        || command.ends_with("\\keel")
 }
 
 /// True when `claude_home` is a real `~/.claude` directory (its final path
@@ -406,6 +460,17 @@ mod tests {
         // silently drop it and re-defer the contract tools.
         assert_eq!(entry["alwaysLoad"], json!(true));
 
+        let _ = fs::remove_dir_all(claude_home.parent().unwrap());
+    }
+
+    #[test]
+    fn entry_disables_idle_reap_for_claude_code() {
+        // Claude Code holds stdin open for the whole session, so the registered
+        // entry must disable the idle self-reap or a live session loses its tools
+        // after 5 idle minutes.
+        let claude_home = unique_home("idle-reap");
+        let entry = mcp_server_entry(&claude_home);
+        assert_eq!(entry["env"]["KEEL_MCP_IDLE_TIMEOUT_SECS"], json!("0"));
         let _ = fs::remove_dir_all(claude_home.parent().unwrap());
     }
 
@@ -575,16 +640,24 @@ mod tests {
     }
 
     #[test]
-    fn register_prunes_sibling_server_with_missing_binary() {
+    fn register_prunes_only_keel_legacy_dead_siblings() {
         let claude_home = unique_home("prune-dead");
         let config_path = mcp_config_path(&claude_home);
-        // Seed a dead sibling pointing at a non-existent absolute path, plus a
-        // PATH-only basename that must survive (we cannot know PATH here).
+        // Seed: (a) a keel-legacy dead sibling pointing at a missing binary — must
+        // be pruned; (b) a THIRD-PARTY dead sibling pointing at a missing absolute
+        // path — must SURVIVE (keel never deletes a user's other MCP server); and
+        // (c) a PATH-only basename that must survive (we cannot know PATH here).
         fs::write(
             &config_path,
             r#"{
               "mcpServers": {
-                "dead-core": {
+                "claude_core": {
+                  "type": "stdio",
+                  "command": "C:\\nonexistent\\claude-skills.exe",
+                  "args": ["mcp", "serve"],
+                  "env": {}
+                },
+                "third-party": {
                   "type": "stdio",
                   "command": "C:\\nonexistent\\missing-mcp.exe",
                   "args": ["mcp", "serve"],
@@ -608,8 +681,13 @@ mod tests {
         let text = fs::read_to_string(&config_path).unwrap();
         let parsed: Value = serde_json::from_str(&text).unwrap();
         assert!(
-            parsed["mcpServers"].get("dead-core").is_none(),
-            "missing-binary sibling must be pruned: {parsed}"
+            parsed["mcpServers"].get("claude_core").is_none(),
+            "keel-legacy missing-binary sibling must be pruned: {parsed}"
+        );
+        assert_eq!(
+            parsed["mcpServers"]["third-party"]["command"],
+            json!("C:\\nonexistent\\missing-mcp.exe"),
+            "a third-party server must NEVER be deleted, even with a missing binary"
         );
         assert_eq!(
             parsed["mcpServers"]["path-tool"]["command"],

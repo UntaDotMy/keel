@@ -170,6 +170,19 @@ function markIronLawSatisfied(sessionID: string): void {
   }
 }
 
+/** Remove the session's Iron Law satisfaction marker at session end, so a
+ *  reused session id does not inherit a stale "satisfied" state. Mirrors the
+ *  filesystem cleanup the OpenCode, Pi, and Cursor adapters do; there is no
+ *  bridge or CLI subcommand for marker cleanup, and the marker is a plain file
+ *  this adapter already owns. */
+function clearIronLawMarker(sessionID: string): void {
+  try {
+    fs.rmSync(ironLawMarkerPath(sessionID), { force: true });
+  } catch {
+    /* best-effort */
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Tool classification — Iron Law gate. Kept in sync with opencode/keel.ts.
 // ---------------------------------------------------------------------------
@@ -242,13 +255,13 @@ function denyOutput(reason: string): string {
 // Bridge runner — never throws, 500ms hard timeout via execFileSync
 // ---------------------------------------------------------------------------
 
-function runBridge(subcommand: string, args: string[]): string {
+function runBridge(subcommand: string, args: string[], timeoutMs = 500): string {
   try {
     const result = execFileSync(
       BRIDGE_BIN,
       ["bridge", subcommand, ...args],
       {
-        timeout: 500,
+        timeout: timeoutMs,
         stdio: ["pipe", "pipe", "pipe"],
         encoding: "utf-8",
         windowsHide: true,
@@ -370,18 +383,28 @@ function handlePreToolUse(input: CodexHookInput, isPre: boolean): string {
   if (input.failed) observeArgs.push("--failed");
   runBridgeWithStdin("observe", observeArgs, stdin);
 
-  // Edit-class: Rust core is source of truth (evidence-based deny).
+  // Edit-class: Rust core is source of truth (evidence-based deny). This gate
+  // is fail-CLOSED: an empty result means the bridge timed out or errored, and
+  // an unevaluated Iron Law gate must BLOCK the edit — never silently allow it.
+  // A 500ms budget is too tight for a cold keel.exe (Windows Defender scan on
+  // first run), so the gate call gets a larger budget than the advisory calls.
   if (isEditClassTool(toolName)) {
-    const gate = runBridge("pre-tool-use", [
-      "--session", sessionID,
-      "--cwd", cwd,
-      "--tool", toolName,
-    ]);
+    const gate = runBridge(
+      "pre-tool-use",
+      ["--session", sessionID, "--cwd", cwd, "--tool", toolName],
+      5000,
+    );
     if (gate.startsWith("KEEL_GATE_DENY")) {
       const reason = gate.split("\n").slice(1).join("\n").trim();
       return denyOutput(
         reason ||
           "keel Iron Law gate: call system_map/recall/context_brief before editing.",
+      );
+    }
+    if (!gate.startsWith("KEEL_GATE_ALLOW")) {
+      // Timeout/error/unexpected output — fail closed.
+      return denyOutput(
+        "keel Iron Law gate could not be evaluated (keel did not respond in time). Retry the edit; if it persists, run `keel doctor`.",
       );
     }
   }
@@ -431,16 +454,16 @@ function handlePostCompact(input: CodexHookInput): string {
   return "";
 }
 
-function handleStop(input: CodexHookInput): string {
-  // Stop fires when a turn completes. Run post-compact for the learning
-  // checkpoint. Session-end fires on explicit session deletion, not here.
-  const sessionID = input.session_id ?? "unknown";
-  const cwd = input.cwd ?? process.cwd();
-
-  return runBridge("post-compact", [
-    "--session", sessionID,
-    "--cwd", cwd,
-  ]);
+function handleStop(_input: CodexHookInput): string {
+  // Stop fires on EVERY turn end. It must NOT run `bridge post-compact`: that
+  // subcommand runs the full session-end learning cycle, so invoking it per turn
+  // spawned and SIGTERM-killed a learning cycle every turn and discarded its
+  // output. The learning checkpoint belongs on the actual compaction event
+  // (handlePostCompact) and on session end (handleSessionEnd). Printing context
+  // on Stop also risks a keep-going loop, so this handler is silenced (matches
+  // the native Claude Code Stop handler and the OpenCode adapter, which do not
+  // run learning on turn end).
+  return "";
 }
 
 function handleSessionEnd(input: CodexHookInput): string {

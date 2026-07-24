@@ -7,7 +7,7 @@
 #
 #   preToolUse  -> session-start (once) + Iron Law gate + Shell compaction reroute
 #   postToolUse -> bridge observe (observation capture, fire-and-forget)
-#   preCompact  -> bridge pre-compact (pre-compaction checkpoint)
+#   preCompact  -> no-op (no bridge pre-compact subcommand; learning runs on stop)
 #   stop        -> bridge post-compact (turn-end checkpoint)
 #   sessionEnd  -> bridge session-end (learning + capture + marker cleanup)
 #
@@ -82,6 +82,18 @@ is_edit_class_tool() {
   esac
 }
 
+# Map a Cursor tool name to the canonical keel/Rust gated tool name so the Iron
+# Law gate actually recognizes it. Cursor uses StrReplace where the Rust gated
+# set uses str_replace; Write/Edit/MultiEdit/NotebookEdit already lowercase-match
+# ("multiedit"/"notebookedit"). Delete is not in the Rust gated set at all, so it
+# relies on the local-marker fallback in the edit-class branch below.
+canonical_keel_tool() {
+  case "$1" in
+    StrReplace) echo "str_replace" ;;
+    *) echo "$1" ;;
+  esac
+}
+
 is_keel_research_tool() {
   case "$1" in
     *keel*|*KEEL*) return 0 ;;
@@ -99,7 +111,9 @@ is_keel_reading_command() {
 # --- Lifecycle events: dispatch to keel bridge, no output needed. ---
 case "$HOOK_EVENT" in
   preCompact)
-    "$KEEL_BIN" bridge pre-compact --session "$SESSION_ID" --cwd "$CWD" >/dev/null 2>&1 || true
+    # No `bridge pre-compact` subcommand exists (bridge.rs would print help).
+    # The learning + post-compaction context runs via `bridge post-compact` on
+    # the stop event, so preCompact is a clean no-op here.
     echo '{}'
     exit 0
     ;;
@@ -144,7 +158,10 @@ fi
 
 # Iron Law: deny edit-class tools via Rust core (evidence-based; no ack-on-deny).
 if is_edit_class_tool "$TOOL_NAME"; then
-  GATE=$("$KEEL_BIN" bridge pre-tool-use --session "$SESSION_ID" --cwd "$CWD" --tool "$TOOL_NAME" 2>/dev/null) || GATE=""
+  # Map the Cursor tool name to the canonical name so the Rust gate recognizes
+  # it (e.g. StrReplace -> str_replace); without this the gate answered ALLOW.
+  CANON_TOOL=$(canonical_keel_tool "$TOOL_NAME")
+  GATE=$("$KEEL_BIN" bridge pre-tool-use --session "$SESSION_ID" --cwd "$CWD" --tool "$CANON_TOOL" 2>/dev/null) || GATE=""
   case "$GATE" in
     KEEL_GATE_DENY*)
       REASON=$(printf '%s' "$GATE" | sed '1d')
@@ -157,6 +174,20 @@ if is_edit_class_tool "$TOOL_NAME"; then
       exit 0
       ;;
   esac
+  # Local-marker fallback (mirrors the Pi adapter). The Rust gated set does not
+  # include Delete, so `bridge pre-tool-use` returns ALLOW for it. Gate any
+  # edit-class tool locally when this session has not yet cleared the Iron Law
+  # marker, so a Delete (or any tool name the Rust core does not recognize) is
+  # not silently allowed to run before research.
+  if [ ! -f "$MARKER" ]; then
+    REASON="IRON LAW ENFORCED (STRICT): Use a keel tool first (MCP system_map, recall, context_brief, skill_route, or keel doctor / code-search). Plain Read does not clear the gate."
+    "$JQ_BIN" -n --arg msg "$REASON" '{
+      "permission": "deny",
+      "user_message": $msg,
+      "agent_message": $msg
+    }'
+    exit 0
+  fi
 fi
 
 # --- Compaction reroute for Shell tools. ---

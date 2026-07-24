@@ -252,6 +252,11 @@ pub fn install_from_paths(
     let synced_subagent_definitions =
         sync_subagent_definitions(&layout, claude_home, &mut tracker)?;
     let synced_commands = sync_commands(&layout, claude_home, &mut tracker)?;
+    // why: native install previously skipped output-styles, so a native-install
+    // user never got them (they shipped only via the plugin manifest). Deliver them
+    // to ~/.claude/output-styles/; the tracker records each file so uninstall
+    // reverses it like every other managed artifact.
+    let _synced_output_styles = sync_output_styles(&layout, claude_home, &mut tracker)?;
 
     let removed_stale_files = remove_orphans(
         claude_home,
@@ -756,9 +761,36 @@ pub(crate) fn maybe_wire_codex(
     ))
 }
 
-/// Install the Cowork (Claude Desktop) plugin files into `~/.claude/plugins/keel-cowork/`.
+/// The Claude Desktop MCP config file, derived from the user's home so it is both
+/// testable (a temp home yields a temp path) and correct in production (APPDATA
+/// defaults to `%USERPROFILE%\AppData\Roaming`).
+fn claude_desktop_config_path(home: &Path) -> PathBuf {
+    let dir = if cfg!(target_os = "windows") {
+        home.join("AppData").join("Roaming").join("Claude")
+    } else if cfg!(target_os = "macos") {
+        home.join("Library")
+            .join("Application Support")
+            .join("Claude")
+    } else {
+        home.join(".config").join("Claude")
+    };
+    dir.join("claude_desktop_config.json")
+}
+
+/// Register keel's MCP server for Claude Desktop (Cowork) in
+/// `claude_desktop_config.json` — the only integration Claude Desktop actually
+/// supports.
+///
+/// why: Claude Desktop has NO lifecycle-hook system and NO JS plugin API (verified
+/// against the docs and open parity issues), so the hook-based automation the CLI
+/// and Claude Code plugin deliver (iron-law gate, compaction, gates, learning)
+/// cannot run there. The prior implementation copied a dead TS plugin into
+/// `~/.claude/plugins/keel-cowork/` (which Desktop never scans) and merged MCP into
+/// `~/.claude/settings.json` (which Desktop never reads). This MCP-only honest
+/// wiring registers the server where Desktop actually looks; skills are added via
+/// Desktop's account-synced Customize UI, not the filesystem.
 pub(crate) fn maybe_wire_cowork(
-    repository_root: &Path,
+    _repository_root: &Path,
     claude_home: &Path,
     detected: bool,
 ) -> Option<String> {
@@ -779,110 +811,32 @@ pub(crate) fn maybe_wire_cowork(
         None => return Some("skipped (no home directory)".to_string()),
     };
 
-    let cowork_source = repository_root.join("cowork");
-    if !cowork_source.is_dir() {
-        return Some("skipped (cowork source absent)".to_string());
-    }
-
-    let plugin_dir = home.join(".claude").join("plugins").join("keel-cowork");
-    if let Err(error) = std::fs::create_dir_all(&plugin_dir) {
-        return Some(format!("plugin dir skipped ({error})"));
-    }
-
-    // Copy the cowork plugin files
-    let mut copied = 0;
-    let mut status_parts: Vec<String> = Vec::new();
-
-    for entry in [
-        "keel.ts",
-        "plugin.json",
-        "package.json",
-        "tsconfig.json",
-        "README.md",
-    ] {
-        let source = cowork_source.join(entry);
-        let target = plugin_dir.join(entry);
-        if source.is_file() && std::fs::copy(&source, &target).is_ok() {
-            copied += 1;
+    let config_path = claude_desktop_config_path(&home);
+    if let Some(parent) = config_path.parent() {
+        if let Err(error) = std::fs::create_dir_all(parent) {
+            return Some(format!("MCP skipped (create config dir: {error})"));
         }
     }
 
-    // Copy skills
-    let skills_source = cowork_source.join("skills");
-    let skills_target = plugin_dir.join("skills");
-    if skills_source.is_dir() {
-        if let Err(e) = copy_dir_recursive(&skills_source, &skills_target) {
-            status_parts.push(format!("skills copy skipped ({})", e));
-        } else {
-            status_parts.push("skills copied".to_string());
-        }
-    }
-
-    // Copy commands
-    let commands_source = cowork_source.join("commands");
-    let commands_target = plugin_dir.join("commands");
-    if commands_source.is_dir() {
-        if let Err(e) = copy_dir_recursive(&commands_source, &commands_target) {
-            status_parts.push(format!("commands copy skipped ({})", e));
-        } else {
-            status_parts.push("commands copied".to_string());
-        }
-    }
-
-    // Configure MCP server in settings (same as main install, but Cowork-specific)
     let binary = installed_executable_path(claude_home);
-    let settings_path = claude_home.join("settings.json");
-
     let mcp_entry = serde_json::json!({
-        "type": "local",
+        "type": "stdio",
         "command": display_path(&binary),
         "args": ["mcp", "serve"],
         "description": "Keel CLI tools for workflow, memory, recall, and sprint management"
     });
 
-    let mcp_status = match merge_cowork_mcp(&settings_path, "keel", &mcp_entry) {
-        Ok(CoworkMcpResult::Added) => {
-            format!("MCP registered in {}", display_path(&settings_path))
-        }
-        Ok(CoworkMcpResult::AlreadyCurrent) => "MCP already current".to_string(),
+    match merge_cowork_mcp(&config_path, "keel", &mcp_entry) {
+        Ok(CoworkMcpResult::Added) => Some(format!(
+            "MCP registered in {} (Desktop supports MCP tools only — no hooks)",
+            display_path(&config_path)
+        )),
+        Ok(CoworkMcpResult::AlreadyCurrent) => Some("MCP already current".to_string()),
         Ok(CoworkMcpResult::Updated) => {
-            format!("MCP updated in {}", display_path(&settings_path))
+            Some(format!("MCP updated in {}", display_path(&config_path)))
         }
-        Err(error) => format!("MCP skipped ({error})"),
-    };
-
-    status_parts.push(mcp_status);
-
-    if copied > 0 || !status_parts.is_empty() {
-        Some(format!(
-            "{} plugin files; {}",
-            copied,
-            status_parts.join("; ")
-        ))
-    } else {
-        Some("nothing to copy".to_string())
+        Err(error) => Some(format!("MCP skipped ({error})")),
     }
-}
-
-/// Copy directory recursively
-fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
-    if !dst.exists() {
-        std::fs::create_dir_all(dst)?;
-    }
-
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let ty = entry.file_type()?;
-        let src_path = entry.path();
-        let dst_path = dst.join(entry.file_name());
-
-        if ty.is_dir() {
-            copy_dir_recursive(&src_path, &dst_path)?;
-        } else {
-            std::fs::copy(&src_path, &dst_path)?;
-        }
-    }
-    Ok(())
 }
 
 /// Merge the `keel` entry into Cowork's settings.json under `mcpServers`.
@@ -1680,6 +1634,45 @@ fn remove_wired_adapters(claude_home: &Path) -> usize {
         }
     }
 
+    // Cowork (Claude Desktop): remove the keel MCP entry from
+    // claude_desktop_config.json (where MCP-only wiring registers it), and clean up
+    // the legacy ~/.claude/plugins/keel-cowork/ dir that older installs copied a
+    // now-retired TS plugin into.
+    let desktop_config = claude_desktop_config_path(&home);
+    if desktop_config.is_file() {
+        if let Ok(text) = crate::runtime::read_text_if_exists(&desktop_config) {
+            let stripped = text.strip_prefix('\u{feff}').unwrap_or(&text);
+            if let Ok(mut doc) = serde_json::from_str::<serde_json::Value>(stripped) {
+                let mutated = if let Some(servers) =
+                    doc.get_mut("mcpServers").and_then(|v| v.as_object_mut())
+                {
+                    if servers.remove("keel").is_some() {
+                        if servers.is_empty() {
+                            doc.as_object_mut().map(|o| o.remove("mcpServers"));
+                        }
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+                if mutated {
+                    let _ = write_text(
+                        &desktop_config,
+                        &serde_json::to_string_pretty(&doc)
+                            .unwrap_or_else(|_| stripped.to_string()),
+                    );
+                    removed += 1;
+                }
+            }
+        }
+    }
+    let legacy_cowork_dir = home.join(".claude").join("plugins").join("keel-cowork");
+    if legacy_cowork_dir.is_dir() {
+        removed += remove_path_if_exists_counted(&legacy_cowork_dir).unwrap_or(0);
+    }
+
     // Cursor hooks: install writes ~/.cursor/hooks/{hooks.json,keel-cursor.sh}.
     // Uninstall must remove both or Cursor keeps invoking a hook that shells to
     // the now-deleted keel binary on every tool call.
@@ -2023,6 +2016,44 @@ fn sync_commands(
         return Ok(0);
     }
     let target_directory = commands_directory(claude_home);
+    fs::create_dir_all(&target_directory)
+        .map_err(|error| format!("create {}: {error}", display_path(&target_directory)))?;
+    let mut synced_count = 0;
+    for entry_result in fs::read_dir(&source_directory)
+        .map_err(|error| format!("read {}: {error}", display_path(&source_directory)))?
+    {
+        let entry = entry_result.map_err(|error| format!("read directory entry: {error}"))?;
+        let source_path = entry.path();
+        if source_path.extension().and_then(|value| value.to_str()) != Some("md") {
+            continue;
+        }
+        let file_name = match source_path.file_name() {
+            Some(name) => name.to_owned(),
+            None => continue,
+        };
+        let target_path = target_directory.join(&file_name);
+        if copy_file_if_changed(&source_path, &target_path)? {
+            synced_count += 1;
+        }
+        tracker.record(&target_path);
+    }
+    Ok(synced_count)
+}
+
+/// Deliver `output-styles/*.md` to `~/.claude/output-styles/`. Mirrors
+/// `sync_commands`: the plugin path ships these via the manifest, but a native
+/// install did not, so this closes that delivery gap. Each file is tracked for
+/// clean uninstall.
+fn sync_output_styles(
+    layout: &RepositoryLayout,
+    claude_home: &Path,
+    tracker: &mut FileTracker,
+) -> Result<usize, String> {
+    let source_directory = layout.root_path.join("output-styles");
+    if !source_directory.is_dir() {
+        return Ok(0);
+    }
+    let target_directory = claude_home.join("output-styles");
     fs::create_dir_all(&target_directory)
         .map_err(|error| format!("create {}: {error}", display_path(&target_directory)))?;
     let mut synced_count = 0;

@@ -665,14 +665,17 @@ fn report_bridge_host_wiring(standard_output: &mut dyn Write, claude_home: &std:
 fn report_host(standard_output: &mut dyn Write, name: &str, wired: bool, mcp: bool) {
     let state = if wired {
         if mcp {
-            "wired (rules + MCP)"
+            "wired (rules + MCP)".to_string()
         } else {
-            "wired (rules)"
+            "wired (rules)".to_string()
         }
     } else {
-        "not wired"
+        format!("not wired (opt in with `keel install --with {name}`)")
     };
-    write_doctor_check(standard_output, true, &format!("{name} host: {state}"));
+    // why: render [ok] only when the host is actually wired. Passing `true`
+    // unconditionally painted an unconfigured — or failed-to-wire — host as healthy;
+    // a not-wired host is now a [warn] so doctor tells the truth about host state.
+    write_doctor_check(standard_output, wired, &format!("{name} host: {state}"));
 }
 
 fn find_on_path(executable: &str) -> Option<PathBuf> {

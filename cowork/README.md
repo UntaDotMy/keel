@@ -1,24 +1,41 @@
-# keel Cowork Plugin for Claude Desktop
+# keel for Claude Desktop (Cowork)
 
-Native delivery rails for Claude Desktop (Cowork) — managed specialist skills, subagents, hooks, review gates, and the keel CLI for workflow, memory, and command compaction.
+Claude Desktop integration for keel. **Scope note up front:** Claude Desktop does
+**not** support the Claude Code lifecycle-hook system or a JavaScript plugin API,
+so the hook-driven parts of keel — the Iron Law edit gate, command compaction,
+review/working-brief gates, and the learning loop — **cannot run in Claude
+Desktop**. What Claude Desktop *does* support is MCP servers, and that is what this
+integration wires.
 
-## Overview
+## What you get in Claude Desktop
 
-This plugin bridges Claude Desktop's lifecycle events to the `keel` Rust CLI, enabling:
+- **The keel MCP tools.** `keel install` registers the keel MCP server in Claude
+  Desktop's `claude_desktop_config.json`, so the keel tools (recall, system-map,
+  context-brief, skill routing/get/list, memory status, working-brief create/list,
+  sprint, user-story lint, and the generic CLI passthrough) are available inside
+  Desktop conversations.
+- **The keel CLI.** Everything the `keel` binary does (workflow, memory, recall,
+  review, sprint) is available from a terminal regardless of host.
 
-- **Iron Law Enforcement** — Research-first operating contract on every prompt
-- **Command Compaction** — Token-saving output compression for noisy commands
-- **Review Gates** — Pre-commit and pre-PR review enforcement
-- **Working Brief Reminders** — Structured spec capture before non-trivial work
-- **Memory Management** — FTS5-backed recall and structured memory families
-- **Sprint Management** — Scrum-style sprint loop with fail-closed completion
+## What is NOT available in Claude Desktop
 
-## Prerequisites
+Because Desktop fires no lifecycle hooks, the following — all of which depend on
+hooks in Claude Code — do **not** happen automatically in Desktop:
 
-1. **keel CLI** must be installed at `~/.claude/keel` (macOS/Linux) or `~/.claude/keel.exe` (Windows)
-2. **Claude Desktop** (Cowork) with plugin support enabled
+- Iron Law PreToolUse edit gate
+- Per-prompt / session-start context injection
+- Command-compaction rewriting
+- PostToolBatch review / working-brief gates
+- Session-end learning checkpoints
 
-### Install keel CLI
+Use Claude Code (CLI or IDE) if you need those. Track upstream parity in the
+Claude Code issue tracker.
+
+## Install
+
+Install the keel binary, then run `keel install` (it auto-detects Desktop, or pass
+`--with cowork`). Installation registers the MCP server in
+`claude_desktop_config.json`; restart Claude Desktop to pick it up.
 
 ```bash
 # macOS / Linux / WSL
@@ -30,171 +47,25 @@ curl -fsSL https://raw.githubusercontent.com/UntaDotMy/keel/main/install.sh | ba
 irm https://raw.githubusercontent.com/UntaDotMy/keel/main/install.ps1 | iex
 ```
 
-## Installation
+Config file locations Desktop reads:
 
-### Option 1: Via Plugin Command (Recommended)
+- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- Windows: `%APPDATA%\Claude\claude_desktop_config.json`
+- Linux: `~/.config/Claude/claude_desktop_config.json`
 
-```bash
-# In Claude Desktop, run:
-/plugin install keel-cowork
-```
+## Skills
 
-### Option 2: Manual Installation
+Claude Desktop syncs skills through your claude.ai account (the **Customize**
+surface), not from a local plugin manifest. Add the keel skills there if you want
+them in Desktop; keel does not push them onto the Desktop filesystem because
+Desktop would not read them.
 
-1. Clone or copy the `cowork/` directory to your Claude Desktop plugins folder:
+## Uninstall
 
-   **macOS/Linux:**
-   ```bash
-   cp -r cowork ~/.claude/plugins/keel-cowork
-   ```
-
-   **Windows:**
-   ```powershell
-   Copy-Item -Recurse cowork $env:USERPROFILE\.claude\plugins\keel-cowork
-   ```
-
-2. Install npm dependencies:
-   ```bash
-   cd ~/.claude/plugins/keel-cowork
-   npm install
-   ```
-
-3. Restart Claude Desktop
-
-## Features
-
-### Lifecycle Hooks
-
-The plugin wires the following lifecycle events:
-
-| Event | Action |
-|---|---|
-| `onInit` | Verify keel binary and log connection status |
-| `onSessionStart` | Inject bootstrap context + workspace digest |
-| `onUserPromptSubmit` | Inject iron law + skill brief before model response |
-| `onPreToolUse` | Command rewrite for compaction |
-| `onPostToolUse` | Record observation for learning loop |
-| `onPostToolBatch` | Fire review/working-brief gates |
-| `onSessionEnd` | Trigger learning checkpoint |
-| `onSessionCompacting` | Inject post-compact context |
-
-### Slash Commands
-
-The plugin provides these slash commands:
-
-| Command | Description |
-|---|---|
-| `/keel` | Run any keel CLI command |
-| `/keel:recall` | Full-text search over memories and working-briefs |
-| `/keel:sprint` | Sprint backlog management |
-| `/keel:review` | Pre-commit or pre-PR review |
-| `/keel:memory` | Memory scope and system-map management |
-| `/keel:workflow` | Workflow routing and management |
-| `/keel:work` | Work item tracking |
-
-### MCP Server
-
-The plugin configures the keel MCP server, providing these tools:
-
-- `context_brief` — Bootstrap context with iron law and skill catalog
-- `recall` — FTS5 full-text search
-- `run_command` — Compacted command execution
-- `skill_route` — Skill routing and selection
-- `skill_get` — Get skill content
-- `skill_list` — List available skills
-- `memory_status` — Memory health overview
-- `brief_list` — List working briefs
-- `brief_get` — Get working brief content
-- `brief_create` — Create working brief
-- `system_map` — Workspace structure map
-- `system_map_refresh` — Force refresh system map
-- `sprint` — Sprint management
-- `user_story_lint` — Validate user story format
-- `cli` — Generic CLI passthrough
-
-### Configuration
-
-The plugin respects these userConfig settings:
-
-| Setting | Default | Description |
-|---|---|---|
-| `review_strictness` | `advisory` | Review gate strictness: `advisory`, `strict`, or `off` |
-| `system_map_refresh_interval` | `10` | Edit-class calls between auto-refresh |
-| `memory_retention_days` | `14` | Days to retain raw output data |
-
-## Architecture
-
-```
-Claude Desktop (Cowork)
-    │
-    ├── Plugin System
-    │   └── keel-cowork plugin (TypeScript)
-    │       │
-    │       ├── Lifecycle Hooks → keel bridge
-    │       ├── Slash Commands → keel CLI
-    │       └── Skills → SKILL.md files
-    │
-    └── MCP Server
-        └── keel mcp serve (Rust binary)
-            │
-            ├── Command Compaction (proxy layer)
-            ├── FTS5 Recall Index
-            ├── Sprint Ledger
-            └── Memory Families
-```
-
-## Comparison with CLI Version
-
-| Feature | CLI | Desktop (Cowork) |
-|---|---|---|
-| Plugin manifest (skills, agents, commands) | ✅ | ✅ |
-| Lifecycle hooks | ✅ | ✅ |
-| MCP server (full tool surface, count asserted by doc_parity_test.rs) | ✅ | ✅ |
-| Command compaction | ✅ | ✅ |
-| Review/sprint/working-brief gates | ✅ | ✅ |
-| OpenCode bridge | N/A | ✅ |
-| Desktop notifications | ✅ | ✅ |
-
-## Troubleshooting
-
-### Plugin not loading
-
-1. Verify plugin is in correct location: `~/.claude/plugins/keel-cowork/`
-2. Check npm dependencies installed: `cd ~/.claude/plugins/keel-cowork && npm install`
-3. Check Claude Desktop logs for plugin loading errors
-
-### Commands not working
-
-1. Verify keel binary is installed: `~/.claude/keel --version`
-2. Check binary is executable: `chmod +x ~/.claude/keel` (macOS/Linux)
-3. Test bridge manually: `~/.claude/keel bridge gate-status`
-
-### Hooks not firing
-
-1. Check plugin is enabled in Claude Desktop settings
-2. Verify plugin.json has correct hooks configuration
-3. Check Claude Desktop supports the hook events used
-
-## Development
-
-### Building the Plugin
-
-```bash
-cd cowork
-npm install
-npm run build
-```
-
-### Testing
-
-```bash
-# Test bridge locally
-./keel bridge session-start --session test --cwd .
-
-# Test recall
-./keel recall "test query"
-```
+`keel uninstall` removes the keel MCP entry from `claude_desktop_config.json` and
+cleans up the legacy `~/.claude/plugins/keel-cowork/` directory that older builds
+created.
 
 ## License
 
-MIT — same as main keel project.
+MIT — same as the main keel project.

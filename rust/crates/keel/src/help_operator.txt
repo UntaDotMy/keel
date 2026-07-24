@@ -35,7 +35,7 @@
   code-search search --workspace-root <path> --query <text> [--format json|compact]
   code-graph build|impact [--workspace-root <path>] [--output <path>] [--changed <a,b,c>] [--json]
   skill-lint --repo-root <path> [--json]
-  skill-eval --repo-root <path> [--json]
+  skill-eval [--repo-root <path> | --installed [--claude-home <path>]] [--json]
   config-audit --repo-root <path> [--json]
   checkpoint create|list|show|restore [--id <id>] [--confirm]
   work add|list|ready|blocked|dep|discovered|close|show  [--workspace-root <path>] [--json]

@@ -886,7 +886,24 @@ pub(crate) fn is_keel_research_command(command: &str) -> bool {
     if !has_keel {
         return false;
     }
-    // Research / orientation subcommands.
+    // why: a compound/chained command can smuggle a non-keel tail past the gate
+    // (`keel doctor && python exfil.py`); only a standalone keel invocation clears.
+    if body.contains("&&")
+        || body.contains("||")
+        || body.contains(';')
+        || body.contains('|')
+        || body.contains('`')
+        || body.contains("$(")
+        || body.contains('\n')
+    {
+        return false;
+    }
+    // Research / orientation subcommands that clear the edit gate. Kept in lockstep
+    // with the documented clearing set (system_map / recall / context_brief /
+    // skill_* / code_search, plus the keel memory / doctor / code-search CLI forms).
+    // Non-research surfaces (help, bare status, brief, gain, observe, workflow,
+    // sprint, review, hook) were removed: they used to clear the gate without any
+    // research happening, which made the hard enforcement a paper wall.
     const HITS: &[&str] = &[
         "system-map",
         "system_map",
@@ -906,20 +923,6 @@ pub(crate) fn is_keel_research_command(command: &str) -> bool {
         "memory recall",
         "memory system-map",
         "memory scope",
-        "working-brief",
-        "brief",
-        "status",
-        "help",
-        "workflow status",
-        "workflow cockpit",
-        "sprint status",
-        "sprint list",
-        "review pre-",
-        "gain",
-        "observe",
-        "hook list",
-        "hook diagnose",
-        "hook instructions",
     ];
     HITS.iter().any(|h| body.contains(h))
 }
@@ -1079,7 +1082,17 @@ pub(crate) fn iron_law_gate_decision(session_id: &str) -> Option<&'static str> {
         return None;
     }
 
-    let claude_home = crate::runtime::resolve_claude_home("").ok()?;
+    let claude_home = match crate::runtime::resolve_claude_home("") {
+        Ok(home) => home,
+        Err(error) => {
+            // why: without the home dir we cannot read the research marker; surface
+            // the fail-open rather than silently disabling the gate.
+            eprintln!(
+                "[keel] Iron Law gate could not resolve the claude home directory ({error}); allowing this tool call unverified."
+            );
+            return None;
+        }
+    };
 
     if iron_law_marker_present(&claude_home, session_id) {
         return None;
@@ -1817,6 +1830,7 @@ fn run_hook_lifecycle(
         prune_raw_output_store(standard_error);
         prune_tool_timings_store(standard_error);
         prune_observations_store(standard_error);
+        prune_state_marker_stores(standard_error);
         run_session_end_learning(standard_error);
     }
 
@@ -2081,8 +2095,11 @@ pub(crate) fn session_start_context() -> String {
         let synthesis = learning::project_synthesis_nudge(&claude_home, &cwd);
         // Synthesis nudge: refine a template-state skill's prose. Gated by
         // CLAUDE_SKILLS_LEARNED_SKILL_ENRICH=off (mirrors CLAUDE_SKILLS_LEARNING=off).
-        let enrichment_enabled =
-            std::env::var("CLAUDE_SKILLS_LEARNED_SKILL_ENRICH").as_deref() != Ok("off");
+        // why: match the trim + case-insensitive parsing of CLAUDE_SKILLS_LEARNING
+        // so `OFF`, `Off`, or `off ` all disable the nudge (exact "off" alone did not).
+        let enrichment_enabled = !std::env::var("CLAUDE_SKILLS_LEARNED_SKILL_ENRICH")
+            .map(|value| value.trim().eq_ignore_ascii_case("off"))
+            .unwrap_or(false);
         if enrichment_enabled && !synthesis.trim().is_empty() {
             context.push_str("\n\n");
             context.push_str(&truncate_on_line_boundary(
@@ -2652,12 +2669,15 @@ fn subagent_start_context() -> String {
 //     via `hookSpecificOutput.additionalContext` (a non-blocking nudge: the agent
 //     is TOLD to run the review / write the brief but the turn is not halted). If
 //     the requirement is STILL unmet at a later end-of-turn, the gate escalates to
-//     `decision: "block"`. This is the honest answer to "not optional": a hook
-//     cannot force a Skill()/tool call, but it can refuse to let the turn close
-//     cheaply. First contact never interrupts mid-task; persistent neglect does.
+//     an imperative feed-forward reminder (still `additionalContext`, never a
+//     `decision: "block"` halt). This is the honest answer to "not optional": a
+//     hook cannot force a Skill()/tool call, but it can feed the correction
+//     forward so the turn does not close cheaply. First contact never interrupts
+//     mid-task; persistent neglect gets the imperative reminder.
 //   * Nudge (`…=nudge`, opt-down) — always a non-blocking reminder, never blocks.
-//   * Block (`…=block`, opt-up) — emit `decision: "block"` on every fire so the harness
-//     Code halts the turn until the requirement is met.
+//   * Block (`…=block`, opt-up) — emit the imperative feed-forward reminder on every
+//     fire (via `additionalContext`; keel never emits `decision: "block"` because
+//     on some events it would loop — the reminder is imperative, not a halt).
 //   * Off (`…=off`/`0`/`false`/`no`, or `…_MAX_BLOCKS=0`) — disabled; only the
 //     generic advisory reminder is emitted.
 //
@@ -2965,7 +2985,7 @@ fn story_closeout_gate_message(
         ));
     }
     let preamble = match decision {
-        GateDecision::Block => "Honest-closeout gate (CLAUDE_SKILLS_STORY_CLOSEOUT_GATE): sprint NOT complete — now a hard stop.",
+        GateDecision::Block => "Honest-closeout gate (CLAUDE_SKILLS_STORY_CLOSEOUT_GATE): sprint NOT complete — escalated (imperative, still feed-forward — not a turn halt).",
         _ => "Closeout reminder (CLAUDE_SKILLS_STORY_CLOSEOUT_GATE): sprint NOT complete.",
     };
     let tail = match decision {
@@ -3017,44 +3037,60 @@ fn research_gate_blocks_path(claude_home: &Path, session_id: &str) -> PathBuf {
 /// or "recall". Fail-open: any read/parse problem returns `true` so the gate
 /// degrades to advisory.
 fn session_has_research_tool(claude_home: &Path, session_id: &str) -> bool {
-    let date = chrono::Local::now().format("%Y-%m-%d").to_string();
-    let path = claude_home
-        .join("state")
-        .join("tool-timings")
-        .join(format!("{date}.jsonl"));
-    let Ok(body) = fs::read_to_string(&path) else {
-        return true;
-    };
-    for line in body.lines() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let Ok(row) = serde_json::from_str::<JsonDocument>(line) else {
+    // why: read yesterday too so research done before midnight in a session that
+    // crosses midnight still counts (matches session_start_ms's two-day span).
+    let now = chrono::Local::now();
+    let today = now.format("%Y-%m-%d").to_string();
+    let yesterday = (now - chrono::Duration::days(1))
+        .format("%Y-%m-%d")
+        .to_string();
+    let mut any_readable = false;
+    for date in [today, yesterday] {
+        let path = claude_home
+            .join("state")
+            .join("tool-timings")
+            .join(format!("{date}.jsonl"));
+        let Ok(body) = fs::read_to_string(&path) else {
             continue;
         };
-        if row.get("session_id").and_then(JsonDocument::as_str) != Some(session_id) {
-            continue;
-        }
-        let tool = row
-            .get("tool_name")
-            .and_then(JsonDocument::as_str)
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        if tool.contains("websearch")
-            || tool.contains("web_fetch")
-            || tool.contains("context7")
-            || tool.contains("recall")
-        {
-            return true;
+        any_readable = true;
+        for line in body.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let Ok(row) = serde_json::from_str::<JsonDocument>(line) else {
+                continue;
+            };
+            if row.get("session_id").and_then(JsonDocument::as_str) != Some(session_id) {
+                continue;
+            }
+            let tool = row
+                .get("tool_name")
+                .and_then(JsonDocument::as_str)
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            // why: `webfetch` (Claude Code's tool name) has no underscore, so the
+            // `web_fetch` substring alone missed it — count both spellings.
+            if tool.contains("websearch")
+                || tool.contains("web_search")
+                || tool.contains("webfetch")
+                || tool.contains("web_fetch")
+                || tool.contains("context7")
+                || tool.contains("recall")
+            {
+                return true;
+            }
         }
     }
-    false
+    // Fail-open: if no timing file was readable we cannot prove research did not
+    // happen, so keep the gate silent rather than firing spuriously.
+    !any_readable
 }
 
 fn research_gate_message(decision: GateDecision) -> String {
     match decision {
-        GateDecision::Block => "Research gate (CLAUDE_SKILLS_RESEARCH_GATE): code changed without web search or recall evidence — now a hard stop. Run `keel run -- recall` or use websearch/context7 before implementing. Bounded per session, then lets the turn through so it cannot loop. Set CLAUDE_SKILLS_RESEARCH_GATE=nudge, =block, =off.".to_string(),
-        _ => "Research gate (CLAUDE_SKILLS_RESEARCH_GATE): code changed without web search or recall evidence. Run `keel run -- recall` or use websearch/context7 before implementing. This first reminder does not stop the turn, but will escalate. Set CLAUDE_SKILLS_RESEARCH_GATE=nudge, =block, =off.".to_string(),
+        GateDecision::Block => "Research gate (CLAUDE_SKILLS_RESEARCH_GATE): code changed without web search or recall evidence — escalated (imperative, still feed-forward — not a turn halt). Use WebSearch/WebFetch, the context7 MCP, or the keel `recall` tool before implementing. Bounded per session, then lets the turn through so it cannot loop. Set CLAUDE_SKILLS_RESEARCH_GATE=nudge, =block, =off.".to_string(),
+        _ => "Research gate (CLAUDE_SKILLS_RESEARCH_GATE): code changed without web search or recall evidence. Use WebSearch/WebFetch, the context7 MCP, or the keel `recall` tool before implementing. This first reminder does not stop the turn, but will escalate. Set CLAUDE_SKILLS_RESEARCH_GATE=nudge, =block, =off.".to_string(),
     }
 }
 
@@ -3125,7 +3161,13 @@ pub fn maybe_record_story_confirmed() {
         .ok()
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| {
-            // Best-effort: read the most recent tool-timings row for any session.
+            // why: without CLAUDE_SESSION_ID, recover the session from the most
+            // recent tool-timings row *in this working directory* so a concurrent
+            // session editing another repo cannot capture this marker. Falls back
+            // to "no-session" rather than borrowing a stranger's id.
+            let cwd_key = std::env::current_dir()
+                .ok()
+                .map(|cwd| sanitize_memory_key(&display_path(&cwd)));
             let date = chrono::Local::now().format("%Y-%m-%d").to_string();
             let path = claude_home
                 .join("state")
@@ -3136,9 +3178,15 @@ pub fn maybe_record_story_confirmed() {
                 .and_then(|body| {
                     body.lines().rev().find_map(|line| {
                         let row = serde_json::from_str::<JsonDocument>(line).ok()?;
-                        row.get("session_id")
-                            .and_then(JsonDocument::as_str)
-                            .map(String::from)
+                        let row_key =
+                            sanitize_memory_key(row.get("cwd").and_then(JsonDocument::as_str)?);
+                        if cwd_key.as_deref() == Some(row_key.as_str()) {
+                            row.get("session_id")
+                                .and_then(JsonDocument::as_str)
+                                .map(String::from)
+                        } else {
+                            None
+                        }
                     })
                 })
                 .unwrap_or_else(|| "no-session".to_string())
@@ -3152,7 +3200,7 @@ pub fn maybe_record_story_confirmed() {
 
 fn story_first_gate_message(decision: GateDecision) -> String {
     match decision {
-        GateDecision::Block => "Story-first gate (CLAUDE_SKILLS_STORY_FIRST_GATE): code changed without confirmed user stories — now a hard stop. Run `keel user-story lint` to confirm stories, then implement. Bounded per session. Set CLAUDE_SKILLS_STORY_FIRST_GATE=nudge, =off.".to_string(),
+        GateDecision::Block => "Story-first gate (CLAUDE_SKILLS_STORY_FIRST_GATE): code changed without confirmed user stories — escalated (imperative, still feed-forward — not a turn halt). Run `keel user-story lint` to confirm stories, then implement. Bounded per session. Set CLAUDE_SKILLS_STORY_FIRST_GATE=nudge, =off.".to_string(),
         _ => "Story-first gate (CLAUDE_SKILLS_STORY_FIRST_GATE): code changed without confirmed user stories. Run `keel user-story lint` to confirm stories, then implement. This first reminder does not stop the turn, but will escalate. Set CLAUDE_SKILLS_STORY_FIRST_GATE=nudge, =block, =off.".to_string(),
     }
 }
@@ -3208,7 +3256,7 @@ fn brief_gate_blocks_path(claude_home: &Path, session_id: &str) -> PathBuf {
 /// action and the off-switch, and both reassure the reminder is bounded.
 fn brief_gate_message(decision: GateDecision) -> String {
     match decision {
-        GateDecision::Block => "Working-brief gate (CLAUDE_SKILLS_BRIEF_GATE): code changed without a working brief — now a hard stop. Write one: `keel memory working-brief write --request \"...\" --acceptance-criteria \"...\"`. Bounded per session, then lets the turn through so it cannot loop. Set CLAUDE_SKILLS_BRIEF_GATE=nudge, =off.".to_string(),
+        GateDecision::Block => "Working-brief gate (CLAUDE_SKILLS_BRIEF_GATE): code changed without a working brief — escalated (imperative, still feed-forward — not a turn halt). Write one: `keel memory working-brief write --request \"...\" --acceptance-criteria \"...\"`. Bounded per session, then lets the turn through so it cannot loop. Set CLAUDE_SKILLS_BRIEF_GATE=nudge, =off.".to_string(),
         // Nudge / Advisory both render the non-blocking phrasing; Advisory never reaches here.
         _ => "Working-brief reminder (CLAUDE_SKILLS_BRIEF_GATE): code changed without a working brief. Write one: `keel memory working-brief write --request \"...\" --acceptance-criteria \"...\"`. This first reminder does not stop the turn, but will escalate. Set CLAUDE_SKILLS_BRIEF_GATE=nudge, =block, =off.".to_string(),
     }
@@ -3252,7 +3300,7 @@ fn memory_gate_blocks_path(claude_home: &Path, session_id: &str) -> PathBuf {
 /// the bound, and the off-switch.
 fn memory_gate_message(decision: GateDecision) -> String {
     match decision {
-        GateDecision::Block => "Memory-save gate (CLAUDE_SKILLS_MEMORY_GATE): code changed without saving to memory — now a hard stop. Use `keel memory research-cache record` for research findings, or `keel memory maintenance append-working-buffer` for working notes. Either clears the gate. Bounded per session, then lets the turn through so it cannot loop. Set CLAUDE_SKILLS_MEMORY_GATE=nudge, =off.".to_string(),
+        GateDecision::Block => "Memory-save gate (CLAUDE_SKILLS_MEMORY_GATE): code changed without saving to memory — escalated (imperative, still feed-forward — not a turn halt). Use `keel memory research-cache record` for research findings, or `keel memory maintenance append-working-buffer` for working notes. Either clears the gate. Bounded per session, then lets the turn through so it cannot loop. Set CLAUDE_SKILLS_MEMORY_GATE=nudge, =off.".to_string(),
         _ => "Memory-save reminder (CLAUDE_SKILLS_MEMORY_GATE): code changed without saving to memory. Use `keel memory research-cache record` for research findings, or `keel memory maintenance append-working-buffer` for working notes. Either clears the gate. This first reminder does not stop the turn, but will escalate. Set CLAUDE_SKILLS_MEMORY_GATE=nudge, =block, =off.".to_string(),
     }
 }
@@ -3293,7 +3341,7 @@ fn sprint_start_gate_blocks_path(claude_home: &Path, session_id: &str) -> PathBu
 /// bound, and the off-switch.
 fn sprint_start_gate_message(decision: GateDecision) -> String {
     match decision {
-        GateDecision::Block => "Sprint-start gate (CLAUDE_SKILLS_SPRINT_START_GATE): brief describes multi-story scope but no sprint started — now a hard stop. Run `keel sprint plan` to start the sprint, then use the `running-a-sprint` skill. Bounded per session, then lets the turn through so it cannot loop. Set CLAUDE_SKILLS_SPRINT_START_GATE=nudge, =off.".to_string(),
+        GateDecision::Block => "Sprint-start gate (CLAUDE_SKILLS_SPRINT_START_GATE): brief describes multi-story scope but no sprint started — escalated (imperative, still feed-forward — not a turn halt). Run `keel sprint plan` to start the sprint, then use the `running-a-sprint` skill. Bounded per session, then lets the turn through so it cannot loop. Set CLAUDE_SKILLS_SPRINT_START_GATE=nudge, =off.".to_string(),
         _ => "Sprint-start reminder (CLAUDE_SKILLS_SPRINT_START_GATE): brief describes multi-story scope but no sprint started. Run `keel sprint plan` to start, then use the `running-a-sprint` skill. This first reminder does not stop the turn, but will escalate. Set CLAUDE_SKILLS_SPRINT_START_GATE=nudge, =block, =off.".to_string(),
     }
 }
@@ -3562,7 +3610,8 @@ enum GateDecision {
 ///
 /// `mode` selects what a fired gate emits:
 ///   * [`GateMode::Nudge`] → always a non-blocking message ([`GateDecision::Nudge`]).
-///   * [`GateMode::Block`] → always a hard stop ([`GateDecision::Block`]).
+///   * [`GateMode::Block`] → an imperative feed-forward reminder on every fire
+///     ([`GateDecision::Block`]; still `additionalContext`, never a turn halt).
 ///   * [`GateMode::Escalate`] (default) → the FIRST fire (`blocks_issued == 0`)
 ///     is a [`GateDecision::Nudge`]; every later fire is a [`GateDecision::Block`].
 ///     This is the "warn once, then refuse to close cheaply" behavior that makes
@@ -3661,43 +3710,64 @@ fn session_edit_stats(claude_home: &Path, session_id: &str) -> SessionEditStats 
         last_edit_ms: 0,
         last_cwd: String::new(),
     };
-    let date = chrono::Local::now().format("%Y-%m-%d").to_string();
-    let path = claude_home
-        .join("state")
-        .join("tool-timings")
-        .join(format!("{date}.jsonl"));
-    let Ok(body) = fs::read_to_string(&path) else {
-        return stats;
-    };
-    for line in body.lines() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let Ok(row) = serde_json::from_str::<JsonDocument>(line) else {
-            continue;
+    // why: read yesterday too so a session that crosses midnight keeps its
+    // pre-midnight edit rows; session_start_ms already spans both days, so
+    // counting only today under-fires the gates after midnight.
+    let now = chrono::Local::now();
+    let today = now.format("%Y-%m-%d").to_string();
+    let yesterday = (now - chrono::Duration::days(1))
+        .format("%Y-%m-%d")
+        .to_string();
+    for date in [today, yesterday] {
+        let path = claude_home
+            .join("state")
+            .join("tool-timings")
+            .join(format!("{date}.jsonl"));
+        let body = match fs::read_to_string(&path) {
+            Ok(body) => body,
+            Err(error) => {
+                // why: a missing file is the normal "no timings yet" case; an
+                // existing-but-unreadable file is a real fault — surface it so the
+                // gate's fail-open (count 0, several gates short-circuit) is not silent.
+                if path.exists() {
+                    eprintln!(
+                        "[keel] gate edit-count could not read {}: {error}",
+                        path.display()
+                    );
+                }
+                continue;
+            }
         };
-        if row.get("session_id").and_then(JsonDocument::as_str) != Some(session_id) {
-            continue;
-        }
-        let tool = row
-            .get("tool_name")
-            .and_then(JsonDocument::as_str)
-            .unwrap_or_default();
-        if !is_edit_class_tool(tool) {
-            continue;
-        }
-        stats.count += 1;
-        let ms = row
-            .get("recorded_at_ms")
-            .and_then(JsonDocument::as_u64)
-            .unwrap_or(0);
-        if ms >= stats.last_edit_ms {
-            stats.last_edit_ms = ms;
-            stats.last_cwd = row
-                .get("cwd")
+        for line in body.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let Ok(row) = serde_json::from_str::<JsonDocument>(line) else {
+                continue;
+            };
+            if row.get("session_id").and_then(JsonDocument::as_str) != Some(session_id) {
+                continue;
+            }
+            let tool = row
+                .get("tool_name")
                 .and_then(JsonDocument::as_str)
-                .unwrap_or_default()
-                .to_string();
+                .unwrap_or_default();
+            if !is_edit_class_tool(tool) {
+                continue;
+            }
+            stats.count += 1;
+            let ms = row
+                .get("recorded_at_ms")
+                .and_then(JsonDocument::as_u64)
+                .unwrap_or(0);
+            if ms >= stats.last_edit_ms {
+                stats.last_edit_ms = ms;
+                stats.last_cwd = row
+                    .get("cwd")
+                    .and_then(JsonDocument::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+            }
         }
     }
     stats
@@ -3744,7 +3814,7 @@ pub fn record_review_gate_clear() {
 /// reassure the reminder is bounded. `Advisory` never reaches here.
 fn review_gate_message(decision: GateDecision) -> String {
     match decision {
-        GateDecision::Block => "Review gate (CLAUDE_SKILLS_REVIEW_GATE): code changed without a reviewer pass — now a hard stop. Run `keel review pre-pr` or invoke the reviewer skill on the diff. Bounded per session, then lets the turn through so it cannot loop. Set CLAUDE_SKILLS_REVIEW_GATE=nudge, =off.".to_string(),
+        GateDecision::Block => "Review gate (CLAUDE_SKILLS_REVIEW_GATE): code changed without a reviewer pass — escalated (imperative, still feed-forward — not a turn halt). Run `keel review pre-pr` or invoke the reviewer skill on the diff. Bounded per session, then lets the turn through so it cannot loop. Set CLAUDE_SKILLS_REVIEW_GATE=nudge, =off.".to_string(),
         // Nudge / Advisory both render the non-blocking phrasing; Advisory never reaches here.
         _ => "Review reminder (CLAUDE_SKILLS_REVIEW_GATE): code changed without a reviewer pass. Run `keel review pre-pr` or invoke the reviewer skill before closing. This first reminder does not stop the turn, but will escalate. Set CLAUDE_SKILLS_REVIEW_GATE=nudge, =block, =off.".to_string(),
     }
@@ -3858,9 +3928,10 @@ fn emit_post_tool_batch_nudge(
 /// is a non-blocking nudge (the gate's message via
 /// `hookSpecificOutput.additionalContext` — told to do the work, turn not halted,
 /// no mid-task interruption), and if the requirement is still unmet on a later
-/// turn the gate escalates to a `decision: "block"` hard stop. Setting a gate's
-/// env var to `nudge` keeps it advisory-only; `block` blocks on every fire; `off`
-/// disables it.
+/// turn the gate escalates to an imperative feed-forward reminder (still via
+/// `additionalContext` — never a `decision: "block"` halt). Setting a gate's env
+/// var to `nudge` keeps it advisory-only; `block` emits the imperative reminder on
+/// every fire; `off` disables it.
 ///
 /// The worst case across a whole session is, per gate, one nudge then one block
 /// (the escalate cap of 2), after which it falls through to the generic advisory
@@ -4213,9 +4284,10 @@ fn evaluate_learned_skill_gate(
 }
 
 /// Route a fired gate's [`GateDecision`] to the matching emitter: `Nudge` →
-/// non-blocking `additionalContext`, `Block` → `decision: "block"`. `Advisory`
-/// should never reach here (the caller only emits on a fired gate) but maps to
-/// the generic advisory so the function is total and fails safe.
+/// non-blocking `additionalContext`, `Block` → an imperative `additionalContext`
+/// reminder (never `decision: "block"` — no host halt). `Advisory` should never
+/// reach here (the caller only emits on a fired gate) but maps to the generic
+/// advisory so the function is total and fails safe.
 fn emit_gate_decision(
     decision: GateDecision,
     message: String,
@@ -4285,6 +4357,76 @@ fn prune_observations_store(standard_error: &mut dyn Write) {
     if let Err(error) = observation::prune_older_than(retention_days) {
         let _ = writeln!(standard_error, "keel observation prune failed: {error}");
     }
+}
+
+/// SessionEnd housekeeping for the per-session gate/marker state under
+/// `<claude_home>/state/`.
+///
+/// why: the one-file-per-session markers (iron-law satisfaction, per-gate block
+/// counters, review-gate, story-first) were never pruned, so they grew unbounded
+/// and a stale shared "default" iron-law marker could satisfy the gate across
+/// id-less sessions forever. Bounding them by mtime caps both the growth and that
+/// cross-session leak. Errors swallowed like the other prunes.
+fn prune_state_marker_stores(standard_error: &mut dyn Write) {
+    let retention_days = user_config_or_env_u64(
+        PLUGIN_MEMORY_RETENTION_DAYS,
+        "CLAUDE_SKILLS_STATE_RETENTION_DAYS",
+        TIMINGS_DEFAULT_RETENTION_DAYS,
+    );
+    if retention_days == 0 {
+        return;
+    }
+    let Ok(claude_home) = resolve_claude_home("") else {
+        return;
+    };
+    let cutoff_ms = now_ms().saturating_sub(retention_days.saturating_mul(86_400_000));
+    let state = claude_home.join("state");
+    let Ok(entries) = fs::read_dir(&state) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        let is_marker_dir = matches!(
+            name.as_str(),
+            IRON_LAW_SATISFIED_DIR | IRON_LAW_LEGACY_GATE_DIR | "review-gate" | "story-first"
+        ) || name.ends_with("-gate-blocks");
+        if !is_marker_dir {
+            continue;
+        }
+        if let Err(error) = prune_dir_files_older_than(&dir, cutoff_ms) {
+            let _ = writeln!(
+                standard_error,
+                "keel state-marker prune failed for {}: {error}",
+                dir.display()
+            );
+        }
+    }
+}
+
+/// Remove regular files in `dir` whose mtime is older than `cutoff_ms`.
+fn prune_dir_files_older_than(dir: &Path, cutoff_ms: u64) -> std::io::Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .ok()
+            .and_then(|meta| meta.modified().ok())
+            .and_then(|mtime| mtime.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|dur| (dur.as_millis() as u64) < cutoff_ms)
+            .unwrap_or(false);
+        if stale {
+            let _ = fs::remove_file(&path);
+        }
+    }
+    Ok(())
 }
 
 /// Run the autonomous learning cycle at session end: distill the session's
@@ -4741,6 +4883,22 @@ const DIGEST_MEMORY_MAX_BYTES: usize = 250;
 /// [`WORKSPACE_DIGEST_MAX_BYTES`] on a line boundary as a final guard. This is
 /// the PUSH half of the contract; the model can still PULL the full artifacts
 /// with `system_map`, `recall`, and `brief_get` when it needs more than the head.
+/// Whether a brief's ISO-8601 `created_at` is within the digest staleness window.
+/// A brief with an unparseable timestamp is treated as fresh (fail-open: never
+/// hide a brief just because its date could not be parsed).
+fn brief_is_fresh(created_at: &str) -> bool {
+    const DIGEST_BRIEF_STALE_DAYS: i64 = 30;
+    match chrono::DateTime::parse_from_rfc3339(created_at.trim()) {
+        Ok(created) => {
+            chrono::Utc::now()
+                .signed_duration_since(created.with_timezone(&chrono::Utc))
+                .num_days()
+                <= DIGEST_BRIEF_STALE_DAYS
+        }
+        Err(_) => true,
+    }
+}
+
 fn workspace_memory_digest() -> String {
     let Ok(claude_home) = resolve_claude_home("") else {
         return String::new();
@@ -4765,14 +4923,23 @@ fn workspace_memory_digest() -> String {
         }
     }
 
-    // 2. Newest working brief for THIS workspace (fall back to newest overall
-    //    when none is workspace-tagged, since legacy briefs have no workspace).
+    // 2. Newest working brief for THIS workspace. why: fall back only to
+    //    workspace-LESS legacy briefs (pre-workspace-tagging), never to another
+    //    workspace's brief — injecting a stranger's brief as "active" bleeds intent
+    //    across projects. And skip briefs older than the staleness window so a
+    //    long-abandoned brief is not presented as active forever.
     if let Ok(briefs) = crate::utility::working_brief::list_briefs(&claude_home) {
         let newest = briefs
             .iter()
             .rev()
             .find(|brief| brief.workspace == workspace_display)
-            .or_else(|| briefs.last());
+            .or_else(|| {
+                briefs
+                    .iter()
+                    .rev()
+                    .find(|brief| brief.workspace.trim().is_empty())
+            })
+            .filter(|brief| brief_is_fresh(&brief.created_at));
         if let Some(brief) = newest {
             let mut line = format!("## Active working brief ({})\n{}", brief.id, brief.request);
             if let Some(first_criterion) = brief.acceptance_criteria.first() {
@@ -5414,22 +5581,22 @@ fn append_managed_hooks(document: &mut JsonDocument, executable: &Path) -> Resul
 
         let entry = managed_hook_entry(executable, event.slug);
 
+        let mut hook_def = serde_json::json!({
+            "type": "command",
+            "command": entry.command,
+            "args": entry.args,
+            "statusMessage": event.status
+        });
+        // why: PostToolUse/PostToolUseFailure record timings + observations and must
+        // not add keel-spawn latency to every tool call — run them async, matching
+        // the plugin hooks.json and the CLAUDE.md contract ("runs async").
+        if matches!(event.name, "PostToolUse" | "PostToolUseFailure") {
+            hook_def["async"] = serde_json::json!(true);
+        }
+
         event_array.push(serde_json::json!({
-
             "matcher": event.matcher,
-
-            "hooks": [{
-
-                "type": "command",
-
-                "command": entry.command,
-
-                "args": entry.args,
-
-                "statusMessage": event.status
-
-            }]
-
+            "hooks": [hook_def]
         }));
     }
 

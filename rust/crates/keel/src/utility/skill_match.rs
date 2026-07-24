@@ -511,14 +511,78 @@ const CURATED_SKILL_TRIGGERS: &[(&str, &[&str])] = &[
 /// Returns the first curated skill whose trigger phrase appears in the
 /// lowercased prompt, or `None`. Conservative by construction: it errs toward
 /// silence, and the caller still gates on the skill being installed.
+///
+/// Matching is **word-boundary-anchored**, not raw substring. A short trigger
+/// like `slo`, `sli`, or `tdd` used to match with a bare `contains`, so it fired
+/// inside ordinary words — `slo` inside "slow", `sli` inside "slideshow"/
+/// "slightly"/"slicker" — and mis-routed the prompt (finding #17). Anchoring the
+/// span to word boundaries fixes that while leaving multi-word phrases (already
+/// boundary-delimited by their internal spaces) and long standalone tokens
+/// unchanged: they still match whenever they appear as whole words.
+///
+/// The lowercase pass is ASCII-only (`to_ascii_lowercase`); every trigger phrase
+/// is ASCII, so non-ASCII prompt text simply never matches a trigger, which is
+/// the intended conservative behavior.
 pub fn curated_skill_for_prompt(prompt: &str) -> Option<&'static str> {
     let lowered = prompt.to_ascii_lowercase();
     for (skill, phrases) in CURATED_SKILL_TRIGGERS {
-        if phrases.iter().any(|phrase| lowered.contains(phrase)) {
+        if phrases
+            .iter()
+            .any(|phrase| phrase_matches_at_word_boundary(&lowered, phrase))
+        {
             return Some(skill);
         }
     }
     None
+}
+
+/// Match `phrase` in `lowered` only at word boundaries, so a short curated
+/// trigger like `slo` matches the standalone token `slo` (or its plural `slos`)
+/// but never fires inside a larger word such as `slow` or `slideshow`.
+///
+/// A phrase may itself contain internal separators (`ci/cd`, `drop-off`, `error
+/// budget`); only the characters immediately before and after the *whole* matched
+/// span are boundary-checked, so internal punctuation and spaces are preserved
+/// and multi-word phrases still match exactly as before. Both `lowered` and every
+/// `phrase` are ASCII-lowercased; a `phrase` is always non-empty ASCII, so all
+/// byte indexing here lands on char boundaries (an ASCII match start plus the
+/// phrase byte length).
+fn phrase_matches_at_word_boundary(lowered: &str, phrase: &str) -> bool {
+    if phrase.is_empty() {
+        return false;
+    }
+    let bytes = lowered.as_bytes();
+    let phrase_len = phrase.len();
+    let mut search_start = 0;
+    while let Some(relative) = lowered[search_start..].find(phrase) {
+        let start = search_start + relative;
+        let end = start + phrase_len;
+        let left_ok = start == 0 || !bytes[start - 1].is_ascii_alphanumeric();
+        let right_ok = match bytes.get(end).copied() {
+            // End of string or a non-alphanumeric char — a clean boundary.
+            None => true,
+            Some(next) if !next.is_ascii_alphanumeric() => true,
+            // Tolerate a single trailing plural `s`: `slo` matches `slos`/`SLOs`
+            // but not `slow`. The char after the plural `s` must itself be a
+            // boundary, so `slosh` still does not match.
+            Some(b's') => bytes
+                .get(end + 1)
+                .map(|after| !after.is_ascii_alphanumeric())
+                .unwrap_or(true),
+            Some(_) => false,
+        };
+        if left_ok && right_ok {
+            return true;
+        }
+        // Advance one byte past this candidate start to look for a later,
+        // properly-bounded occurrence. `start` is an ASCII position, so
+        // `start + 1` stays on a char boundary.
+        search_start = start + 1;
+        if search_start >= lowered.len() {
+            break;
+        }
+    }
+    false
 }
 
 /// Read the matched skill's `SKILL.md` and return a bounded, ready-to-inject
@@ -801,14 +865,33 @@ pub fn score_prompt_against_skills(prompt: &str, skills: &[SkillTerms]) -> Optio
         return None;
     }
 
+    // Exclude auto-generated `learned-<project>` skills from the statistical
+    // corpus entirely — as candidates AND from document-frequency (finding #18).
+    // Their name tokens are generic project words (rust, keel, driver, hub,
+    // farm); via the own-name distinctiveness boost below they would hijack any
+    // prompt containing that word in ANY project ("fix this rust borrow checker
+    // error" -> learned-rust), and even without the boost a df=1 name token like
+    // `rust` would score `ln(N)` and win globally. A learned skill is meant to
+    // surface only inside its own project, which the harness's project-path
+    // matcher handles; this global IDF tier must never route to one on a bare
+    // language/word token. Keeping them out of `document_frequency` too means
+    // their tokens do not distort the IDF of the real skills.
+    let candidates: Vec<&SkillTerms> = skills
+        .iter()
+        .filter(|skill| !is_learned_skill(&skill.name))
+        .collect();
+    if candidates.is_empty() {
+        return None;
+    }
+
     // Document frequency: how many skills contain each token.
     let mut document_frequency: HashMap<&str, usize> = HashMap::new();
-    for skill in skills {
+    for skill in &candidates {
         for token in &skill.all_tokens {
             *document_frequency.entry(token.as_str()).or_insert(0) += 1;
         }
     }
-    let corpus_size = skills.len() as f64;
+    let corpus_size = candidates.len() as f64;
 
     let idf = |token: &str| -> f64 {
         let df = document_frequency.get(token).copied().unwrap_or(0);
@@ -819,8 +902,8 @@ pub fn score_prompt_against_skills(prompt: &str, skills: &[SkillTerms]) -> Optio
         }
     };
 
-    let mut scored: Vec<(usize, f64, bool)> = Vec::with_capacity(skills.len());
-    for (index, skill) in skills.iter().enumerate() {
+    let mut scored: Vec<(usize, f64, bool)> = Vec::with_capacity(candidates.len());
+    for (index, skill) in candidates.iter().enumerate() {
         let mut score = 0.0;
         let mut has_distinctive = false;
         for token in &prompt_tokens {
@@ -857,7 +940,7 @@ pub fn score_prompt_against_skills(prompt: &str, skills: &[SkillTerms]) -> Optio
     scored.sort_by(|a, b| {
         b.1.partial_cmp(&a.1)
             .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| skills[a.0].name.cmp(&skills[b.0].name))
+            .then_with(|| candidates[a.0].name.cmp(&candidates[b.0].name))
     });
 
     let (best_index, best_score, best_distinctive) = scored[0];
@@ -871,9 +954,17 @@ pub fn score_prompt_against_skills(prompt: &str, skills: &[SkillTerms]) -> Optio
     }
 
     Some(SkillMatch {
-        name: skills[best_index].name.clone(),
+        name: candidates[best_index].name.clone(),
         score: best_score,
     })
+}
+
+/// A `learned-<project>` skill is auto-generated by the keel learning loop from
+/// observed per-project command/edit patterns. Its name tokens are generic
+/// project words, so it is excluded from the global statistical matcher (finding
+/// #18); it surfaces only through the harness's project-path routing.
+fn is_learned_skill(name: &str) -> bool {
+    name.starts_with("learned-")
 }
 
 /// English stopwords plus prompt-generic verbs/nouns that carry no routing
@@ -1284,6 +1375,99 @@ mod tests {
         );
         assert_eq!(curated_skill_for_prompt("add a logout button"), None);
         assert_eq!(curated_skill_for_prompt(""), None);
+    }
+
+    #[test]
+    fn curated_tier_word_boundary_rejects_substring_false_positives() {
+        // Finding #17: short curated triggers (`slo`, `sli`) used to match as bare
+        // substrings and fired inside ordinary words, mis-routing the prompt to
+        // observability. Word-boundary matching must now keep these silent. These
+        // assertions FAIL under the old `lowered.contains(phrase)` matcher and pass
+        // after the boundary fix.
+        assert_eq!(
+            curated_skill_for_prompt("the page is loading slow, can you take a look"),
+            None,
+            "`slo` inside `slow` must not route to observability"
+        );
+        assert_eq!(
+            curated_skill_for_prompt("make the slideshow transition slightly slicker"),
+            None,
+            "`sli` inside slideshow/slightly/slicker must not route to observability"
+        );
+        assert_eq!(
+            curated_skill_for_prompt("please deslot the widget and reslice the grid"),
+            None,
+            "`slo`/`sli` embedded mid-word must not trip the trigger"
+        );
+    }
+
+    #[test]
+    fn curated_tier_still_matches_standalone_short_and_plural_tokens() {
+        // The boundary fix must NOT regress genuine standalone matches: the short
+        // trigger still fires as a whole word and tolerates a plural `s`.
+        assert_eq!(
+            curated_skill_for_prompt("define an slo and error budget"),
+            Some("observability-and-incident-response"),
+            "standalone `slo` must still route"
+        );
+        assert_eq!(
+            curated_skill_for_prompt("our slos are being missed this quarter"),
+            Some("observability-and-incident-response"),
+            "plural `slos` must still route"
+        );
+        // A multi-word phrase with internal punctuation still matches as before.
+        assert_eq!(
+            curated_skill_for_prompt("fix the ci/cd pipeline"),
+            Some("cloud-and-devops-expert"),
+            "internal-separator phrase `ci/cd` must still route"
+        );
+    }
+
+    #[test]
+    fn learned_skill_never_wins_statistical_match_on_bare_token() {
+        // Finding #18: an auto-generated `learned-<project>` skill has generic
+        // name tokens (here `rust`). The own-name distinctiveness boost used to
+        // make it win any prompt containing that word in ANY project. It must now
+        // be excluded from the global statistical corpus entirely. This corpus
+        // reproduces the hijack: before the fix `resolve_skill_for_prompt` returns
+        // `learned-rust`; after, it must not.
+        let corpus = vec![
+            skill(
+                "learned-rust",
+                "Learned procedures for the rust project from observed command and edit patterns.",
+                "When working in the rust project, apply learned procedures instead of re-deriving the workflow.",
+            ),
+            skill(
+                "reviewer",
+                "Reviews completed implementation work for production readiness.",
+                "Production-readiness review and quality gate after implementation.",
+            ),
+            skill(
+                "git-expert",
+                "Safe Git workflow: branching, conflict resolution, history repair.",
+                "Version control operations and history repair.",
+            ),
+        ];
+        let prompt = "fix this rust borrow checker error";
+        // The statistical tier must not surface the learned skill at all.
+        assert_eq!(
+            score_prompt_against_skills(prompt, &corpus),
+            None,
+            "learned-rust must be excluded from the statistical corpus"
+        );
+        // And the full resolution (statistical + curated) must never return it.
+        assert_ne!(
+            resolve_skill_for_prompt(prompt, &corpus).map(|m| m.name),
+            Some("learned-rust".to_string()),
+            "a bare language token must not route to a learned-<project> skill"
+        );
+        // A non-learned skill still wins on its own name token — the RC7 boost is
+        // preserved for real skills.
+        assert_eq!(
+            score_prompt_against_skills("run the reviewer on this change", &corpus).map(|m| m.name),
+            Some("reviewer".to_string()),
+            "own-name boost must still work for non-learned skills"
+        );
     }
 
     #[test]

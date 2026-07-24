@@ -14,7 +14,6 @@
 //   tool_call (edit-class)  -> keel bridge pre-tool-use    (Iron Law edit gate; block on deny)
 //   tool_call (bash)        -> keel bridge rewrite         (compaction reroute, in place)
 //   tool_execution_end      -> keel bridge observe          (tool observation, fire-and-forget)
-//   session_before_compact  -> keel bridge pre-compact      (pre-compaction checkpoint)
 //   session_compact         -> keel bridge post-compact     (post-compaction context + learning)
 //   session_shutdown        -> keel bridge session-end      (learning + session capture)
 //
@@ -231,8 +230,11 @@ function runBridge(
   }
 }
 
-function bridgeRewrite(command: string): string {
-  return runBridge("rewrite", [], command, 500);
+function bridgeRewrite(command: string, toolName: string): string {
+  // why: --tool is required; without it `bridge rewrite` sees an empty tool
+  // name, fails the shell-tool check, and returns nothing, so no command is
+  // ever rerouted (mirrors the cursor adapter fix).
+  return runBridge("rewrite", ["--tool", toolName], command, 500);
 }
 
 // ---------------------------------------------------------------------------
@@ -360,18 +362,22 @@ function handleUserPrompt(event: PiMessageEvent, ctx?: PiExtensionContext): void
   const promptText = extractUserText(event);
   if (!promptText) return;
 
-  // user-prompt prints the composite per-prompt context (skill brief + iron
-  // law + pointers) in one call. Surface it as a visible info line so the
-  // user sees the routing decision; the model can also call skill_route /
-  // context_brief directly via the MCP tools.
-  const text = runBridge("user-prompt", ["--session", sessionID], promptText);
-  if (text) {
-    try {
-      (console as unknown as { log?: (m: string) => void }).log?.(text);
-    } catch {
-      /* best-effort */
-    }
-  }
+  // user-prompt composes the per-prompt context (skill brief + iron law +
+  // pointers). The bridge reads the prompt from the --prompt flag (not stdin)
+  // and resolves the workspace from --cwd, so both must be passed. As with
+  // session-start, running it keeps the session's keel state coherent and drives
+  // skill routing; the persistent Iron Law itself rides in the AGENTS.md context
+  // file loaded into the system prompt, and the model can call skill_route /
+  // context_brief via the MCP tools. The stdout is not injected into model
+  // context here (Pi has no seam for it on this event), matching session-start.
+  runBridge("user-prompt", [
+    "--session",
+    sessionID,
+    "--cwd",
+    resolveCwd(ctx),
+    "--prompt",
+    promptText,
+  ]);
 }
 
 /**
@@ -436,7 +442,7 @@ function handleToolCall(
     if (isShellTool(toolName)) {
       const cmd = event?.input?.command;
       if (typeof cmd === "string" && cmd.trim() !== "" && !cmd.startsWith("keel run --")) {
-        const rewrite = bridgeRewrite(cmd);
+        const rewrite = bridgeRewrite(cmd, toolName);
         // keel bridge rewrite outputs "KEEL_REWRITE <cmd>" for noisy commands.
         if (rewrite.startsWith("KEEL_REWRITE ")) {
           const rewritten = rewrite.slice("KEEL_REWRITE ".length).trim();
@@ -464,22 +470,22 @@ function handleToolExecutionEnd(
   event: PiToolExecutionEndEvent,
   ctx?: PiExtensionContext,
 ): void {
-  // Fire-and-forget observation capture. bridge observe reads a JSON payload
-  // from stdin and records a memory observation; it never blocks.
+  // Fire-and-forget observation capture. `bridge observe` reads the tool name,
+  // cwd, and failed state from FLAGS (--tool/--cwd/--failed), not from the stdin
+  // JSON — stdin is the tool_input used only for shell-command extraction, which
+  // is absent at execution end. Passing the tool via a JSON body left the
+  // observation recorded with an empty tool name; the flags fix that.
   const sessionID = resolveSessionId(event as PiSessionLikeEvent, ctx);
-  const payload = JSON.stringify({
-    session_id: sessionID,
-    cwd: resolveCwd(ctx),
-    tool: event?.toolName ?? "",
-    tool_call_id: event?.toolCallId ?? "",
-    error: event?.error ? String(event.error) : undefined,
-  });
-  runBridge("observe", ["--session", sessionID], payload, 500);
-}
-
-function handlePreCompact(event: PiSessionLikeEvent, ctx?: PiExtensionContext): void {
-  const sessionID = resolveSessionId(event, ctx);
-  runBridge("pre-compact", ["--session", sessionID, "--cwd", resolveCwd(ctx)]);
+  const args = [
+    "--session",
+    sessionID,
+    "--cwd",
+    resolveCwd(ctx),
+    "--tool",
+    event?.toolName ?? "",
+  ];
+  if (event?.error) args.push("--failed");
+  runBridge("observe", args, "{}", 500);
 }
 
 function handlePostCompact(event: PiSessionLikeEvent, ctx?: PiExtensionContext): void {
@@ -542,14 +548,10 @@ function setup(pi: PiExtensionAPI): void {
     }
   });
 
-  // compaction cycle.
-  pi.on("session_before_compact", (event: PiSessionLikeEvent, ctx?: PiExtensionContext) => {
-    try {
-      handlePreCompact(event, ctx);
-    } catch {
-      /* degrade */
-    }
-  });
+  // compaction cycle. Only post-compact is wired: there is no `bridge
+  // pre-compact` subcommand, so no session_before_compact handler is registered
+  // (it would only invoke a nonexistent subcommand). Learning + post-compaction
+  // context runs here, on the actual compaction event.
   pi.on("session_compact", (event: PiSessionLikeEvent, ctx?: PiExtensionContext) => {
     try {
       handlePostCompact(event, ctx);

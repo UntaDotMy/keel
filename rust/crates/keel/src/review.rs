@@ -15,6 +15,17 @@ use crate::json::{write_indented, Value};
 use crate::runtime::{resolve_claude_home, resolve_repository_root, run_command, write_text};
 use crate::utility::record_store::RecordStore;
 
+/// Whether a review invocation counts as a reviewer pass that clears the
+/// PostToolBatch review gate.
+///
+/// why: only a PASSING `gates` / `pre-pr` / `pre-commit` is a real reviewer
+/// pass. A non-zero exit (blocking findings) must not satisfy the gate, or
+/// run-and-ignore clears it; and the informational `diff` / `init` surfaces
+/// review nothing, so they never clear it.
+fn review_pass_clears_gate(surface: &str, code: u8) -> bool {
+    code == 0 && matches!(surface, "gates" | "pre-pr" | "pre-commit")
+}
+
 pub fn run_review_command(
     arguments: &[String],
     standard_output: &mut dyn Write,
@@ -27,10 +38,9 @@ pub fn run_review_command(
     match arguments[0].as_str() {
         "gates" => {
             let code = run_review_gates_command(&arguments[1..], standard_output, standard_error);
-            // Running a gates check is a reviewer pass — clear the optional
-            // PostToolBatch review gate for this workspace so it does not block
-            // closeout. Best-effort and a no-op unless the gate is enabled.
-            crate::runner::hook_lifecycle::record_review_gate_clear();
+            if review_pass_clears_gate("gates", code) {
+                crate::runner::hook_lifecycle::record_review_gate_clear();
+            }
             code
         }
         "hosted" => run_review_hosted_command(&arguments[1..], standard_output, standard_error),
@@ -41,11 +51,9 @@ pub fn run_review_command(
                 standard_output,
                 standard_error,
             );
-            // pre-pr / pre-commit / diff constitute a reviewer pass over the
-            // working diff; clear the review gate for this workspace. `init` is
-            // harmless to clear on (no edits yet). Best-effort; no-op when the
-            // gate is disabled.
-            crate::runner::hook_lifecycle::record_review_gate_clear();
+            if review_pass_clears_gate(arguments[0].as_str(), code) {
+                crate::runner::hook_lifecycle::record_review_gate_clear();
+            }
             code
         }
         "policy" => run_review_policy_command(&arguments[1..], standard_output, standard_error),
@@ -3481,6 +3489,23 @@ fn is_help_argument(argument: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression: only a PASSING review is a reviewer pass. A failed review or
+    /// the informational diff/init surfaces must not clear the review gate.
+    #[test]
+    fn review_pass_clears_gate_only_on_passing_real_surface() {
+        // Passing real reviewer surfaces clear the gate.
+        assert!(review_pass_clears_gate("gates", 0));
+        assert!(review_pass_clears_gate("pre-pr", 0));
+        assert!(review_pass_clears_gate("pre-commit", 0));
+        // Failing (non-zero) review must NOT clear the gate.
+        assert!(!review_pass_clears_gate("gates", 1));
+        assert!(!review_pass_clears_gate("pre-pr", 2));
+        assert!(!review_pass_clears_gate("pre-commit", 1));
+        // Informational surfaces review nothing → never clear.
+        assert!(!review_pass_clears_gate("diff", 0));
+        assert!(!review_pass_clears_gate("init", 0));
+    }
 
     // ---- brownfield flow gate classification (offline; no git invocation) ----
 
