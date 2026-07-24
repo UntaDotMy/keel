@@ -1165,6 +1165,105 @@ fn iron_law_tool_classification_strict_requires_keel() {
 }
 
 #[test]
+fn iron_law_research_command_rejects_bypass_and_non_research_surfaces() {
+    // why: a compound command must not smuggle a non-keel tail past the gate.
+    assert!(!is_keel_research_command("keel doctor && python exfil.py"));
+    assert!(!is_keel_research_command("keel recall x; rm -rf tmp"));
+    assert!(!is_keel_research_command(
+        "keel memory recall foo | tee out"
+    ));
+    assert!(!is_keel_research_command("keel recall $(whoami)"));
+    // Non-research keel surfaces no longer clear the edit gate.
+    assert!(!is_keel_research_command("keel help"));
+    assert!(!is_keel_research_command("keel status"));
+    assert!(!is_keel_research_command("keel gain"));
+    assert!(!is_keel_research_command("keel observe"));
+    assert!(!is_keel_research_command("keel workflow status"));
+    assert!(!is_keel_research_command("keel review pre-pr"));
+    // Genuine standalone research still clears it.
+    assert!(is_keel_research_command("keel recall borrow checker"));
+    assert!(is_keel_research_command("keel memory recall foo"));
+    assert!(is_keel_research_command(
+        "keel code-search search --query x"
+    ));
+    assert!(is_keel_research_command("keel doctor"));
+    // And a smuggling compound stays gated at the tool level.
+    assert!(tool_is_iron_law_gated(
+        "Bash",
+        Some("keel doctor && python exfil.py")
+    ));
+}
+
+#[test]
+fn session_has_research_tool_counts_webfetch_and_stays_silent_otherwise() {
+    let dir = std::env::temp_dir().join(format!("keel-research-{}", now_ms()));
+    let timings = dir.join("state").join("tool-timings");
+    std::fs::create_dir_all(&timings).unwrap();
+    let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+    // A WebFetch row (Claude Code spelling, no underscore) must count as research.
+    let row = serde_json::json!({
+        "recorded_at_ms": now_ms(), "tool_name": "WebFetch", "session_id": "sess-r", "cwd": "x",
+    });
+    std::fs::write(timings.join(format!("{date}.jsonl")), format!("{row}\n")).unwrap();
+    assert!(session_has_research_tool(&dir, "sess-r"));
+    // A session whose only row is an edit did no research.
+    let row2 = serde_json::json!({
+        "recorded_at_ms": now_ms(), "tool_name": "Edit", "session_id": "sess-e", "cwd": "x",
+    });
+    std::fs::write(timings.join(format!("{date}.jsonl")), format!("{row2}\n")).unwrap();
+    assert!(!session_has_research_tool(&dir, "sess-e"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn prune_dir_files_older_than_removes_stale_keeps_fresh() {
+    let dir = std::env::temp_dir().join(format!("keel-prune-{}", now_ms()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let marker = dir.join("some-session");
+    std::fs::write(&marker, "satisfied").unwrap();
+    // cutoff far in the future → the file is "older than cutoff" → removed.
+    prune_dir_files_older_than(&dir, u64::MAX).unwrap();
+    assert!(
+        !marker.exists(),
+        "far-future cutoff must prune the stale marker"
+    );
+    // cutoff 0 → nothing predates the epoch → everything kept.
+    std::fs::write(&marker, "satisfied").unwrap();
+    prune_dir_files_older_than(&dir, 0).unwrap();
+    assert!(marker.exists(), "cutoff 0 must keep every marker");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn brief_is_fresh_rejects_old_and_keeps_recent_or_unparseable() {
+    let recent = chrono::Utc::now().to_rfc3339();
+    assert!(brief_is_fresh(&recent), "a just-created brief is fresh");
+    let old = (chrono::Utc::now() - chrono::Duration::days(90)).to_rfc3339();
+    assert!(!brief_is_fresh(&old), "a 90-day-old brief is stale");
+    // Fail-open: an unparseable timestamp is treated as fresh, never hidden.
+    assert!(brief_is_fresh("not-a-date"));
+}
+
+#[test]
+fn gate_messages_do_not_claim_a_nonexistent_hard_stop() {
+    // PostToolBatch gates emit additionalContext only (feed-forward), never a
+    // decision:block halt — so no Block message may claim a "hard stop".
+    for message in [
+        review_gate_message(GateDecision::Block),
+        brief_gate_message(GateDecision::Block),
+        memory_gate_message(GateDecision::Block),
+        research_gate_message(GateDecision::Block),
+        story_first_gate_message(GateDecision::Block),
+        sprint_start_gate_message(GateDecision::Block),
+    ] {
+        assert!(
+            !message.to_ascii_lowercase().contains("hard stop"),
+            "gate message must not claim a hard stop that the mechanism never emits: {message}"
+        );
+    }
+}
+
+#[test]
 fn iron_law_gate_denies_without_evidence_and_does_not_ack_on_deny() {
     // Evidence-based gate: deny does NOT write a satisfaction marker; only a
     // qualifying research tool does. Retry without research still denies.
@@ -1465,7 +1564,7 @@ fn review_gate_messages_name_the_switches() {
         "block message must reassure that the gate is bounded"
     );
     assert!(
-        block.contains("hard stop"),
+        block.contains("escalated"),
         "block message must make clear it now halts the turn"
     );
 }
@@ -1503,7 +1602,7 @@ fn brief_gate_messages_name_the_switches_and_action() {
         "block message must reassure that the gate is bounded"
     );
     assert!(
-        block.contains("hard stop"),
+        block.contains("escalated"),
         "block message must make clear it now halts the turn"
     );
 }
@@ -1762,7 +1861,7 @@ fn run_hook_post_tool_batch_brief_gate_nudges_in_nudge_mode_then_falls_through()
     assert_eq!(code3, 0, "stderr: {}", String::from_utf8_lossy(&err3));
     assert!(
         out3_text.contains("additionalContext")
-            && out3_text.contains("now a hard stop")
+            && out3_text.contains("escalated")
             && out3_text.contains("CLAUDE_SKILLS_BRIEF_GATE"),
         "BRIEF_GATE=block must emit the feed-forward hard stop: {out3_text}"
     );
@@ -1854,7 +1953,7 @@ fn run_hook_post_tool_batch_brief_gate_blocks_by_default() {
     );
     assert!(
         out1_text.contains("additionalContext")
-            && out1_text.contains("now a hard stop")
+            && out1_text.contains("escalated")
             && out1_text.contains("CLAUDE_SKILLS_BRIEF_GATE"),
         "default brief gate must emit hard-stop feed-forward: {out1_text}"
     );
@@ -1866,7 +1965,7 @@ fn run_hook_post_tool_batch_brief_gate_blocks_by_default() {
     let out2_text = String::from_utf8_lossy(&out2);
     assert_eq!(code2, 0, "stderr: {}", String::from_utf8_lossy(&err2));
     assert!(
-        out2_text.contains("now a hard stop"),
+        out2_text.contains("escalated"),
         "second fire still hard-stop under Block cap: {out2_text}"
     );
 
@@ -1876,7 +1975,7 @@ fn run_hook_post_tool_batch_brief_gate_blocks_by_default() {
     let out3_text = String::from_utf8_lossy(&out3);
     assert_eq!(code3, 0, "stderr: {}", String::from_utf8_lossy(&err3));
     assert!(
-        out3_text.contains("now a hard stop"),
+        out3_text.contains("escalated"),
         "third fire still hard-stop under Block cap: {out3_text}"
     );
 
@@ -2040,7 +2139,7 @@ fn run_hook_post_tool_batch_review_gate_nudges_in_nudge_mode_then_falls_through(
     assert_eq!(code3, 0, "stderr: {}", String::from_utf8_lossy(&err3));
     assert!(
         out3_text.contains("additionalContext")
-            && out3_text.contains("now a hard stop")
+            && out3_text.contains("escalated")
             && out3_text.contains("CLAUDE_SKILLS_REVIEW_GATE"),
         "REVIEW_GATE=block must emit the feed-forward hard stop: {out3_text}"
     );
@@ -2265,7 +2364,7 @@ fn story_closeout_gate_blocks_when_opted_in_and_silent_when_complete() {
     assert!(
         out1_text.contains("additionalContext")
             && out1_text.contains("Do NOT")
-            && out1_text.contains("now a hard stop"),
+            && out1_text.contains("escalated"),
         "STORY_CLOSEOUT_GATE=block must emit the feed-forward hard stop: {out1_text}"
     );
 
@@ -2417,7 +2516,7 @@ fn memory_gate_messages_name_the_switches_and_action() {
     assert!(block.contains("=off"));
     assert!(block.contains("research-cache record"));
     assert!(block.contains("cannot loop") || block.contains("bounded"));
-    assert!(block.contains("hard stop"));
+    assert!(block.contains("escalated"));
 }
 
 #[test]
@@ -2438,7 +2537,7 @@ fn sprint_start_gate_messages_name_the_switches_and_action() {
     assert!(block.contains("=off"));
     assert!(block.contains("keel sprint plan"));
     assert!(block.contains("cannot loop") || block.contains("bounded"));
-    assert!(block.contains("hard stop"));
+    assert!(block.contains("escalated"));
 }
 
 #[test]
@@ -3108,7 +3207,10 @@ fn workspace_memory_digest_pushes_real_content_and_stays_bounded() {
         vec!["frobnicate returns 200".to_string()],
         vec![],
         workspace_display,
-        "2026-06-13T00:00:00Z".to_string(),
+        // why: use a fresh timestamp so the digest's staleness guard keeps it; a
+        // fixed past date would fall outside the window and make the test flaky over
+        // time. (Staleness itself is covered by brief_is_fresh's own unit test.)
+        chrono::Utc::now().to_rfc3339(),
     );
     crate::utility::working_brief::write_brief(&claude_home, &brief).unwrap();
 
@@ -4529,7 +4631,7 @@ fn research_gate_off_matches_advisory_path() {
     );
 
     let block_msg = research_gate_message(GateDecision::Block);
-    assert!(block_msg.contains("hard stop"));
+    assert!(block_msg.contains("escalated"));
     let nudge_msg = research_gate_message(GateDecision::Nudge);
     assert!(nudge_msg.contains("does not stop the turn"));
 
@@ -4623,7 +4725,7 @@ fn story_first_gate_off_matches_advisory_path() {
     );
 
     let block_msg = story_first_gate_message(GateDecision::Block);
-    assert!(block_msg.contains("hard stop"));
+    assert!(block_msg.contains("escalated"));
     let nudge_msg = story_first_gate_message(GateDecision::Nudge);
     assert!(nudge_msg.contains("does not stop the turn"));
 

@@ -2,12 +2,12 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Bash",
+        "matcher": "",
         "hooks": [
           {
             "type": "command",
             "command": "keel hook pre-tool-use",
-            "statusMessage": "Transparently rewriting noisy commands via keel run"
+            "statusMessage": "Enforcing the Iron Law gate and rewriting noisy commands via keel run"
           }
         ]
       }
@@ -225,7 +225,7 @@
           {
             "type": "command",
             "command": "keel hook stop",
-            "statusMessage": "Injecting closeout context"
+            "statusMessage": "Stop hook (silenced; closeout rides PostToolBatch)"
           }
         ]
       }

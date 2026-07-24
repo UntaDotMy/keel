@@ -898,3 +898,34 @@ fn first_party_skills_do_not_use_paths_frontmatter() {
          Use description/when_to_use for routing; fall back to MCP skill_get if the host still reports Unknown skill."
     );
 }
+
+/// The committed plugin hook wiring must gate the Iron Law on ALL tools, not
+/// only Bash. A `"Bash"` matcher on PreToolUse (as shipped before this guard)
+/// means Edit/Write/NotebookEdit/Agent never reach the deny handler for plugin
+/// installs, silently disabling the hard enforcement the native install has.
+#[test]
+fn plugin_hooks_pretooluse_matcher_is_unscoped() {
+    let repo_root = repository_root();
+    let path = repo_root.join(".claude").join("hooks.json");
+    let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let doc: Value =
+        serde_json::from_str(&text).unwrap_or_else(|e| panic!("parse {}: {e}", path.display()));
+    let pre = doc
+        .get("hooks")
+        .and_then(|h| h.get("PreToolUse"))
+        .and_then(Value::as_array)
+        .expect(".claude/hooks.json has a PreToolUse array");
+    assert!(!pre.is_empty(), "PreToolUse must have at least one entry");
+    for entry in pre {
+        let matcher = entry
+            .get("matcher")
+            .and_then(Value::as_str)
+            .expect("each PreToolUse entry has a string matcher");
+        assert_eq!(
+            matcher, "",
+            "PreToolUse matcher must be \"\" so the Iron Law gate fires on every \
+             edit-class tool; a scoped matcher (e.g. \"Bash\") disables the gate \
+             for Edit/Write/Agent on the plugin install path"
+        );
+    }
+}

@@ -77,6 +77,36 @@ fn bridge_flag_set(name: &str) -> FlagSet {
     flags
 }
 
+/// Run `body` with the process working directory temporarily set to the
+/// host-passed `--cwd`, restoring the previous cwd afterward.
+///
+/// The context builders (`session_start_context`, `user_prompt_submit_context`,
+/// `post_compact_context`) resolve the workspace — system map, working brief,
+/// memory scope, instinct lane — from the process cwd. A host that spawns the
+/// bridge from a different directory than the user's workspace (e.g. an editor
+/// plugin launching keel from the plugin dir) would otherwise get the wrong
+/// workspace's digest. Scoping the cwd to `--cwd` for the duration of the build
+/// makes those subcommands honor it without changing the shared lifecycle code.
+///
+/// Backward compatible: an empty `--cwd`, or one that is not a usable directory,
+/// leaves the process cwd unchanged (the previous behavior). The bridge runs one
+/// short-lived subcommand per process, so the temporary switch is safe.
+fn with_workspace_cwd<F: FnOnce() -> String>(cwd: &str, body: F) -> String {
+    let trimmed = cwd.trim();
+    if trimmed.is_empty() {
+        return body();
+    }
+    let previous = std::env::current_dir().ok();
+    let switched = std::env::set_current_dir(trimmed).is_ok();
+    let result = body();
+    if switched {
+        if let Some(previous) = previous {
+            let _ = std::env::set_current_dir(previous);
+        }
+    }
+    result
+}
+
 fn resolve_bridge_args(flag_set: &FlagSet, standard_error: &mut dyn Write) -> (String, String) {
     let session = flag_set.string_value("session").trim().to_string();
     let cwd = flag_set.string_value("cwd").trim().to_string();
@@ -98,7 +128,10 @@ fn run_bridge_session_start(
     if let Err(parse_error) = flags.parse(arguments) {
         let _ = writeln!(standard_error, "{}", parse_error.message);
     }
-    let context = hook_lifecycle::session_start_context();
+    let context = with_workspace_cwd(
+        flags.string_value("cwd"),
+        hook_lifecycle::session_start_context,
+    );
     let _ = writeln!(standard_output, "{context}");
     0
 }
@@ -114,7 +147,9 @@ fn run_bridge_user_prompt(
         let _ = writeln!(standard_error, "{}", parse_error.message);
     }
     let prompt = flags.string_value("prompt");
-    let context = hook_lifecycle::user_prompt_submit_context(prompt);
+    let context = with_workspace_cwd(flags.string_value("cwd"), || {
+        hook_lifecycle::user_prompt_submit_context(prompt)
+    });
     let _ = writeln!(standard_output, "{context}");
     0
 }
@@ -240,7 +275,10 @@ fn run_bridge_post_compact(
     if let Err(parse_error) = flags.parse(arguments) {
         let _ = writeln!(standard_error, "{}", parse_error.message);
     }
-    let context = hook_lifecycle::post_compact_context();
+    let context = with_workspace_cwd(
+        flags.string_value("cwd"),
+        hook_lifecycle::post_compact_context,
+    );
     let _ = writeln!(standard_output, "{context}");
     hook_lifecycle::run_session_end_learning(standard_error);
     0
@@ -452,6 +490,83 @@ mod tests {
             None => std::env::remove_var("CLAUDE_TARGET_OVERRIDE"),
         }
         let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    /// #35 regression: the context subcommands (`session-start`, `user-prompt`,
+    /// `post-compact`) must honor a host-passed `--cwd` so a bridge spawned from a
+    /// different working directory than the user's workspace still resolves the
+    /// correct workspace. Previously they ignored `--cwd` and always resolved from
+    /// the bridge process's own cwd. We prove the fix by passing a workspace path
+    /// carrying a distinctive lowercase-alnum marker (survives `sanitize_key`
+    /// verbatim) and asserting the marker appears in the workspace-scope summary,
+    /// then that omitting `--cwd` falls back to the process cwd (no marker).
+    #[test]
+    fn bridge_context_subcommands_honor_cwd() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let temp = std::env::temp_dir().join(format!("keel-bridge-cwd-home-{nanos}"));
+        std::fs::create_dir_all(&temp).expect("create test claude home");
+        // Distinctive workspace dir; the basename is all lowercase-alnum so it
+        // survives sanitize_key unchanged and is unmistakable in the output.
+        let marker = format!("keelcwdmarker{}{nanos}", std::process::id());
+        let workspace = std::env::temp_dir().join(&marker);
+        std::fs::create_dir_all(&workspace).expect("create test workspace");
+
+        let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
+        std::env::set_var("CLAUDE_TARGET_OVERRIDE", &temp);
+
+        // With --cwd: the workspace-scope summary must reference the passed dir.
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = run_bridge_command(
+            &[
+                "session-start".to_string(),
+                "--session".to_string(),
+                "s1".to_string(),
+                "--cwd".to_string(),
+                workspace.to_string_lossy().to_string(),
+            ],
+            &mut stdout,
+            &mut stderr,
+        );
+        assert_eq!(code, 0, "session-start must exit 0: {stderr:?}");
+        let out_with_cwd = String::from_utf8_lossy(&stdout);
+        assert!(
+            out_with_cwd.contains(&marker),
+            "session-start must resolve the passed --cwd workspace (marker {marker}); got: {out_with_cwd}"
+        );
+
+        // Without --cwd: falls back to the process cwd (the crate dir), so the
+        // marker must NOT appear — proving --cwd is actually consulted.
+        let mut stdout_no_cwd = Vec::new();
+        let mut stderr_no_cwd = Vec::new();
+        let _ = run_bridge_command(
+            &[
+                "session-start".to_string(),
+                "--session".to_string(),
+                "s1".to_string(),
+            ],
+            &mut stdout_no_cwd,
+            &mut stderr_no_cwd,
+        );
+        let out_no_cwd = String::from_utf8_lossy(&stdout_no_cwd);
+        assert!(
+            !out_no_cwd.contains(&marker),
+            "without --cwd the workspace marker must not appear (used process cwd): {out_no_cwd}"
+        );
+
+        match previous_home {
+            Some(v) => std::env::set_var("CLAUDE_TARGET_OVERRIDE", v),
+            None => std::env::remove_var("CLAUDE_TARGET_OVERRIDE"),
+        }
+        let _ = std::fs::remove_dir_all(&temp);
+        let _ = std::fs::remove_dir_all(&workspace);
     }
 
     /// H2: an empty session id must not panic and must use the no-session key

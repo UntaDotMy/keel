@@ -20,7 +20,9 @@ use std::io::Write;
 
 use crate::args::FlagSet;
 use crate::json::{write_indented, Value};
-use crate::runtime::{display_path, resolve_repository_root};
+use crate::runtime::{
+    display_path, resolve_claude_home, resolve_repository_root, skills_directory,
+};
 use crate::utility::skill_match::{load_skill_terms, resolve_skill_for_prompt};
 
 /// One behavioral expectation: a prompt and the set of skills any of which is an
@@ -110,6 +112,29 @@ const TRIGGER_FIXTURES: &[TriggerFixture] = &[
         prompt: "remind me to call my mother this weekend",
         accept: &[],
     },
+    // Adversarial should-NOT-trigger (findings #17/#18): these previously
+    // mis-routed via a curated substring false-positive or a learned-skill
+    // own-name hijack. They must now stay silent (or at least never route to the
+    // named wrong skill). Word-boundary curated matching and learned-skill
+    // exclusion are what keep them quiet.
+    TriggerFixture {
+        // `slo` inside "slow" used to route to observability-and-incident-response.
+        prompt: "the page is loading slow, can you take a look",
+        accept: &[],
+    },
+    TriggerFixture {
+        // `sli` inside "slideshow"/"slightly"/"slicker" used to route to
+        // observability-and-incident-response.
+        prompt: "make the slideshow transition slightly slicker",
+        accept: &[],
+    },
+    TriggerFixture {
+        // With the installed corpus present, `rust` used to hijack learned-rust
+        // via the own-name boost. Must never route to a learned-<project> skill;
+        // stays silent in the repo corpus (which has no learned skills) too.
+        prompt: "fix this rust borrow checker error",
+        accept: &[],
+    },
 ];
 
 pub fn run_skill_eval_command(
@@ -119,27 +144,47 @@ pub fn run_skill_eval_command(
 ) -> u8 {
     let mut flag_set = FlagSet::new("skill-eval");
     flag_set.string_flag("repo-root", "");
+    flag_set.string_flag("claude-home", "");
+    flag_set.bool_flag("installed", false);
     flag_set.bool_flag("json", false);
     if let Err(parse_error) = flag_set.parse(arguments) {
         let _ = writeln!(standard_error, "{}", parse_error.message);
         return 1;
     }
-    let repository_root = match resolve_repository_root(flag_set.string_value("repo-root")) {
-        Ok(path) => path,
-        Err(error) => {
-            let _ = writeln!(standard_error, "skill-eval: {error}");
-            return 1;
+
+    // By default the eval reads the repo's `<name>/SKILL.md` sources (the CI
+    // corpus). `--installed` instead reads the installed `<claude_home>/skills`
+    // corpus — the one production `match_skill_for_prompt` actually matches
+    // against, which includes the `learned-<project>` skills the repo does not
+    // ship. That is the corpus where findings #17/#18 are observable end-to-end;
+    // the repo corpus cannot see the learned-skill hijack because it has none.
+    let corpus_dir = if flag_set.bool_value("installed") {
+        let claude_home = match resolve_claude_home(flag_set.string_value("claude-home")) {
+            Ok(path) => path,
+            Err(error) => {
+                let _ = writeln!(standard_error, "skill-eval: {error}");
+                return 1;
+            }
+        };
+        skills_directory(&claude_home)
+    } else {
+        match resolve_repository_root(flag_set.string_value("repo-root")) {
+            Ok(path) => path,
+            Err(error) => {
+                let _ = writeln!(standard_error, "skill-eval: {error}");
+                return 1;
+            }
         }
     };
 
-    // The repo root is the skills dir: each `<name>/SKILL.md` sits one level
+    // The corpus dir is the skills dir: each `<name>/SKILL.md` sits one level
     // down, which is exactly the layout load_skill_terms expects.
-    let skills = load_skill_terms(&repository_root);
+    let skills = load_skill_terms(&corpus_dir);
     if skills.is_empty() {
         let _ = writeln!(
             standard_error,
             "skill-eval: no skills found under {}",
-            display_path(&repository_root)
+            display_path(&corpus_dir)
         );
         return 1;
     }
@@ -353,6 +398,53 @@ mod tests {
         assert!(
             got.is_none(),
             "generic prompt should stay silent, got {got:?}"
+        );
+    }
+
+    #[test]
+    fn adversarial_prompts_stay_silent_over_installed_shaped_corpus() {
+        // Findings #17/#18 are only observable against a corpus that carries the
+        // curated-tier target (observability) and a learned-<project> skill —
+        // exactly the installed corpus, which the repo corpus lacks. Build that
+        // shape and drive the REAL resolver: the substring false-positives and the
+        // learned-skill hijack must all stay silent / never route to the wrong
+        // skill.
+        let corpus = vec![
+            terms(
+                "observability-and-incident-response",
+                &["telemetry", "alerting", "paging", "runbook", "incident"],
+            ),
+            terms(
+                "learned-rust",
+                &["learned", "procedures", "project", "observed", "patterns"],
+            ),
+            terms("reviewer", &["review", "production", "readiness"]),
+        ];
+        // #17: `slo`/`sli` embedded in ordinary words must not route.
+        assert_eq!(
+            resolve_skill_for_prompt("the page is loading slow, can you take a look", &corpus)
+                .map(|m| m.name),
+            None,
+            "`slo` inside `slow` must not route to observability"
+        );
+        assert_eq!(
+            resolve_skill_for_prompt("make the slideshow transition slightly slicker", &corpus)
+                .map(|m| m.name),
+            None,
+            "`sli` inside slideshow must not route to observability"
+        );
+        // #18: a bare language token must never route to a learned-<project> skill.
+        assert_ne!(
+            resolve_skill_for_prompt("fix this rust borrow checker error", &corpus).map(|m| m.name),
+            Some("learned-rust".to_string()),
+            "`rust` must not hijack learned-rust"
+        );
+        // Positive control: a genuine standalone `slo` still routes to observability.
+        assert_eq!(
+            resolve_skill_for_prompt("define an slo and error budget for the service", &corpus)
+                .map(|m| m.name),
+            Some("observability-and-incident-response".to_string()),
+            "standalone `slo` must still route"
         );
     }
 

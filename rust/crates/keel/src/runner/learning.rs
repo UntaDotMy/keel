@@ -23,7 +23,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::args::FlagSet;
 use crate::runner::observation::{self, Observation};
@@ -309,7 +309,11 @@ fn evaluate_predictions_and_rollback(claude_home: &Path, log: &mut dyn std::io::
             continue;
         }
         // Respect a manual refinement: a skill whose content the agent changed is
-        // no longer a template and must never be auto-removed.
+        // no longer a template and must never be auto-removed. why: this is an
+        // intentional adoption semantic — the falsification rollback below only
+        // governs template-state generated skills; #23 (git-root project bucketing)
+        // is what prevents a wrong-project skill from being generated in the first
+        // place, so the rollback net does not need to override adoption.
         let on_disk = fs::read(dir.join("SKILL.md")).unwrap_or_default();
         if fnv1a_64(&on_disk) != marker.generated_hash {
             continue;
@@ -889,11 +893,39 @@ fn project_name(cwd: &str) -> String {
     if trimmed.is_empty() {
         return "global".to_string();
     }
+    // why: bucket learning by the project ROOT, not the launch subdir. A session
+    // started from `repo/rust` must learn into `repo`, not a separate `rust`
+    // bucket that fragments the signal and collides with any other repo also
+    // launched from a dir named `rust`. Walk up to the nearest ancestor holding a
+    // `.git` entry (the repo root) and use its directory name.
+    if let Some(root) = git_root_from(Path::new(trimmed)) {
+        if let Some(name) = root
+            .file_name()
+            .and_then(|segment| segment.to_str())
+            .filter(|segment| !segment.is_empty())
+        {
+            return name.to_string();
+        }
+    }
+    // Fallback: last path segment (non-git trees, or synthetic paths in tests).
     trimmed
         .rsplit(['/', '\\'])
         .find(|segment| !segment.is_empty())
         .unwrap_or("global")
         .to_string()
+}
+
+/// Nearest ancestor of `start` (inclusive) that contains a `.git` entry — the git
+/// repository root. `None` when `start` is not inside a git repository.
+fn git_root_from(start: &Path) -> Option<PathBuf> {
+    let mut current = Some(start);
+    while let Some(dir) = current {
+        if dir.join(".git").exists() {
+            return Some(dir.to_path_buf());
+        }
+        current = dir.parent();
+    }
+    None
 }
 
 fn project_slug(project: &str) -> String {
@@ -1633,9 +1665,28 @@ mod tests {
 
     #[test]
     fn project_name_takes_last_path_segment() {
+        // Synthetic paths that are not inside a git repo fall back to the last
+        // segment (the git-root walk finds no `.git` and yields None).
         assert_eq!(project_name("/work/myproj"), "myproj");
         assert_eq!(project_name("C:\\Users\\x\\repo\\"), "repo");
         assert_eq!(project_name(""), "global");
+    }
+
+    #[test]
+    fn project_name_resolves_to_git_root_not_launch_subdir() {
+        let base = std::env::temp_dir().join(format!("keel-proj-{}", std::process::id()));
+        let repo = base.join("myrepo");
+        let sub = repo.join("rust").join("crates");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        // A session launched from repo/rust/crates buckets into the repo root name,
+        // not the "crates"/"rust" subdir.
+        assert_eq!(project_name(&sub.to_string_lossy()), "myrepo");
+        // Outside any git repo, still falls back to the last segment.
+        let plain = base.join("plaindir");
+        std::fs::create_dir_all(&plain).unwrap();
+        assert_eq!(project_name(&plain.to_string_lossy()), "plaindir");
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

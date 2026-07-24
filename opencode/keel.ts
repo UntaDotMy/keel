@@ -168,6 +168,21 @@ function markIronLawSatisfied(sessionID: string): void {
   }
 }
 
+/** Remove the session's Iron Law satisfaction marker at session end, so a
+ *  reused session id does not inherit a stale "satisfied" state. Mirrors the
+ *  filesystem cleanup the Codex, Pi, and Cursor adapters do; there is no bridge
+ *  or CLI subcommand for marker cleanup, and the marker is a plain file this
+ *  adapter already owns. */
+function clearIronLaw(sessionID: string): void {
+  try {
+    fs.rmSync(path.join(IRON_LAW_DIR, sanitizeSessionKey(sessionID)), {
+      force: true,
+    });
+  } catch {
+    /* best-effort */
+  }
+}
+
 function isKeelResearchTool(toolName: string): boolean {
   const lower = toolName.toLowerCase();
   if (
@@ -224,6 +239,7 @@ const KeelPlugin: Plugin = async ({ client, directory, $ }) => {
   async function runBridge(
     subcommand: string,
     args: string[],
+    timeoutMs = 500,
   ): Promise<string> {
     try {
       // Bun's $ escapes each interpolation as a single argument; a string array
@@ -231,7 +247,7 @@ const KeelPlugin: Plugin = async ({ client, directory, $ }) => {
       // subcommand, and args array as distinct tokens so they are NOT collapsed
       // into one bogus program name.
       const result = await $`${BRIDGE_BIN} bridge ${subcommand} ${args}`
-        .timeout(500)
+        .timeout(timeoutMs)
         .quiet()
         .text();
       return result ?? "";
@@ -330,16 +346,18 @@ const KeelPlugin: Plugin = async ({ client, directory, $ }) => {
         }
       }
 
-      // Edit-class: Rust core is source of truth (evidence-based deny).
+      // Edit-class: Rust core is source of truth (evidence-based deny). This
+      // gate is fail-CLOSED: an empty result means the bridge timed out or
+      // errored, and an unevaluated Iron Law gate must BLOCK the edit — never
+      // silently allow it. A 500ms budget is too tight for a cold keel.exe
+      // (Windows Defender scan on first run), so the gate call gets a larger
+      // budget than the advisory calls.
       if (isEditClassTool(toolName)) {
-        const result = await runBridge("pre-tool-use", [
-          "--session",
-          sessionID,
-          "--cwd",
-          cwd,
-          "--tool",
-          toolName,
-        ]);
+        const result = await runBridge(
+          "pre-tool-use",
+          ["--session", sessionID, "--cwd", cwd, "--tool", toolName],
+          5000,
+        );
         if (result.startsWith("KEEL_GATE_DENY")) {
           const reason = result
             .split("\n")
@@ -349,6 +367,12 @@ const KeelPlugin: Plugin = async ({ client, directory, $ }) => {
           throw new Error(
             reason ||
               "keel Iron Law gate: call system_map/recall/context_brief before editing.",
+          );
+        }
+        if (!result.startsWith("KEEL_GATE_ALLOW")) {
+          // Timeout/error/unexpected output — fail closed.
+          throw new Error(
+            "keel Iron Law gate could not be evaluated (keel did not respond in time). Retry the edit; if it persists, run `keel doctor`.",
           );
         }
         return;

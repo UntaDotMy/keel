@@ -7,7 +7,6 @@
     "message_start",
     "tool_call",
     "tool_execution_end",
-    "session_before_compact",
     "session_compact",
     "session_shutdown"
   ],
@@ -23,7 +22,7 @@
     "UserPromptSubmit": {
       "description": "Restates the iron law research-first rules on every prompt and injects a short context brief (skill routing decision + pointers).",
       "deliveredBy": "keel-pi.ts on 'input' and 'message_start' (role=user)",
-      "keelCommand": "keel bridge user-prompt --session <id>",
+      "keelCommand": "keel bridge user-prompt --session <id> --cwd <dir> --prompt <text>",
       "mcpEquivalent": "skill_route / context_brief (tool call)",
       "manualTrigger": "The AGENTS.md file loaded at startup serves the same purpose — the iron law is always present in context.",
       "timing": "Every user prompt"
@@ -39,18 +38,18 @@
     "PostToolUse": {
       "description": "Records tool execution observations (tool name, call id, errors) for memory and learning.",
       "deliveredBy": "keel-pi.ts on 'tool_execution_end' (fire-and-forget)",
-      "keelCommand": "keel bridge observe --session <id> (JSON payload on stdin)",
+      "keelCommand": "keel bridge observe --session <id> --cwd <dir> --tool <name> [--failed]",
       "mcpEquivalent": null,
       "manualTrigger": "No manual trigger needed. Observations are recorded when using MCP tools.",
       "timing": "After every tool invocation"
     },
     "PreCompact": {
-      "description": "Runs the keel learning checkpoint and refreshes the workspace SYSTEM_MAP before context compaction to preserve structural awareness.",
-      "deliveredBy": "keel-pi.ts on 'session_before_compact'",
-      "keelCommand": "keel bridge pre-compact --session <id> --cwd <dir>",
+      "description": "No separate pre-compaction handler: there is no `keel bridge pre-compact` subcommand, so the extension does not subscribe to 'session_before_compact'. The learning checkpoint and post-compaction context run on compaction via the PostCompact entry below.",
+      "deliveredBy": "(none — folded into PostCompact / 'session_compact')",
+      "keelCommand": "keel bridge post-compact --session <id> --cwd <dir>",
       "mcpEquivalent": "system_map_refresh (tool call)",
       "manualTrigger": "Before compaction, run: keel memory scope resolve --create-missing --refresh-system-map",
-      "timing": "On compaction start"
+      "timing": "On compaction (handled by PostCompact)"
     },
     "PostCompact": {
       "description": "Injects the post-compaction context (workspace digest + active work items) and triggers the learning checkpoint, so keel state survives compaction.",
