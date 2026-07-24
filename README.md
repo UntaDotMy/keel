@@ -80,7 +80,7 @@ The cast file ships in this repo. Render to GIF with `agg docs/demos/quickstart.
 | Review gates | `review pre-pr` / `review pre-commit`, review strictness via plugin `userConfig.review_strictness`, and CI-ready artifacts so non-trivial code never self-reviews. |
 | Memory | Working briefs, completion ledgers, scoped `SYSTEM_MAP.md`, and durable recovery state under `~/.claude/memories/`. |
 | Command compaction | `keel run -- <cmd>` produces compact output for noisy test/build/lint/log/search commands without dropping diagnostic signal. |
-| MCP server | `keel mcp serve` (stdio: **one process per host session**; concurrent in-flight tools via `KEEL_MCP_MAX_INFLIGHT`, default 64; shared recall DB uses SQLite WAL + busy_timeout) and `keel mcp serve-http` (Streamable HTTP multi-client on `127.0.0.1:3920` by default). Registered through the plugin manifest so the harness auto-discovers the tool surface (count asserted by `tests/doc_parity_test.rs` via `"inputSchema":` in `mcp/tools.rs`) ,  `recall`, `system_map`, `run_command`, `recall_status`, `skill_route`, `skill_get`, `skill_list`, `memory_status`, `brief_list`, `brief_get`, `brief_create`, `system_map_refresh`, `context_brief`, `cli`, `sprint`, `user_story_lint`, `review`, `workflow`, `git_workflow`, `memory`, `gain`, `raw`, `config_audit`, `skill_lint`, `telemetry`, `orchestration`, `checkpoint`, `session`, `doctor`, `code_search`, `user_story` ,  plus system-map and recall-status resources. |
+| MCP server | `keel mcp serve` (stdio: **one process per host session**; concurrent in-flight tools via `KEEL_MCP_MAX_INFLIGHT`, default 64; shared recall DB uses SQLite WAL + busy_timeout) and `keel mcp serve-http` (Streamable HTTP multi-client on `127.0.0.1:3920` by default). Registered through the plugin manifest so the harness auto-discovers the tool surface (count asserted by `tests/doc_parity_test.rs` via `"inputSchema":` in `mcp/tools.rs`) ,  `recall`, `system_map`, `run_command`, `recall_status`, `skill_route`, `skill_get`, `skill_list`, `memory_status`, `brief_list`, `brief_get`, `brief_create`, `system_map_refresh`, `context_brief`, `cli`, `sprint`, `user_story_lint`, `review`, `workflow`, `git_workflow`, `memory`, `gain`, `raw`, `config_audit`, `skill_lint`, `telemetry`, `orchestration`, `checkpoint`, `session`, `doctor`, `code_search`, `user_story`, `flow`, `work`, `code_graph`, `learn`, `observe`, `rewrite`, `skill_eval`, `dispatch`, `design_intelligence` ,  plus system-map and recall-status resources. |
 | Slash commands | `/keel:workflow`, `/keel:review`, `/keel:recall`, `/keel:gain`, `/keel:sprint`, `/keel:user-story` ,  six discoverable `/`-menu wrappers over implemented CLI surfaces. Shipped via the plugin manifest `commands` key. |
 | Specialist skills | Manifest-driven specialist profiles synced into `~/.claude/agent-profiles/*.toml`, invokable via the Skill tool. Run `keel skill-lint` for the live verified count. |
 
@@ -459,7 +459,7 @@ The pack is strict on purpose:
 
 ## Native Review and CI
 
-`.claude/review.json` is the tracked repo-level rule file.
+Review strictness is configured in `.claude-plugin/plugin.json` under `userConfig.review_strictness`. There is no separate `.claude/review.json`.
 
 - keel review pre-commit is the local pre-commit surface.
 - keel review pre-pr is the local pre-PR surface.
@@ -609,7 +609,7 @@ keel flow check
 keel flow finish
 ```
 
-The default artifact is `~/.claude/memories/workspaces/<workspace-slug>/flow/flow-check.json`. It records the target file or function, current behavior to preserve, entry point, producer, source of truth, storage/state/queue owner, side-effect owner, consumers, cleanup/recovery path, edit boundary, validation needed, and validation evidence. The schema is documented in `docs/flow-check-schema.md`, and native review blocks existing source edits when that artifact is missing or incomplete.
+The default artifact is `~/.claude/memories/workspaces/<workspace-slug>/flow/flow-check.json`. It records the target file or function, current behavior to preserve, entry point, producer, source of truth, storage/state/queue owner, side-effect owner, consumers, cleanup/recovery path, edit boundary, validation needed, and validation evidence. The schema is documented in `docs/flow-check-schema.md`. The `flow_check` gate in `keel review pre-commit`, `pre-pr`, and `gates check` is blocking: when the diff modifies established source and the artifact is missing, incomplete, or traces a file you are not editing, review fails and names the files. Added files, non-source extensions, and generated or vendored trees are exempt, so greenfield and docs-only work is never gated. An unresolvable diff range reports a warn rather than a silent pass.
 
 ## Professional Text Templates
 
@@ -742,7 +742,8 @@ keel/
 |- pi/                       Pi Agent adapter (static AGENTS.md + MCP config)
 |- .claude-plugin/           Native Claude Code plugin manifest
 |- .github/workflows/        Native Rust CI and release pipelines
-|- .claude/review.json       Native review rules
+|- .claude/agents/           Plugin-shipped subagent definitions
+|- .claude/hooks.json        Hook wiring rendered by `keel hook install`
 |- AGENTS.md                 Agent operating doctrine
 |- WORKFLOW.md               Branch and completion rules
 ```
