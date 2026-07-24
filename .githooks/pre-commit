@@ -26,7 +26,9 @@ if [ -f "Cargo.toml" ]; then
             echo "  ✓ cargo fmt passed"
         fi
         if cargo clippy --version >/dev/null 2>&1; then
-            if ! cargo clippy -- -D warnings 2>/dev/null; then
+            # why: without --all-targets clippy skips test code, so lint failures
+            # in tests pass the hook and reach CI.
+            if ! cargo clippy --workspace --all-targets -- -D warnings 2>/dev/null; then
                 echo "  ✗ cargo clippy failed"
                 ERRORS=$((ERRORS + 1))
             else

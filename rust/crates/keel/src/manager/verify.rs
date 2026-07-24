@@ -341,66 +341,6 @@ pub fn metadata_value<'a>(metadata: &'a str, key: &str) -> Option<&'a str> {
     None
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::runtime::RepositoryLayout;
-    use std::path::PathBuf;
-
-    #[test]
-    fn stale_managed_skill_names_detects_content_drift() {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let root = std::env::temp_dir().join(format!(
-            "keel-stale-skills-{}-{}",
-            std::process::id(),
-            nanos
-        ));
-        let home = root.join("claude-home");
-        let src_skill = root.join("repo").join("demo-skill");
-        let dst_skill = skills_directory(&home).join("demo-skill");
-        fs::create_dir_all(&src_skill).unwrap();
-        fs::create_dir_all(&dst_skill).unwrap();
-        fs::write(
-            src_skill.join("SKILL.md"),
-            "---\nname: demo-skill\n---\nnew\n",
-        )
-        .unwrap();
-        fs::write(
-            dst_skill.join("SKILL.md"),
-            "---\nname: demo-skill\n---\nold\n",
-        )
-        .unwrap();
-
-        let layout = RepositoryLayout {
-            root_path: root.join("repo"),
-            skills: vec![SkillDefinition {
-                name: "demo-skill".into(),
-                skill_path: src_skill.clone(),
-                agent_configs: vec![],
-            }],
-            root_files: vec![],
-            shared_resource_directories: vec![],
-            agent_names: vec![],
-        };
-        let stale = stale_managed_skill_names(&layout, &home);
-        assert_eq!(stale, vec!["demo-skill".to_string()]);
-
-        // After syncing content, drift clears.
-        fs::write(
-            dst_skill.join("SKILL.md"),
-            "---\nname: demo-skill\n---\nnew\n",
-        )
-        .unwrap();
-        assert!(stale_managed_skill_names(&layout, &home).is_empty());
-
-        let _ = fs::remove_dir_all(&root);
-        let _ = PathBuf::from("."); // silence unused if any
-    }
-}
-
 pub fn run_validate_command(
     arguments: &[String],
     standard_output: &mut dyn Write,
@@ -409,8 +349,6 @@ pub fn run_validate_command(
     let mut flag_set = FlagSet::new("validate");
     flag_set.string_flag("repo-root", "");
     flag_set.string_flag("profile", "full");
-    flag_set.string_flag("review-surface", "");
-    flag_set.string_flag("review-base-ref", "");
     if let Err(parse_error) = flag_set.parse(arguments) {
         let _ = writeln!(standard_error, "{}", parse_error.message);
         return 1;
@@ -486,8 +424,6 @@ pub fn run_all_command(
     flag_set.string_flag("repo-root", "");
     flag_set.string_flag("claude-home", "");
     flag_set.string_flag("profile", "full");
-    flag_set.string_flag("review-surface", "");
-    flag_set.string_flag("review-base-ref", "");
     if let Err(parse_error) = flag_set.parse(arguments) {
         let _ = writeln!(standard_error, "{}", parse_error.message);
         return 1;
@@ -530,4 +466,65 @@ pub fn run_menu_command(standard_output: &mut dyn Write) -> u8 {
         "Run the named command directly, for example `keel status`."
     );
     0
+}
+
+// why: clippy::items_after_test_module fires when any item follows this block.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::RepositoryLayout;
+    use std::path::PathBuf;
+
+    #[test]
+    fn stale_managed_skill_names_detects_content_drift() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let root = std::env::temp_dir().join(format!(
+            "keel-stale-skills-{}-{}",
+            std::process::id(),
+            nanos
+        ));
+        let home = root.join("claude-home");
+        let src_skill = root.join("repo").join("demo-skill");
+        let dst_skill = skills_directory(&home).join("demo-skill");
+        fs::create_dir_all(&src_skill).unwrap();
+        fs::create_dir_all(&dst_skill).unwrap();
+        fs::write(
+            src_skill.join("SKILL.md"),
+            "---\nname: demo-skill\n---\nnew\n",
+        )
+        .unwrap();
+        fs::write(
+            dst_skill.join("SKILL.md"),
+            "---\nname: demo-skill\n---\nold\n",
+        )
+        .unwrap();
+
+        let layout = RepositoryLayout {
+            root_path: root.join("repo"),
+            skills: vec![SkillDefinition {
+                name: "demo-skill".into(),
+                skill_path: src_skill.clone(),
+                agent_configs: vec![],
+            }],
+            root_files: vec![],
+            shared_resource_directories: vec![],
+            agent_names: vec![],
+        };
+        let stale = stale_managed_skill_names(&layout, &home);
+        assert_eq!(stale, vec!["demo-skill".to_string()]);
+
+        // After syncing content, drift clears.
+        fs::write(
+            dst_skill.join("SKILL.md"),
+            "---\nname: demo-skill\n---\nnew\n",
+        )
+        .unwrap();
+        assert!(stale_managed_skill_names(&layout, &home).is_empty());
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = PathBuf::from("."); // silence unused if any
+    }
 }

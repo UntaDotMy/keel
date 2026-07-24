@@ -120,7 +120,9 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Lint
-        run: cargo clippy --locked -- -D warnings
+        # why: without --all-targets clippy skips test code, so lint failures in
+        # tests reach main while CI stays green.
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Check MSRV
         shell: bash
         run: |
@@ -155,7 +157,9 @@ jobs:
           cache-on-failure: true
           key: validate-windows
       - name: Lint
-        run: cargo clippy --locked -- -D warnings
+        # why: without --all-targets clippy skips test code, so lint failures in
+        # tests reach main while CI stays green.
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Run tests
         run: cargo test --locked
       - name: Run tests (semantic feature)
@@ -173,7 +177,9 @@ jobs:
           cache-on-failure: true
           key: validate-macos
       - name: Lint
-        run: cargo clippy --locked -- -D warnings
+        # why: without --all-targets clippy skips test code, so lint failures in
+        # tests reach main while CI stays green.
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Run tests
         run: cargo test --locked
       - name: Run tests (semantic feature)
