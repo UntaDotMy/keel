@@ -497,7 +497,7 @@ pub fn run_command(
     let (stdout, original_stdout_bytes) = cap_captured_stream(output.stdout);
     let (stderr, original_stderr_bytes) = cap_captured_stream(output.stderr);
     Ok(ProcessResult {
-        code: output.status.code().unwrap_or(1),
+        code: exit_status_code(&output.status),
         stdout,
         stderr,
         original_stdout_bytes,
@@ -527,7 +527,24 @@ pub fn run_command_inherit(
     let status = command
         .status()
         .map_err(|error| format!("execute {program}: {error}"))?;
-    Ok(status.code().unwrap_or(1))
+    Ok(exit_status_code(&status))
+}
+
+/// Exit code for a finished child, using the shell's `128 + signal` convention.
+/// why: `code()` is `None` for a signalled child, and reporting `1` made a
+/// SIGKILLed command indistinguishable from ordinary failure.
+fn exit_status_code(status: &std::process::ExitStatus) -> i32 {
+    if let Some(code) = status.code() {
+        return code;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(signal) = status.signal() {
+            return 128 + signal;
+        }
+    }
+    1
 }
 
 /// Wrap a single shell command string into the (program, args) pair appropriate
