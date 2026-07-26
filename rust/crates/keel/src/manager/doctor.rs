@@ -136,6 +136,7 @@ pub fn run_doctor_command(
         hook_accepts_wrapped_command() && installed_executable_path(&claude_home).exists(),
         "rerun wrapper command is accepted",
     );
+    report_capture_gate(standard_output);
     report_mcp_registration(standard_output, &claude_home);
     probe_mcp_launch(standard_output, &claude_home);
     report_bridge_host_wiring(standard_output, &claude_home);
@@ -349,6 +350,24 @@ fn run_hook_probe(command: &str) -> Option<String> {
 /// The single-command probe above only covers the platform-default shape, so it
 /// reported healthy while the PowerShell tool path emitted a POSIX-quoted path
 /// with no call operator, which PowerShell rejects outright.
+/// Report whether the rewritten command would actually be captured.
+/// why: doctor probed only the rewrite, so it passed while capture did nothing.
+fn report_capture_gate(standard_output: &mut dyn Write) {
+    if crate::proxy::run::running_under_claude_code() {
+        let _ = writeln!(
+            standard_output,
+            "[ok] compaction capture active (agent-session signal present)"
+        );
+        return;
+    }
+    let _ = writeln!(
+        standard_output,
+        "[warn] compaction capture inactive: no agent-session env signal, so `keel run` \
+         passes through without compacting. Expected when you run doctor from a plain \
+         shell; inside an agent session it means rewritten commands save nothing."
+    );
+}
+
 fn per_shell_rewrite_prefixes_are_valid() -> bool {
     use crate::runner::shell_rewrite::{
         rewrite_command_text_for_shell, rewrite_shell_for_tool, RewriteShell, SHELL_TOOL_NAMES,
