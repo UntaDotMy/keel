@@ -12,6 +12,56 @@ fn keel_no_args_exits_zero() {
     keel_bin().assert().success();
 }
 
+/// Regression: `bridge pre-tool-use` read stdin to EOF whenever `--command` was
+/// absent, but only a *shell* tool's decision consults the command. Every host
+/// adapter calls it for edit-class tools with no `--command` and no stdin pipe,
+/// so on a host whose child inherits a still-open stdin the call blocked until
+/// the adapter's timeout and the fail-closed branch denied every edit.
+///
+/// Holds the write end open and never sends a byte: the process must still exit.
+#[test]
+fn bridge_pre_tool_use_does_not_block_on_stdin_for_edit_tools() {
+    use std::process::{Command as StdCommand, Stdio};
+    use std::time::Instant;
+
+    let binary = assert_cmd::cargo::cargo_bin("keel");
+    let mut child = StdCommand::new(binary)
+        .args([
+            "bridge",
+            "pre-tool-use",
+            "--session",
+            "s",
+            "--cwd",
+            ".",
+            "--tool",
+            "Edit",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn keel bridge pre-tool-use");
+
+    // Deliberately NOT dropped: stdin stays open for the life of this scope.
+    let _held_stdin = child.stdin.take().expect("piped stdin");
+
+    let deadline = Duration::from_secs(10);
+    let started = Instant::now();
+    loop {
+        match child.try_wait().expect("poll child") {
+            Some(_) => break,
+            None if started.elapsed() > deadline => {
+                let _ = child.kill();
+                panic!(
+                    "bridge pre-tool-use blocked on an open stdin for an edit-class tool; \
+                     adapters would time out and deny every edit"
+                );
+            }
+            None => std::thread::sleep(Duration::from_millis(25)),
+        }
+    }
+}
+
 #[test]
 fn keel_unknown_command_fails() {
     keel_bin()

@@ -350,9 +350,10 @@ fn run_bridge_pre_tool_use(
     let (session, _cwd) = resolve_bridge_args(&flags, standard_error);
     let tool_name = flags.string_value("tool");
     let command_flag = flags.string_value("command");
-    // Optional command on stdin when --command empty (shell adapters).
+    // why: only a *shell* tool's gate decision reads the command, and an
+    // inherited open stdin made this block until the adapter timed out.
     let mut stdin_command = String::new();
-    if command_flag.trim().is_empty() {
+    if command_flag.trim().is_empty() && shell_rewrite::is_shell_tool_name(tool_name) {
         let _ = std::io::stdin().read_to_string(&mut stdin_command);
     }
     let command = if !command_flag.trim().is_empty() {
