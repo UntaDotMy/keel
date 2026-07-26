@@ -674,7 +674,7 @@ keel works with multiple AI coding agents through dedicated adapters. Each adapt
 | Agent | Adapter Type | Mechanism | Files |
 | --- | --- | --- | --- |
 | **Claude Code** (native) | Plugin manifest + hooks | `.claude-plugin/plugin.json` + `~/.claude/settings.json` hooks ,  automatic via `keel install` | `.claude-plugin/` |
-| **Claude Desktop** (Cowork) | TypeScript plugin | `cowork/keel.ts` ,  lifecycle bridge with `bridge` subcommands per event | `cowork/` |
+| **Claude Desktop** (Cowork) | MCP server only | Desktop exposes no hook API, so `keel install` merges the `keel` MCP entry into the Desktop config and stops there. No lifecycle bridge, no Iron Law gate, no command compaction on this host. | `cowork/` |
 | **OpenCode** | TypeScript plugin | `opencode/keel.ts` ,  lifecycle bridge with `bridge` subcommands per event | `opencode/` |
 | **Codex CLI** | Plugin + hooks + script | `codex/.codex-plugin/plugin.json` + `hooks/hooks.json` + `keel-codex.ts` | `codex/` |
 | **Cursor IDE** | Rules + hooks + MCP | `cursor/.cursorrules` + `cursor/hooks/` + `cursor/mcp.json`: iron law, lifecycle bridge (`keel bridge`), MCP tools. Install with `keel install --with cursor` (Cursor is not always auto-detected) | `cursor/` |

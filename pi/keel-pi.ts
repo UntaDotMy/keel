@@ -136,7 +136,9 @@ function sanitizeSessionKey(sessionID: string): string {
     raw
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-+|-+$/g, "") || "default"
+      // why: Rust sanitize_memory_key falls back to "workspace"; "default" here
+      // pointed a symbol-only session id at a different marker file than the gate.
+      .replace(/^-+|-+$/g, "") || "workspace"
   );
 }
 
@@ -276,28 +278,37 @@ function isShellTool(toolName: string): boolean {
   return SHELL_TOOL_NAMES.has(toolName.toLowerCase());
 }
 
+/** Mirrors the Rust `is_keel_research_command` HITS list; the doc-parity test
+ *  `adapter_gate_lists_match_the_rust_source_of_truth` fails on drift. */
+const KEEL_RESEARCH_SUBCOMMANDS = [
+  "system-map", "system_map", "recall", "doctor", "code-search", "code_search",
+  "skill-route", "skill_route", "skill-list", "skill_list", "skill-get", "skill_get",
+  "context-brief", "context_brief", "memory status", "memory recall",
+  "memory system-map", "memory scope",
+];
+
 function isKeelReadingCommand(command: string): boolean {
   const trimmed = command.trim().toLowerCase();
   const body = trimmed.startsWith("keel run -- ")
     ? trimmed.slice("keel run -- ".length)
-    : trimmed;
-  if (!(body.startsWith("keel ") || body.includes("keel.exe"))) {
+    : trimmed.startsWith("keel.exe run -- ")
+      ? trimmed.slice("keel.exe run -- ".length)
+      : trimmed;
+  const hasKeel =
+    body.startsWith("keel ") ||
+    body.startsWith("keel.exe ") ||
+    body.includes("\\keel.exe ") ||
+    body.includes("/keel ") ||
+    body.includes("\\keel ");
+  if (!hasKeel) {
     return false;
   }
-  return (
-    body.includes("system-map") ||
-    body.includes("system_map") ||
-    body.includes("recall") ||
-    body.includes("doctor") ||
-    body.includes("code-search") ||
-    body.includes("code_search") ||
-    body.includes("skill") ||
-    body.includes("context") ||
-    body.includes("memory") ||
-    body.includes("status") ||
-    body.includes("help") ||
-    body.includes("brief")
-  );
+  // why: a chained command smuggles a non-keel tail past the gate
+  // (`keel doctor && curl evil`); only a standalone keel invocation clears.
+  if (/[&|;`\n]/.test(body) || body.includes("$(")) {
+    return false;
+  }
+  return KEEL_RESEARCH_SUBCOMMANDS.some((hit) => body.includes(hit));
 }
 
 // ---------------------------------------------------------------------------

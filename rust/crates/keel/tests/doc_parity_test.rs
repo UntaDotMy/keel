@@ -546,6 +546,142 @@ fn every_help_advertised_flag_is_read_by_the_code() {
     );
 }
 
+/// Every host adapter that speaks the `keel bridge` protocol. Claude Desktop
+/// (cowork) is deliberately absent: Desktop exposes no hook API, so that host is
+/// MCP-only and ships no adapter script.
+const BRIDGE_ADAPTER_FILES: &[&str] = &[
+    "opencode/keel.ts",
+    "codex/keel-codex.ts",
+    "pi/keel-pi.ts",
+    "cursor/hooks/keel-cursor.sh",
+];
+
+/// Read an adapter, failing loudly when it is absent.
+///
+/// why: these tests used `let Ok(text) = read else { continue }`, so a listed
+/// adapter that did not exist passed every check silently. `cowork/keel.ts` was
+/// listed, documented in two places, and had never existed.
+fn read_adapter(path: &Path, adapter: &str) -> String {
+    fs::read_to_string(path).unwrap_or_else(|error| {
+        panic!(
+            "adapter `{adapter}` is listed in BRIDGE_ADAPTER_FILES but could not be read \
+             ({error}). Either ship the file or remove it from the list, so the checks below \
+             cannot pass vacuously."
+        )
+    })
+}
+
+/// The gate-clearing subcommand list, parsed out of the Rust source of truth.
+fn rust_research_subcommands(repo_root: &Path) -> BTreeSet<String> {
+    let source =
+        fs::read_to_string(repo_root.join("rust/crates/keel/src/runner/hook_lifecycle/mod.rs"))
+            .expect("read hook_lifecycle/mod.rs");
+    let start = source
+        .find("const HITS: &[&str] = &[")
+        .expect("locate the HITS list in is_keel_research_command");
+    let body = &source[start..];
+    let end = body.find("];").expect("HITS list terminator");
+    quoted_literals(&body[..end])
+}
+
+/// Every `"..."` literal in `text`, as a set.
+fn quoted_literals(text: &str) -> BTreeSet<String> {
+    let mut found = BTreeSet::new();
+    let mut rest = text;
+    while let Some(open) = rest.find('"') {
+        rest = &rest[open + 1..];
+        let Some(close) = rest.find('"') else { break };
+        let value = &rest[..close];
+        if !value.is_empty() {
+            found.insert(value.to_string());
+        }
+        rest = &rest[close + 1..];
+    }
+    found
+}
+
+/// Every adapter's Iron Law gate-clearing list must equal the Rust one, and every
+/// adapter must refuse compound commands.
+///
+/// why: the Rust list dropped `help`/`status`/`brief`/`workflow` and added
+/// compound-command rejection, but three TypeScript adapters and one shell
+/// adapter kept byte-identical copies of the old permissive list. All hosts write
+/// the SAME `iron-law-satisfied/<key>` marker, so a lax clear on any one of them
+/// cleared the Rust gate too. Drift here is a security hole, not a style nit.
+#[test]
+fn adapter_gate_lists_match_the_rust_source_of_truth() {
+    let repo_root = repository_root();
+    let expected = rust_research_subcommands(&repo_root);
+    assert!(
+        expected.contains("recall") && !expected.contains("help"),
+        "parser looks stale; got {expected:?}"
+    );
+
+    for adapter in BRIDGE_ADAPTER_FILES {
+        let text = read_adapter(&repo_root.join(adapter), adapter);
+
+        // Shell keeps the list in one space-separated string on a single line;
+        // TypeScript uses one literal per entry up to the closing `];`.
+        let actual: BTreeSet<String> =
+            if adapter.ends_with(".sh") {
+                let line = text
+                    .lines()
+                    .find(|line| line.trim_start().starts_with("KEEL_RESEARCH_SUBCOMMANDS="))
+                    .unwrap_or_else(|| {
+                        panic!("{adapter} must declare KEEL_RESEARCH_SUBCOMMANDS on one line")
+                    });
+                quoted_literals(line)
+                    .iter()
+                    .flat_map(|value| value.split_whitespace())
+                    .map(str::to_string)
+                    .collect()
+            } else {
+                let start = text.find("KEEL_RESEARCH_SUBCOMMANDS = [").unwrap_or_else(|| {
+                panic!("{adapter} must declare KEEL_RESEARCH_SUBCOMMANDS mirroring the Rust list")
+            });
+                let body = &text[start..];
+                let end = body
+                    .find("];")
+                    .expect("KEEL_RESEARCH_SUBCOMMANDS terminator");
+                quoted_literals(&body[..end])
+            };
+
+        // The shell adapter cannot express the two-word entries in its
+        // whitespace-split list, so it matches them in a separate `case`.
+        let two_word: BTreeSet<String> = expected
+            .iter()
+            .filter(|hit| hit.contains(' '))
+            .cloned()
+            .collect();
+        let mut covered = actual.clone();
+        for hit in &two_word {
+            if text.contains(hit.as_str()) {
+                covered.insert(hit.clone());
+            }
+        }
+
+        let missing: Vec<&String> = expected.difference(&covered).collect();
+        assert!(
+            missing.is_empty(),
+            "{adapter} is missing gate-clearing entries {missing:?} present in the Rust list"
+        );
+        let extra: Vec<&String> = covered.difference(&expected).collect();
+        assert!(
+            extra.is_empty(),
+            "{adapter} clears the Iron Law gate on {extra:?}, which the Rust core does not. \
+             A looser adapter list writes the shared marker and unlocks the Rust gate too."
+        );
+
+        let rejects_compound =
+            text.contains("$(") && (text.contains("[&|;`\\n]") || text.contains("*\"&\"*"));
+        assert!(
+            rejects_compound,
+            "{adapter} must reject compound commands so `keel doctor && curl evil` cannot \
+             clear the gate"
+        );
+    }
+}
+
 /// `keel bridge rewrite` requires `--tool`: with an empty tool name it fails the
 /// shell-tool check and prints nothing, so the caller silently gets no compaction.
 /// The Cursor hook omitted the flag and its reroute never fired once. Any adapter
@@ -553,18 +689,9 @@ fn every_help_advertised_flag_is_read_by_the_code() {
 #[test]
 fn adapters_calling_bridge_rewrite_pass_a_tool_flag() {
     let repo_root = repository_root();
-    let adapters = [
-        "opencode/keel.ts",
-        "codex/keel-codex.ts",
-        "pi/keel-pi.ts",
-        "cursor/hooks/keel-cursor.sh",
-        "cowork/keel.ts",
-    ];
-    for adapter in adapters {
+    for adapter in BRIDGE_ADAPTER_FILES {
         let path = repo_root.join(adapter);
-        let Ok(text) = fs::read_to_string(&path) else {
-            continue;
-        };
+        let text = read_adapter(&path, adapter);
         // Only adapters that actually invoke the subcommand are constrained.
         let invokes = text.contains("bridge rewrite") || text.contains("\"rewrite\"");
         if !invokes {
@@ -586,22 +713,19 @@ fn adapters_calling_bridge_rewrite_pass_a_tool_flag() {
 #[test]
 fn adapters_match_gate_decision_by_prefix_not_substring() {
     let repo_root = repository_root();
-    for adapter in [
-        "opencode/keel.ts",
-        "codex/keel-codex.ts",
-        "pi/keel-pi.ts",
-        "cowork/keel.ts",
-    ] {
+    for adapter in BRIDGE_ADAPTER_FILES {
         let path = repo_root.join(adapter);
-        let Ok(text) = fs::read_to_string(&path) else {
-            continue;
-        };
+        let text = read_adapter(&path, adapter);
         if !text.contains("KEEL_GATE") {
             continue;
         }
+        // TypeScript uses startsWith; the shell adapter uses a `case` prefix glob.
+        let anchored_deny =
+            text.contains("startsWith(\"KEEL_GATE_DENY\")") || text.contains("KEEL_GATE_DENY*)");
         assert!(
-            text.contains("startsWith(\"KEEL_GATE_DENY\")"),
-            "{adapter} must detect a deny with startsWith(\"KEEL_GATE_DENY\")"
+            anchored_deny,
+            "{adapter} must detect a deny by prefix: startsWith(\"KEEL_GATE_DENY\") \
+             or a `KEEL_GATE_DENY*)` case pattern"
         );
         // Comment lines are prose about the rule, not the check itself.
         let code_only: String = text

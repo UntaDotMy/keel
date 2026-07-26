@@ -66,8 +66,11 @@ SESSION_ID=$(printf '%s' "$INPUT" | "$JQ_BIN" -r '.conversation_id // empty' 2>/
 
 # --- Iron Law marker dir (SHARED with Rust: iron-law-satisfied). ---
 # Session key matches Rust sanitize_memory_key (lowercase alnum, else '-').
-SESSION_KEY=$(printf '%s' "$SESSION_ID" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g; s/-\+/-/g; s/^-//; s/-$//')
-[ -z "$SESSION_KEY" ] && SESSION_KEY="default"
+# why: `s/-\+/-/g` is GNU-only; BSD sed (macOS) never collapsed the dash runs, so
+# this adapter and the Rust gate read different marker files. `tr -s` is POSIX.
+SESSION_KEY=$(printf '%s' "$SESSION_ID" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | tr -s '-' | sed 's/^-//; s/-$//')
+# Rust's sanitize_memory_key falls back to "workspace" when nothing survives.
+[ -z "$SESSION_KEY" ] && SESSION_KEY="workspace"
 MARKER_DIR="$HOME/.claude/state/iron-law-satisfied"
 mkdir -p "$MARKER_DIR" 2>/dev/null || true
 MARKER="$MARKER_DIR/$SESSION_KEY"
@@ -101,11 +104,30 @@ is_keel_research_tool() {
   esac
 }
 
+# Mirrors the Rust is_keel_research_command HITS list (hook_lifecycle/mod.rs).
+# The doc-parity test adapter_gate_lists_match_the_rust_source_of_truth enforces it.
+KEEL_RESEARCH_SUBCOMMANDS="system-map system_map recall doctor code-search code_search skill-route skill_route skill-list skill_list skill-get skill_get context-brief context_brief"
 is_keel_reading_command() {
-  case "$1" in
-    "keel system-map"*|"keel recall"*|"keel doctor"*|"keel code-search"*|"keel observe"*|"keel memory"*|"keel workflow cockpit"*|"keel workflow status"*|"keel run -- keel "*) return 0 ;;
+  body=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+  case "$body" in
+    "keel run -- "*) body=${body#keel run -- } ;;
+    "keel.exe run -- "*) body=${body#keel.exe run -- } ;;
+  esac
+  case "$body" in
+    "keel "*|"keel.exe "*|*"/keel "*|*"/keel.exe "*) : ;;
     *) return 1 ;;
   esac
+  # why: a chained command smuggles a non-keel tail past the gate.
+  case "$body" in
+    *"&"*|*"|"*|*";"*|*'`'*|*'$('*) return 1 ;;
+  esac
+  for hit in $KEEL_RESEARCH_SUBCOMMANDS; do
+    case "$body" in *"$hit"*) return 0 ;; esac
+  done
+  case "$body" in
+    *"memory status"*|*"memory recall"*|*"memory system-map"*|*"memory scope"*) return 0 ;;
+  esac
+  return 1
 }
 
 # --- Lifecycle events: dispatch to keel bridge, no output needed. ---
