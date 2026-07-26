@@ -1025,6 +1025,11 @@ fn session_has_iron_law_evidence(
         if line.trim().is_empty() {
             continue;
         }
+        // why: the day's file holds every session's rows; a line without the id as
+        // a substring cannot match, so skip the parse rather than just the compare.
+        if !line.contains(session_id) {
+            continue;
+        }
         let Ok(row) = serde_json::from_str::<JsonDocument>(line) else {
             continue;
         };

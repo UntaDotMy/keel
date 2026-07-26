@@ -945,7 +945,9 @@ pub fn score_prompt_against_skills(prompt: &str, skills: &[SkillTerms]) -> Optio
 
     let (best_index, best_score, best_distinctive) = scored[0];
     let min_score = MIN_SCORE_FACTOR * corpus_size.ln();
-    if best_score < min_score || !best_distinctive {
+    // why: with one installed skill every weight and the floor are ln(1)=0, so a
+    // single shared token matched at score 0, which is no evidence at all.
+    if best_score <= 0.0 || best_score < min_score || !best_distinctive {
         return None;
     }
     let runner_up = scored.get(1).map(|entry| entry.1).unwrap_or(0.0);

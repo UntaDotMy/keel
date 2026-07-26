@@ -142,17 +142,10 @@ function sanitizeSessionKey(sessionID: string): string {
     raw
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-+|-+$/g, "") || "default"
+      // why: Rust sanitize_memory_key falls back to "workspace"; "default" here
+      // pointed a symbol-only session id at a different marker file than the gate.
+      .replace(/^-+|-+$/g, "") || "workspace"
   );
-}
-
-function ironLawSatisfied(sessionID: string): boolean {
-  ensureIronLawDir();
-  try {
-    return fs.existsSync(path.join(IRON_LAW_DIR, sanitizeSessionKey(sessionID)));
-  } catch {
-    return false;
-  }
 }
 
 function markIronLawSatisfied(sessionID: string): void {
@@ -201,28 +194,37 @@ function isKeelResearchTool(toolName: string): boolean {
   );
 }
 
+/** Mirrors the Rust `is_keel_research_command` HITS list; the doc-parity test
+ *  `adapter_gate_lists_match_the_rust_source_of_truth` fails on drift. */
+const KEEL_RESEARCH_SUBCOMMANDS = [
+  "system-map", "system_map", "recall", "doctor", "code-search", "code_search",
+  "skill-route", "skill_route", "skill-list", "skill_list", "skill-get", "skill_get",
+  "context-brief", "context_brief", "memory status", "memory recall",
+  "memory system-map", "memory scope",
+];
+
 function isKeelReadingCommand(command: string): boolean {
   const trimmed = command.trim().toLowerCase();
   const body = trimmed.startsWith("keel run -- ")
     ? trimmed.slice("keel run -- ".length)
-    : trimmed;
-  if (!(body.startsWith("keel ") || body.includes("keel.exe"))) {
+    : trimmed.startsWith("keel.exe run -- ")
+      ? trimmed.slice("keel.exe run -- ".length)
+      : trimmed;
+  const hasKeel =
+    body.startsWith("keel ") ||
+    body.startsWith("keel.exe ") ||
+    body.includes("\\keel.exe ") ||
+    body.includes("/keel ") ||
+    body.includes("\\keel ");
+  if (!hasKeel) {
     return false;
   }
-  return (
-    body.includes("system-map") ||
-    body.includes("system_map") ||
-    body.includes("recall") ||
-    body.includes("doctor") ||
-    body.includes("code-search") ||
-    body.includes("code_search") ||
-    body.includes("skill") ||
-    body.includes("context") ||
-    body.includes("memory") ||
-    body.includes("status") ||
-    body.includes("help") ||
-    body.includes("brief")
-  );
+  // why: a chained command smuggles a non-keel tail past the gate
+  // (`keel doctor && curl evil`); only a standalone keel invocation clears.
+  if (/[&|;`\n]/.test(body) || body.includes("$(")) {
+    return false;
+  }
+  return KEEL_RESEARCH_SUBCOMMANDS.some((hit) => body.includes(hit));
 }
 
 // ---------------------------------------------------------------------------
@@ -380,14 +382,30 @@ const KeelPlugin: Plugin = async ({ client, directory, $ }) => {
 
       // Compaction reroute for shell tools (existing behavior).
       if (isShellTool(toolName)) {
-        if (!ironLawSatisfied(sessionID)) {
-          throw new Error(
-            "IRON LAW ENFORCED (STRICT): Use a keel tool first (MCP system_map, recall, context_brief, skill_route, or `keel doctor` / `keel code-search`). Plain Read does not clear the gate.",
-          );
-        }
         const command: string =
           (output as { args?: { command?: string } })?.args?.command ?? "";
         if (!command) return;
+
+        // why: the local marker check here never consulted the Rust core, so
+        // KEEL_IRON_LAW_GATE=off/balanced was ignored on this host.
+        const gate = await runBridge(
+          "pre-tool-use",
+          ["--session", sessionID, "--cwd", cwd, "--tool", toolName, "--command", command],
+          5000,
+        );
+        if (gate.startsWith("KEEL_GATE_DENY")) {
+          const reason = gate.split("\n").slice(1).join("\n").trim();
+          throw new Error(
+            reason ||
+              "keel Iron Law gate: call system_map/recall/context_brief before running shell commands.",
+          );
+        }
+        if (!gate.startsWith("KEEL_GATE_ALLOW")) {
+          throw new Error(
+            "keel Iron Law gate could not be evaluated (keel did not respond in time). Retry; if it persists, run `keel doctor`.",
+          );
+        }
+
         const rewrite = await runBridgeWithStdin("rewrite", ["--tool", toolName], command);
         if (rewrite.startsWith("KEEL_REWRITE ")) {
           const rewritten = rewrite.slice("KEEL_REWRITE ".length).trim();
@@ -408,24 +426,29 @@ const KeelPlugin: Plugin = async ({ client, directory, $ }) => {
           switch (event.type) {
             // ---- Tool observation (non-blocking side-effect) ----
             case "tool.execute.after": {
-              // The event shape per the task: { type, tool, input, failed? }
-              const te = event as unknown as {
+              // why: session id came from `properties` while tool/input came from
+              // the event root, so one was always undefined. Read both shapes.
+              type ToolEventFields = {
                 tool?: string;
                 input?: unknown;
                 failed?: boolean;
+                sessionID?: string;
               };
-              const toolName = te.tool ?? "";
-              const stdin =
-                te.input != null ? JSON.stringify(te.input) : "{}";
+              const root = event as unknown as ToolEventFields;
+              const props = (event.properties ?? {}) as ToolEventFields;
+              const toolName = props.tool ?? root.tool ?? "";
+              const payload = props.input ?? root.input;
+              const failed = props.failed ?? root.failed;
+              const stdin = payload != null ? JSON.stringify(payload) : "{}";
               const obsArgs = [
                 "--session",
-                (event.properties as { sessionID?: string })?.sessionID ?? "",
+                props.sessionID ?? root.sessionID ?? "",
                 "--cwd",
                 cwd,
                 "--tool",
                 toolName,
               ];
-              if (te.failed) obsArgs.push("--failed");
+              if (failed) obsArgs.push("--failed");
               await runBridgeWithStdin("observe", obsArgs, stdin);
               break;
             }

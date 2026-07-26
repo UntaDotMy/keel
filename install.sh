@@ -105,7 +105,9 @@ tar -xzf "$archive_path" -C "$extract_directory"
 
 installer_binary="${extract_directory}/keel"
 if [ ! -x "$installer_binary" ]; then
-  installer_binary="$(find "$extract_directory" -type f -name keel -perm /111 | head -n 1)"
+  # why: `-perm /111` is GNU-only and BSD find (macOS) errors on it; the `-x`
+  # test below is the real executability check anyway.
+  installer_binary="$(find "$extract_directory" -type f -name keel | head -n 1)"
 fi
 if [ -z "$installer_binary" ] || [ ! -x "$installer_binary" ]; then
   printf 'Release archive did not contain an executable keel binary.\n' >&2

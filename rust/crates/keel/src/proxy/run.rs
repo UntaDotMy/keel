@@ -34,18 +34,34 @@ use crate::runtime::{display_path, run_command, ProcessResult, MAX_CAPTURED_OUTP
 ///   - `CLAUDE_PLUGIN_ROOT`: present for plugin-scoped hooks.
 ///   - `CLAUDE_AGENT` / `CLAUDE_SKILLS_AGENT`: legacy markers some integrations
 ///     set when launching us; preserved so existing automations keep working.
+///   - `CLAUDECODE` / `CLAUDE_CODE_ENTRYPOINT` / `CLAUDE_CODE_SESSION_ID` /
+///     `AI_AGENT`: the vars the harness exports to the **Bash tool** child.
+///
+/// why: the first five are *hook*-process variables. `keel run` is spawned by
+/// the Bash tool, not by a hook, and that environment carries none of them, so
+/// every PreToolUse-rewritten command took the passthrough branch below and the
+/// proxy silently did nothing: no compaction, no raw-store recovery artifact, no
+/// compaction event (leaving `keel gain` empty), and no injection neutralization.
+/// Measured on harness 2.1.220: the same command emitted 400 lines bare vs 50
+/// with a signal present. The tool-process vars close that gap; the hook vars
+/// stay so hook-launched runs keep working.
 ///
 /// Any one of those being non-empty signals "this is a harness-driven run."
 /// Absence means "user typed `keel run --` themselves" — passthrough.
+pub(crate) const CLAUDE_CODE_SIGNAL_VARS: &[&str] = &[
+    "CLAUDE_SKILLS_HOOK",
+    "CLAUDE_PROJECT_DIR",
+    "CLAUDE_PLUGIN_ROOT",
+    "CLAUDE_AGENT",
+    "CLAUDE_SKILLS_AGENT",
+    "CLAUDECODE",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_SESSION_ID",
+    "AI_AGENT",
+];
+
 pub fn running_under_claude_code() -> bool {
-    const SIGNALS: &[&str] = &[
-        "CLAUDE_SKILLS_HOOK",
-        "CLAUDE_PROJECT_DIR",
-        "CLAUDE_PLUGIN_ROOT",
-        "CLAUDE_AGENT",
-        "CLAUDE_SKILLS_AGENT",
-    ];
-    SIGNALS.iter().any(|name| {
+    CLAUDE_CODE_SIGNAL_VARS.iter().any(|name| {
         std::env::var(name)
             .map(|value| !value.trim().is_empty())
             .unwrap_or(false)
@@ -123,6 +139,32 @@ pub fn run_proxy(
     // (`--errors-only`, `--ultra`) are intentional opt-ins and always capture.
     let force_capture = flag_set.bool_value("errors-only") || flag_set.bool_value("ultra");
     if !running_under_claude_code() && !force_capture {
+        // why: passthrough honors none of the capture-only flags, and silently
+        // ignoring an explicit `--json` reads as a broken flag rather than a mode.
+        const CAPTURE_ONLY_FLAGS: &[&str] = &["json", "stream", "full", "no-compact", "no-raw"];
+        let ignored: Vec<&str> = CAPTURE_ONLY_FLAGS
+            .iter()
+            .copied()
+            .filter(|name| flag_set.bool_value(name))
+            .chain(
+                ["adapter", "recovery-dir"]
+                    .into_iter()
+                    .filter(|name| !flag_set.string_value(name).trim().is_empty()),
+            )
+            .chain(std::iter::once("max-lines").filter(|_| max_lines > 0))
+            .collect();
+        if !ignored.is_empty() {
+            let _ = writeln!(
+                standard_error,
+                "keel run: ignoring {} outside an agent session (no capture, so nothing to \
+                 compact or report). Pass --ultra or --errors-only to force capture.",
+                ignored
+                    .iter()
+                    .map(|name| format!("--{name}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
         return run_proxy_passthrough(&command_arguments, standard_error);
     }
 
@@ -691,13 +733,9 @@ mod tests {
     use super::*;
     use crate::test_support::ENV_LOCK;
 
-    const SIGNAL_VARS: &[&str] = &[
-        "CLAUDE_SKILLS_HOOK",
-        "CLAUDE_PROJECT_DIR",
-        "CLAUDE_PLUGIN_ROOT",
-        "CLAUDE_AGENT",
-        "CLAUDE_SKILLS_AGENT",
-    ];
+    // why: a copy here would let a new gate signal survive `clear_signals`,
+    // silently turning the "no signal present" tests into no-ops.
+    const SIGNAL_VARS: &[&str] = super::CLAUDE_CODE_SIGNAL_VARS;
 
     fn snapshot_signals() -> Vec<(&'static str, Option<String>)> {
         SIGNAL_VARS
@@ -768,6 +806,36 @@ mod tests {
             running_under_claude_code(),
             "operators must be able to opt into capture mode for tests and tooling"
         );
+
+        restore_signals(&snapshot);
+    }
+
+    /// Regression: the gate listed only *hook*-process vars, so every rewritten
+    /// command hit passthrough. Each var below is live in a 2.1.220 Bash tool env.
+    #[test]
+    fn gate_allows_capture_for_bash_tool_environment_variables() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let snapshot = snapshot_signals();
+
+        for (name, value) in [
+            ("CLAUDECODE", "1"),
+            ("CLAUDE_CODE_ENTRYPOINT", "cli"),
+            (
+                "CLAUDE_CODE_SESSION_ID",
+                "78b79ef6-1775-4dd3-b63c-9ccef1251fb7",
+            ),
+            ("AI_AGENT", "claude-code_2-1-220_agent"),
+        ] {
+            clear_signals();
+            std::env::set_var(name, value);
+            assert!(
+                running_under_claude_code(),
+                "{name} is exported to the Bash tool child; it must satisfy the capture gate \
+                 or the compaction proxy silently no-ops on every rewritten command"
+            );
+        }
 
         restore_signals(&snapshot);
     }
