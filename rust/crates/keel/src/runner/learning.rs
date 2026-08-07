@@ -904,7 +904,10 @@ fn project_name(cwd: &str) -> String {
             .and_then(|segment| segment.to_str())
             .filter(|segment| !segment.is_empty())
         {
-            return name.to_string();
+            // why: two repos can share a root dir name (~/work/app vs ~/oss/app);
+            // the path hash keeps their buckets, skills, and instincts distinct.
+            let path_hash = fnv1a_64(root.to_string_lossy().as_bytes()) as u32;
+            return format!("{name}-{path_hash:08x}");
         }
     }
     // Fallback: last path segment (non-git trees, or synthetic paths in tests).
@@ -1679,13 +1682,40 @@ mod tests {
         let sub = repo.join("rust").join("crates");
         std::fs::create_dir_all(&sub).unwrap();
         std::fs::create_dir_all(repo.join(".git")).unwrap();
-        // A session launched from repo/rust/crates buckets into the repo root name,
-        // not the "crates"/"rust" subdir.
-        assert_eq!(project_name(&sub.to_string_lossy()), "myrepo");
+        // A session launched from repo/rust/crates buckets into the repo root,
+        // not the "crates"/"rust" subdir. The key carries the root dir name plus
+        // a hash of the absolute root path.
+        let key = project_name(&sub.to_string_lossy());
+        assert!(key.starts_with("myrepo-"), "git-root key: {key}");
+        assert_eq!(key.len(), "myrepo-".len() + 8);
         // Outside any git repo, still falls back to the last segment.
         let plain = base.join("plaindir");
         std::fs::create_dir_all(&plain).unwrap();
         assert_eq!(project_name(&plain.to_string_lossy()), "plaindir");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn project_name_disambiguates_same_named_roots_by_path() {
+        let base = std::env::temp_dir().join(format!("keel-proj-collision-{}", std::process::id()));
+        let work = base.join("work").join("app");
+        let oss = base.join("oss").join("app");
+        std::fs::create_dir_all(work.join(".git")).unwrap();
+        std::fs::create_dir_all(oss.join(".git")).unwrap();
+        let work_key = project_name(&work.to_string_lossy());
+        let oss_key = project_name(&oss.to_string_lossy());
+        assert_ne!(work_key, oss_key);
+        assert!(work_key.starts_with("app-"), "name prefix kept: {work_key}");
+        assert!(oss_key.starts_with("app-"), "name prefix kept: {oss_key}");
+        // The same path hashes to the same key on every call.
+        assert_eq!(work_key, project_name(&work.to_string_lossy()));
+        assert_eq!(oss_key, project_name(&oss.to_string_lossy()));
+        // Skill slugs and instinct ids diverge with the project key.
+        assert_ne!(project_slug(&work_key), project_slug(&oss_key));
+        assert_ne!(
+            instinct_id(&work_key, "cargo test"),
+            instinct_id(&oss_key, "cargo test")
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
