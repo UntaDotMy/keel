@@ -189,6 +189,9 @@ impl Application {
             "session" => {
                 utility::run_session_command(command_arguments, standard_output, standard_error)
             }
+            "stats" => {
+                utility::run_stats_command(command_arguments, standard_output, standard_error)
+            }
             "bench" => {
                 utility::run_bench_command(command_arguments, standard_output, standard_error)
             }

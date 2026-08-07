@@ -593,6 +593,18 @@ fn tools_list_catalog() -> Value {
                     },
                     "required": ["request"]
                 }
+            },
+            {
+                "name": "stats",
+                "description": "Unified keel dashboard: token savings + savings %, commands observed/compacted, top space-saving commands, gate/enforcement activity, recall index health, active sprint/work. Lead with headline numbers. Aggregates gain/telemetry/observe; read-only.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "days": { "type": "integer", "description": "Window in days for savings/timings. Default 7." },
+                        "workspace_root": { "type": "string", "description": "Workspace root for sprint progress. Defaults to cwd." },
+                        "json": { "type": "boolean", "description": "Output as JSON. Default true on this tool when omitted." }
+                    }
+                }
             }
         ]
     })
@@ -727,6 +739,7 @@ const MCP_TOOL_NAMES: &[&str] = &[
     "skill_eval",
     "dispatch",
     "design_intelligence",
+    "stats",
 ];
 
 type McpToolHandler = fn(&Value) -> Result<String, String>;
@@ -775,6 +788,7 @@ fn mcp_tool_handler(name: &str) -> Option<McpToolHandler> {
         "skill_eval" => tool_skill_eval,
         "dispatch" => tool_dispatch,
         "design_intelligence" => tool_design_intelligence,
+        "stats" => tool_stats,
         _ => return None,
     })
 }
@@ -2449,6 +2463,24 @@ fn tool_observe(arguments: &Value) -> Result<String, String> {
     }
     run_inprocess_cli("keel observe", |out, err| {
         crate::utility::run_observe_command(&owned, out, err)
+    })
+}
+
+/// Unified dashboard over gain/telemetry/gates/recall/sprint. Read-only.
+fn tool_stats(arguments: &Value) -> Result<String, String> {
+    let mut owned: Vec<String> = Vec::new();
+    if let Some(days) = optional_int_arg(arguments, "days") {
+        owned.push(format!("--days={days}"));
+    }
+    if let Some(root) = optional_string_arg(arguments, "workspace_root") {
+        owned.push(format!("--workspace-root={root}"));
+    }
+    // Agents almost always want structured output; default to JSON unless false.
+    if optional_bool_arg(arguments, "json") != Some(false) {
+        owned.push("--json".to_string());
+    }
+    run_inprocess_cli("keel stats", |out, err| {
+        crate::utility::run_stats_command(&owned, out, err)
     })
 }
 

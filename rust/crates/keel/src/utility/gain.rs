@@ -452,7 +452,7 @@ pub fn load_compaction_loss_today() -> CompactionLossSummary {
     }
 }
 
-fn parse_gain_summary(
+pub(crate) fn parse_gain_summary(
     text: &str,
     since_timestamp: Option<u64>,
     adapter_filter: Option<&str>,
@@ -586,19 +586,21 @@ fn gain_since_timestamp_v2(flag_set: &FlagSet) -> u64 {
 }
 
 #[derive(Default)]
-struct GainSummary {
-    commands_observed: u64,
-    commands_compacted: u64,
-    tokens_before: u64,
-    tokens_after: u64,
-    tokens_saved: u64,
-    top_commands: Vec<GainCommandSummary>,
+pub(crate) struct GainSummary {
+    pub commands_observed: u64,
+    pub commands_compacted: u64,
+    pub tokens_before: u64,
+    pub tokens_after: u64,
+    pub tokens_saved: u64,
+    pub top_commands: Vec<GainCommandSummary>,
+    #[allow(dead_code)]
     top_reducers: Vec<GainDimensionSummary>,
+    #[allow(dead_code)]
     top_families: Vec<GainDimensionSummary>,
 }
 
 impl GainSummary {
-    fn savings_percent(&self) -> f64 {
+    pub fn savings_percent(&self) -> f64 {
         if self.tokens_before == 0 {
             0.0
         } else {
@@ -608,9 +610,10 @@ impl GainSummary {
 }
 
 #[derive(Clone)]
-struct GainCommandSummary {
-    command: String,
-    tokens_saved: u64,
+pub(crate) struct GainCommandSummary {
+    pub command: String,
+    pub tokens_saved: u64,
+    #[allow(dead_code)]
     count: u64,
 }
 
