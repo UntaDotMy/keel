@@ -2040,6 +2040,13 @@ fn run_review_surface_command(
         flag_set.string_value("base-ref"),
         surface_name,
     ));
+    if flag_set.bool_value("impact") {
+        gate_results.push(impact_gate(
+            &repository_root,
+            flag_set.string_value("base-ref"),
+            surface_name,
+        ));
+    }
     if let Some(e2e_result) = check_e2e_config(&repository_root) {
         gate_results.push(e2e_result);
     }
@@ -2842,6 +2849,61 @@ fn preview_touched_paths(paths: &[String]) -> String {
         .join(", ")
 }
 
+/// Advisory blast-radius gate: reports which in-repo files transitively import
+/// the changed files. Non-blocking and fail-open; a missing or unreadable graph
+/// silently skips. Uses the cached artifact when present, builds fresh otherwise.
+fn impact_gate(repository_root: &Path, base_ref: &str, surface_name: &str) -> GateResult {
+    let range: Vec<String> = if surface_name == "pre-commit" {
+        vec!["HEAD".to_string()]
+    } else {
+        let base = base_ref.trim();
+        let base = if base.is_empty() { "origin/main" } else { base };
+        vec![format!("{base}...HEAD")]
+    };
+
+    let Some(touched) = modified_existing_sources(repository_root, &range) else {
+        return GateResult {
+            name: "impact".to_string(),
+            status: GateStatus::Blocked,
+            blocking: false,
+            details: Some("could not resolve diff range".to_string()),
+        };
+    };
+    if touched.is_empty() {
+        return GateResult {
+            name: "impact".to_string(),
+            status: GateStatus::Pass,
+            blocking: false,
+            details: Some("no existing source modified".to_string()),
+        };
+    }
+
+    let graph = crate::utility::code_graph::cached_artifact_path(repository_root, "")
+        .and_then(|p| crate::utility::code_graph::CodeGraph::from_json_file(&p))
+        .unwrap_or_else(|| crate::utility::code_graph::build_graph(repository_root));
+
+    let impacted = graph.impact_of(&touched);
+    if impacted.is_empty() {
+        return GateResult {
+            name: "impact".to_string(),
+            status: GateStatus::Pass,
+            blocking: false,
+            details: Some(format!("{} changed, no in-repo dependents", touched.len())),
+        };
+    }
+    GateResult {
+        name: "impact".to_string(),
+        status: GateStatus::Pass,
+        blocking: false,
+        details: Some(format!(
+            "{} changed, {} impacted: {}",
+            touched.len(),
+            impacted.len(),
+            preview_touched_paths(&impacted)
+        )),
+    }
+}
+
 /// Whether the artifact's `target_file` names one of the files under review.
 ///
 /// Suffix matching in both directions tolerates repo-relative vs absolute paths
@@ -3098,6 +3160,7 @@ fn review_flag_set(name: &str) -> FlagSet {
     flag_set.string_flag("base-ref", "");
     flag_set.string_flag("format", "compact");
     flag_set.bool_flag("all", false);
+    flag_set.bool_flag("impact", false);
     flag_set
 }
 
@@ -4645,5 +4708,27 @@ mod tests {
         let (blocking, warnings) = tally_gate_results(&results);
         assert_eq!(blocking, 1, "E2E should not add blocking findings");
         assert_eq!(warnings, 0);
+    }
+
+    #[test]
+    fn impact_flag_defaults_to_false() {
+        let flag_set = review_flag_set("review pre-pr");
+        assert!(
+            !flag_set.bool_value("impact"),
+            "impact gate must be opt-in to keep default review fast"
+        );
+    }
+
+    #[test]
+    fn impact_gate_result_is_never_blocking() {
+        let gate = GateResult {
+            name: "impact".to_string(),
+            status: GateStatus::Pass,
+            blocking: false,
+            details: Some("3 changed, 2 impacted: a.ts, b.ts".to_string()),
+        };
+        let results = vec![gate];
+        let (blocking, _) = tally_gate_results(&results);
+        assert_eq!(blocking, 0, "impact gate must never block review");
     }
 }
