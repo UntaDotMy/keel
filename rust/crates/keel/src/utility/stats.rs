@@ -19,9 +19,9 @@ use std::path::PathBuf;
 
 use crate::args::FlagSet;
 use crate::json::{write_indented, Value};
-use crate::runtime::{display_path, resolve_claude_home, COMMAND_COMPACTION_EVENTS_FILE_NAME};
 use crate::runner::hook_lifecycle::gate_status_rows;
 use crate::runner::telemetry::{aggregate_rows, read_rows};
+use crate::runtime::{display_path, resolve_claude_home, COMMAND_COMPACTION_EVENTS_FILE_NAME};
 use crate::utility::gain::parse_gain_summary;
 use crate::utility::recall::recall_status_snapshot;
 use crate::utility::sprint::open_stories_for_workspace;
@@ -83,7 +83,10 @@ pub fn run_stats_command(
     if flag_set.bool_value("json") {
         let payload = snapshot.to_json(days);
         if let Err(write_error) = write_indented(standard_output, &payload) {
-            let _ = writeln!(standard_error, "stats: unable to render JSON: {write_error}");
+            let _ = writeln!(
+                standard_error,
+                "stats: unable to render JSON: {write_error}"
+            );
             return 1;
         }
         return 0;
