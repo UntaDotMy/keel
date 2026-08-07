@@ -44,7 +44,7 @@ Each specialist contains three artifacts, plus an optional reference library:
 - `<name>/SKILL.md` ,  Skill definition (loaded by the harness when relevant)
 - `.claude/agents/<name>.md` ,  Subagent definition (delegation target with isolated context)
 - `<name>/agents/claude.yaml` ,  Managed profile (CLI runtime configuration)
-- `<name>/references/` ,  Deep knowledge files referenced by SKILL.md (most specialists; the narrow specialists `api-contract-design`, `postgres-migration-safety`, `react-performance-audit`, `stripe-integration`, `websocket-realtime-design`, `observability-and-incident-response`, `dependency-and-supply-chain`, `data-and-ml-engineering`, `authentication-and-identity`, `cloud-cost-and-finops`, and `internationalization-and-localization` ship a self-contained SKILL.md with no reference library)
+- `<name>/references/` ,  Deep knowledge files referenced by SKILL.md (most specialists; the narrow specialists `api-contract-design`, `postgres-migration-safety`, `react-performance-audit`, `stripe-integration`, `websocket-realtime-design`, `observability-and-incident-response`, `dependency-and-supply-chain`, `authentication-and-identity`, `cloud-cost-and-finops`, and `internationalization-and-localization` ship a self-contained SKILL.md with no reference library)
 
 Specialists (each with a paired subagent + managed profile; roster maintained by `tests/doc_parity_test.rs` and surfaced by `keel skill-lint` or the `skill_list` MCP tool): `software-development-life-cycle`, `web-development-life-cycle`, `mobile-development-life-cycle`, `backend-and-data-architecture`, `domain-driven-design`, `cloud-and-devops-expert`, `qa-and-automation-engineer`, `security-and-compliance-auditor`, `git-expert`, `preserve-existing-flow`, `reviewer`, `ui-design-systems-and-responsive-interfaces`, `ux-research-and-experience-strategy`, `memory-status-reporter`, `api-contract-design`, `react-performance-audit`, `postgres-migration-safety`, `stripe-integration`, `websocket-realtime-design`, `observability-and-incident-response`, `dependency-and-supply-chain`, `data-and-ml-engineering`, `authentication-and-identity`, `cloud-cost-and-finops`, `internationalization-and-localization`, `dart-and-flutter-expert`.
 
@@ -177,14 +177,17 @@ Each gate env var maps to a `GateMode` with **four** values: **`nudge` → non-b
 
 ### Managed Profile Schema
 
-Managed profiles (`<name>/agents/claude.yaml`) wire the `keel` runtime to specific reasoning effort and tool policy. Supported fields:
+Managed profiles (`<name>/agents/claude.yaml`) wire the `keel` runtime to a specialist's reasoning effort, interface text, and invocation policy. The CLI parser (`manager/agent_config.rs::parse_agent_config`) reads these fields:
 
 | Field | Purpose |
 |---|---|
-| `agent` | Default subagent to spawn for this profile (e.g. `Explore`, `Plan`, `general-purpose`) |
-| `maxTurns` | Maximum agentic turns per session before auto-terminating |
-| `effort` | Default effort level: `low`, `medium`, `high`, `xhigh`, `max` (ultracode = `xhigh`) |
-| `permissionMode` | Tool permission mode for the managed subagent: `default`, `acceptEdits`, `auto`, `dontAsk`, `bypassPermissions`, `plan` |
+| `reasoning_effort` | Reasoning baseline rendered as `model_reasoning_effort`: `low`, `medium`, `high`, `xhigh`, `max`. Defaults to `high` when absent. |
+| `interface.display_name` | Human-readable specialist name. |
+| `interface.short_description` | One-line description rendered as the agent `description`. |
+| `interface.default_prompt` | Required. The specialist operating prompt rendered as `developer_instructions`; missing -> parse error. |
+| `policy.allow_implicit_invocation` | Whether the profile may be invoked implicitly (`false` = explicit only). |
+
+Note: the subagent frontmatter table above (`model`, `permissionMode`, `maxTurns`, etc.) describes `.claude/agents/<name>.md`, a different artifact. Do not conflate the two schemas.
 
 ### Declarative Filter Registry
 
