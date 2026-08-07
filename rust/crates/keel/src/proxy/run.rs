@@ -348,6 +348,9 @@ pub fn run_proxy(
                 let _ = store.save_compact(&meta, &agent_output);
             }
             record_compaction_event(&meta, &compact_result, &all_findings);
+            // Housekeeping after the capture completes. Throttled and fail-open
+            // inside auto_prune, so the wrapped command is never slowed or failed.
+            store.auto_prune();
 
             if flag_set.bool_value("json") {
                 let json_result = serde_json::json!({
