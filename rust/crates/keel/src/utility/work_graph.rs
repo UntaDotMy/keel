@@ -81,11 +81,15 @@ pub fn open_work_items_for_workspace(
 /// Resolve the per-workspace work store group path, normalizing the path the same
 /// way the CLI does so the closeout gate reads the exact directory `work add` wrote.
 fn work_group_for_workspace(workspace_root: &str) -> String {
-    // Absolutize+clean so the writer (work CLI) and the reader (closeout gate)
-    // slug the SAME lane for every --workspace-root input form.
-    let normalized = resolve_repository_root(workspace_root)
-        .map(|path| display_path(&path))
-        .unwrap_or_else(|_| display_path(&std::path::PathBuf::from(workspace_root)));
+    // Absolutize+clean a RELATIVE root so writer and reader slug the same lane.
+    // A root already absolute on any platform is used as-is (see sprint.rs).
+    let normalized = if crate::runtime::is_absolute_any_platform(workspace_root) {
+        display_path(&std::path::PathBuf::from(workspace_root))
+    } else {
+        resolve_repository_root(workspace_root)
+            .map(|path| display_path(&path))
+            .unwrap_or_else(|_| display_path(&std::path::PathBuf::from(workspace_root)))
+    };
     format!("work/{}", workspace_slug(&normalized))
 }
 

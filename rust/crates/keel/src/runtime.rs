@@ -222,6 +222,20 @@ pub fn resolve_repository_root(requested_repository_root: &str) -> Result<PathBu
     Ok(clean_path(&absolute_candidate))
 }
 
+/// True when `path` is absolute on ANY platform, not just the host. `Path::is_absolute`
+/// is host-specific: a Windows drive path (`C:/x` / `D:\x`) reads as relative on Unix,
+/// which would wrongly get the current directory prepended. A leading `/` or `\`, a
+/// drive-letter prefix (`X:`), or a UNC root (`\\`) all count as absolute here so
+/// cross-platform callers never rebase an already-rooted path.
+pub fn is_absolute_any_platform(path: &str) -> bool {
+    let trimmed = path.trim();
+    if trimmed.starts_with(['/', '\\']) {
+        return true;
+    }
+    let bytes = trimmed.as_bytes();
+    bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
+}
+
 pub fn resolve_claude_home(requested_claude_home: &str) -> Result<PathBuf, String> {
     let trimmed = requested_claude_home.trim();
     if !trimmed.is_empty() {
@@ -589,6 +603,29 @@ pub fn git_short_head(repository_root: &Path) -> String {
             String::from_utf8_lossy(&result.stdout).trim().to_string()
         }
         _ => "unknown".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod absolute_any_platform_tests {
+    use super::is_absolute_any_platform;
+
+    #[test]
+    fn windows_drive_paths_count_as_absolute_on_every_platform() {
+        // why: Path::is_absolute is host-specific, so a drive path reads as
+        // relative on Unix and would get the cwd prepended, splitting the lane.
+        assert!(is_absolute_any_platform("D:/Nasri/Project/keel"));
+        assert!(is_absolute_any_platform("C:\\Users\\HP"));
+        assert!(is_absolute_any_platform("d:relative"));
+    }
+
+    #[test]
+    fn unix_and_unc_roots_count_and_relative_does_not() {
+        assert!(is_absolute_any_platform("/home/user/repo"));
+        assert!(is_absolute_any_platform("\\\\server\\share"));
+        assert!(!is_absolute_any_platform("relative/path"));
+        assert!(!is_absolute_any_platform("./dot"));
+        assert!(!is_absolute_any_platform("plain"));
     }
 }
 

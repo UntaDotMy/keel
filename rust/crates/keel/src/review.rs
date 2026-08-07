@@ -498,13 +498,15 @@ fn query_checks_gh(repo: Option<&Path>) -> CiQuery {
         Ok(result) => result,
         Err(_) => return CiQuery::Error, // gh failed to launch (absent/unexecutable).
     };
+    // `gh pr checks` signals pending/failing checks via a non-zero exit (8 for
+    // pending) while still printing the table, so parseable rows ARE the signal.
     if result.code != 0 {
-        let detail = format!(
-            "{}\n{}",
-            String::from_utf8_lossy(&result.stdout),
-            String::from_utf8_lossy(&result.stderr)
-        )
-        .to_ascii_lowercase();
+        let stdout = String::from_utf8_lossy(&result.stdout);
+        if let Some(checks) = parse_gh_checks(&stdout) {
+            return CiQuery::Checks(checks);
+        }
+        let detail =
+            format!("{}\n{}", stdout, String::from_utf8_lossy(&result.stderr)).to_ascii_lowercase();
         // The honest no-CI case: gh reached the provider and found no PR.
         // Anything else (auth, network, not-a-repo) is an error, so fail closed.
         if detail.contains("no pull requests found")
@@ -3674,6 +3676,16 @@ mod tests {
         // A populated table parses to checks.
         let checks = parse_gh_checks("NAME  STATUS\nci  success\n").expect("one check");
         assert!(matches!(evaluate_checks(&checks), CiVerdict::Green));
+    }
+
+    /// `gh pr checks` exits 8 when checks are pending while still printing the
+    /// table. A non-zero exit carrying parseable rows is signal (pending), not
+    /// an error; the gate must read the table, not fail closed on the code.
+    #[test]
+    fn gh_pending_exit_code_still_reads_the_check_table() {
+        let pending = parse_gh_checks("NAME  STATUS\nci  pending\nbuild  pass\n")
+            .expect("two checks despite a pending exit code");
+        assert!(matches!(evaluate_checks(&pending), CiVerdict::Pending));
     }
 
     /// Regression: only a PASSING review is a reviewer pass. A failed review or
