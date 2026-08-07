@@ -44,6 +44,7 @@
   dispatch plan|start|status|complete|merge|abandon|list [--workspace-root <path>] [--claude-home <path>] [--worktree-root <path>] [--json]
   telemetry summary [--days <N>] [--session <id>] [--top <N>] [--json]
   observe [--claude-home <path>] [--workspace-root <path>] [--json]
+  stats [--days <N>] [--top <N>] [--claude-home <path>] [--workspace-root <path>] [--json]
   design-intelligence recommend [request...]
   memory scope resolve [--claude-home <path>] [--workspace-root <path>] [--create-missing] [--refresh-system-map] [--format json|compact]
   memory system-map refresh [--claude-home <path>] [--workspace-root <path>] [--format json|compact]

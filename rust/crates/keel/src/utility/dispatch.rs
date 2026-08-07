@@ -539,6 +539,26 @@ fn run_merge(
         }
     };
 
+    // A dirty tree can entangle unrelated work in the merge and blocks a clean
+    // `merge --abort`, so refuse unless the current branch's tree is clean.
+    let tree_status = git(
+        &context.repo_root,
+        &["status", "--porcelain"],
+        "dispatch merge",
+        standard_error,
+    );
+    match tree_status {
+        Some(status) if status.is_empty() => {}
+        Some(_) => {
+            let _ = writeln!(
+                standard_error,
+                "dispatch merge: the current branch has uncommitted changes. Commit or stash them before merging worker {id} so a conflicted merge can be aborted to a clean tree."
+            );
+            return 1;
+        }
+        None => return 1,
+    }
+
     let merge_args: Vec<String> = vec![
         "merge".into(),
         "--no-ff".into(),

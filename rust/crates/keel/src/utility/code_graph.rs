@@ -167,16 +167,14 @@ fn resolve_root(
     label: &str,
     standard_error: &mut dyn Write,
 ) -> Option<PathBuf> {
-    let root = if workspace_root.is_empty() {
-        match resolve_repository_root("") {
-            Ok(path) => path,
-            Err(_) => {
-                let _ = writeln!(standard_error, "{label}: no repository root found");
-                return None;
-            }
+    // Absolutize+clean every root so a relative or odd-form --workspace-root
+    // slugs to the same per-workspace lane as the absolute form.
+    let root = match resolve_repository_root(workspace_root) {
+        Ok(path) => path,
+        Err(_) => {
+            let _ = writeln!(standard_error, "{label}: no repository root found");
+            return None;
         }
-    } else {
-        PathBuf::from(workspace_root)
     };
     if !root.is_dir() {
         let _ = writeln!(
@@ -496,6 +494,70 @@ impl CodeGraph {
             "edges": edges,
         })
     }
+
+    /// Read a cached artifact back into a graph. Returns `None` on any error
+    /// (missing file, invalid JSON, wrong version) so callers fail open.
+    pub fn from_json_file(path: &Path) -> Option<Self> {
+        let text = fs::read_to_string(path).ok()?;
+        let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+        let version = value.get("version")?.as_u64()?;
+        if version != GRAPH_VERSION {
+            return None;
+        }
+        let nodes: Vec<Node> = value
+            .get("nodes")?
+            .as_array()?
+            .iter()
+            .filter_map(|n| {
+                Some(Node {
+                    id: n.get("id")?.as_str()?.to_string(),
+                    lang: match n.get("lang")?.as_str()? {
+                        "rust" => "rust",
+                        "javascript" => "javascript",
+                        "typescript" => "typescript",
+                        "python" => "python",
+                        "go" => "go",
+                        _ => return None,
+                    },
+                    defines: n
+                        .get("defines")?
+                        .as_array()?
+                        .iter()
+                        .filter_map(|d| d.as_str().map(String::from))
+                        .collect(),
+                    imports: n
+                        .get("imports")?
+                        .as_array()?
+                        .iter()
+                        .filter_map(|i| i.as_str().map(String::from))
+                        .collect(),
+                })
+            })
+            .collect();
+        let edges: Vec<Edge> = value
+            .get("edges")?
+            .as_array()?
+            .iter()
+            .filter_map(|e| {
+                Some(Edge {
+                    from: e.get("from")?.as_str()?.to_string(),
+                    to: e.get("to")?.as_str()?.to_string(),
+                    kind: "imports",
+                })
+            })
+            .collect();
+        Some(CodeGraph {
+            root: PathBuf::new(),
+            nodes,
+            edges,
+        })
+    }
+}
+
+/// Resolve the default cached artifact path for a workspace root. Public so
+/// review can locate the graph without duplicating the lane logic.
+pub fn cached_artifact_path(root: &Path, claude_home_flag: &str) -> Option<PathBuf> {
+    resolve_artifact_path(root, "", claude_home_flag).ok()
 }
 
 /// Forward-slash and trim a relative path to a stable cross-platform id.
@@ -1085,6 +1147,54 @@ mod tests {
             !graph.nodes.iter().any(|n| n.id.contains("node_modules/")),
             "node_modules/ must be pruned"
         );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn from_json_file_round_trips_and_impact_works() {
+        let root = tempdir("roundtrip");
+        write(&root, "c.ts", "export const c = 1;\n");
+        write(
+            &root,
+            "b.ts",
+            "import { c } from './c';\nexport const b = c;\n",
+        );
+        write(
+            &root,
+            "a.ts",
+            "import { b } from './b';\nexport const a = b;\n",
+        );
+
+        let graph = build_graph(&root);
+        let json = graph.to_json();
+        let artifact = root.join("code-graph.json");
+        fs::write(&artifact, serde_json::to_string_pretty(&json).unwrap()).unwrap();
+
+        let loaded = CodeGraph::from_json_file(&artifact).expect("round-trip");
+        let impacted = loaded.impact_of(&["c.ts".to_string()]);
+        assert_eq!(impacted, vec!["a.ts".to_string(), "b.ts".to_string()]);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn from_json_file_returns_none_for_missing_or_invalid() {
+        let root = tempdir("failopen");
+        let missing = root.join("nonexistent.json");
+        assert!(CodeGraph::from_json_file(&missing).is_none());
+
+        let invalid = root.join("bad.json");
+        fs::write(&invalid, "not json").unwrap();
+        assert!(CodeGraph::from_json_file(&invalid).is_none());
+
+        let wrong_version = root.join("v999.json");
+        fs::write(
+            &wrong_version,
+            r#"{"version": 999, "nodes": [], "edges": []}"#,
+        )
+        .unwrap();
+        assert!(CodeGraph::from_json_file(&wrong_version).is_none());
 
         let _ = fs::remove_dir_all(root);
     }

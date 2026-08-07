@@ -106,19 +106,17 @@ fn run_system_map_refresh(
         return 1;
     }
     let workspace_root_value = flag_set.string_value("workspace-root");
-    let workspace_root = if workspace_root_value.is_empty() {
-        match resolve_repository_root("") {
-            Ok(path) => path,
-            Err(_) => {
-                let _ = writeln!(
-                    standard_error,
-                    "{command_group} system-map refresh: no repository root found"
-                );
-                return 1;
-            }
+    // Absolutize+clean default AND explicit roots so a relative --workspace-root
+    // resolves to the same reference lane as the absolute form (see code_graph).
+    let workspace_root = match resolve_repository_root(workspace_root_value) {
+        Ok(path) => path,
+        Err(_) => {
+            let _ = writeln!(
+                standard_error,
+                "{command_group} system-map refresh: no repository root found"
+            );
+            return 1;
         }
-    } else {
-        PathBuf::from(workspace_root_value)
     };
     let Some(claude_home) = resolve_claude_home(flag_set.string_value("claude-home")).ok() else {
         let _ = writeln!(

@@ -80,7 +80,15 @@ pub fn open_stories_for_workspace(
 /// the exact directory `sprint plan` wrote — separator/case differences between
 /// the timing-row cwd and the CLI `--workspace-root` cannot split them.
 fn sprint_group_for_workspace(workspace_root: &str) -> String {
-    let normalized = display_path(&std::path::PathBuf::from(workspace_root));
+    // Absolutize+clean a RELATIVE root so writer and reader slug the same lane;
+    // a root already absolute on any platform is used as-is, never rebased.
+    let normalized = if crate::runtime::is_absolute_any_platform(workspace_root) {
+        display_path(&std::path::PathBuf::from(workspace_root))
+    } else {
+        resolve_repository_root(workspace_root)
+            .map(|path| display_path(&path))
+            .unwrap_or_else(|_| display_path(&std::path::PathBuf::from(workspace_root)))
+    };
     format!("sprint/{}", workspace_slug(&normalized))
 }
 
@@ -149,14 +157,9 @@ fn resolve_store(
             return None;
         }
     };
-    let root = if workspace_root.is_empty() {
-        resolve_repository_root("").unwrap_or_else(|_| std::path::PathBuf::from("."))
-    } else {
-        std::path::PathBuf::from(workspace_root)
-    };
     Some(RecordStore::new(
         &claude_home,
-        &sprint_group_for_workspace(&display_path(&root)),
+        &sprint_group_for_workspace(workspace_root),
     ))
 }
 

@@ -191,35 +191,44 @@ pub fn run_doctor_command(
     0
 }
 
-/// PIDs of running `keel mcp serve` processes other than the caller's own. A
-/// dropped Grok/Claude session leaves these as orphans; each holds the recall
-/// SQLite WAL and is the root cause of intermittent MCP tool timeouts. The
-/// caller's own PID is always excluded so `doctor` never targets the live
-/// session serving it.
+/// PIDs of running `keel mcp serve` processes whose owning harness session has
+/// died. A dropped Grok/Claude session leaves these as orphans; each holds the
+/// recall SQLite WAL and is the root cause of intermittent MCP tool timeouts.
+///
+/// Orphan means the parent harness process is gone, not merely "not the
+/// caller's PID": keel runs one `mcp serve` per live session, so a healthy
+/// server owned by another running session must never be flagged. Otherwise
+/// `doctor --fix` would `taskkill` a live, in-use server. The caller's own PID
+/// is excluded as well. A PID whose parent cannot be determined is treated as
+/// alive, because a false orphan leads to killing a healthy server.
 fn find_orphan_mcp_serve_pids() -> Vec<u32> {
     let own_pid = std::process::id();
-    running_mcp_serve_pids()
+    running_mcp_serve_pids_with_ppid()
         .into_iter()
-        .filter(|pid| *pid != own_pid)
+        .filter(|(pid, _)| *pid != own_pid)
+        .filter(|(_, ppid)| !parent_is_alive(*ppid))
+        .map(|(pid, _)| pid)
         .collect()
 }
 
-/// Enumerate `keel mcp serve` PIDs via the OS process table. Windows uses WMIC/
-/// PowerShell CIM; Unix uses `ps`. Returns an empty vec on any probe failure; the
-/// orphan check is advisory and must never fail the doctor run.
+/// Enumerate `keel mcp serve` processes as `(pid, parent_pid)` pairs via the OS
+/// process table. Windows uses PowerShell CIM; Unix uses `ps`. Returns an empty
+/// vec on any probe failure; the orphan check is advisory and must never fail
+/// the doctor run. A parent pid of 0 means "unknown" (conservatively treated as
+/// alive by [`parent_is_alive`]).
 #[cfg(windows)]
-fn running_mcp_serve_pids() -> Vec<u32> {
+fn running_mcp_serve_pids_with_ppid() -> Vec<(u32, u32)> {
     let output = Command::new("powershell")
         .args([
             "-NoProfile",
             "-NonInteractive",
             "-Command",
-            "Get-CimInstance Win32_Process -Filter \"Name='keel.exe'\" | Where-Object { $_.CommandLine -match 'mcp serve' } | ForEach-Object { $_.ProcessId }",
+            "Get-CimInstance Win32_Process -Filter \"Name='keel.exe'\" | Where-Object { $_.CommandLine -match 'mcp serve' } | ForEach-Object { \"$($_.ProcessId) $($_.ParentProcessId)\" }",
         ])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .output();
-    parse_pid_listing(
+    parse_pid_ppid_listing(
         output
             .ok()
             .map(|o| String::from_utf8_lossy(&o.stdout).to_string()),
@@ -227,28 +236,78 @@ fn running_mcp_serve_pids() -> Vec<u32> {
 }
 
 #[cfg(not(windows))]
-fn running_mcp_serve_pids() -> Vec<u32> {
+fn running_mcp_serve_pids_with_ppid() -> Vec<(u32, u32)> {
     let output = Command::new("sh")
         .args([
             "-c",
-            "ps -eo pid,args | grep '[k]eel mcp serve' | awk '{print $1}'",
+            "ps -eo pid=,ppid=,args | grep '[k]eel mcp serve' | awk '{print $1\" \"$2}'",
         ])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .output();
-    parse_pid_listing(
+    parse_pid_ppid_listing(
         output
             .ok()
             .map(|o| String::from_utf8_lossy(&o.stdout).to_string()),
     )
 }
 
-fn parse_pid_listing(listing: Option<String>) -> Vec<u32> {
+fn parse_pid_ppid_listing(listing: Option<String>) -> Vec<(u32, u32)> {
     listing
         .unwrap_or_default()
         .lines()
-        .filter_map(|line| line.trim().parse::<u32>().ok())
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            let pid = parts.next()?.trim().parse::<u32>().ok()?;
+            let ppid = parts
+                .next()
+                .and_then(|p| p.trim().parse::<u32>().ok())
+                .unwrap_or(0);
+            Some((pid, ppid))
+        })
         .collect()
+}
+
+/// Whether the parent harness process is still alive. Unknown parents (ppid 0
+/// or a failed probe) count as alive so a healthy server is never killed on
+/// inconclusive evidence.
+#[cfg(windows)]
+fn parent_is_alive(ppid: u32) -> bool {
+    if ppid == 0 {
+        return true; // Unknown parent: assume alive, never kill on doubt.
+    }
+    Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &format!("if (Get-Process -Id {ppid} -ErrorAction SilentlyContinue) {{ 'alive' }}"),
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains("alive"))
+        // Probe failure: assume alive rather than kill on doubt.
+        .unwrap_or(true)
+}
+
+#[cfg(not(windows))]
+fn parent_is_alive(ppid: u32) -> bool {
+    if ppid == 0 {
+        return true; // Unknown parent: assume alive, never kill on doubt.
+    }
+    if ppid == 1 {
+        return false; // Reparented to init/launchd: the harness parent is gone.
+    }
+    // kill -0 probes existence without signalling; failure (no such process)
+    // means the parent is gone. A probe error (None) is treated as alive.
+    Command::new("kill")
+        .args(["-0", &ppid.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(true)
 }
 
 /// Terminate the given PIDs, returning how many were actually reaped. Used only
@@ -742,11 +801,14 @@ mod tests {
     }
 
     #[test]
-    fn parse_pid_listing_reads_numeric_lines_and_skips_noise() {
-        let pids = parse_pid_listing(Some("1234\n  5678 \nnot-a-pid\n\n90\n".to_string()));
-        assert_eq!(pids, vec![1234, 5678, 90]);
-        assert!(parse_pid_listing(None).is_empty());
-        assert!(parse_pid_listing(Some(String::new())).is_empty());
+    fn parse_pid_ppid_listing_reads_pairs_and_skips_noise() {
+        let pairs = parse_pid_ppid_listing(Some(
+            "1234 100\n  5678   200 \nnot-a-pid x\n\n90\n".to_string(),
+        ));
+        // "90" has no parent token -> ppid defaults to 0 (unknown -> treated alive).
+        assert_eq!(pairs, vec![(1234, 100), (5678, 200), (90, 0)]);
+        assert!(parse_pid_ppid_listing(None).is_empty());
+        assert!(parse_pid_ppid_listing(Some(String::new())).is_empty());
     }
 
     #[test]
@@ -759,6 +821,39 @@ mod tests {
             .filter(|p| *p != own)
             .collect();
         assert!(!filtered.contains(&own));
+    }
+
+    #[test]
+    fn unknown_parent_is_treated_as_alive_never_orphaned() {
+        // why: inconclusive parent evidence must resolve to alive, or a false
+        // orphan gets a healthy live server killed.
+        assert!(parent_is_alive(0));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn reparented_to_init_is_orphaned_on_unix() {
+        // why: on Unix a process whose harness parent died is reparented to
+        // init/launchd (ppid 1), the only unambiguous orphan signal.
+        assert!(!parent_is_alive(1));
+    }
+
+    #[test]
+    fn orphan_detection_keeps_live_and_unknown_parents() {
+        // why: the filter must drop the caller's own PID and any live-or-unknown
+        // parent, flagging only confirmed-dead parents.
+        let own = std::process::id();
+        let table: Vec<(u32, u32)> = vec![
+            (own, 0),  // Own PID: excluded regardless of parent.
+            (5000, 0), // Unknown parent -> alive -> keep out.
+        ];
+        let orphans: Vec<u32> = table
+            .into_iter()
+            .filter(|(pid, _)| *pid != own)
+            .filter(|(_, ppid)| !parent_is_alive(*ppid))
+            .map(|(pid, _)| pid)
+            .collect();
+        assert!(orphans.is_empty(), "no live/unknown parent may be orphaned");
     }
 
     #[test]

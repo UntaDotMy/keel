@@ -17,6 +17,35 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 /// an unbounded stream to disk. Matches the capture cap.
 const MAX_RAW_WRITE_BYTES: usize = 64 * 1024 * 1024;
 
+/// Default raw-output retention when neither the plugin userConfig knob nor the
+/// operator env var is set. Mirrors RAW_OUTPUT_DEFAULT_RETENTION_DAYS used by
+/// the SessionEnd prune in runner::hook_lifecycle; both read the same override
+/// vars so manual, session-end, and auto prune agree on the bound.
+const RAW_AUTO_PRUNE_DEFAULT_RETENTION_DAYS: u64 = 14;
+
+/// Minimum wall-clock gap between auto-prune sweeps on the capture hot path.
+/// The store ages by whole days, so sweeping more often than a few hours buys
+/// nothing; a stamp file under the store root throttles repeat runs.
+const RAW_AUTO_PRUNE_INTERVAL_SECS: u64 = 6 * 60 * 60;
+
+/// Resolve the raw-output retention in days using the same precedence as the
+/// SessionEnd prune: plugin userConfig env, then the operator env var, then the
+/// default. `0` disables pruning. Kept local so the proxy hot path does not
+/// depend on the runner module.
+fn raw_auto_prune_retention_days() -> u64 {
+    for var in [
+        "CLAUDE_PLUGIN_OPTION_MEMORY_RETENTION_DAYS",
+        "CLAUDE_SKILLS_RAW_RETENTION_DAYS",
+    ] {
+        if let Ok(value) = std::env::var(var) {
+            if let Ok(parsed) = value.trim().parse::<u64>() {
+                return parsed;
+            }
+        }
+    }
+    RAW_AUTO_PRUNE_DEFAULT_RETENTION_DAYS
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunMeta {
     pub raw_id: String,
@@ -227,6 +256,52 @@ impl RawStore {
         }
         Ok(removed)
     }
+
+    /// Age-based prune for the capture hot path. Throttled to at most one sweep
+    /// per RAW_AUTO_PRUNE_INTERVAL_SECS via a stamp file under the store root,
+    /// and fail-open: a prune or stamp error never reaches the caller, so a
+    /// housekeeping failure cannot fail or block the wrapped command. Uses the
+    /// same `prune_older_than` the manual `raw prune` command uses, so manual,
+    /// session-end, and auto prune never drift.
+    pub fn auto_prune(&self) {
+        let retention_days = raw_auto_prune_retention_days();
+        if retention_days == 0 {
+            return;
+        }
+        if !self.prune_stamp_due() {
+            return;
+        }
+        let _ = self.prune_older_than(retention_days);
+        self.write_prune_stamp();
+    }
+
+    /// True when no fresh stamp exists, meaning a sweep is due. A missing or
+    /// unreadable stamp counts as due so a first run prunes.
+    fn prune_stamp_due(&self) -> bool {
+        let stamp = self.root.join(".last-auto-prune");
+        let Ok(contents) = fs::read_to_string(&stamp) else {
+            return true;
+        };
+        let Ok(secs) = contents.trim().parse::<u64>() else {
+            return true;
+        };
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        now.saturating_sub(secs) >= RAW_AUTO_PRUNE_INTERVAL_SECS
+    }
+
+    fn write_prune_stamp(&self) {
+        if fs::create_dir_all(&self.root).is_err() {
+            return;
+        }
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let _ = fs::write(self.root.join(".last-auto-prune"), now.to_string());
+    }
 }
 
 /// Resolve an age signal for a raw entry path: parent `YYYY-MM-DD` folder midnight
@@ -427,5 +502,130 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Serialize the auto-prune tests that mutate the shared retention env vars
+    /// so parallel test threads do not observe each other's override.
+    static AUTO_PRUNE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    const RETENTION_ENV_VARS: [&str; 2] = [
+        "CLAUDE_PLUGIN_OPTION_MEMORY_RETENTION_DAYS",
+        "CLAUDE_SKILLS_RAW_RETENTION_DAYS",
+    ];
+
+    /// Set the operator retention env var, run the closure, restore prior state.
+    /// Caller must hold AUTO_PRUNE_ENV_LOCK.
+    fn with_retention_env<F: FnOnce() -> R, R>(value: Option<&str>, run: F) -> R {
+        let previous: Vec<Option<String>> = RETENTION_ENV_VARS
+            .iter()
+            .map(|var| std::env::var(var).ok())
+            .collect();
+        std::env::remove_var(RETENTION_ENV_VARS[0]);
+        match value {
+            Some(v) => std::env::set_var(RETENTION_ENV_VARS[1], v),
+            None => std::env::remove_var(RETENTION_ENV_VARS[1]),
+        }
+        let result = run();
+        for (index, var) in RETENTION_ENV_VARS.iter().enumerate() {
+            match &previous[index] {
+                Some(v) => std::env::set_var(var, v),
+                None => std::env::remove_var(var),
+            }
+        }
+        result
+    }
+
+    fn auto_prune_root(tag: &str) -> PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("keel-raw-auto-prune-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        root
+    }
+
+    /// Write one raw entry under a synthetic logical day so the prune ages it by
+    /// the date folder, independent of filesystem mtime.
+    fn write_dated_entry(root: &std::path::Path, day: &str, id: &str) -> PathBuf {
+        let dir = root.join(day).join(id);
+        std::fs::create_dir_all(&dir).expect("entry dir");
+        std::fs::write(dir.join("stdout.log"), b"x").expect("stdout");
+        dir
+    }
+
+    #[test]
+    fn auto_prune_removes_stale_keeps_fresh() {
+        let _guard = AUTO_PRUNE_ENV_LOCK.lock().unwrap();
+        with_retention_env(Some("14"), || {
+            let root = auto_prune_root("stale");
+            let store = RawStore::with_root(root.clone());
+            let stale = write_dated_entry(&root, "2001-02-03", "stale-id");
+            let fresh = write_dated_entry(&root, "2099-01-01", "fresh-id");
+            store.auto_prune();
+            assert!(!stale.exists(), "stale entry removed by auto prune");
+            assert!(fresh.exists(), "fresh entry kept by auto prune");
+            let _ = std::fs::remove_dir_all(&root);
+        });
+    }
+
+    #[test]
+    fn auto_prune_disabled_when_retention_is_zero() {
+        let _guard = AUTO_PRUNE_ENV_LOCK.lock().unwrap();
+        with_retention_env(Some("0"), || {
+            let root = auto_prune_root("disabled");
+            let store = RawStore::with_root(root.clone());
+            let ancient = write_dated_entry(&root, "2001-02-03", "ancient-id");
+            store.auto_prune();
+            assert!(
+                ancient.exists(),
+                "retention=0 must disable the auto prune even for an ancient entry"
+            );
+            let _ = std::fs::remove_dir_all(&root);
+        });
+    }
+
+    #[test]
+    fn auto_prune_throttles_to_once_per_interval() {
+        let _guard = AUTO_PRUNE_ENV_LOCK.lock().unwrap();
+        with_retention_env(Some("14"), || {
+            let root = auto_prune_root("throttle");
+            let store = RawStore::with_root(root.clone());
+            let stamp = root.join(".last-auto-prune");
+            std::fs::create_dir_all(&root).expect("root");
+            // A fresh stamp (now) means a sweep is not due, so even a stale
+            // entry survives this call.
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            std::fs::write(&stamp, now.to_string()).expect("write fresh stamp");
+            let stale = write_dated_entry(&root, "2001-02-03", "stale-id");
+            store.auto_prune();
+            assert!(
+                stale.exists(),
+                "a fresh stamp must throttle the sweep within the interval"
+            );
+
+            // An old stamp (older than the interval) means a sweep is due.
+            let old = now.saturating_sub(super::RAW_AUTO_PRUNE_INTERVAL_SECS + 60);
+            std::fs::write(&stamp, old.to_string()).expect("write old stamp");
+            store.auto_prune();
+            assert!(
+                !stale.exists(),
+                "an expired stamp must let the sweep run again"
+            );
+            let _ = std::fs::remove_dir_all(&root);
+        });
+    }
+
+    #[test]
+    fn auto_prune_fails_open_when_store_is_unwritable() {
+        let _guard = AUTO_PRUNE_ENV_LOCK.lock().unwrap();
+        with_retention_env(Some("14"), || {
+            // A store root that cannot be created or listed must not panic or
+            // return an error to the caller: auto_prune returns ().
+            let root = auto_prune_root("missing").join("does-not-exist");
+            let store = RawStore::with_root(root.clone());
+            store.auto_prune();
+            let _ = std::fs::remove_dir_all(&root);
+        });
     }
 }

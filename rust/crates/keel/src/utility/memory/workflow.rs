@@ -437,6 +437,16 @@ fn run_workflow_finish(
         );
         return 1;
     }
+    // `finish` is the proof-first closeout: closing with no evidence would let
+    // work present as done with nothing to reconcile against.
+    let proof = flag_set.string_value("proof").trim().to_string();
+    if proof.is_empty() {
+        let _ = writeln!(
+            standard_error,
+            "workflow finish: --proof is required (the evidence that the work is done, e.g. --proof \"cargo test green, review pre-pr pass\")"
+        );
+        return 1;
+    }
     let claude_home = match resolve_claude_home(flag_set.string_value("claude-home")) {
         Ok(path) => path,
         Err(error) => {
@@ -467,11 +477,7 @@ fn run_workflow_finish(
         return 1;
     }
     let now_millis = current_timestamp_millis();
-    let closed = close_entry(
-        existing,
-        format_timestamp_iso8601(now_millis),
-        flag_set.string_value("proof").trim().to_string(),
-    );
+    let closed = close_entry(existing, format_timestamp_iso8601(now_millis), proof);
     let path = match write_entry(&claude_home, &closed) {
         Ok(path) => path,
         Err(error) => {
