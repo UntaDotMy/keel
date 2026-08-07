@@ -14,7 +14,7 @@ use crate::args::FlagSet;
 use crate::runtime::{
     display_path, resolve_claude_home, resolve_repository_root, run_command, safe_path_segment,
 };
-use crate::utility::record_store::{field, Record, RecordStore};
+use crate::utility::record_store::{allocate_unique_record_id, field, Record, RecordStore};
 
 /// Tmux session prefix for keel team workers.
 const TMUX_SESSION_PREFIX: &str = "keel-team-";
@@ -22,6 +22,10 @@ const TMUX_SESSION_PREFIX: &str = "keel-team-";
 /// Worker states mirrored from dispatch.rs pattern.
 const STATE_RUNNING: &str = "running";
 const STATE_KILLED: &str = "killed";
+
+/// Message lifecycle states for the team bus.
+const MSG_PENDING: &str = "pending";
+const MSG_ACKED: &str = "acked";
 
 /// CLI: `keel team <spawn|status|kill|list> [flags]`.
 pub fn run_team_command(
@@ -38,6 +42,10 @@ pub fn run_team_command(
         "spawn" => run_spawn(&arguments[1..], standard_output, standard_error),
         "status" | "list" => run_status(&arguments[1..], standard_output, standard_error),
         "kill" => run_kill(&arguments[1..], standard_output, standard_error),
+        "send" => run_send(&arguments[1..], standard_output, standard_error),
+        "get" => run_get(&arguments[1..], standard_output, standard_error),
+        "ack" => run_ack(&arguments[1..], standard_output, standard_error),
+        "inbox" => run_inbox(&arguments[1..], standard_output, standard_error),
         other => {
             let _ = writeln!(standard_error, "team: unknown subcommand: {other}");
             render_help(standard_error);
@@ -49,7 +57,7 @@ pub fn run_team_command(
 fn render_help(standard_output: &mut dyn Write) {
     let _ = writeln!(
         standard_output,
-        "Usage: keel team <spawn|status|kill|list> [flags]\n\
+        "Usage: keel team <spawn|status|kill|list|send|get|ack|inbox> [flags]\n\
          \n\
          spawn     Spawn a named tmux pane running claude with a prompt.\n\
          \x20          --name <name> --prompt \"<prompt>\" [--claude-home <path>]\n\
@@ -58,8 +66,16 @@ fn render_help(standard_output: &mut dyn Write) {
          kill      Kill a specific team pane by name.\n\
          \x20          --name <name> [--claude-home <path>] [--json]\n\
          list      Alias for status.\n\
+         send      Send a durable message to a worker's inbox.\n\
+         \x20          --to <name> --message \"<text>\" [--from <name>] [--workspace-root <path>]\n\
+         get       List a worker's pending messages (does not mark them read).\n\
+         \x20          --name <name> [--workspace-root <path>] [--json]\n\
+         ack       Mark one message acked (pending -> acked).\n\
+         \x20          --name <name> --id <msg-id> [--workspace-root <path>]\n\
+         inbox     Show pending message counts per worker.\n\
+         \x20          [--workspace-root <path>] [--json]\n\
          \n\
-         Common flags: --claude-home <path>  --json"
+         Common flags: --claude-home <path>  --workspace-root <path>  --json"
     );
 }
 
@@ -88,6 +104,7 @@ fn workspace_slug(path: &str) -> String {
 /// projects never share a team board.
 fn resolve_store(
     claude_home_flag: &str,
+    workspace_root: &str,
     standard_error: &mut dyn Write,
 ) -> Option<(RecordStore, String)> {
     let home = match resolve_claude_home(claude_home_flag) {
@@ -97,7 +114,12 @@ fn resolve_store(
             return None;
         }
     };
-    let repo_root = match resolve_repository_root(".") {
+    let root = if workspace_root.trim().is_empty() {
+        "."
+    } else {
+        workspace_root.trim()
+    };
+    let repo_root = match resolve_repository_root(root) {
         Ok(path) => path,
         Err(error) => {
             let _ = writeln!(standard_error, "team: {error}");
@@ -198,6 +220,7 @@ fn run_spawn(
     flags.string_flag("name", "");
     flags.string_flag("prompt", "");
     flags.string_flag("claude-home", "");
+    flags.string_flag("workspace-root", "");
     flags.bool_flag("json", false);
     if let Err(parse_error) = flags.parse(arguments) {
         let _ = writeln!(standard_error, "team spawn: {}", parse_error.message);
@@ -217,8 +240,11 @@ fn run_spawn(
         return 1;
     }
 
-    let Some((store, _slug)) = resolve_store(flags.string_value("claude-home"), standard_error)
-    else {
+    let Some((store, _slug)) = resolve_store(
+        flags.string_value("claude-home"),
+        flags.string_value("workspace-root"),
+        standard_error,
+    ) else {
         return 1;
     };
 
@@ -325,14 +351,18 @@ fn run_status(
 ) -> u8 {
     let mut flags = FlagSet::new("team status");
     flags.string_flag("claude-home", "");
+    flags.string_flag("workspace-root", "");
     flags.bool_flag("json", false);
     if let Err(parse_error) = flags.parse(arguments) {
         let _ = writeln!(standard_error, "team status: {}", parse_error.message);
         return 1;
     }
 
-    let Some((store, _slug)) = resolve_store(flags.string_value("claude-home"), standard_error)
-    else {
+    let Some((store, _slug)) = resolve_store(
+        flags.string_value("claude-home"),
+        flags.string_value("workspace-root"),
+        standard_error,
+    ) else {
         return 1;
     };
 
@@ -423,6 +453,7 @@ fn run_kill(
     let mut flags = FlagSet::new("team kill");
     flags.string_flag("name", "");
     flags.string_flag("claude-home", "");
+    flags.string_flag("workspace-root", "");
     flags.bool_flag("json", false);
     if let Err(parse_error) = flags.parse(arguments) {
         let _ = writeln!(standard_error, "team kill: {}", parse_error.message);
@@ -434,8 +465,11 @@ fn run_kill(
         None => return 1,
     };
 
-    let Some((store, _slug)) = resolve_store(flags.string_value("claude-home"), standard_error)
-    else {
+    let Some((store, _slug)) = resolve_store(
+        flags.string_value("claude-home"),
+        flags.string_value("workspace-root"),
+        standard_error,
+    ) else {
         return 1;
     };
 
@@ -513,6 +547,350 @@ fn run_kill(
         );
         0
     }
+}
+
+/// Millisecond timestamp used for message `sent_at` and the id base.
+fn now_millis() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0)
+}
+
+/// Append a durable pending message to `to`'s inbox. Returns the allocated id.
+/// Ids come from `allocate_unique_record_id` so two sends in the same
+/// millisecond never collide (the count+1 race).
+fn bus_send(store: &RecordStore, to: &str, from: &str, body: &str) -> Result<String, String> {
+    let base = format!("msg-{:x}", now_millis());
+    let id = allocate_unique_record_id(store, &base);
+    let record: Record = vec![
+        ("id".into(), id.clone()),
+        ("to".into(), to.to_string()),
+        ("from".into(), from.to_string()),
+        ("body".into(), body.to_string()),
+        ("sent_at".into(), now_millis().to_string()),
+        ("status".into(), MSG_PENDING.into()),
+    ];
+    store
+        .write_record(&id, &record)
+        .map(|_| id)
+        .map_err(|error| error.to_string())
+}
+
+/// List pending messages for `to`, oldest first. Read-only: no state change.
+fn bus_pending(store: &RecordStore, to: &str) -> Result<Vec<(String, Record)>, String> {
+    let records = store.list_records().map_err(|error| error.to_string())?;
+    let mut pending: Vec<(String, Record)> = records
+        .into_iter()
+        .filter(|(_, record)| field(record, "to") == Some(to))
+        .filter(|(_, record)| field(record, "status") == Some(MSG_PENDING))
+        .collect();
+    pending.sort_by_key(|(_, record)| {
+        field(record, "sent_at")
+            .and_then(|value| value.parse::<u128>().ok())
+            .unwrap_or(0)
+    });
+    Ok(pending)
+}
+
+/// Transition one message from pending to acked. Fails when the id is unknown
+/// or not a message for `to`.
+fn bus_ack(store: &RecordStore, to: &str, id: &str) -> Result<(), String> {
+    let record = match store.read_record(id).map_err(|error| error.to_string())? {
+        Some(record) => record,
+        None => return Err(format!("unknown message id {id}")),
+    };
+    if field(&record, "to") != Some(to) {
+        return Err(format!("message {id} is not addressed to {to}"));
+    }
+    let mut updated = record;
+    if let Some(slot) = updated.iter_mut().find(|(key, _)| key == "status") {
+        slot.1 = MSG_ACKED.to_string();
+    }
+    store
+        .write_record(id, &updated)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+/// Pending message count per recipient, for the orchestrator inbox view.
+fn bus_inbox_counts(store: &RecordStore) -> Result<Vec<(String, usize)>, String> {
+    let records = store.list_records().map_err(|error| error.to_string())?;
+    let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for (_, record) in records {
+        if field(&record, "status") != Some(MSG_PENDING) {
+            continue;
+        }
+        let to = field(&record, "to").unwrap_or("").to_string();
+        if to.is_empty() {
+            continue;
+        }
+        *counts.entry(to).or_insert(0) += 1;
+    }
+    Ok(counts.into_iter().collect())
+}
+
+/// Send: append a durable message to a worker's inbox.
+fn run_send(
+    arguments: &[String],
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let mut flags = FlagSet::new("team send");
+    flags.string_flag("to", "");
+    flags.string_flag("message", "");
+    flags.string_flag("from", "");
+    flags.string_flag("claude-home", "");
+    flags.string_flag("workspace-root", "");
+    flags.bool_flag("json", false);
+    if let Err(parse_error) = flags.parse(arguments) {
+        let _ = writeln!(standard_error, "team send: {}", parse_error.message);
+        return 1;
+    }
+    let to = match validate_name(flags.string_value("to"), "team send", standard_error) {
+        Some(name) => name,
+        None => return 1,
+    };
+    let message = flags.string_value("message").to_string();
+    if message.trim().is_empty() {
+        let _ = writeln!(standard_error, "team send: --message is required");
+        return 1;
+    }
+    let from = {
+        let raw = flags.string_value("from").trim();
+        if raw.is_empty() {
+            "orchestrator".to_string()
+        } else {
+            raw.to_string()
+        }
+    };
+    let Some((store, _slug)) = resolve_store(
+        flags.string_value("claude-home"),
+        flags.string_value("workspace-root"),
+        standard_error,
+    ) else {
+        return 1;
+    };
+    match bus_send(&store, &to, &from, &message) {
+        Ok(id) => {
+            if flags.bool_value("json") {
+                let payload = serde_json::json!({
+                    "sent": true,
+                    "id": id,
+                    "to": to,
+                    "from": from,
+                    "status": MSG_PENDING,
+                });
+                match serde_json::to_string_pretty(&payload) {
+                    Ok(text) => {
+                        let _ = writeln!(standard_output, "{text}");
+                    }
+                    Err(error) => {
+                        let _ = writeln!(standard_error, "team send: json: {error}");
+                        return 1;
+                    }
+                }
+            } else {
+                let _ = writeln!(standard_output, "team send: message {id} queued for {to}");
+            }
+            0
+        }
+        Err(error) => {
+            let _ = writeln!(standard_error, "team send: {error}");
+            1
+        }
+    }
+}
+
+/// Get: list a worker's pending messages without marking them read.
+fn run_get(
+    arguments: &[String],
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let mut flags = FlagSet::new("team get");
+    flags.string_flag("name", "");
+    flags.string_flag("claude-home", "");
+    flags.string_flag("workspace-root", "");
+    flags.bool_flag("json", false);
+    if let Err(parse_error) = flags.parse(arguments) {
+        let _ = writeln!(standard_error, "team get: {}", parse_error.message);
+        return 1;
+    }
+    let name = match validate_name(flags.string_value("name"), "team get", standard_error) {
+        Some(name) => name,
+        None => return 1,
+    };
+    let Some((store, _slug)) = resolve_store(
+        flags.string_value("claude-home"),
+        flags.string_value("workspace-root"),
+        standard_error,
+    ) else {
+        return 1;
+    };
+    let pending = match bus_pending(&store, &name) {
+        Ok(pending) => pending,
+        Err(error) => {
+            let _ = writeln!(standard_error, "team get: {error}");
+            return 1;
+        }
+    };
+    if flags.bool_value("json") {
+        let items: Vec<serde_json::Value> = pending
+            .iter()
+            .map(|(id, record)| {
+                serde_json::json!({
+                    "id": id,
+                    "to": field(record, "to").unwrap_or(""),
+                    "from": field(record, "from").unwrap_or(""),
+                    "body": field(record, "body").unwrap_or(""),
+                    "sent_at": field(record, "sent_at").unwrap_or(""),
+                    "status": field(record, "status").unwrap_or(MSG_PENDING),
+                })
+            })
+            .collect();
+        let payload = serde_json::json!({ "name": name, "pending": items });
+        match serde_json::to_string_pretty(&payload) {
+            Ok(text) => {
+                let _ = writeln!(standard_output, "{text}");
+            }
+            Err(error) => {
+                let _ = writeln!(standard_error, "team get: json: {error}");
+                return 1;
+            }
+        }
+        return 0;
+    }
+    if pending.is_empty() {
+        let _ = writeln!(standard_output, "team get: no pending messages for {name}");
+        return 0;
+    }
+    for (id, record) in &pending {
+        let _ = writeln!(
+            standard_output,
+            "  {id} :: from={} :: {}",
+            field(record, "from").unwrap_or(""),
+            field(record, "body").unwrap_or("")
+        );
+    }
+    0
+}
+
+/// Ack: mark one message acked (durable pending -> acked transition).
+fn run_ack(
+    arguments: &[String],
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let mut flags = FlagSet::new("team ack");
+    flags.string_flag("name", "");
+    flags.string_flag("id", "");
+    flags.string_flag("claude-home", "");
+    flags.string_flag("workspace-root", "");
+    flags.bool_flag("json", false);
+    if let Err(parse_error) = flags.parse(arguments) {
+        let _ = writeln!(standard_error, "team ack: {}", parse_error.message);
+        return 1;
+    }
+    let name = match validate_name(flags.string_value("name"), "team ack", standard_error) {
+        Some(name) => name,
+        None => return 1,
+    };
+    let id = flags.string_value("id").trim().to_string();
+    if id.is_empty() {
+        let _ = writeln!(standard_error, "team ack: --id is required");
+        return 1;
+    }
+    let Some((store, _slug)) = resolve_store(
+        flags.string_value("claude-home"),
+        flags.string_value("workspace-root"),
+        standard_error,
+    ) else {
+        return 1;
+    };
+    match bus_ack(&store, &name, &id) {
+        Ok(()) => {
+            if flags.bool_value("json") {
+                let payload = serde_json::json!({
+                    "acked": true,
+                    "id": id,
+                    "name": name,
+                    "status": MSG_ACKED,
+                });
+                match serde_json::to_string_pretty(&payload) {
+                    Ok(text) => {
+                        let _ = writeln!(standard_output, "{text}");
+                    }
+                    Err(error) => {
+                        let _ = writeln!(standard_error, "team ack: json: {error}");
+                        return 1;
+                    }
+                }
+            } else {
+                let _ = writeln!(standard_output, "team ack: message {id} acked for {name}");
+            }
+            0
+        }
+        Err(error) => {
+            let _ = writeln!(standard_error, "team ack: {error}");
+            1
+        }
+    }
+}
+
+/// Inbox: show pending message counts per worker.
+fn run_inbox(
+    arguments: &[String],
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let mut flags = FlagSet::new("team inbox");
+    flags.string_flag("claude-home", "");
+    flags.string_flag("workspace-root", "");
+    flags.bool_flag("json", false);
+    if let Err(parse_error) = flags.parse(arguments) {
+        let _ = writeln!(standard_error, "team inbox: {}", parse_error.message);
+        return 1;
+    }
+    let Some((store, _slug)) = resolve_store(
+        flags.string_value("claude-home"),
+        flags.string_value("workspace-root"),
+        standard_error,
+    ) else {
+        return 1;
+    };
+    let counts = match bus_inbox_counts(&store) {
+        Ok(counts) => counts,
+        Err(error) => {
+            let _ = writeln!(standard_error, "team inbox: {error}");
+            return 1;
+        }
+    };
+    if flags.bool_value("json") {
+        let items: Vec<serde_json::Value> = counts
+            .iter()
+            .map(|(name, count)| serde_json::json!({ "name": name, "pending": count }))
+            .collect();
+        let payload = serde_json::json!({ "inbox": items });
+        match serde_json::to_string_pretty(&payload) {
+            Ok(text) => {
+                let _ = writeln!(standard_output, "{text}");
+            }
+            Err(error) => {
+                let _ = writeln!(standard_error, "team inbox: json: {error}");
+                return 1;
+            }
+        }
+        return 0;
+    }
+    if counts.is_empty() {
+        let _ = writeln!(standard_output, "team inbox: no pending messages");
+        return 0;
+    }
+    for (name, count) in &counts {
+        let _ = writeln!(standard_output, "  {name}: {count} pending");
+    }
+    0
 }
 
 #[cfg(test)]
@@ -618,5 +996,137 @@ mod tests {
         let code = run_team_command(&["kill".to_string()], &mut stdout, &mut stderr);
         assert_eq!(code, 1);
         assert!(String::from_utf8_lossy(&stderr).contains("--name is required"));
+    }
+
+    fn temp_home(tag: &str) -> std::path::PathBuf {
+        let home = std::env::temp_dir().join(format!(
+            "keel-team-bus-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&home).unwrap();
+        home
+    }
+
+    fn bus_store(home: &std::path::Path) -> RecordStore {
+        RecordStore::new(home, "team/test-workspace")
+    }
+
+    #[test]
+    fn send_writes_durable_pending_record() {
+        let home = temp_home("send");
+        let store = bus_store(&home);
+        let id = bus_send(&store, "worker-a", "orchestrator", "do the thing").unwrap();
+        let record = store.read_record(&id).unwrap().expect("record persisted");
+        assert_eq!(field(&record, "to"), Some("worker-a"));
+        assert_eq!(field(&record, "from"), Some("orchestrator"));
+        assert_eq!(field(&record, "body"), Some("do the thing"));
+        assert_eq!(field(&record, "status"), Some(MSG_PENDING));
+        assert!(field(&record, "sent_at").is_some());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn get_lists_pending_for_recipient_only() {
+        let home = temp_home("get");
+        let store = bus_store(&home);
+        bus_send(&store, "worker-a", "orchestrator", "first").unwrap();
+        bus_send(&store, "worker-a", "orchestrator", "second").unwrap();
+        bus_send(&store, "worker-b", "orchestrator", "other").unwrap();
+        let pending = bus_pending(&store, "worker-a").unwrap();
+        assert_eq!(pending.len(), 2);
+        let bodies: Vec<&str> = pending
+            .iter()
+            .map(|(_, record)| field(record, "body").unwrap_or(""))
+            .collect();
+        assert!(bodies.contains(&"first"));
+        assert!(bodies.contains(&"second"));
+        // Get must not mark anything read.
+        assert_eq!(bus_pending(&store, "worker-a").unwrap().len(), 2);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn ack_transitions_pending_to_acked() {
+        let home = temp_home("ack");
+        let store = bus_store(&home);
+        let id = bus_send(&store, "worker-a", "orchestrator", "task").unwrap();
+        bus_ack(&store, "worker-a", &id).unwrap();
+        let record = store.read_record(&id).unwrap().expect("record persisted");
+        assert_eq!(field(&record, "status"), Some(MSG_ACKED));
+        // Acked message no longer appears as pending.
+        assert!(bus_pending(&store, "worker-a").unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn ack_unknown_id_fails() {
+        let home = temp_home("ack-unknown");
+        let store = bus_store(&home);
+        let result = bus_ack(&store, "worker-a", "msg-does-not-exist");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("unknown message id"));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn ack_rejects_message_for_another_worker() {
+        let home = temp_home("ack-wrong");
+        let store = bus_store(&home);
+        let id = bus_send(&store, "worker-a", "orchestrator", "task").unwrap();
+        let result = bus_ack(&store, "worker-b", &id);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not addressed to"));
+        // Original message is still pending, untouched.
+        assert_eq!(bus_pending(&store, "worker-a").unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn concurrent_sends_get_unique_ids() {
+        let home = temp_home("unique");
+        let store = bus_store(&home);
+        let mut ids = std::collections::HashSet::new();
+        for index in 0..50 {
+            let id = bus_send(&store, "worker-a", "orchestrator", &format!("m{index}")).unwrap();
+            assert!(ids.insert(id), "duplicate id allocated");
+        }
+        assert_eq!(bus_pending(&store, "worker-a").unwrap().len(), 50);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn messages_survive_fresh_store() {
+        let home = temp_home("restart");
+        let id = {
+            let store = bus_store(&home);
+            bus_send(&store, "worker-a", "orchestrator", "durable").unwrap()
+        };
+        // Simulate a restart: a fresh RecordStore over the same directory.
+        let reopened = bus_store(&home);
+        let pending = bus_pending(&reopened, "worker-a").unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].0, id);
+        assert_eq!(field(&pending[0].1, "body"), Some("durable"));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn inbox_counts_pending_per_worker() {
+        let home = temp_home("inbox");
+        let store = bus_store(&home);
+        bus_send(&store, "worker-a", "orchestrator", "one").unwrap();
+        bus_send(&store, "worker-a", "orchestrator", "two").unwrap();
+        bus_send(&store, "worker-b", "orchestrator", "three").unwrap();
+        let acked_id = bus_send(&store, "worker-b", "orchestrator", "four").unwrap();
+        bus_ack(&store, "worker-b", &acked_id).unwrap();
+        let counts = bus_inbox_counts(&store).unwrap();
+        let map: std::collections::HashMap<String, usize> = counts.into_iter().collect();
+        assert_eq!(map.get("worker-a"), Some(&2));
+        assert_eq!(map.get("worker-b"), Some(&1));
+        let _ = std::fs::remove_dir_all(&home);
     }
 }
