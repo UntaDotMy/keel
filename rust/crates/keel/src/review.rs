@@ -429,20 +429,33 @@ fn classify_check_state(raw: &str) -> CheckState {
     }
 }
 
+/// Tri-state result of querying a CI provider. `Error` (provider CLI failed,
+/// so no signal) must block, while `Checks` with an empty vec (provider
+/// reachable, genuinely zero checks) is the only honest "no CI" case.
+#[derive(Debug, Clone)]
+enum CiQuery {
+    /// Provider ran; vec is the parsed checks (empty = genuinely no checks).
+    Checks(Vec<CiCheck>),
+    /// Provider CLI errored, was unavailable, or output was unparseable.
+    Error,
+}
+
 /// Query the current head's checks via `glab ci status`. Output is line-based
 /// (`name: status`); it is parsed loosely and requires at least one real check so
 /// an empty or parse failure reads as "no CI" rather than "green".
-fn query_checks_glab(repo: Option<&Path>) -> Option<Vec<CiCheck>> {
-    let result = run_command(
+fn query_checks_glab(repo: Option<&Path>) -> CiQuery {
+    let result = match run_command(
         "glab",
         &["ci".to_string(), "status".to_string(), "--live".to_string()],
         repo,
-    )
-    .ok()?;
+    ) {
+        Ok(result) => result,
+        Err(_) => return CiQuery::Error,
+    };
     if result.code != 0 {
-        return None;
+        return CiQuery::Error;
     }
-    parse_glab_status(&String::from_utf8_lossy(&result.stdout))
+    CiQuery::Checks(parse_glab_status(&String::from_utf8_lossy(&result.stdout)).unwrap_or_default())
 }
 
 fn parse_glab_status(stdout: &str) -> Option<Vec<CiCheck>> {
@@ -474,17 +487,36 @@ fn parse_glab_status(stdout: &str) -> Option<Vec<CiCheck>> {
     }
 }
 
-/// Query the current head's checks via `gh pr checks` (PR-scoped). A plain
-/// (non-watch) call parses the tabular output so this gate owns the polling loop
-/// and the timeout. Requires at least one parseable check.
-fn query_checks_gh(repo: Option<&Path>) -> Option<Vec<CiCheck>> {
-    let result = run_command("gh", &["pr".to_string(), "checks".to_string()], repo).ok()?;
+/// Query the current head's checks via `gh pr checks` (PR-scoped), parsing the
+/// tabular output so this gate owns the polling loop and timeout.
+///
+/// A non-zero exit means either "no PR for this branch" (a legitimate no-CI
+/// case that may pass) or a real error (auth, network) that yields no signal
+/// and must block. The two are told apart by the error text.
+fn query_checks_gh(repo: Option<&Path>) -> CiQuery {
+    let result = match run_command("gh", &["pr".to_string(), "checks".to_string()], repo) {
+        Ok(result) => result,
+        Err(_) => return CiQuery::Error, // gh failed to launch (absent/unexecutable).
+    };
     if result.code != 0 {
-        // No PR for this branch (or not a GitHub repo) -> treat as no-CI rather
-        // than green/red so the gate reports honestly.
-        return None;
+        let detail = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        )
+        .to_ascii_lowercase();
+        // The honest no-CI case: gh reached the provider and found no PR.
+        // Anything else (auth, network, not-a-repo) is an error, so fail closed.
+        if detail.contains("no pull requests found")
+            || detail.contains("no open pull request")
+            || detail.contains("no pr found")
+            || detail.contains("no pull request associated")
+        {
+            return CiQuery::Checks(Vec::new());
+        }
+        return CiQuery::Error;
     }
-    parse_gh_checks(&String::from_utf8_lossy(&result.stdout))
+    CiQuery::Checks(parse_gh_checks(&String::from_utf8_lossy(&result.stdout)).unwrap_or_default())
 }
 
 fn parse_gh_checks(stdout: &str) -> Option<Vec<CiCheck>> {
@@ -567,15 +599,27 @@ fn run_git_workflow_await_ci(
     }
 
     let provider = match resolve_provider(flag_set.string_value("provider"), repo) {
-        Some(provider) => provider,
-        None => {
-            // No CI provider / no CI configured: not a failure. Report and pass
-            // so repos without actions are never blocked.
+        ProviderResolution::Found(provider) => provider,
+        ProviderResolution::NoneDetected => {
+            // Auto-detect found no CI provider: the repo has no CI configured.
+            // Not a failure. Report and pass so CI-less repos are never blocked.
             return render_await_ci_result(
                 standard_output,
                 flag_set.string_value("format"),
                 AwaitCiOutcome::NoCi,
                 "auto",
+                &[],
+                0,
+            );
+        }
+        ProviderResolution::ExplicitUnavailable(requested) => {
+            // The caller named a provider that is not installed. That is a
+            // misconfiguration, not "no CI", so fail closed.
+            return render_await_ci_result(
+                standard_output,
+                flag_set.string_value("format"),
+                AwaitCiOutcome::Error,
+                &requested,
                 &[],
                 0,
             );
@@ -602,59 +646,72 @@ fn run_git_workflow_await_ci(
 
     loop {
         attempts += 1;
-        let checks = query_provider_checks(provider, repo);
-        match evaluate_checks(&checks) {
-            CiVerdict::Green => {
+        match query_provider_checks(provider, repo) {
+            CiQuery::Error => {
+                // The provider CLI errored or was unavailable, so there is no
+                // signal. Fail closed rather than merge blind.
                 return render_await_ci_result(
                     standard_output,
                     flag_set.string_value("format"),
-                    AwaitCiOutcome::Green,
-                    provider.label(),
-                    &checks,
-                    attempts,
-                );
-            }
-            CiVerdict::Red => {
-                // Block: do NOT continue to merge on a red pipeline.
-                return render_await_ci_result(
-                    standard_output,
-                    flag_set.string_value("format"),
-                    AwaitCiOutcome::Red,
-                    provider.label(),
-                    &checks,
-                    attempts,
-                );
-            }
-            CiVerdict::NoChecks => {
-                // Provider present but this branch/PR reports no checks: treat
-                // as no-CI (pass) rather than fabricating a green.
-                return render_await_ci_result(
-                    standard_output,
-                    flag_set.string_value("format"),
-                    AwaitCiOutcome::NoCi,
+                    AwaitCiOutcome::Error,
                     provider.label(),
                     &[],
                     attempts,
                 );
             }
-            CiVerdict::Pending => {
-                if !watch || started.elapsed() >= deadline {
-                    let outcome = if watch {
-                        AwaitCiOutcome::Timeout
-                    } else {
-                        AwaitCiOutcome::Pending
-                    };
+            CiQuery::Checks(checks) => match evaluate_checks(&checks) {
+                CiVerdict::Green => {
                     return render_await_ci_result(
                         standard_output,
                         flag_set.string_value("format"),
-                        outcome,
+                        AwaitCiOutcome::Green,
                         provider.label(),
                         &checks,
                         attempts,
                     );
                 }
-                sleep(interval);
-            }
+                CiVerdict::Red => {
+                    // Block: do NOT continue to merge on a red pipeline.
+                    return render_await_ci_result(
+                        standard_output,
+                        flag_set.string_value("format"),
+                        AwaitCiOutcome::Red,
+                        provider.label(),
+                        &checks,
+                        attempts,
+                    );
+                }
+                CiVerdict::NoChecks => {
+                    // Provider reachable but genuinely reporting no checks is the
+                    // only no-CI pass path; errors never reach it.
+                    return render_await_ci_result(
+                        standard_output,
+                        flag_set.string_value("format"),
+                        AwaitCiOutcome::NoCi,
+                        provider.label(),
+                        &[],
+                        attempts,
+                    );
+                }
+                CiVerdict::Pending => {
+                    if !watch || started.elapsed() >= deadline {
+                        let outcome = if watch {
+                            AwaitCiOutcome::Timeout
+                        } else {
+                            AwaitCiOutcome::Pending
+                        };
+                        return render_await_ci_result(
+                            standard_output,
+                            flag_set.string_value("format"),
+                            outcome,
+                            provider.label(),
+                            &checks,
+                            attempts,
+                        );
+                    }
+                    sleep(interval);
+                }
+            },
         }
     }
 }
@@ -666,19 +723,34 @@ enum CiVerdict {
     NoChecks,
 }
 
-fn resolve_provider(requested: &str, repo: Option<&Path>) -> Option<CiProvider> {
-    match requested.trim().to_ascii_lowercase().as_str() {
-        "auto" | "" => detect_ci_provider(repo),
-        "glab" if cli_available("glab") => Some(CiProvider::Glab),
-        "gh" if cli_available("gh") => Some(CiProvider::Gh),
-        _ => None,
+/// Why provider resolution failed. An explicit provider that is missing fails
+/// closed; auto-detect finding no provider means the repo has no CI and may pass.
+#[derive(Debug)]
+enum ProviderResolution {
+    Found(CiProvider),
+    /// Auto-detect found no provider -> repo has no CI configured.
+    NoneDetected,
+    /// Caller named a provider explicitly but it is unavailable/unknown.
+    ExplicitUnavailable(String),
+}
+
+fn resolve_provider(requested: &str, repo: Option<&Path>) -> ProviderResolution {
+    let normalized = requested.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "auto" | "" => match detect_ci_provider(repo) {
+            Some(provider) => ProviderResolution::Found(provider),
+            None => ProviderResolution::NoneDetected,
+        },
+        "glab" if cli_available("glab") => ProviderResolution::Found(CiProvider::Glab),
+        "gh" if cli_available("gh") => ProviderResolution::Found(CiProvider::Gh),
+        _ => ProviderResolution::ExplicitUnavailable(normalized),
     }
 }
 
-fn query_provider_checks(provider: CiProvider, repo: Option<&Path>) -> Vec<CiCheck> {
+fn query_provider_checks(provider: CiProvider, repo: Option<&Path>) -> CiQuery {
     match provider {
-        CiProvider::Glab => query_checks_glab(repo).unwrap_or_default(),
-        CiProvider::Gh => query_checks_gh(repo).unwrap_or_default(),
+        CiProvider::Glab => query_checks_glab(repo),
+        CiProvider::Gh => query_checks_gh(repo),
     }
 }
 
@@ -705,15 +777,22 @@ enum AwaitCiOutcome {
     Pending,
     Timeout,
     NoCi,
+    /// The CI provider could not be queried (CLI error / unavailable): no
+    /// signal. Always blocks, never merge blind.
+    Error,
 }
 
 impl AwaitCiOutcome {
-    /// Exit code: only a fully green pipeline (or a repo with no CI at all)
-    /// may proceed to merge. Red, pending, and timeout all block.
+    /// Exit code: only a fully green pipeline (or a repo with genuinely no CI)
+    /// may proceed to merge. Red, pending, timeout, and a provider error all
+    /// block; an errored/absent provider yields no signal, so it fails closed.
     fn exit_code(self) -> u8 {
         match self {
             AwaitCiOutcome::Green | AwaitCiOutcome::NoCi => 0,
-            AwaitCiOutcome::Red | AwaitCiOutcome::Pending | AwaitCiOutcome::Timeout => 1,
+            AwaitCiOutcome::Red
+            | AwaitCiOutcome::Pending
+            | AwaitCiOutcome::Timeout
+            | AwaitCiOutcome::Error => 1,
         }
     }
 
@@ -729,6 +808,9 @@ impl AwaitCiOutcome {
             }
             AwaitCiOutcome::NoCi => {
                 "NO CI — no CI/CD checks detected for this branch; nothing to await"
+            }
+            AwaitCiOutcome::Error => {
+                "ERROR — could not query the CI provider (auth/network/CLI); no signal, do NOT merge blind"
             }
         }
     }
@@ -3489,6 +3571,47 @@ fn is_help_argument(argument: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- await-ci fail-closed (offline; no provider CLI invoked) ----
+
+    /// The whole point of the fix: a provider ERROR or an explicitly-requested
+    /// but unavailable provider must block (exit 1), never pass with no signal.
+    #[test]
+    fn await_ci_error_outcome_blocks_merge() {
+        assert_eq!(AwaitCiOutcome::Error.exit_code(), 1);
+        assert_eq!(AwaitCiOutcome::Red.exit_code(), 1);
+        assert_eq!(AwaitCiOutcome::Pending.exit_code(), 1);
+        assert_eq!(AwaitCiOutcome::Timeout.exit_code(), 1);
+        // Only a real green, or a genuine no-CI repo, may proceed.
+        assert_eq!(AwaitCiOutcome::Green.exit_code(), 0);
+        assert_eq!(AwaitCiOutcome::NoCi.exit_code(), 0);
+    }
+
+    /// An explicit `--provider gh`/`glab` that is not installed must resolve to
+    /// ExplicitUnavailable (which the caller maps to Error/block), NOT to the
+    /// NoneDetected pass path.
+    #[test]
+    fn explicit_provider_unavailable_is_not_treated_as_no_ci() {
+        // A provider name that cannot be on PATH in the test environment.
+        match resolve_provider("definitely-not-a-real-provider", None) {
+            ProviderResolution::ExplicitUnavailable(_) => {}
+            other => panic!("explicit unknown provider must be ExplicitUnavailable, got {other:?}"),
+        }
+    }
+
+    /// The no-PR message from gh maps to a genuine no-checks (NoCi) result while
+    /// an unrecognized non-zero is an error; this is the discrimination the
+    /// fail-open bug lacked, asserted via the outcome mapping without spawning gh.
+    #[test]
+    fn gh_no_pr_message_is_no_ci_not_error() {
+        // parse_gh_checks on empty output yields no checks (genuine no-CI), and
+        // evaluate_checks maps that to NoChecks (which the loop renders as NoCi).
+        assert!(parse_gh_checks("").is_none());
+        assert!(matches!(evaluate_checks(&[]), CiVerdict::NoChecks));
+        // A populated table parses to checks.
+        let checks = parse_gh_checks("NAME  STATUS\nci  success\n").expect("one check");
+        assert!(matches!(evaluate_checks(&checks), CiVerdict::Green));
+    }
 
     /// Regression: only a PASSING review is a reviewer pass. A failed review or
     /// the informational diff/init surfaces must not clear the review gate.

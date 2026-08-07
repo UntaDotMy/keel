@@ -167,16 +167,14 @@ fn resolve_root(
     label: &str,
     standard_error: &mut dyn Write,
 ) -> Option<PathBuf> {
-    let root = if workspace_root.is_empty() {
-        match resolve_repository_root("") {
-            Ok(path) => path,
-            Err(_) => {
-                let _ = writeln!(standard_error, "{label}: no repository root found");
-                return None;
-            }
+    // Absolutize+clean every root so a relative or odd-form --workspace-root
+    // slugs to the same per-workspace lane as the absolute form.
+    let root = match resolve_repository_root(workspace_root) {
+        Ok(path) => path,
+        Err(_) => {
+            let _ = writeln!(standard_error, "{label}: no repository root found");
+            return None;
         }
-    } else {
-        PathBuf::from(workspace_root)
     };
     if !root.is_dir() {
         let _ = writeln!(

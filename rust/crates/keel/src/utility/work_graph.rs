@@ -81,7 +81,11 @@ pub fn open_work_items_for_workspace(
 /// Resolve the per-workspace work store group path, normalizing the path the same
 /// way the CLI does so the closeout gate reads the exact directory `work add` wrote.
 fn work_group_for_workspace(workspace_root: &str) -> String {
-    let normalized = display_path(&std::path::PathBuf::from(workspace_root));
+    // Absolutize+clean so the writer (work CLI) and the reader (closeout gate)
+    // slug the SAME lane for every --workspace-root input form.
+    let normalized = resolve_repository_root(workspace_root)
+        .map(|path| display_path(&path))
+        .unwrap_or_else(|_| display_path(&std::path::PathBuf::from(workspace_root)));
     format!("work/{}", workspace_slug(&normalized))
 }
 
@@ -101,7 +105,9 @@ fn workspace_slug(workspace_root: &str) -> String {
     }
     let trimmed = slug.trim_matches('-').to_string();
     if trimmed.is_empty() {
-        "default".to_string()
+        // Match the sprint/team/dispatch/SYSTEM_MAP fallback so a degenerate
+        // path lands in the same shared lane everywhere, not a divergent one.
+        "workspace".to_string()
     } else {
         trimmed
     }
@@ -251,14 +257,9 @@ fn resolve_store(
             return None;
         }
     };
-    let root = if workspace_root.is_empty() {
-        resolve_repository_root("").unwrap_or_else(|_| std::path::PathBuf::from("."))
-    } else {
-        std::path::PathBuf::from(workspace_root)
-    };
     Some(RecordStore::new(
         &claude_home,
-        &work_group_for_workspace(&display_path(&root)),
+        &work_group_for_workspace(workspace_root),
     ))
 }
 
