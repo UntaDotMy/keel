@@ -1286,11 +1286,19 @@ fn tool_brief_create(arguments: &Value) -> Result<String, String> {
     );
     let path =
         write_brief(&claude_home, &brief).map_err(|error| format!("brief_create: {error}"))?;
-    let payload = json!({
+    // Multi-story on-ramp (mirrors the CLI write path): 2+ criteria IS a sprint
+    // backlog, so surface the next step; otherwise the sprint-start gate never engages.
+    let mut payload = json!({
         "written": true,
         "path": display_path(&path),
         "brief": brief_to_json(&brief),
     });
+    if brief.acceptance_criteria.len() >= 2 {
+        payload["next_step"] = Value::String(format!(
+            "{} acceptance criteria -> run `keel sprint plan` (or the sprint MCP tool) to track them as a sprint",
+            brief.acceptance_criteria.len()
+        ));
+    }
     mcp_json_compact(&payload).map_err(|error| format!("brief_create: {error}"))
 }
 
