@@ -761,15 +761,26 @@ fn report_bridge_host_wiring(standard_output: &mut dyn Write, claude_home: &std:
             .any(|entry| entry.get("name").and_then(|n| n.as_str()) == Some("keel"))
     })
     .unwrap_or(false);
-    let codex_enabled = fs::read_to_string(home.join(".codex").join("config.toml"))
+    let codex_config_text = fs::read_to_string(home.join(".codex").join("config.toml"))
         .ok()
-        .and_then(|text| text.parse::<toml::Value>().ok())
-        .and_then(|doc| {
-            doc.get("plugins")
-                .and_then(|p| p.get("keel@personal-keel"))
-                .and_then(|entry| entry.get("enabled"))
-                .and_then(|v| v.as_bool())
-        })
+        .and_then(|text| text.parse::<toml::Value>().ok());
+    let codex_enabled = codex_config_text
+        .as_ref()
+        .and_then(|doc| doc.get("plugins"))
+        .and_then(|p| p.get("keel@personal-keel"))
+        .and_then(|entry| entry.get("enabled"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    // Native MCP registration: this config.toml entry is what actually makes
+    // the tools reachable on Windows, where plugin-bundled MCP never loads.
+    let codex_native_mcp = codex_config_text
+        .as_ref()
+        .and_then(|doc| doc.get("mcp_servers"))
+        .and_then(|m| m.get("keel"))
+        .and_then(|entry| entry.get("command"))
+        .is_some();
+    let codex_agents_md = fs::read_to_string(home.join(".codex").join("AGENTS.md"))
+        .map(|text| text.contains("keel:begin"))
         .unwrap_or(false);
     report_host(standard_output, "codex", codex_plugin.is_file(), codex_mcp);
     write_doctor_check(
@@ -801,6 +812,34 @@ fn report_bridge_host_wiring(standard_output: &mut dyn Write, claude_home: &std:
                 "enabled"
             } else if codex_plugin.is_file() {
                 "not enabled - run `keel install` or enable via /plugins"
+            } else {
+                "n/a - plugin not installed"
+            }
+        ),
+    );
+    write_doctor_check(
+        standard_output,
+        codex_native_mcp || !codex_plugin.is_file(),
+        &format!(
+            "codex native MCP (config.toml [mcp_servers.keel]): {}",
+            if codex_native_mcp {
+                "registered"
+            } else if codex_plugin.is_file() {
+                "missing - run `keel install` to register (required on Windows)"
+            } else {
+                "n/a - plugin not installed"
+            }
+        ),
+    );
+    write_doctor_check(
+        standard_output,
+        codex_agents_md || !codex_plugin.is_file(),
+        &format!(
+            "codex AGENTS.md iron law contract: {}",
+            if codex_agents_md {
+                "present"
+            } else if codex_plugin.is_file() {
+                "missing - run `keel install` to write it"
             } else {
                 "n/a - plugin not installed"
             }
