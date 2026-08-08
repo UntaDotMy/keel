@@ -3,7 +3,7 @@ REM Purpose: Bootstrap keel on Windows CMD by delegating to the PowerShell insta
 REM Caller: Windows CMD users running the documented one-line installer.
 REM Dependencies: curl or PowerShell download support, PowerShell script execution, and GitHub release assets.
 REM Main Functions: Download install.ps1 to temp, run it, and delete the temporary script.
-REM Side Effects: Writes the managed keel surface under %USERPROFILE%\.claude through install.ps1.
+REM Side Effects: Writes keel's host-neutral home under %USERPROFILE%\.keel and the Claude engagement files under %USERPROFILE%\.claude through install.ps1.
 
 setlocal
 set "INSTALL_BASE=%CLAUDE_SKILLS_INSTALL_BASE%"

@@ -18,10 +18,10 @@ use crate::args::FlagSet;
 use crate::runtime::{
     agent_profiles_directory, agents_directory, commands_directory, config_path,
     discover_repository_layout, display_path, executable_file_name, git_short_head,
-    installed_executable_path, read_text_if_exists, remove_path_if_exists,
-    repository_layout_is_complete, resolve_claude_home, resolve_repository_root, run_command,
-    skills_directory, state_directory, write_lines, write_text, RepositoryLayout,
-    SKILL_SYNC_DIRECTORIES,
+    installed_executable_path, is_standard_keel_home, legacy_claude_executable_path,
+    read_text_if_exists, remove_path_if_exists, repository_layout_is_complete, resolve_claude_home,
+    resolve_repository_root, run_command, skills_directory, state_directory, write_lines,
+    write_text, RepositoryLayout, SKILL_SYNC_DIRECTORIES,
 };
 
 use super::agent_config::{parse_agent_config, render_agent_toml, unix_timestamp};
@@ -106,6 +106,17 @@ fn apply_overrides(
     detected
 }
 
+/// True when `home` is a real user-level install root: the legacy `.claude`
+/// home or the host-neutral `.keel` home. Every host-wiring gate keys off
+/// this so adapters register for both layouts; non-standard roots (test temp
+/// dirs, custom `--claude-home` overrides) keep wiring hermetic.
+fn is_standard_home(home: &Path) -> bool {
+    home.file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name == ".claude" || name == crate::runtime::KEEL_HOME_DIRECTORY_NAME)
+        .unwrap_or(false)
+}
+
 #[derive(Default)]
 pub struct InstallSummary {
     pub synced_skills: usize,
@@ -152,6 +163,13 @@ pub struct InstallSummary {
     /// Human-readable outcome of installing the Cowork (Claude Desktop) plugin
     /// files, or `None` when skipped. Best-effort.
     pub cowork_wiring: Option<String>,
+    /// Human-readable outcome of migrating keel-owned data out of a legacy
+    /// `~/.claude` install into the host-neutral root, or `None` when there
+    /// was nothing to migrate. Data-preserving by construction.
+    pub migration_report: Option<String>,
+    /// Human-readable outcome of putting the keel home on the user PATH so
+    /// every shell and host can invoke `keel` without a full path.
+    pub path_wiring: Option<String>,
 }
 
 struct FileTracker<'a> {
@@ -235,31 +253,42 @@ pub fn install_from_paths(
     overrides: &InstallOverrides,
     purge_stale: bool,
 ) -> Result<InstallSummary, String> {
+    // Two-home split: `claude_home` is the neutral root (~/.keel); the
+    // engagement home (~/.claude) is where the harness reads its artifacts.
+    let engagement_home = crate::runtime::claude_engagement_home(claude_home);
     let layout = discover_repository_layout(repository_root)?;
+    // Migrate BEFORE scaffolding: ensure_*_directories would create empty root
+    // dirs that migration mistakes for existing destinations.
+    fs::create_dir_all(claude_home)
+        .map_err(|error| format!("create {}: {error}", display_path(claude_home)))?;
+    // Move keel-owned data out of a legacy ~/.claude install into the neutral
+    // root; data-preserving, keel-owned names only, never overwrites.
+    let migration_report = migrate_from_legacy_claude_home(claude_home, &engagement_home);
     ensure_claude_home_directories(claude_home)?;
+    ensure_claude_home_directories(&engagement_home)?;
     remove_deprecated_config_keys(claude_home)?;
 
     let previous_files = read_inventory_set(&managed_files_inventory_path(claude_home));
     let previous_skills = read_inventory_set(&managed_skills_inventory_path(claude_home));
     let previous_shared_resources =
         read_inventory_set(&managed_shared_resources_inventory_path(claude_home));
-    let mut tracker = FileTracker::new(claude_home);
+    let mut tracker = FileTracker::new(&engagement_home);
 
-    let synced_root_files = sync_root_files(&layout, claude_home, &mut tracker)?;
-    let synced_skills = sync_skills(&layout, claude_home, &mut tracker)?;
-    let synced_shared_resources = sync_shared_resources(&layout, claude_home, &mut tracker)?;
-    let synced_agents = sync_agents(&layout, claude_home, &mut tracker)?;
+    let synced_root_files = sync_root_files(&layout, &engagement_home, &mut tracker)?;
+    let synced_skills = sync_skills(&layout, &engagement_home, &mut tracker)?;
+    let synced_shared_resources = sync_shared_resources(&layout, &engagement_home, &mut tracker)?;
+    let synced_agents = sync_agents(&layout, &engagement_home, &mut tracker)?;
     let synced_subagent_definitions =
-        sync_subagent_definitions(&layout, claude_home, &mut tracker)?;
-    let synced_commands = sync_commands(&layout, claude_home, &mut tracker)?;
+        sync_subagent_definitions(&layout, &engagement_home, &mut tracker)?;
+    let synced_commands = sync_commands(&layout, &engagement_home, &mut tracker)?;
     // why: native install previously skipped output-styles, so a native-install
     // user never got them (they shipped only via the plugin manifest). Deliver them
     // to ~/.claude/output-styles/; the tracker records each file so uninstall
     // reverses it like every other managed artifact.
-    let _synced_output_styles = sync_output_styles(&layout, claude_home, &mut tracker)?;
+    let _synced_output_styles = sync_output_styles(&layout, &engagement_home, &mut tracker)?;
 
     let removed_stale_files = remove_orphans(
-        claude_home,
+        &engagement_home,
         &previous_files,
         &previous_skills,
         &previous_shared_resources,
@@ -270,13 +299,25 @@ pub fn install_from_paths(
 
     write_managed_config(claude_home)?;
     let published_executable = publish_native_executable(repository_root, claude_home)?;
-    let removed_executable_orphans = remove_executable_orphans(claude_home)?;
+    // Sweep both homes: the legacy binary parks as a `.stale-*` sibling in
+    // ~/.claude (Windows cannot delete a mapped image), so sweep there too.
+    let mut removed_executable_orphans = remove_executable_orphans(claude_home)?;
+    if engagement_home != claude_home {
+        removed_executable_orphans += remove_executable_orphans(&engagement_home).unwrap_or(0);
+    }
     write_install_metadata(build_version, repository_root, claude_home)?;
     write_inventories(&layout, claude_home, &tracker)?;
-    let mcp_registration = maybe_register_mcp_server(claude_home);
-    let hooks_installation = maybe_install_hooks(claude_home);
-    let user_claude_md = maybe_sync_user_claude_md(claude_home);
-    let detection_home = claude_home.parent().unwrap_or(claude_home);
+    // Put the keel home on PATH: best-effort, idempotent, guarded on the
+    // standard neutral home so test fixtures never touch the real PATH.
+    let path_wiring = if published_executable && is_standard_keel_home(claude_home) {
+        Some(ensure_keel_home_on_path(claude_home))
+    } else {
+        None
+    };
+    let mcp_registration = maybe_register_mcp_server(&engagement_home);
+    let hooks_installation = maybe_install_hooks(&engagement_home, claude_home);
+    let user_claude_md = maybe_sync_user_claude_md(&engagement_home);
+    let detection_home = engagement_home.parent().unwrap_or(&engagement_home);
     let detected = super::platform_detect::PlatformDetector::new(detection_home).detect();
     let detected = apply_overrides(detected, overrides);
     let opencode_wiring = maybe_wire_opencode(repository_root, claude_home, detected.opencode);
@@ -302,6 +343,8 @@ pub fn install_from_paths(
         codex_wiring,
         pi_wiring,
         cowork_wiring,
+        migration_report,
+        path_wiring,
     })
 }
 
@@ -349,22 +392,17 @@ fn maybe_register_mcp_server(claude_home: &Path) -> Option<String> {
 /// or a plugin-only setup produced skills+MCP with no hooks — meaning the
 /// SessionStart bootstrap and per-prompt routing never fired. Folding it in
 /// here makes the engagement rails load-bearing on every install path.
-fn maybe_install_hooks(claude_home: &Path) -> Option<String> {
-    let is_standard_home = claude_home
-        .file_name()
-        .and_then(|name| name.to_str())
-        .map(|name| name == ".claude")
-        .unwrap_or(false);
-    if !is_standard_home {
+fn maybe_install_hooks(engagement_home: &Path, keel_home: &Path) -> Option<String> {
+    if !is_standard_home(engagement_home) {
         return None;
     }
-    let hook_path = claude_home.join(crate::hooks::claude::SETTINGS_FILE_NAME);
-    // Point the hooks at the binary we just published into claude_home, not at
+    let hook_path = engagement_home.join(crate::hooks::claude::SETTINGS_FILE_NAME);
+    // Point the hooks at the binary we just published into the keel home, not at
     // the currently-running executable (which during `update` is the freshly
     // built release artifact in the repo target dir, and during a release-bundle
     // install is the extracted temp binary). The published path is the stable
     // location the harness will invoke for the lifetime of the install.
-    let executable = installed_executable_path(claude_home);
+    let executable = installed_executable_path(keel_home);
     match crate::runner::hook_lifecycle::build_hooks_payload(&hook_path, &executable) {
         Ok(payload) => match write_text(&hook_path, &payload) {
             Ok(()) => Some(format!("installed at {}", display_path(&hook_path))),
@@ -384,12 +422,7 @@ pub(crate) fn maybe_wire_opencode(
     claude_home: &Path,
     detected: bool,
 ) -> Option<String> {
-    let is_standard_home = claude_home
-        .file_name()
-        .and_then(|name| name.to_str())
-        .map(|name| name == ".claude")
-        .unwrap_or(false);
-    if !is_standard_home {
+    if !is_standard_home(claude_home) {
         return None;
     }
     if !detected {
@@ -451,12 +484,7 @@ pub(crate) fn maybe_wire_cursor(
     claude_home: &Path,
     detected: bool,
 ) -> Option<String> {
-    let is_standard_home = claude_home
-        .file_name()
-        .and_then(|name| name.to_str())
-        .map(|name| name == ".claude")
-        .unwrap_or(false);
-    if !is_standard_home {
+    if !is_standard_home(claude_home) {
         return None;
     }
     if !detected {
@@ -578,12 +606,7 @@ pub(crate) fn maybe_wire_pi(
     claude_home: &Path,
     detected: bool,
 ) -> Option<String> {
-    let is_standard_home = claude_home
-        .file_name()
-        .and_then(|name| name.to_str())
-        .map(|name| name == ".claude")
-        .unwrap_or(false);
-    if !is_standard_home {
+    if !is_standard_home(claude_home) {
         return None;
     }
     if !detected {
@@ -684,12 +707,7 @@ pub(crate) fn maybe_wire_codex(
     claude_home: &Path,
     detected: bool,
 ) -> Option<String> {
-    let is_standard_home = claude_home
-        .file_name()
-        .and_then(|name| name.to_str())
-        .map(|name| name == ".claude")
-        .unwrap_or(false);
-    if !is_standard_home {
+    if !is_standard_home(claude_home) {
         return None;
     }
     if !detected {
@@ -755,10 +773,715 @@ pub(crate) fn maybe_wire_codex(
     } else {
         "MCP absent".to_string()
     };
+    // Codex discovers plugins ONLY via a marketplace manifest and loads only
+    // plugins enabled in config.toml; copying files alone never wires them.
+    let home_dir = plugin_target
+        .parent() // plugins/
+        .and_then(|p| p.parent()) // .codex/
+        .and_then(|p| p.parent()) // user home
+        .map(Path::to_path_buf);
+    let mut wire_status: Vec<String> = Vec::new();
+    if let Some(home_dir) = &home_dir {
+        let marketplace_path = home_dir
+            .join(".agents")
+            .join("plugins")
+            .join("marketplace.json");
+        match merge_codex_marketplace(&marketplace_path) {
+            Ok(CodexMarketplaceResult::Added) => wire_status.push(format!(
+                "marketplace entry added in {}",
+                display_path(&marketplace_path)
+            )),
+            Ok(CodexMarketplaceResult::AlreadyCurrent) => {
+                wire_status.push("marketplace entry already current".to_string())
+            }
+            Ok(CodexMarketplaceResult::Updated) => wire_status.push(format!(
+                "marketplace entry updated in {}",
+                display_path(&marketplace_path)
+            )),
+            Err(error) => wire_status.push(format!("marketplace skipped ({error})")),
+        }
+        let codex_config = home_dir.join(".codex").join("config.toml");
+        match ensure_codex_plugin_enabled(&codex_config) {
+            Ok(CodexEnableResult::Added) => {
+                wire_status.push(format!("plugin enabled in {}", display_path(&codex_config)))
+            }
+            Ok(CodexEnableResult::AlreadyEnabled) => {
+                wire_status.push("plugin already enabled".to_string())
+            }
+            Ok(CodexEnableResult::UnchangedDisabled) => {
+                wire_status.push("plugin disabled by user (enable via Codex /plugins)".to_string())
+            }
+            Err(error) => wire_status.push(format!("enablement skipped ({error})")),
+        }
+    }
+
     Some(format!(
-        "{copied} files -> {}; {mcp_status}",
-        display_path(&plugin_target)
+        "{copied} files -> {}; {mcp_status}; {}",
+        display_path(&plugin_target),
+        wire_status.join("; ")
     ))
+}
+
+/// Result of merging the keel entry into the personal Codex marketplace.
+#[derive(Debug)]
+enum CodexMarketplaceResult {
+    Added,
+    AlreadyCurrent,
+    Updated,
+}
+
+/// Marketplace name for the personal keel catalog. Codex keys enabled plugins
+/// as `<plugin>@<marketplace>` in config.toml, so this constant is part of the
+/// enablement key and must stay stable across installs.
+const CODEX_PERSONAL_MARKETPLACE_NAME: &str = "personal-keel";
+
+/// The marketplace entry that makes ~/.codex/plugins/keel discoverable. The
+/// shape (source/policy/category) follows the Codex marketplace schema; the
+/// `~` in `path` is expanded by Codex itself.
+fn codex_marketplace_entry() -> serde_json::Value {
+    serde_json::json!({
+        "name": "keel",
+        "source": { "source": "local", "path": "~/.codex/plugins/keel" },
+        "policy": {
+            "installation": "AVAILABLE",
+            "authentication": "ON_INSTALL"
+        },
+        "category": "Productivity"
+    })
+}
+
+/// Merge the keel entry into the personal Codex marketplace manifest
+/// (`~/.agents/plugins/marketplace.json`). Codex discovers plugins only via a
+/// marketplace; without this entry the copied plugin bundle never loads.
+/// Preserves sibling plugin entries and any user-authored top-level metadata;
+/// creates a fresh `personal-keel` catalog when the manifest is absent.
+fn merge_codex_marketplace(marketplace_path: &Path) -> Result<CodexMarketplaceResult, String> {
+    let existing_text = crate::runtime::read_text_if_exists(marketplace_path).unwrap_or_default();
+    let stripped = existing_text
+        .strip_prefix('\u{feff}')
+        .unwrap_or(&existing_text);
+    let mut document: serde_json::Value = if stripped.trim().is_empty() {
+        serde_json::json!({
+            "name": CODEX_PERSONAL_MARKETPLACE_NAME,
+            "interface": { "displayName": "keel" }
+        })
+    } else {
+        serde_json::from_str(stripped).map_err(|error| format!("parse error: {error}"))?
+    };
+    if document.get("plugins").is_none() {
+        document["plugins"] = serde_json::json!([]);
+    }
+    let plugins = document["plugins"]
+        .as_array_mut()
+        .ok_or("plugins is not an array")?;
+    let desired = codex_marketplace_entry();
+    let had_keel = plugins
+        .iter()
+        .any(|entry| entry.get("name").and_then(|n| n.as_str()) == Some("keel"));
+    if let Some(existing) = plugins
+        .iter_mut()
+        .find(|entry| entry.get("name").and_then(|n| n.as_str()) == Some("keel"))
+    {
+        if *existing == desired {
+            return Ok(CodexMarketplaceResult::AlreadyCurrent);
+        }
+        *existing = desired;
+    } else {
+        plugins.push(desired);
+    }
+    if let Some(parent) = marketplace_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("create {}: {error}", display_path(parent)))?;
+    }
+    let pretty = serde_json::to_string_pretty(&document)
+        .map_err(|error| format!("serialize error: {error}"))?;
+    write_text(marketplace_path, &pretty)?;
+    Ok(if had_keel {
+        CodexMarketplaceResult::Updated
+    } else {
+        CodexMarketplaceResult::Added
+    })
+}
+
+/// Result of ensuring the keel plugin is enabled in Codex config.toml.
+#[derive(Debug)]
+enum CodexEnableResult {
+    Added,
+    AlreadyEnabled,
+    /// The user explicitly set `enabled = false`; install never overrides an
+    /// intentional disable. Enable via Codex's `/plugins` UI or by editing the
+    /// config key.
+    UnchangedDisabled,
+}
+
+/// The config.toml section Codex reads for this plugin's enablement:
+/// `[plugins."keel@personal-keel"]` (plugin@marketplace).
+const CODEX_PLUGIN_CONFIG_SECTION: &str = "[plugins.\"keel@personal-keel\"]";
+
+/// Ensure `[plugins."keel@personal-keel"] enabled = true` is present in
+/// `~/.codex/config.toml`. The edit is string-surgical (parse with `toml` to
+/// decide, then append or insert lines) so comments, ordering, and unrelated
+/// keys survive untouched. An explicit user `enabled = false` is respected.
+/// Creates the file when absent.
+fn ensure_codex_plugin_enabled(config_path: &Path) -> Result<CodexEnableResult, String> {
+    let existing_text = crate::runtime::read_text_if_exists(config_path).unwrap_or_default();
+    let stripped = existing_text
+        .strip_prefix('\u{feff}')
+        .unwrap_or(&existing_text);
+    // Decide current state via a real TOML parse; on parse failure refuse to
+    // touch the file rather than risk corrupting it.
+    if !stripped.trim().is_empty() {
+        let doc: toml::Value =
+            toml::from_str(stripped).map_err(|error| format!("parse error: {error}"))?;
+        let enabled = doc
+            .get("plugins")
+            .and_then(|p| p.get("keel@personal-keel"))
+            .and_then(|entry| entry.get("enabled"))
+            .and_then(|v| v.as_bool());
+        match enabled {
+            Some(true) => return Ok(CodexEnableResult::AlreadyEnabled),
+            Some(false) => return Ok(CodexEnableResult::UnchangedDisabled),
+            None => {}
+        }
+    }
+    // Need `enabled = true`: insert under an existing section header, else
+    // append the whole section at the end of the file.
+    let header = CODEX_PLUGIN_CONFIG_SECTION;
+    let lines: Vec<&str> = stripped.lines().collect();
+    let mut new_text: String = if let Some(pos) = lines.iter().position(|line| {
+        let trimmed = line.trim();
+        trimmed == header || trimmed == "[plugins.'keel@personal-keel']"
+    }) {
+        let mut rebuilt: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+        rebuilt.insert(pos + 1, "enabled = true".to_string());
+        rebuilt.join("\n")
+    } else {
+        let mut out = stripped.to_string();
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(header);
+        out.push('\n');
+        out.push_str("enabled = true\n");
+        out
+    };
+    if new_text.is_empty() {
+        new_text = format!("{header}\nenabled = true\n");
+    }
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("create {}: {error}", display_path(parent)))?;
+    }
+    write_text(config_path, &new_text)?;
+    Ok(CodexEnableResult::Added)
+}
+
+/// Remove the `keel` entry from the personal Codex marketplace manifest.
+/// Preserves sibling entries and other keys; deletes the manifest only when it
+/// becomes an empty catalog that install itself created shape for.
+fn remove_codex_marketplace_entry(marketplace_path: &Path) -> usize {
+    if !marketplace_path.is_file() {
+        return 0;
+    }
+    let Ok(text) = crate::runtime::read_text_if_exists(marketplace_path) else {
+        return 0;
+    };
+    let stripped = text.strip_prefix('\u{feff}').unwrap_or(&text);
+    let Ok(mut doc) = serde_json::from_str::<serde_json::Value>(stripped) else {
+        return 0;
+    };
+    let Some(plugins) = doc.get_mut("plugins").and_then(|v| v.as_array_mut()) else {
+        return 0;
+    };
+    let before = plugins.len();
+    plugins.retain(|entry| entry.get("name").and_then(|n| n.as_str()) != Some("keel"));
+    if plugins.len() == before {
+        return 0;
+    }
+    if plugins.is_empty() {
+        // The catalog holds no plugins anymore; the whole file is keel's.
+        return remove_path_if_exists_counted(marketplace_path).unwrap_or(0);
+    }
+    let _ = write_text(
+        marketplace_path,
+        &serde_json::to_string_pretty(&doc).unwrap_or_else(|_| stripped.to_string()),
+    );
+    1
+}
+
+/// Top-level names under a legacy `~/.claude` home that keel owns (creates
+/// and reads) and that the claude harness never reads. These move to the
+/// host-neutral root during migration; harness-owned engagement surfaces stay.
+const MIGRATION_DATA_NAMES: &[&str] = &[
+    "working-briefs",
+    "memories",
+    "memory",
+    "sprint",
+    "state",
+    // NOTE: `agent-profiles` is NOT migrated. Install re-syncs it into the
+    // engagement home every run, so moving it would only churn.
+    ".claude-skill-manager",
+    "raw-output",
+    "config.toml",
+    "command-compaction-events.jsonl",
+    "recall-index.sqlite3",
+];
+
+/// Migrate keel-owned data out of a legacy `~/.claude` install into the
+/// host-neutral root and remove the old binary placement. Runs on every
+/// install/update; a no-op once the old home holds nothing keel-owned.
+///
+/// Data-preserving by construction: each name moves only when the
+/// destination is absent (existing destination wins, never overwritten), and
+/// a move failure degrades to "skipped", never an install error.
+fn migrate_from_legacy_claude_home(keel_home: &Path, engagement_home: &Path) -> Option<String> {
+    if !is_standard_keel_home(keel_home) || engagement_home == keel_home {
+        return None;
+    }
+    let legacy = engagement_home;
+    if !legacy.is_dir() {
+        return None;
+    }
+    let mut moved = 0usize;
+    let mut skipped = 0usize;
+    for name in MIGRATION_DATA_NAMES {
+        let source = legacy.join(name);
+        if !source.exists() {
+            continue;
+        }
+        let destination = keel_home.join(name);
+        if destination.exists() && destination.is_dir() && source.is_dir() {
+            // File-level merge: destination files win on exact-path conflicts;
+            // everything else moves over, and nothing is ever deleted.
+            let (merged, conflicts) = merge_tree_preserving(&source, &destination);
+            moved += merged;
+            if conflicts > 0 {
+                skipped += 1;
+            }
+            if is_empty_directory(&source) {
+                let _ = fs::remove_dir(&source);
+            }
+            continue;
+        }
+        if destination.exists() {
+            // Type mismatch (file vs directory) or a destination file: never
+            // overwrite; leave both copies for the operator.
+            skipped += 1;
+            continue;
+        }
+        if move_path_preserving(&source, &destination) {
+            moved += 1;
+        } else {
+            skipped += 1;
+        }
+    }
+    // SQLite WAL sidecars must travel with the database, or a mid-transaction
+    // migration loses committed-but-unmerged rows.
+    for suffix in ["-wal", "-shm"] {
+        let source = legacy.join(format!("recall-index.sqlite3{suffix}"));
+        if source.exists() {
+            let destination = keel_home.join(format!("recall-index.sqlite3{suffix}"));
+            if !destination.exists() && move_path_preserving(&source, &destination) {
+                moved += 1;
+            }
+        }
+    }
+    let binary_outcome = remove_legacy_binary(keel_home);
+    if moved == 0 && skipped == 0 && binary_outcome.is_empty() {
+        return None;
+    }
+    let mut report = format!("moved {moved} item(s) from {}", display_path(legacy));
+    if skipped > 0 {
+        report.push_str(&format!(
+            ", skipped {skipped} (destination exists or move failed)"
+        ));
+    }
+    if !binary_outcome.is_empty() {
+        report.push_str(&format!("; {binary_outcome}"));
+    }
+    Some(report)
+}
+
+/// True when `directory` exists, is a directory, and holds no entries.
+fn is_empty_directory(directory: &Path) -> bool {
+    directory.is_dir()
+        && fs::read_dir(directory)
+            .map(|entries| entries.count() == 0)
+            .unwrap_or(false)
+}
+
+/// Merge a legacy directory tree into an existing destination directory
+/// without ever deleting destination content. Returns `(moved, conflicts)`
+/// where `moved` counts files/directories relocated and `conflicts` counts
+/// exact-path collisions (a source and destination file with the same
+/// relative path). Destination files win every conflict; conflicting source
+/// files stay in place for the operator to reconcile.
+fn merge_tree_preserving(source: &Path, destination: &Path) -> (usize, usize) {
+    let mut moved = 0usize;
+    let mut conflicts = 0usize;
+    let Ok(entries) = fs::read_dir(source) else {
+        return (0, 0);
+    };
+    for entry in entries.flatten() {
+        let child_source = entry.path();
+        let child_destination = destination.join(entry.file_name());
+        if child_source.is_dir() {
+            if child_destination.is_dir() {
+                // Recurse: merge nested directories level by level.
+                let (child_moved, child_conflicts) =
+                    merge_tree_preserving(&child_source, &child_destination);
+                moved += child_moved;
+                conflicts += child_conflicts;
+                if is_empty_directory(&child_source) {
+                    let _ = fs::remove_dir(&child_source);
+                }
+            } else if child_destination.exists() {
+                conflicts += 1;
+            } else if fs::rename(&child_source, &child_destination).is_ok()
+                || copy_tree(&child_source, &child_destination)
+            {
+                moved += 1;
+            } else {
+                conflicts += 1;
+            }
+        } else if child_destination.is_file() {
+            // Exact-path conflict: byte-identical copies are provable
+            // duplicates (safe to remove); otherwise the destination wins.
+            if files_are_identical(&child_source, &child_destination) {
+                if fs::remove_file(&child_source).is_ok() {
+                    moved += 1;
+                } else {
+                    conflicts += 1;
+                }
+            } else {
+                conflicts += 1;
+            }
+        } else if child_destination.exists() {
+            conflicts += 1;
+        } else if fs::rename(&child_source, &child_destination).is_ok()
+            || copy_tree(&child_source, &child_destination)
+        {
+            moved += 1;
+        } else {
+            conflicts += 1;
+        }
+    }
+    (moved, conflicts)
+}
+
+/// True when both paths are files with identical bytes. Any read error
+/// conservatively answers `false` so a never-read file is treated as a
+/// genuine conflict and never deleted.
+fn files_are_identical(left: &Path, right: &Path) -> bool {
+    match (fs::read(left), fs::read(right)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
+/// Move a file or directory tree. Rename first (same volume, atomic); on
+/// cross-volume failure fall back to copy-then-remove. Never overwrites the
+/// destination; callers check that before calling.
+fn move_path_preserving(source: &Path, destination: &Path) -> bool {
+    if fs::rename(source, destination).is_ok() {
+        return true;
+    }
+    if !copy_tree(source, destination) {
+        return false;
+    }
+    // Verify the copy landed before touching the source.
+    if !destination.exists() {
+        return false;
+    }
+    if source.is_dir() {
+        fs::remove_dir_all(source).is_ok()
+    } else {
+        fs::remove_file(source).is_ok()
+    }
+}
+
+/// Recursive copy for files and directories (best-effort: per-entry failures
+/// propagate as a false result rather than partial-success lies).
+fn copy_tree(source: &Path, destination: &Path) -> bool {
+    if source.is_file() {
+        if let Some(parent) = destination.parent() {
+            if fs::create_dir_all(parent).is_err() {
+                return false;
+            }
+        }
+        return fs::copy(source, destination).is_ok();
+    }
+    if !source.is_dir() {
+        return false;
+    }
+    if fs::create_dir_all(destination).is_err() {
+        return false;
+    }
+    let Ok(entries) = fs::read_dir(source) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let child_source = entry.path();
+        let child_destination = destination.join(entry.file_name());
+        if !copy_tree(&child_source, &child_destination) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Remove the legacy `~/.claude/keel[.exe]` binary. On Windows a running
+/// image cannot be deleted, so a failed delete parks the image under the
+/// `.stale-<ts>` sibling name that `find_executable_orphans` sweeps on the
+/// next install (rename works on running images; delete does not).
+fn remove_legacy_binary(keel_home: &Path) -> String {
+    let Some(old_binary) = legacy_claude_executable_path(keel_home) else {
+        return String::new();
+    };
+    if !old_binary.exists() {
+        return String::new();
+    }
+    match remove_path_if_exists(&old_binary) {
+        Ok(()) => format!("removed legacy binary {}", display_path(&old_binary)),
+        Err(_) => {
+            #[cfg(windows)]
+            {
+                // Park the running image; orphan sweep deletes it later.
+                let mut stale_name = old_binary
+                    .file_name()
+                    .map(|n| n.to_owned())
+                    .unwrap_or_default();
+                stale_name.push(format!(".stale-{}", unix_timestamp()));
+                let stale = old_binary.with_file_name(stale_name);
+                if fs::rename(&old_binary, &stale).is_ok() {
+                    return format!(
+                        "legacy binary parked as {} (in use; swept next install)",
+                        display_path(&stale)
+                    );
+                }
+            }
+            format!(
+                "legacy binary removal deferred: {}",
+                display_path(&old_binary)
+            )
+        }
+    }
+}
+
+/// Marker guarding the keel PATH export appended to unix shell rc files.
+#[cfg(not(windows))]
+const KEEL_PATH_MARKER: &str = "# keel PATH (managed by the keel installer)";
+
+/// Ensure the keel home directory is on the user's PATH so every shell and
+/// every host can invoke `keel` without a full path. Best-effort and
+/// idempotent: existing PATH entries and rc files are never duplicated or
+/// clobbered; failures report a status string instead of failing the install.
+///
+/// Windows: appends to the per-user `HKCU\Environment\Path` via `reg.exe`.
+/// Unix: appends a marker-guarded `export PATH=` line to each existing
+/// `~/.bashrc` / `~/.zshrc` / `~/.profile` (creating `~/.profile` when none
+/// exists).
+pub fn ensure_keel_home_on_path(keel_home: &Path) -> String {
+    let dir = display_path(keel_home);
+    if path_already_contains(keel_home) {
+        return format!("PATH already contains {dir}");
+    }
+    #[cfg(windows)]
+    {
+        match windows_append_user_path(keel_home) {
+            Ok(()) => format!("added {dir} to user PATH (HKCU\\Environment)"),
+            Err(error) => format!("PATH update skipped ({error}); add {dir} manually"),
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        match unix_append_path_export(keel_home) {
+            Ok(files) => {
+                if files.is_empty() {
+                    format!("PATH update skipped (no shell rc file found); add {dir} manually")
+                } else {
+                    format!("added {dir} to PATH via {}", files.join(", "))
+                }
+            }
+            Err(error) => format!("PATH update skipped ({error}); add {dir} manually"),
+        }
+    }
+}
+
+/// True when the current-process PATH already lists `keel_home`.
+fn path_already_contains(keel_home: &Path) -> bool {
+    let Some(path_value) = std::env::var_os("PATH") else {
+        return false;
+    };
+    for entry in std::env::split_paths(&path_value) {
+        if entry == keel_home {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(windows)]
+fn windows_append_user_path(keel_home: &Path) -> Result<(), String> {
+    let dir = display_path(keel_home);
+    // Read the current user PATH. `reg query` prints
+    // `    Path    REG_SZ    <value>` (or REG_EXPAND_SZ); parse leniently.
+    let output = std::process::Command::new("reg")
+        .args(["query", "HKCU\\Environment", "/v", "Path"])
+        .output()
+        .map_err(|error| format!("run reg.exe: {error}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut current = String::new();
+    let mut has_expand = false;
+    if output.status.success() {
+        for line in stdout.lines() {
+            let trimmed = line.trim_start();
+            let Some(rest) = trimmed.strip_prefix("Path") else {
+                continue;
+            };
+            let rest = rest.trim_start();
+            if rest.starts_with("REG_EXPAND_SZ") {
+                has_expand = true;
+                current = rest
+                    .trim_start_matches("REG_EXPAND_SZ")
+                    .trim_start()
+                    .to_string();
+            } else if rest.starts_with("REG_SZ") {
+                current = rest.trim_start_matches("REG_SZ").trim_start().to_string();
+            }
+        }
+    }
+    // Case-insensitive duplicate guard: Windows PATH entries ignore case.
+    let lower_current = current.to_lowercase();
+    let lower_home = dir.to_lowercase();
+    for entry in lower_current.split(';') {
+        if entry.trim() == lower_home.trim() {
+            return Ok(());
+        }
+    }
+    let new_value = if current.trim().is_empty() {
+        dir.to_string()
+    } else if current.ends_with(';') {
+        format!("{current}{dir}")
+    } else {
+        format!("{current};{dir}")
+    };
+    // REG_EXPAND_SZ when the existing value uses %VAR% expansion, so reg.exe
+    // does not silently convert it to a REG_SZ and break expansion.
+    let value_type = if has_expand || new_value.contains('%') {
+        "REG_EXPAND_SZ"
+    } else {
+        "REG_SZ"
+    };
+    let status = std::process::Command::new("reg")
+        .args([
+            "add",
+            "HKCU\\Environment",
+            "/v",
+            "Path",
+            "/t",
+            value_type,
+            "/d",
+            &new_value,
+            "/f",
+        ])
+        .status()
+        .map_err(|error| format!("run reg.exe add: {error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("reg.exe add exited with {status}"))
+    }
+}
+
+#[cfg(not(windows))]
+fn unix_append_path_export(keel_home: &Path) -> Result<Vec<String>, String> {
+    let user_home = crate::runtime::resolve_user_home()?;
+    let export_line = format!(
+        "{KEEL_PATH_MARKER}\nexport PATH=\"{dir}:$PATH\"\n",
+        dir = display_path(keel_home)
+    );
+    let candidates = [
+        user_home.join(".bashrc"),
+        user_home.join(".zshrc"),
+        user_home.join(".profile"),
+    ];
+    let mut touched = Vec::new();
+    for rc in &candidates {
+        if !rc.is_file() {
+            continue;
+        }
+        let text = read_text_if_exists(rc).unwrap_or_default();
+        // Marker-guarded: never append twice, never touch unmanaged lines.
+        if text.contains(KEEL_PATH_MARKER) {
+            continue;
+        }
+        let mut updated = text.clone();
+        if !updated.is_empty() && !updated.ends_with('\n') {
+            updated.push('\n');
+        }
+        updated.push_str(&export_line);
+        write_text(rc, &updated)?;
+        touched.push(display_path(rc));
+    }
+    if touched.is_empty() && !candidates.iter().any(|rc| rc.is_file()) {
+        // No rc file at all: create ~/.profile so sh-based sessions pick it up.
+        let profile = user_home.join(".profile");
+        write_text(&profile, &export_line)?;
+        touched.push(display_path(&profile));
+    }
+    Ok(touched)
+}
+
+/// Remove the `[plugins."keel@personal-keel"]` section from Codex config.toml
+/// without disturbing any other section, key, or comment. String-surgical:
+/// drops the header line plus every key line until the next section header.
+fn remove_codex_plugin_section(config_path: &Path) -> usize {
+    if !config_path.is_file() {
+        return 0;
+    }
+    let Ok(text) = crate::runtime::read_text_if_exists(config_path) else {
+        return 0;
+    };
+    let stripped = text.strip_prefix('\u{feff}').unwrap_or(&text);
+    let lines: Vec<&str> = stripped.lines().collect();
+    let header_pos = lines.iter().position(|line| {
+        let trimmed = line.trim();
+        trimmed == CODEX_PLUGIN_CONFIG_SECTION || trimmed == "[plugins.'keel@personal-keel']"
+    });
+    let Some(pos) = header_pos else {
+        return 0;
+    };
+    // Find the end of the section: the next line that starts a new table.
+    let mut end = lines.len();
+    for (offset, line) in lines[pos + 1..].iter().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            end = pos + 1 + offset;
+            break;
+        }
+    }
+    let mut kept: Vec<&str> = Vec::with_capacity(lines.len());
+    kept.extend_from_slice(&lines[..pos]);
+    kept.extend_from_slice(&lines[end..]);
+    // Collapse the blank-line seam the removal may leave at the splice point.
+    while kept.len() >= 2 {
+        let n = kept.len();
+        if kept[n - 1].trim().is_empty() && kept[n - 2].trim().is_empty() {
+            kept.remove(n - 1);
+        } else {
+            break;
+        }
+    }
+    let mut new_text = kept.join("\n");
+    if !new_text.is_empty() && !new_text.ends_with('\n') {
+        new_text.push('\n');
+    }
+    let _ = write_text(config_path, &new_text);
+    1
 }
 
 /// The Claude Desktop MCP config file, derived from the user's home so it is both
@@ -794,12 +1517,7 @@ pub(crate) fn maybe_wire_cowork(
     claude_home: &Path,
     detected: bool,
 ) -> Option<String> {
-    let is_standard_home = claude_home
-        .file_name()
-        .and_then(|name| name.to_str())
-        .map(|name| name == ".claude")
-        .unwrap_or(false);
-    if !is_standard_home {
+    if !is_standard_home(claude_home) {
         return None;
     }
     if !detected {
@@ -1202,12 +1920,7 @@ fn strip_managed_claude_md(existing: &str) -> String {
 /// installs into `~/.claude` always get the file. Best-effort: a failure is
 /// reported in the summary but never fails the install.
 fn maybe_sync_user_claude_md(claude_home: &Path) -> Option<String> {
-    let is_standard_home = claude_home
-        .file_name()
-        .and_then(|name| name.to_str())
-        .map(|name| name == ".claude")
-        .unwrap_or(false);
-    if !is_standard_home {
+    if !is_standard_home(claude_home) {
         return None;
     }
     let path = claude_home.join("CLAUDE.md");
@@ -1495,6 +2208,12 @@ pub fn write_install_summary(summary: &InstallSummary, output: &mut dyn Write) {
     if let Some(cowork_status) = &summary.cowork_wiring {
         let _ = writeln!(output, "  Cowork wiring: {cowork_status}");
     }
+    if let Some(migration) = &summary.migration_report {
+        let _ = writeln!(output, "  Legacy migration: {migration}");
+    }
+    if let Some(path_status) = &summary.path_wiring {
+        let _ = writeln!(output, "  PATH: {path_status}");
+    }
 }
 
 fn ensure_claude_home_directories(claude_home: &Path) -> Result<(), String> {
@@ -1513,9 +2232,12 @@ fn ensure_claude_home_directories(claude_home: &Path) -> Result<(), String> {
 
 fn uninstall_managed_files(claude_home: &Path) -> Result<usize, String> {
     let mut removed_count = 0;
+    // Managed engagement files live in the engagement home (even when the
+    // root is ~/.keel), so inventory-relative paths resolve there.
+    let engagement_home = crate::runtime::claude_engagement_home(claude_home);
     let file_inventory = read_inventory_set(&managed_files_inventory_path(claude_home));
     for relative in &file_inventory {
-        let absolute = claude_home.join(relative);
+        let absolute = engagement_home.join(relative);
         if absolute.is_file() {
             removed_count += remove_path_if_exists_counted(&absolute)?;
         }
@@ -1624,6 +2346,16 @@ fn remove_wired_adapters(claude_home: &Path) -> usize {
     if codex_dir.is_dir() {
         removed += remove_path_if_exists_counted(&codex_dir).unwrap_or(0);
     }
+
+    // Codex discovery surfaces written by maybe_wire_codex: leaving either
+    // behind makes Codex try to load a plugin whose files no longer exist.
+    let codex_marketplace = home
+        .join(".agents")
+        .join("plugins")
+        .join("marketplace.json");
+    removed += remove_codex_marketplace_entry(&codex_marketplace);
+    let codex_config = home.join(".codex").join("config.toml");
+    removed += remove_codex_plugin_section(&codex_config);
 
     let cursorrules = home.join(".cursorrules");
     if cursorrules.is_file() {
@@ -2616,6 +3348,9 @@ pub fn run_uninstall_command(
             return 1;
         }
     };
+    // Engagement files (root guidance, CLAUDE.md) live in the engagement home
+    // even when the keel root is `~/.keel`.
+    let engagement_home = crate::runtime::claude_engagement_home(&claude_home);
     let mut removed_count = 0;
     match uninstall_managed_files(&claude_home) {
         Ok(count) => removed_count += count,
@@ -2625,7 +3360,7 @@ pub fn run_uninstall_command(
         }
     }
     for root_file_name in ["AGENTS.md", "README.md"] {
-        let path = claude_home.join(root_file_name);
+        let path = engagement_home.join(root_file_name);
         match remove_path_if_exists_counted(&path) {
             Ok(count) => removed_count += count,
             Err(error) => {
@@ -2639,7 +3374,7 @@ pub fn run_uninstall_command(
     // keel owns wholesale at this path), CLAUDE.md may hold the user's own
     // global memory, so we only remove our block and delete the file solely when
     // nothing else remains.
-    match remove_managed_user_claude_md(&claude_home) {
+    match remove_managed_user_claude_md(&engagement_home) {
         Ok(count) => removed_count += count,
         Err(error) => {
             let _ = writeln!(
@@ -4115,5 +4850,438 @@ mod tests {
         assert!(!rewrite_codex_mcp_command(&mut doc, "/x/keel"));
         let mut non_object = serde_json::json!(42);
         assert!(!rewrite_codex_mcp_command(&mut non_object, "/x/keel"));
+    }
+
+    fn unique_codex_test_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("keel-codex-{label}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Build a fake user home holding `.keel` (the neutral root) and `.claude`
+    /// (the engagement home) so migration tests run hermetically. Returns
+    /// `(home, keel_home, claude_home)`.
+    fn legacy_home_fixture(label: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let home =
+            std::env::temp_dir().join(format!("keel-migrate-{label}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&home);
+        let keel_home = home.join(".keel");
+        let claude_home = home.join(".claude");
+        fs::create_dir_all(&keel_home).unwrap();
+        fs::create_dir_all(&claude_home).unwrap();
+        (home, keel_home, claude_home)
+    }
+
+    #[test]
+    fn migration_moves_keel_owned_data_to_neutral_home() {
+        let (_home, keel_home, claude_home) = legacy_home_fixture("move");
+        // Seed legacy data that keel owns.
+        fs::create_dir_all(claude_home.join("working-briefs")).unwrap();
+        fs::write(claude_home.join("working-briefs/brief.json"), "{}").unwrap();
+        fs::write(claude_home.join("config.toml"), "x = 1").unwrap();
+        fs::create_dir_all(claude_home.join("memories")).unwrap();
+
+        let report = migrate_from_legacy_claude_home(&keel_home, &claude_home);
+        assert!(report.is_some(), "migration must report when it moves data");
+
+        assert!(keel_home.join("working-briefs/brief.json").is_file());
+        assert!(keel_home.join("config.toml").is_file());
+        assert!(keel_home.join("memories").is_dir());
+        // Sources are gone from the legacy home.
+        assert!(!claude_home.join("working-briefs").exists());
+        assert!(!claude_home.join("config.toml").exists());
+        let _ = fs::remove_dir_all(keel_home.parent().unwrap());
+    }
+
+    #[test]
+    fn migration_merges_legacy_dir_into_existing_destination() {
+        let (_home, keel_home, claude_home) = legacy_home_fixture("nooverwrite");
+        // Both homes hold working-briefs: the merge keeps the destination
+        // file AND brings the legacy file over.
+        fs::create_dir_all(keel_home.join("working-briefs")).unwrap();
+        fs::write(keel_home.join("working-briefs/new.json"), "kept").unwrap();
+        fs::create_dir_all(claude_home.join("working-briefs")).unwrap();
+        fs::write(claude_home.join("working-briefs/old.json"), "legacy").unwrap();
+
+        let report = migrate_from_legacy_claude_home(&keel_home, &claude_home);
+        assert!(report.is_some());
+        assert_eq!(
+            fs::read_to_string(keel_home.join("working-briefs/new.json")).unwrap(),
+            "kept"
+        );
+        assert_eq!(
+            fs::read_to_string(keel_home.join("working-briefs/old.json")).unwrap(),
+            "legacy",
+            "legacy data must land beside the existing destination content"
+        );
+        assert!(
+            !claude_home.join("working-briefs").exists(),
+            "a fully merged legacy directory must be removed"
+        );
+        let _ = fs::remove_dir_all(keel_home.parent().unwrap());
+    }
+
+    #[test]
+    fn migration_exact_path_conflict_keeps_destination_and_source() {
+        let (_home, keel_home, claude_home) = legacy_home_fixture("conflict");
+        // Same relative path on both sides: destination wins, the conflicting
+        // legacy copy is left in place (never deleted, never overwritten).
+        fs::create_dir_all(keel_home.join("memories")).unwrap();
+        fs::write(keel_home.join("memories/note.md"), "fresh").unwrap();
+        fs::create_dir_all(claude_home.join("memories")).unwrap();
+        fs::write(claude_home.join("memories/note.md"), "legacy").unwrap();
+
+        let report = migrate_from_legacy_claude_home(&keel_home, &claude_home);
+        assert!(report.is_some());
+        assert_eq!(
+            fs::read_to_string(keel_home.join("memories/note.md")).unwrap(),
+            "fresh",
+            "destination content must win an exact-path conflict"
+        );
+        assert_eq!(
+            fs::read_to_string(claude_home.join("memories/note.md")).unwrap(),
+            "legacy",
+            "the conflicting legacy copy must stay for manual reconciliation"
+        );
+        let _ = fs::remove_dir_all(keel_home.parent().unwrap());
+    }
+
+    #[test]
+    fn migration_is_noop_when_same_root_or_non_standard() {
+        // Non-standard root: engagement == root, so nothing migrates.
+        let dir = unique_codex_test_dir("noop");
+        let result = migrate_from_legacy_claude_home(&dir, &dir);
+        assert!(result.is_none(), "non-standard roots must not migrate");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn migration_noop_when_legacy_home_absent() {
+        let home = std::env::temp_dir().join(format!("keel-migrate-absent-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&home);
+        let keel_home = home.join(".keel");
+        fs::create_dir_all(&keel_home).unwrap();
+        let claude_home = home.join(".claude"); // does not exist
+        let result = migrate_from_legacy_claude_home(&keel_home, &claude_home);
+        assert!(result.is_none(), "no legacy home means nothing to migrate");
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn migration_replaces_empty_destination_dir_but_keeps_non_empty() {
+        // Ordering regression: an empty scaffolded destination gets replaced
+        // by legacy data; a non-empty one merges, nothing overwritten.
+        let (_home, keel_home, claude_home) = legacy_home_fixture("emptydest");
+        // Empty scaffolded destination + real legacy data -> moved.
+        fs::create_dir_all(keel_home.join("memories")).unwrap(); // empty
+        fs::create_dir_all(claude_home.join("memories")).unwrap();
+        fs::write(claude_home.join("memories/note.md"), "real").unwrap();
+        // Non-empty destination + legacy data with a DISTINCT path -> merged.
+        fs::create_dir_all(keel_home.join("raw-output")).unwrap();
+        fs::write(keel_home.join("raw-output/new.json"), "fresh").unwrap();
+        fs::create_dir_all(claude_home.join("raw-output")).unwrap();
+        fs::write(claude_home.join("raw-output/old.json"), "legacy").unwrap();
+
+        let report = migrate_from_legacy_claude_home(&keel_home, &claude_home);
+        assert!(report.is_some());
+        // Empty destination was replaced by the real data.
+        assert_eq!(
+            fs::read_to_string(keel_home.join("memories/note.md")).unwrap(),
+            "real"
+        );
+        assert!(!claude_home.join("memories").exists());
+        // Non-empty destination merged: BOTH files present, legacy dir removed.
+        assert!(keel_home.join("raw-output/new.json").is_file());
+        assert!(
+            keel_home.join("raw-output/old.json").is_file(),
+            "legacy data with a distinct path must merge into the destination"
+        );
+        assert!(
+            !claude_home.join("raw-output").exists(),
+            "a fully merged legacy directory must be removed"
+        );
+        let _ = fs::remove_dir_all(keel_home.parent().unwrap());
+    }
+
+    #[test]
+    fn migration_idempotent_second_run_is_quiet() {
+        let (_home, keel_home, claude_home) = legacy_home_fixture("idem");
+        fs::write(claude_home.join("config.toml"), "x = 1").unwrap();
+        let first = migrate_from_legacy_claude_home(&keel_home, &claude_home);
+        assert!(first.is_some());
+        let second = migrate_from_legacy_claude_home(&keel_home, &claude_home);
+        assert!(
+            second.is_none(),
+            "second run must be a no-op once migrated, got {second:?}"
+        );
+        let _ = fs::remove_dir_all(keel_home.parent().unwrap());
+    }
+
+    #[test]
+    fn copy_tree_copies_nested_directories() {
+        let dir = unique_codex_test_dir("copytree");
+        let src = dir.join("src");
+        let dst = dir.join("dst");
+        fs::create_dir_all(src.join("a/b")).unwrap();
+        fs::write(src.join("root.txt"), "root").unwrap();
+        fs::write(src.join("a/b/deep.txt"), "deep").unwrap();
+
+        assert!(copy_tree(&src, &dst));
+        assert_eq!(fs::read_to_string(dst.join("root.txt")).unwrap(), "root");
+        assert_eq!(
+            fs::read_to_string(dst.join("a/b/deep.txt")).unwrap(),
+            "deep"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn move_path_preserving_moves_file_and_dir() {
+        let dir = unique_codex_test_dir("movepath");
+        let src_file = dir.join("a.txt");
+        let dst_file = dir.join("b.txt");
+        fs::write(&src_file, "hello").unwrap();
+        assert!(move_path_preserving(&src_file, &dst_file));
+        assert!(!src_file.exists());
+        assert_eq!(fs::read_to_string(&dst_file).unwrap(), "hello");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn merge_codex_marketplace_creates_catalog_when_absent() {
+        let dir = unique_codex_test_dir("market-create");
+        let path = dir.join(".agents/plugins/marketplace.json");
+        let result = merge_codex_marketplace(&path).unwrap();
+        assert!(
+            matches!(result, CodexMarketplaceResult::Added),
+            "absent manifest must report Added, got {result:?}"
+        );
+        let doc: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(doc["name"], CODEX_PERSONAL_MARKETPLACE_NAME);
+        let plugins = doc["plugins"].as_array().unwrap();
+        assert_eq!(plugins.len(), 1);
+        assert_eq!(plugins[0]["name"], "keel");
+        assert_eq!(plugins[0]["source"]["path"], "~/.codex/plugins/keel");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn merge_codex_marketplace_preserves_siblings_and_is_idempotent() {
+        let dir = unique_codex_test_dir("market-idem");
+        let path = dir.join("marketplace.json");
+        fs::write(
+            &path,
+            r#"{"name":"user-catalog","plugins":[{"name":"other-plugin","source":{"source":"local","path":"~/p/other"}}]}"#,
+        )
+        .unwrap();
+        let first = merge_codex_marketplace(&path).unwrap();
+        assert!(matches!(first, CodexMarketplaceResult::Added));
+        let second = merge_codex_marketplace(&path).unwrap();
+        assert!(
+            matches!(second, CodexMarketplaceResult::AlreadyCurrent),
+            "second merge must be a no-op, got {second:?}"
+        );
+        let doc: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(doc["name"], "user-catalog", "user metadata preserved");
+        let names: Vec<&str> = doc["plugins"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"other-plugin"), "sibling entry preserved");
+        assert!(names.contains(&"keel"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn merge_codex_marketplace_updates_stale_keel_entry() {
+        let dir = unique_codex_test_dir("market-stale");
+        let path = dir.join("marketplace.json");
+        fs::write(
+            &path,
+            r#"{"name":"user-catalog","plugins":[{"name":"keel","source":{"source":"local","path":"/old/path"}}]}"#,
+        )
+        .unwrap();
+        let result = merge_codex_marketplace(&path).unwrap();
+        assert!(
+            matches!(result, CodexMarketplaceResult::Updated),
+            "stale keel entry must report Updated, got {result:?}"
+        );
+        let doc: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(doc["plugins"][0]["source"]["path"], "~/.codex/plugins/keel");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn ensure_codex_plugin_enabled_appends_section_when_absent() {
+        let dir = unique_codex_test_dir("enable-absent");
+        let path = dir.join("config.toml");
+        fs::write(&path, "model = \"some-model\"\n").unwrap();
+        let result = ensure_codex_plugin_enabled(&path).unwrap();
+        assert!(matches!(result, CodexEnableResult::Added));
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains(CODEX_PLUGIN_CONFIG_SECTION));
+        assert!(text.contains("enabled = true"));
+        assert!(
+            text.contains("model = \"some-model\""),
+            "existing keys must survive the append"
+        );
+        // The result must still be valid TOML with the enabled flag set.
+        let doc: toml::Value = text.parse().unwrap();
+        assert_eq!(
+            doc["plugins"]["keel@personal-keel"]["enabled"].as_bool(),
+            Some(true)
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn ensure_codex_plugin_enabled_creates_missing_file() {
+        let dir = unique_codex_test_dir("enable-newfile");
+        let path = dir.join("config.toml");
+        let result = ensure_codex_plugin_enabled(&path).unwrap();
+        assert!(matches!(result, CodexEnableResult::Added));
+        assert!(path.is_file());
+        let doc: toml::Value = fs::read_to_string(&path).unwrap().parse().unwrap();
+        assert_eq!(
+            doc["plugins"]["keel@personal-keel"]["enabled"].as_bool(),
+            Some(true)
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn ensure_codex_plugin_enabled_is_idempotent() {
+        let dir = unique_codex_test_dir("enable-idem");
+        let path = dir.join("config.toml");
+        assert!(matches!(
+            ensure_codex_plugin_enabled(&path).unwrap(),
+            CodexEnableResult::Added
+        ));
+        assert!(matches!(
+            ensure_codex_plugin_enabled(&path).unwrap(),
+            CodexEnableResult::AlreadyEnabled
+        ));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn ensure_codex_plugin_enabled_respects_user_disable() {
+        let dir = unique_codex_test_dir("enable-disabled");
+        let path = dir.join("config.toml");
+        let body = format!("{CODEX_PLUGIN_CONFIG_SECTION}\nenabled = false\n");
+        fs::write(&path, &body).unwrap();
+        let result = ensure_codex_plugin_enabled(&path).unwrap();
+        assert!(
+            matches!(result, CodexEnableResult::UnchangedDisabled),
+            "an explicit user disable must win, got {result:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            body,
+            "the file must be untouched when the user disabled the plugin"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn ensure_codex_plugin_enabled_inserts_under_existing_header() {
+        let dir = unique_codex_test_dir("enable-header");
+        let path = dir.join("config.toml");
+        fs::write(
+            &path,
+            format!("model = \"x\"\n{CODEX_PLUGIN_CONFIG_SECTION}\nother_key = 1\n"),
+        )
+        .unwrap();
+        let result = ensure_codex_plugin_enabled(&path).unwrap();
+        assert!(matches!(result, CodexEnableResult::Added));
+        let doc: toml::Value = fs::read_to_string(&path).unwrap().parse().unwrap();
+        let entry = &doc["plugins"]["keel@personal-keel"];
+        assert_eq!(entry["enabled"].as_bool(), Some(true));
+        assert_eq!(entry["other_key"].as_integer(), Some(1));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn ensure_codex_plugin_enabled_refuses_unparseable_toml() {
+        let dir = unique_codex_test_dir("enable-badtoml");
+        let path = dir.join("config.toml");
+        let broken = "model = \"unterminated\n";
+        fs::write(&path, broken).unwrap();
+        assert!(
+            ensure_codex_plugin_enabled(&path).is_err(),
+            "unparseable config.toml must be refused, never mutated"
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), broken);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn remove_codex_marketplace_entry_removes_keel_and_keeps_siblings() {
+        let dir = unique_codex_test_dir("market-remove");
+        let path = dir.join("marketplace.json");
+        fs::write(
+            &path,
+            r#"{"name":"user-catalog","plugins":[{"name":"keel","source":{}},{"name":"keep-me","source":{}}]}"#,
+        )
+        .unwrap();
+        assert_eq!(remove_codex_marketplace_entry(&path), 1);
+        let doc: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let names: Vec<&str> = doc["plugins"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["keep-me"]);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn remove_codex_marketplace_entry_deletes_keel_only_catalog() {
+        let dir = unique_codex_test_dir("market-remove-only");
+        let path = dir.join("marketplace.json");
+        fs::write(
+            &path,
+            r#"{"name":"personal-keel","plugins":[{"name":"keel"}]}"#,
+        )
+        .unwrap();
+        assert!(remove_codex_marketplace_entry(&path) >= 1);
+        assert!(
+            !path.exists(),
+            "a catalog that held only keel must be removed wholesale"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn remove_codex_plugin_section_removes_only_keel_section() {
+        let dir = unique_codex_test_dir("section-remove");
+        let path = dir.join("config.toml");
+        fs::write(
+            &path,
+            format!(
+                "# user comment\nmodel = \"x\"\n\n{CODEX_PLUGIN_CONFIG_SECTION}\nenabled = true\n\n[plugins.\"other@market\"]\nenabled = false\n"
+            ),
+        )
+        .unwrap();
+        assert_eq!(remove_codex_plugin_section(&path), 1);
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("keel@personal-keel"));
+        assert!(text.contains("[plugins.\"other@market\"]"));
+        assert!(text.contains("# user comment"), "comments must survive");
+        let doc: toml::Value = text.parse().unwrap();
+        assert_eq!(
+            doc["plugins"]["other@market"]["enabled"].as_bool(),
+            Some(false),
+            "sibling plugin sections must be untouched"
+        );
+        let _ = fs::remove_dir_all(dir);
     }
 }

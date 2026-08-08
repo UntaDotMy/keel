@@ -56,6 +56,9 @@ fn verify_install(
 ) -> Result<(), String> {
     let repository_root = resolve_repository_root(flag_set.string_value("repo-root"))?;
     let claude_home = resolve_claude_home(flag_set.string_value("claude-home"))?;
+    // Root guidance files install into the engagement home even when the keel
+    // root is `~/.keel`, so verification compares them there.
+    let engagement_home = crate::runtime::claude_engagement_home(&claude_home);
     let layout = discover_repository_layout(&repository_root)?;
     if !skills_directory(&claude_home).is_dir() {
         return Err(format!(
@@ -65,7 +68,7 @@ fn verify_install(
     }
     for relative_path_name in &layout.root_files {
         let source_path = repository_root.join(relative_path_name);
-        let target_path = claude_home.join(relative_path_name);
+        let target_path = engagement_home.join(relative_path_name);
         compare_file_bytes(&source_path, &target_path)?;
         let _ = writeln!(
             standard_output,
@@ -107,7 +110,8 @@ fn verify_install(
         );
     }
     for agent_name in &layout.agent_names {
-        if !agent_profiles_directory(&claude_home)
+        // Profiles install via sync_agents into the engagement home.
+        if !agent_profiles_directory(&engagement_home)
             .join(format!("{agent_name}.toml"))
             .is_file()
         {

@@ -105,17 +105,40 @@ const BIN_NAME: string =
 
 /**
  * Resolve the bridge binary path.
- * Prefer ~/.claude/<binary>; fall back to bare name (PATH lookup).
+ * Resolution order: $KEEL_HOME, then the host-neutral ~/.keel, then the
+ * legacy ~/.claude placement, then the bare name (PATH lookup).
  */
 function resolveBinary(): string {
   const home = os.homedir();
-  const fallback = path.join(home, ".claude", BIN_NAME);
-  try {
-    if (fs.existsSync(fallback)) return fallback;
-  } catch {
-    // fs failure — PATH only
+  const candidates: string[] = [];
+  const envHome = process.env.KEEL_HOME;
+  if (envHome && envHome.trim()) candidates.push(path.join(envHome.trim(), BIN_NAME));
+  candidates.push(path.join(home, ".keel", BIN_NAME));
+  candidates.push(path.join(home, ".claude", BIN_NAME));
+  for (const candidate of candidates) {
+    try {
+      if (fs.existsSync(candidate)) return candidate;
+    } catch {
+      // fs failure, try the next candidate
+    }
   }
   return BIN_NAME;
+}
+
+/**
+ * Resolve the keel state root: ~/.keel/state now, legacy ~/.claude fallback.
+ */
+function keelStateRoot(): string {
+  const home = os.homedir();
+  const envHome = process.env.KEEL_HOME;
+  if (envHome && envHome.trim()) return path.join(envHome.trim(), "state");
+  const neutralHome = path.join(home, ".keel");
+  try {
+    if (fs.existsSync(neutralHome)) return path.join(neutralHome, "state");
+  } catch {
+    // fall through to legacy
+  }
+  return path.join(home, ".claude", "state");
 }
 
 const BRIDGE_BIN: string = resolveBinary();
@@ -124,10 +147,18 @@ const BRIDGE_BIN: string = resolveBinary();
 // Marker-file helpers
 // ---------------------------------------------------------------------------
 
-const STATE_DIR = path.join(os.homedir(), ".claude", "state");
+const STATE_DIR = keelStateRoot();
 const STARTED_DIR = path.join(STATE_DIR, "pi-session-started");
 // Shared with Rust core / OpenCode / Codex (STRICT keel-required).
 const IRONLAW_DIR = path.join(STATE_DIR, "iron-law-satisfied");
+// Legacy marker location (pre-migration installs wrote here); consulted on
+// reads and cleared alongside the current one.
+const IRONLAW_DIR_LEGACY = path.join(
+  os.homedir(),
+  ".claude",
+  "state",
+  "iron-law-satisfied",
+);
 
 /** Match Rust `sanitize_memory_key`: lowercase alnum, other runs → single `-`. */
 function sanitizeSessionKey(sessionID: string): string {
@@ -159,7 +190,15 @@ function ensureDir(dir: string): void {
 function hasMarker(dir: string, sessionID: string): boolean {
   ensureDir(dir);
   try {
-    return fs.existsSync(markerPath(dir, sessionID));
+    if (fs.existsSync(markerPath(dir, sessionID))) return true;
+    // Iron-law legacy fallback: a marker written by a pre-migration install
+    // still counts as satisfied.
+    if (dir === IRONLAW_DIR) {
+      return fs.existsSync(
+        path.join(IRONLAW_DIR_LEGACY, sanitizeSessionKey(sessionID)),
+      );
+    }
+    return false;
   } catch {
     return false;
   }
@@ -511,6 +550,7 @@ function handleSessionShutdown(event: PiSessionLikeEvent, ctx?: PiExtensionConte
   } finally {
     clearStarted(sessionID);
     clearMarker(IRONLAW_DIR, sessionID);
+    clearMarker(IRONLAW_DIR_LEGACY, sessionID);
   }
 }
 

@@ -195,7 +195,8 @@ pub fn run_repair_command(
 /// function `keel hook install` uses, so repair and install stay in
 /// lockstep.
 fn repair_hooks(claude_home: &Path) -> Result<std::path::PathBuf, String> {
-    let settings_path = claude_home.join(crate::hooks::claude::SETTINGS_FILE_NAME);
+    let settings_path = crate::runtime::claude_engagement_home(claude_home)
+        .join(crate::hooks::claude::SETTINGS_FILE_NAME);
     let executable = installed_executable_path(claude_home);
     let payload = build_hooks_payload(&settings_path, &executable)?;
     write_text(&settings_path, &payload)?;
@@ -241,9 +242,11 @@ mod tests {
         );
 
         // Hooks written.
-        let settings =
-            fs::read_to_string(claude_home.join(crate::hooks::claude::SETTINGS_FILE_NAME))
-                .expect("settings written");
+        let settings = fs::read_to_string(
+            crate::runtime::claude_engagement_home(&claude_home)
+                .join(crate::hooks::claude::SETTINGS_FILE_NAME),
+        )
+        .expect("settings written");
         assert!(settings.contains("UserPromptSubmit"));
         assert!(settings.contains("SessionStart"));
 

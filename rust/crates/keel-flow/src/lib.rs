@@ -195,10 +195,14 @@ pub fn default_workspace_artifact_path(repository_root: &Path) -> PathBuf {
 }
 
 fn claude_home_directory() -> PathBuf {
-    if let Ok(override_value) = env::var("CLAUDE_TARGET_OVERRIDE") {
-        let trimmed = override_value.trim();
-        if !trimmed.is_empty() {
-            return clean_path(&PathBuf::from(trimmed));
+    // Mirror the CLI home resolution: KEEL_HOME, CLAUDE_TARGET_OVERRIDE,
+    // ~/.keel when it exists, legacy ~/.claude otherwise.
+    for env_name in ["KEEL_HOME", "CLAUDE_TARGET_OVERRIDE"] {
+        if let Ok(override_value) = env::var(env_name) {
+            let trimmed = override_value.trim();
+            if !trimmed.is_empty() {
+                return clean_path(&PathBuf::from(trimmed));
+            }
         }
     }
     let home = env::var("HOME")
@@ -210,7 +214,12 @@ fn claude_home_directory() -> PathBuf {
                 .filter(|value| !value.trim().is_empty())
         })
         .unwrap_or_else(|| ".".to_string());
-    clean_path(&PathBuf::from(home).join(".claude"))
+    let home_path = clean_path(&PathBuf::from(home));
+    let keel_home = home_path.join(".keel");
+    if keel_home.is_dir() {
+        return keel_home;
+    }
+    home_path.join(".claude")
 }
 
 fn workspace_key(repository_root: &Path) -> String {

@@ -260,7 +260,8 @@ fn run_hook_install(
         }
     };
 
-    let hook_path = claude_home.join(crate::hooks::claude::SETTINGS_FILE_NAME);
+    let hook_path = crate::runtime::claude_engagement_home(&claude_home)
+        .join(crate::hooks::claude::SETTINGS_FILE_NAME);
 
     let executable = match resolve_current_executable() {
         Ok(path) => path,
@@ -444,7 +445,8 @@ fn run_hook_uninstall(
         }
     };
 
-    let hook_path = claude_home.join(crate::hooks::claude::SETTINGS_FILE_NAME);
+    let hook_path = crate::runtime::claude_engagement_home(&claude_home)
+        .join(crate::hooks::claude::SETTINGS_FILE_NAME);
 
     match remove_managed_hook_payload(&hook_path) {
         Ok((payload, removed)) => {
@@ -506,7 +508,8 @@ fn run_hook_list(
         }
     };
 
-    let hook_path = claude_home.join(crate::hooks::claude::SETTINGS_FILE_NAME);
+    let hook_path = crate::runtime::claude_engagement_home(&claude_home)
+        .join(crate::hooks::claude::SETTINGS_FILE_NAME);
 
     match fs::read_to_string(&hook_path) {
         Ok(text) => {
@@ -5488,7 +5491,8 @@ impl HookDiagnostics {
 fn collect_hook_diagnostics(claude_home: &Path) -> HookDiagnostics {
     let installed_executable = installed_executable_path(claude_home);
     let installed_executable_present = installed_executable.is_file();
-    let settings_path = claude_home.join(crate::hooks::claude::SETTINGS_FILE_NAME);
+    let settings_path = crate::runtime::claude_engagement_home(claude_home)
+        .join(crate::hooks::claude::SETTINGS_FILE_NAME);
     let settings_present = settings_path.is_file();
 
     let (settings_parses, settings_points_at_installed) = if !settings_present {
@@ -5698,7 +5702,8 @@ pub fn remove_managed_hook_payload(hook_path: &Path) -> Result<(String, bool), S
 /// full uninstall does not leave the harness firing hooks at a deleted binary.
 /// A missing settings file is a no-op (nothing to clean), not an error.
 pub fn remove_managed_hook_payload_for_home(claude_home: &Path) -> Result<bool, String> {
-    let hook_path = claude_home.join(crate::hooks::claude::SETTINGS_FILE_NAME);
+    let hook_path = crate::runtime::claude_engagement_home(claude_home)
+        .join(crate::hooks::claude::SETTINGS_FILE_NAME);
     let (payload, removed) = remove_managed_hook_payload(&hook_path)?;
     if removed {
         write_text(&hook_path, &payload)?;

@@ -236,17 +236,8 @@ pub fn is_absolute_any_platform(path: &str) -> bool {
     bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
 }
 
-pub fn resolve_claude_home(requested_claude_home: &str) -> Result<PathBuf, String> {
-    let trimmed = requested_claude_home.trim();
-    if !trimmed.is_empty() {
-        return Ok(clean_path(&PathBuf::from(trimmed)));
-    }
-    if let Ok(override_value) = env::var("CLAUDE_TARGET_OVERRIDE") {
-        let trimmed_override = override_value.trim();
-        if !trimmed_override.is_empty() {
-            return Ok(clean_path(&PathBuf::from(trimmed_override)));
-        }
-    }
+/// The user's home directory (`$HOME`, falling back to `%USERPROFILE%`).
+pub fn resolve_user_home() -> Result<PathBuf, String> {
     let home = env::var("HOME")
         .ok()
         .filter(|value| !value.trim().is_empty())
@@ -256,7 +247,96 @@ pub fn resolve_claude_home(requested_claude_home: &str) -> Result<PathBuf, Strin
                 .filter(|value| !value.trim().is_empty())
         })
         .ok_or_else(|| "no user home directory available".to_string())?;
-    Ok(clean_path(&PathBuf::from(home).join(".claude")))
+    Ok(clean_path(&PathBuf::from(home)))
+}
+
+/// keel's host-neutral root home: the binary, data, and state live here so
+/// every host (claude, codex, opencode, cursor, pi, cowork) shares one
+/// install. Resolution order: explicit flag → `KEEL_HOME` env →
+/// legacy `CLAUDE_TARGET_OVERRIDE` env → `~/.keel` default.
+pub fn resolve_keel_home(requested_home: &str) -> Result<PathBuf, String> {
+    let trimmed = requested_home.trim();
+    if !trimmed.is_empty() {
+        return Ok(clean_path(&PathBuf::from(trimmed)));
+    }
+    for env_name in ["KEEL_HOME", "CLAUDE_TARGET_OVERRIDE"] {
+        if let Ok(override_value) = env::var(env_name) {
+            let trimmed_override = override_value.trim();
+            if !trimmed_override.is_empty() {
+                return Ok(clean_path(&PathBuf::from(trimmed_override)));
+            }
+        }
+    }
+    Ok(resolve_user_home()?.join(".keel"))
+}
+
+/// Resolve keel's root home. Historically named "claude home" because the
+/// install lived under `~/.claude`; the default is now the host-neutral
+/// `~/.keel` (see `resolve_keel_home`). Callers receive the root; claude-
+/// harness-specific artifacts derive their own location from
+/// `claude_engagement_home`.
+pub fn resolve_claude_home(requested_claude_home: &str) -> Result<PathBuf, String> {
+    resolve_keel_home(requested_claude_home)
+}
+
+/// Directory name of the standard host-neutral keel home.
+pub const KEEL_HOME_DIRECTORY_NAME: &str = ".keel";
+
+/// Where the claude-harness-specific engagement artifacts live (skills,
+/// agents, commands, settings.json, user CLAUDE.md, the plugin): the harness
+/// only reads them from `~/.claude`, so they can never move to `~/.keel`.
+///
+/// Split rule: when `keel_home` is a standard `.keel` directory, the
+/// engagement home is its sibling `~/.claude`. For any other root name
+/// (test temp dirs, legacy `--claude-home` overrides), the root doubles as
+/// the engagement home, preserving the pre-split single-root behavior.
+pub fn claude_engagement_home(keel_home: &Path) -> PathBuf {
+    let is_standard_keel_home = keel_home
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name == KEEL_HOME_DIRECTORY_NAME)
+        .unwrap_or(false);
+    if is_standard_keel_home {
+        if let Some(parent) = keel_home.parent() {
+            return parent.join(".claude");
+        }
+    }
+    keel_home.to_path_buf()
+}
+
+/// True when `keel_home` is the standard `~/.keel` (basename check only; the
+/// parent is not validated so temp-dir `.keel` fixtures also count).
+pub fn is_standard_keel_home(keel_home: &Path) -> bool {
+    keel_home
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name == KEEL_HOME_DIRECTORY_NAME)
+        .unwrap_or(false)
+}
+
+/// Inverse of `claude_engagement_home`: given the claude-harness engagement
+/// home, find the host-neutral keel home that holds the binary and data.
+///
+/// When the engagement home is a standard `.claude` and its sibling `.keel`
+/// exists, that sibling is the keel home (the migrated layout). Otherwise the
+/// engagement home IS the keel home (legacy installs and non-standard roots).
+/// The existence check keeps pre-migration installs correct: until `~/.keel`
+/// is created, the binary still lives under `~/.claude`.
+pub fn keel_home_from_engagement(engagement_home: &Path) -> PathBuf {
+    let is_standard_engagement = engagement_home
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name == ".claude")
+        .unwrap_or(false);
+    if is_standard_engagement {
+        if let Some(parent) = engagement_home.parent() {
+            let sibling = parent.join(KEEL_HOME_DIRECTORY_NAME);
+            if sibling.is_dir() {
+                return sibling;
+            }
+        }
+    }
+    engagement_home.to_path_buf()
 }
 
 /// Validate that `candidate` is a single, safe path segment usable as one
@@ -317,18 +397,30 @@ pub fn display_path(path: &Path) -> String {
     }
 }
 
+/// Skills are a harness-engagement artifact: the claude harness only loads them
+/// from `~/.claude/skills`, so the directory resolves against the engagement
+/// home even when the keel root is `~/.keel`. Non-standard roots resolve to
+/// themselves, preserving single-root behavior for tests and overrides.
 pub fn skills_directory(claude_home: &Path) -> PathBuf {
-    claude_home.join("skills")
+    claude_engagement_home(claude_home).join("skills")
 }
 
+/// Subagent definitions: same engagement-home rule as `skills_directory`
+/// (the harness reads them from `~/.claude/agents`).
 pub fn agents_directory(claude_home: &Path) -> PathBuf {
-    claude_home.join("agents")
+    claude_engagement_home(claude_home).join("agents")
 }
 
+/// Slash commands: same engagement-home rule as `skills_directory`
+/// (the harness reads them from `~/.claude/commands`).
 pub fn commands_directory(claude_home: &Path) -> PathBuf {
-    claude_home.join("commands")
+    claude_engagement_home(claude_home).join("commands")
 }
 
+/// Managed agent profiles (`<name>.toml`) are keel-internal CLI config; the
+/// harness never reads them. They install alongside the other managed pack
+/// surfaces in the engagement home (`~/.claude`) so inventory tracking,
+/// orphan cleanup, verify, and uninstall all share one tree.
 pub fn agent_profiles_directory(claude_home: &Path) -> PathBuf {
     claude_home.join("agent-profiles")
 }
@@ -349,8 +441,19 @@ pub fn executable_file_name() -> String {
     }
 }
 
-pub fn installed_executable_path(claude_home: &Path) -> PathBuf {
-    claude_home.join(executable_file_name())
+/// The installed keel binary. Host-neutral: it lives in the keel home
+/// (`~/.keel` by default), not in `~/.claude`, so every host can invoke it.
+pub fn installed_executable_path(keel_home: &Path) -> PathBuf {
+    keel_home.join(executable_file_name())
+}
+
+/// Legacy install location (`~/.claude/keel[.exe]`). Used only to detect and
+/// remove the old placement during migration; nothing new installs here.
+pub fn legacy_claude_executable_path(keel_home: &Path) -> Option<PathBuf> {
+    if !is_standard_keel_home(keel_home) {
+        return None;
+    }
+    Some(claude_engagement_home(keel_home).join(executable_file_name()))
 }
 
 pub fn ensure_parent_directory(path: &Path) -> Result<(), String> {
@@ -789,5 +892,106 @@ mod cap_captured_stream_tests {
             capped.windows(b"[keel]".len()).any(|w| w == b"[keel]"),
             "capped buffer must carry the truncation marker"
         );
+    }
+}
+
+#[cfg(test)]
+mod keel_home_split_tests {
+    use super::*;
+
+    #[test]
+    fn engagement_home_splits_to_sibling_dot_claude_for_keel_root() {
+        let keel_home = PathBuf::from("/home/user/.keel");
+        let engagement = claude_engagement_home(&keel_home);
+        assert_eq!(engagement, PathBuf::from("/home/user/.claude"));
+    }
+
+    #[test]
+    fn engagement_home_is_the_root_itself_for_non_standard_roots() {
+        // Test temp dirs and legacy --claude-home overrides keep the
+        // single-root behavior so hermetic tests stay hermetic.
+        let custom = PathBuf::from("/tmp/keel-test-root");
+        assert_eq!(claude_engagement_home(&custom), custom);
+        let legacy = PathBuf::from("/home/user/.claude");
+        assert_eq!(claude_engagement_home(&legacy), legacy);
+    }
+
+    #[test]
+    fn is_standard_keel_home_checks_basename_only() {
+        assert!(is_standard_keel_home(&PathBuf::from("/home/user/.keel")));
+        assert!(is_standard_keel_home(&PathBuf::from("/tmp/fixture/.keel")));
+        assert!(!is_standard_keel_home(&PathBuf::from("/home/user/.claude")));
+        assert!(!is_standard_keel_home(&PathBuf::from("/home/user/keel")));
+    }
+
+    #[test]
+    fn keel_home_from_engagement_prefers_existing_sibling_keel() {
+        let dir = std::env::temp_dir().join(format!("keel-home-split-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let claude_dir = dir.join(".claude");
+        let keel_dir = dir.join(".keel");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+
+        // Before migration: no ~/.keel sibling, so the engagement home is the home.
+        assert_eq!(keel_home_from_engagement(&claude_dir), claude_dir);
+
+        // After migration: the sibling .keel wins.
+        std::fs::create_dir_all(&keel_dir).unwrap();
+        assert_eq!(keel_home_from_engagement(&claude_dir), keel_dir);
+
+        // Non-standard engagement homes map to themselves.
+        assert_eq!(keel_home_from_engagement(&dir), dir);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_claude_executable_path_only_for_standard_layout() {
+        let keel_home = PathBuf::from("/home/user/.keel");
+        let legacy = legacy_claude_executable_path(&keel_home).unwrap();
+        assert_eq!(
+            legacy,
+            PathBuf::from("/home/user/.claude").join(executable_file_name())
+        );
+        assert!(
+            legacy_claude_executable_path(&PathBuf::from("/tmp/custom")).is_none(),
+            "non-standard roots have no legacy placement"
+        );
+    }
+
+    #[test]
+    fn engagement_artifacts_resolve_under_dot_claude_for_keel_root() {
+        let keel_home = PathBuf::from("/home/user/.keel");
+        assert_eq!(
+            skills_directory(&keel_home),
+            PathBuf::from("/home/user/.claude/skills")
+        );
+        assert_eq!(
+            agents_directory(&keel_home),
+            PathBuf::from("/home/user/.claude/agents")
+        );
+        assert_eq!(
+            commands_directory(&keel_home),
+            PathBuf::from("/home/user/.claude/commands")
+        );
+        // The binary stays in the neutral home.
+        assert_eq!(
+            installed_executable_path(&keel_home),
+            keel_home.join(executable_file_name())
+        );
+    }
+
+    #[test]
+    fn resolve_keel_home_explicit_flag_wins() {
+        let custom = PathBuf::from("/tmp/my-keel-home");
+        assert_eq!(resolve_keel_home("/tmp/my-keel-home").unwrap(), custom);
+    }
+
+    #[test]
+    fn resolve_keel_home_default_is_dot_keel_under_user_home() {
+        // KEEL_HOME/CLAUDE_TARGET_OVERRIDE may be set by other tests; assert
+        // only the invariant that holds in every case: an absolute home.
+        let home = resolve_keel_home("").unwrap();
+        assert!(home.is_absolute(), "keel home must be absolute: {home:?}");
     }
 }

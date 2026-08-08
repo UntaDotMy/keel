@@ -142,7 +142,10 @@ pub fn mcp_config_path(claude_home: &Path) -> PathBuf {
 /// code.claude.com/docs/en/mcp); the tools are tiny, so the upfront context cost
 /// is negligible.
 pub fn mcp_server_entry(claude_home: &Path) -> Value {
-    let executable = installed_executable_path(claude_home);
+    // The binary lives in the neutral keel home; `claude_home` here is the
+    // engagement home, and its sibling ~/.keel holds the executable.
+    let binary_home = crate::runtime::keel_home_from_engagement(claude_home);
+    let executable = installed_executable_path(&binary_home);
     json!({
         "type": "stdio",
         "command": display_path(&executable),
@@ -325,7 +328,7 @@ pub fn is_standard_claude_home(claude_home: &Path) -> bool {
     claude_home
         .file_name()
         .and_then(|name| name.to_str())
-        .map(|name| name == ".claude")
+        .map(|name| name == ".claude" || name == crate::runtime::KEEL_HOME_DIRECTORY_NAME)
         .unwrap_or(false)
 }
 
