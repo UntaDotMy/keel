@@ -41,7 +41,7 @@ curl -fsSL https://raw.githubusercontent.com/UntaDotMy/keel/main/install.cmd -o 
 
 The installer detects your OS and architecture, pulls the matching prebuilt binary from [GitHub Releases](https://github.com/UntaDotMy/keel/releases/latest), runs `keel install`, verifies `status`, and cleans up temp downloads only. No Rust toolchain required. Pin a version with `CLAUDE_SKILLS_VERSION=vX.Y.Z`.
 
-**Data safety:** install writes under `%USERPROFILE%\.claude` / `~/.claude` (skills, agents, `keel` binary, hook/MCP merge). It does **not** touch `~/.grok` sessions. It does **not** delete chat `sessions/`, `projects/`, `file-history/`, `memories/`, or `history.jsonl`. Orphan cleanup of old managed skills is **off by default**; use `keel install --purge-stale` only when you want pack hygiene deletes (still never touches those protected paths).
+**Install layout:** keel uses a host-neutral home so every host (claude, codex, opencode, cursor, pi, cowork) shares one install. The binary, data, and state live in `%USERPROFILE%\.keel` / `~/.keel` (override with `KEEL_HOME`); the Claude-harness engagement files (skills, agents, commands, `settings.json`, user `CLAUDE.md`) stay in `%USERPROFILE%\.claude` / `~/.claude` because the harness only reads them there. Upgrading from an older install migrates keel-owned data from `~/.claude` into `~/.keel` on the next `keel install`/`update` and removes the old `~/.claude/keel` binary, never overwriting a file that already exists at the destination. Install also adds the keel home to your PATH so `keel` works from any shell. It does **not** touch `~/.grok` sessions, and it does **not** delete chat `sessions/`, `projects/`, `file-history/`, `memories/`, or `history.jsonl`. Orphan cleanup of old managed skills is **off by default**; use `keel install --purge-stale` only when you want pack hygiene deletes (still never touches those protected paths).
 
 **Semantic (vector-recall) build.** The default binary is lexical-only (FTS5). To install the variant with built-in vector semantic recall (sqlite-vec + a 33MB BERT model baked in), pass `--semantic`:
 
@@ -129,7 +129,7 @@ Example: a raw `cargo test --workspace` may produce `Rerun that as: keel run -- 
 | Need | Run | Why |
 | --- | --- | --- |
 | First install, no Rust required | Download a release, extract it, run `./keel install` or `.\keel.exe install` | Installs the native binary and managed skills into the harness home. |
-| Check the install | `~/.claude/keel status` or `%USERPROFILE%\.claude\keel.exe status` | Confirms the managed harness-home surface. |
+| Check the install | `keel status` (on PATH after install) or `~/.keel/keel status` / `%USERPROFILE%\.keel\keel.exe status` | Confirms the managed harness-home surface. |
 | Start normal work | `keel workflow start --request "..."` | The lowest-friction first run. |
 | Route a broad request first | `keel workflow route --request "..."` | Picks the recommended preset before starting. |
 | See live state | `keel workflow cockpit` | Shows stage, proof, blockers, and next command. |
@@ -139,8 +139,10 @@ The default operator path is `workflow start -> workflow cockpit -> workflow fin
 
 After install, the preferred global CLI path for agents on supported operating systems is:
 
-- macOS or Linux: `~/.claude/keel`
-- Windows: `~/.claude/keel.exe`
+- macOS or Linux: `~/.keel/keel`
+- Windows: `~/.keel/keel.exe`
+
+(Installs also put this directory on PATH, so plain `keel` resolves in new shells.)
 
 This matters because the install metadata remembers the source bundle or checkout so `status`, `update`, `verify`, `doctor`, and `menu` can still work when the installed binary is called from another project. For AI-agent or shell contexts where PATH resolution is not guaranteed, prefer the explicit installed path in the harness home root. `--repo-root <path>` is an advanced override for CI, unusual layouts, or running the binary from a different folder than the extracted release/source checkout.
 
@@ -149,8 +151,8 @@ This matters because the install metadata remembers the source bundle or checkou
 After running the one-paste installer above, verify with:
 
 ```bash
-~/.claude/keel status              # macOS / Linux
-& "$env:USERPROFILE\.claude\keel.exe" status   # Windows PowerShell
+~/.keel/keel status              # macOS / Linux
+& "$env:USERPROFILE\.keel\keel.exe" status   # Windows PowerShell
 ```
 
 ### Manual Release Install
@@ -171,15 +173,15 @@ Use `--repo-root <path>` only when you intentionally run `keel install` from out
 ### Native Update
 
 ```bash
-~/.claude/keel update
-~/.claude/keel verify
-~/.claude/keel status
+~/.keel/keel update
+~/.keel/keel verify
+~/.keel/keel status
 ```
 
 ```powershell
-& "$env:USERPROFILE\.claude\keel.exe" update
-& "$env:USERPROFILE\.claude\keel.exe" verify
-& "$env:USERPROFILE\.claude\keel.exe" status
+& "$env:USERPROFILE\.keel\keel.exe" update
+& "$env:USERPROFILE\.keel\keel.exe" verify
+& "$env:USERPROFILE\.keel\keel.exe" status
 ```
 
 The Rust manager remembers the source checkout in install metadata, fast-forwards that checkout on `update`, rebuilds the native CLI when needed, delta-syncs changed files, removes stale managed files, and preserves unrelated harness-home files. Shell and PowerShell wrapper launchers are no longer shipped.
@@ -191,28 +193,29 @@ On Windows, install replaces the running `keel.exe` synchronously via `MoveFileE
 Run these once after a fresh install or update:
 
 ```bash
-~/.claude/keel.exe verify     # confirms inventory + binary match the source
-~/.claude/keel.exe doctor     # probes hooks end-to-end, reports any drift
-~/.claude/keel.exe status     # version, repo SHA, install timestamp
+~/.keel/keel verify     # confirms inventory + binary match the source
+~/.keel/keel doctor     # probes hooks end-to-end, reports any drift
+~/.keel/keel status     # version, repo SHA, install timestamp
 ```
 
 Hooks are wired automatically by `install`. If you want to refresh `~/.claude/settings.json` without a full reinstall:
 
 ```bash
-~/.claude/keel.exe hook install
+~/.keel/keel hook install
 ```
 
 Optional environment variables:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `CLAUDE_SKILLS_RAW_RETENTION_DAYS` | `14` | Days of `~/.claude/raw-output/` runs kept on disk. SessionEnd hook prunes anything older. Set to `0` to disable auto-prune. |
+| `CLAUDE_SKILLS_RAW_RETENTION_DAYS` | `14` | Days of `~/.keel/raw-output/` runs kept on disk. SessionEnd hook prunes anything older. Set to `0` to disable auto-prune. |
+| `KEEL_HOME` | `~/.keel` | Override the host-neutral keel home (binary, data, state). |
 | `CLAUDE_SKILLS_VERSION` | latest | Pin the bootstrap installer to a specific release tag. |
 
 Manual prune (any time):
 
 ```bash
-~/.claude/keel.exe raw prune --older-than 30d
+~/.keel/keel raw prune --older-than 30d
 ```
 
 ## Slash Commands
@@ -282,8 +285,8 @@ The hook lifecycle is tuned to preserve the harness's prompt cache and minimize 
 If you customize hooks downstream and want to see exactly what the lifecycle emits for an event:
 
 ```bash
-echo '{}' | ~/.claude/keel.exe hook stop
-echo '{}' | ~/.claude/keel.exe hook user-prompt-submit
+echo '{}' | ~/.keel/keel.exe hook stop
+echo '{}' | ~/.keel/keel.exe hook user-prompt-submit
 ```
 
 Empty stdout means the hook is intentionally silent for that event.
@@ -562,7 +565,7 @@ Limitations and safety:
 
 ### Hook path
 
-The one-line installer refreshes the managed harness hooks automatically, and `keel hook install` can refresh them manually. The hook set is written to `~/.claude/hooks.json`. `PreToolUse` keeps the `Bash` matcher because command-output wrapping is scoped to shell commands; the other lifecycle events use native lifecycle handlers.
+The one-line installer refreshes the managed harness hooks automatically, and `keel hook install` can refresh them manually. The hook set is written to `~/.claude/settings.json`. `PreToolUse` keeps the `Bash` matcher because command-output wrapping is scoped to shell commands; the other lifecycle events use native lifecycle handlers.
 
 ```json
 {

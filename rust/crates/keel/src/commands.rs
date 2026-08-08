@@ -708,17 +708,24 @@ fn resolve_flow_repository_root(repository_root: &str) -> PathBuf {
 }
 
 fn resolve_default_claude_home_directory() -> Result<String, String> {
-    if let Ok(override_value) = env::var("CLAUDE_TARGET_OVERRIDE") {
-        let trimmed = override_value.trim();
-        if !trimmed.is_empty() {
-            return Ok(trimmed.to_string());
+    // Mirror the CLI home resolution: KEEL_HOME, CLAUDE_TARGET_OVERRIDE,
+    // ~/.keel when it exists, legacy ~/.claude otherwise.
+    for env_name in ["KEEL_HOME", "CLAUDE_TARGET_OVERRIDE"] {
+        if let Ok(override_value) = env::var(env_name) {
+            let trimmed = override_value.trim();
+            if !trimmed.is_empty() {
+                return Ok(trimmed.to_string());
+            }
         }
     }
     match home_directory() {
         Some(user_home) => {
-            let mut claude_home_path = std::path::PathBuf::from(user_home);
-            claude_home_path.push(".claude");
-            Ok(path_to_display_string(&claude_home_path))
+            let home_path = std::path::PathBuf::from(user_home);
+            let keel_home = home_path.join(".keel");
+            if keel_home.is_dir() {
+                return Ok(path_to_display_string(&keel_home));
+            }
+            Ok(path_to_display_string(&home_path.join(".claude")))
         }
         None => Err("no user home directory available".to_string()),
     }

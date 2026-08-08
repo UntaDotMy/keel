@@ -2,7 +2,7 @@
 # Caller: Windows PowerShell users running the documented one-line installer.
 # Dependencies: PowerShell, Invoke-WebRequest, Expand-Archive, and keel GitHub release assets.
 # Main Functions: Detect platform, download a release archive to temp, extract it, run install, and verify status.
-# Side Effects: Writes the managed keel surface under $env:USERPROFILE\.claude and removes temporary download files.
+# Side Effects: Writes keel's host-neutral home under $env:USERPROFILE\.keel (binary, data, state), the Claude harness engagement files under $env:USERPROFILE\.claude (skills, agents, commands, settings.json), and removes temporary download files.
 
 [CmdletBinding()]
 param(
@@ -100,9 +100,20 @@ try {
         throw "keel install failed with exit code $LASTEXITCODE"
     }
 
-    $InstalledBinary = Join-Path $env:USERPROFILE ".claude\keel.exe"
+    # The binary publishes to the host-neutral ~/.keel home; fall back to the
+    # legacy ~/.claude placement for pre-migration installs. KEEL_HOME overrides.
+    $KeelHome = $env:KEEL_HOME
+    if ([string]::IsNullOrWhiteSpace($KeelHome)) {
+        $KeelHome = Join-Path $env:USERPROFILE ".keel"
+    }
+    $InstalledBinary = Join-Path $KeelHome "keel.exe"
     if (-not (Test-Path $InstalledBinary -PathType Leaf)) {
-        throw "Installed binary not found at $InstalledBinary"
+        $LegacyBinary = Join-Path $env:USERPROFILE ".claude\keel.exe"
+        if (Test-Path $LegacyBinary -PathType Leaf) {
+            $InstalledBinary = $LegacyBinary
+        } else {
+            throw "Installed binary not found at $InstalledBinary (or legacy ~/.claude\keel.exe)"
+        }
     }
 
     & $InstalledBinary status --repo-root $BundleRoot

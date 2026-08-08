@@ -500,6 +500,145 @@ fn install_copies_codex_mcp_config() {
 }
 
 #[test]
+fn keel_home_splits_engagement_to_sibling_dot_claude() {
+    // The host-neutral layout: `--claude-home <tmp>/.keel` publishes binary
+    // and data into `.keel`; skills/agents/commands land in sibling `.claude`.
+    let repo = repository_root();
+    let (home, keel_home) = {
+        let home = unique_temp_dir("keel-home-split");
+        let _ = fs::remove_dir_all(&home);
+        let keel_home = home.join(".keel");
+        let _ = fs::create_dir_all(&keel_home);
+        (home, keel_home)
+    };
+    run_install(&repo, &keel_home, &[]);
+
+    // The neutral home carries keel's own config/state surfaces.
+    assert!(
+        keel_home.join("config.toml").is_file(),
+        "the keel root must hold keel's managed config.toml"
+    );
+    // Engagement files live in the sibling .claude, not the .keel root.
+    let claude_home = home.join(".claude");
+    assert!(
+        claude_home.join("skills").is_dir(),
+        "skills must land in the sibling ~/.claude, got none under {}",
+        claude_home.display()
+    );
+    assert!(
+        claude_home.join("agents").is_dir(),
+        "agents must land in the sibling ~/.claude"
+    );
+    assert!(
+        !keel_home.join("skills").is_dir(),
+        "skills must NOT be duplicated into the .keel root"
+    );
+    let _ = fs::remove_dir_all(&home);
+}
+
+#[test]
+fn codex_install_registers_marketplace_and_enablement() {
+    // The "installed but not wired" regression: Codex discovers plugins via
+    // the marketplace manifest and loads only plugins enabled in config.toml.
+    let repo = repository_root();
+    let (home, claude_home) = fake_home_with_claude("keel-codex-discovery");
+    let _ = fs::create_dir_all(home.join(".codex"));
+    run_install(&repo, &claude_home, &[]);
+
+    let marketplace = home
+        .join(".agents")
+        .join("plugins")
+        .join("marketplace.json");
+    assert!(
+        marketplace.is_file(),
+        "install must register the keel plugin in the personal marketplace manifest"
+    );
+    let marketplace_doc: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&marketplace).unwrap())
+            .expect("marketplace.json must be valid JSON");
+    let has_keel = marketplace_doc
+        .get("plugins")
+        .and_then(|p| p.as_array())
+        .map(|entries| {
+            entries
+                .iter()
+                .any(|entry| entry.get("name").and_then(|n| n.as_str()) == Some("keel"))
+        })
+        .unwrap_or(false);
+    assert!(has_keel, "marketplace.json must contain the keel entry");
+
+    let config_toml = home.join(".codex").join("config.toml");
+    assert!(
+        config_toml.is_file(),
+        "install must ensure codex config.toml exists for enablement"
+    );
+    let config_text = fs::read_to_string(&config_toml).unwrap();
+    let parsed: toml::Value = config_text
+        .parse()
+        .expect("codex config.toml must remain valid TOML");
+    assert_eq!(
+        parsed
+            .get("plugins")
+            .and_then(|p| p.get("keel@personal-keel"))
+            .and_then(|entry| entry.get("enabled"))
+            .and_then(|v| v.as_bool()),
+        Some(true),
+        "codex config.toml must enable the keel plugin"
+    );
+
+    // Uninstall reverses both discovery surfaces.
+    run_uninstall(&repo, &claude_home);
+    assert!(
+        !marketplace.exists(),
+        "uninstall must remove the keel-only marketplace manifest"
+    );
+    if config_toml.is_file() {
+        let after = fs::read_to_string(&config_toml).unwrap();
+        assert!(
+            !after.contains("keel@personal-keel"),
+            "uninstall must remove the keel plugin enablement section"
+        );
+    }
+    let _ = fs::remove_dir_all(&home);
+}
+
+#[test]
+fn codex_enablement_preserves_user_config_and_disable_choice() {
+    // install must never clobber unrelated config.toml keys and must respect a
+    // user's explicit `enabled = false`.
+    let repo = repository_root();
+    let (home, claude_home) = fake_home_with_claude("keel-codex-preserve");
+    let _ = fs::create_dir_all(home.join(".codex"));
+    let config_toml = home.join(".codex").join("config.toml");
+    fs::write(
+        &config_toml,
+        "model = \"user-model\"\n\n[plugins.\"keel@personal-keel\"]\nenabled = false\n",
+    )
+    .unwrap();
+    run_install(&repo, &claude_home, &[]);
+
+    let parsed: toml::Value = fs::read_to_string(&config_toml)
+        .unwrap()
+        .parse()
+        .expect("config.toml must remain valid TOML");
+    assert_eq!(
+        parsed.get("model").and_then(|v| v.as_str()),
+        Some("user-model"),
+        "install must preserve unrelated config keys"
+    );
+    assert_eq!(
+        parsed
+            .get("plugins")
+            .and_then(|p| p.get("keel@personal-keel"))
+            .and_then(|entry| entry.get("enabled"))
+            .and_then(|v| v.as_bool()),
+        Some(false),
+        "an explicit user disable must survive install"
+    );
+    let _ = fs::remove_dir_all(&home);
+}
+
+#[test]
 fn uninstall_removes_cursor_mcp_entry() {
     // install↔uninstall symmetry: install merges the `keel` entry into
     // ~/.cursor/mcp.json, so uninstall must remove that entry (preserving any

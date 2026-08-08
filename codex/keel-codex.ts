@@ -52,17 +52,39 @@ const BIN_NAME: string =
 
 /**
  * Resolve the bridge binary path.
- * Prefer ~/.claude/<binary>; fall back to bare name (PATH lookup).
+ * Resolution order: $KEEL_HOME, ~/.keel, legacy ~/.claude, then PATH.
  */
 function resolveBinary(): string {
   const home = os.homedir();
-  const fallback = path.join(home, ".claude", BIN_NAME);
-  try {
-    if (fs.existsSync(fallback)) return fallback;
-  } catch {
-    // fs failure — PATH only
+  const candidates: string[] = [];
+  const envHome = process.env.KEEL_HOME;
+  if (envHome && envHome.trim()) candidates.push(path.join(envHome.trim(), BIN_NAME));
+  candidates.push(path.join(home, ".keel", BIN_NAME));
+  candidates.push(path.join(home, ".claude", BIN_NAME));
+  for (const candidate of candidates) {
+    try {
+      if (fs.existsSync(candidate)) return candidate;
+    } catch {
+      // fs failure, try the next candidate
+    }
   }
   return BIN_NAME;
+}
+
+/**
+ * Resolve the keel state root: ~/.keel/state now, legacy ~/.claude fallback.
+ */
+function keelStateRoot(): string {
+  const home = os.homedir();
+  const envHome = process.env.KEEL_HOME;
+  if (envHome && envHome.trim()) return path.join(envHome.trim(), "state");
+  const neutralHome = path.join(home, ".keel");
+  try {
+    if (fs.existsSync(neutralHome)) return path.join(neutralHome, "state");
+  } catch {
+    // fall through to legacy
+  }
+  return path.join(home, ".claude", "state");
 }
 
 const BRIDGE_BIN: string = resolveBinary();
@@ -71,12 +93,7 @@ const BRIDGE_BIN: string = resolveBinary();
 // Marker-file helpers — guard session-start to once per session
 // ---------------------------------------------------------------------------
 
-const MARKER_DIR = path.join(
-  os.homedir(),
-  ".claude",
-  "state",
-  "codex-session-started",
-);
+const MARKER_DIR = path.join(keelStateRoot(), "codex-session-started");
 
 function markerPath(sessionID: string): string {
   return path.join(MARKER_DIR, sessionID);
@@ -122,7 +139,11 @@ function clearMarker(sessionID: string): void {
 // STRICT default: only keel research tools clear the marker (not plain Read).
 // ---------------------------------------------------------------------------
 
-const IRONLAW_DIR = path.join(
+const IRONLAW_DIR = path.join(keelStateRoot(), "iron-law-satisfied");
+
+// Legacy marker location (pre-migration installs wrote here); checked on
+// reads so old-home gate satisfaction survives the move to ~/.keel.
+const IRONLAW_DIR_LEGACY = path.join(
   os.homedir(),
   ".claude",
   "state",
@@ -157,7 +178,12 @@ function ensureIronLawDir(): void {
 function ironLawSatisfied(sessionID: string): boolean {
   ensureIronLawDir();
   try {
-    return fs.existsSync(ironLawMarkerPath(sessionID));
+    if (fs.existsSync(ironLawMarkerPath(sessionID))) return true;
+    // Legacy home fallback: a marker written by a pre-migration install
+    // still counts as satisfied.
+    return fs.existsSync(
+      path.join(IRONLAW_DIR_LEGACY, sanitizeSessionKey(sessionID)),
+    );
   } catch {
     return false;
   }
@@ -180,6 +206,9 @@ function markIronLawSatisfied(sessionID: string): void {
 function clearIronLawMarker(sessionID: string): void {
   try {
     fs.rmSync(ironLawMarkerPath(sessionID), { force: true });
+    fs.rmSync(path.join(IRONLAW_DIR_LEGACY, sanitizeSessionKey(sessionID)), {
+      force: true,
+    });
   } catch {
     /* best-effort */
   }

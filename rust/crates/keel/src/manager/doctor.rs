@@ -54,7 +54,8 @@ pub fn run_doctor_command(
         }
     };
     let _ = config_path(&claude_home);
-    let hooks_path = claude_home.join(crate::hooks::claude::SETTINGS_FILE_NAME);
+    let hooks_path = crate::runtime::claude_engagement_home(&claude_home)
+        .join(crate::hooks::claude::SETTINGS_FILE_NAME);
     let hooks_text = fs::read_to_string(&hooks_path).unwrap_or_default();
     let claude_binary = find_on_path(if cfg!(windows) {
         "claude.exe"
@@ -135,6 +136,36 @@ pub fn run_doctor_command(
         standard_output,
         hook_accepts_wrapped_command() && installed_executable_path(&claude_home).exists(),
         "rerun wrapper command is accepted",
+    );
+    // Host-neutral home health: report the keel home, binary, legacy-binary
+    // removal, and PATH so a partial migration is visible, not silent.
+    let keel_home_label = display_path(&claude_home);
+    write_doctor_check(
+        standard_output,
+        claude_home.is_dir(),
+        &format!("keel home exists: {keel_home_label}"),
+    );
+    let keel_binary = installed_executable_path(&claude_home);
+    write_doctor_check(
+        standard_output,
+        keel_binary.is_file(),
+        &format!("keel binary present: {}", display_path(&keel_binary)),
+    );
+    let legacy_binary = crate::runtime::legacy_claude_executable_path(&claude_home);
+    write_doctor_check(
+        standard_output,
+        legacy_binary.as_ref().map(|p| !p.exists()).unwrap_or(true),
+        &match legacy_binary {
+            Some(path) if path.exists() => {
+                format!("legacy binary removed (still at {})", display_path(&path))
+            }
+            _ => "legacy ~/.claude binary removed".to_string(),
+        },
+    );
+    write_doctor_check(
+        standard_output,
+        path_contains_dir(&claude_home),
+        &format!("PATH includes keel home: {keel_home_label}"),
     );
     report_capture_gate(standard_output);
     report_mcp_registration(standard_output, &claude_home);
@@ -702,6 +733,8 @@ fn report_bridge_host_wiring(standard_output: &mut dyn Write, claude_home: &std:
     );
 
     // Codex: plugin dir with manifest + bundled .mcp.json (plugin MCP server).
+    // File presence alone is NOT enough: Codex discovers plugins through the
+    // marketplace manifest and loads only plugins enabled in config.toml.
     let codex_plugin = home
         .join(".codex")
         .join("plugins")
@@ -714,7 +747,65 @@ fn report_bridge_host_wiring(standard_output: &mut dyn Write, claude_home: &std:
         .join("keel")
         .join(".mcp.json")
         .is_file();
+    let codex_marketplace_registered = fs::read_to_string(
+        home.join(".agents")
+            .join("plugins")
+            .join("marketplace.json"),
+    )
+    .ok()
+    .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+    .and_then(|doc| doc.get("plugins").and_then(|p| p.as_array()).cloned())
+    .map(|entries| {
+        entries
+            .iter()
+            .any(|entry| entry.get("name").and_then(|n| n.as_str()) == Some("keel"))
+    })
+    .unwrap_or(false);
+    let codex_enabled = fs::read_to_string(home.join(".codex").join("config.toml"))
+        .ok()
+        .and_then(|text| text.parse::<toml::Value>().ok())
+        .and_then(|doc| {
+            doc.get("plugins")
+                .and_then(|p| p.get("keel@personal-keel"))
+                .and_then(|entry| entry.get("enabled"))
+                .and_then(|v| v.as_bool())
+        })
+        .unwrap_or(false);
     report_host(standard_output, "codex", codex_plugin.is_file(), codex_mcp);
+    write_doctor_check(
+        standard_output,
+        codex_marketplace_registered || !codex_plugin.is_file(),
+        &format!(
+            "codex marketplace entry ({}): {}",
+            display_path(
+                &home
+                    .join(".agents")
+                    .join("plugins")
+                    .join("marketplace.json")
+            ),
+            if codex_marketplace_registered {
+                "registered"
+            } else if codex_plugin.is_file() {
+                "missing - run `keel install` to register"
+            } else {
+                "n/a - plugin not installed"
+            }
+        ),
+    );
+    write_doctor_check(
+        standard_output,
+        codex_enabled || !codex_plugin.is_file(),
+        &format!(
+            "codex plugin enablement (config.toml [plugins.\"keel@personal-keel\"]): {}",
+            if codex_enabled {
+                "enabled"
+            } else if codex_plugin.is_file() {
+                "not enabled - run `keel install` or enable via /plugins"
+            } else {
+                "n/a - plugin not installed"
+            }
+        ),
+    );
 
     // Cursor: .cursorrules + hooks dir + mcp.json keel entry.
     let cursor_rules = home.join(".cursorrules");
@@ -754,6 +845,25 @@ fn report_host(standard_output: &mut dyn Write, name: &str, wired: bool, mcp: bo
     // unconditionally painted an unconfigured — or failed-to-wire — host as healthy;
     // a not-wired host is now a [warn] so doctor tells the truth about host state.
     write_doctor_check(standard_output, wired, &format!("{name} host: {state}"));
+}
+
+/// True when `directory` is one of the entries on the current PATH.
+/// Case-insensitive on Windows (PATH entries ignore case there).
+fn path_contains_dir(directory: &std::path::Path) -> bool {
+    let Some(path_value) = std::env::var_os("PATH") else {
+        return false;
+    };
+    for entry in std::env::split_paths(&path_value) {
+        if cfg!(windows) {
+            if entry.to_string_lossy().to_lowercase() == directory.to_string_lossy().to_lowercase()
+            {
+                return true;
+            }
+        } else if entry == directory {
+            return true;
+        }
+    }
+    false
 }
 
 fn find_on_path(executable: &str) -> Option<PathBuf> {

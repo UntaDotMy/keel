@@ -4,7 +4,7 @@ Bridges Codex CLI lifecycle events to the `keel` Rust CLI for context injection,
 
 ## Prerequisites
 
-1. The `keel` binary must be installed at `~/.claude/keel` (unix) or `~/.claude/keel.exe` (win32), or on `PATH`. The plugin resolves the binary once at init, preferring the explicit `~/.claude/` path.
+1. The `keel` binary must be installed at `~/.keel/keel` (unix) or `~/.keel/keel.exe` (win32), or on `PATH`. The plugin resolves the binary once at init in this order: `$KEEL_HOME`, `~/.keel/`, the legacy `~/.claude/` path, then PATH.
 2. Codex CLI must be installed and functional.
 3. `tsx` must be available (via `npx` or globally) for TypeScript execution. Alternatively, compile the adapter to JavaScript first.
 

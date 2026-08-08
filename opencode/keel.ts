@@ -24,17 +24,40 @@ const BIN_NAME: string =
 
 /**
  * Resolve the bridge binary path.
- * Prefer ~/.claude/<binary>; fall back to bare name (PATH lookup by Bun shell).
+ * Resolution order: $KEEL_HOME, then the host-neutral ~/.keel, then the
+ * legacy ~/.claude placement, then the bare name (PATH lookup by Bun shell).
  */
 function resolveBinary(): string {
   const home = os.homedir();
-  const fallback = path.join(home, ".claude", BIN_NAME);
-  try {
-    if (fs.existsSync(fallback)) return fallback;
-  } catch {
-    // fs failure — PATH only
+  const candidates: string[] = [];
+  const envHome = process.env.KEEL_HOME;
+  if (envHome && envHome.trim()) candidates.push(path.join(envHome.trim(), BIN_NAME));
+  candidates.push(path.join(home, ".keel", BIN_NAME));
+  candidates.push(path.join(home, ".claude", BIN_NAME));
+  for (const candidate of candidates) {
+    try {
+      if (fs.existsSync(candidate)) return candidate;
+    } catch {
+      // fs failure, try the next candidate
+    }
   }
   return BIN_NAME;
+}
+
+/**
+ * Resolve the keel state root: ~/.keel/state now, legacy ~/.claude fallback.
+ */
+function keelStateRoot(): string {
+  const home = os.homedir();
+  const envHome = process.env.KEEL_HOME;
+  if (envHome && envHome.trim()) return path.join(envHome.trim(), "state");
+  const neutralHome = path.join(home, ".keel");
+  try {
+    if (fs.existsSync(neutralHome)) return path.join(neutralHome, "state");
+  } catch {
+    // fall through to legacy
+  }
+  return path.join(home, ".claude", "state");
 }
 
 const BRIDGE_BIN: string = resolveBinary();
@@ -43,12 +66,7 @@ const BRIDGE_BIN: string = resolveBinary();
 // Marker-file helpers — guard session-start to once per session
 // ---------------------------------------------------------------------------
 
-const MARKER_DIR = path.join(
-  os.homedir(),
-  ".claude",
-  "state",
-  "opencode-session-started",
-);
+const MARKER_DIR = path.join(keelStateRoot(), "opencode-session-started");
 
 function markerPath(sessionID: string): string {
   return path.join(MARKER_DIR, sessionID);
@@ -120,7 +138,11 @@ function isShellTool(toolName: string): boolean {
 // Marker path must match Rust: ~/.claude/state/iron-law-satisfied/<session>
 // ---------------------------------------------------------------------------
 
-const IRON_LAW_DIR = path.join(
+const IRON_LAW_DIR = path.join(keelStateRoot(), "iron-law-satisfied");
+
+// Legacy marker location (pre-migration installs wrote here). Removed at
+// session end so a stale legacy marker never leaks into a fresh session.
+const IRON_LAW_DIR_LEGACY = path.join(
   os.homedir(),
   ".claude",
   "state",
@@ -169,6 +191,9 @@ function markIronLawSatisfied(sessionID: string): void {
 function clearIronLaw(sessionID: string): void {
   try {
     fs.rmSync(path.join(IRON_LAW_DIR, sanitizeSessionKey(sessionID)), {
+      force: true,
+    });
+    fs.rmSync(path.join(IRON_LAW_DIR_LEGACY, sanitizeSessionKey(sessionID)), {
       force: true,
     });
   } catch {

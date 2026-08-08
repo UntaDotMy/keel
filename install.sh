@@ -3,7 +3,7 @@
 # Caller: macOS, Linux, and WSL users running the documented one-line installer.
 # Dependencies: curl, tar, uname, mktemp, and the keel GitHub release assets.
 # Main Functions: Detect platform, download a release archive to temp, extract it, run install, and verify status.
-# Side Effects: Writes the managed keel surface under ~/.claude and removes temporary download files.
+# Side Effects: Writes keel's host-neutral home under ~/.keel (binary, data, state), the Claude harness engagement files under ~/.claude (skills, agents, commands, settings.json), and removes temporary download files.
 
 set -euo pipefail
 
@@ -117,10 +117,18 @@ fi
 bundle_root="$(cd "$(dirname "$installer_binary")" && pwd)"
 "$installer_binary" install --repo-root "$bundle_root"
 
-installed_binary="${HOME}/.claude/keel"
+# The binary publishes to the host-neutral ~/.keel home; fall back to the
+# legacy ~/.claude placement for pre-migration installs. KEEL_HOME overrides.
+keel_home="${KEEL_HOME:-${HOME}/.keel}"
+installed_binary="${keel_home}/keel"
 if [ ! -x "$installed_binary" ]; then
-  printf 'Installed binary not found at %s\n' "$installed_binary" >&2
-  exit 1
+  legacy_binary="${HOME}/.claude/keel"
+  if [ -x "$legacy_binary" ]; then
+    installed_binary="$legacy_binary"
+  else
+    printf 'Installed binary not found at %s (or legacy ~/.claude/keel)\n' "$installed_binary" >&2
+    exit 1
+  fi
 fi
 
 "$installed_binary" status --repo-root "$bundle_root"
