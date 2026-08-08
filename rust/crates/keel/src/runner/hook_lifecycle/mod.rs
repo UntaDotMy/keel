@@ -1532,6 +1532,13 @@ fn run_post_tool_graph_context(tool_name: &str, input: &JsonDocument) -> Option<
     }
     let repo_root = std::env::current_dir().ok()?;
     let artifact = crate::utility::code_graph::cached_artifact_path(&repo_root, "")?;
+    // Staleness guard: a graph older than the file just edited is stale for this
+    // edit and would mislead, so stay silent rather than inject wrong dependents.
+    let artifact_mtime = file_mtime_ms(&artifact)?;
+    let edited_mtime = file_mtime_ms(std::path::Path::new(edited_path))?;
+    if artifact_mtime < edited_mtime {
+        return None;
+    }
     let graph = crate::utility::code_graph::CodeGraph::from_json_file(&artifact)?;
     // Normalize the edited path to the graph's workspace-relative forward-slash id.
     let relative = std::path::Path::new(edited_path)
