@@ -20,7 +20,17 @@ pub fn classify_command(command_arguments: &[String]) -> Option<CommandAst> {
         cwd,
         command_arguments
             .first()
-            .map(|value| matches!(base_name(value).as_str(), "bash" | "sh" | "zsh"))
+            .map(|value| {
+                matches!(
+                    base_name(value).as_str(),
+                    // why: `pwsh`/`powershell`/`cmd` already wrap a command line
+                    // (e.g. the MCP run_command tool emits `pwsh -NoProfile
+                    // -Command "…"`). Failing to mark them shell_wrapped made the
+                    // proxy see the inner `|`/`>` and wrap AGAIN through the
+                    // platform shell — the double-wrap that mangled quoting.
+                    "bash" | "sh" | "zsh" | "pwsh" | "powershell" | "cmd"
+                )
+            })
             .unwrap_or(false),
         has_shell_syntax(command_arguments),
     ))
@@ -90,6 +100,23 @@ fn effective_command_fields(words: &[String], depth: usize) -> Vec<String> {
             for (offset, word) in words[index + 1..].iter().enumerate() {
                 if word.starts_with('-') && word.contains('c') {
                     if let Some(shell_command) = words.get(index + offset + 2) {
+                        let nested = split_shell_words(shell_command);
+                        return effective_command_fields(&nested, depth + 1);
+                    }
+                }
+            }
+            words[index..].to_vec()
+        }
+        // why: Windows shells carry the command line after `-Command`/`-c`
+        // (pwsh / powershell) or `/C` (cmd). On Windows the inner command line
+        // arrives as a *single* argv token (the quoted `-Command "…"` string),
+        // so split it into words like the `bash -c` branch does — recursing on
+        // the raw token would treat the whole line as one program name.
+        "pwsh" | "powershell" | "cmd" => {
+            for (offset, word) in words[index + 1..].iter().enumerate() {
+                let lowered = word.to_ascii_lowercase();
+                if lowered == "-command" || lowered == "-c" || lowered == "/c" {
+                    if let Some(shell_command) = words.get(index + 1 + offset + 1) {
                         let nested = split_shell_words(shell_command);
                         return effective_command_fields(&nested, depth + 1);
                     }
@@ -201,5 +228,42 @@ mod tests {
         let ast = classify_command(&args(&["rg", "error|warning", "src"])).expect("ast");
         assert_eq!(ast.detected_kind, CommandKind::Search);
         assert!(!ast.has_shell_syntax);
+    }
+
+    #[test]
+    fn windows_shell_wrappers_are_marked_wrapped_and_unwrapped() {
+        // Regression: the MCP run_command tool emits `pwsh -NoProfile -Command
+        // "<cmd>"`. classify_command only recognized bash/sh/zsh as wrappers, so
+        // the inner `|` made has_shell_syntax fire and the proxy wrapped the
+        // whole thing AGAIN — the double-wrap that mangled quoting. A Windows
+        // shell must be flagged shell_wrapped AND unwrapped to its inner program.
+        let ast = classify_command(&args(&[
+            "pwsh",
+            "-NoProfile",
+            "-Command",
+            "Get-Content log.txt | Select-Object -First 2",
+        ]))
+        .expect("ast");
+        assert!(
+            ast.shell_wrapped,
+            "pwsh -Command must be recognized as already shell-wrapped"
+        );
+        assert_eq!(
+            ast.program, "Get-Content",
+            "classification should unwrap to the inner cmdlet"
+        );
+
+        // cmd /C carries the command line as a single token (how
+        // platform_shell_command_parts emits it).
+        let ast = classify_command(&args(&["cmd", "/C", "dir /b"])).expect("ast");
+        assert!(ast.shell_wrapped, "cmd /C must be marked shell-wrapped");
+        assert_eq!(ast.program, "dir");
+
+        // powershell.exe (5.1) uses the same -Command surface; the inner line is
+        // one quoted token.
+        let ast = classify_command(&args(&["powershell", "-Command", "cargo test"])).expect("ast");
+        assert!(ast.shell_wrapped);
+        assert_eq!(ast.program, "cargo");
+        assert_eq!(ast.detected_kind, CommandKind::Test);
     }
 }

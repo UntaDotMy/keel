@@ -80,9 +80,30 @@ The cast file ships in this repo. Render to GIF with `agg docs/demos/quickstart.
 | Review gates | `review pre-pr` / `review pre-commit`, review strictness via plugin `userConfig.review_strictness`, and CI-ready artifacts so non-trivial code never self-reviews. |
 | Memory | Working briefs, completion ledgers, scoped `SYSTEM_MAP.md`, and durable recovery state under `~/.claude/memories/`. |
 | Command compaction | `keel run -- <cmd>` produces compact output for noisy test/build/lint/log/search commands without dropping diagnostic signal. |
-| MCP server | `keel mcp serve` (stdio: **one process per host session**; concurrent in-flight tools via `KEEL_MCP_MAX_INFLIGHT`, default 64; shared recall DB uses SQLite WAL + busy_timeout) and `keel mcp serve-http` (Streamable HTTP multi-client on `127.0.0.1:3920` by default). Registered through the plugin manifest so the harness auto-discovers the tool surface (count asserted by `tests/doc_parity_test.rs` via `"inputSchema":` in `mcp/tools.rs`) ,  `recall`, `system_map`, `run_command`, `recall_status`, `skill_route`, `skill_get`, `skill_list`, `memory_status`, `brief_list`, `brief_get`, `brief_create`, `system_map_refresh`, `context_brief`, `cli`, `sprint`, `user_story_lint`, `review`, `workflow`, `git_workflow`, `memory`, `gain`, `raw`, `config_audit`, `skill_lint`, `telemetry`, `orchestration`, `checkpoint`, `session`, `doctor`, `code_search`, `user_story`, `flow`, `work`, `code_graph`, `learn`, `observe`, `rewrite`, `skill_eval`, `dispatch`, `design_intelligence`, `stats`, `team` ,  plus system-map and recall-status resources. |
+| MCP server | `keel mcp serve` (stdio: **one process per host session**; concurrent in-flight tools via `KEEL_MCP_MAX_INFLIGHT`, default 64; shared recall DB uses SQLite WAL + busy_timeout) and `keel mcp serve-http` (Streamable HTTP multi-client on `127.0.0.1:3920` by default). Registered through the plugin manifest so the harness auto-discovers the tool surface (count asserted by `tests/doc_parity_test.rs` via `"inputSchema":` in `mcp/tools.rs`) ,  `recall`, `system_map`, `run_command`, `command_output`, `command_kill`, `recall_status`, `skill_route`, `skill_get`, `skill_list`, `memory_status`, `brief_list`, `brief_get`, `brief_create`, `system_map_refresh`, `context_brief`, `cli`, `sprint`, `user_story_lint`, `review`, `workflow`, `git_workflow`, `memory`, `gain`, `raw`, `config_audit`, `skill_lint`, `telemetry`, `orchestration`, `checkpoint`, `session`, `doctor`, `code_search`, `user_story`, `flow`, `work`, `code_graph`, `learn`, `observe`, `rewrite`, `skill_eval`, `dispatch`, `design_intelligence`, `stats`, `team` ,  plus system-map and recall-status resources. |
 | Slash commands | `/keel:workflow`, `/keel:review`, `/keel:recall`, `/keel:gain`, `/keel:sprint`, `/keel:user-story` ,  six discoverable `/`-menu wrappers over implemented CLI surfaces. Shipped via the plugin manifest `commands` key. |
 | Specialist skills | Manifest-driven specialist profiles synced into `~/.claude/agent-profiles/*.toml`, invokable via the Skill tool. Run `keel skill-lint` for the live verified count. |
+
+
+### MCP across many windows (shared daemon)
+
+Running several harness windows at once means several keel processes. Two
+surfaces matter at that scale:
+
+- **One daemon instead of one server per window.** Start a single shared
+  server with `keel mcp serve-http` (Streamable HTTP on `127.0.0.1:3920`),
+  then point every host that supports HTTP MCP transports at
+  `http://127.0.0.1:3920/mcp` instead of spawning its own stdio
+  `keel mcp serve`. All windows then share one process, one recall writer
+  (WAL + 5s busy timeout keeps readers unblocked), and one background-command
+  registry.
+- **Background commands.** `run_command` accepts `wait: false` and returns a
+  `commandId`; poll with `command_output`, stop with `command_kill`. Kill
+  reaches the whole process tree (`taskkill /T` on Windows, process-group
+  kill on Unix), so stopping a shell wrapper also stops the work it spawned.
+  Note: a `commandId` lives in the process that started it — with the shared
+  HTTP daemon every window sees every command; with per-window stdio servers
+  only the owning window can poll/kill.
 
 ## Use as a harness Plugin
 

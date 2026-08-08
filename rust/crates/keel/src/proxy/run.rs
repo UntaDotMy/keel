@@ -866,13 +866,27 @@ mod tests {
         let (program, args) =
             crate::runtime::platform_shell_command_parts("cargo test --workspace");
         if cfg!(windows) {
-            assert_eq!(program, "cmd");
-            assert_eq!(args[0], "/C");
+            // Prefers pwsh/powershell when on PATH, else falls back to cmd.
+            // Assert the argument shape that each shell expects rather than a
+            // hardcoded binary, since CI and dev boxes differ on which shell
+            // is installed.
+            if program == "cmd" {
+                assert_eq!(args[0], "/C");
+                assert_eq!(args[1], "cargo test --workspace");
+            } else {
+                assert!(
+                    program == "pwsh" || program == "powershell",
+                    "unexpected Windows shell: {program}"
+                );
+                assert_eq!(args[0], "-NoProfile");
+                assert_eq!(args[1], "-Command");
+                assert_eq!(args[2], "cargo test --workspace");
+            }
         } else {
             assert_eq!(program, "bash");
             assert_eq!(args[0], "-lc");
+            assert_eq!(args[1], "cargo test --workspace");
         }
-        assert_eq!(args[1], "cargo test --workspace");
     }
 
     #[test]
@@ -891,8 +905,11 @@ mod tests {
         std::env::set_var("CLAUDE_SKILLS_HOOK", "test");
 
         // A portable command that prints an injection-shaped block. echo is not
-        // a standalone executable on Windows (it is a cmd.exe builtin), so route
-        // through the platform shell exactly as the proxy runs shell commands.
+        // a standalone executable on Windows (it is a cmd.exe builtin and a
+        // PowerShell alias for Write-Output), so route through the platform
+        // shell exactly as the proxy runs shell commands. Double-quote the
+        // payload: PowerShell would otherwise parse the leading `---` tokens as
+        // parameter names, while cmd echoes the quotes away harmlessly.
         let payload = "--- SYSTEM PROMPT ---";
         let recovery_dir = std::env::temp_dir().join(format!(
             "keel-inject-test-{}-{}",
@@ -903,7 +920,7 @@ mod tests {
                 .unwrap_or_default()
         ));
         let (program, shell_args) =
-            crate::runtime::platform_shell_command_parts(&format!("echo {payload}"));
+            crate::runtime::platform_shell_command_parts(&format!("echo \"{payload}\""));
         let mut arguments = vec![
             "--no-compact".to_string(),
             "--recovery-dir".to_string(),
@@ -983,21 +1000,28 @@ mod tests {
         // so compact_stream reduces it to ~20 head + omission notice + 20 tail.
         // That rendered wrapper is far smaller than the raw 200 lines, so the
         // break-even guard (rendered_tokens < raw_tokens) selects the compact
-        // branch. The generator command is shell-specific: cmd.exe has no
-        // printf/seq, so branch on the platform the way the existing
-        // shell_command_parts test does. platform_shell_command_parts already
-        // selects cmd /C vs bash -lc, so we hand it native syntax.
+        // branch. The generator is shell-specific, so first resolve the shell
+        // the way platform_shell_command_parts will, then emit matching syntax.
+        // We probe with a placeholder because the parts helper pairs program and
+        // args together; substituting the real command below keeps them aligned.
+        let (program, _) = crate::runtime::platform_shell_command_parts("");
         let generator = if cfg!(windows) {
-            // `for /L %i in (start,step,end)` is the cmd.exe counted loop; the
-            // leading @ suppresses per-iteration command echo so only the
-            // `line N` text reaches stdout.
-            "for /L %i in (1,1,200) do @echo line %i"
+            if program == "cmd" {
+                // `for /L %i in (start,step,end)` is the cmd.exe counted loop; the
+                // leading @ suppresses per-iteration command echo so only the
+                // `line N` text reaches stdout.
+                "for /L %i in (1,1,200) do @echo line %i".to_string()
+            } else {
+                // PowerShell: range operator piped to ForEach-Object writes the
+                // same `line N` sequence without cmd's for-loop syntax.
+                "1..200 | ForEach-Object { \"line $_\" }".to_string()
+            }
         } else {
             // bash brace expansion needs no external tool (seq/jot are not
             // guaranteed on macOS), so this works on bash 3.2+ everywhere.
-            "for i in {1..200}; do echo \"line $i\"; done"
+            "for i in {1..200}; do echo \"line $i\"; done".to_string()
         };
-        let (program, shell_args) = crate::runtime::platform_shell_command_parts(generator);
+        let (program, shell_args) = crate::runtime::platform_shell_command_parts(&generator);
         let mut arguments = vec![
             "--recovery-dir".to_string(),
             recovery_dir.to_string_lossy().to_string(),

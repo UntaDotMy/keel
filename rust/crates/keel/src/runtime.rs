@@ -665,13 +665,33 @@ fn exit_status_code(status: &std::process::ExitStatus) -> i32 {
 }
 
 /// Wrap a single shell command string into the (program, args) pair appropriate
-/// for the current platform: `cmd /C "<command>"` on Windows, `bash -lc
-/// "<command>"` everywhere else. Used by call sites that need to delegate a
-/// composite shell expression (with pipes, redirects, env-var assignments, or
-/// other shell metacharacters) to the host shell rather than executing one
-/// program directly.
+/// for the current platform: PowerShell (`pwsh`/`powershell -Command`) on
+/// Windows, `bash -lc "<command>"` everywhere else. Used by call sites that need
+/// to delegate a composite shell expression (with pipes, redirects, env-var
+/// assignments, or other shell metacharacters) to the host shell rather than
+/// executing one program directly.
+///
+/// why: the previous `cmd /C` shape could not run PowerShell cmdlets
+/// (`Get-Content`, `Select-Object`) and mangled quoted `findstr`/`rg` patterns,
+/// so agents on Windows got "not recognized" for valid commands. PowerShell
+/// still runs cmd builtins (`more`, `findstr`, `dir`) via native lookup/aliases,
+/// so routing through it does not regress the cmd-native cases. `pwsh`
+/// (PowerShell 7) is preferred over Windows PowerShell 5.1 (`powershell`) for
+/// its saner quoting and `-Command` semantics; `cmd /C` is the last resort only
+/// when neither is on PATH. For an EXPLICIT shell choice (no guessing at all),
+/// use [`named_shell_command_parts`] instead.
 pub fn platform_shell_command_parts(command: &str) -> (String, Vec<String>) {
     if cfg!(windows) {
+        if let Some(shell) = powershell_executable() {
+            return (
+                shell,
+                vec![
+                    "-NoProfile".to_string(),
+                    "-Command".to_string(),
+                    command.to_string(),
+                ],
+            );
+        }
         (
             "cmd".to_string(),
             vec!["/C".to_string(), command.to_string()],
@@ -682,6 +702,68 @@ pub fn platform_shell_command_parts(command: &str) -> (String, Vec<String>) {
             vec!["-lc".to_string(), command.to_string()],
         )
     }
+}
+
+/// Build the (program, args) pair that runs `script` through the EXPLICITLY
+/// named shell: `powershell` (pwsh or Windows PowerShell 5.1), `cmd`
+/// (Windows-only), or `bash`. Unlike [`platform_shell_command_parts`] this never
+/// guesses and never substitutes a different shell — a named shell that cannot
+/// be resolved is an error the caller reports to the agent. This is the shape
+/// the MCP `run_command` `script` + `shell` form uses, so an agent that asks for
+/// PowerShell gets PowerShell and an agent that asks for cmd gets cmd.
+pub fn named_shell_command_parts(
+    shell: &str,
+    script: &str,
+) -> Result<(String, Vec<String>), String> {
+    match shell {
+        "powershell" => {
+            let executable = powershell_executable().ok_or_else(|| {
+                "shell 'powershell' was requested but neither pwsh nor powershell is on PATH"
+                    .to_string()
+            })?;
+            Ok((
+                executable,
+                vec![
+                    "-NoProfile".to_string(),
+                    "-Command".to_string(),
+                    script.to_string(),
+                ],
+            ))
+        }
+        "cmd" => {
+            if cfg!(windows) {
+                Ok((
+                    "cmd".to_string(),
+                    vec!["/C".to_string(), script.to_string()],
+                ))
+            } else {
+                Err("shell 'cmd' was requested but cmd.exe only exists on Windows".to_string())
+            }
+        }
+        "bash" => Ok((
+            "bash".to_string(),
+            vec!["-lc".to_string(), script.to_string()],
+        )),
+        other => Err(format!(
+            "unknown shell {other:?}: expected one of powershell, cmd, bash"
+        )),
+    }
+}
+
+/// First PowerShell executable on PATH, preferring `pwsh` (7+) over
+/// `powershell` (5.1); `None` when neither resolves. Cached process-wide: a
+/// long-lived `mcp serve` daemon resolves once instead of re-probing per tool
+/// call. Works on every platform where pwsh is installed (Linux/macOS
+/// included), not just Windows.
+pub fn powershell_executable() -> Option<String> {
+    use std::sync::LazyLock;
+    static CACHED: LazyLock<Option<String>> = LazyLock::new(|| {
+        ["pwsh", "powershell"]
+            .iter()
+            .find(|name| which::which(name).is_ok())
+            .map(|name| (*name).to_string())
+    });
+    CACHED.clone()
 }
 
 pub fn forward_process_result(

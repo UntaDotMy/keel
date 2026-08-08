@@ -844,12 +844,16 @@ fn open_recall_connection(database_path: &Path) -> Result<Connection, String> {
         .map_err(|database_error| {
             recall_open_error_hint(database_path, &format!("set synchronous: {database_error}"))
         })?;
-    // why: fail fast on WAL lock contention so an orphaned `keel mcp serve`
-    // degrades to a quick error+rebuild hint. Override `KEEL_RECALL_BUSY_TIMEOUT_MS`.
+    // why: WAL lets one writer proceed alongside readers, so a short wait lets a
+    // concurrent `keel mcp serve` finish its transaction instead of erroring. The
+    // previous 750ms default surfaced as spurious "database is locked" failures —
+    // and downstream `context_brief` timeouts — whenever two keel processes raced
+    // the index. 5s absorbs normal contention; an orphaned writer still fails in
+    // bounded time. Override `KEEL_RECALL_BUSY_TIMEOUT_MS`.
     let busy_ms = std::env::var("KEEL_RECALL_BUSY_TIMEOUT_MS")
         .ok()
         .and_then(|raw| raw.trim().parse::<u64>().ok())
-        .unwrap_or(750)
+        .unwrap_or(5_000)
         .clamp(0, 30_000);
     connection
         .busy_timeout(std::time::Duration::from_millis(busy_ms))

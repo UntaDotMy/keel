@@ -30,7 +30,7 @@ use std::env;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -153,14 +153,41 @@ fn tools_list_catalog() -> Value {
             },
             {
                 "name": "run_command",
-                "description": "Prefer this over a raw shell call for noisy commands (test, build, lint, logs, search): it runs the command through the compaction proxy so compacted high-signal output enters context instead of the raw stream. Safe to use for any shell command; output is always neutralized for prompt-injection before reaching the model.",
+                "description": "Prefer this over a raw shell call for noisy commands (test, build, lint, logs, search): it runs the command through the compaction proxy so compacted high-signal output enters context instead of the raw stream. Three mutually-exclusive input forms: (1) argv — program plus argument array, executed DIRECTLY with NO shell: use this whenever possible, it can never misquote or hit the wrong shell; (2) script + shell — a script string run through the NAMED shell (powershell|cmd|bash): the shell is explicit, never guessed; (3) command — legacy single string, run through the platform default shell. Output is always neutralized for prompt-injection before reaching the model. Long commands: pass wait:false to run in the background and get a commandId to poll with command_output / kill with command_kill.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "command": { "type": "string", "description": "Shell command line to execute (joined with the platform shell when shell metacharacters are present)." },
-                        "json": { "type": "boolean", "description": "Return the compacted output as a JSON object (command, exit_code, stdout, stderr) instead of the text report. Default false." }
+                        "argv": { "type": "array", "items": { "type": "string" }, "description": "Program plus its arguments, executed directly with no shell (no quoting issues). Example: [\"cargo\", \"test\", \"--workspace\"]." },
+                        "script": { "type": "string", "description": "Shell script line. Requires `shell` alongside it; use argv instead when no shell features are needed." },
+                        "shell": { "type": "string", "enum": ["powershell", "cmd", "bash"], "description": "The exact shell for `script`. No fallback and no guessing: the script runs through this shell and only this shell." },
+                        "command": { "type": "string", "description": "Legacy: one shell command string run through the platform default shell. Prefer argv or script+shell." },
+                        "cwd": { "type": "string", "description": "Working directory for the command. Defaults to the server's cwd." },
+                        "wait": { "type": "boolean", "description": "Default true: wait for the command to finish and return its output. false: start in the background and return a commandId immediately — use for commands that may outlive the tool timeout (long builds, analyze)." },
+                        "json": { "type": "boolean", "description": "Return the output as a JSON object (command, exit_code, stdout, stderr) instead of the text report. Default false." }
+                    }
+                }
+            },
+            {
+                "name": "command_output",
+                "description": "Poll a background command started with run_command wait:false. While running it returns the live stdout/stderr captured so far (running:true); once the command finishes it returns the final exit_code, full stdout/stderr (running:false) and releases the commandId — the finished result is delivered exactly once.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "command_id": { "type": "string", "description": "The commandId returned by run_command with wait:false." },
+                        "json": { "type": "boolean", "description": "Return a JSON object instead of the text report when the command has finished. Default false." }
                     },
-                    "required": ["command"]
+                    "required": ["command_id"]
+                }
+            },
+            {
+                "name": "command_kill",
+                "description": "Stop a background command started with run_command wait:false. Kills the process and reports the exit code. On Windows the whole process group dies together (Job Object), so a killed shell wrapper does not orphan the work it spawned. Safe to call on an already-finished command: it reports killed:false with the final exit code.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "command_id": { "type": "string", "description": "The commandId returned by run_command with wait:false." }
+                    },
+                    "required": ["command_id"]
                 }
             },
             {
@@ -715,6 +742,8 @@ const MCP_TOOL_NAMES: &[&str] = &[
     "recall",
     "system_map",
     "run_command",
+    "command_output",
+    "command_kill",
     "recall_status",
     "skill_route",
     "skill_get",
@@ -765,6 +794,8 @@ fn mcp_tool_handler(name: &str) -> Option<McpToolHandler> {
         "recall" => tool_recall,
         "system_map" => tool_system_map,
         "run_command" => tool_run_command,
+        "command_output" => tool_command_output,
+        "command_kill" => tool_command_kill,
         "recall_status" => tool_recall_status,
         "skill_route" => tool_skill_route,
         "skill_get" => tool_skill_get,
@@ -962,41 +993,133 @@ fn tool_system_map(arguments: &Value) -> Result<String, String> {
 }
 
 fn tool_run_command(arguments: &Value) -> Result<String, String> {
+    let argv: Option<Vec<String>> = arguments
+        .get("argv")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        });
+    let script = arguments
+        .get("script")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let shell = arguments
+        .get("shell")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_lowercase();
     let command = arguments
         .get("command")
         .and_then(Value::as_str)
         .unwrap_or("")
         .trim()
         .to_string();
-    if command.is_empty() {
-        return Err("run_command: missing command".to_string());
-    }
-    // Shell out to a fresh `keel run -- <command>` so the proxy
+    let cwd = arguments
+        .get("cwd")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    let wait = optional_bool_arg(arguments, "wait").unwrap_or(true);
+
+    // Three mutually exclusive input forms. Exactly one must be present; each
+    // maps to (label, program, args) for the child. No fallback between forms:
+    // an invalid combination is an error the agent can correct, never a silent
+    // reinterpretation.
+    let (label, program, shell_args) = if let Some(argv) = argv {
+        if !script.is_empty() || !command.is_empty() {
+            return Err(
+                "run_command: pass exactly one of argv, script (+shell), or command".to_string(),
+            );
+        }
+        if argv.is_empty() {
+            return Err("run_command: argv must contain the program and its arguments".to_string());
+        }
+        // Direct exec: no shell at all, so nothing can be misquoted and no
+        // platform guessing is involved.
+        let label = argv.join(" ");
+        let program = argv[0].clone();
+        let args = argv[1..].to_vec();
+        (label, program, args)
+    } else if !script.is_empty() {
+        if !command.is_empty() {
+            return Err(
+                "run_command: pass exactly one of argv, script (+shell), or command".to_string(),
+            );
+        }
+        if shell.is_empty() {
+            return Err(
+                "run_command: script requires `shell` (powershell|cmd|bash) — the shell is explicit, never guessed".to_string(),
+            );
+        }
+        let (program, args) = crate::runtime::named_shell_command_parts(&shell, &script)
+            .map_err(|error| format!("run_command: {error}"))?;
+        (format!("[{shell}] {script}"), program, args)
+    } else if !command.is_empty() {
+        if !shell.is_empty() {
+            return Err(
+                "run_command: `shell` only applies to `script`; use script+shell or argv"
+                    .to_string(),
+            );
+        }
+        // Legacy single-string form: platform default shell, as before.
+        let (program, args) = crate::runtime::platform_shell_command_parts(&command);
+        (command.clone(), program, args)
+    } else {
+        return Err(
+            "run_command: missing input — pass argv, script (+shell), or command".to_string(),
+        );
+    };
+
+    // Shell out to a fresh `keel run -- <program> <args...>` so the proxy
     // pipeline (capture, compaction, raw-store, gain analytics) runs in its
     // intended configuration. Setting `CLAUDE_SKILLS_HOOK` flips the proxy's
     // capture gate on for this child even when the parent MCP server was
-    // launched from a plain shell.
+    // launched from a plain shell. The child receives program+args as separate
+    // argv tokens — the proxy classifies `pwsh`/`powershell`/`cmd`/`bash`
+    // wrappers as already shell-wrapped and never wraps them again.
     let executable =
         env::current_exe().map_err(|error| format!("run_command: locate self: {error}"))?;
     let mut child = Command::new(&executable);
     child.arg("run");
     child.arg("--");
-    let (program, args) = crate::runtime::platform_shell_command_parts(&command);
-    child.arg(program);
-    for argument in args {
+    child.arg(&program);
+    for argument in &shell_args {
         child.arg(argument);
+    }
+    if let Some(directory) = &cwd {
+        child.current_dir(directory);
     }
     child.env("CLAUDE_SKILLS_HOOK", "mcp");
     child.stdin(Stdio::null());
     child.stdout(Stdio::piped());
     child.stderr(Stdio::piped());
+
+    if !wait {
+        let command_id = spawn_background_command(child, &label)?;
+        let payload = json!({
+            "commandId": command_id,
+            "running": true,
+            "label": label,
+            "hint": "poll with command_output, stop with command_kill",
+        });
+        return mcp_json_compact(&payload).map_err(|error| format!("run_command: {error}"));
+    }
+
     let (exit_code, stdout_text, stderr_text) =
         run_command_with_timeout(child, mcp_child_timeout(), "run_command")?;
     // `json` mode returns a structured object; default text report keeps real
     // newlines so multi-line build/test logs stay legible in the tool-result view.
     if Some(true) == optional_bool_arg(arguments, "json") {
         let payload = json!({
-            "command": command,
+            "command": label,
             "exit_code": exit_code,
             "stdout": stdout_text,
             "stderr": stderr_text,
@@ -1004,11 +1127,369 @@ fn tool_run_command(arguments: &Value) -> Result<String, String> {
         return mcp_json_compact(&payload).map_err(|error| format!("run_command: {error}"));
     }
     Ok(render_run_command_report(
-        &command,
+        &label,
         exit_code,
         &stdout_text,
         &stderr_text,
     ))
+}
+
+// ---------------------------------------------------------------------------
+// Background command registry — the `wait:false` surface of run_command.
+//
+// Process-local: each `keel mcp serve` owns the commands it spawned. A reaper
+// thread per command polls try_wait and records the exit code; two reader
+// threads append chunked stdout/stderr into capped buffers so command_output
+// can report live progress and a runaway producer cannot exhaust memory. The
+// final result is returned exactly once: the finished:true response removes the
+// entry from the registry.
+// ---------------------------------------------------------------------------
+
+/// Cap per captured stream of a background command. Beyond this the buffer
+/// stops growing and a one-time marker records the truncation.
+const BACKGROUND_STREAM_CAP_CHARS: usize = 2_000_000;
+
+struct BackgroundCommand {
+    label: String,
+    started_at_millis: u128,
+    pid: Option<u32>,
+    stdout: Arc<Mutex<String>>,
+    stderr: Arc<Mutex<String>>,
+    /// `Some(child)` while running; the reaper or command_kill takes it out
+    /// when the process ends and records the exit code in `exit`.
+    child: Arc<Mutex<Option<std::process::Child>>>,
+    exit: Arc<Mutex<Option<i32>>>,
+}
+
+fn background_registry() -> &'static Mutex<std::collections::HashMap<String, Arc<BackgroundCommand>>>
+{
+    use std::sync::LazyLock;
+    static REGISTRY: LazyLock<Mutex<std::collections::HashMap<String, Arc<BackgroundCommand>>>> =
+        LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+    &REGISTRY
+}
+
+fn next_background_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::LazyLock;
+    static COUNTER: LazyLock<AtomicU64> = LazyLock::new(|| AtomicU64::new(1));
+    format!("c{}", COUNTER.fetch_add(1, Ordering::Relaxed))
+}
+
+/// Spawn `child` in the background and register it under a fresh command id.
+/// On Unix the child becomes its own process-group leader (setsid) so
+/// `kill_process_tree` can reach every descendant via `kill(-pid, SIGKILL)`.
+/// On Windows `taskkill /T` walks the tree instead, so no setup is needed.
+fn spawn_background_command(mut child: Command, label: &str) -> Result<String, String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // setsid detaches the child into a new session + process group, making
+        // its pid == pgid. Safe here: we never send SIGINT-style job-control
+        // signals to background commands, only SIGKILL via kill_process_tree.
+        unsafe {
+            child.pre_exec(|| {
+                if libc_setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    let mut spawned = child
+        .spawn()
+        .map_err(|error| format!("run_command: background spawn: {error}"))?;
+    let pid = spawned.id();
+    let stdout_pipe = spawned
+        .stdout
+        .take()
+        .ok_or_else(|| "run_command: background: missing stdout pipe".to_string())?;
+    let stderr_pipe = spawned
+        .stderr
+        .take()
+        .ok_or_else(|| "run_command: background: missing stderr pipe".to_string())?;
+
+    let entry = Arc::new(BackgroundCommand {
+        label: label.to_string(),
+        started_at_millis: current_timestamp_millis(),
+        pid: Some(pid),
+        stdout: Arc::new(Mutex::new(String::new())),
+        stderr: Arc::new(Mutex::new(String::new())),
+        child: Arc::new(Mutex::new(Some(spawned))),
+        exit: Arc::new(Mutex::new(None)),
+    });
+    let command_id = next_background_id();
+
+    background_reader_thread(Arc::clone(&entry.stdout), stdout_pipe);
+    background_reader_thread(Arc::clone(&entry.stderr), stderr_pipe);
+
+    // Reaper: poll try_wait until the child exits (or kill takes it), then
+    // record the exit code. Consistent with run_command_with_timeout_stdin's
+    // poll loop — no platform-specific signals needed.
+    let reaper_entry = Arc::clone(&entry);
+    let _ = std::thread::Builder::new()
+        .name(format!("keel-bg-reaper-{command_id}"))
+        .spawn(move || loop {
+            let outcome = {
+                let mut guard = reaper_entry
+                    .child
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                match guard.as_mut() {
+                    Some(child) => match child.try_wait() {
+                        Ok(Some(status)) => {
+                            let code = status.code().unwrap_or(-1);
+                            *guard = None;
+                            Some(code)
+                        }
+                        Ok(None) => None,
+                        Err(_) => {
+                            *guard = None;
+                            Some(-1)
+                        }
+                    },
+                    // command_kill already finished and nulled the child.
+                    None => break,
+                }
+            };
+            if let Some(code) = outcome {
+                let mut exit_guard = reaper_entry
+                    .exit
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                *exit_guard = Some(code);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        });
+
+    let mut registry = background_registry()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    registry.insert(command_id.clone(), entry);
+    Ok(command_id)
+}
+
+/// Chunked reader: appends to the shared buffer as data arrives so
+/// command_output can report live progress. Stops growing at the cap.
+fn background_reader_thread(buffer: Arc<Mutex<String>>, mut pipe: impl Read + Send + 'static) {
+    let _ = std::thread::spawn(move || {
+        let mut chunk = [0u8; 8192];
+        loop {
+            match pipe.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(count) => {
+                    let mut guard = buffer
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    if guard.chars().count() >= BACKGROUND_STREAM_CAP_CHARS {
+                        if !guard.ends_with("[stream truncated at 2MB]") {
+                            guard.push_str("\n[stream truncated at 2MB]");
+                        }
+                        continue;
+                    }
+                    guard.push_str(&String::from_utf8_lossy(&chunk[..count]));
+                }
+            }
+        }
+    });
+}
+
+fn tool_command_output(arguments: &Value) -> Result<String, String> {
+    let command_id = arguments
+        .get("command_id")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if command_id.is_empty() {
+        return Err("command_output: missing command_id".to_string());
+    }
+
+    let entry = {
+        let registry = background_registry()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        registry
+            .get(&command_id)
+            .cloned()
+            .ok_or_else(|| format!("command_output: unknown command_id {command_id:?}"))?
+    };
+
+    let exit_code = *entry
+        .exit
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let stdout_text = entry
+        .stdout
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    let stderr_text = entry
+        .stderr
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    let elapsed_millis = current_timestamp_millis().saturating_sub(entry.started_at_millis);
+
+    if let Some(code) = exit_code {
+        // Finished: return the full result exactly once, then release the id.
+        let mut registry = background_registry()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        registry.remove(&command_id);
+        if Some(true) == optional_bool_arg(arguments, "json") {
+            let payload = json!({
+                "command_id": command_id,
+                "label": entry.label,
+                "running": false,
+                "exit_code": code,
+                "elapsed_ms": elapsed_millis,
+                "stdout": stdout_text,
+                "stderr": stderr_text,
+            });
+            return mcp_json_compact(&payload).map_err(|error| format!("command_output: {error}"));
+        }
+        let mut report = render_run_command_report(&entry.label, code, &stdout_text, &stderr_text);
+        report.push_str(&format!("elapsed: {}ms\n", elapsed_millis));
+        return Ok(report);
+    }
+
+    let payload = json!({
+        "command_id": command_id,
+        "label": entry.label,
+        "running": true,
+        "pid": entry.pid,
+        "elapsed_ms": elapsed_millis,
+        "stdout": truncate_chars(&stdout_text, max_mcp_text_chars()).0,
+        "stderr": truncate_chars(&stderr_text, max_mcp_text_chars()).0,
+        "hint": "still running — call command_output again later, or command_kill to stop it",
+    });
+    mcp_json_compact(&payload).map_err(|error| format!("command_output: {error}"))
+}
+
+fn tool_command_kill(arguments: &Value) -> Result<String, String> {
+    let command_id = arguments
+        .get("command_id")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if command_id.is_empty() {
+        return Err("command_kill: missing command_id".to_string());
+    }
+
+    let entry = {
+        let registry = background_registry()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        registry
+            .get(&command_id)
+            .cloned()
+            .ok_or_else(|| format!("command_kill: unknown command_id {command_id:?}"))?
+    };
+
+    // Take the child out of the registry entry so the reaper stops polling it,
+    // then kill + wait here. If the reaper already nulled it, the process is
+    // already gone.
+    let maybe_child = entry
+        .child
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take();
+    match maybe_child {
+        Some(mut child) => {
+            // Kill the whole tree, not just the direct child: on Windows the
+            // direct child is usually a shell wrapper (`pwsh`/`cmd`) and
+            // killing only it would orphan the real work it spawned. The
+            // wrapper was started in a kill-on-close Job Object (Windows) or
+            // its own process group (Unix), so the tree is reachable.
+            kill_process_tree(&mut child);
+            let status = child.wait();
+            let code = status.ok().and_then(|status| status.code()).unwrap_or(-1);
+            let mut exit_guard = entry
+                .exit
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if exit_guard.is_none() {
+                *exit_guard = Some(code);
+            }
+            let payload = json!({
+                "command_id": command_id,
+                "label": entry.label,
+                "killed": true,
+                "exit_code": code,
+            });
+            mcp_json_compact(&payload).map_err(|error| format!("command_kill: {error}"))
+        }
+        None => {
+            let code = *entry
+                .exit
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let payload = json!({
+                "command_id": command_id,
+                "label": entry.label,
+                "killed": false,
+                "already_finished": true,
+                "exit_code": code,
+            });
+            mcp_json_compact(&payload).map_err(|error| format!("command_kill: {error}"))
+        }
+    }
+}
+
+/// Kill a child process AND everything it spawned, so a killed shell wrapper
+/// never orphans the real work (e.g. a `flutter analyze` it launched).
+///
+/// Windows: `taskkill /T /F /PID <root>` force-terminates the root and all
+/// its descendants by walking the process tree — no FFI needed, available on
+/// every Windows edition. Direct `Child::kill` is the fallback if taskkill is
+/// somehow unavailable.
+/// Unix: the child runs in its own process group (spawned below via
+/// `pre_exec` setsid), so `kill(-pgid, SIGKILL)` reaches the whole tree.
+#[cfg(windows)]
+fn kill_process_tree(child: &mut std::process::Child) {
+    let pid = child.id();
+    let taskkill = Command::new("taskkill")
+        .args(["/T", "/F", "/PID", &pid.to_string()])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    if taskkill.is_err() {
+        // taskkill unavailable: degrade to killing the root process only.
+        let _ = child.kill();
+    }
+}
+
+#[cfg(unix)]
+fn kill_process_tree(child: &mut std::process::Child) {
+    let pid = child.id() as i32;
+    // Negative pid targets the process group; the child's pgid == its pid
+    // because spawn_background_command made it a group leader via setsid.
+    let group_kill = unsafe { libc_kill_process_group(pid) };
+    if group_kill != 0 {
+        // Process group gone or not a leader: fall back to the root.
+        let _ = child.kill();
+    }
+}
+
+#[cfg(unix)]
+fn libc_kill_process_group(pid: i32) -> i32 {
+    extern "C" {
+        fn kill(pid: i32, sig: i32) -> i32;
+    }
+    // SIGKILL = 9.
+    unsafe { kill(-pid, 9) }
+}
+
+#[cfg(unix)]
+fn libc_setsid() -> i32 {
+    extern "C" {
+        fn setsid() -> i32;
+    }
+    unsafe { setsid() }
 }
 
 /// Build the human-readable `run_command` report. Pure (no IO) so the framing
@@ -1666,8 +2147,13 @@ fn run_command_with_timeout_stdin(
                     let _ = child.wait();
                     let _ = stdout_handle.join();
                     let _ = stderr_handle.join();
+                    let async_hint = if label == "run_command" {
+                        "; for long commands pass wait:false and poll command_output instead of waiting"
+                    } else {
+                        ""
+                    };
                     return Err(format!(
-                        "{label}: timed out after {}s (set KEEL_MCP_TOOL_TIMEOUT_SECS to raise; kill orphan `keel mcp serve` processes if tools keep hanging)",
+                        "{label}: timed out after {}s{async_hint} (set KEEL_MCP_TOOL_TIMEOUT_SECS to raise; kill orphan `keel mcp serve` processes if tools keep hanging)",
                         timeout.as_secs()
                     ));
                 }
@@ -3419,5 +3905,129 @@ mod tests {
             !args.iter().any(|a| a == "orchestration"),
             "subcommand leaked into extra args: {args:?}"
         );
+    }
+
+    #[test]
+    fn run_command_input_validation_rejects_ambiguous_forms() {
+        // No input at all.
+        let error = tool_run_command(&json!({})).expect_err("no input must fail");
+        assert!(error.contains("missing input"), "got: {error}");
+
+        // Two forms at once are never silently interpreted.
+        let error = tool_run_command(&json!({
+            "argv": ["echo", "hi"],
+            "script": "echo hi",
+        }))
+        .expect_err("argv+script must fail");
+        assert!(error.contains("exactly one of"), "got: {error}");
+
+        // script without a shell is an error: the shell is explicit, never guessed.
+        let error =
+            tool_run_command(&json!({ "script": "echo hi" })).expect_err("script alone must fail");
+        assert!(error.contains("requires `shell`"), "got: {error}");
+
+        // Unknown shell names fail fast with the allowed set.
+        let error = tool_run_command(&json!({ "script": "echo hi", "shell": "zsh9000" }))
+            .expect_err("unknown shell must fail");
+        assert!(error.contains("unknown shell"), "got: {error}");
+
+        // cmd exists only on Windows.
+        if cfg!(not(windows)) {
+            let error = tool_run_command(&json!({ "script": "echo hi", "shell": "cmd" }))
+                .expect_err("cmd on non-Windows must fail");
+            assert!(error.contains("only exists on Windows"), "got: {error}");
+        }
+
+        // Empty argv.
+        let error = tool_run_command(&json!({ "argv": [] })).expect_err("empty argv must fail");
+        assert!(error.contains("argv must contain"), "got: {error}");
+
+        // `shell` only applies to script — never to the legacy command string.
+        let error = tool_run_command(&json!({ "command": "echo hi", "shell": "bash" }))
+            .expect_err("command+shell must fail");
+        assert!(error.contains("only applies to `script`"), "got: {error}");
+    }
+
+    #[test]
+    fn background_command_lifecycle_runs_polls_and_finishes() {
+        let mut child = if cfg!(windows) {
+            let mut command = Command::new("cmd");
+            command.args(["/C", "echo keel-bg-test"]);
+            command
+        } else {
+            let mut command = Command::new("bash");
+            command.args(["-c", "echo keel-bg-test"]);
+            command
+        };
+        child.stdin(Stdio::null());
+        child.stdout(Stdio::piped());
+        child.stderr(Stdio::piped());
+        let id = spawn_background_command(child, "echo keel-bg-test").expect("spawn");
+
+        // Poll until finished; the command is sub-second, budget generously.
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let mut finished: Option<Value> = None;
+        while Instant::now() < deadline {
+            let result = tool_command_output(&json!({ "command_id": id, "json": true }))
+                .expect("poll output");
+            let payload: Value = serde_json::from_str(&result).expect("json payload");
+            if payload["running"] == json!(false) {
+                finished = Some(payload);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let payload = finished.expect("background command must finish");
+        assert_eq!(payload["exit_code"], json!(0), "payload: {payload}");
+        assert!(
+            payload["stdout"]
+                .as_str()
+                .unwrap_or("")
+                .contains("keel-bg-test"),
+            "payload: {payload}"
+        );
+
+        // Exactly-once delivery: the finished id is released immediately.
+        let second =
+            tool_command_output(&json!({ "command_id": id })).expect_err("id must be released");
+        assert!(second.contains("unknown command_id"), "got: {second}");
+    }
+
+    #[test]
+    fn background_command_kill_stops_a_long_command() {
+        let mut child = if cfg!(windows) {
+            let mut command = Command::new("cmd");
+            command.args(["/C", "ping -n 60 127.0.0.1 >nul"]);
+            command
+        } else {
+            let mut command = Command::new("bash");
+            command.args(["-c", "sleep 60"]);
+            command
+        };
+        child.stdin(Stdio::null());
+        child.stdout(Stdio::piped());
+        child.stderr(Stdio::piped());
+        let id = spawn_background_command(child, "long-runner").expect("spawn");
+
+        // Still running right after spawn.
+        let running = tool_command_output(&json!({ "command_id": id })).expect("poll");
+        assert!(running.contains("\"running\":true"), "got: {running}");
+
+        // Kill reports killed:true.
+        let killed = tool_command_kill(&json!({ "command_id": id })).expect("kill");
+        assert!(killed.contains("\"killed\":true"), "got: {killed}");
+
+        // Polling after kill returns the final result and releases the id.
+        let final_result = tool_command_output(&json!({ "command_id": id })).expect("final");
+        assert!(final_result.contains("exit code"), "got: {final_result}");
+        let gone =
+            tool_command_output(&json!({ "command_id": id })).expect_err("id must be released");
+        assert!(gone.contains("unknown command_id"), "got: {gone}");
+
+        // Unknown ids are rejected by both tools.
+        let error = tool_command_kill(&json!({ "command_id": "nope" })).expect_err("unknown");
+        assert!(error.contains("unknown command_id"), "got: {error}");
+        let error = tool_command_output(&json!({ "command_id": "nope" })).expect_err("unknown");
+        assert!(error.contains("unknown command_id"), "got: {error}");
     }
 }
