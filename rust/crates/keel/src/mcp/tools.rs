@@ -582,6 +582,19 @@ fn tools_list_catalog() -> Value {
                 }
             },
             {
+                "name": "team",
+                "description": "Team worker messaging + tmux panes. send/get/ack/inbox form a durable file-based message bus so parallel agents can pass messages reliably without tmux; spawn/status/kill/list manage tmux panes. Use send/get/ack for any agent-to-agent handoff.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["send", "get", "ack", "inbox", "spawn", "status", "kill", "list"], "description": "Team operation." },
+                        "args": { "type": "array", "items": { "type": "string" }, "description": "Extra CLI args (e.g. --to <worker>, --message <text>, --name <worker>, --id <msg-id>, --prompt <prompt>)." },
+                        "json": { "type": "boolean", "description": "JSON output when supported." }
+                    },
+                    "required": ["action"]
+                }
+            },
+            {
                 "name": "design_intelligence",
                 "description": "UI design-system recommendation packet (styles, palettes, typography, anti-patterns) for a product request. Use before implementing UI so visual choices are catalog-backed.",
                 "inputSchema": {
@@ -740,6 +753,7 @@ const MCP_TOOL_NAMES: &[&str] = &[
     "dispatch",
     "design_intelligence",
     "stats",
+    "team",
 ];
 
 type McpToolHandler = fn(&Value) -> Result<String, String>;
@@ -789,6 +803,7 @@ fn mcp_tool_handler(name: &str) -> Option<McpToolHandler> {
         "dispatch" => tool_dispatch,
         "design_intelligence" => tool_design_intelligence,
         "stats" => tool_stats,
+        "team" => tool_team,
         _ => return None,
     })
 }
@@ -2562,6 +2577,40 @@ fn tool_dispatch(arguments: &Value) -> Result<String, String> {
     }
     run_inprocess_cli(&format!("keel dispatch {action}"), |out, err| {
         crate::utility::run_dispatch_command(&owned, out, err)
+    })
+}
+
+/// Team worker messaging + tmux panes. send/get/ack/inbox form a durable
+/// file-based message bus; spawn/status/kill/list manage tmux panes. Exposed via
+/// MCP so parallel agents can hand off messages without relying on tmux.
+fn tool_team(arguments: &Value) -> Result<String, String> {
+    let action = arguments
+        .get("action")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            "team: missing action (send|get|ack|inbox|spawn|status|kill|list)".to_string()
+        })?;
+    let allowed = [
+        "send", "get", "ack", "inbox", "spawn", "status", "kill", "list",
+    ];
+    if !allowed.contains(&action) {
+        return Err(format!("team: action {action:?} not recognized"));
+    }
+    let mut owned: Vec<String> = vec![action.to_string()];
+    if let Some(Value::Array(items)) = arguments.get("args") {
+        for item in items {
+            if let Some(s) = item.as_str() {
+                if !s.trim().is_empty() {
+                    owned.push(s.to_string());
+                }
+            }
+        }
+    }
+    if Some(true) == optional_bool_arg(arguments, "json") {
+        owned.push("--json".to_string());
+    }
+    run_inprocess_cli(&format!("keel team {action}"), |out, err| {
+        crate::utility::run_team_command(&owned, out, err)
     })
 }
 
