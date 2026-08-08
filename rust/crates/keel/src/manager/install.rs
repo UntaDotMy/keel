@@ -813,6 +813,30 @@ pub(crate) fn maybe_wire_codex(
             }
             Err(error) => wire_status.push(format!("enablement skipped ({error})")),
         }
+        // Native MCP registration: Codex on Windows never loads a plugin's
+        // bundled MCP (openai/codex#26693), and [mcp_servers.keel] works everywhere.
+        let binary = installed_executable_path(claude_home);
+        match ensure_codex_native_mcp(&codex_config, &binary) {
+            Ok(CodexNativeMcpResult::Added) => wire_status.push(format!(
+                "native MCP registered in {}",
+                display_path(&codex_config)
+            )),
+            Ok(CodexNativeMcpResult::Updated) => wire_status.push(format!(
+                "native MCP command updated in {}",
+                display_path(&codex_config)
+            )),
+            Ok(CodexNativeMcpResult::AlreadyCurrent) => {
+                wire_status.push("native MCP already current".to_string())
+            }
+            Err(error) => wire_status.push(format!("native MCP skipped ({error})")),
+        }
+        // Always-on contract: Codex hooks are unreliable (absent on Windows),
+        // and the user-global AGENTS.md is the hook-independent surface.
+        let codex_agents = home_dir.join(".codex").join("AGENTS.md");
+        match sync_codex_agents_md(&codex_agents) {
+            Ok(status) => wire_status.push(status),
+            Err(error) => wire_status.push(format!("AGENTS.md skipped ({error})")),
+        }
     }
 
     Some(format!(
@@ -914,9 +938,217 @@ enum CodexEnableResult {
     UnchangedDisabled,
 }
 
+/// Result of registering the keel MCP server natively in Codex config.toml.
+#[derive(Debug)]
+enum CodexNativeMcpResult {
+    Added,
+    Updated,
+    AlreadyCurrent,
+}
+
 /// The config.toml section Codex reads for this plugin's enablement:
 /// `[plugins."keel@personal-keel"]` (plugin@marketplace).
 const CODEX_PLUGIN_CONFIG_SECTION: &str = "[plugins.\"keel@personal-keel\"]";
+
+/// The config.toml section for the native keel MCP server. A top-level
+/// `[mcp_servers.<name>]` table is honored on every platform.
+const CODEX_NATIVE_MCP_SECTION: &str = "[mcp_servers.keel]";
+
+/// Register the keel MCP server directly in `~/.codex/config.toml`.
+///
+/// why: Codex on Windows does not load the MCP server a plugin bundles
+/// (upstream openai/codex#26693), so the plugin path alone leaves MCP empty
+/// there. The native `[mcp_servers.keel]` table works everywhere, so install
+/// writes it deterministically alongside the plugin. The edit is string-
+/// surgical (parse with `toml` to decide, then append or rewrite the section)
+/// so comments, ordering, and unrelated keys survive untouched. Creates the
+/// file when absent.
+fn ensure_codex_native_mcp(
+    config_path: &Path,
+    binary: &Path,
+) -> Result<CodexNativeMcpResult, String> {
+    let command = display_path(binary);
+    let existing_text = crate::runtime::read_text_if_exists(config_path).unwrap_or_default();
+    let stripped = existing_text
+        .strip_prefix('\u{feff}')
+        .unwrap_or(&existing_text);
+    // Decide current state via a real TOML parse; on parse failure refuse to
+    // touch the file rather than risk corrupting it.
+    if !stripped.trim().is_empty() {
+        let doc: toml::Value =
+            toml::from_str(stripped).map_err(|error| format!("parse error: {error}"))?;
+        if let Some(entry) = doc.get("mcp_servers").and_then(|m| m.get("keel")) {
+            let current_command = entry.get("command").and_then(|v| v.as_str());
+            let current_args = entry
+                .get("args")
+                .and_then(|v| v.as_array())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| item.as_str().map(str::to_string))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let args_match = current_args == ["mcp", "serve"];
+            if current_command == Some(command.as_str()) && args_match {
+                return Ok(CodexNativeMcpResult::AlreadyCurrent);
+            }
+        }
+    }
+    // Replace an existing section in place, or append a fresh one at the end.
+    let lines: Vec<&str> = stripped.lines().collect();
+    let header_pos = lines
+        .iter()
+        .position(|line| line.trim() == CODEX_NATIVE_MCP_SECTION);
+    let new_text: String = if let Some(pos) = header_pos {
+        // Drop the old section body (until the next table header), then
+        // re-emit the section with the desired values.
+        let mut end = lines.len();
+        for (offset, line) in lines[pos + 1..].iter().enumerate() {
+            let trimmed = line.trim();
+            if trimmed.starts_with('[') && trimmed.ends_with(']') {
+                end = pos + 1 + offset;
+                break;
+            }
+        }
+        let mut rebuilt: Vec<String> = Vec::with_capacity(lines.len());
+        rebuilt.extend(lines[..pos].iter().map(|l| l.to_string()));
+        rebuilt.push(CODEX_NATIVE_MCP_SECTION.to_string());
+        rebuilt.push(format!("command = {}", toml_quote(&command)));
+        rebuilt.push("args = [\"mcp\", \"serve\"]".to_string());
+        rebuilt.extend(lines[end..].iter().map(|l| l.to_string()));
+        rebuilt.join("\n")
+    } else {
+        let mut out = stripped.to_string();
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(CODEX_NATIVE_MCP_SECTION);
+        out.push('\n');
+        out.push_str(&format!("command = {}\n", toml_quote(&command)));
+        out.push_str("args = [\"mcp\", \"serve\"]\n");
+        out
+    };
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("create {}: {error}", display_path(parent)))?;
+    }
+    write_text(config_path, &new_text)?;
+    // Report Added vs Updated: Added when no prior section existed.
+    if header_pos.is_some() {
+        Ok(CodexNativeMcpResult::Updated)
+    } else {
+        Ok(CodexNativeMcpResult::Added)
+    }
+}
+
+/// Quote a string as a TOML basic (double-quoted) string, escaping the
+/// backslashes and double quotes that Windows paths carry.
+fn toml_quote(value: &str) -> String {
+    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{escaped}\"")
+}
+
+/// Sentinels delimiting the keel-managed region inside the user-global
+/// `~/.codex/AGENTS.md`, mirroring the `~/.claude/CLAUDE.md` sentinels so the
+/// uninstall path can strip exactly what install wrote.
+const MANAGED_CODEX_AGENTS_BEGIN: &str =
+    "<!-- keel:begin (managed by keel install — edits inside this block are overwritten; edit outside it freely) -->";
+const MANAGED_CODEX_AGENTS_END: &str = "<!-- keel:end -->";
+
+/// The always-on operating contract written into `~/.codex/AGENTS.md`.
+///
+/// why: Codex hooks do not fire on Windows and plugin-bundled hooks require
+/// approval elsewhere, so the hook channel that carries the iron law on the
+/// claude host is unreliable here. Codex loads the user-global AGENTS.md into
+/// every session, making it the hook-independent surface. Kept compact because
+/// it is paid on every session of every project.
+const MANAGED_CODEX_AGENTS_BODY: &str = r#"# keel operating contract (always-on)
+
+Installed by keel into `~/.codex/AGENTS.md` and loaded into every Codex session — independent of hooks. Applies to every project you work in, not just keel.
+
+## Iron Law — for any request that could touch code, config, or architecture
+1. **Read first.** Read the workspace SYSTEM_MAP and the owning file before claiming behavior; never propose changes against an imagined version.
+2. **Understand before building.** Restate what the request asks and research what is genuinely needed before writing code. No guessing, no building against an imagined spec.
+3. **Request fidelity.** Implement only what the user asked. Do not invent features, APIs, files, refactors, or "nice extras" outside the request.
+4. **Ask when unclear.** If the request is unclear, conflicting, or incomplete, stop and ask the user before coding. Do not decide silently.
+5. **Never trust knowledge-base alone.** Read SYSTEM_MAP, owning files, and user stories here; nothing in training data is truth for this repo.
+6. **Use the keel MCP tools.** Prefer `system_map`, `recall`, `run_command`, and the `skill_*` tools over guessing; they are always available.
+7. **Find the root cause.** Trace the symptom end-to-end with file:line evidence and confirm the suspect is on that path before changing anything.
+8. **Preserve existing data.** Never remove or replace an existing field, column, output, or record to fit a new format — ADD alongside, and ASK before dropping anything the user did not name."#;
+
+/// Write (or refresh) the keel managed block inside `~/.codex/AGENTS.md`,
+/// preserving any user content outside it. Creates the file when absent.
+fn sync_codex_agents_md(path: &Path) -> Result<String, String> {
+    let block = format!(
+        "{MANAGED_CODEX_AGENTS_BEGIN}\n{MANAGED_CODEX_AGENTS_BODY}\n{MANAGED_CODEX_AGENTS_END}"
+    );
+    let existing = crate::runtime::read_text_if_exists(path).unwrap_or_default();
+    let stripped = existing.strip_prefix('\u{feff}').unwrap_or(&existing);
+    let merged = merge_managed_region(
+        stripped,
+        &block,
+        MANAGED_CODEX_AGENTS_BEGIN,
+        MANAGED_CODEX_AGENTS_END,
+    );
+    if merged == stripped {
+        return Ok("AGENTS.md already current".to_string());
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("create {}: {error}", display_path(parent)))?;
+    }
+    write_text(path, &merged)?;
+    Ok(format!("AGENTS.md written to {}", display_path(path)))
+}
+
+/// Splice `block` into `existing` content between `begin`/`end` sentinels,
+/// preserving user content. If the region already exists it is replaced in
+/// place; otherwise the block is prepended so the contract reads first. Pure
+/// (no IO) so the splice logic is unit-testable.
+fn merge_managed_region(existing: &str, block: &str, begin: &str, end: &str) -> String {
+    if let (Some(start), Some(end_idx)) = (existing.find(begin), existing.find(end)) {
+        if end_idx > start {
+            let end_full = end_idx + end.len();
+            let before = &existing[..start];
+            let after = &existing[end_full..];
+            return format!("{before}{block}{after}");
+        }
+    }
+    if existing.trim().is_empty() {
+        format!("{block}\n")
+    } else {
+        format!("{block}\n\n{existing}")
+    }
+}
+
+/// Strip the keel managed block from a file, preserving user content. Returns
+/// the stripped text, or `None` when the block is absent. A file that is only
+/// the block collapses to empty so the caller can delete it.
+fn strip_managed_region(existing: &str, begin: &str, end: &str) -> Option<String> {
+    let start = existing.find(begin)?;
+    let end_idx = existing.find(end)?;
+    if end_idx <= start {
+        return None;
+    }
+    let end_full = end_idx + end.len();
+    let before = existing[..start].trim_end();
+    let after = existing[end_full..].trim_start();
+    let mut stripped = if before.is_empty() {
+        after.to_string()
+    } else if after.is_empty() {
+        format!("{before}\n")
+    } else {
+        format!("{before}\n{after}")
+    };
+    if stripped.trim().is_empty() {
+        stripped = String::new();
+    }
+    Some(stripped)
+}
 
 /// Ensure `[plugins."keel@personal-keel"] enabled = true` is present in
 /// `~/.codex/config.toml`. The edit is string-surgical (parse with `toml` to
@@ -1482,6 +1714,80 @@ fn remove_codex_plugin_section(config_path: &Path) -> usize {
     }
     let _ = write_text(config_path, &new_text);
     1
+}
+
+/// Remove the `[mcp_servers.keel]` section from Codex config.toml without
+/// disturbing any other section, key, or comment. Mirrors the plugin-section
+/// removal: drops the header line plus every key line until the next header.
+fn remove_codex_native_mcp_section(config_path: &Path) -> usize {
+    if !config_path.is_file() {
+        return 0;
+    }
+    let Ok(text) = crate::runtime::read_text_if_exists(config_path) else {
+        return 0;
+    };
+    let stripped = text.strip_prefix('\u{feff}').unwrap_or(&text);
+    let lines: Vec<&str> = stripped.lines().collect();
+    let Some(pos) = lines
+        .iter()
+        .position(|line| line.trim() == CODEX_NATIVE_MCP_SECTION)
+    else {
+        return 0;
+    };
+    let mut end = lines.len();
+    for (offset, line) in lines[pos + 1..].iter().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            end = pos + 1 + offset;
+            break;
+        }
+    }
+    let mut kept: Vec<&str> = Vec::with_capacity(lines.len());
+    kept.extend_from_slice(&lines[..pos]);
+    kept.extend_from_slice(&lines[end..]);
+    while kept.len() >= 2 {
+        let n = kept.len();
+        if kept[n - 1].trim().is_empty() && kept[n - 2].trim().is_empty() {
+            kept.remove(n - 1);
+        } else {
+            break;
+        }
+    }
+    let mut new_text = kept.join("\n");
+    if !new_text.is_empty() && !new_text.ends_with('\n') {
+        new_text.push('\n');
+    }
+    let _ = write_text(config_path, &new_text);
+    1
+}
+
+/// Strip the keel managed block from `~/.codex/AGENTS.md`, preserving any user
+/// content outside it. Deletes the file only if it becomes empty. Returns the
+/// number of paths changed/removed (0 or 1); a missing file or one without the
+/// managed block is a no-op.
+fn remove_codex_managed_agents_md(path: &Path) -> usize {
+    if !path.is_file() {
+        return 0;
+    }
+    let Ok(text) = crate::runtime::read_text_if_exists(path) else {
+        return 0;
+    };
+    let stripped = text.strip_prefix('\u{feff}').unwrap_or(&text);
+    let Some(stripped_content) = strip_managed_region(
+        stripped,
+        MANAGED_CODEX_AGENTS_BEGIN,
+        MANAGED_CODEX_AGENTS_END,
+    ) else {
+        return 0;
+    };
+    if stripped_content.trim().is_empty() {
+        remove_path_if_exists_counted(path).unwrap_or(0)
+    } else {
+        match write_text(path, &stripped_content) {
+            Ok(()) => 1,
+            Err(_) => 0,
+        }
+    }
 }
 
 /// The Claude Desktop MCP config file, derived from the user's home so it is both
@@ -2356,6 +2662,10 @@ fn remove_wired_adapters(claude_home: &Path) -> usize {
     removed += remove_codex_marketplace_entry(&codex_marketplace);
     let codex_config = home.join(".codex").join("config.toml");
     removed += remove_codex_plugin_section(&codex_config);
+    // Native MCP entry + managed AGENTS.md block written by maybe_wire_codex;
+    // a stale entry would spawn the deleted keel binary every session.
+    removed += remove_codex_native_mcp_section(&codex_config);
+    removed += remove_codex_managed_agents_md(&home.join(".codex").join("AGENTS.md"));
 
     let cursorrules = home.join(".cursorrules");
     if cursorrules.is_file() {
@@ -5257,6 +5567,176 @@ mod tests {
             !path.exists(),
             "a catalog that held only keel must be removed wholesale"
         );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn ensure_codex_native_mcp_appends_section_when_absent() {
+        let dir = unique_codex_test_dir("natmcp-absent");
+        let path = dir.join("config.toml");
+        fs::write(&path, "model = \"some-model\"\n").unwrap();
+        let binary = dir.join("keel.exe");
+        let result = ensure_codex_native_mcp(&path, &binary).unwrap();
+        assert!(matches!(result, CodexNativeMcpResult::Added));
+        let doc: toml::Value = fs::read_to_string(&path).unwrap().parse().unwrap();
+        let entry = &doc["mcp_servers"]["keel"];
+        assert_eq!(
+            entry["command"].as_str().unwrap(),
+            display_path(&binary),
+            "command must be the absolute binary path"
+        );
+        let args: Vec<&str> = entry["args"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(args, vec!["mcp", "serve"]);
+        assert!(
+            fs::read_to_string(&path)
+                .unwrap()
+                .contains("model = \"some-model\""),
+            "existing keys must survive the append"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn ensure_codex_native_mcp_is_idempotent() {
+        let dir = unique_codex_test_dir("natmcp-idem");
+        let path = dir.join("config.toml");
+        let binary = dir.join("keel.exe");
+        assert!(matches!(
+            ensure_codex_native_mcp(&path, &binary).unwrap(),
+            CodexNativeMcpResult::Added
+        ));
+        assert!(matches!(
+            ensure_codex_native_mcp(&path, &binary).unwrap(),
+            CodexNativeMcpResult::AlreadyCurrent
+        ));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn ensure_codex_native_mcp_updates_stale_command_preserving_siblings() {
+        let dir = unique_codex_test_dir("natmcp-stale");
+        let path = dir.join("config.toml");
+        fs::write(
+            &path,
+            "[mcp_servers.other]\ncommand = \"other-mcp\"\n\n[mcp_servers.keel]\ncommand = \"old\"\nargs = [\"mcp\", \"serve\"]\n",
+        )
+        .unwrap();
+        let binary = dir.join("keel.exe");
+        let result = ensure_codex_native_mcp(&path, &binary).unwrap();
+        assert!(matches!(result, CodexNativeMcpResult::Updated));
+        let doc: toml::Value = fs::read_to_string(&path).unwrap().parse().unwrap();
+        assert_eq!(
+            doc["mcp_servers"]["keel"]["command"].as_str().unwrap(),
+            display_path(&binary)
+        );
+        assert_eq!(
+            doc["mcp_servers"]["other"]["command"].as_str().unwrap(),
+            "other-mcp",
+            "a sibling MCP server must survive untouched"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn ensure_codex_native_mcp_escapes_windows_backslashes() {
+        let dir = unique_codex_test_dir("natmcp-escape");
+        let path = dir.join("config.toml");
+        let binary = dir.join("sub dir").join("keel.exe");
+        let result = ensure_codex_native_mcp(&path, &binary).unwrap();
+        assert!(matches!(result, CodexNativeMcpResult::Added));
+        // The written TOML must parse back to the exact path (escaping valid).
+        let doc: toml::Value = fs::read_to_string(&path).unwrap().parse().unwrap();
+        assert_eq!(
+            doc["mcp_servers"]["keel"]["command"].as_str().unwrap(),
+            display_path(&binary)
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn sync_codex_agents_md_writes_contract_and_preserves_user_content() {
+        let dir = unique_codex_test_dir("agents-md");
+        let path = dir.join("AGENTS.md");
+        fs::write(&path, "# My codex notes\n").unwrap();
+        let status = sync_codex_agents_md(&path).unwrap();
+        assert!(status.starts_with("AGENTS.md written"));
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("Iron Law"),
+            "the contract must carry the Iron Law"
+        );
+        assert!(text.contains("My codex notes"), "user content must survive");
+        assert!(text.contains(MANAGED_CODEX_AGENTS_BEGIN));
+        // Second run is a no-op (already current) and never duplicates.
+        let again = sync_codex_agents_md(&path).unwrap();
+        assert_eq!(again, "AGENTS.md already current");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn strip_managed_region_removes_block_keeps_user_content() {
+        let user_above = "# Top notes\n";
+        let block = format!("{MANAGED_CODEX_AGENTS_BEGIN}\ncontract\n{MANAGED_CODEX_AGENTS_END}");
+        let user_below = "# Bottom notes\n";
+        let existing = format!("{user_above}\n{block}\n\n{user_below}");
+        let stripped = strip_managed_region(
+            &existing,
+            MANAGED_CODEX_AGENTS_BEGIN,
+            MANAGED_CODEX_AGENTS_END,
+        )
+        .unwrap();
+        assert!(stripped.contains("Top notes"));
+        assert!(stripped.contains("Bottom notes"));
+        assert!(!stripped.contains("contract"));
+        // A block-only file collapses to empty so the caller can delete it.
+        let only_block =
+            strip_managed_region(&block, MANAGED_CODEX_AGENTS_BEGIN, MANAGED_CODEX_AGENTS_END)
+                .unwrap();
+        assert!(only_block.trim().is_empty());
+        // No block present -> None.
+        assert!(strip_managed_region(
+            "# just user\n",
+            MANAGED_CODEX_AGENTS_BEGIN,
+            MANAGED_CODEX_AGENTS_END
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn remove_codex_native_mcp_section_removes_only_keel() {
+        let dir = unique_codex_test_dir("natmcp-remove");
+        let path = dir.join("config.toml");
+        fs::write(
+            &path,
+            "[mcp_servers.keel]\ncommand = \"x\"\nargs = []\n\n[mcp_servers.keep]\ncommand = \"y\"\n",
+        )
+        .unwrap();
+        assert_eq!(remove_codex_native_mcp_section(&path), 1);
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("mcp_servers.keel"));
+        assert!(text.contains("mcp_servers.keep"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn remove_codex_managed_agents_md_deletes_keel_only_file() {
+        let dir = unique_codex_test_dir("agents-md-remove");
+        let path = dir.join("AGENTS.md");
+        let block = format!("{MANAGED_CODEX_AGENTS_BEGIN}\ncontract\n{MANAGED_CODEX_AGENTS_END}");
+        fs::write(&path, &block).unwrap();
+        assert!(remove_codex_managed_agents_md(&path) >= 1);
+        assert!(!path.exists(), "a keel-only AGENTS.md must be removed");
+        // With user content, the block is stripped but the file stays.
+        fs::write(&path, format!("user stuff\n\n{block}\n")).unwrap();
+        assert_eq!(remove_codex_managed_agents_md(&path), 1);
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("user stuff"));
+        assert!(!text.contains(MANAGED_CODEX_AGENTS_BEGIN));
         let _ = fs::remove_dir_all(dir);
     }
 
