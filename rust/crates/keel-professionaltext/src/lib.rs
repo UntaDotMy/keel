@@ -261,6 +261,191 @@ fn has_contract_marker(text: &str) -> bool {
         || lower.contains("otherwise")
         || lower.contains("avoids ")
         || lower.contains("required by")
+        // The comment points at a non-obvious constraint, edge case, or rationale
+        // the code cannot express. These words signal "why", not "what".
+        || lower.contains("because")
+        || lower.contains("because ")
+        || lower.contains("so that")
+        || lower.contains("instead of")
+        || lower.contains("rather than")
+        || lower.contains("workaround")
+        || lower.contains("regression")
+        || lower.contains("edge case")
+        || lower.contains("fallback")
+        || lower.contains("default")
+        || lower.contains("not obvious")
+        || lower.contains("non-obvious")
+}
+
+/// Words that carry no information in a comment (articles, filler, code keywords
+/// that just narrate). Used to strip a comment down to its information content.
+fn is_stop_word(word: &str) -> bool {
+    matches!(
+        word,
+        "the"
+            | "a"
+            | "an"
+            | "this"
+            | "that"
+            | "these"
+            | "those"
+            | "we"
+            | "it"
+            | "to"
+            | "of"
+            | "and"
+            | "or"
+            | "is"
+            | "are"
+            | "was"
+            | "be"
+            | "been"
+            | "will"
+            | "would"
+            | "here"
+            | "now"
+            | "then"
+            | "just"
+            | "simply"
+            | "also"
+            | "so"
+            | "for"
+            | "with"
+            | "in"
+            | "on"
+            | "at"
+            | "by"
+            | "as"
+            | "from"
+            | "into"
+            | "return"
+            | "returns"
+            | "returning"
+            | "set"
+            | "sets"
+            | "get"
+            | "gets"
+            | "create"
+            | "creates"
+            | "make"
+            | "makes"
+            | "call"
+            | "calls"
+            | "use"
+            | "uses"
+            | "using"
+            | "used"
+            | "new"
+            | "value"
+            | "result"
+            | "data"
+            | "variable"
+            | "function"
+            | "method"
+            | "loop"
+            | "iterate"
+            | "iterates"
+            | "through"
+            | "each"
+            | "every"
+            | "all"
+            | "if"
+            | "else"
+            | "when"
+            | "check"
+            | "checks"
+            | "handle"
+            | "handles"
+            | "process"
+            | "processes"
+            | "add"
+            | "adds"
+            | "added"
+    )
+}
+
+/// Split an identifier or prose into lowercase word tokens (snake_case, camelCase,
+/// and spaces all split). Used to compare a comment against the code it describes.
+fn word_tokens(text: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    for ch in text.chars() {
+        if ch.is_alphanumeric() {
+            // Split camelCase boundaries (lower->upper) into separate tokens.
+            if ch.is_uppercase() && !current.is_empty() {
+                tokens.push(std::mem::take(&mut current));
+            }
+            current.push(ch.to_ascii_lowercase());
+        } else if !current.is_empty() {
+            tokens.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
+}
+
+/// A comment restates the code when every informative word in it already appears
+/// as an identifier/keyword on the very next code line. Such a comment adds zero
+/// information (`// increment the counter` over `counter += 1`). Returns true only
+/// when the comment has at least one informative word AND all of them are covered
+/// by the next code line, AND the comment carries no contract/why marker.
+/// A comment word that just narrates the OPERATION on the next line (not a
+/// literal identifier) still restates the code: `// increment the counter` over
+/// `counter += 1`, `// loop through the items` over `for item in items`. Maps an
+/// action word to the operator/keyword it narrates.
+fn narrates_operation(word: &str, code_line: &str) -> bool {
+    let code = code_line;
+    let has = |needle: &str| code.contains(needle);
+    match word {
+        // arithmetic / assignment verbs
+        "increment" | "increments" | "add" | "adds" | "adding" | "sum" | "sums" => {
+            has("+") || has("push") || has("append") || has("add")
+        }
+        "decrement" | "decrements" | "subtract" | "subtracts" => has("-"),
+        "multiply" | "multiplies" => has("*"),
+        "divide" | "divides" => has("/"),
+        "assign" | "assigns" | "set" | "sets" | "store" | "stores" => has("="),
+        // iteration verbs
+        "loop" | "loops" | "iterate" | "iterates" | "iterating" | "traverse" | "traverses" => {
+            has("for ") || has("while ") || has(".iter()") || has(".map(") || has("loop")
+        }
+        // condition verbs
+        "check" | "checks" | "checking" | "test" | "tests" | "validate" | "validates" => {
+            has("if ") || has("assert") || has("match ") || has("==")
+        }
+        // return verbs
+        "return" | "returns" | "returning" | "yield" | "yields" => {
+            has("return") || has("->") || has("Ok(") || has("Some(")
+        }
+        _ => false,
+    }
+}
+
+fn comment_restates_code(comment: &str, next_code_line: &str) -> bool {
+    if has_contract_marker(comment) {
+        return false;
+    }
+    let informative: Vec<String> = word_tokens(comment)
+        .into_iter()
+        .filter(|w| w.len() >= 3 && !is_stop_word(w))
+        .collect();
+    if informative.is_empty() {
+        return false; // too short to judge; length/wording rules handle it
+    }
+    let code_tokens: std::collections::HashSet<String> = word_tokens(next_code_line)
+        .into_iter()
+        .filter(|w| w.len() >= 2)
+        .collect();
+    if code_tokens.is_empty() {
+        return false;
+    }
+    // Every informative word in the comment is already named by the code, either
+    // as a literal identifier or as the operation it narrates.
+    informative
+        .iter()
+        .all(|w| code_tokens.contains(w) || narrates_operation(w, next_code_line))
 }
 
 /// Apply professional-wording rules to a single comment's joined text. Shared by
@@ -367,6 +552,20 @@ pub fn lint_code_comments(
                 ),
             });
         }
+        // The next non-comment line after the block is the code the comment sits on.
+        let next_code = lines[index..]
+            .iter()
+            .map(|l| l.trim())
+            .find(|l| !l.is_empty() && !is_comment_line(l, syntax))
+            .unwrap_or("");
+        if !is_doc && comment_restates_code(&block_text, next_code) {
+            findings.push(CommentFinding {
+                line: report_line,
+                id: "comment-restates-code".into(),
+                severity: "high".into(),
+                message: "Comment only restates the next line's identifiers; delete it or explain WHY/constraint instead.".into(),
+            });
+        }
         findings.extend(comment_wording_findings(report_line, &block_text));
     }
     findings
@@ -463,6 +662,54 @@ pub fn has_blocking_prose_findings(findings: &[ProseFinding]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn has_id(findings: &[CommentFinding], id: &str) -> bool {
+        findings.iter().any(|f| f.id == id)
+    }
+
+    #[test]
+    fn restating_comment_is_flagged() {
+        // The comment names only identifiers already on the next line: zero info.
+        let src = "// increment the counter\nlet counter = counter + 1;\n";
+        let findings = lint_code_comments(src, CommentSyntax::SlashSlash, 0);
+        assert!(
+            has_id(&findings, "comment-restates-code"),
+            "restatement must be flagged: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn restating_comment_camelcase_is_flagged() {
+        let src = "// gets the user name\nfn getUserName() -> String {\n";
+        let findings = lint_code_comments(src, CommentSyntax::SlashSlash, 0);
+        assert!(has_id(&findings, "comment-restates-code"));
+    }
+
+    #[test]
+    fn why_comment_is_not_flagged_as_restatement() {
+        // A constraint/rationale the code cannot say is never a restatement.
+        let src = "// retry because the registry closes idle sockets after 30s\nlet conn = reconnect(conn);\n";
+        let findings = lint_code_comments(src, CommentSyntax::SlashSlash, 0);
+        assert!(
+            !has_id(&findings, "comment-restates-code"),
+            "why-comment must not be flagged: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn comment_with_new_information_is_not_flagged() {
+        // Mentions a concept (timeout, registry) absent from the next line's code.
+        let src = "// the remote registry enforces a 30s idle timeout\nlet conn = connect(host);\n";
+        let findings = lint_code_comments(src, CommentSyntax::SlashSlash, 0);
+        assert!(!has_id(&findings, "comment-restates-code"));
+    }
+
+    #[test]
+    fn contract_marked_comment_is_not_flagged() {
+        let src = "// why: avoids a stale read when the cache is cold\nlet v = cache.get(k);\n";
+        let findings = lint_code_comments(src, CommentSyntax::SlashSlash, 0);
+        assert!(!has_id(&findings, "comment-restates-code"));
+    }
 
     #[test]
     fn lint_message_rejects_chatty_and_ai_markers() {
