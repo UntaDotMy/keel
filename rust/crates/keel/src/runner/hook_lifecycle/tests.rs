@@ -1401,6 +1401,31 @@ fn verified_mode_requires_web_research_not_internal_state() {
 }
 
 #[test]
+fn checkpoint_advisory_env_gate_and_thresholds() {
+    let _guard = crate::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let previous = std::env::var(CHECKPOINT_ADVISORY_ENV_VAR).ok();
+    // Default on.
+    std::env::remove_var(CHECKPOINT_ADVISORY_ENV_VAR);
+    assert!(checkpoint_advisory_enabled(), "default must be enabled");
+    // Explicit off.
+    std::env::set_var(CHECKPOINT_ADVISORY_ENV_VAR, "off");
+    assert!(!checkpoint_advisory_enabled());
+    // A real git workspace reports a file count (this repo has edits).
+    std::env::set_var(CHECKPOINT_ADVISORY_ENV_VAR, "");
+    std::env::remove_var(CHECKPOINT_ADVISORY_ENV_VAR);
+    // Non-git dir -> None (fail-open, no nudge).
+    let home = temp_brief_gate_home("checkpoint-non-git");
+    assert_eq!(uncommitted_file_count(&home.to_string_lossy()), None);
+    std::fs::remove_dir_all(&home).ok();
+    match previous {
+        Some(value) => std::env::set_var(CHECKPOINT_ADVISORY_ENV_VAR, value),
+        None => std::env::remove_var(CHECKPOINT_ADVISORY_ENV_VAR),
+    }
+}
+
+#[test]
 fn gate_cannot_loop_terminates_at_cap() {
     // THE TERMINATION PROOF. Simulate the worst case: the gate stays enabled,
     // code stays changed, and the requirement is NEVER satisfied

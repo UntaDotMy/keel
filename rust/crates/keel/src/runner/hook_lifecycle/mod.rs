@@ -3948,6 +3948,108 @@ fn review_gate_message(decision: GateDecision) -> String {
 /// Emit the advisory PostToolBatch reminder (the default, gate-disabled path and
 /// every fail-open branch). Mirrors the lifecycle render so the output is
 /// identical to what `run_hook_lifecycle("post-tool-batch")` produces.
+const CHECKPOINT_ADVISORY_ENV_VAR: &str = "CLAUDE_SKILLS_CHECKPOINT_ADVISORY";
+/// Edits between checkpoint advisories in one session (throttle).
+const CHECKPOINT_ADVISORY_EDIT_INTERVAL: usize = 10;
+/// Modified/staged files that make a snapshot worth nudging.
+const CHECKPOINT_ADVISORY_MIN_DIRTY_FILES: usize = 3;
+
+fn checkpoint_advisory_enabled() -> bool {
+    std::env::var(CHECKPOINT_ADVISORY_ENV_VAR).as_deref() != Ok("off")
+}
+
+fn checkpoint_advisory_counter_path(claude_home: &Path, session_id: &str) -> PathBuf {
+    let key = if session_id.trim().is_empty() {
+        "no-session".to_string()
+    } else {
+        sanitize_memory_key(session_id)
+    };
+    claude_home
+        .join("state")
+        .join("checkpoint-advisory")
+        .join(key)
+}
+
+/// Modified/staged file count in `workspace` (`git status --porcelain -uno`), or
+/// None when it is not a git repository or git fails (fail-open: no nudge).
+fn uncommitted_file_count(workspace: &str) -> Option<usize> {
+    let repo = std::path::PathBuf::from(workspace);
+    let result = crate::runtime::run_command(
+        "git",
+        &[
+            "status".to_string(),
+            "--porcelain=v1".to_string(),
+            "-uno".to_string(),
+        ],
+        Some(&repo),
+    )
+    .ok()?;
+    if result.code != 0 {
+        return None;
+    }
+    let count = String::from_utf8_lossy(&result.stdout)
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count();
+    Some(count)
+}
+
+/// Checkpoint advisory: when this session edited code and uncommitted work piles
+/// up, remind (throttled, non-blocking) to snapshot with `keel checkpoint create`
+/// so a misstep is reversible. Returns `Some(0)` after emitting, replacing the
+/// generic advisory for this batch; `None` falls through to it. Fail-open: any
+/// error leaves the turn untouched. Off-switch: CLAUDE_SKILLS_CHECKPOINT_ADVISORY=off.
+fn maybe_emit_checkpoint_advisory(
+    claude_home: &Path,
+    session_id: &str,
+    stats: &SessionEditStats,
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> Option<u8> {
+    if !checkpoint_advisory_enabled() {
+        return None;
+    }
+    if stats.count == 0 || stats.last_cwd.trim().is_empty() {
+        return None;
+    }
+    let counter_path = checkpoint_advisory_counter_path(claude_home, session_id);
+    let last_advised_at = read_counter_value(&counter_path);
+    if (stats.count as u64) < last_advised_at + CHECKPOINT_ADVISORY_EDIT_INTERVAL as u64 {
+        return None;
+    }
+    let dirty = uncommitted_file_count(&stats.last_cwd)?;
+    if dirty < CHECKPOINT_ADVISORY_MIN_DIRTY_FILES {
+        return None;
+    }
+    let _ = increment_counter_file(&counter_path);
+    let message = format!(
+        "keel checkpoint reminder: {} file(s) uncommitted in {} after {} edit(s) this session. Run `keel checkpoint create` to snapshot before continuing so a misstep is reversible. Advisory; set CLAUDE_SKILLS_CHECKPOINT_ADVISORY=off to silence.",
+        dirty,
+        display_path(&std::path::PathBuf::from(&stats.last_cwd)),
+        stats.count
+    );
+    let payload = serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": "PostToolBatch",
+            "additionalContext": message,
+        },
+        "suppressOutput": true,
+    });
+    match serde_json::to_string_pretty(&payload) {
+        Ok(rendered) => {
+            let _ = writeln!(standard_output, "{rendered}");
+            Some(0)
+        }
+        Err(error) => {
+            let _ = writeln!(
+                standard_error,
+                "Unable to render checkpoint advisory output: {error}"
+            );
+            None
+        }
+    }
+}
+
 fn emit_post_tool_batch_advisory(
     standard_output: &mut dyn Write,
     standard_error: &mut dyn Write,
@@ -4307,6 +4409,18 @@ fn run_hook_post_tool_batch(
             let _ = increment_counter_file(&blocks_path);
             return emit_gate_decision(decision, message, standard_output, standard_error);
         }
+    }
+
+    // Checkpoint advisory (protect uncommitted work): throttled, non-blocking,
+    // and last so it never starves a real gate. Falls through on no signal.
+    if let Some(code) = maybe_emit_checkpoint_advisory(
+        &claude_home,
+        session_id,
+        &stats,
+        standard_output,
+        standard_error,
+    ) {
+        return code;
     }
 
     // No gate fired → advisory reminder.
