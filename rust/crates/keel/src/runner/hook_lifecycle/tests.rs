@@ -1741,6 +1741,25 @@ fn temp_brief_gate_home(label: &str) -> std::path::PathBuf {
 }
 
 #[test]
+fn graph_context_gate_off_and_missing_path_are_silent() {
+    let _guard = crate::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    std::env::set_var("CLAUDE_SKILLS_GRAPH_CONTEXT_GATE", "off");
+    let input = serde_json::json!({"tool_name":"Edit","tool_input":{"file_path":"src/x.rs"}});
+    let input: JsonDocument = input;
+    // Off gate -> always silent.
+    assert!(run_post_tool_graph_context("Edit", &input).is_none());
+    std::env::remove_var("CLAUDE_SKILLS_GRAPH_CONTEXT_GATE");
+    // A tool with no single file path (e.g. Bash) is never scoped.
+    let bash: JsonDocument = serde_json::json!({"tool_name":"Bash","tool_input":{}});
+    assert!(run_post_tool_graph_context("Bash", &bash).is_none());
+    // Edit with an empty file_path is silent (no path to scope).
+    let empty: JsonDocument = serde_json::json!({"tool_name":"Edit","tool_input":{"file_path":""}});
+    assert!(run_post_tool_graph_context("Edit", &empty).is_none());
+}
+
+#[test]
 fn run_hook_post_tool_batch_brief_gate_nudges_in_nudge_mode_then_falls_through() {
     // END-TO-END through the real dispatcher in explicit NUDGE mode (the
     // opt-down). Two things proven here:

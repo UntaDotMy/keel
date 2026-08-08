@@ -1397,6 +1397,21 @@ fn run_hook_post_tool_use(standard_error: &mut dyn Write) -> u8 {
         }
     }
 
+    // Graph context: after an edit, surface the blast radius (which files import
+    // the edited file) so the next action is scoped by real edges, not grep.
+    if let Some(context) = run_post_tool_graph_context(tool_name, &input) {
+        let payload = serde_json::json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PostToolUse",
+                "additionalContext": context,
+            },
+            "suppressOutput": true,
+        });
+        if let Ok(rendered) = serde_json::to_string(&payload) {
+            let _ = writeln!(std::io::stdout(), "{rendered}");
+        }
+    }
+
     let threshold = system_map_refresh_threshold();
 
     if threshold == 0 {
@@ -1484,6 +1499,66 @@ fn run_post_tool_comment_lint(tool_name: &str, input: &JsonDocument) -> Option<S
     Some(format!(
         "keel comment-lint: blocking comment finding(s) in this edit — fix before moving on:\n{rendered}\nAdvisory; set CLAUDE_SKILLS_COMMENT_LINT_GATE=off to silence."
     ))
+}
+
+/// Graph context for PostToolUse: after an edit, report the edited file's blast
+/// radius (the in-repo files that import it) so the agent's next step is scoped
+/// by real dependency edges instead of a grep loop.
+///
+/// Design constraints (runs on every edit, a hot path):
+/// - Env-gated: `CLAUDE_SKILLS_GRAPH_CONTEXT_GATE=off` disables; on by default.
+/// - Fail-open: any error (no graph artifact, unreadable JSON, no cwd) -> `None`.
+///   A context nudge must never break the PostToolUse hook.
+/// - Cheap: reads the cached per-workspace code-graph artifact; it never builds
+///   the graph here (building walks the whole tree, too slow for a hot path). If
+///   no artifact exists yet, the nudge says how to build it once.
+/// - Bounded: caps the dependent list so a wide blast radius cannot flood context.
+fn run_post_tool_graph_context(tool_name: &str, input: &JsonDocument) -> Option<String> {
+    if std::env::var("CLAUDE_SKILLS_GRAPH_CONTEXT_GATE").as_deref() == Ok("off") {
+        return None;
+    }
+    // Only Edit/Write/MultiEdit carry a single file path.
+    let edited_path = if matches!(tool_name, "Edit" | "Write" | "MultiEdit") {
+        input
+            .get("tool_input")
+            .and_then(|ti| ti.get("file_path"))
+            .and_then(JsonDocument::as_str)
+            .unwrap_or_default()
+    } else {
+        return None;
+    };
+    if edited_path.is_empty() {
+        return None;
+    }
+    let repo_root = std::env::current_dir().ok()?;
+    let artifact = crate::utility::code_graph::cached_artifact_path(&repo_root, "")?;
+    let graph = crate::utility::code_graph::CodeGraph::from_json_file(&artifact)?;
+    // Normalize the edited path to the graph's workspace-relative forward-slash id.
+    let relative = std::path::Path::new(edited_path)
+        .strip_prefix(&repo_root)
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_else(|_| edited_path.replace('\\', "/"));
+    let impacted = graph.impact_of(std::slice::from_ref(&relative));
+    if impacted.is_empty() {
+        return None;
+    }
+    const MAX_LISTED: usize = 8;
+    let listed: Vec<&str> = impacted
+        .iter()
+        .take(MAX_LISTED)
+        .map(String::as_str)
+        .collect();
+    let more = impacted.len().saturating_sub(MAX_LISTED);
+    let mut line = format!(
+        "keel graph: `{relative}` is imported by {} file(s): {}",
+        impacted.len(),
+        listed.join(", ")
+    );
+    if more > 0 {
+        line.push_str(&format!(" (+{more} more)"));
+    }
+    line.push_str(". Verify these still compile/behave before closeout.");
+    Some(line)
 }
 
 /// PostToolUseFailure handler.
