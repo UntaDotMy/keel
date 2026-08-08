@@ -1275,7 +1275,9 @@ fn iron_law_gate_denies_without_evidence_and_does_not_ack_on_deny() {
     let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
     let previous_mode = std::env::var(IRON_LAW_GATE_ENV_VAR).ok();
     std::env::set_var("CLAUDE_TARGET_OVERRIDE", &claude_home);
-    std::env::remove_var(IRON_LAW_GATE_ENV_VAR); // default → strict
+    // Explicit Strict: this test exercises Strict behavior (the gate default is
+    // Verified, asserted in iron_law_gate_mode_default_is_verified).
+    std::env::set_var(IRON_LAW_GATE_ENV_VAR, "strict");
 
     let session = "sess-iron-law-strict";
     let first = iron_law_gate_decision(session);
@@ -1314,6 +1316,36 @@ fn iron_law_gate_denies_without_evidence_and_does_not_ack_on_deny() {
         None => std::env::remove_var(IRON_LAW_GATE_ENV_VAR),
     }
     let _ = std::fs::remove_dir_all(&claude_home);
+}
+
+#[test]
+fn iron_law_gate_mode_default_is_verified() {
+    let _guard = crate::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let previous = std::env::var(IRON_LAW_GATE_ENV_VAR).ok();
+    std::env::remove_var(IRON_LAW_GATE_ENV_VAR);
+    // why: the operator rule makes fresh-research-before-edit the default posture;
+    // an unset or unrecognized var must resolve to Verified, not the older Strict.
+    assert_eq!(
+        iron_law_gate_mode(),
+        IronLawGateMode::Verified,
+        "unset must default to Verified"
+    );
+    std::env::set_var(IRON_LAW_GATE_ENV_VAR, "strict");
+    assert_eq!(
+        iron_law_gate_mode(),
+        IronLawGateMode::Strict,
+        "explicit strict wins"
+    );
+    std::env::set_var(IRON_LAW_GATE_ENV_VAR, "balanced");
+    assert_eq!(iron_law_gate_mode(), IronLawGateMode::Balanced);
+    std::env::set_var(IRON_LAW_GATE_ENV_VAR, "off");
+    assert_eq!(iron_law_gate_mode(), IronLawGateMode::Off);
+    match previous {
+        Some(value) => std::env::set_var(IRON_LAW_GATE_ENV_VAR, value),
+        None => std::env::remove_var(IRON_LAW_GATE_ENV_VAR),
+    }
 }
 
 #[test]

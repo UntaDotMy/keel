@@ -778,11 +778,10 @@ fn iron_law_gate_mode() -> IronLawGateMode {
     {
         Some("off") | Some("0") | Some("false") | Some("no") => IronLawGateMode::Off,
         Some("balanced") | Some("balance") | Some("any") => IronLawGateMode::Balanced,
-        Some("verified") | Some("verify") | Some("web") | Some("strictest") => {
-            IronLawGateMode::Verified
-        }
-        // unset, "on", "strict", "true", typos → strict (fail closed toward enforcement)
-        _ => IronLawGateMode::Strict,
+        Some("strict") | Some("on") | Some("true") => IronLawGateMode::Strict,
+        // unset, "verified", "web", typos → verified (fail closed toward the
+        // strictest enforcement: fresh external research required before editing)
+        _ => IronLawGateMode::Verified,
     }
 }
 
