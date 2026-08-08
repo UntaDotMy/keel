@@ -739,6 +739,19 @@ const IRON_LAW_GATE_DENIAL_BALANCED: &str =
         2. Or host Read/Grep/Glob of the owning file.\n\
         Retry after researching. Set KEEL_IRON_LAW_GATE=off to disable.";
 
+const IRON_LAW_GATE_DENIAL_VERIFIED: &str =
+    "[keel] Iron Law gate (VERIFIED): Edit/Write/Bash (non-keel) and Agent/Task are \
+        BLOCKED until this session did FRESH external research. Do not trust the \
+        codebase, memory, or the model's own knowledge — verify against the live \
+        source first.\n\
+        Do ONE of these, then retry:\n\
+        1. WebSearch for the current official docs/behavior\n\
+        2. WebFetch the authoritative source page\n\
+        3. The context7 MCP for up-to-date library docs\n\
+        Recall/memory/keel reads do NOT clear VERIFIED — they are internal state, \
+        not verification. Read/Grep/Glob stay allowed. Set KEEL_IRON_LAW_GATE=strict, \
+        =balanced, or =off to relax.";
+
 /// Iron-law edit-gate mode. Default is **Strict** (keel tool required).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum IronLawGateMode {
@@ -748,6 +761,11 @@ pub(crate) enum IronLawGateMode {
     Strict,
     /// Require any research evidence (keel tools OR host Read/Grep/Glob).
     Balanced,
+    /// Require FRESH external research this session (WebSearch/WebFetch/context7).
+    /// Recall/memory/keel tools do NOT clear it. The operator rule is "do not
+    /// trust the codebase, memory, or the model's own knowledge; verify against the
+    /// live source before editing." Strictest; still allows Read/Grep/Glob.
+    Verified,
 }
 
 fn iron_law_gate_mode() -> IronLawGateMode {
@@ -760,6 +778,9 @@ fn iron_law_gate_mode() -> IronLawGateMode {
     {
         Some("off") | Some("0") | Some("false") | Some("no") => IronLawGateMode::Off,
         Some("balanced") | Some("balance") | Some("any") => IronLawGateMode::Balanced,
+        Some("verified") | Some("verify") | Some("web") | Some("strictest") => {
+            IronLawGateMode::Verified
+        }
         // unset, "on", "strict", "true", typos → strict (fail closed toward enforcement)
         _ => IronLawGateMode::Strict,
     }
@@ -860,6 +881,18 @@ fn is_host_research_tool_name(tool_name: &str) -> bool {
         || lower.contains("context7")
 }
 
+/// Tools that count as FRESH external research under Verified mode. Only a live
+/// lookup against an external source qualifies. Recall/memory/keel reads are
+/// internal state the operator rule says not to trust as sole evidence.
+fn is_web_research_tool_name(tool_name: &str) -> bool {
+    let lower = tool_name.to_ascii_lowercase();
+    lower.contains("websearch")
+        || lower.contains("web_search")
+        || lower.contains("webfetch")
+        || lower.contains("web_fetch")
+        || lower.contains("context7")
+}
+
 /// Shell tools that may carry a `keel ...` research command. Delegates to
 /// `shell_rewrite` so the gate and the rewriter read one list, guaranteeing every
 /// admitted name has a shell mapping in `rewrite_shell_for_tool`.
@@ -935,6 +968,11 @@ pub(crate) fn tool_satisfies_iron_law(
 ) -> bool {
     if mode == IronLawGateMode::Off {
         return false;
+    }
+    // Verified mode: only a fresh external research tool clears the gate. keel
+    // research tools, recall, and host reads are internal state, not verification.
+    if mode == IronLawGateMode::Verified {
+        return is_web_research_tool_name(tool_name);
     }
     if is_keel_research_tool_name(tool_name) {
         return true;
@@ -1112,6 +1150,7 @@ pub(crate) fn iron_law_gate_decision(session_id: &str) -> Option<&'static str> {
     Some(match mode {
         IronLawGateMode::Strict => IRON_LAW_GATE_DENIAL_STRICT,
         IronLawGateMode::Balanced => IRON_LAW_GATE_DENIAL_BALANCED,
+        IronLawGateMode::Verified => IRON_LAW_GATE_DENIAL_VERIFIED,
         IronLawGateMode::Off => return None,
     })
 }

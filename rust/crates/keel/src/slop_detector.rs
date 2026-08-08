@@ -158,7 +158,7 @@ fn is_scannable_source(path: &str) -> bool {
     )
 }
 
-/// Run all 5 slop detectors against a block of added lines.
+/// Run all 6 slop detectors against a block of added lines.
 fn detect_slop_patterns(
     file: &str,
     added_lines: &[(usize, String)],
@@ -169,6 +169,45 @@ fn detect_slop_patterns(
     detect_phantom_flags(file, added_lines, findings);
     detect_hallucinated_apis(file, added_lines, findings);
     detect_n_plus_one_queries(file, added_lines, findings);
+    detect_copy_paste_duplication(file, added_lines, findings);
+}
+
+/// Copy-paste spaghetti: the same non-trivial code line added 3+ times in one
+/// diff is a copy-paste smell (the model duplicated a block instead of extracting
+/// a helper). Blank/brace-only/short lines are ignored so structural repetition
+/// (`}`, `let mut x = 0;`) does not false-positive.
+fn detect_copy_paste_duplication(
+    file: &str,
+    added_lines: &[(usize, String)],
+    findings: &mut Vec<SlopFinding>,
+) {
+    let mut seen: std::collections::HashMap<String, Vec<usize>> = std::collections::HashMap::new();
+    for (line_no, line) in added_lines {
+        let normalized = line.trim();
+        // Only substantive lines count: skip blanks, lone braces, short lines.
+        if normalized.len() < 24 || normalized.chars().all(|c| "{}();, ".contains(c)) {
+            continue;
+        }
+        seen.entry(normalized.to_string())
+            .or_default()
+            .push(*line_no);
+    }
+    for (text, lines) in seen {
+        if lines.len() >= 3 {
+            findings.push(SlopFinding {
+                file: file.to_string(),
+                line: lines[0],
+                pattern: "copy-paste-duplication",
+                severity: "warn",
+                message: format!(
+                    "identical line added {} times (lines {}) — extract a helper instead of copy-pasting: `{}`",
+                    lines.len(),
+                    lines.iter().map(|l| l.to_string()).collect::<Vec<_>>().join(", "),
+                    text.chars().take(48).collect::<String>()
+                ),
+            });
+        }
+    }
 }
 
 fn detect_dead_defensive_code(
@@ -442,6 +481,42 @@ mod tests {
         let owned: Vec<String> = args.iter().map(|a| a.to_string()).collect();
         let result = run_command("git", &owned, Some(repo)).expect("git runs");
         assert_eq!(result.code, 0, "git {args:?} failed");
+    }
+
+    #[test]
+    fn copy_paste_duplication_flags_repeated_substantive_lines() {
+        let repeated = "let result = expensive_call(input).expect_handle();";
+        let added: Vec<(usize, String)> = (1..=3).map(|i| (i, repeated.to_string())).collect();
+        let mut findings = Vec::new();
+        detect_copy_paste_duplication("src/x.rs", &added, &mut findings);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.pattern == "copy-paste-duplication"),
+            "3x identical substantive line must be flagged: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn copy_paste_duplication_ignores_short_and_brace_lines() {
+        let added: Vec<(usize, String)> = vec![
+            (1, "}".to_string()),
+            (2, "}".to_string()),
+            (3, "}".to_string()),
+            (4, "}".to_string()),
+        ];
+        let mut findings = Vec::new();
+        detect_copy_paste_duplication("src/x.rs", &added, &mut findings);
+        assert!(findings.is_empty(), "lone braces must not be flagged");
+    }
+
+    #[test]
+    fn copy_paste_duplication_needs_three_occurrences() {
+        let line = "let result = expensive_call(input).expect_handle();";
+        let added: Vec<(usize, String)> = vec![(1, line.to_string()), (2, line.to_string())];
+        let mut findings = Vec::new();
+        detect_copy_paste_duplication("src/x.rs", &added, &mut findings);
+        assert!(findings.is_empty(), "only 2 occurrences must not flag");
     }
 
     // Whole-tree scan: pre-existing slop (no diff) must be caught by --all mode.

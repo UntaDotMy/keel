@@ -1317,6 +1317,58 @@ fn iron_law_gate_denies_without_evidence_and_does_not_ack_on_deny() {
 }
 
 #[test]
+fn verified_mode_requires_web_research_not_internal_state() {
+    let _guard = crate::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    std::env::set_var(IRON_LAW_GATE_ENV_VAR, "verified");
+    // Verified: keel research tools, recall, and host reads are internal state and
+    // must NOT clear the gate; only a fresh external lookup counts.
+    assert!(!tool_satisfies_iron_law(
+        IronLawGateMode::Verified,
+        "mcp__keel__recall",
+        None
+    ));
+    assert!(!tool_satisfies_iron_law(
+        IronLawGateMode::Verified,
+        "mcp__keel__system_map",
+        None
+    ));
+    assert!(!tool_satisfies_iron_law(
+        IronLawGateMode::Verified,
+        "Read",
+        None
+    ));
+    assert!(tool_satisfies_iron_law(
+        IronLawGateMode::Verified,
+        "WebSearch",
+        None
+    ));
+    assert!(tool_satisfies_iron_law(
+        IronLawGateMode::Verified,
+        "WebFetch",
+        None
+    ));
+    assert!(tool_satisfies_iron_law(
+        IronLawGateMode::Verified,
+        "mcp__context7__get-library-docs",
+        None
+    ));
+    // The denial message names VERIFIED.
+    std::env::set_var(
+        "CLAUDE_TARGET_OVERRIDE",
+        temp_brief_gate_home("iron-law-verified"),
+    );
+    let decision = iron_law_gate_decision("sess-verified-fresh");
+    assert!(
+        decision.map(|d| d.contains("VERIFIED")).unwrap_or(false),
+        "fresh edit in Verified mode must deny with the VERIFIED message: {decision:?}"
+    );
+    std::env::remove_var(IRON_LAW_GATE_ENV_VAR);
+    std::env::remove_var("CLAUDE_TARGET_OVERRIDE");
+}
+
+#[test]
 fn gate_cannot_loop_terminates_at_cap() {
     // THE TERMINATION PROOF. Simulate the worst case: the gate stays enabled,
     // code stays changed, and the requirement is NEVER satisfied
