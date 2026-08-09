@@ -579,7 +579,7 @@ pub(crate) fn maybe_wire_cursor(
             Err(_) => serde_json::json!({}),
         };
         let binary = installed_executable_path(claude_home);
-        let mcp_entry = if mcp_entry.is_null() {
+        let mut mcp_entry = if mcp_entry.is_null() {
             serde_json::json!({
                 "command": display_path(&binary),
                 "args": ["mcp", "serve"],
@@ -587,6 +587,10 @@ pub(crate) fn maybe_wire_cursor(
         } else {
             mcp_entry
         };
+        // The shipped cursor/mcp.json templates a bare PATH-dependent `keel`
+        // command; rewrite it to the absolute installed binary path exactly as
+        // the codex path does (bare `keel` only works when PATH is wired).
+        rewrite_mcp_entry_command(&mut mcp_entry, &display_path(&binary));
         match merge_cursor_mcp(&mcp_target, "keel", &mcp_entry) {
             Ok(CursorMcpResult::Added) => {
                 status_parts.push(format!("MCP registered in {}", display_path(&mcp_target)))
@@ -659,20 +663,31 @@ pub(crate) fn maybe_wire_pi(
         if let Some(parent) = mcp_target.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let mcp_entry = match std::fs::read_to_string(&mcp_source) {
+        let (mcp_entry, template_defaults) = match std::fs::read_to_string(&mcp_source) {
             Ok(text) => {
                 let parsed: serde_json::Value =
                     serde_json::from_str(&text).unwrap_or(serde_json::json!({}));
-                parsed
+                let entry = parsed
                     .get("mcpServers")
                     .and_then(|s| s.get("keel"))
                     .cloned()
-                    .unwrap_or(serde_json::json!({}))
+                    .unwrap_or(serde_json::json!({}));
+                // Top-level template keys (e.g. `settings`) ride along as
+                // defaults; existing user values always win in the merge.
+                let mut defaults = serde_json::json!({});
+                if let Some(obj) = parsed.as_object() {
+                    for (key, value) in obj {
+                        if key != "mcpServers" {
+                            defaults[key.clone()] = value.clone();
+                        }
+                    }
+                }
+                (entry, defaults)
             }
-            Err(_) => serde_json::json!({}),
+            Err(_) => (serde_json::json!({}), serde_json::json!({})),
         };
         let binary = installed_executable_path(claude_home);
-        let mcp_entry = if mcp_entry.is_null() {
+        let mut mcp_entry = if mcp_entry.is_null() {
             serde_json::json!({
                 "command": display_path(&binary),
                 "args": ["mcp", "serve"],
@@ -682,7 +697,11 @@ pub(crate) fn maybe_wire_pi(
         } else {
             mcp_entry
         };
-        match merge_pi_mcp(&mcp_target, "keel", &mcp_entry) {
+        // The shipped pi/.mcp.json templates a bare PATH-dependent `keel`
+        // command; rewrite it to the absolute installed binary path exactly as
+        // the codex path does (bare `keel` only works when PATH is wired).
+        rewrite_mcp_entry_command(&mut mcp_entry, &display_path(&binary));
+        match merge_pi_mcp(&mcp_target, "keel", &mcp_entry, &template_defaults) {
             Ok(PiMcpResult::Added) => {
                 status_parts.push(format!("MCP registered in {}", display_path(&mcp_target)))
             }
@@ -2059,6 +2078,25 @@ fn rewrite_codex_mcp_command(doc: &mut serde_json::Value, absolute: &str) -> boo
     true
 }
 
+/// Rewrite a single MCP server entry's `command` to the absolute binary path.
+/// Codex's merged document goes through [`rewrite_codex_mcp_command`]; the
+/// Cursor and Pi wiring extract the `keel` entry value from the shipped
+/// template first, so they rewrite the entry itself before merging. A bare
+/// `keel` command fails on PATH-less hosts (the common case on Windows, where
+/// install does not modify PATH), so the resolved installed path must land in
+/// the merged config. Returns true when the entry was mutated.
+fn rewrite_mcp_entry_command(entry: &mut serde_json::Value, absolute: &str) -> bool {
+    let Some(server) = entry.as_object_mut() else {
+        return false;
+    };
+    let current = server.get("command").and_then(|v| v.as_str()).unwrap_or("");
+    if current == absolute {
+        return false;
+    }
+    server["command"] = serde_json::Value::String(absolute.to_string());
+    true
+}
+
 #[derive(Debug)]
 enum OpencodeMcpResult {
     Added,
@@ -2142,6 +2180,7 @@ fn merge_pi_mcp(
     config_path: &std::path::Path,
     server_key: &str,
     entry: &serde_json::Value,
+    template_defaults: &serde_json::Value,
 ) -> Result<PiMcpResult, String> {
     let existing_text = crate::runtime::read_text_if_exists(config_path).unwrap_or_default();
     let existing_text = existing_text
@@ -2155,6 +2194,15 @@ fn merge_pi_mcp(
 
     if document.get("mcpServers").is_none() {
         document["mcpServers"] = serde_json::json!({});
+    }
+    // Template top-level keys (e.g. `settings`) seed the document only where
+    // the user has no value of their own — never clobber existing keys.
+    if let Some(defaults) = template_defaults.as_object() {
+        for (key, value) in defaults {
+            if document.get(key).is_none() {
+                document[key.clone()] = value.clone();
+            }
+        }
     }
     let current = document["mcpServers"]
         .as_object_mut()
@@ -3339,6 +3387,47 @@ pub fn publish_native_executable(
     Ok(true)
 }
 
+/// Repair-facing executable publication: restores `<claude_home>/keel[.exe]`
+/// when it is missing. Unlike [`publish_native_executable`] this probes the
+/// debug build layouts too (lowest priority), so a dev workspace whose last
+/// build was `cargo build -p keel` can still repair a deleted binary.
+/// `Ok(false)` when no artifact exists anywhere.
+pub fn restore_missing_executable(
+    repository_root: &Path,
+    claude_home: &Path,
+) -> Result<bool, String> {
+    let target = detect_current_target().map_err(|error| format!("detect target: {error}"))?;
+    let target_dir = repository_root.join("target");
+    // Release artifacts win; debug is the last resort so developer workspaces
+    // (where plain `cargo build` is the norm) can still self-repair.
+    let probes = [
+        target_dir
+            .join(target.directory_name())
+            .join("release")
+            .join(executable_file_name()),
+        target_dir.join("release").join(executable_file_name()),
+        repository_root.join(executable_file_name()),
+        target_dir
+            .join(target.directory_name())
+            .join("debug")
+            .join(executable_file_name()),
+        target_dir.join("debug").join(executable_file_name()),
+    ];
+    let Some(source_path) = probes.iter().find(|probe| probe.is_file()) else {
+        return Ok(false);
+    };
+    let target_path = installed_executable_path(claude_home);
+    if target_path.is_file() {
+        return Ok(false);
+    }
+    if let Some(parent) = target_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("create {}: {error}", display_path(parent)))?;
+    }
+    atomic_copy_executable(source_path, &target_path)?;
+    Ok(true)
+}
+
 fn executables_are_identical(source: &Path, target: &Path) -> bool {
     if !target.is_file() {
         return false;
@@ -3684,7 +3773,7 @@ pub fn run_update_command(
         standard_output,
         "Updating repository from origin/{current_branch}"
     );
-    if let Err(error) = run_command(
+    match run_command(
         "git",
         &[
             "pull".to_string(),
@@ -3693,8 +3782,20 @@ pub fn run_update_command(
         ],
         Some(&repository_root),
     ) {
-        let _ = writeln!(standard_error, "git pull failed: {error}");
-        return 1;
+        Ok(result) if result.code != 0 => {
+            let _ = writeln!(
+                standard_error,
+                "git pull exited with code {}:\n{}",
+                result.code,
+                external_failure_detail(&result)
+            );
+            return result.code.clamp(1, 255) as u8;
+        }
+        Err(error) => {
+            let _ = writeln!(standard_error, "git pull failed: {error}");
+            return 1;
+        }
+        Ok(_) => {}
     }
     let _ = writeln!(standard_output, "Building native Rust executable");
     let build_result = run_command(
@@ -3707,9 +3808,21 @@ pub fn run_update_command(
         ],
         Some(&repository_root),
     );
-    if let Err(error) = build_result {
-        let _ = writeln!(standard_error, "cargo build failed: {error}");
-        return 1;
+    match build_result {
+        Ok(result) if result.code != 0 => {
+            let _ = writeln!(
+                standard_error,
+                "cargo build exited with code {}:\n{}",
+                result.code,
+                external_failure_detail(&result)
+            );
+            return result.code.clamp(1, 255) as u8;
+        }
+        Err(error) => {
+            let _ = writeln!(standard_error, "cargo build failed: {error}");
+            return 1;
+        }
+        Ok(_) => {}
     }
     let _ = writeln!(standard_output, "Installing updated skill pack");
     match install_from_paths(
@@ -3728,6 +3841,34 @@ pub fn run_update_command(
             1
         }
     }
+}
+
+/// Bounded failure detail from a captured external command: the trailing
+/// lines of stderr (stdout when stderr is empty), where the actionable
+/// error message lives. Capped so a verbose build cannot flood the report.
+fn external_failure_detail(result: &crate::runtime::ProcessResult) -> String {
+    const MAX_LINES: usize = 20;
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    let source = if stderr.trim().is_empty() {
+        &stdout
+    } else {
+        &stderr
+    };
+    let lines: Vec<&str> = source.lines().collect();
+    if lines.len() > MAX_LINES {
+        let mut detail = vec![format!(
+            "... ({} earlier lines omitted)",
+            lines.len() - MAX_LINES
+        )];
+        detail.extend(
+            lines[lines.len() - MAX_LINES..]
+                .iter()
+                .map(|line| line.to_string()),
+        );
+        return detail.join("\n");
+    }
+    source.trim().to_string()
 }
 
 fn resolve_update_repository_root(flag_value: &str) -> Result<PathBuf, String> {
@@ -5328,6 +5469,112 @@ mod tests {
         assert!(!rewrite_codex_mcp_command(&mut doc, "/x/keel"));
         let mut non_object = serde_json::json!(42);
         assert!(!rewrite_codex_mcp_command(&mut non_object, "/x/keel"));
+    }
+
+    #[test]
+    fn rewrite_mcp_entry_command_rewrites_bare_command() {
+        // The shipped cursor/mcp.json and pi/.mcp.json template a bare
+        // PATH-dependent `keel` command; the extracted entry must be rewritten
+        // to the absolute binary path before merging.
+        let mut entry = serde_json::json!({
+            "command": "keel",
+            "args": ["mcp", "serve"],
+        });
+        assert!(rewrite_mcp_entry_command(&mut entry, "/x/keel.exe"));
+        assert_eq!(entry["command"], "/x/keel.exe");
+        // Non-command fields must be preserved.
+        assert_eq!(entry["args"][0], "mcp");
+    }
+
+    #[test]
+    fn rewrite_mcp_entry_command_idempotent_and_robust() {
+        // Already-absolute command → no mutation (re-install is a no-op).
+        let mut entry = serde_json::json!({ "command": "/x/keel", "args": [] });
+        assert!(!rewrite_mcp_entry_command(&mut entry, "/x/keel"));
+        // Non-object entries must not panic.
+        let mut not_object = serde_json::json!(null);
+        assert!(!rewrite_mcp_entry_command(&mut not_object, "/x/keel"));
+    }
+
+    #[test]
+    fn wire_cursor_rewrites_mcp_command_to_absolute() {
+        // Install must land the absolute installed-binary path in
+        // ~/.cursor/mcp.json, not the bare PATH-dependent template value.
+        let base = std::env::temp_dir().join(format!("ulw-wire-cursor-abs-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let claude_home = base.join(".claude");
+        let _ = fs::create_dir_all(&claude_home);
+        let repo = create_minimal_layout("wire-cursor-abs");
+        let _ = fs::create_dir_all(repo.join("cursor"));
+        let _ = fs::write(
+            repo.join("cursor").join("mcp.json"),
+            r#"{"mcpServers":{"keel":{"command":"keel","args":["mcp","serve"]}}}"#,
+        );
+
+        let summary = maybe_wire_cursor(&repo, &claude_home, true);
+        assert!(summary.is_some());
+
+        let home = claude_home.parent().unwrap();
+        let mcp_target = home.join(".cursor").join("mcp.json");
+        assert!(mcp_target.is_file(), "cursor mcp.json must be merged");
+        let doc: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&mcp_target).expect("read cursor mcp.json"))
+                .expect("cursor mcp.json must be valid JSON");
+        let command = doc["mcpServers"]["keel"]["command"]
+            .as_str()
+            .expect("cursor entry must have a command");
+        assert_ne!(command, "keel", "must not keep the bare template command");
+        assert_eq!(
+            command,
+            display_path(&installed_executable_path(&claude_home)),
+            "cursor MCP command must be the absolute installed binary path"
+        );
+
+        let _ = fs::remove_dir_all(&base);
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn wire_pi_rewrites_mcp_command_to_absolute() {
+        // Install must land the absolute installed-binary path in
+        // ~/.pi/agent/mcp.json, not the bare PATH-dependent template value.
+        let base = std::env::temp_dir().join(format!("ulw-wire-pi-abs-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let claude_home = base.join(".claude");
+        let _ = fs::create_dir_all(&claude_home);
+        let repo = create_minimal_layout("wire-pi-abs");
+        let _ = fs::create_dir_all(repo.join("pi"));
+        let _ = fs::write(repo.join("pi").join("AGENTS.md"), "# Pi Agent\n");
+        let _ = fs::write(
+            repo.join("pi").join(".mcp.json"),
+            r#"{"settings":{"idleTimeout":60},"mcpServers":{"keel":{"command":"keel","args":["mcp","serve"],"lifecycle":"lazy","directTools":true}}}"#,
+        );
+
+        let summary = maybe_wire_pi(&repo, &claude_home, true);
+        assert!(summary.is_some());
+
+        let home = claude_home.parent().unwrap();
+        let mcp_target = home.join(".pi").join("agent").join("mcp.json");
+        assert!(mcp_target.is_file(), "pi mcp.json must be merged");
+        let doc: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&mcp_target).expect("read pi mcp.json"))
+                .expect("pi mcp.json must be valid JSON");
+        let command = doc["mcpServers"]["keel"]["command"]
+            .as_str()
+            .expect("pi entry must have a command");
+        assert_ne!(command, "keel", "must not keep the bare template command");
+        assert_eq!(
+            command,
+            display_path(&installed_executable_path(&claude_home)),
+            "pi MCP command must be the absolute installed binary path"
+        );
+        // Sibling fields from the shipped template must survive the rewrite.
+        assert_eq!(doc["mcpServers"]["keel"]["lifecycle"], "lazy");
+        assert_eq!(doc["mcpServers"]["keel"]["directTools"], true);
+        assert_eq!(doc["settings"]["idleTimeout"], 60);
+
+        let _ = fs::remove_dir_all(&base);
+        let _ = fs::remove_dir_all(&repo);
     }
 
     fn unique_codex_test_dir(label: &str) -> PathBuf {

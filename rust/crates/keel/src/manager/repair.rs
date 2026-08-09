@@ -5,8 +5,10 @@
 //! Dependencies: crate::runner::hook_lifecycle for the hooks payload builder,
 //!   crate::manager::mcp_register for MCP registration, crate::runtime for paths.
 //! Main Functions: run_repair_command.
-//! Side Effects: Writes `~/.claude/settings.json` (hooks) and `~/.claude.json`
-//!   (MCP). Both writers preserve unrelated content. Prints a status report.
+//! Side Effects: Writes hooks into the resolved home's `settings.json` and the
+//!   MCP entry into the resolved home's `.claude.json` (never outside it), and
+//!   restores a missing `keel` executable from the repo's build artifact. Both
+//!   writers preserve unrelated content. Prints a status report.
 //!
 //! Why this exists: install/update already wire hooks and MCP, but a partial or
 //! interrupted install, a hand-edited settings.json, or an install that skipped
@@ -17,7 +19,7 @@
 use std::io::Write;
 use std::path::Path;
 
-use crate::manager::mcp_register::{register_mcp_server, McpRegistration};
+use crate::manager::mcp_register::{mcp_config_path, register_mcp_server, McpRegistration};
 use crate::runner::hook_lifecycle::build_hooks_payload;
 use crate::runtime::{display_path, installed_executable_path, resolve_claude_home, write_text};
 
@@ -63,23 +65,24 @@ pub fn run_repair_command(
 
     // 2. Register the MCP server in ~/.claude.json (unconditional — repair is an
     //    explicit operator action, so no test-isolation guard here).
+    let mcp_config = display_path(&mcp_config_path(&claude_home));
     match register_mcp_server(&claude_home) {
         Ok(McpRegistration::Added) => {
             let _ = writeln!(
                 standard_output,
-                "[ok] MCP server registered in ~/.claude.json"
+                "[ok] MCP server registered in {mcp_config}"
             );
         }
         Ok(McpRegistration::Updated) => {
             let _ = writeln!(
                 standard_output,
-                "[ok] MCP server entry updated in ~/.claude.json"
+                "[ok] MCP server entry updated in {mcp_config}"
             );
         }
         Ok(McpRegistration::AlreadyCurrent) => {
             let _ = writeln!(
                 standard_output,
-                "[ok] MCP server already registered in ~/.claude.json"
+                "[ok] MCP server already registered in {mcp_config}"
             );
         }
         Err(error) => {
@@ -88,23 +91,57 @@ pub fn run_repair_command(
         }
     }
 
-    // 3. Re-wire the four bridge hosts (OpenCode, Pi, Codex, Cursor). Like the
-    //    native MCP step, repair is an explicit operator action, so we force
-    //    detected=true for each host the operator has installed — re-running its
-    //    wiring idempotently. Cursor is never auto-detected, so we always force
-    //    it (the maybe_wire call is a no-op if the source files are absent).
+    // 3. Resolve the repository root; it anchors both the executable restore
+    //    below and the bridge-host wiring after it.
     let repo_root =
         match crate::runtime::resolve_repository_root(flag_set.string_value("repo-root")) {
             Ok(path) => path,
             Err(error) => {
                 had_error = true;
                 let _ = writeln!(
-                    standard_error,
-                    "[fail] bridge hosts: resolve repo root: {error}"
-                );
+                standard_error,
+                "[fail] resolve repo root: {error} (executable restore and bridge wiring skipped)"
+            );
                 return if had_error { 1 } else { 0 };
             }
         };
+
+    // 4. Restore a deleted executable into the requested home. install/update
+    //    publish it; repair must bring it back so hooks and MCP keep working.
+    let executable = installed_executable_path(&claude_home);
+    match crate::manager::install::restore_missing_executable(&repo_root, &claude_home) {
+        Ok(true) => {
+            let _ = writeln!(
+                standard_output,
+                "[ok] executable restored at {}",
+                display_path(&executable)
+            );
+        }
+        Ok(false) if executable.is_file() => {
+            let _ = writeln!(
+                standard_output,
+                "[ok] executable already present at {}",
+                display_path(&executable)
+            );
+        }
+        Ok(false) => {
+            had_error = true;
+            let _ = writeln!(
+                standard_error,
+                "[fail] executable missing and no release artifact under repo root"
+            );
+        }
+        Err(error) => {
+            had_error = true;
+            let _ = writeln!(standard_error, "[fail] executable: {error}");
+        }
+    }
+
+    // 5. Re-wire the four bridge hosts (OpenCode, Pi, Codex, Cursor). Like the
+    //    native MCP step, repair is an explicit operator action, so we force
+    //    detected=true for each host the operator has installed — re-running its
+    //    wiring idempotently. Cursor is never auto-detected, so we always force
+    //    it (the maybe_wire call is a no-op if the source files are absent).
     for (name, status) in [
         (
             "opencode",
@@ -147,7 +184,8 @@ pub fn run_repair_command(
     let _ = writeln!(standard_output, "Next steps:");
     let _ = writeln!(
         standard_output,
-        "  - Restart the harness so it reloads settings.json and ~/.claude.json."
+        "  - Restart the harness so it reloads settings.json and {}.",
+        display_path(&mcp_config_path(&claude_home))
     );
     let _ = writeln!(
         standard_output,
@@ -224,14 +262,30 @@ mod tests {
         claude_home
     }
 
+    /// Stage a minimal repo root with a release artifact so repair's
+    /// executable-restore step has something to publish.
+    fn stage_repo(root: &std::path::Path, artifact_bytes: &[u8]) {
+        let release_dir = root.join("target").join("release");
+        fs::create_dir_all(&release_dir).expect("create release dir");
+        fs::write(
+            release_dir.join(crate::runtime::executable_file_name()),
+            artifact_bytes,
+        )
+        .expect("stage artifact");
+    }
+
     #[test]
-    fn repair_wires_hooks_and_registers_mcp() {
+    fn repair_wires_hooks_registers_mcp_and_restores_executable() {
         let claude_home = unique_home("full");
+        let repo_root = claude_home.parent().unwrap().join("repo");
+        stage_repo(&repo_root, b"fake-keel");
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let args = vec![
             "--claude-home".to_string(),
             claude_home.to_string_lossy().to_string(),
+            "--repo-root".to_string(),
+            repo_root.to_string_lossy().to_string(),
         ];
         let code = run_repair_command(&args, &mut stdout, &mut stderr);
         assert_eq!(
@@ -250,12 +304,66 @@ mod tests {
         assert!(settings.contains("UserPromptSubmit"));
         assert!(settings.contains("SessionStart"));
 
-        // MCP registered in the parent ~/.claude.json.
-        let config = fs::read_to_string(super::super::mcp_register::mcp_config_path(&claude_home))
-            .expect("claude.json written");
+        // MCP registered in the resolved home's .claude.json.
+        let config =
+            fs::read_to_string(mcp_config_path(&claude_home)).expect("claude.json written");
         assert!(config.contains("keel"));
         assert!(config.contains("mcp"));
 
+        // Deleted executable restored into the requested home.
+        let executable = installed_executable_path(&claude_home);
+        assert_eq!(
+            fs::read(&executable).expect("executable restored"),
+            b"fake-keel"
+        );
+
         let _ = fs::remove_dir_all(claude_home.parent().unwrap());
+    }
+
+    #[test]
+    fn repair_non_standard_home_keeps_mcp_config_inside() {
+        // A home NOT named `.claude` (temp fixtures, `--claude-home` overrides)
+        // must keep its `.claude.json` INSIDE the requested home: the old
+        // parent-derived path wrote OUTSIDE it — straight into the real
+        // `~/.claude.json` when the temp home sat directly under the real
+        // user home.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        let root =
+            std::env::temp_dir().join(format!("keel-repair-nonstd-{}-{nanos}", std::process::id()));
+        let claude_home = root.join("home");
+        fs::create_dir_all(&claude_home).expect("create home");
+        let repo_root = root.join("repo");
+        stage_repo(&repo_root, b"fake-keel");
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let args = vec![
+            "--claude-home".to_string(),
+            claude_home.to_string_lossy().to_string(),
+            "--repo-root".to_string(),
+            repo_root.to_string_lossy().to_string(),
+        ];
+        let code = run_repair_command(&args, &mut stdout, &mut stderr);
+        assert_eq!(
+            code,
+            0,
+            "repair failed: {}",
+            String::from_utf8_lossy(&stderr)
+        );
+
+        // Config lives inside the requested home, never beside it.
+        assert!(
+            claude_home.join(".claude.json").is_file(),
+            "non-standard home must keep its .claude.json inside itself"
+        );
+        assert!(
+            !root.join(".claude.json").exists(),
+            "repair must never write outside the requested home"
+        );
+
+        let _ = fs::remove_dir_all(&root);
     }
 }

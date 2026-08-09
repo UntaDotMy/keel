@@ -3116,11 +3116,63 @@ fn run_review_policy_command(
             let _ = writeln!(standard_error, "{}", parse_error.message);
             return 1;
         }
-        if flag_set.string_value("format") == "compact" {
+        let format = flag_set.string_value("format");
+        if format == "compact" {
             let _ = writeln!(
                 standard_output,
                 "native_rules=rust,python,js,go,cpp language_gates=auto go_fallback=false"
             );
+        } else if format == "json" {
+            let payload = Value::Object(vec![
+                ("runtime".into(), Value::String("rust-native".into())),
+                (
+                    "native_rules".into(),
+                    Value::Array(
+                        ["rust", "python", "js", "go", "cpp"]
+                            .iter()
+                            .map(|rule| Value::String((*rule).into()))
+                            .collect(),
+                    ),
+                ),
+                ("language_gates".into(), Value::String("auto".into())),
+                (
+                    "language_gates_detail".into(),
+                    Value::String("auto-detect root markers (Cargo.toml, pyproject.toml/setup.py, package.json, go.mod, CMakeLists.txt / root C/C++ sources)".into()),
+                ),
+                (
+                    "pre_commit".into(),
+                    Value::String("rust fmt+clippy; python black+ruff; js prettier+eslint; go gofmt+vet; c/c++ clang-format (tools missing = non-blocking)".into()),
+                ),
+                (
+                    "pre_pr".into(),
+                    Value::String("above plus unit tests (cargo test / pytest / npm test / go test) and typecheck (mypy / tsc when present); pytest exit 5 (no tests) is non-blocking".into()),
+                ),
+                (
+                    "python_checks".into(),
+                    Value::Array(
+                        ["black", "ruff", "mypy", "pytest", "circular_imports", "import_safety"]
+                            .iter()
+                            .map(|check| Value::String((*check).into()))
+                            .collect(),
+                    ),
+                ),
+                (
+                    "js_checks".into(),
+                    Value::Array(
+                        ["prettier", "eslint", "tsc", "npm test"]
+                            .iter()
+                            .map(|check| Value::String((*check).into()))
+                            .collect(),
+                    ),
+                ),
+                (
+                    "go_checks".into(),
+                    Value::String("gofmt, go vet, go test".into()),
+                ),
+                ("cpp_checks".into(), Value::String("clang-format".into())),
+                ("go_fallback".into(), Value::Bool(false)),
+            ]);
+            let _ = write_indented(standard_output, &payload);
         } else {
             let _ = writeln!(standard_output, "# Native Review Policy");
             let _ = writeln!(standard_output, "- runtime: rust-native");
@@ -3218,9 +3270,10 @@ fn render_generated_message(
     let mut flag_set = FlagSet::new(format!("git-workflow {message_kind}"));
     flag_set.bool_flag("from-diff", false);
     flag_set.string_flag("test-result", "");
-    // Accept the flags the README and help advertise for this command so it does
-    // not error on its own documented usage. `repo-root` scopes the git diff;
-    // `base-ref` and `format` are accepted for documented-surface compatibility.
+    // `repo-root` scopes the git diff. `base-ref` selects the range the diff is
+    // computed against (committed commits ahead of the base); when a base ref is
+    // given, staging state is irrelevant. `format` selects the output rendering
+    // (commit-message/pr-body default to markdown when unset).
     flag_set.string_flag("repo-root", "");
     flag_set.string_flag("base-ref", "");
     flag_set.string_flag("format", "");
@@ -3235,46 +3288,171 @@ fn render_generated_message(
         Some(std::path::PathBuf::from(repo_root_value))
     };
     let from_diff = flag_set.bool_value("from-diff");
-    let staged = if from_diff {
-        staged_files(repo_root.as_deref()).unwrap_or_default()
+    let base_ref = flag_set.string_value("base-ref").trim().to_string();
+    let format = {
+        let value = flag_set.string_value("format").trim().to_string();
+        if value.is_empty() {
+            "markdown".to_string()
+        } else {
+            value
+        }
+    };
+    if format != "markdown" && format != "json" && format != "compact" {
+        let _ = writeln!(
+            standard_error,
+            "git-workflow {message_kind}: unknown --format '{format}' (expected json, markdown, or compact)"
+        );
+        return 1;
+    }
+    let changed_files = if from_diff {
+        if !base_ref.is_empty() {
+            changed_files_against_base(repo_root.as_deref(), &base_ref).unwrap_or_default()
+        } else {
+            staged_files(repo_root.as_deref()).unwrap_or_default()
+        }
     } else {
         Vec::new()
     };
     let diff_summary = if from_diff {
-        git_diff_stat(repo_root.as_deref())
-            .unwrap_or_else(|| "No diff summary available.".to_string())
+        if !base_ref.is_empty() {
+            git_diff_stat_against_base(repo_root.as_deref(), &base_ref)
+                .unwrap_or_else(|| "No diff summary available.".to_string())
+        } else {
+            git_diff_stat(repo_root.as_deref())
+                .unwrap_or_else(|| "No diff summary available.".to_string())
+        }
     } else {
         "No diff summary requested.".to_string()
     };
     if message_kind == "commit" {
-        let _ = writeln!(
-            standard_output,
-            "{}",
-            generate_commit_subject(from_diff, &staged)
-        );
-        let _ = writeln!(standard_output);
-        let _ = writeln!(standard_output, "{}", commit_body_from_staged(&staged));
-        let _ = writeln!(standard_output);
-        let _ = writeln!(standard_output, "{diff_summary}");
-    } else {
-        let _ = writeln!(standard_output, "## Summary");
-        for bullet in pr_summary_bullets(&staged) {
-            let _ = writeln!(standard_output, "- {bullet}");
+        let subject = generate_commit_subject(from_diff, &changed_files);
+        let body = commit_body_from_staged(&changed_files);
+        if format == "json" {
+            let payload = Value::Object(vec![
+                (
+                    "command".into(),
+                    Value::String("git-workflow commit-message".into()),
+                ),
+                ("subject".into(), Value::String(subject)),
+                ("body".into(), Value::String(body)),
+                ("diff_summary".into(), Value::String(diff_summary)),
+                (
+                    "files".into(),
+                    Value::Array(
+                        changed_files
+                            .iter()
+                            .map(|file| Value::String(file.clone()))
+                            .collect(),
+                    ),
+                ),
+            ]);
+            let _ = write_indented(standard_output, &payload);
+        } else {
+            let _ = writeln!(standard_output, "{subject}");
+            let _ = writeln!(standard_output);
+            let _ = writeln!(standard_output, "{body}");
+            let _ = writeln!(standard_output);
+            let _ = writeln!(standard_output, "{diff_summary}");
         }
-        let _ = writeln!(standard_output);
-        let _ = writeln!(standard_output, "## Test plan");
+    } else {
+        let bullets = pr_summary_bullets(&changed_files);
         let test_result = flag_set.string_value("test-result");
-        let _ = writeln!(
-            standard_output,
-            "- {}",
-            if test_result.trim().is_empty() {
-                "Not provided"
-            } else {
-                test_result
+        let test_plan = if test_result.trim().is_empty() {
+            "Not provided".to_string()
+        } else {
+            test_result.to_string()
+        };
+        if format == "json" {
+            let payload = Value::Object(vec![
+                (
+                    "command".into(),
+                    Value::String("git-workflow pr-body".into()),
+                ),
+                (
+                    "summary".into(),
+                    Value::Array(bullets.iter().map(|b| Value::String(b.clone())).collect()),
+                ),
+                (
+                    "test_plan".into(),
+                    Value::Array(vec![Value::String(test_plan)]),
+                ),
+                (
+                    "files".into(),
+                    Value::Array(
+                        changed_files
+                            .iter()
+                            .map(|file| Value::String(file.clone()))
+                            .collect(),
+                    ),
+                ),
+            ]);
+            let _ = write_indented(standard_output, &payload);
+        } else {
+            let _ = writeln!(standard_output, "## Summary");
+            for bullet in &bullets {
+                let _ = writeln!(standard_output, "- {bullet}");
             }
-        );
+            let _ = writeln!(standard_output);
+            let _ = writeln!(standard_output, "## Test plan");
+            let _ = writeln!(standard_output, "- {test_plan}");
+        }
     }
     0
+}
+
+/// Paths changed between `base_ref` and HEAD, from `git diff --name-only`.
+/// Unlike [`staged_files`], this is independent of the index/staging state.
+fn changed_files_against_base(
+    repo_root: Option<&std::path::Path>,
+    base_ref: &str,
+) -> Option<Vec<String>> {
+    let result = run_command(
+        "git",
+        &[
+            "diff".to_string(),
+            "--name-only".to_string(),
+            format!("{base_ref}..HEAD"),
+        ],
+        repo_root,
+    )
+    .ok()?;
+    if result.code != 0 {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&result.stdout);
+    Some(
+        text.lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect(),
+    )
+}
+
+/// `git diff --stat` of the committed range `base_ref..HEAD`, for message bodies.
+fn git_diff_stat_against_base(
+    repo_root: Option<&std::path::Path>,
+    base_ref: &str,
+) -> Option<String> {
+    let result = run_command(
+        "git",
+        &[
+            "diff".to_string(),
+            "--stat".to_string(),
+            format!("{base_ref}..HEAD"),
+        ],
+        repo_root,
+    )
+    .ok()?;
+    if result.code != 0 {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&result.stdout).trim().to_string();
+    Some(if text.is_empty() {
+        "No diff against base.".to_string()
+    } else {
+        text
+    })
 }
 
 fn staged_files(repo_root: Option<&std::path::Path>) -> Option<Vec<String>> {

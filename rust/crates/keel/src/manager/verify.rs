@@ -420,10 +420,6 @@ pub fn run_all_command(
     standard_output: &mut dyn Write,
     standard_error: &mut dyn Write,
 ) -> u8 {
-    let validate_code = run_validate_command(arguments, standard_output, standard_error);
-    if validate_code != 0 {
-        return validate_code;
-    }
     let mut flag_set = FlagSet::new("all");
     flag_set.string_flag("repo-root", "");
     flag_set.string_flag("claude-home", "");
@@ -431,6 +427,28 @@ pub fn run_all_command(
     if let Err(parse_error) = flag_set.parse(arguments) {
         let _ = writeln!(standard_error, "{}", parse_error.message);
         return 1;
+    }
+    if !flag_set.positional.is_empty() {
+        let _ = writeln!(
+            standard_error,
+            "Native Rust validate does not accept positional arguments, got {}",
+            flag_set.positional.len()
+        );
+        return 1;
+    }
+    // `validate` does not accept `--claude-home`; rebuild its argument list from
+    // the flags it does accept instead of forwarding the raw arguments.
+    let mut validate_arguments: Vec<String> = vec![
+        "--profile".to_string(),
+        flag_set.string_value("profile").to_string(),
+    ];
+    if !flag_set.string_value("repo-root").trim().is_empty() {
+        validate_arguments.push("--repo-root".to_string());
+        validate_arguments.push(flag_set.string_value("repo-root").to_string());
+    }
+    let validate_code = run_validate_command(&validate_arguments, standard_output, standard_error);
+    if validate_code != 0 {
+        return validate_code;
     }
     let mut install_arguments = Vec::new();
     if !flag_set.string_value("repo-root").trim().is_empty() {

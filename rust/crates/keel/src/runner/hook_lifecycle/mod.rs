@@ -302,6 +302,60 @@ fn run_hook_install(
     }
 }
 
+/// Rewrite a git config so `[core]` carries exactly one `hooksPath = <value>`.
+///
+/// The earlier implementation deleted any line containing the literal string
+/// `core.hooksPath` (a form that never appears inside a config file) and then
+/// appended `hooksPath` at the end of the file — so the key landed inside
+/// whatever section happened to be last (e.g. a `[branch "..."]` block) and
+/// accumulated one stray line per run. This version parses section headers so
+/// the key is removed from every section it appears in (git only honors it
+/// under `[core]`, and the appended duplicates this command itself wrote are
+/// the primary source of strays), then re-inserted exactly once under
+/// `[core]`. Idempotent: a config already carrying the desired value comes
+/// back unchanged apart from the line endings the join normalizes.
+fn set_core_hooks_path(git_config: &str, value: &str) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    let mut core_insert_at: Option<usize> = None;
+
+    for line in git_config.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            if trimmed.eq_ignore_ascii_case("[core]") {
+                // Insert position = right after this header line.
+                core_insert_at = Some(lines.len() + 1);
+            }
+            lines.push(line.to_string());
+            continue;
+        }
+        // A hooksPath key line in any section is dropped; a single canonical
+        // entry is re-inserted under [core] below.
+        if let Some((key, _)) = trimmed.split_once('=') {
+            if key.trim().eq_ignore_ascii_case("hookspath") {
+                continue;
+            }
+        }
+        lines.push(line.to_string());
+    }
+
+    let entry = format!("\thooksPath = {value}");
+    if let Some(index) = core_insert_at {
+        lines.insert(index, entry);
+    } else {
+        if !lines.is_empty() {
+            lines.push(String::new());
+        }
+        lines.push("[core]".to_string());
+        lines.push(entry);
+    }
+
+    let mut joined = lines.join("\n");
+    if git_config.ends_with('\n') && !joined.ends_with('\n') {
+        joined.push('\n');
+    }
+    joined
+}
+
 fn run_hook_git_hooks(
     arguments: &[String],
     standard_output: &mut dyn Write,
@@ -387,19 +441,9 @@ fn run_hook_git_hooks(
     let hooks_path_value = ".githooks";
 
     if git_config_path.exists() {
-        let mut git_config = fs::read_to_string(&git_config_path).unwrap_or_default();
-
-        if git_config.contains("core.hooksPath") {
-            git_config = git_config
-                .lines()
-                .filter(|line| !line.contains("core.hooksPath"))
-                .collect::<Vec<_>>()
-                .join("\n");
-            let _ = fs::write(&git_config_path, &git_config);
-        }
-
-        git_config.push_str(&format!("\thooksPath = {}\n", hooks_path_value));
-        if let Err(e) = fs::write(&git_config_path, &git_config) {
+        let git_config = fs::read_to_string(&git_config_path).unwrap_or_default();
+        let updated_config = set_core_hooks_path(&git_config, hooks_path_value);
+        if let Err(e) = fs::write(&git_config_path, &updated_config) {
             let _ = writeln!(standard_error, "Failed to update .git/config: {}", e);
             return 1;
         }

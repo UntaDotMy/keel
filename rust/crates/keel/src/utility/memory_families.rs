@@ -273,13 +273,102 @@ fn run_research_cache(
             }
             0
         }
-        "stale" | "reward" => {
-            let new_state = if arguments[0] == "stale" {
-                "stale"
-            } else {
-                "rewarded"
+        "stale" => {
+            // Documented contract (help + research-enforcement skill):
+            // `stale [--days N]` lists research-cache entries older than N days
+            // (default 30). `--id <id>` marks a single entry stale explicitly.
+            let mut flags = FlagSet::new(format!("{label} stale"));
+            flags.string_flag("id", "");
+            flags.string_flag("days", "");
+            flags.string_flag("claude-home", "");
+            flags.bool_flag("json", false);
+            if let Err(error) = flags.parse(&arguments[1..]) {
+                let _ = writeln!(standard_error, "{}", error.message);
+                return 1;
+            }
+            let Some(home) =
+                resolve_home(flags.string_value("claude-home"), &label, standard_error)
+            else {
+                return 1;
             };
-            let mut flags = FlagSet::new(format!("{label} {}", arguments[0]));
+            let store = family_store(&home, command_group, "research-cache");
+            let id = flags.string_value("id").trim().to_string();
+            if !id.is_empty() {
+                return mark_cache_entry_state(
+                    &store,
+                    &label,
+                    &id,
+                    "stale",
+                    flags.bool_value("json"),
+                    standard_output,
+                    standard_error,
+                );
+            }
+            let days: u128 = match flags.string_value("days").trim().parse::<u128>() {
+                Ok(days) if days > 0 => days,
+                Ok(_) => {
+                    let _ = writeln!(
+                        standard_error,
+                        "{label} stale: --days must be a positive integer"
+                    );
+                    return 1;
+                }
+                Err(_) => 30,
+            };
+            let records = match store.list_records() {
+                Ok(records) => records,
+                Err(error) => {
+                    let _ = writeln!(standard_error, "{label}: {error}");
+                    return 1;
+                }
+            };
+            // ISO-8601 `YYYY-MM-DDTHH:MM:SSZ` strings compare lexicographically,
+            // so an age cutoff reduces to a string comparison against the cutoff.
+            let cutoff = format_timestamp_iso8601(current_timestamp_millis() - days * 86_400_000);
+            let stale_records: Vec<&Record> = records
+                .iter()
+                .map(|(_, record)| record)
+                .filter(|record| field(record, "recordedAt").unwrap_or("") < cutoff.as_str())
+                .collect();
+            if flags.bool_value("json") {
+                let payload = Value::Object(vec![
+                    ("days".into(), Value::Number(days.to_string())),
+                    (
+                        "count".into(),
+                        Value::Number(stale_records.len().to_string()),
+                    ),
+                    (
+                        "entries".into(),
+                        Value::Array(
+                            stale_records
+                                .iter()
+                                .map(|record| record_to_value(record))
+                                .collect(),
+                        ),
+                    ),
+                ]);
+                return render_json(standard_output, standard_error, &payload);
+            }
+            let _ = writeln!(
+                standard_output,
+                "{label} stale: {days} day(s) cutoff, {} entr{} older",
+                stale_records.len(),
+                if stale_records.len() == 1 { "y" } else { "ies" }
+            );
+            for record in &stale_records {
+                let _ = writeln!(
+                    standard_output,
+                    "  [{}] {} recorded {} -> {}",
+                    field(record, "state").unwrap_or("?"),
+                    field(record, "id").unwrap_or("?"),
+                    field(record, "recordedAt").unwrap_or("?"),
+                    field(record, "question").unwrap_or("")
+                );
+            }
+            0
+        }
+        "reward" => {
+            let mut flags = FlagSet::new(format!("{label} reward"));
             flags.string_flag("id", "");
             flags.string_flag("claude-home", "");
             flags.bool_flag("json", false);
@@ -289,7 +378,7 @@ fn run_research_cache(
             }
             let id = flags.string_value("id").trim().to_string();
             if id.is_empty() {
-                let _ = writeln!(standard_error, "{label} {}: --id is required", arguments[0]);
+                let _ = writeln!(standard_error, "{label} reward: --id is required");
                 return 1;
             }
             let Some(home) =
@@ -298,36 +387,15 @@ fn run_research_cache(
                 return 1;
             };
             let store = family_store(&home, command_group, "research-cache");
-            let mut record = match store.read_record(&id) {
-                Ok(Some(record)) => record,
-                Ok(None) => {
-                    let _ = writeln!(standard_error, "{label}: no cache entry with id {id}");
-                    return 1;
-                }
-                Err(error) => {
-                    let _ = writeln!(standard_error, "{label}: {error}");
-                    return 1;
-                }
-            };
-            set_field(&mut record, "state", new_state.to_string());
-            match store.write_record(&id, &record) {
-                Ok(path) => {
-                    if flags.bool_value("json") {
-                        let payload = Value::Object(vec![
-                            ("updated".into(), Value::Bool(true)),
-                            ("entry".into(), record_to_value(&record)),
-                        ]);
-                        return render_json(standard_output, standard_error, &payload);
-                    }
-                    let _ = writeln!(standard_output, "{label}: {id} -> {new_state}");
-                    let _ = writeln!(standard_output, "  {}", display_path(&path));
-                    0
-                }
-                Err(error) => {
-                    let _ = writeln!(standard_error, "{label}: {error}");
-                    1
-                }
-            }
+            mark_cache_entry_state(
+                &store,
+                &label,
+                &id,
+                "rewarded",
+                flags.bool_value("json"),
+                standard_output,
+                standard_error,
+            )
         }
         "list" => list_family(
             command_group,
@@ -1666,6 +1734,55 @@ fn split_flag_list(value: &str) -> Vec<String> {
         .map(|part| part.trim().to_string())
         .filter(|part| !part.is_empty())
         .collect()
+}
+
+/// Set the `state` field on one research-cache record (used by `stale --id` and `reward`).
+fn mark_cache_entry_state(
+    store: &RecordStore,
+    label: &str,
+    id: &str,
+    new_state: &str,
+    json: bool,
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let record = match store.read_record(id) {
+        Ok(Some(record)) => record,
+        Ok(None) => {
+            let _ = writeln!(
+                standard_error,
+                "{label}: no research-cache entry with id {id}"
+            );
+            return 1;
+        }
+        Err(error) => {
+            let _ = writeln!(standard_error, "{label}: {error}");
+            return 1;
+        }
+    };
+    let mut record: Record = record
+        .into_iter()
+        .filter(|(key, _)| key != "state")
+        .collect();
+    record.push(("state".into(), new_state.to_string()));
+    match store.write_record(id, &record) {
+        Ok(path) => {
+            if json {
+                let payload = Value::Object(vec![
+                    ("updated".into(), Value::Bool(true)),
+                    ("entry".into(), record_to_value(&record)),
+                ]);
+                return render_json(standard_output, standard_error, &payload);
+            }
+            let _ = writeln!(standard_output, "{label}: {id} -> {new_state}");
+            let _ = writeln!(standard_output, "  {}", display_path(&path));
+            0
+        }
+        Err(error) => {
+            let _ = writeln!(standard_error, "{label}: {error}");
+            1
+        }
+    }
 }
 
 fn emit_created(
