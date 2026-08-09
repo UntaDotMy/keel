@@ -1468,7 +1468,8 @@ fn kill_process_tree(child: &mut std::process::Child) {
     let pid = child.id() as i32;
     // Negative pid targets the process group; the child's pgid == its pid
     // because spawn_background_command made it a group leader via setsid.
-    let group_kill = unsafe { libc_kill_process_group(pid) };
+    // (No `unsafe` here: the FFI is wrapped inside libc_kill_process_group.)
+    let group_kill = libc_kill_process_group(pid);
     if group_kill != 0 {
         // Process group gone or not a leader: fall back to the root.
         let _ = child.kill();
