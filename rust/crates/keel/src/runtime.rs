@@ -314,6 +314,22 @@ pub fn is_standard_keel_home(keel_home: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// True when `keel_home` is the user's DEFAULT keel home (`~/.keel` from
+/// [`resolve_user_home`]), as opposed to a `--claude-home`/`KEEL_HOME`
+/// override or a test fixture. PATH wiring must only ever touch the
+/// persistent user PATH for the default home: a temp-dir fixture passes
+/// `is_standard_keel_home` (basename-only) and previously leaked dead
+/// `keel-home-split-*\.keel` directories into the user PATH on every install.
+pub fn is_default_keel_home(keel_home: &Path) -> bool {
+    match resolve_user_home() {
+        Ok(user_home) => is_default_keel_home_for(&user_home, keel_home),
+        Err(_) => false,
+    }
+}
+fn is_default_keel_home_for(user_home: &Path, keel_home: &Path) -> bool {
+    clean_path(&user_home.join(KEEL_HOME_DIRECTORY_NAME)) == clean_path(keel_home)
+}
+
 /// Inverse of `claude_engagement_home`: given the claude-harness engagement
 /// home, find the host-neutral keel home that holds the binary and data.
 ///
