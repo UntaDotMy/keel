@@ -661,41 +661,13 @@ fn run_git_workflow_await_ci(
                     attempts,
                 );
             }
-            CiQuery::Checks(checks) => match evaluate_checks(&checks) {
-                CiVerdict::Green => {
-                    return render_await_ci_result(
-                        standard_output,
-                        flag_set.string_value("format"),
-                        AwaitCiOutcome::Green,
-                        provider.label(),
-                        &checks,
-                        attempts,
-                    );
-                }
-                CiVerdict::Red => {
-                    // Block: do NOT continue to merge on a red pipeline.
-                    return render_await_ci_result(
-                        standard_output,
-                        flag_set.string_value("format"),
-                        AwaitCiOutcome::Red,
-                        provider.label(),
-                        &checks,
-                        attempts,
-                    );
-                }
-                CiVerdict::NoChecks => {
-                    // Provider reachable but genuinely reporting no checks is the
-                    // only no-CI pass path; errors never reach it.
-                    return render_await_ci_result(
-                        standard_output,
-                        flag_set.string_value("format"),
-                        AwaitCiOutcome::NoCi,
-                        provider.label(),
-                        &[],
-                        attempts,
-                    );
-                }
-                CiVerdict::Pending => {
+            CiQuery::Checks(checks) => {
+                // Freshness guard: right after a push the newest run still
+                // belongs to the PREVIOUS commit, so its verdict is stale —
+                // reporting it as RED makes the gate cry wolf before the new
+                // pipeline even exists. Until a run exists for the current
+                // head, treat the state as pending.
+                if !checks.is_empty() && !ci_run_matches_head(provider, repo) {
                     if !watch || started.elapsed() >= deadline {
                         let outcome = if watch {
                             AwaitCiOutcome::Timeout
@@ -712,8 +684,62 @@ fn run_git_workflow_await_ci(
                         );
                     }
                     sleep(interval);
+                    continue;
                 }
-            },
+                match evaluate_checks(&checks) {
+                    CiVerdict::Green => {
+                        return render_await_ci_result(
+                            standard_output,
+                            flag_set.string_value("format"),
+                            AwaitCiOutcome::Green,
+                            provider.label(),
+                            &checks,
+                            attempts,
+                        );
+                    }
+                    CiVerdict::Red => {
+                        // Block: do NOT continue to merge on a red pipeline.
+                        return render_await_ci_result(
+                            standard_output,
+                            flag_set.string_value("format"),
+                            AwaitCiOutcome::Red,
+                            provider.label(),
+                            &checks,
+                            attempts,
+                        );
+                    }
+                    CiVerdict::NoChecks => {
+                        // Provider reachable but genuinely reporting no checks is the
+                        // only no-CI pass path; errors never reach it.
+                        return render_await_ci_result(
+                            standard_output,
+                            flag_set.string_value("format"),
+                            AwaitCiOutcome::NoCi,
+                            provider.label(),
+                            &[],
+                            attempts,
+                        );
+                    }
+                    CiVerdict::Pending => {
+                        if !watch || started.elapsed() >= deadline {
+                            let outcome = if watch {
+                                AwaitCiOutcome::Timeout
+                            } else {
+                                AwaitCiOutcome::Pending
+                            };
+                            return render_await_ci_result(
+                                standard_output,
+                                flag_set.string_value("format"),
+                                outcome,
+                                provider.label(),
+                                &checks,
+                                attempts,
+                            );
+                        }
+                        sleep(interval);
+                    }
+                }
+            }
         }
     }
 }
@@ -753,6 +779,58 @@ fn query_provider_checks(provider: CiProvider, repo: Option<&Path>) -> CiQuery {
     match provider {
         CiProvider::Glab => query_checks_glab(repo),
         CiProvider::Gh => query_checks_gh(repo),
+    }
+}
+
+/// True when the newest CI run was created for the current local HEAD. Right
+/// after a push, GitHub still lists the previous commit's run; its verdict
+/// must not be reported for the new head. Query failures degrade to `true`
+/// (fresh) so a missing signal never stalls the gate — `evaluate_checks` then
+/// decides from the checks themselves.
+fn ci_run_matches_head(provider: CiProvider, repo: Option<&Path>) -> bool {
+    let head = match run_command("git", &["rev-parse".to_string(), "HEAD".to_string()], repo) {
+        Ok(result) if result.code == 0 => {
+            String::from_utf8_lossy(&result.stdout).trim().to_string()
+        }
+        _ => return true,
+    };
+    if head.is_empty() {
+        return true;
+    }
+    match provider {
+        CiProvider::Gh => {
+            match run_command(
+                "gh",
+                &[
+                    "run".to_string(),
+                    "list".to_string(),
+                    "--limit".to_string(),
+                    "1".to_string(),
+                    "--json".to_string(),
+                    "headSha".to_string(),
+                ],
+                repo,
+            ) {
+                Ok(result) if result.code == 0 => {
+                    let parsed: serde_json::Value =
+                        serde_json::from_str(&String::from_utf8_lossy(&result.stdout))
+                            .unwrap_or(serde_json::Value::Null);
+                    match parsed
+                        .as_array()
+                        .and_then(|runs| runs.first())
+                        .and_then(|run| run.get("headSha"))
+                        .and_then(serde_json::Value::as_str)
+                    {
+                        Some(sha) => sha.eq_ignore_ascii_case(&head),
+                        None => true,
+                    }
+                }
+                _ => true,
+            }
+        }
+        // glab's list output carries no cheap head-sha column; keep prior
+        // behavior there.
+        CiProvider::Glab => true,
     }
 }
 
@@ -1177,6 +1255,19 @@ fn run_review_gates_command(
     flag_set.bool_flag("js-checks", false);
     if let Err(parse_error) = flag_set.parse(&arguments[1..]) {
         let _ = writeln!(standard_error, "{}", parse_error.message);
+        return 1;
+    }
+    // A typo'd --surface silently changed the flow-check range before; reject
+    // unknown surfaces instead of guessing.
+    let surface = flag_set.string_value("surface").trim().to_string();
+    if !matches!(
+        surface.as_str(),
+        "gates" | "pre-pr" | "pre-commit" | "diff" | "init" | "hosted" | "policy"
+    ) {
+        let _ = writeln!(
+            standard_error,
+            "review gates check: unknown --surface {surface:?}; expected one of gates, pre-pr, pre-commit, diff, init, hosted, policy"
+        );
         return 1;
     }
     let repository_root = match resolve_repository_root(flag_set.string_value("repo-root")) {
