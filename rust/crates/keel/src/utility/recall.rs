@@ -43,16 +43,14 @@ use keel_sqlite_vec::sqlite3_vec_init;
 #[cfg(feature = "semantic")]
 use std::sync::OnceLock;
 
-/// Schema version stamped into the `meta` table. Bump when the FTS5 column layout
-/// or tokenizer chain changes so existing indexes get rebuilt automatically.
-/// Schema version stamped into the `meta` table. The semantic feature bumps
-/// to "2" so a vec_items table is created alongside FTS5; non-semantic builds
-/// stay at "1" to avoid a pointless FTS5 reindex for users who never enable
-/// vector recall.
-#[cfg(feature = "semantic")]
+// One schema version for BOTH feature builds. The FTS5 `documents` table is
+// identical with and without `semantic`; the vector table is additive
+// (`CREATE … IF NOT EXISTS` under the feature) and simply ignored by
+// non-semantic builds. A feature-dependent version made switching between a
+// semantic and a non-semantic binary DROP and rebuild the whole index on every
+// open — a multi-minute write-locked reindex that every other keel process
+// then blocked on ("database is locked" / MCP timeouts).
 const SCHEMA_VERSION: &str = "2";
-#[cfg(not(feature = "semantic"))]
-const SCHEMA_VERSION: &str = "1";
 
 /// Top-level subdirectories under `<claude-home>` that recall indexes by default.
 /// Listed explicitly so the indexer never wanders into binaries, hooks, or release
@@ -215,11 +213,20 @@ fn run_recall_search(
         }
     };
     if let Err(error_message) = sync_recall_index(&mut connection, &claude_home, false) {
+        if !is_lock_contention(&error_message) {
+            let _ = writeln!(
+                standard_error,
+                "{command_group} recall: refresh index: {error_message}"
+            );
+            return 1;
+        }
+        // Another keel process holds the write lock (a reindex in progress).
+        // Searching the existing index is still correct — it only lags one
+        // sync — so warn and continue instead of killing the recall call.
         let _ = writeln!(
             standard_error,
-            "{command_group} recall: refresh index: {error_message}"
+            "{command_group} recall: index busy ({error_message}); searching existing index"
         );
-        return 1;
     }
 
     // Workspace affinity: boost current-project hits above cross-project.
@@ -765,7 +772,15 @@ pub fn search_recall_index(
     }
     let database_path = recall_database_path(claude_home);
     let mut connection = open_recall_connection(&database_path)?;
-    sync_recall_index(&mut connection, claude_home, false)?;
+    // Best-effort sync: another keel process may hold the write lock (a reindex
+    // in progress). Searching the EXISTING index is always correct — it only
+    // lags by one sync — so a lock timeout must degrade to a search, never to
+    // a "database is locked" error that kills the MCP tool call.
+    if let Err(sync_error) = sync_recall_index(&mut connection, claude_home, false) {
+        if !is_lock_contention(&sync_error) {
+            return Err(sync_error);
+        }
+    }
     match cascade_recall_query(&connection, trimmed_query, limit, workspace_slug)? {
         Some(cascade) => {
             // Semantic on: blend vector KNN candidates so the embedding stage
@@ -786,6 +801,14 @@ pub fn search_recall_index(
         }
         None => Ok(None),
     }
+}
+
+/// True when a recall open/sync error is lock contention from another keel
+/// process (WAL write lock held) rather than corruption. Callers treat this as
+/// "search the existing index anyway"; anything else is a hard error.
+fn is_lock_contention(error_message: &str) -> bool {
+    let lowered = error_message.to_ascii_lowercase();
+    lowered.contains("locked") || lowered.contains("busy")
 }
 
 /// Open (and if necessary create) the recall index under `claude_home`, run a
@@ -920,7 +943,20 @@ fn ensure_recall_schema(connection: &Connection) -> Result<(), String> {
         .map_err(|database_error| format!("read schema_version: {database_error}"))?;
 
     match stored_version.as_deref() {
-        Some(value) if value == SCHEMA_VERSION => {}
+        // "1" is compatible: the only 1→2 change was the additive vec_items
+        // table (created under the semantic feature on open), so no document
+        // rebuild is needed — just restamp. Dropping the index here was the
+        // source of multi-minute write-locked reindexes on build switches.
+        Some(value) if value == SCHEMA_VERSION || value == "1" => {
+            if value != SCHEMA_VERSION {
+                connection
+                    .execute(
+                        "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?1)",
+                        params![SCHEMA_VERSION],
+                    )
+                    .map_err(|database_error| format!("stamp schema_version: {database_error}"))?;
+            }
+        }
         Some(_) => {
             connection
                 .execute_batch(
@@ -1012,9 +1048,21 @@ pub fn sync_recall_index(
     }
 
     let mut on_disk_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let transaction = connection
-        .transaction()
-        .map_err(|database_error| format!("begin transaction: {database_error}"))?;
+    // Phase 1 — read + embed OUTSIDE the write transaction. Embedding is
+    // CPU-bound model inference; holding the SQLite write lock across it made
+    // every other keel process block for the whole reindex ("database is
+    // locked" / MCP timeouts). Prepare all rows first, then commit them in one
+    // short SQL-only transaction.
+    struct PendingDocument {
+        path: String,
+        modified_at: String,
+        size: String,
+        content: String,
+        was_existing: bool,
+        #[cfg(feature = "semantic")]
+        vector: Option<Vec<f32>>,
+    }
+    let mut pending: Vec<PendingDocument> = Vec::new();
     for document in &on_disk {
         on_disk_paths.insert(document.absolute_path.clone());
         let needs_write = match existing_rows.get(&document.absolute_path) {
@@ -1033,40 +1081,57 @@ pub fn sync_recall_index(
             Err(_) => {
                 // Skip files we can't read as UTF-8; they don't belong in a
                 // Markdown text index. We deliberately do not fail the entire
-                // sync over a single unreadable document — but we count it so a
-                // silently-excluded file is visible in the sync report instead
-                // of vanishing from search with no signal.
+                // sync over a single unreadable document — but we count it so
+                // a silently-excluded file is visible in the sync report
+                // instead of vanishing from search with no signal.
                 report.skipped += 1;
                 continue;
             }
         };
+        #[cfg(feature = "semantic")]
+        let vector = embed_text(&content).ok();
+        pending.push(PendingDocument {
+            path: document.absolute_path.clone(),
+            modified_at: document.modified_at_millis.to_string(),
+            size: document.size_bytes.to_string(),
+            content,
+            was_existing: existing_rows.contains_key(&document.absolute_path),
+            #[cfg(feature = "semantic")]
+            vector,
+        });
+    }
+
+    // Phase 2 — short SQL-only write transaction.
+    let transaction = connection
+        .transaction()
+        .map_err(|database_error| format!("begin transaction: {database_error}"))?;
+    for document in &pending {
         transaction
             .execute(
                 "DELETE FROM documents WHERE path = ?1",
-                params![&document.absolute_path],
+                params![&document.path],
             )
             .map_err(|database_error| format!("delete stale row: {database_error}"))?;
         transaction
             .execute(
                 "INSERT INTO documents(path, modified_at, size, content) VALUES (?1, ?2, ?3, ?4)",
                 params![
-                    &document.absolute_path,
-                    document.modified_at_millis.to_string(),
-                    document.size_bytes.to_string(),
-                    content,
+                    &document.path,
+                    &document.modified_at,
+                    &document.size,
+                    &document.content,
                 ],
             )
             .map_err(|database_error| format!("insert document: {database_error}"))?;
         #[cfg(feature = "semantic")]
         {
-            // Best-effort: if embedding fails, skip this document's vector
-            // without failing the whole sync. A missing vec_items row is
-            // preferable to aborting a reindex over a single embed error.
-            if let Ok(vector) = embed_text(&content) {
-                let _ = upsert_doc_vector(&transaction, &document.absolute_path, &vector);
+            // Best-effort: a missing vec_items row is preferable to aborting a
+            // reindex over a single vector write error.
+            if let Some(vector) = &document.vector {
+                let _ = upsert_doc_vector(&transaction, &document.path, vector);
             }
         }
-        if existing_rows.contains_key(&document.absolute_path) {
+        if document.was_existing {
             report.updated += 1;
         } else {
             report.added += 1;
