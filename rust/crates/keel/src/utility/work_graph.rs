@@ -364,9 +364,10 @@ fn run_add(
         return 1;
     }
     if flags.bool_value("json") {
-        let _ = writeln!(
+        return emit_json(
             standard_output,
-            "{{\"id\":\"{id}\",\"status\":\"{status}\"}}"
+            standard_error,
+            &serde_json::json!({"id": id, "status": status, "title": title}),
         );
     } else {
         let _ = writeln!(
@@ -438,9 +439,10 @@ fn run_discovered(
         return 1;
     }
     if flags.bool_value("json") {
-        let _ = writeln!(
+        return emit_json(
             standard_output,
-            "{{\"id\":\"{id}\",\"discovered_from\":\"{from}\"}}"
+            standard_error,
+            &serde_json::json!({"id": id, "discovered_from": from, "title": title}),
         );
     } else {
         let _ = writeln!(
@@ -522,6 +524,13 @@ fn run_dep(
         let _ = writeln!(standard_error, "work dep: {error}");
         return 1;
     }
+    if flags.bool_value("json") {
+        return emit_json(
+            standard_output,
+            standard_error,
+            &serde_json::json!({"linked": true, "id": id, "depends_on": on}),
+        );
+    }
     let _ = writeln!(standard_output, "work dep: {id} now depends on {on}");
     0
 }
@@ -565,6 +574,13 @@ fn run_close(
     if let Err(error) = store.write_record(&id, &record) {
         let _ = writeln!(standard_error, "work close: {error}");
         return 1;
+    }
+    if flags.bool_value("json") {
+        return emit_json(
+            standard_output,
+            standard_error,
+            &serde_json::json!({"closed": true, "id": id, "status": STATE_DONE}),
+        );
     }
     let _ = writeln!(standard_output, "work close: {id} done");
     0
@@ -643,6 +659,22 @@ fn run_ready(
         .map(|(id, record)| (id.as_str(), field(record, "title").unwrap_or("")))
         .collect();
     let ready = compute_ready(&items);
+    if flags.bool_value("json") {
+        let entries: Vec<serde_json::Value> = ready
+            .iter()
+            .map(|id| {
+                serde_json::json!({
+                    "id": id,
+                    "title": titles.get(id.as_str()).copied().unwrap_or(""),
+                })
+            })
+            .collect();
+        return emit_json(
+            standard_output,
+            standard_error,
+            &serde_json::json!({"total": entries.len(), "ready": entries}),
+        );
+    }
     if ready.is_empty() {
         let _ = writeln!(standard_output, "work ready: nothing ready");
         return 0;
@@ -685,6 +717,22 @@ fn run_blocked(
         }
     };
     let blocked = compute_blocked(&items);
+    if flags.bool_value("json") {
+        let entries: Vec<serde_json::Value> = blocked
+            .iter()
+            .map(|(id, open_blockers)| {
+                serde_json::json!({
+                    "id": id,
+                    "waiting_on": open_blockers,
+                })
+            })
+            .collect();
+        return emit_json(
+            standard_output,
+            standard_error,
+            &serde_json::json!({"total": entries.len(), "blocked": entries}),
+        );
+    }
     if blocked.is_empty() {
         let _ = writeln!(standard_output, "work blocked: nothing blocked");
         return 0;
@@ -731,6 +779,20 @@ fn run_show(
     };
     match store.read_record(&id) {
         Ok(Some(record)) => {
+            if flags.bool_value("json") {
+                return emit_json(
+                    standard_output,
+                    standard_error,
+                    &serde_json::json!({
+                        "id": id,
+                        "title": field(&record, "title").unwrap_or(""),
+                        "status": field(&record, "status").unwrap_or("open"),
+                        "priority": field(&record, "priority").unwrap_or("2"),
+                        "depends_on": blockers_of(&record),
+                        "discovered_from": field(&record, "discovered_from").unwrap_or(""),
+                    }),
+                );
+            }
             let _ = writeln!(standard_output, "id: {id}");
             let _ = writeln!(
                 standard_output,
@@ -779,6 +841,23 @@ fn set_field(record: &mut Record, key: &str, value: String) {
         existing.1 = value;
     } else {
         record.push((key.to_string(), value));
+    }
+}
+
+fn emit_json(
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+    payload: &serde_json::Value,
+) -> u8 {
+    match serde_json::to_string_pretty(payload) {
+        Ok(text) => {
+            let _ = writeln!(standard_output, "{text}");
+            0
+        }
+        Err(error) => {
+            let _ = writeln!(standard_error, "work: render json: {error}");
+            1
+        }
     }
 }
 

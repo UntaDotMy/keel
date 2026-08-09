@@ -286,6 +286,11 @@ fn run_impact(
     let mut flags = FlagSet::new("code-graph impact");
     flags.string_flag("workspace-root", "");
     flags.string_flag("changed", "");
+    // Accepted for path-parity with `build` (operator help and the MCP schema
+    // advertise `--output` on `code-graph`); a stored artifact is byte-identical
+    // to a fresh build for the same tree, so the closure is unchanged.
+    flags.string_flag("output", "");
+    flags.string_flag("claude-home", "");
     flags.bool_flag("json", false);
     if let Err(error) = flags.parse(arguments) {
         let _ = writeln!(standard_error, "{}", error.message);

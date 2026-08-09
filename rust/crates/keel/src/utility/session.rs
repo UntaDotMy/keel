@@ -46,13 +46,7 @@ pub fn run_session_command(
             Ok(value) => value,
             Err(_) => continue,
         };
-        let timestamp = event
-            .get("timestamp")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0);
-        if !all_sessions && timestamp < since_timestamp {
-            continue;
-        }
+        let timestamp = event_timestamp(&event);
         let tokens_before = event
             .get("tokens_before")
             .or_else(|| event.get("tokensBefore"))
@@ -87,6 +81,22 @@ pub fn run_session_command(
         });
     }
 
+    // why: event_log.rs serializes some events with missing or zero
+    // timestamps; the log's own mtime is the most truthful real clock left,
+    // so a real session never renders the fake 00:00 window.
+    let file_mtime_secs = fs::metadata(&path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs());
+    for event in &mut events {
+        if event.timestamp == 0 {
+            event.timestamp = file_mtime_secs.unwrap_or(0);
+        }
+    }
+    if !all_sessions {
+        events.retain(|event| event.timestamp >= since_timestamp);
+    }
     events.sort_by_key(|event| event.timestamp);
 
     let session_gap_secs: u64 = 30 * 60;
@@ -245,8 +255,7 @@ pub fn run_session_command(
         )
     );
     for session in &sessions {
-        let start_time = format_timestamp_time(session.start_timestamp);
-        let end_time = format_timestamp_time(session.last_timestamp);
+        let label = format_session_label(session.start_timestamp, session.last_timestamp);
         let savings = if session.tokens_before == 0 {
             0.0
         } else {
@@ -255,7 +264,7 @@ pub fn run_session_command(
         let _ = writeln!(
             standard_output,
             " {:<11} {:>8} {:>8} {:>8} {:>8} {:>6.1}% {:>9}",
-            format!("{}-{}", start_time, end_time),
+            label,
             session.commands,
             format_count(session.tokens_saved),
             format_count(session.tokens_before),
@@ -302,11 +311,18 @@ fn compute_since_timestamp(since_value: &str) -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or(0);
+    let days_ago = |count: u64| now.saturating_sub(count * 24 * 3600);
     match since_value {
-        "today" => now.saturating_sub(24 * 3600),
-        "week" => now.saturating_sub(7 * 24 * 3600),
-        "month" => now.saturating_sub(30 * 24 * 3600),
-        _ => 0,
+        "today" => days_ago(1),
+        "week" => days_ago(7),
+        "month" => days_ago(30),
+        // Help text advertises `Nd` windows (e.g. `--since 7d`); without this
+        // arm they silently fell through to cutoff 0 (no filtering at all).
+        other => other
+            .strip_suffix('d')
+            .and_then(|digits| digits.parse::<u64>().ok())
+            .map(days_ago)
+            .unwrap_or(0),
     }
 }
 
@@ -315,6 +331,34 @@ fn format_timestamp_time(timestamp: u64) -> String {
     let hours = (seconds / 3600) % 24;
     let minutes = (seconds / 60) % 60;
     format!("{:02}:{:02}", hours, minutes)
+}
+
+/// Render a session's time label. A zero timestamp means no trustworthy
+/// event time was available; surface an explicit marker instead of 00:00.
+fn format_session_label(start_timestamp: u64, last_timestamp: u64) -> String {
+    match (start_timestamp, last_timestamp) {
+        (0, 0) => "(no time)".to_string(),
+        (0, _) => format!("?-{}", format_timestamp_time(last_timestamp)),
+        (_, 0) => format!("{}-?", format_timestamp_time(start_timestamp)),
+        _ => format!(
+            "{}-{}",
+            format_timestamp_time(start_timestamp),
+            format_timestamp_time(last_timestamp)
+        ),
+    }
+}
+
+/// Read `timestamp` whether serialized as a JSON number or string.
+/// event_log.rs writes it as a string; older/test events use a number.
+fn event_timestamp(event: &serde_json::Value) -> u64 {
+    event
+        .get("timestamp")
+        .and_then(|value| {
+            value
+                .as_u64()
+                .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
+        })
+        .unwrap_or(0)
 }
 
 fn format_count(count: u64) -> String {
@@ -438,5 +482,48 @@ mod tests {
         assert_eq!(format_count(999), "999");
         assert_eq!(format_count(1000), "1.0K");
         assert_eq!(format_count(1_000_000), "1.0M");
+    }
+
+    #[test]
+    fn event_timestamp_reads_string_timestamps() {
+        // event_log.rs serializes `timestamp` as a string; session parsing
+        // must coerce it or every real event reads as 0 (00:00-00:00 labels).
+        let event: serde_json::Value =
+            serde_json::from_str(r#"{"timestamp":"1700000000"}"#).unwrap();
+        assert_eq!(event_timestamp(&event), 1_700_000_000);
+    }
+
+    #[test]
+    fn event_timestamp_reads_numeric_timestamps() {
+        let event: serde_json::Value = serde_json::from_str(r#"{"timestamp":1700000000}"#).unwrap();
+        assert_eq!(event_timestamp(&event), 1_700_000_000);
+    }
+
+    #[test]
+    fn event_timestamp_missing_is_zero() {
+        let event: serde_json::Value = serde_json::from_str(r#"{"command":"x"}"#).unwrap();
+        assert_eq!(event_timestamp(&event), 0);
+    }
+
+    #[test]
+    fn compute_since_timestamp_nd_window() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let result = compute_since_timestamp("7d");
+        assert!(result <= now);
+        assert!(result >= now.saturating_sub(7 * 24 * 3600 + 1));
+        let result = compute_since_timestamp("30d");
+        assert!(result <= now);
+        assert!(result >= now.saturating_sub(30 * 24 * 3600 + 1));
+    }
+
+    #[test]
+    fn format_session_label_marks_missing_times() {
+        assert_eq!(format_session_label(0, 0), "(no time)");
+        assert_eq!(format_session_label(0, 3661), "?-01:01");
+        assert_eq!(format_session_label(3661, 0), "01:01-?");
+        assert_eq!(format_session_label(3661, 7322), "01:01-02:02");
     }
 }

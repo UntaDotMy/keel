@@ -310,12 +310,14 @@ pub(super) fn max_inflight() -> usize {
         .unwrap_or(DEFAULT_MAX_INFLIGHT)
 }
 
-/// Default idle self-reap budget for stdio `mcp serve`. A Grok/Claude session
-/// that drops without closing stdin leaves the server blocked on `recv()`
-/// forever, holding the recall SQLite WAL and disk, which is the root cause of
-/// the intermittent Grok tool timeouts. After this long with no inbound frame
-/// the server exits 0 so the orphan reaps itself. Override with
-/// `KEEL_MCP_IDLE_TIMEOUT_SECS` (min 30, max 86400; 0 disables).
+/// Default idle self-reap budget for stdio `mcp serve`. A harness session that
+/// drops without closing stdin leaves the server blocked on `recv()` forever,
+/// holding the recall SQLite WAL and disk, which is the root cause of the
+/// intermittent host tool timeouts. Idle alone is NOT an orphan, though: hosts
+/// like Codex keep one server per session and go quiet between tool calls, so
+/// the loop only exits after this budget when the SPAWNING harness process is
+/// dead; with a live parent it resets the clock and keeps serving. Override
+/// with `KEEL_MCP_IDLE_TIMEOUT_SECS` (min 30, max 86400; 0 disables).
 const DEFAULT_MCP_IDLE_TIMEOUT_SECS: u64 = 300;
 
 /// Resolve the idle self-reap budget. `0` disables (legacy never-exit behavior,
@@ -330,6 +332,103 @@ pub(super) fn idle_timeout() -> Option<std::time::Duration> {
         return None;
     }
     Some(std::time::Duration::from_secs(secs.clamp(30, 86_400)))
+}
+
+/// Snapshot of the process that spawned this `mcp serve`, used to distinguish
+/// an abandoned session (parent dead → reap) from a quiet-but-live one (parent
+/// alive → keep serving). Captured once at startup; `alive()` re-probes the OS.
+/// `None` (probe failed) is treated as alive: killing a live session's
+/// transport is far worse than the rare unreaped orphan, which `doctor --fix`
+/// still sweeps.
+struct ParentWatch {
+    ppid: u32,
+}
+
+impl ParentWatch {
+    #[cfg(windows)]
+    fn capture() -> Option<Self> {
+        let own = std::process::id();
+        let output = std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                &format!(
+                    "(Get-CimInstance Win32_Process -Filter \"ProcessId={own}\").ParentProcessId"
+                ),
+            ])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        text.trim().parse::<u32>().ok().map(|ppid| Self { ppid })
+    }
+
+    #[cfg(unix)]
+    fn capture() -> Option<Self> {
+        extern "C" {
+            fn getppid() -> i32;
+        }
+        let ppid = unsafe { getppid() };
+        if ppid <= 0 {
+            return None;
+        }
+        Some(Self { ppid: ppid as u32 })
+    }
+
+    #[cfg(windows)]
+    fn alive(&self) -> bool {
+        let ppid = self.ppid;
+        let output = std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                &format!("if (Get-Process -Id {ppid} -ErrorAction SilentlyContinue) {{ 1 }} else {{ 0 }}"),
+            ])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output();
+        match output {
+            Ok(output) if output.status.success() => {
+                String::from_utf8_lossy(&output.stdout).trim() == "1"
+            }
+            // Probe failure is conservative: assume alive, keep serving.
+            _ => true,
+        }
+    }
+
+    #[cfg(unix)]
+    fn alive(&self) -> bool {
+        extern "C" {
+            fn kill(pid: i32, sig: i32) -> i32;
+        }
+        // sig 0 = existence/permission check only.
+        unsafe { kill(self.ppid as i32, 0) == 0 }
+    }
+}
+
+/// Idle expiry only reaps when the harness that spawned this server is gone.
+/// A live parent means the session is merely between tool calls (Codex keeps
+/// one stdio server per session for hours), so the transport must stay up.
+fn idle_reap_parent_gone(
+    parent: &Option<ParentWatch>,
+    standard_error: &mut dyn Write,
+    budget: std::time::Duration,
+) -> bool {
+    let gone = !parent.as_ref().map(ParentWatch::alive).unwrap_or(true);
+    if gone {
+        let _ = writeln!(
+            standard_error,
+            "[keel mcp] idle for {}s and the spawning process is gone; self-reaping orphan (set KEEL_MCP_IDLE_TIMEOUT_SECS=0 to disable)",
+            budget.as_secs()
+        );
+    }
+    gone
 }
 
 fn read_frames_into(input: &mut dyn Read, event_tx: mpsc::Sender<ServeEvent>) {
@@ -384,6 +483,7 @@ fn run_serve_event_loop(
     let mut reader_done = false;
     let mut exit_code: u8 = 0;
     let idle_budget = idle_timeout();
+    let parent = ParentWatch::capture();
     let mut last_frame_at = std::time::Instant::now();
 
     loop {
@@ -393,12 +493,11 @@ fn run_serve_event_loop(
             Some(budget) => {
                 let elapsed = last_frame_at.elapsed();
                 if elapsed >= budget && in_flight == 0 && pending.is_empty() {
-                    let _ = writeln!(
-                        standard_error,
-                        "[keel mcp] idle for {}s with no inbound frame; self-reaping orphan (set KEEL_MCP_IDLE_TIMEOUT_SECS=0 to disable)",
-                        budget.as_secs()
-                    );
-                    break;
+                    if idle_reap_parent_gone(&parent, standard_error, budget) {
+                        break;
+                    }
+                    // Parent alive: the session is merely quiet — keep serving.
+                    last_frame_at = std::time::Instant::now();
                 }
                 let remaining = budget
                     .saturating_sub(elapsed)
@@ -406,13 +505,14 @@ fn run_serve_event_loop(
                 match event_rx.recv_timeout(remaining) {
                     Ok(event) => event,
                     Err(mpsc::RecvTimeoutError::Timeout) => {
-                        if in_flight == 0 && pending.is_empty() {
-                            let _ = writeln!(
-                                standard_error,
-                                "[keel mcp] idle for {}s with no inbound frame; self-reaping orphan (set KEEL_MCP_IDLE_TIMEOUT_SECS=0 to disable)",
-                                budget.as_secs()
-                            );
+                        if in_flight == 0
+                            && pending.is_empty()
+                            && idle_reap_parent_gone(&parent, standard_error, budget)
+                        {
                             break;
+                        }
+                        if in_flight == 0 && pending.is_empty() {
+                            last_frame_at = std::time::Instant::now();
                         }
                         continue;
                     }
@@ -1414,47 +1514,41 @@ mod tests {
     #[test]
     fn serve_stdio_concurrent_in_process_delays_share_wall_clock() {
         // why: prove workers overlap without OS hang children (user ban 2026-07-15).
-        // Two 80ms in-process delays + one ping. Serial ≈ 160ms+; concurrent ≈ 80ms.
-        let delay = |id: u64| {
+        // Load-proof by COMPLETION ORDER, not wall clock (fixed ceilings flake on
+        // saturated CI/dev boxes): a 300ms delay, an 80ms delay, and a ping.
+        // Serial FIFO execution renders d1, d2, ping; concurrent workers render
+        // ping, d2, d1. Asserting that order proves overlap regardless of how
+        // slow the machine is.
+        let delay = |id: u64, ms: u64| {
             json!({
                 "jsonrpc": "2.0",
                 "id": id,
                 "method": "keel/test_delay_ms",
-                "params": { "ms": 80 }
+                "params": { "ms": ms }
             })
         };
         let ping = json!({"jsonrpc": "2.0", "id": 99, "method": "ping"});
         let mut input_bytes = Vec::new();
-        for value in [delay(1), delay(2), ping] {
+        for value in [delay(1, 300), delay(2, 80), ping] {
             input_bytes.extend(serde_json::to_vec(&value).expect("serialize"));
             input_bytes.push(b'\n');
         }
         let mut input: &[u8] = &input_bytes;
         let mut output: Vec<u8> = Vec::new();
         let mut error_output: Vec<u8> = Vec::new();
-        let started = std::time::Instant::now();
         let exit = serve_stdio(&mut input, &mut output, &mut error_output);
-        let elapsed = started.elapsed();
         assert_eq!(exit, 0);
         let rendered = String::from_utf8_lossy(&output);
         assert!(rendered.contains("\"id\":1"), "{rendered}");
         assert!(rendered.contains("\"id\":2"), "{rendered}");
         assert!(rendered.contains("\"id\":99"), "{rendered}");
-        // Ping must not wait behind both delays.
         let ping_pos = rendered.find("\"id\":99").expect("ping");
         let d1 = rendered.find("\"id\":1").expect("d1");
         let d2 = rendered.find("\"id\":2").expect("d2");
         assert!(
-            ping_pos < d1 && ping_pos < d2,
-            "ping should complete first; {rendered}"
-        );
-        // Concurrent wall ≈ max(80,80) + scheduler/spawn noise. Serial pure
-        // sleep alone is ≥160ms before overhead. CI macOS shared runners have
-        // high noise (~220ms observed); keep a loose upper bound that still
-        // fails if work is fully serialized with large delays.
-        assert!(
-            elapsed < std::time::Duration::from_millis(400),
-            "expected concurrent completion under 400ms, took {elapsed:?} (serial sleep alone ≥160ms)"
+            ping_pos < d2 && d2 < d1,
+            "fast jobs must overtake the slow one (ping, then 80ms, then 300ms); \
+             serial FIFO would render d1 first: {rendered}"
         );
     }
 

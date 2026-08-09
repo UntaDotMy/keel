@@ -2525,21 +2525,30 @@ fn tool_review(arguments: &Value) -> Result<String, String> {
         .get("action")
         .and_then(Value::as_str)
         .ok_or_else(|| "review: missing action (pre-commit|pre-pr|gates)".to_string())?;
-    let mut owned: Vec<String> = Vec::new();
+    let all_args = review_args(action, arguments);
+    run_keel_subcommand("review", &all_args)
+}
+
+/// Pure arg-builder for `tool_review`, extracted so the `gates → gates check`
+/// rewrite is unit-testable without shelling out to the real binary. The CLI
+/// surface is `keel review gates check [flags]` (see `run_review_gates_command`);
+/// without the injected `check` the child exits 1 with "Unknown review gates
+/// command", which surfaced to hosts as `isError` on a valid read-only call.
+fn review_args(action: &str, arguments: &Value) -> Vec<String> {
+    let mut all_args: Vec<String> = vec![action.to_string()];
+    if action == "gates" {
+        all_args.push("check".to_string());
+    }
     if let Some(r) = optional_string_arg(arguments, "base_ref") {
-        owned.push(format!("--base-ref={r}"));
+        all_args.push(format!("--base-ref={r}"));
     }
     if let Some(f) = optional_string_arg(arguments, "format") {
-        owned.push(format!("--format={f}"));
+        all_args.push(format!("--format={f}"));
     }
     if let Some(root) = optional_string_arg(arguments, "repo_root") {
-        owned.push(format!("--repo-root={root}"));
+        all_args.push(format!("--repo-root={root}"));
     }
-    let mut all_args: Vec<&str> = vec![action];
-    for s in &owned {
-        all_args.push(s);
-    }
-    run_keel_subcommand("review", &all_args)
+    all_args
 }
 
 fn tool_workflow(arguments: &Value) -> Result<String, String> {
@@ -3702,6 +3711,26 @@ mod tests {
         assert_eq!(result["isError"], json!(true));
         let text = result["content"][0]["text"].as_str().unwrap_or("");
         assert!(text.contains("missing action"), "text: {text}");
+    }
+
+    #[test]
+    fn review_gates_inserts_check_subcommand() {
+        // CLI surface is `keel review gates check [flags]`; the MCP `gates`
+        // action must inject `check`, else the child exits 1 with
+        // "Unknown review gates command" and hosts see isError on a valid call.
+        let args = review_args("gates", &json!({ "format": "json", "repo_root": "/tmp/x" }));
+        assert_eq!(
+            args,
+            vec!["gates", "check", "--format=json", "--repo-root=/tmp/x"]
+        );
+    }
+
+    #[test]
+    fn review_surface_actions_skip_check_subcommand() {
+        for action in ["pre-commit", "pre-pr"] {
+            let args = review_args(action, &json!({ "base_ref": "origin/main" }));
+            assert_eq!(args, vec![action, "--base-ref=origin/main"]);
+        }
     }
 
     #[test]

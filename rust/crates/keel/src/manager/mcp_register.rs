@@ -113,15 +113,27 @@ pub enum McpRegistration {
     AlreadyCurrent,
 }
 
-/// Resolve `~/.claude.json` from the resolved harness home. harness home is
-/// `<user-home>/.claude`, so its parent is the user home where `.claude.json`
-/// lives. Falls back to joining `.claude.json` as a sibling of `claude_home`
-/// when the parent cannot be determined (degenerate paths only).
+/// Resolve `.claude.json` from the resolved harness home, hermetically.
+///
+/// Standard homes follow the harness layout: for a `.claude` engagement home
+/// the config lives as its sibling (`~/.claude.json` beside `~/.claude`), and
+/// for a standard `.keel` root the engagement sibling's parent is the user
+/// home. Any OTHER home name is a throwaway/override root: placing the config
+/// in its parent could land OUTSIDE the requested home (e.g. a temp dir
+/// directly under the real user home would mutate the real `~/.claude.json`),
+/// so non-standard homes keep the config INSIDE themselves.
 pub fn mcp_config_path(claude_home: &Path) -> PathBuf {
-    match claude_home.parent() {
-        Some(home) => home.join(".claude.json"),
-        None => claude_home.with_file_name(".claude.json"),
+    let name = claude_home
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    if name == ".claude" || name == crate::runtime::KEEL_HOME_DIRECTORY_NAME {
+        match claude_home.parent() {
+            Some(home) => return home.join(".claude.json"),
+            None => return claude_home.with_file_name(".claude.json"),
+        }
     }
+    claude_home.join(".claude.json")
 }
 
 /// Build the stdio MCP server entry pointing at the installed binary.
