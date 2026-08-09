@@ -38,6 +38,15 @@ pub fn run_team_command(
         render_help(standard_output);
         return if action.is_empty() { 1 } else { 0 };
     }
+    // Subcommand-level --help renders the full help instead of a parse error.
+    if arguments
+        .iter()
+        .skip(1)
+        .any(|arg| arg == "--help" || arg == "-h")
+    {
+        render_help(standard_output);
+        return 0;
+    }
     match action {
         "spawn" => run_spawn(&arguments[1..], standard_output, standard_error),
         "status" | "list" => run_status(&arguments[1..], standard_output, standard_error),
@@ -155,35 +164,32 @@ fn validate_name(name: &str, label: &str, standard_error: &mut dyn Write) -> Opt
 
 /// Check whether a tmux session exists by name.
 fn tmux_session_exists(session_name: &str) -> bool {
-    let result = run_command(
-        "tmux",
-        &[
-            "has-session".to_string(),
-            "-t".to_string(),
-            session_name.to_string(),
-        ],
-        None,
-    );
-    matches!(result, Ok(ref r) if r.code == 0)
+    let result = match run_tmux(&[
+        "has-session".to_string(),
+        "-t".to_string(),
+        session_name.to_string(),
+    ]) {
+        Ok(result) => result,
+        Err(_) => return false,
+    };
+    result.code == 0
 }
 
 /// Run `tmux list-sessions` and return the raw output.
 fn tmux_list_sessions() -> Result<String, String> {
-    match run_command("tmux", &["list-sessions".to_string()], None) {
+    match run_tmux(&["list-sessions".to_string()]) {
         Ok(result) if result.code == 0 => Ok(String::from_utf8_lossy(&result.stdout).to_string()),
         Ok(result) => {
             let stderr = String::from_utf8_lossy(&result.stderr).trim().to_string();
-            if stderr.contains("no server running") || result.stdout.is_empty() {
-                Ok(String::new())
+            Err(if stderr.is_empty() {
+                format!("tmux list-sessions exited {}", result.code)
             } else {
-                Err(stderr)
-            }
+                stderr
+            })
         }
         Err(error) => Err(error),
     }
 }
-
-/// Get the list of active tmux session names matching our prefix.
 fn list_active_team_sessions() -> Vec<String> {
     let mut names = Vec::new();
     let Ok(output) = tmux_list_sessions() else {
@@ -210,6 +216,27 @@ fn worker_name_from_session(session_name: &str) -> String {
         .to_string()
 }
 
+/// Run a tmux subcommand, falling back to WSL on Windows when tmux is not on
+/// the native PATH (tmux ships with WSL distros, not Windows). The session
+/// then lives inside the WSL tmux server, so `claude` must be available in the
+/// distro for spawned workers to run.
+fn run_tmux(tmux_args: &[String]) -> Result<crate::runtime::ProcessResult, String> {
+    match run_command("tmux", tmux_args, None) {
+        Ok(result) => Ok(result),
+        Err(native_error) if cfg!(windows) => {
+            let mut wsl_args = vec!["--".to_string(), "tmux".to_string()];
+            wsl_args.extend(tmux_args.iter().cloned());
+            run_command("wsl", &wsl_args, None).map_err(|wsl_error| {
+                format!(
+                    "tmux unavailable natively ({native_error}) and via WSL ({wsl_error}); \
+                     install tmux (or a WSL distro with tmux) to use team"
+                )
+            })
+        }
+        Err(error) => Err(error),
+    }
+}
+
 /// Spawn: create a named tmux pane running `claude` with the given prompt.
 fn run_spawn(
     arguments: &[String],
@@ -223,7 +250,8 @@ fn run_spawn(
     flags.string_flag("workspace-root", "");
     flags.bool_flag("json", false);
     if let Err(parse_error) = flags.parse(arguments) {
-        let _ = writeln!(standard_error, "team spawn: {}", parse_error.message);
+        // FlagSet messages already carry the "team spawn" prefix.
+        let _ = writeln!(standard_error, "{}", parse_error.message);
         return 1;
     }
 
@@ -280,7 +308,7 @@ fn run_spawn(
         session_name.clone(),
         format!("claude --prompt {prompt:?}"),
     ];
-    match run_command("tmux", &tmux_args, None) {
+    match run_tmux(&tmux_args) {
         Ok(result) if result.code == 0 => {}
         Ok(result) => {
             let stderr = String::from_utf8_lossy(&result.stderr).trim().to_string();
@@ -306,11 +334,7 @@ fn run_spawn(
     if let Err(error) = store.write_record(&name, &record) {
         let _ = writeln!(standard_error, "team spawn: {error}");
         // Attempt to clean up the tmux session we just created.
-        let _ = run_command(
-            "tmux",
-            &["kill-session".to_string(), "-t".to_string(), session_name],
-            None,
-        );
+        let _ = run_tmux(&["kill-session".to_string(), "-t".to_string(), session_name]);
         return 1;
     }
 
@@ -491,15 +515,11 @@ fn run_kill(
 
     // Kill the tmux session if it exists.
     let tmux_killed = if tmux_session_exists(&session_name) {
-        match run_command(
-            "tmux",
-            &[
-                "kill-session".to_string(),
-                "-t".to_string(),
-                session_name.clone(),
-            ],
-            None,
-        ) {
+        match run_tmux(&[
+            "kill-session".to_string(),
+            "-t".to_string(),
+            session_name.to_string(),
+        ]) {
             Ok(result) => result.code == 0,
             Err(_) => false,
         }

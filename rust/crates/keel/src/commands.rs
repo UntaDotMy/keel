@@ -274,6 +274,10 @@ impl Application {
                     Value::String(FOUNDATION_PHASE_NAME.into()),
                 ),
                 ("target".into(), target_value(&target)),
+                (
+                    "featureSet".into(),
+                    Value::String(Self::build_feature_set().into()),
+                ),
             ]);
             return render_json(standard_output, standard_error, &payload);
         }
@@ -283,7 +287,24 @@ impl Application {
             "native foundation: {FOUNDATION_PHASE_NAME}"
         );
         let _ = writeln!(standard_output, "target: {}", target.directory_name());
+        let _ = writeln!(
+            standard_output,
+            "feature set: {}",
+            Self::build_feature_set()
+        );
         0
+    }
+
+    /// Compile-time feature set of THIS binary: `semantic` when built with the
+    /// `semantic` feature (vector recall via the embedded BERT model), else
+    /// `standard`. Surfaced in `version` so operators can tell which binary is
+    /// installed — the silent semantic<->standard swap was a real support trap.
+    fn build_feature_set() -> &'static str {
+        if cfg!(feature = "semantic") {
+            "semantic"
+        } else {
+            "standard"
+        }
     }
 
     fn run_platform_command(

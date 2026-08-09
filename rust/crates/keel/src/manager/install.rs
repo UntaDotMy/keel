@@ -3834,6 +3834,13 @@ pub fn run_update_command(
     ) {
         Ok(summary) => {
             write_install_summary(&summary, standard_output);
+            // `update` builds with plain `cargo build --release` (no semantic
+            // feature), so the published binary is always the standard set.
+            // Say so — a silent semantic->standard swap was a support trap.
+            let _ = writeln!(
+                standard_output,
+                "Feature set: standard (update builds without --features semantic; build manually with it for vector recall)"
+            );
             0
         }
         Err(error) => {

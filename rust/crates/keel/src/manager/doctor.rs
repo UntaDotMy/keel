@@ -215,6 +215,17 @@ pub fn run_doctor_command(
                 .join(", ")
         );
     }
+    // Many concurrent stdio servers means many processes sharing one recall
+    // DB; the shared Streamable HTTP daemon is the documented scale path.
+    let live_servers = running_mcp_serve_pids_with_ppid().len();
+    if live_servers > 1 {
+        let _ = writeln!(
+            standard_output,
+            "[info] {live_servers} keel mcp serve processes running (one per host window). \
+             For many windows, run one shared `keel mcp serve-http` daemon and point hosts at \
+             http://127.0.0.1:3920/mcp instead (see README 'MCP across many windows')."
+        );
+    }
     let _ = writeln!(
         standard_output,
         "Run `keel validate --profile smoke` for local proof."

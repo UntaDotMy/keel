@@ -135,15 +135,5 @@
       "min": 1,
       "max": 90
     }
-  },
-  "experimental": {
-    "monitors": [
-      {
-        "name": "build-watcher",
-        "command": "cargo check --message-format=short",
-        "description": "Watches for Rust compilation errors after edits",
-        "when": "on-skill-invoke:keel:review"
-      }
-    ]
   }
 }
