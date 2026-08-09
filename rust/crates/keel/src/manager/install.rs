@@ -18,10 +18,11 @@ use crate::args::FlagSet;
 use crate::runtime::{
     agent_profiles_directory, agents_directory, commands_directory, config_path,
     discover_repository_layout, display_path, executable_file_name, git_short_head,
-    installed_executable_path, is_standard_keel_home, legacy_claude_executable_path,
-    read_text_if_exists, remove_path_if_exists, repository_layout_is_complete, resolve_claude_home,
-    resolve_repository_root, run_command, skills_directory, state_directory, write_lines,
-    write_text, RepositoryLayout, SKILL_SYNC_DIRECTORIES,
+    installed_executable_path, is_default_keel_home, is_standard_keel_home,
+    legacy_claude_executable_path, read_text_if_exists, remove_path_if_exists,
+    repository_layout_is_complete, resolve_claude_home, resolve_repository_root, run_command,
+    skills_directory, state_directory, write_lines, write_text, RepositoryLayout,
+    SKILL_SYNC_DIRECTORIES,
 };
 
 use super::agent_config::{parse_agent_config, render_agent_toml, unix_timestamp};
@@ -307,9 +308,15 @@ pub fn install_from_paths(
     }
     write_install_metadata(build_version, repository_root, claude_home)?;
     write_inventories(&layout, claude_home, &tracker)?;
-    // Put the keel home on PATH: best-effort, idempotent, guarded on the
-    // standard neutral home so test fixtures never touch the real PATH.
-    let path_wiring = if published_executable && is_standard_keel_home(claude_home) {
+    // Put the keel home on PATH: best-effort, idempotent, and ONLY for the
+    // user's default `~/.keel`. The previous guard used `is_standard_keel_home`
+    // (basename-only), so test fixtures like `<tmp>/keel-home-split-<pid>/.keel`
+    // passed it and every test install appended a dead temp dir to the real
+    // user PATH. `is_default_keel_home` compares against the resolved user home,
+    // so fixtures never touch PATH. When we DO install to the default home, also
+    // sweep any stale `keel-home-split-*\.keel` entries a buggy older build left.
+    let path_wiring = if published_executable && is_default_keel_home(claude_home) {
+        purge_stale_temp_keel_path_entries();
         Some(ensure_keel_home_on_path(claude_home))
     } else {
         None
@@ -1556,11 +1563,116 @@ fn path_already_contains(keel_home: &Path) -> bool {
     false
 }
 
+/// Remove dead `keel-home-split-*\.keel` entries that a buggy older build
+/// appended to the persistent user PATH during test installs. Only touches
+/// entries that (a) live under a directory whose name starts with
+/// `keel-home-split-` and (b) no longer exist on disk, so a legitimate live
+/// install is never removed. Best-effort: failures are swallowed because this
+/// is cleanup, not the install itself.
 #[cfg(windows)]
-fn windows_append_user_path(keel_home: &Path) -> Result<(), String> {
-    let dir = display_path(keel_home);
-    // Read the current user PATH. `reg query` prints
-    // `    Path    REG_SZ    <value>` (or REG_EXPAND_SZ); parse leniently.
+fn purge_stale_temp_keel_path_entries() {
+    let Ok((current, _expand)) = windows_read_user_path() else {
+        return;
+    };
+    let kept: Vec<&str> = current
+        .split(';')
+        .filter(|entry| !is_stale_temp_keel_entry(entry.trim()))
+        .collect();
+    let new_value = kept.join(";");
+    if new_value == current {
+        return;
+    }
+    let value_type = if new_value.contains('%') {
+        "REG_EXPAND_SZ"
+    } else {
+        "REG_SZ"
+    };
+    let _ = std::process::Command::new("reg")
+        .args([
+            "add",
+            "HKCU\\Environment",
+            "/v",
+            "Path",
+            "/t",
+            value_type,
+            "/d",
+            &new_value,
+            "/f",
+        ])
+        .status();
+}
+
+#[cfg(not(windows))]
+fn purge_stale_temp_keel_path_entries() {
+    // Unix fixtures appended a marker-guarded export line to rc files. Sweep
+    // the marker + following export when the referenced dir is a dead temp.
+    let Ok(user_home) = crate::runtime::resolve_user_home() else {
+        return;
+    };
+    for rc in [
+        user_home.join(".bashrc"),
+        user_home.join(".zshrc"),
+        user_home.join(".profile"),
+    ] {
+        let Ok(text) = read_text_if_exists(&rc) else {
+            continue;
+        };
+        let mut out: Vec<&str> = Vec::new();
+        let mut lines = text.lines().peekable();
+        let mut changed = false;
+        while let Some(line) = lines.next() {
+            if line.trim() == KEEL_PATH_MARKER {
+                if let Some(next) = lines.peek() {
+                    if let Some(dir) = next
+                        .trim()
+                        .strip_prefix("export PATH=\"")
+                        .and_then(|rest| rest.strip_suffix(":$PATH\""))
+                    {
+                        if is_stale_temp_keel_entry(dir) {
+                            lines.next();
+                            changed = true;
+                            continue;
+                        }
+                    }
+                }
+            }
+            out.push(line);
+        }
+        if changed {
+            let mut joined = out.join("\n");
+            if !joined.is_empty() && !joined.ends_with('\n') {
+                joined.push('\n');
+            }
+            let _ = write_text(&rc, &joined);
+        }
+    }
+}
+
+/// True when `entry` is a dead temp-dir keel home left by a test install:
+/// its parent directory name starts with `keel-home-split-`, its own name is
+/// the standard `.keel`, and the directory no longer exists.
+fn is_stale_temp_keel_entry(entry: &str) -> bool {
+    if entry.is_empty() {
+        return false;
+    }
+    let path = PathBuf::from(entry);
+    let is_keel = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name == crate::runtime::KEEL_HOME_DIRECTORY_NAME)
+        .unwrap_or(false);
+    let is_temp_parent = path
+        .parent()
+        .and_then(|parent| parent.file_name())
+        .and_then(|name| name.to_str())
+        .map(|name| name.starts_with("keel-home-split-"))
+        .unwrap_or(false);
+    is_keel && is_temp_parent && !path.exists()
+}
+
+/// Read the per-user PATH value from `HKCU\Environment` (empty when absent).
+#[cfg(windows)]
+fn windows_read_user_path() -> Result<(String, bool), String> {
     let output = std::process::Command::new("reg")
         .args(["query", "HKCU\\Environment", "/v", "Path"])
         .output()
@@ -1586,6 +1698,13 @@ fn windows_append_user_path(keel_home: &Path) -> Result<(), String> {
             }
         }
     }
+    Ok((current, has_expand))
+}
+
+#[cfg(windows)]
+fn windows_append_user_path(keel_home: &Path) -> Result<(), String> {
+    let dir = display_path(keel_home);
+    let (current, has_expand) = windows_read_user_path()?;
     // Case-insensitive duplicate guard: Windows PATH entries ignore case.
     let lower_current = current.to_lowercase();
     let lower_home = dir.to_lowercase();
@@ -3845,6 +3964,55 @@ mod tests {
         assert!(matches!(result, Ok(OpencodeMcpResult::Added)));
         assert!(config.is_file());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stale_temp_keel_entry_detection() {
+        // A dead temp fixture dir is stale and purgeable.
+        let temp = std::env::temp_dir();
+        let dead = temp
+            .join(format!("keel-home-split-{}", std::process::id()))
+            .join(".keel");
+        let _ = fs::remove_dir_all(dead.parent().unwrap());
+        assert!(
+            is_stale_temp_keel_entry(&dead.to_string_lossy()),
+            "nonexistent keel-home-split-*/.keel must be stale"
+        );
+
+        // A LIVE temp dir is NOT stale — purge must never remove a real install.
+        let live = temp
+            .join(format!("keel-home-split-live-{}", std::process::id()))
+            .join(".keel");
+        let _ = fs::create_dir_all(&live);
+        assert!(
+            !is_stale_temp_keel_entry(&live.to_string_lossy()),
+            "existing dir must not be purged"
+        );
+        let _ = fs::remove_dir_all(live.parent().unwrap());
+
+        // The real default home is never stale regardless of existence.
+        assert!(
+            !is_stale_temp_keel_entry("C:\\Users\\me\\.keel"),
+            "default home must never match the temp pattern"
+        );
+        assert!(!is_stale_temp_keel_entry(""), "empty entry is not stale");
+    }
+
+    #[test]
+    fn default_home_guard_excludes_temp_fixtures() {
+        // The guard that stops test installs from touching the user PATH.
+        let temp = std::env::temp_dir();
+        let fixture = temp
+            .join(format!("keel-home-split-{}", std::process::id()))
+            .join(".keel");
+        assert!(
+            crate::runtime::is_standard_keel_home(&fixture),
+            "fixture passes the basename check (why the old guard leaked)"
+        );
+        assert!(
+            !crate::runtime::is_default_keel_home(&fixture),
+            "fixture must NOT pass the default-home guard"
+        );
     }
 
     #[test]
