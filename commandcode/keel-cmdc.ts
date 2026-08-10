@@ -247,20 +247,33 @@ export default function keelCmdcMod(cmd: ModApi): void {
   // Run-scoped post-compact context: populated by compaction_done (which has
   // no ctx/session seam) and consumed by transformContext on the next run.
   let postCompactContext = "";
+  // Full keel contract from `bridge session-start` (iron law, MCP pointers,
+  // memory protocol). Injected via appendSystemPrompt; short fallback below.
+  let sessionStartContract = "";
 
   const mod: AgentMod = {
     id: MOD_ID,
 
-    // Session start: bridge session-start once per session
+    // Session start: fetch the full keel contract from the bridge once and
+    // keep it for appendSystemPrompt injection.
     onSessionStart: async ({ source }, ctx) => {
       void source;
       if (hasSessionStarted(ctx, cmd.cwd)) return;
-      runBridge("session-start", ["--session", sessionIdFor(cmd.cwd), "--cwd", cmd.cwd]);
+      const contract = runBridge(
+        "session-start",
+        ["--session", sessionIdFor(cmd.cwd), "--cwd", cmd.cwd],
+        2000,
+      );
+      if (contract) {
+        sessionStartContract = contract;
+      }
       markSessionStarted(ctx, sessionIdFor(cmd.cwd));
     },
 
-    // Append keel contract to the system prompt
-    appendSystemPrompt: async () => keelSystemPromptSuffix(),
+    // Append keel contract to the system prompt: the full bridge contract when
+    // available, else the compact fallback (fresh sessions before onSessionStart).
+    appendSystemPrompt: async () =>
+      sessionStartContract || keelSystemPromptSuffix(),
 
     // Per-run context: post-compact re-push (EPHEMERAL, never rewrites transcript)
     transformContext: async ({ messages, state }) => {
