@@ -456,6 +456,7 @@ fn bridge_subcommands_are_documented_and_in_help() {
         "user-prompt",
         "observe",
         "session-end",
+        "pre-compact",
         "post-compact",
         "gate-status",
         "pre-tool-use",
@@ -554,6 +555,7 @@ const BRIDGE_ADAPTER_FILES: &[&str] = &[
     "codex/keel-codex.ts",
     "pi/keel-pi.ts",
     "cursor/hooks/keel-cursor.sh",
+    "commandcode/keel-cmdc.ts",
 ];
 
 /// Read an adapter, failing loudly when it is absent.
@@ -760,10 +762,11 @@ fn release_bundle_stages_adapter_source_dirs() {
     )
     .expect("read .github/workflows/release.yml");
 
-    for adapter in ["opencode", "codex", "pi", "cursor", "cowork"] {
+    for adapter in ["opencode", "codex", "pi", "cursor", "cowork", "commandcode"] {
         let staged_explicit = release_yml.contains(&format!("cp -R \"{adapter}\""))
             || release_yml.contains(&format!("cp -R {adapter} "));
-        let staged_loop = release_yml.contains("for adapter in opencode codex pi cursor cowork");
+        let staged_loop =
+            release_yml.contains("for adapter in opencode codex pi cursor cowork commandcode");
         assert!(
             staged_explicit || staged_loop,
             "release.yml must stage the `{adapter}` adapter dir into the release bundle; \

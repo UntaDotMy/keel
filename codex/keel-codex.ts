@@ -476,22 +476,23 @@ function handlePreCompact(input: CodexHookInput): string {
   const sessionID = input.session_id ?? "unknown";
   const cwd = input.cwd ?? process.cwd();
 
-  return runBridge("post-compact", [
-    "--session", sessionID,
-    "--cwd", cwd,
-  ]);
-}
-
-function handlePostCompact(input: CodexHookInput): string {
-  // PostCompact fires after compaction. Record a learning checkpoint.
-  const sessionID = input.session_id ?? "unknown";
-  const cwd = input.cwd ?? process.cwd();
-
-  runBridge("post-compact", [
+  // Pre-compact: persist what was learned before the window is rewritten.
+  runBridge("pre-compact", [
     "--session", sessionID,
     "--cwd", cwd,
   ]);
   return "";
+}
+
+function handlePostCompact(input: CodexHookInput): string {
+  // PostCompact: learning upsert (idempotent) + post-compaction context.
+  const sessionID = input.session_id ?? "unknown";
+  const cwd = input.cwd ?? process.cwd();
+
+  return runBridge("post-compact", [
+    "--session", sessionID,
+    "--cwd", cwd,
+  ]);
 }
 
 function handleStop(_input: CodexHookInput): string {

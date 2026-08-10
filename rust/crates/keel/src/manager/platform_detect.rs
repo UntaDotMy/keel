@@ -17,6 +17,7 @@ pub struct DetectedPlatforms {
     pub pi: bool,
     pub cursor: bool,
     pub cowork: bool,
+    pub commandcode: bool,
 }
 
 pub struct PlatformDetector {
@@ -47,6 +48,8 @@ impl PlatformDetector {
                 || self.has_binary("claude-desktop")
                 || std::env::var("CLAUDE_DESKTOP_HOME").is_ok()
                 || self.detect_cowork_via_claude_dir(),
+            // Command Code: config dir ~/.commandcode or the cmdc binary on PATH.
+            commandcode: self.has_config_dir(".commandcode") || self.has_binary("cmdc"),
         }
     }
 

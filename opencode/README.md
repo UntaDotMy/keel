@@ -31,8 +31,8 @@ Prerequisite: the `keel` binary must be installed at `~/.claude/keel` (unix) or 
 | `chat.message` (1st per session) | `bridge session-start` — injects bootstrap + workspace digest | Before model sees message | Yes (awaited, 500ms timeout) |
 | `chat.message` (every) | `bridge user-prompt` — injects iron law + skill brief | Before model sees message | Yes (awaited, 500ms timeout) |
 | `event` type=`tool.execute.after` | `bridge observe` — records tool observation | After tool completes | No (fire-and-forget) |
-| `event` type=`session.compacted` | `bridge post-compact` — learning checkpoint | On compaction event | No (fire-and-forget) |
-| `experimental.session.compacting` | `bridge post-compact` — injects context into compaction summary | During compaction prompt generation | Yes (awaited, 500ms timeout) |
+| `event` type=`session.compacted` | `bridge pre-compact` (learning checkpoint before window rewrite) + `bridge post-compact` (post-compaction context) | On compaction event | No (fire-and-forget) |
+| `experimental.session.compacting` | `bridge pre-compact` (learning) + `bridge post-compact` (injects context into compaction summary) | During compaction prompt generation | Yes (awaited, 500ms timeout) |
 | `event` type=`session.deleted` | `bridge session-end` — learning + save session summary | On session deletion | No (fire-and-forget) |
 
 ## Design
@@ -51,7 +51,7 @@ The first `chat.message` per session calls `bridge session-start` and caches via
 
 ### Compaction: dual hooks
 
-The `session.compacted` event (fire-and-forget) triggers a learning checkpoint via `bridge post-compact`. The `experimental.session.compacting` named hook (awaited) calls `bridge post-compact` again for the returned text and pushes it into `output.context`, injecting bridge state into the compaction summary so it survives across context windows.
+The `session.compacted` event (fire-and-forget) runs `bridge pre-compact` (learning checkpoint before the window is rewritten) then `bridge post-compact` (post-compaction context + idempotent learning upsert). The `experimental.session.compacting` named hook (awaited) calls `bridge pre-compact` then `bridge post-compact` for the returned text and pushes it into `output.context`, injecting bridge state into the compaction summary so it survives across context windows.
 
 ### Observations
 
