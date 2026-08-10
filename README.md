@@ -703,10 +703,11 @@ keel works with multiple AI coding agents through dedicated adapters. Each adapt
 | **Codex CLI** | Plugin + hooks + script | `codex/.codex-plugin/plugin.json` + `hooks/hooks.json` + `keel-codex.ts` | `codex/` |
 | **Cursor IDE** | Rules + hooks + MCP | `cursor/.cursorrules` + `cursor/hooks/` + `cursor/mcp.json`: iron law, lifecycle bridge (`keel bridge`), MCP tools. Install with `keel install --with cursor` (Cursor is not always auto-detected) | `cursor/` |
 | **Pi Agent** | Rules + hooks + MCP | `pi/AGENTS.md` + `pi/hooks.json` + `pi/keel-pi.ts` + `pi/.mcp.json`: iron law, lifecycle bridge, MCP tools | `pi/` |
+| **Command Code** (cmdc) | Mod (TypeScript) + MCP | `commandcode/keel-cmdc.ts` ,  lifecycle bridge (`keel bridge`) via ModApi hooks + `compaction_start`/`compaction_done` events, MCP tools via `commandcode/mcp.json` | `commandcode/` |
 
-Claude Code is the primary target (native hooks, full lifecycle). OpenCode, Codex, Cowork, Cursor, and Pi ship runtime bridges that map host events to `keel bridge` (edit gate, rewrite, observe, session-end learn). Cursor often needs `--with cursor` because desktop IDEs are not always detected.
+Claude Code is the primary target (native hooks, full lifecycle). OpenCode, Codex, Cowork, Cursor, Pi, and Command Code ship runtime bridges that map host events to `keel bridge` (edit gate, rewrite, observe, session-end learn, pre/post-compact continuity). Cursor often needs `--with cursor` because desktop IDEs are not always detected.
 
-`keel install` auto-detects which AI CLIs are installed (via config dirs, env vars, and binary-on-PATH) and wires only the matching adapters. Use `--with <name>` to force an adapter even when not detected (e.g. `--with cursor`), and `--without <name>` to skip a detected adapter (e.g. `--without opencode`). Names: `opencode`, `codex`, `pi`, `cursor`, `cowork`. Manual file copying is no longer required.
+`keel install` auto-detects which AI CLIs are installed (via config dirs, env vars, and binary-on-PATH) and wires only the matching adapters. Use `--with <name>` to force an adapter even when not detected (e.g. `--with cursor`), and `--without <name>` to skip a detected adapter (e.g. `--without opencode`). Names: `opencode`, `codex`, `pi`, `cursor`, `cowork`, `commandcode`. Manual file copying is no longer required.
 
 ## Managed Agent Profiles
 

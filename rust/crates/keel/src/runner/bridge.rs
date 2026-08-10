@@ -4,8 +4,8 @@
 //! Dependencies: crate::runner::hook_lifecycle, crate::utility::skill_match,
 //!   crate::runner::observation, crate::runtime.
 //! Main Functions: run_bridge_command dispatching subcommands (session-start,
-//!   user-prompt, observe, session-end, post-compact, gate-status, pre-tool-use,
-//!   rewrite). pre-tool-use emits the Iron Law edit-gate decision
+//!   user-prompt, observe, session-end, pre-compact, post-compact, gate-status,
+//!   pre-tool-use, rewrite). pre-tool-use emits the Iron Law edit-gate decision
 //!   (KEEL_GATE_ALLOW / KEEL_GATE_DENY) as text; rewrite reroutes shell commands
 //!   through compaction (KEEL_REWRITE) by reading the command on stdin. Both
 //!   exit 0 — the host adapter enforces the deny, never the bridge itself.
@@ -33,6 +33,7 @@ pub fn run_bridge_command(
         "user-prompt" => run_bridge_user_prompt(&arguments[1..], standard_output, standard_error),
         "observe" => run_bridge_observe(&arguments[1..], standard_output, standard_error),
         "session-end" => run_bridge_session_end(&arguments[1..], standard_output, standard_error),
+        "pre-compact" => run_bridge_pre_compact(&arguments[1..], standard_output, standard_error),
         "post-compact" => run_bridge_post_compact(&arguments[1..], standard_output, standard_error),
         "gate-status" => run_bridge_gate_status(&arguments[1..], standard_output, standard_error),
         "pre-tool-use" => run_bridge_pre_tool_use(&arguments[1..], standard_output, standard_error),
@@ -62,6 +63,7 @@ fn render_bridge_help(standard_output: &mut dyn Write) {
          \x20 user-prompt   --session <id> --cwd <path> --prompt <text>\n\
          \x20 observe       --session <id> --cwd <path> --tool <name> [--failed]\n\
          \x20 session-end   --session <id> --cwd <path>\n\
+         \x20 pre-compact   --session <id> --cwd <path>\n\
          \x20 post-compact  --session <id> --cwd <path>\n\
          \x20 gate-status   --session <id> --cwd <path>\n\
          \x20 pre-tool-use  --session <id> --cwd <path> --tool <name>\n\
@@ -263,6 +265,27 @@ fn run_bridge_session_end(
     };
 
     hook_lifecycle::run_bridge_session_end(&claude_home, &session, standard_error);
+    0
+}
+
+fn run_bridge_pre_compact(
+    arguments: &[String],
+    _standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let mut flags = bridge_flag_set("bridge pre-compact");
+    if let Err(parse_error) = flags.parse(arguments) {
+        let _ = writeln!(standard_error, "{}", parse_error.message);
+    }
+    // Honor --cwd so the workspace learning checkpoint runs against the host's
+    // workspace, not the bridge process cwd (same contract as post-compact).
+    let cwd = flags.string_value("cwd").trim().to_string();
+    if !cwd.is_empty() {
+        let _ = std::env::set_current_dir(&cwd);
+    }
+    // Pre-compact persists what was learned before the window rewrite. It
+    // emits no context; the post-compact memory digest belongs on post-compact.
+    hook_lifecycle::run_session_end_learning(standard_error);
     0
 }
 

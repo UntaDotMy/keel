@@ -34,6 +34,7 @@ pub enum PlatformName {
     Pi,
     Cursor,
     Cowork,
+    Commandcode,
 }
 
 impl PlatformName {
@@ -44,6 +45,7 @@ impl PlatformName {
             "pi" => Some(Self::Pi),
             "cursor" => Some(Self::Cursor),
             "cowork" | "desktop" => Some(Self::Cowork),
+            "commandcode" | "cmdc" | "command-code" => Some(Self::Commandcode),
             _ => None,
         }
     }
@@ -89,6 +91,9 @@ fn apply_overrides(
     if overrides.force.contains(&PlatformName::Cowork) {
         detected.cowork = true;
     }
+    if overrides.force.contains(&PlatformName::Commandcode) {
+        detected.commandcode = true;
+    }
     if overrides.skip.contains(&PlatformName::Opencode) {
         detected.opencode = false;
     }
@@ -103,6 +108,9 @@ fn apply_overrides(
     }
     if overrides.skip.contains(&PlatformName::Cowork) {
         detected.cowork = false;
+    }
+    if overrides.skip.contains(&PlatformName::Commandcode) {
+        detected.commandcode = false;
     }
     detected
 }
@@ -161,6 +169,10 @@ pub struct InstallSummary {
     /// Human-readable outcome of copying the Pi Agent adapter files into the
     /// project root during install, or `None` when skipped. Best-effort.
     pub pi_wiring: Option<String>,
+    /// Human-readable outcome of wiring the Command Code (cmdc) mod into
+    /// `~/.commandcode/mods/` + MCP registration, or `None` when skipped.
+    /// Best-effort.
+    pub commandcode_wiring: Option<String>,
     /// Human-readable outcome of installing the Cowork (Claude Desktop) plugin
     /// files, or `None` when skipped. Best-effort.
     pub cowork_wiring: Option<String>,
@@ -332,6 +344,8 @@ pub fn install_from_paths(
     let codex_wiring = maybe_wire_codex(repository_root, claude_home, detected.codex);
     let pi_wiring = maybe_wire_pi(repository_root, claude_home, detected.pi);
     let cowork_wiring = maybe_wire_cowork(repository_root, claude_home, detected.cowork);
+    let commandcode_wiring =
+        maybe_wire_commandcode(repository_root, claude_home, detected.commandcode);
     Ok(InstallSummary {
         synced_skills,
         synced_agents,
@@ -349,6 +363,7 @@ pub fn install_from_paths(
         cursor_wiring,
         codex_wiring,
         pi_wiring,
+        commandcode_wiring,
         cowork_wiring,
         migration_report,
         path_wiring,
@@ -726,6 +741,94 @@ pub(crate) fn maybe_wire_pi(
     }
 
     Some(status_parts.join("; "))
+}
+
+/// Wire the Command Code (cmdc) adapter: copy the mod into
+/// `~/.commandcode/mods/` and merge the `keel` MCP entry (never clobber).
+pub(crate) fn maybe_wire_commandcode(
+    repository_root: &Path,
+    claude_home: &Path,
+    detected: bool,
+) -> Option<String> {
+    if !is_standard_home(claude_home) {
+        return None;
+    }
+    if !detected {
+        return Some("skipped (not detected)".to_string());
+    }
+    let home: PathBuf = match claude_home.parent() {
+        Some(path) => path.to_path_buf(),
+        None => return Some("no home directory".to_string()),
+    };
+    let mut status_parts: Vec<String> = Vec::new();
+
+    // Copy the mod into the personal mods directory so it loads next session.
+    let mod_source = repository_root.join("commandcode").join("keel-cmdc.ts");
+    if mod_source.is_file() {
+        let mods_dir = home.join(".commandcode").join("mods");
+        if let Err(error) = std::fs::create_dir_all(&mods_dir) {
+            status_parts.push(format!("mods dir skipped ({error})"));
+        } else {
+            let target = mods_dir.join("keel-cmdc.ts");
+            match std::fs::copy(&mod_source, &target) {
+                Ok(_) => status_parts.push(format!("keel-cmdc.ts -> {}", display_path(&target))),
+                Err(error) => status_parts.push(format!("keel-cmdc.ts copy failed ({error})")),
+            }
+        }
+    } else {
+        status_parts.push("mod source absent".to_string());
+    }
+
+    // Merge the keel MCP entry into ~/.commandcode/mcp.json.
+    let mcp_source = repository_root.join("commandcode").join("mcp.json");
+    if mcp_source.is_file() {
+        let mcp_target = home.join(".commandcode").join("mcp.json");
+        if let Some(parent) = mcp_target.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let mcp_entry = match std::fs::read_to_string(&mcp_source) {
+            Ok(text) => {
+                let parsed: serde_json::Value =
+                    serde_json::from_str(&text).unwrap_or(serde_json::json!({}));
+                parsed
+                    .get("mcpServers")
+                    .and_then(|s| s.get("keel"))
+                    .cloned()
+                    .unwrap_or(serde_json::json!({}))
+            }
+            Err(_) => serde_json::json!({}),
+        };
+        let binary = installed_executable_path(claude_home);
+        let mut mcp_entry = if mcp_entry.is_null() {
+            serde_json::json!({
+                "command": display_path(&binary),
+                "args": ["mcp", "serve"],
+            })
+        } else {
+            mcp_entry
+        };
+        // The shipped commandcode/mcp.json templates a bare PATH-dependent
+        // `keel` command; rewrite it to the absolute installed binary path.
+        rewrite_mcp_entry_command(&mut mcp_entry, &display_path(&binary));
+        match merge_commandcode_mcp(&mcp_target, "keel", &mcp_entry) {
+            Ok(CommandcodeMcpResult::Added) => {
+                status_parts.push(format!("MCP registered in {}", display_path(&mcp_target)))
+            }
+            Ok(CommandcodeMcpResult::AlreadyCurrent) => {
+                status_parts.push("MCP already current".to_string())
+            }
+            Ok(CommandcodeMcpResult::Updated) => {
+                status_parts.push(format!("MCP updated in {}", display_path(&mcp_target)))
+            }
+            Err(error) => status_parts.push(format!("MCP skipped ({error})")),
+        }
+    }
+
+    if status_parts.is_empty() {
+        Some("nothing to copy".to_string())
+    } else {
+        Some(status_parts.join("; "))
+    }
 }
 
 pub(crate) fn maybe_wire_codex(
@@ -2118,6 +2221,13 @@ enum CursorMcpResult {
 }
 
 #[derive(Debug)]
+enum CommandcodeMcpResult {
+    Added,
+    AlreadyCurrent,
+    Updated,
+}
+
+#[derive(Debug)]
 enum CoworkMcpResult {
     Added,
     AlreadyCurrent,
@@ -2174,6 +2284,59 @@ fn merge_cursor_mcp(
             .map_err(|error| format!("serialize error: {error}"))?,
     )?;
     Ok(CursorMcpResult::Added)
+}
+
+/// Merge the `keel` entry into `~/.commandcode/mcp.json` under `mcpServers`.
+/// Merge, never clobber; preserves the user's other MCP servers. BOM-tolerant.
+/// Command Code uses the same standard `{"mcpServers": {<name>: {command, args}}}`
+/// shape as Cursor.
+fn merge_commandcode_mcp(
+    config_path: &std::path::Path,
+    server_key: &str,
+    entry: &serde_json::Value,
+) -> Result<CommandcodeMcpResult, String> {
+    let existing_text = crate::runtime::read_text_if_exists(config_path).unwrap_or_default();
+    let stripped = existing_text
+        .strip_prefix('\u{feff}')
+        .unwrap_or(&existing_text);
+    let mut document: serde_json::Value = if stripped.trim().is_empty() {
+        serde_json::json!({})
+    } else {
+        serde_json::from_str(stripped).map_err(|error| format!("parse error: {error}"))?
+    };
+
+    if document.get("mcpServers").is_none() {
+        document["mcpServers"] = serde_json::json!({});
+    }
+    let current = document["mcpServers"]
+        .as_object_mut()
+        .ok_or("mcpServers is not an object")?;
+
+    let desired =
+        serde_json::to_string_pretty(entry).map_err(|error| format!("serialize error: {error}"))?;
+
+    if let Some(existing) = current.get(server_key) {
+        let existing_str = serde_json::to_string_pretty(existing)
+            .map_err(|error| format!("serialize error: {error}"))?;
+        if existing_str == desired {
+            return Ok(CommandcodeMcpResult::AlreadyCurrent);
+        }
+        current.insert(server_key.to_string(), entry.clone());
+        write_text(
+            config_path,
+            &serde_json::to_string_pretty(&document)
+                .map_err(|error| format!("serialize error: {error}"))?,
+        )?;
+        return Ok(CommandcodeMcpResult::Updated);
+    }
+
+    current.insert(server_key.to_string(), entry.clone());
+    write_text(
+        config_path,
+        &serde_json::to_string_pretty(&document)
+            .map_err(|error| format!("serialize error: {error}"))?,
+    )?;
+    Ok(CommandcodeMcpResult::Added)
 }
 
 fn merge_pi_mcp(
@@ -2678,6 +2841,9 @@ pub fn write_install_summary(summary: &InstallSummary, output: &mut dyn Write) {
     if let Some(pi_status) = &summary.pi_wiring {
         let _ = writeln!(output, "  Pi Agent wiring: {pi_status}");
     }
+    if let Some(commandcode_status) = &summary.commandcode_wiring {
+        let _ = writeln!(output, "  Command Code wiring: {commandcode_status}");
+    }
     if let Some(cowork_status) = &summary.cowork_wiring {
         let _ = writeln!(output, "  Cowork wiring: {cowork_status}");
     }
@@ -2970,6 +3136,42 @@ fn remove_wired_adapters(claude_home: &Path) -> usize {
         home.join(".pi").join("extensions").join("keel-pi.ts"),
     ] {
         removed += remove_path_if_exists_counted(&ext).unwrap_or(0);
+    }
+
+    // Command Code (cmdc): remove the mod + MCP entry installed by
+    // maybe_wire_commandcode, so nothing spawns the deleted keel binary.
+    let cmdc_mod = home.join(".commandcode").join("mods").join("keel-cmdc.ts");
+    removed += remove_path_if_exists_counted(&cmdc_mod).unwrap_or(0);
+
+    let cmdc_mcp = home.join(".commandcode").join("mcp.json");
+    if cmdc_mcp.is_file() {
+        if let Ok(text) = crate::runtime::read_text_if_exists(&cmdc_mcp) {
+            let stripped = text.strip_prefix('\u{feff}').unwrap_or(&text);
+            if let Ok(mut doc) = serde_json::from_str::<serde_json::Value>(stripped) {
+                let mutated = if let Some(servers) =
+                    doc.get_mut("mcpServers").and_then(|v| v.as_object_mut())
+                {
+                    if servers.remove("keel").is_some() {
+                        if servers.is_empty() {
+                            doc.as_object_mut().map(|o| o.remove("mcpServers"));
+                        }
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+                if mutated {
+                    let _ = write_text(
+                        &cmdc_mcp,
+                        &serde_json::to_string_pretty(&doc)
+                            .unwrap_or_else(|_| stripped.to_string()),
+                    );
+                    removed += 1;
+                }
+            }
+        }
     }
 
     removed

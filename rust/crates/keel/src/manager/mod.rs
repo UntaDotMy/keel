@@ -107,7 +107,10 @@ fn run_interactive_install(
         ("Iron law hooks", true),
         ("Command compaction", true),
         ("Memory system", true),
-        ("Cross-harness adapters (Codex/Cursor/OpenCode)", false),
+        (
+            "Cross-harness adapters (Codex/Cursor/OpenCode/Command Code)",
+            false,
+        ),
     ];
 
     let mut selected: Vec<bool> = Vec::new();

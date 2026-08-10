@@ -237,8 +237,7 @@ Invoke any skill below by routing through the MCP `skill_route` and `skill_get` 
 | `tool_call` (edit-class) | `pre-tool-use` | Blocks with `{block:true,reason}` until Iron Law satisfied; then records gate state |
 | `tool_call` (bash/shell) | `rewrite` | Mutates `event.input.command` in place to reroute noisy commands through `keel run --` |
 | `tool_execution_end` | `observe` | Records tool observation (fire-and-forget) |
-| `session_before_compact` | `pre-compact` | Pre-compaction learning checkpoint |
-| `session_compact` | `post-compact` | Post-compaction context injection + learning |
+| `session_compact` | `pre-compact` + `post-compact` | Learning checkpoint before the window rewrite, then post-compaction context injection + idempotent learning upsert |
 | `session_shutdown` | `session-end` | Learning cycle + session summary capture + marker cleanup |
 
 Every bridge call is capped at a 500ms timeout and fails open to "no context / no block" on any error, so the extension never hangs a turn.

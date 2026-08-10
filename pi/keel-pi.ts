@@ -14,7 +14,8 @@
 //   tool_call (edit-class)  -> keel bridge pre-tool-use    (Iron Law edit gate; block on deny)
 //   tool_call (bash)        -> keel bridge rewrite         (compaction reroute, in place)
 //   tool_execution_end      -> keel bridge observe          (tool observation, fire-and-forget)
-//   session_compact         -> keel bridge post-compact     (post-compaction context + learning)
+//   session_compact         -> keel bridge pre-compact + post-compact
+//                             (learning checkpoint + post-compaction context)
 //   session_shutdown        -> keel bridge session-end      (learning + session capture)
 //
 // Pi's tool_call contract (from official docs):
@@ -540,6 +541,8 @@ function handleToolExecutionEnd(
 
 function handlePostCompact(event: PiSessionLikeEvent, ctx?: PiExtensionContext): void {
   const sessionID = resolveSessionId(event, ctx);
+  // Pre-window checkpoint, then post-compaction learning + context (idempotent).
+  runBridge("pre-compact", ["--session", sessionID, "--cwd", resolveCwd(ctx)]);
   runBridge("post-compact", ["--session", sessionID, "--cwd", resolveCwd(ctx)]);
 }
 
@@ -599,10 +602,7 @@ function setup(pi: PiExtensionAPI): void {
     }
   });
 
-  // compaction cycle. Only post-compact is wired: there is no `bridge
-  // pre-compact` subcommand, so no session_before_compact handler is registered
-  // (it would only invoke a nonexistent subcommand). Learning + post-compaction
-  // context runs here, on the actual compaction event.
+  // Compaction cycle: pre-compact checkpoint + post-compact context on the event.
   pi.on("session_compact", (event: PiSessionLikeEvent, ctx?: PiExtensionContext) => {
     try {
       handlePostCompact(event, ctx);

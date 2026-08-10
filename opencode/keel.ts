@@ -501,15 +501,17 @@ const KeelPlugin: Plugin = async ({ client, directory, $ }) => {
       })();
     },
 
-    // -----------------------------------------------------------------------
-    // "experimental.session.compacting" — NAMED, awaited. Sole post-compact
-    // caller: injects the post-compaction context into the compaction summary
-    // AND triggers the learning checkpoint (bridge post-compact does both), so
-    // the cycle runs exactly once per compaction.
-    // -----------------------------------------------------------------------
+    // "experimental.session.compacting" (NAMED, awaited): pre-compact learning
+    // checkpoint, then post-compact context injection into the summary.
     "experimental.session.compacting": async (input, output) => {
       try {
         const sessionID: string = input.sessionID;
+        await runBridge("pre-compact", [
+          "--session",
+          sessionID,
+          "--cwd",
+          cwd,
+        ]);
         const contextText = await runBridge("post-compact", [
           "--session",
           sessionID,

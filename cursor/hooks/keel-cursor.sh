@@ -7,7 +7,7 @@
 #
 #   preToolUse  -> session-start (once) + Iron Law gate + Shell compaction reroute
 #   postToolUse -> bridge observe (observation capture, fire-and-forget)
-#   preCompact  -> no-op (no bridge pre-compact subcommand; learning runs on stop)
+#   preCompact  -> bridge pre-compact (learning checkpoint before window rewrite)
 #   stop        -> bridge post-compact (turn-end checkpoint)
 #   sessionEnd  -> bridge session-end (learning + capture + marker cleanup)
 #
@@ -133,9 +133,8 @@ is_keel_reading_command() {
 # --- Lifecycle events: dispatch to keel bridge, no output needed. ---
 case "$HOOK_EVENT" in
   preCompact)
-    # No `bridge pre-compact` subcommand exists (bridge.rs would print help).
-    # The learning + post-compaction context runs via `bridge post-compact` on
-    # the stop event, so preCompact is a clean no-op here.
+    # Learning checkpoint before the working window is rewritten.
+    "$KEEL_BIN" bridge pre-compact --session "$SESSION_ID" --cwd "$CWD" >/dev/null 2>&1 || true
     echo '{}'
     exit 0
     ;;

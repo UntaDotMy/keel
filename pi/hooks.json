@@ -44,9 +44,9 @@
       "timing": "After every tool invocation"
     },
     "PreCompact": {
-      "description": "No separate pre-compaction handler: there is no `keel bridge pre-compact` subcommand, so the extension does not subscribe to 'session_before_compact'. The learning checkpoint and post-compaction context run on compaction via the PostCompact entry below.",
-      "deliveredBy": "(none — folded into PostCompact / 'session_compact')",
-      "keelCommand": "keel bridge post-compact --session <id> --cwd <dir>",
+      "description": "Learning checkpoint before the working window is rewritten. `keel bridge pre-compact` runs the idempotent learning cycle only (no context); the post-compaction context runs on the actual compaction event via the PostCompact entry below.",
+      "deliveredBy": "keel-pi.ts on 'session_compact' (runs pre-compact then post-compact)",
+      "keelCommand": "keel bridge pre-compact --session <id> --cwd <dir>",
       "mcpEquivalent": "system_map_refresh (tool call)",
       "manualTrigger": "Before compaction, run: keel memory scope resolve --create-missing --refresh-system-map",
       "timing": "On compaction (handled by PostCompact)"

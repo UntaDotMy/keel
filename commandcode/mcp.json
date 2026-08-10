@@ -1,0 +1,9 @@
+{
+  "_comment": "keel MCP server registration for Command Code. Command Code reads MCP config from ~/.commandcode/mcp.json (user, lowest precedence), <project>/.mcp.json (project, checked in and shared), and ~/.commandcode/projects/<slug>/mcp.json (local, private). The structure is {mcpServers: {<name>: {command, args}}}. Command Code resolves 'keel' on PATH; the keel installer places the binary at ~/.keel/keel (unix) or ~/.keel/keel.exe (win32) and on PATH. The keel installer merges the 'keel' entry into your existing config (never clobbers other servers) and uninstall removes only the 'keel' entry.",
+  "mcpServers": {
+    "keel": {
+      "command": "keel",
+      "args": ["mcp", "serve"]
+    }
+  }
+}
