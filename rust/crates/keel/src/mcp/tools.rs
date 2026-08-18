@@ -1916,11 +1916,14 @@ fn run_keel_subcommand<S: AsRef<str>>(
 
 fn command_nests_mcp_serve(program: &str, args: &[String], label: &str) -> bool {
     fn is_keel(name: &str) -> bool {
-        std::path::Path::new(name)
-            .file_stem()
-            .and_then(|value| value.to_str())
-            .unwrap_or(name)
-            .eq_ignore_ascii_case("keel")
+        // Split on both separators so a Windows `...\keel.exe` path still
+        // matches when this code runs on Linux/macOS CI.
+        let file = name.rsplit(['/', '\\']).next().unwrap_or(name);
+        let stem = file
+            .strip_suffix(".exe")
+            .or_else(|| file.strip_suffix(".EXE"))
+            .unwrap_or(file);
+        stem.eq_ignore_ascii_case("keel")
     }
     if is_keel(program) && args.iter().any(|arg| arg == "mcp") {
         return true;
