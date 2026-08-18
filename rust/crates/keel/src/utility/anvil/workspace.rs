@@ -1,12 +1,13 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static NEXT_WORKSPACE: AtomicU64 = AtomicU64::new(1);
 
 pub fn create_workspace(files: &[String], gates: &[String]) -> Result<PathBuf, String> {
     let dir = std::env::temp_dir().join(format!(
-        "anvil-ws-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
+        "anvil-ws-{}-{}",
+        std::process::id(),
+        NEXT_WORKSPACE.fetch_add(1, Ordering::Relaxed)
     ));
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     for f in files.iter().chain(gates.iter()) {
