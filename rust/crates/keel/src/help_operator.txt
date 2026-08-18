@@ -29,6 +29,7 @@
   raw list
   raw prune --older-than <Nd>
   replay <raw-id>
+  anvil compile|cast|sieve|stamp|loop|run|prefix-check [--workspace-root <path>] [--claude-home <path>] [--json] [--dry-run] [--strict]
   hook install|uninstall|list|show|instructions|diagnose|git-hooks
   bridge <session-start|user-prompt|observe|session-end|post-compact|gate-status|pre-tool-use|rewrite> [flags]
   learn [status|dry-run|run] [--window <days>] [--json]
@@ -38,10 +39,6 @@
   skill-eval [--repo-root <path> | --installed [--claude-home <path>]] [--json]
   config-audit --repo-root <path> [--json]
   checkpoint create|list|show|restore [--id <id>] [--confirm]
-  work add|list|ready|blocked|dep|discovered|close|show  [--workspace-root <path>] [--json]
-  user-story lint [--file <path>] [--stdin] [--json]
-  sprint plan|status|advance|review|list [--workspace-root <path>] [--claude-home <path>] [--json]
-  dispatch plan|start|status|complete|merge|abandon|list [--workspace-root <path>] [--claude-home <path>] [--worktree-root <path>] [--json]
   telemetry summary [--days <N>] [--session <id>] [--top <N>] [--json]
   observe [--claude-home <path>] [--workspace-root <path>] [--json]
   stats [--days <N>] [--top <N>] [--claude-home <path>] [--workspace-root <path>] [--json]
@@ -54,8 +51,6 @@
   memory consolidate [--window <days>] [--claude-home <path>] [--format json|compact]
   memory report [--claude-home <path>] [--format json|compact]
   memory instincts|research-cache|maintenance|agent-registry|agent-packets|loop-guard|entity|graph|retrieve|status
-  orchestration runtime-preflight|resume-status|task|checkpoint
-  workflow route|start|cockpit|status|dashboard|watch|finish|resume
   gain [reset]
   session [--since today|7d|30d|all] [--json]
   bench [--fixtures] [--json]
@@ -63,5 +58,4 @@
   flow start --target-file <path> [--target-function <name>] [--repo-root <path>] [--output <path>] [--json]
   flow check [--repo-root <path>] [--artifact <path>] [--json]
   flow finish [--repo-root <path>] [--artifact <path>] [--json]
-  team spawn|status|kill|list [--json]
   mcp serve

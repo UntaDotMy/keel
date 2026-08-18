@@ -1,0 +1,176 @@
+use std::io::Write;
+use std::process::{Command, Stdio};
+
+use crate::args::FlagSet;
+use crate::utility::anvil::filter::compress_output;
+use crate::utility::anvil::job;
+
+pub struct SieveOutcome {
+    pub ok: bool,
+    pub greens: u64,
+    pub logs: String,
+    pub skip_stamp: bool,
+    pub critic: String,
+}
+
+pub fn run_gates(gates: &[String]) -> (bool, String) {
+    let mut all_ok = true;
+    let mut logs = String::new();
+    for gate in gates {
+        let parts: Vec<&str> = gate.split_whitespace().collect();
+        if parts.is_empty() {
+            continue;
+        }
+        if parts[0].eq_ignore_ascii_case("echo") {
+            logs.push_str(&parts[1..].join(" "));
+            logs.push('\n');
+            continue;
+        }
+        let mut cmd = Command::new(parts[0]);
+        if parts.len() > 1 {
+            cmd.args(&parts[1..]);
+        }
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+        match cmd.output() {
+            Ok(output) => {
+                if !output.status.success() {
+                    all_ok = false;
+                }
+                logs.push_str(&String::from_utf8_lossy(&output.stdout));
+                logs.push_str(&String::from_utf8_lossy(&output.stderr));
+            }
+            Err(error) => {
+                all_ok = false;
+                logs.push_str(&error.to_string());
+            }
+        }
+    }
+    (all_ok, compress_output(&logs))
+}
+
+pub fn sieve_lock(
+    paths: &job::JobPaths,
+    piece: &str,
+    override_gates: &[String],
+) -> Result<SieveOutcome, String> {
+    let lock = job::load_lock(paths)?;
+    let pieces = job::pieces_from_lock(&lock, piece)?;
+    let mut greens = 0u64;
+    let mut ok = true;
+    let mut logs = String::new();
+    let mut has_blind = false;
+    for spec in pieces {
+        if spec.critic == "blind_ab" {
+            has_blind = true;
+        }
+        let gates = if override_gates.is_empty() {
+            spec.gates.clone()
+        } else {
+            override_gates.to_vec()
+        };
+        if spec.critic == "none" && gates.is_empty() {
+            return Err(format!(
+                "anvil sieve: piece {} critic:none has no gates",
+                spec.id
+            ));
+        }
+        let (pass, piece_logs) = run_gates(&gates);
+        logs.push_str(&piece_logs);
+        if pass && !gates.is_empty() {
+            greens += 1;
+        } else if spec.critic == "none" {
+            ok = false;
+        }
+    }
+    if greens == 0 && override_gates.is_empty() {
+        ok = false;
+    }
+    let skip_stamp = if has_blind { greens < 2 } else { greens >= 1 };
+    Ok(SieveOutcome {
+        ok,
+        greens,
+        logs,
+        skip_stamp,
+        critic: if has_blind {
+            "blind_ab".into()
+        } else {
+            "none".into()
+        },
+    })
+}
+
+pub fn run_sieve(
+    arguments: &[String],
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let mut flags = FlagSet::new("anvil sieve");
+    flags.string_flag("piece", "");
+    flags.string_flag("gates", "");
+    flags.string_flag("workspace-root", "");
+    flags.string_flag("claude-home", "");
+    if let Err(error) = flags.parse(arguments) {
+        let _ = writeln!(standard_error, "{}", error.message);
+        return 1;
+    }
+    let gates_str = flags.string_value("gates").to_string();
+    let override_gates: Vec<String> = if gates_str.trim().is_empty() {
+        Vec::new()
+    } else {
+        vec![gates_str]
+    };
+    if !override_gates.is_empty() {
+        let (ok, logs) = run_gates(&override_gates);
+        return emit_sieve(ok, 0, &logs, standard_output, standard_error);
+    }
+    let paths = match job::JobPaths::resolve(
+        flags.string_value("workspace-root"),
+        flags.string_value("claude-home"),
+    ) {
+        Ok(value) => value,
+        Err(error) => {
+            let _ = writeln!(standard_error, "{error}");
+            return 1;
+        }
+    };
+    match sieve_lock(&paths, flags.string_value("piece"), &override_gates) {
+        Ok(outcome) => emit_sieve(
+            outcome.ok,
+            outcome.greens,
+            &outcome.logs,
+            standard_output,
+            standard_error,
+        ),
+        Err(error) => {
+            let _ = writeln!(standard_error, "{error}");
+            1
+        }
+    }
+}
+
+fn emit_sieve(
+    ok: bool,
+    greens: u64,
+    logs: &str,
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    if ok {
+        let _ = writeln!(standard_output, "anvil sieve: PASS greens={greens}\n{logs}");
+        0
+    } else {
+        let _ = writeln!(standard_error, "anvil sieve: FAIL greens={greens}\n{logs}");
+        1
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sieve_no_gate_done_picks_green() {
+        let (ok, _) = run_gates(&[]);
+        assert!(ok);
+    }
+}

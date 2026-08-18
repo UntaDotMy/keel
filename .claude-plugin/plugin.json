@@ -55,7 +55,7 @@
     "./react-performance-audit",
     "./receiving-code-review",
     "./reviewer",
-    "./running-a-sprint",
+    "./running-anvil",
     "./security-and-compliance-auditor",
     "./software-development-life-cycle",
     "./stripe-integration",
@@ -69,7 +69,6 @@
     "./websocket-realtime-design",
     "./writing-plans",
     "./writing-skills",
-    "./writing-user-stories",
     "./requesting-code-review",
     "./deliberation",
     "./research-enforcement"

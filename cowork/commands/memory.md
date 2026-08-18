@@ -38,4 +38,4 @@ to force a manual refresh.
 ## Related Commands
 
 - `/keel:recall` — Full-text search
-- `/keel:sprint` — Sprint management
+- `/keel:anvil` — Delivery loop

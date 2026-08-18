@@ -146,11 +146,11 @@ fn mcp_serve_initialize_then_tools_list_round_trip() {
     assert!(tool_names.contains(&"observe".to_string()));
     assert!(tool_names.contains(&"rewrite".to_string()));
     assert!(tool_names.contains(&"skill_eval".to_string()));
-    assert!(tool_names.contains(&"dispatch".to_string()));
+    assert!(tool_names.contains(&"anvil".to_string()));
     assert!(tool_names.contains(&"design_intelligence".to_string()));
     assert!(
-        tools.len() >= 40,
-        "expected full MCP catalog (>=40 tools), got {}: {tool_names:?}",
+        tools.len() >= 30,
+        "expected full MCP catalog (>=30 tools), got {}: {tool_names:?}",
         tools.len()
     );
     for tool in tools {

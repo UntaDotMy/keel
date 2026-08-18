@@ -1,5 +1,3 @@
-  orchestration runtime-preflight [--claude-home <path>] [--json]
-  orchestration resume-status [--claude-home <path>] [--json]
   memory scope resolve [--workspace-root <path>] [--format text|json] [--create-missing] [--refresh-system-map]
   memory system-map refresh [--workspace-root <path>]
   memory system-map show [--workspace-root <path>]
@@ -8,3 +6,10 @@
   memory working-brief list [--claude-home <path>] [--json]
   memory completion-gate check --id <entry-id> [--brief-id <id>] [--proof <text>] [--claude-home <path>] [--json]
   memory recall <query> [--limit <count>] [--json] [--claude-home <path>]
+  anvil compile --goal <text> [--bar <text>] [--files <csv>] [--out <path>]
+  anvil cast --dry-run
+  anvil sieve [--gates <cmd>]
+  anvil stamp [--strict]
+  anvil loop [--strict]
+  anvil run [--dry-run] [--strict]
+  anvil prefix-check [--prefix <text>]

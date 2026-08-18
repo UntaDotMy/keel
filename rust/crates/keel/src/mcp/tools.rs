@@ -48,8 +48,8 @@ use crate::utility::working_brief::{create_brief, list_briefs, read_brief, write
 
 use super::{recall_status_payload, system_map_text, MethodError, JSON_RPC_INVALID_PARAMS};
 
-/// Default wall-clock budget for MCP tools that spawn a child (`cli`,
-/// `run_command`, `sprint`, …) **and** for in-process tools that can block
+/// Default wall-clock budget for MCP tools that spawn a child (`run_command`)
+/// **and** for in-process tools that can block
 /// (SQLite recall, skill catalog scan, system map render). The serve loop runs
 /// concurrent workers, but a single hung tool still burns an in-flight slot and
 /// can exhaust host patience — deadline so hosts get `isError` instead of a
@@ -157,10 +157,13 @@ fn tools_list_catalog() -> Value {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "argv": { "type": "array", "items": { "type": "string" }, "description": "Program plus its arguments, executed directly with no shell (no quoting issues). Example: [\"cargo\", \"test\", \"--workspace\"]." },
+                        "argv": { "type": "array", "items": { "type": "string" }, "description": "Program plus its arguments, executed directly with no shell (no quoting issues). Example: [\"cargo\", \"test\", \"--workspace\"]. Alias: args as an array." },
+                        "args": { "description": "Alias for argv when this is a string array, or for command when this is a string." },
+                        "cmd": { "type": "string", "description": "Alias for command." },
                         "script": { "type": "string", "description": "Shell script line. Requires `shell` alongside it; use argv instead when no shell features are needed." },
                         "shell": { "type": "string", "enum": ["powershell", "cmd", "bash"], "description": "The exact shell for `script`. No fallback and no guessing: the script runs through this shell and only this shell." },
-                        "command": { "type": "string", "description": "Legacy: one shell command string run through the platform default shell. Prefer argv or script+shell." },
+                        "command": { "type": "string", "description": "One shell command string run through the platform default shell. Prefer argv. Aliases: cmd, input." },
+                        "input": { "type": "string", "description": "Alias for command." },
                         "cwd": { "type": "string", "description": "Working directory for the command. Defaults to the server's cwd." },
                         "wait": { "type": "boolean", "description": "Default true: wait for the command to finish and return its output. false: start in the background and return a commandId immediately — use for commands that may outlive the tool timeout (long builds, analyze)." },
                         "json": { "type": "boolean", "description": "Return the output as a JSON object (command, exit_code, stdout, stderr) instead of the text report. Default false." }
@@ -290,37 +293,26 @@ fn tools_list_catalog() -> Value {
             },
             {
                 "name": "cli",
-                "description": "Run any keel CLI subcommand and get its compacted output — the full toolkit surface including families without a dedicated tool (bridge, eval, bench, team, hook list/diagnose, status, platform, ...). Pass the subcommand and flags as `args`. Read/inspection subcommands run directly; destructive or management subcommands (install, update, repair, uninstall, validate, all, self-replace, `checkpoint restore`, and `hook install`/`hook uninstall`) require `confirm: true`. The `mcp` subcommand is refused. Prefer dedicated tools (recall, observe, rewrite, skill_eval, dispatch, design_intelligence, ...) when one fits; use cli for everything else.",
+                "description": "Run any keel CLI subcommand and get its compacted output — the full toolkit surface including families without a dedicated tool (bridge, eval, bench, hook list/diagnose, status, platform, ...). Pass the subcommand and flags as `args`. Read/inspection subcommands run in-process; destructive or management subcommands (install, update, repair, uninstall, validate, all, self-replace, `checkpoint restore`, and `hook install`/`hook uninstall`) require `confirm: true`. The `mcp` and `cli` subcommands are refused so the MCP server cannot re-enter itself. Prefer dedicated tools (recall, observe, rewrite, skill_eval, anvil, design_intelligence, ...) when one fits; use cli for everything else.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "args": { "type": "array", "items": { "type": "string" }, "description": "keel arguments, e.g. [\"review\",\"pre-pr\",\"--base-ref\",\"origin/feat\"] or [\"workflow\",\"status\"]." },
+                        "args": { "type": "array", "items": { "type": "string" }, "description": "keel arguments, e.g. [\"review\",\"pre-pr\",\"--base-ref\",\"origin/feat\"] or [\"anvil\",\"run\",\"--dry-run\"]." },
                         "confirm": { "type": "boolean", "description": "Required true to run a destructive/management subcommand. Default false." }
                     },
                     "required": ["args"]
                 }
             },
             {
-                "name": "sprint",
-                "description": "Drive the Scrum-style sprint loop (plan → implement → verify → review → LOOP until every story is Done). Subcommands: `plan` (create a sprint from confirmed stories), `status` (show current sprint state), `advance` (move a story to the next state), `review` (fail-closed gate that verifies every story meets Definition of Done), `list` (show all sprints). The sprint **must not** close until every story is Done — this is the anti-partial-completion backstop.",
+                "name": "anvil",
+                "description": "Drive the Anvil delivery loop (compile → cast → sieve → stamp → loop). Subcommands: compile, cast, sieve, stamp, loop, run, prefix-check. This is the only keel delivery loop.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "action": { "type": "string", "enum": ["plan", "status", "advance", "review", "list"], "description": "Sprint operation to perform." },
-                        "args": { "type": "array", "items": { "type": "string" }, "description": "Additional arguments for the action (e.g. story-id for advance, workspace-root for plan)." }
+                        "action": { "type": "string", "enum": ["compile", "cast", "sieve", "stamp", "loop", "run", "prefix-check"], "description": "Anvil operation to perform." },
+                        "args": { "type": "array", "items": { "type": "string" }, "description": "Additional CLI flags after the action." }
                     },
                     "required": ["action"]
-                }
-            },
-            {
-                "name": "user_story_lint",
-                "description": "Validate user stories against strict Agile/Jira format (Connextra \"As a/I want/so that\" + Gherkin Given/When/Then, validated against INVEST). Use before building to confirm the requirement spec is well-formed. Stories that fail INVEST or lack Gherkin criteria **must not** proceed to implementation.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "file": { "type": "string", "description": "Path to markdown file containing the stories." },
-                        "stdin": { "type": "string", "description": "Story text to validate (alternative to file)." }
-                    }
                 }
             },
             {
@@ -333,20 +325,6 @@ fn tools_list_catalog() -> Value {
                         "base_ref": { "type": "string", "description": "Base ref for diff comparison (e.g. \"origin/feat\")." },
                         "format": { "type": "string", "description": "Output format: json, markdown, or compact." },
                         "repo_root": { "type": "string", "description": "Repository root path. Defaults to cwd." }
-                    },
-                    "required": ["action"]
-                }
-            },
-            {
-                "name": "workflow",
-                "description": "Drive workflow state (route, start, cockpit, finish, status). Use to manage a proof-first workstream with tracked proof and closeout discipline.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "action": { "type": "string", "enum": ["route", "start", "cockpit", "finish", "status"], "description": "Workflow operation to perform." },
-                        "request": { "type": "string", "description": "The work request or description." },
-                        "id": { "type": "string", "description": "Workflow entry id." },
-                        "proof": { "type": "string", "description": "Proof evidence for finish." }
                     },
                     "required": ["action"]
                 }
@@ -431,18 +409,7 @@ fn tools_list_catalog() -> Value {
                     }
                 }
             },
-            {
-                "name": "orchestration",
-                "description": "Orchestration operations (runtime-preflight, resume-status, task, checkpoint). Use for multi-agent or multi-step workflow coordination.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "action": { "type": "string", "enum": ["runtime-preflight", "resume-status", "task", "checkpoint"], "description": "Orchestration operation." },
-                        "args": { "type": "array", "items": { "type": "string" }, "description": "Additional CLI arguments." }
-                    },
-                    "required": ["action"]
-                }
-            },
+
             {
                 "name": "checkpoint",
                 "description": "Create/restore checkpoints for workflow state. Use to snapshot progress or recover from interruption.",
@@ -490,17 +457,6 @@ fn tools_list_catalog() -> Value {
                 }
             },
             {
-                "name": "user_story",
-                "description": "Lint user stories against strict Agile/Jira format (Connextra \"As a/I want/so that\" + Gherkin Given/When/Then, validated against INVEST). Use before building to confirm the requirement spec is well-formed.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "file": { "type": "string", "description": "Path to markdown file containing the stories." },
-                        "stdin": { "type": "string", "description": "Story text to validate (alternative to file)." }
-                    }
-                }
-            },
-            {
                 "name": "flow",
                 "description": "Preserve-Existing-Flow gate — the Iron Law's pre-edit ownership trace. Use `start` before editing an existing source file to record its owner path; `check` validates the trace still holds; `finish` clears it. Prevents blind edits to code whose ownership hasn't been traced.",
                 "inputSchema": {
@@ -510,25 +466,6 @@ fn tools_list_catalog() -> Value {
                         "file": { "type": "string", "description": "Target source file path (for start/check). Translated to --target-file." },
                         "target_function": { "type": "string", "description": "Target function name within the file (optional, for start/check)." },
                         "repo_root": { "type": "string", "description": "Repository root path. Defaults to cwd." }
-                    },
-                    "required": ["action"]
-                }
-            },
-            {
-                "name": "work",
-                "description": "Dependency-aware work graph. Track items with depends_on/discovered-from edges, query `ready` (unblocked) or `blocked` items, capture work discovered mid-task so it is never dropped. Open + ready/blocked items survive compaction via the SessionStart digest.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "action": { "type": "string", "enum": ["add", "list", "ready", "blocked", "dep", "discovered", "close", "show"], "description": "Work-graph operation to perform." },
-                        "title": { "type": "string", "description": "Work item title (required for add)." },
-                        "id": { "type": "string", "description": "Work item id (for dep/discovered/close/show)." },
-                        "depends_on": { "type": "string", "description": "Id of the dependency B (for dep: A depends on B). Translated to --on." },
-                        "from": { "type": "string", "description": "Id of the item this was discovered from (for discovered)." },
-                        "status": { "type": "string", "description": "Initial status for add: open|in-progress|blocked|done." },
-                        "priority": { "type": "string", "description": "Priority for add (default 2)." },
-                        "workspace_root": { "type": "string", "description": "Workspace root path. Defaults to cwd." },
-                        "json": { "type": "boolean", "description": "Output as JSON." }
                     },
                     "required": ["action"]
                 }
@@ -562,7 +499,7 @@ fn tools_list_catalog() -> Value {
             },
             {
                 "name": "observe",
-                "description": "Read-only session/workspace health: recall index, working-brief count, sprint progress. Prefer this over guessing closeout readiness. Token-savings axis stays on gain/session.",
+                "description": "Read-only session/workspace health: recall index, working-brief count. Prefer this over guessing closeout readiness. Token-savings axis stays on gain/session.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -595,33 +532,6 @@ fn tools_list_catalog() -> Value {
                 }
             },
             {
-                "name": "dispatch",
-                "description": "Git-worktree-isolated parallel workers (plan|start|status|complete|merge|abandon|list). Owns worktrees + merge gate; does not spawn agents. merge/abandon require confirm:true (CLI --confirm).",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "action": { "type": "string", "enum": ["plan", "start", "status", "complete", "merge", "abandon", "list"], "description": "Dispatch operation." },
-                        "args": { "type": "array", "items": { "type": "string" }, "description": "Extra CLI args (e.g. --id, --task)." },
-                        "confirm": { "type": "boolean", "description": "Required true for merge/abandon. Default false." },
-                        "json": { "type": "boolean", "description": "JSON output when supported." }
-                    },
-                    "required": ["action"]
-                }
-            },
-            {
-                "name": "team",
-                "description": "Team worker messaging + tmux panes. send/get/ack/inbox form a durable file-based message bus so parallel agents can pass messages reliably without tmux; spawn/status/kill/list manage tmux panes. Use send/get/ack for any agent-to-agent handoff.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "action": { "type": "string", "enum": ["send", "get", "ack", "inbox", "spawn", "status", "kill", "list"], "description": "Team operation." },
-                        "args": { "type": "array", "items": { "type": "string" }, "description": "Extra CLI args (e.g. --to <worker>, --message <text>, --name <worker>, --id <msg-id>, --prompt <prompt>)." },
-                        "json": { "type": "boolean", "description": "JSON output when supported." }
-                    },
-                    "required": ["action"]
-                }
-            },
-            {
                 "name": "design_intelligence",
                 "description": "UI design-system recommendation packet (styles, palettes, typography, anti-patterns) for a product request. Use before implementing UI so visual choices are catalog-backed.",
                 "inputSchema": {
@@ -636,12 +546,12 @@ fn tools_list_catalog() -> Value {
             },
             {
                 "name": "stats",
-                "description": "Unified keel dashboard: token savings + savings %, commands observed/compacted, top space-saving commands, gate/enforcement activity, recall index health, active sprint/work. Lead with headline numbers. Aggregates gain/telemetry/observe; read-only.",
+                "description": "Unified keel dashboard: token savings + savings %, commands observed/compacted, top space-saving commands, gate/enforcement activity, recall index health. Lead with headline numbers. Aggregates gain/telemetry/observe; read-only.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "days": { "type": "integer", "description": "Window in days for savings/timings. Default 7." },
-                        "workspace_root": { "type": "string", "description": "Workspace root for sprint progress. Defaults to cwd." },
+                        "workspace_root": { "type": "string", "description": "Workspace root. Defaults to cwd." },
                         "json": { "type": "boolean", "description": "Output as JSON. Default true on this tool when omitted." }
                     }
                 }
@@ -755,10 +665,8 @@ const MCP_TOOL_NAMES: &[&str] = &[
     "system_map_refresh",
     "context_brief",
     "cli",
-    "sprint",
-    "user_story_lint",
+    "anvil",
     "review",
-    "workflow",
     "git_workflow",
     "memory",
     "gain",
@@ -766,23 +674,18 @@ const MCP_TOOL_NAMES: &[&str] = &[
     "config_audit",
     "skill_lint",
     "telemetry",
-    "orchestration",
     "checkpoint",
     "session",
     "doctor",
     "code_search",
-    "user_story",
     "flow",
-    "work",
     "code_graph",
     "learn",
     "observe",
     "rewrite",
     "skill_eval",
-    "dispatch",
     "design_intelligence",
     "stats",
-    "team",
 ];
 
 type McpToolHandler = fn(&Value) -> Result<String, String>;
@@ -807,10 +710,8 @@ fn mcp_tool_handler(name: &str) -> Option<McpToolHandler> {
         "system_map_refresh" => tool_system_map_refresh,
         "context_brief" => tool_context_brief,
         "cli" => tool_cli,
-        "sprint" => tool_sprint,
-        "user_story_lint" => tool_user_story_lint,
+        "anvil" => tool_anvil,
         "review" => tool_review,
-        "workflow" => tool_workflow,
         "git_workflow" => tool_git_workflow,
         "memory" => tool_memory,
         "gain" => tool_gain,
@@ -818,23 +719,18 @@ fn mcp_tool_handler(name: &str) -> Option<McpToolHandler> {
         "config_audit" => tool_config_audit,
         "skill_lint" => tool_skill_lint,
         "telemetry" => tool_telemetry,
-        "orchestration" => tool_orchestration,
         "checkpoint" => tool_checkpoint,
         "session" => tool_session,
         "doctor" => tool_doctor,
         "code_search" => tool_code_search,
-        "user_story" => tool_user_story,
         "flow" => tool_flow,
-        "work" => tool_work,
         "code_graph" => tool_code_graph,
         "learn" => tool_learn,
         "observe" => tool_observe,
         "rewrite" => tool_rewrite,
         "skill_eval" => tool_skill_eval,
-        "dispatch" => tool_dispatch,
         "design_intelligence" => tool_design_intelligence,
         "stats" => tool_stats,
-        "team" => tool_team,
         _ => return None,
     })
 }
@@ -992,17 +888,31 @@ fn tool_system_map(arguments: &Value) -> Result<String, String> {
     Ok(truncate_mcp_text(&text))
 }
 
+fn string_list_field(arguments: &Value, name: &str) -> Option<Vec<String>> {
+    arguments.get(name).and_then(Value::as_array).map(|items| {
+        items
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect()
+    })
+}
+
+fn first_string_field(arguments: &Value, names: &[&str]) -> String {
+    for name in names {
+        if let Some(text) = arguments.get(*name).and_then(Value::as_str) {
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+    }
+    String::new()
+}
+
 fn tool_run_command(arguments: &Value) -> Result<String, String> {
-    let argv: Option<Vec<String>> = arguments
-        .get("argv")
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_string)
-                .collect()
-        });
+    let argv: Option<Vec<String>> =
+        string_list_field(arguments, "argv").or_else(|| string_list_field(arguments, "args"));
     let script = arguments
         .get("script")
         .and_then(Value::as_str)
@@ -1015,12 +925,12 @@ fn tool_run_command(arguments: &Value) -> Result<String, String> {
         .unwrap_or("")
         .trim()
         .to_lowercase();
-    let command = arguments
-        .get("command")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .trim()
-        .to_string();
+    let command = first_string_field(arguments, &["command", "cmd", "input"]);
+    let command = if command.is_empty() {
+        first_string_field(arguments, &["args"])
+    } else {
+        command
+    };
     let cwd = arguments
         .get("cwd")
         .and_then(Value::as_str)
@@ -1074,17 +984,41 @@ fn tool_run_command(arguments: &Value) -> Result<String, String> {
         (command.clone(), program, args)
     } else {
         return Err(
-            "run_command: missing input — pass argv, script (+shell), or command".to_string(),
+            "run_command: missing input — pass argv (or args[]), script+shell, or command (aliases: cmd, input, args as a string)".to_string(),
         );
     };
 
-    // Shell out to a fresh `keel run -- <program> <args...>` so the proxy
-    // pipeline (capture, compaction, raw-store, gain analytics) runs in its
-    // intended configuration. Setting `CLAUDE_SKILLS_HOOK` flips the proxy's
-    // capture gate on for this child even when the parent MCP server was
-    // launched from a plain shell. The child receives program+args as separate
-    // argv tokens — the proxy classifies `pwsh`/`powershell`/`cmd`/`bash`
-    // wrappers as already shell-wrapped and never wraps them again.
+    if command_nests_mcp_serve(&program, &shell_args, &label) {
+        return Err(
+            "run_command: refusing to start `keel mcp` from inside MCP (that re-enters the server and hangs)"
+                .into(),
+        );
+    }
+
+    // Token saver stays in-process (`keel run`) so MCP never re-execs this
+    // binary and never hits the host tool budget from a nested serve.
+    if wait
+        && cwd
+            .as_ref()
+            .map(|path| path.as_os_str().is_empty())
+            .unwrap_or(true)
+    {
+        let mut run_args = vec!["--".to_string(), program.clone()];
+        run_args.extend(shell_args.iter().cloned());
+        let previous_hook = env::var("CLAUDE_SKILLS_HOOK").ok();
+        env::set_var("CLAUDE_SKILLS_HOOK", "mcp");
+        let result = run_inprocess_cli(&format!("keel run -- {label}"), |out, err| {
+            crate::runner::run_run_command(&run_args, out, err)
+        });
+        match previous_hook {
+            Some(value) => env::set_var("CLAUDE_SKILLS_HOOK", value),
+            None => env::remove_var("CLAUDE_SKILLS_HOOK"),
+        }
+        return result;
+    }
+
+    // Background jobs, or a cwd that must not mutate the MCP process, still
+    // spawn `keel run` (never `keel mcp`).
     let executable =
         env::current_exe().map_err(|error| format!("run_command: locate self: {error}"))?;
     let mut child = Command::new(&executable);
@@ -1768,8 +1702,7 @@ fn tool_brief_create(arguments: &Value) -> Result<String, String> {
     );
     let path =
         write_brief(&claude_home, &brief).map_err(|error| format!("brief_create: {error}"))?;
-    // Multi-story on-ramp (mirrors the CLI write path): 2+ criteria IS a sprint
-    // backlog, so surface the next step; otherwise the sprint-start gate never engages.
+    // Multi-piece on-ramp: 2+ criteria means drive them through Anvil.
     let mut payload = json!({
         "written": true,
         "path": display_path(&path),
@@ -1777,7 +1710,7 @@ fn tool_brief_create(arguments: &Value) -> Result<String, String> {
     });
     if brief.acceptance_criteria.len() >= 2 {
         payload["next_step"] = Value::String(format!(
-            "{} acceptance criteria -> run `keel sprint plan` (or the sprint MCP tool) to track them as a sprint",
+            "{} acceptance criteria -> run `keel anvil compile --goal ... --bar ...` then `keel anvil run`",
             brief.acceptance_criteria.len()
         ));
     }
@@ -1900,7 +1833,7 @@ fn tool_cli(arguments: &Value) -> Result<String, String> {
         _ => return Err("cli: args must start with a subcommand".to_string()),
     };
 
-    if CLI_REFUSED_SUBCOMMANDS.contains(&subcommand.as_str()) {
+    if CLI_REFUSED_SUBCOMMANDS.contains(&subcommand.as_str()) || subcommand == "cli" {
         return Err(format!(
             "cli: subcommand {subcommand:?} is not available through MCP"
         ));
@@ -1928,151 +1861,74 @@ fn tool_cli(arguments: &Value) -> Result<String, String> {
         ));
     }
 
-    let executable = env::current_exe().map_err(|error| format!("cli: locate self: {error}"))?;
-    let mut child = Command::new(&executable);
-    for argument in &args {
-        child.arg(argument);
-    }
-    child.env("CLAUDE_SKILLS_HOOK", "mcp");
-    child.stdin(Stdio::null());
-    child.stdout(Stdio::piped());
-    child.stderr(Stdio::piped());
-    let (exit_code, stdout_text, stderr_text) =
-        run_command_with_timeout(child, mcp_child_timeout(), "cli")?;
-    Ok(render_run_command_report(
-        &format!("keel {}", args.join(" ")),
-        exit_code,
-        &stdout_text,
-        &stderr_text,
-    ))
+    // In-process: spawning current_exe() from `keel mcp serve` re-enters the
+    // same binary and regularly exceeds the host's ~30s tool budget.
+    run_inprocess_cli(&format!("keel {}", args.join(" ")), |out, err| {
+        crate::commands::Application::new(env!("CARGO_PKG_VERSION")).run(&args, out, err)
+    })
 }
 
-/// Sprint tool: drive the Scrum-style sprint loop (plan, status, advance, review, list).
-/// Thin wrapper over the CLI sprint commands, preserving the same interface.
-fn tool_sprint(arguments: &Value) -> Result<String, String> {
+fn tool_anvil(arguments: &Value) -> Result<String, String> {
     let action = arguments
         .get("action")
         .and_then(Value::as_str)
-        .ok_or_else(|| "sprint: missing action (plan|status|advance|review|list)".to_string())?;
-
-    let args: Vec<String> = match arguments.get("args") {
-        Some(Value::Array(items)) => items
-            .iter()
-            .filter_map(Value::as_str)
-            .map(str::to_string)
-            .collect(),
-        Some(Value::Null) | None => Vec::new(),
-        _ => return Err("sprint: args must be a JSON array of strings".to_string()),
-    };
-
-    let executable = env::current_exe().map_err(|error| format!("sprint: locate self: {error}"))?;
-    let mut child = Command::new(&executable);
-    child.arg("sprint");
-    child.arg(action);
-    for argument in &args {
-        child.arg(argument);
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if action.is_empty() {
+        return Err(
+            "anvil: missing action (compile|cast|sieve|stamp|loop|run|prefix-check)".into(),
+        );
     }
-    child.env("CLAUDE_SKILLS_HOOK", "mcp");
-    child.stdin(Stdio::null());
-    child.stdout(Stdio::piped());
-    child.stderr(Stdio::piped());
-    let (exit_code, stdout_text, stderr_text) =
-        run_command_with_timeout(child, mcp_child_timeout(), "sprint")?;
-    Ok(render_run_command_report(
-        &format!("keel sprint {} {}", action, args.join(" ")),
-        exit_code,
-        &stdout_text,
-        &stderr_text,
-    ))
+    let mut owned = vec![action];
+    if let Some(Value::Array(items)) = arguments.get("args") {
+        for item in items {
+            if let Some(text) = item.as_str() {
+                owned.push(text.to_string());
+            }
+        }
+    }
+    run_inprocess_cli("keel anvil", |out, err| {
+        crate::utility::run_anvil_command(&owned, out, err)
+    })
 }
 
-/// User story lint tool: validate user stories against strict Agile/Jira format.
-/// Thin wrapper over the CLI user-story lint command. Always uses a kill timeout
-/// so a hung lint child cannot freeze MCP (hosts report that as "stuck").
-fn tool_user_story_lint(arguments: &Value) -> Result<String, String> {
-    let file = arguments
-        .get("file")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-
-    let stdin = arguments
-        .get("stdin")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-
-    if file.is_none() && stdin.is_none() {
-        return Err("user_story_lint: must provide either 'file' or 'stdin'".to_string());
-    }
-
-    let executable =
-        env::current_exe().map_err(|error| format!("user_story_lint: locate self: {error}"))?;
-    let mut child = Command::new(&executable);
-    child.arg("user-story");
-    child.arg("lint");
-    child.env("CLAUDE_SKILLS_HOOK", "mcp");
-    child.stdout(Stdio::piped());
-    child.stderr(Stdio::piped());
-
-    let label;
-    let stdin_bytes = if let Some(file_path) = file {
-        child.arg("--file");
-        child.arg(file_path);
-        child.stdin(Stdio::null());
-        label = format!("keel user-story lint --file {file_path}");
-        None
-    } else {
-        let text = stdin.unwrap_or_default();
-        child.arg("--stdin");
-        child.stdin(Stdio::piped());
-        label = "keel user-story lint --stdin".to_string();
-        Some(text.as_bytes().to_vec())
-    };
-
-    let (exit_code, stdout_text, stderr_text) =
-        run_command_with_timeout_stdin(child, stdin_bytes, mcp_child_timeout(), "user_story_lint")?;
-    Ok(render_run_command_report(
-        &label,
-        exit_code,
-        &stdout_text,
-        &stderr_text,
-    ))
-}
-
-/// Generic passthrough helper: shell out to the keel binary with the given
-/// subcommand and args. Returns the compacted report text.
+/// Run a dedicated MCP wrapper through the same in-process CLI dispatcher.
+/// Spawning `current_exe()` from `keel mcp serve` re-enters the binary and
+/// regularly exceeds the host tool budget.
 fn run_keel_subcommand<S: AsRef<str>>(
     subcommand: &str,
     extra_args: &[S],
 ) -> Result<String, String> {
-    let executable =
-        env::current_exe().map_err(|error| format!("{subcommand}: locate self: {error}"))?;
-    let mut child = Command::new(&executable);
-    child.arg(subcommand);
-    for arg in extra_args {
-        child.arg(arg.as_ref());
+    if matches!(subcommand, "mcp" | "cli") {
+        return Err(format!(
+            "{subcommand}: not available through MCP (would re-enter the server)"
+        ));
     }
-    child.env("CLAUDE_SKILLS_HOOK", "mcp");
-    child.stdin(Stdio::null());
-    child.stdout(Stdio::piped());
-    child.stderr(Stdio::piped());
-    let (exit_code, stdout_text, stderr_text) =
-        run_command_with_timeout(child, mcp_child_timeout(), subcommand)?;
-    let label = format!(
-        "keel {subcommand} {}",
-        extra_args
-            .iter()
-            .map(|a| a.as_ref())
-            .collect::<Vec<_>>()
-            .join(" ")
-    );
-    Ok(render_run_command_report(
-        &label,
-        exit_code,
-        &stdout_text,
-        &stderr_text,
-    ))
+    let mut args = vec![subcommand.to_string()];
+    for arg in extra_args {
+        args.push(arg.as_ref().to_string());
+    }
+    run_inprocess_cli(&format!("keel {}", args.join(" ")), |out, err| {
+        crate::commands::Application::new(env!("CARGO_PKG_VERSION")).run(&args, out, err)
+    })
+}
+
+fn command_nests_mcp_serve(program: &str, args: &[String], label: &str) -> bool {
+    fn is_keel(name: &str) -> bool {
+        std::path::Path::new(name)
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or(name)
+            .eq_ignore_ascii_case("keel")
+    }
+    if is_keel(program) && args.iter().any(|arg| arg == "mcp") {
+        return true;
+    }
+    let tokens: Vec<&str> = label.split_whitespace().collect();
+    tokens
+        .windows(2)
+        .any(|pair| is_keel(pair[0]) && pair[1] == "mcp")
 }
 
 fn mcp_child_timeout() -> Duration {
@@ -2551,30 +2407,6 @@ fn review_args(action: &str, arguments: &Value) -> Vec<String> {
     all_args
 }
 
-fn tool_workflow(arguments: &Value) -> Result<String, String> {
-    let action = arguments
-        .get("action")
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            "workflow: missing action (route|start|cockpit|finish|status)".to_string()
-        })?;
-    let mut owned: Vec<String> = Vec::new();
-    if let Some(r) = optional_string_arg(arguments, "request") {
-        owned.push(format!("--request={r}"));
-    }
-    if let Some(i) = optional_string_arg(arguments, "id") {
-        owned.push(format!("--id={i}"));
-    }
-    if let Some(p) = optional_string_arg(arguments, "proof") {
-        owned.push(format!("--proof={p}"));
-    }
-    let mut all_args: Vec<&str> = vec![action];
-    for s in &owned {
-        all_args.push(s);
-    }
-    run_keel_subcommand("workflow", &all_args)
-}
-
 fn tool_git_workflow(arguments: &Value) -> Result<String, String> {
     let action = arguments
         .get("action")
@@ -2705,27 +2537,6 @@ fn tool_telemetry(arguments: &Value) -> Result<String, String> {
     run_keel_subcommand("telemetry", &all_args)
 }
 
-fn tool_orchestration(arguments: &Value) -> Result<String, String> {
-    let action = arguments
-        .get("action")
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            "orchestration: missing action (runtime-preflight|resume-status|task|checkpoint)"
-                .to_string()
-        })?;
-    let all_args = orchestration_args(action, arguments);
-    run_keel_subcommand("orchestration", &all_args)
-}
-
-/// Pure arg-builder for `tool_orchestration` (see `memory_args` for the testability rationale).
-fn orchestration_args(action: &str, arguments: &Value) -> Vec<String> {
-    let mut all_args: Vec<String> = vec![action.to_string()];
-    for extra in collect_extra_args(arguments) {
-        all_args.push(extra);
-    }
-    all_args
-}
-
 fn tool_checkpoint(arguments: &Value) -> Result<String, String> {
     let action = arguments
         .get("action")
@@ -2802,10 +2613,6 @@ fn tool_code_search(arguments: &Value) -> Result<String, String> {
     run_keel_subcommand("code-search", &all_args)
 }
 
-fn tool_user_story(arguments: &Value) -> Result<String, String> {
-    tool_user_story_lint(arguments)
-}
-
 /// Preserve-Existing-Flow gate: the Iron Law's pre-edit ownership trace.
 /// `start` records the owning file before an edit; `check` validates evidence
 /// still holds; `finish` clears it. Routes through the compaction proxy.
@@ -2831,62 +2638,6 @@ fn flow_args(action: &str, arguments: &Value) -> Vec<String> {
         all_args.push(format!("--repo-root={root}"));
     }
     all_args
-}
-
-/// Dependency-aware work graph. `add` needs --title; `dep` needs --id + --on
-/// (A depends on B); `close`/`show` need --id; `discovered` needs --id + --from.
-/// Reads named fields and translates to the real CLI flags so nothing is dropped.
-fn tool_work(arguments: &Value) -> Result<String, String> {
-    let action = arguments
-        .get("action")
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            "work: missing action (add|list|ready|blocked|dep|discovered|close|show)".to_string()
-        })?;
-    let all_args = work_args(action, arguments);
-    run_keel_subcommand("work", &all_args)
-}
-
-/// Pure arg-builder for `tool_work` (see `memory_args` for the testability rationale).
-fn work_args(action: &str, arguments: &Value) -> Vec<String> {
-    let mut all_args: Vec<String> = vec![action.to_string()];
-    for flag in work_cli_args(arguments) {
-        all_args.push(flag);
-    }
-    all_args
-}
-
-/// Pure translation of the `work` tool's named MCP fields to real CLI flags.
-/// Extracted so the mapping is unit-testable without shelling out. Guards
-/// against silent field drops (the bug where `collect_extra_args` ignored
-/// named fields and `--title`/`--on` never reached the CLI).
-fn work_cli_args(arguments: &Value) -> Vec<String> {
-    let mut owned: Vec<String> = Vec::new();
-    if let Some(title) = optional_string_arg(arguments, "title") {
-        owned.push(format!("--title={title}"));
-    }
-    if let Some(id) = optional_string_arg(arguments, "id") {
-        owned.push(format!("--id={id}"));
-    }
-    if let Some(depends_on) = optional_string_arg(arguments, "depends_on") {
-        owned.push(format!("--on={depends_on}"));
-    }
-    if let Some(from) = optional_string_arg(arguments, "from") {
-        owned.push(format!("--from={from}"));
-    }
-    if let Some(status) = optional_string_arg(arguments, "status") {
-        owned.push(format!("--status={status}"));
-    }
-    if let Some(priority) = optional_string_arg(arguments, "priority") {
-        owned.push(format!("--priority={priority}"));
-    }
-    if let Some(root) = optional_string_arg(arguments, "workspace_root") {
-        owned.push(format!("--workspace-root={root}"));
-    }
-    if Some(true) == optional_bool_arg(arguments, "json") {
-        owned.push("--json".to_string());
-    }
-    owned
 }
 
 /// Deterministic codebase-understanding graph. `build` scans the workspace and
@@ -2970,7 +2721,7 @@ where
     ))
 }
 
-/// Read-only aggregator: recall health + working briefs + sprint progress.
+/// Read-only aggregator: recall health + working briefs.
 fn tool_observe(arguments: &Value) -> Result<String, String> {
     let mut owned: Vec<String> = Vec::new();
     if let Some(root) = optional_string_arg(arguments, "workspace_root") {
@@ -2985,7 +2736,7 @@ fn tool_observe(arguments: &Value) -> Result<String, String> {
     })
 }
 
-/// Unified dashboard over gain/telemetry/gates/recall/sprint. Read-only.
+/// Unified dashboard over gain/telemetry/gates/recall. Read-only.
 fn tool_stats(arguments: &Value) -> Result<String, String> {
     let mut owned: Vec<String> = Vec::new();
     if let Some(days) = optional_int_arg(arguments, "days") {
@@ -3035,86 +2786,6 @@ fn tool_skill_eval(arguments: &Value) -> Result<String, String> {
     }
     run_inprocess_cli("keel skill-eval", |out, err| {
         crate::utility::run_skill_eval_command(&owned, out, err)
-    })
-}
-
-/// Worktree-isolated parallel dispatch ledger (no agent spawn).
-fn tool_dispatch(arguments: &Value) -> Result<String, String> {
-    let action = arguments
-        .get("action")
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            "dispatch: missing action (plan|start|status|complete|merge|abandon|list)".to_string()
-        })?;
-    let allowed = [
-        "plan", "start", "status", "complete", "merge", "abandon", "list",
-    ];
-    if !allowed.contains(&action) {
-        return Err(format!("dispatch: action {action:?} not recognized"));
-    }
-    let confirm = optional_bool_arg(arguments, "confirm").unwrap_or(false);
-    if matches!(action, "merge" | "abandon") && !confirm {
-        return Err(format!(
-            "dispatch: action {action:?} mutates git/worktrees — re-call with confirm:true"
-        ));
-    }
-    let mut owned: Vec<String> = vec![action.to_string()];
-    if let Some(Value::Array(items)) = arguments.get("args") {
-        for item in items {
-            if let Some(s) = item.as_str() {
-                if !s.trim().is_empty() {
-                    owned.push(s.to_string());
-                }
-            }
-        }
-    }
-    if confirm
-        && matches!(action, "merge" | "abandon")
-        && !owned
-            .iter()
-            .any(|a| a == "--confirm" || a.starts_with("--confirm="))
-    {
-        owned.push("--confirm".to_string());
-    }
-    if Some(true) == optional_bool_arg(arguments, "json") {
-        owned.push("--json".to_string());
-    }
-    run_inprocess_cli(&format!("keel dispatch {action}"), |out, err| {
-        crate::utility::run_dispatch_command(&owned, out, err)
-    })
-}
-
-/// Team worker messaging + tmux panes. send/get/ack/inbox form a durable
-/// file-based message bus; spawn/status/kill/list manage tmux panes. Exposed via
-/// MCP so parallel agents can hand off messages without relying on tmux.
-fn tool_team(arguments: &Value) -> Result<String, String> {
-    let action = arguments
-        .get("action")
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            "team: missing action (send|get|ack|inbox|spawn|status|kill|list)".to_string()
-        })?;
-    let allowed = [
-        "send", "get", "ack", "inbox", "spawn", "status", "kill", "list",
-    ];
-    if !allowed.contains(&action) {
-        return Err(format!("team: action {action:?} not recognized"));
-    }
-    let mut owned: Vec<String> = vec![action.to_string()];
-    if let Some(Value::Array(items)) = arguments.get("args") {
-        for item in items {
-            if let Some(s) = item.as_str() {
-                if !s.trim().is_empty() {
-                    owned.push(s.to_string());
-                }
-            }
-        }
-    }
-    if Some(true) == optional_bool_arg(arguments, "json") {
-        owned.push("--json".to_string());
-    }
-    run_inprocess_cli(&format!("keel team {action}"), |out, err| {
-        crate::utility::run_team_command(&owned, out, err)
     })
 }
 
@@ -3297,12 +2968,11 @@ mod tests {
             "observe",
             "rewrite",
             "skill-eval",
-            "dispatch",
+            "anvil",
             "design-intelligence",
             "bridge",
             "eval",
             "bench",
-            "team",
             "hook",
         ] {
             assert!(
@@ -3320,17 +2990,17 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_merge_requires_confirm_on_mcp_tool() {
+    fn anvil_requires_action() {
         let params = json!({
-            "name": "dispatch",
-            "arguments": { "action": "merge", "args": ["--id", "x"] }
+            "name": "anvil",
+            "arguments": {}
         });
         let result = handle_tools_call(&params).expect("envelope");
         assert_eq!(result["isError"], json!(true));
         let text = result["content"][0]["text"].as_str().unwrap_or("");
         assert!(
-            text.contains("confirm:true"),
-            "merge must require confirm: {text}"
+            text.contains("missing action"),
+            "anvil must require action: {text}"
         );
     }
 
@@ -3435,24 +3105,12 @@ mod tests {
             di
         );
 
-        let dl = handle_tools_call(&json!({
-            "name": "dispatch",
-            "arguments": { "action": "list", "json": true }
+        let anvil = handle_tools_call(&json!({
+            "name": "anvil",
+            "arguments": { "action": "prefix-check" }
         }))
-        .expect("dispatch list envelope");
-        assert_eq!(dl["isError"], json!(false), "dispatch list failed: {}", dl);
-
-        let ds = handle_tools_call(&json!({
-            "name": "dispatch",
-            "arguments": { "action": "status", "json": true }
-        }))
-        .expect("dispatch status envelope");
-        assert_eq!(
-            ds["isError"],
-            json!(false),
-            "dispatch status failed: {}",
-            ds
-        );
+        .expect("anvil envelope");
+        assert_eq!(anvil["isError"], json!(false), "anvil failed: {}", anvil);
     }
 
     #[test]
@@ -3494,6 +3152,15 @@ mod tests {
     fn cli_refuses_mcp_subcommand() {
         // The mcp subcommand would recurse into another server; refuse outright.
         let params = json!({ "name": "cli", "arguments": { "args": ["mcp", "serve"] } });
+        let result = handle_tools_call(&params).expect("envelope present");
+        assert_eq!(result["isError"], json!(true));
+        let text = result["content"][0]["text"].as_str().unwrap_or("");
+        assert!(text.contains("not available through MCP"), "text: {text}");
+    }
+
+    #[test]
+    fn cli_refuses_nested_cli_subcommand() {
+        let params = json!({ "name": "cli", "arguments": { "args": ["cli", "status"] } });
         let result = handle_tools_call(&params).expect("envelope present");
         assert_eq!(result["isError"], json!(true));
         let text = result["content"][0]["text"].as_str().unwrap_or("");
@@ -3734,15 +3401,6 @@ mod tests {
     }
 
     #[test]
-    fn workflow_requires_action() {
-        let params = json!({ "name": "workflow", "arguments": {} });
-        let result = handle_tools_call(&params).expect("envelope present");
-        assert_eq!(result["isError"], json!(true));
-        let text = result["content"][0]["text"].as_str().unwrap_or("");
-        assert!(text.contains("missing action"), "text: {text}");
-    }
-
-    #[test]
     fn git_workflow_requires_action() {
         let params = json!({ "name": "git_workflow", "arguments": {} });
         let result = handle_tools_call(&params).expect("envelope present");
@@ -3780,33 +3438,12 @@ mod tests {
     }
 
     #[test]
-    fn orchestration_requires_action() {
-        let params = json!({ "name": "orchestration", "arguments": {} });
-        let result = handle_tools_call(&params).expect("envelope present");
-        assert_eq!(result["isError"], json!(true));
-        let text = result["content"][0]["text"].as_str().unwrap_or("");
-        assert!(text.contains("missing action"), "text: {text}");
-    }
-
-    #[test]
     fn code_search_requires_query() {
         let params = json!({ "name": "code_search", "arguments": {} });
         let result = handle_tools_call(&params).expect("envelope present");
         assert_eq!(result["isError"], json!(true));
         let text = result["content"][0]["text"].as_str().unwrap_or("");
         assert!(text.contains("missing query"), "text: {text}");
-    }
-
-    #[test]
-    fn user_story_delegates_to_user_story_lint() {
-        let params = json!({ "name": "user_story", "arguments": {} });
-        let result = handle_tools_call(&params).expect("envelope present");
-        assert_eq!(result["isError"], json!(true));
-        let text = result["content"][0]["text"].as_str().unwrap_or("");
-        assert!(
-            text.contains("must provide"),
-            "user_story should delegate to user_story_lint: {text}"
-        );
     }
 
     #[test]
@@ -3830,61 +3467,6 @@ mod tests {
             );
         }
         assert!(!tools.is_empty(), "tools list must not be empty");
-    }
-
-    /// Regression: the `work` tool's named fields must translate to real CLI
-    /// flags. The old `collect_extra_args` handler dropped every named field,
-    /// so `work add {title:"x"}` created an item with no title. This pins the
-    /// translation: each named field produces its real CLI flag.
-    #[test]
-    fn work_tool_translates_named_fields_to_cli_flags() {
-        let args = work_cli_args(&json!({
-            "title": "fix the bug",
-            "id": "w1",
-            "depends_on": "w2",
-            "from": "w0",
-            "status": "in-progress",
-            "priority": "1",
-            "workspace_root": "/tmp/repo",
-            "json": true
-        }));
-        let joined = args.join(" ");
-        assert!(
-            joined.contains("--title=fix the bug"),
-            "title dropped: {joined}"
-        );
-        assert!(joined.contains("--id=w1"), "id dropped: {joined}");
-        // depends_on MUST become --on (the real CLI flag for `work dep A --on B`).
-        assert!(
-            joined.contains("--on=w2"),
-            "depends_on not translated to --on: {joined}"
-        );
-        assert!(joined.contains("--from=w0"), "from dropped: {joined}");
-        assert!(
-            joined.contains("--status=in-progress"),
-            "status dropped: {joined}"
-        );
-        assert!(
-            joined.contains("--priority=1"),
-            "priority dropped: {joined}"
-        );
-        assert!(
-            joined.contains("--workspace-root=/tmp/repo"),
-            "workspace_root dropped: {joined}"
-        );
-        assert!(joined.contains("--json"), "json dropped: {joined}");
-    }
-
-    /// Regression: an empty/absent field must NOT produce an empty flag (which
-    /// the CLI would reject). `optional_string_arg` already trims and filters
-    /// empty, but pin it so a future change can't silently reintroduce `--id=`.
-    #[test]
-    fn work_tool_omits_empty_fields() {
-        let args = work_cli_args(&json!({ "title": "  ", "id": "" }));
-        assert!(
-            args.is_empty(),
-            "empty fields should produce no flags: {args:?}"
-        );
     }
 
     // Regression guards for the double-prefix bug: every `run_keel_subcommand`
@@ -3913,26 +3495,6 @@ mod tests {
         assert!(args.iter().any(|a| a == "--target-file=src/lib.rs"));
         assert!(
             !args.iter().any(|a| a == "flow"),
-            "subcommand leaked into extra args: {args:?}"
-        );
-    }
-
-    #[test]
-    fn work_args_does_not_repeat_subcommand() {
-        let args = work_args("list", &json!({}));
-        assert_eq!(args[0], "list");
-        assert!(
-            !args.iter().any(|a| a == "work"),
-            "subcommand leaked into extra args: {args:?}"
-        );
-    }
-
-    #[test]
-    fn orchestration_args_does_not_repeat_subcommand() {
-        let args = orchestration_args("resume-status", &json!({}));
-        assert_eq!(args[0], "resume-status");
-        assert!(
-            !args.iter().any(|a| a == "orchestration"),
             "subcommand leaked into extra args: {args:?}"
         );
     }
@@ -3972,10 +3534,54 @@ mod tests {
         let error = tool_run_command(&json!({ "argv": [] })).expect_err("empty argv must fail");
         assert!(error.contains("argv must contain"), "got: {error}");
 
+        // Host aliases: cmd / args[] / args string must resolve to a form.
+        let error = tool_run_command(&json!({ "cmd": "" })).expect_err("empty cmd still missing");
+        assert!(error.contains("missing input"), "got: {error}");
+
         // `shell` only applies to script — never to the legacy command string.
         let error = tool_run_command(&json!({ "command": "echo hi", "shell": "bash" }))
             .expect_err("command+shell must fail");
         assert!(error.contains("only applies to `script`"), "got: {error}");
+    }
+
+    #[test]
+    fn run_command_refuses_nested_mcp_serve() {
+        let error = tool_run_command(&json!({
+            "argv": ["keel", "mcp", "serve"]
+        }))
+        .expect_err("nested mcp must fail");
+        assert!(
+            error.contains("refusing to start `keel mcp`"),
+            "got: {error}"
+        );
+
+        let error = tool_run_command(&json!({
+            "command": "keel mcp serve"
+        }))
+        .expect_err("command form nested mcp must fail");
+        assert!(
+            error.contains("refusing to start `keel mcp`"),
+            "got: {error}"
+        );
+    }
+
+    #[test]
+    fn command_nests_mcp_serve_detects_keel_mcp() {
+        assert!(command_nests_mcp_serve(
+            "keel",
+            &["mcp".into(), "serve".into()],
+            "keel mcp serve"
+        ));
+        assert!(command_nests_mcp_serve(
+            r"C:\Users\HP\.keel\keel.exe",
+            &["mcp".into()],
+            "C:\\Users\\HP\\.keel\\keel.exe mcp serve"
+        ));
+        assert!(!command_nests_mcp_serve(
+            "cargo",
+            &["test".into()],
+            "cargo test"
+        ));
     }
 
     #[test]

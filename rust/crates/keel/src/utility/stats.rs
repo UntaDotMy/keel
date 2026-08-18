@@ -24,7 +24,6 @@ use crate::runner::telemetry::{aggregate_rows, read_rows};
 use crate::runtime::{display_path, resolve_claude_home, COMMAND_COMPACTION_EVENTS_FILE_NAME};
 use crate::utility::gain::parse_gain_summary;
 use crate::utility::recall::recall_status_snapshot;
-use crate::utility::sprint::open_stories_for_workspace;
 
 /// Default `--days` window for the savings/timing axes. Matches the telemetry
 /// default so the two surfaces agree on a window when neither is given one.
@@ -108,7 +107,7 @@ struct StatsSnapshot {
     gates: Vec<(String, u64)>,
     recall_documents: Option<u64>,
     recall_last_indexed_ms: u128,
-    sprint: Option<Vec<(String, String)>>,
+    anvil: Option<Vec<(String, String)>>,
 }
 
 /// Read the compaction event log under `claude_home` and reuse the `gain`
@@ -144,7 +143,7 @@ fn telemetry_day_files(claude_home: &Path, days: u64) -> Vec<PathBuf> {
 
 fn collect_snapshot(
     claude_home: &Path,
-    workspace_root: &str,
+    _workspace_root: &str,
     days: u64,
     top_count: usize,
 ) -> StatsSnapshot {
@@ -174,15 +173,7 @@ fn collect_snapshot(
         Err(_) => (None, 0),
     };
 
-    let sprint = open_stories_for_workspace(claude_home, workspace_root)
-        .ok()
-        .flatten()
-        .map(|stories| {
-            stories
-                .into_iter()
-                .map(|story| (story.id, story.state))
-                .collect::<Vec<_>>()
-        });
+    let anvil: Option<Vec<(String, String)>> = None;
 
     StatsSnapshot {
         tokens_saved: gain.tokens_saved,
@@ -195,7 +186,7 @@ fn collect_snapshot(
         gates,
         recall_documents,
         recall_last_indexed_ms,
-        sprint,
+        anvil,
     }
 }
 
@@ -280,15 +271,15 @@ impl StatsSnapshot {
                 let _ = writeln!(standard_output, "  memory: index unavailable");
             }
         }
-        match &self.sprint {
+        match &self.anvil {
             None => {
-                let _ = writeln!(standard_output, "  sprint: none active");
+                let _ = writeln!(standard_output, "  anvil: none active");
             }
             Some(open) if open.is_empty() => {
-                let _ = writeln!(standard_output, "  sprint: complete");
+                let _ = writeln!(standard_output, "  anvil: complete");
             }
             Some(open) => {
-                let _ = writeln!(standard_output, "  sprint: {} open", open.len());
+                let _ = writeln!(standard_output, "  anvil: {} open", open.len());
                 for (id, state) in open.iter().take(5) {
                     let _ = writeln!(standard_output, "    {id} [{state}]");
                 }
@@ -329,7 +320,7 @@ impl StatsSnapshot {
             })
             .collect::<Vec<_>>();
         let open_stories = self
-            .sprint
+            .anvil
             .as_ref()
             .map(|stories| {
                 stories
@@ -425,7 +416,7 @@ mod tests {
     fn gate_activity_empty_when_no_state() {
         with_isolated_home("gates-empty", |home| {
             let activity = gate_activity(home);
-            assert_eq!(activity.len(), 8);
+            assert_eq!(activity.len(), 5);
             assert!(activity.iter().all(|(_, count)| *count == 0));
         });
     }
@@ -457,7 +448,7 @@ mod tests {
             assert!(rendered.contains("commands:"), "rendered: {rendered}");
             assert!(rendered.contains("gates:"), "rendered: {rendered}");
             assert!(rendered.contains("memory:"), "rendered: {rendered}");
-            assert!(rendered.contains("sprint:"), "rendered: {rendered}");
+            assert!(rendered.contains("anvil:"), "rendered: {rendered}");
         });
     }
 

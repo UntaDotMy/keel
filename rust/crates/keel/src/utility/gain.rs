@@ -418,6 +418,7 @@ fn load_gain_summary(since_timestamp: Option<u64>, adapter_filter: Option<&str>)
     parse_gain_summary(&text, since_timestamp, adapter_filter)
 }
 
+#[cfg(test)]
 pub struct CompactionLossSummary {
     pub commands_observed: u64,
     pub commands_compacted: u64,
@@ -426,6 +427,7 @@ pub struct CompactionLossSummary {
     pub tokens_saved: u64,
 }
 
+#[cfg(test)]
 impl CompactionLossSummary {
     pub fn savings_percent(&self) -> f64 {
         if self.tokens_before == 0 {
@@ -436,6 +438,8 @@ impl CompactionLossSummary {
     }
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 pub fn load_compaction_loss_today() -> CompactionLossSummary {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

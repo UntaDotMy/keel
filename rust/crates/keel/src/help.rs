@@ -79,7 +79,7 @@ fn parse_command_tokens(line: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utility::{run_memory_command, run_orchestration_command, run_workflow_command};
+    use crate::utility::run_memory_command;
 
     /// Every command advertised in help_advanced.txt must route to a real dispatcher arm.
     ///
@@ -110,8 +110,8 @@ mod tests {
                 "memory" => {
                     run_memory_command(group.as_str(), &subcommand_args, &mut stdout, &mut stderr)
                 }
-                "orchestration" => {
-                    run_orchestration_command(&subcommand_args, &mut stdout, &mut stderr)
+                "anvil" => {
+                    crate::utility::run_anvil_command(&subcommand_args, &mut stdout, &mut stderr)
                 }
                 other => panic!("help line uses unknown top-level group: {other:?}"),
             };
@@ -155,7 +155,7 @@ mod tests {
                 continue;
             }
             let group = tokens[0].clone();
-            if !matches!(group.as_str(), "memory" | "orchestration" | "workflow") {
+            if group != "memory" {
                 continue;
             }
             assert!(
@@ -182,10 +182,6 @@ mod tests {
                         &mut stdout,
                         &mut stderr,
                     ),
-                    "orchestration" => {
-                        run_orchestration_command(&subcommand_args, &mut stdout, &mut stderr)
-                    }
-                    "workflow" => run_workflow_command(&subcommand_args, &mut stdout, &mut stderr),
                     _ => unreachable!(),
                 };
 
@@ -212,21 +208,13 @@ mod tests {
             parse_command_tokens("  memory scope resolve [--workspace-root <path>] [--json]"),
             vec!["memory", "scope", "resolve"]
         );
-        assert_eq!(
-            parse_command_tokens(
-                "  orchestration runtime-preflight [--claude-home <path>] [--json]"
-            ),
-            vec!["orchestration", "runtime-preflight"]
-        );
     }
 
     /// H9 inverse guard: every top-level command dispatched in commands.rs must
     /// appear in one of the help surfaces. The forward tests above check
     /// advertised -> routes; this checks the inverse (routes -> advertised) so a
     /// dispatched-but-undocumented command cannot silently disappear from help
-    /// again. The 8 commands this catches (bridge, code-graph, skill-eval,
-    /// user-story, sprint, dispatch, observe, eval) were all dispatched but
-    /// missing from help before this test existed.
+    /// again.
     #[test]
     fn every_dispatched_top_level_command_is_advertised() {
         // Curated list of user-facing top-level match arms from commands.rs,
@@ -260,23 +248,16 @@ mod tests {
             "skill-lint",
             "skill-eval",
             "config-audit",
-            "checkpoint",
-            "work",
-            "user-story",
-            "sprint",
-            "dispatch",
+            "anvil",
             "telemetry",
             "observe",
             "design-intelligence",
             "memory",
-            "orchestration",
-            "workflow",
             "gain",
             "session",
             "bench",
             "eval",
             "flow",
-            "team",
             "mcp",
         ];
         let combined_help = format!(

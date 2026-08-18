@@ -27,8 +27,16 @@
 
 set -euo pipefail
 
-# Resolve the keel binary: prefer ~/.claude/keel(.exe), fall back to PATH.
-if [ -x "$HOME/.claude/keel" ]; then
+# Resolve the keel binary: KEEL_HOME → ~/.keel → ~/.claude → PATH.
+if [ -n "${KEEL_HOME:-}" ] && [ -x "$KEEL_HOME/keel" ]; then
+  KEEL_BIN="$KEEL_HOME/keel"
+elif [ -n "${KEEL_HOME:-}" ] && [ -x "$KEEL_HOME/keel.exe" ]; then
+  KEEL_BIN="$KEEL_HOME/keel.exe"
+elif [ -x "$HOME/.keel/keel" ]; then
+  KEEL_BIN="$HOME/.keel/keel"
+elif [ -x "$HOME/.keel/keel.exe" ]; then
+  KEEL_BIN="$HOME/.keel/keel.exe"
+elif [ -x "$HOME/.claude/keel" ]; then
   KEEL_BIN="$HOME/.claude/keel"
 elif [ -x "$HOME/.claude/keel.exe" ]; then
   KEEL_BIN="$HOME/.claude/keel.exe"
@@ -71,10 +79,16 @@ SESSION_ID=$(printf '%s' "$INPUT" | "$JQ_BIN" -r '.conversation_id // empty' 2>/
 SESSION_KEY=$(printf '%s' "$SESSION_ID" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | tr -s '-' | sed 's/^-//; s/-$//')
 # Rust's sanitize_memory_key falls back to "workspace" when nothing survives.
 [ -z "$SESSION_KEY" ] && SESSION_KEY="workspace"
-MARKER_DIR="$HOME/.claude/state/iron-law-satisfied"
+keel_state_root() {
+  if [ -n "${KEEL_HOME:-}" ]; then echo "$KEEL_HOME/state"; return; fi
+  if [ -d "$HOME/.keel" ]; then echo "$HOME/.keel/state"; return; fi
+  echo "$HOME/.claude/state"
+}
+STATE_ROOT="$(keel_state_root)"
+MARKER_DIR="$STATE_ROOT/iron-law-satisfied"
 mkdir -p "$MARKER_DIR" 2>/dev/null || true
 MARKER="$MARKER_DIR/$SESSION_KEY"
-STARTED_DIR="$HOME/.claude/state/cursor-session-started"
+STARTED_DIR="$STATE_ROOT/cursor-session-started"
 mkdir -p "$STARTED_DIR" 2>/dev/null || true
 STARTED_MARKER="$STARTED_DIR/$SESSION_ID"
 

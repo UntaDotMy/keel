@@ -172,12 +172,10 @@ fn run_working_brief_write(
         "  assumptions: {} entries",
         brief.assumptions.len()
     );
-    // Multi-story on-ramp: a brief with 2+ criteria IS a sprint backlog, so name
-    // the next step; otherwise the sprint-start gate never engages.
     if brief.acceptance_criteria.len() >= 2 {
         let _ = writeln!(
             standard_output,
-            "  sprint: {} acceptance criteria -> run `keel sprint plan` to track them as a sprint, then `keel sprint advance --id <id> --state <todo|in-progress|done>` as each passes.",
+            "  anvil: {} acceptance criteria -> run `keel anvil run --dry-run` then `keel anvil run` against a named bar.",
             brief.acceptance_criteria.len()
         );
     }

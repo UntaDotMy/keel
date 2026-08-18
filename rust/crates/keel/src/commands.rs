@@ -145,13 +145,9 @@ impl Application {
             "code-graph" => {
                 utility::run_code_graph_command(command_arguments, standard_output, standard_error)
             }
-            "user-story" => {
-                utility::run_user_story_command(command_arguments, standard_output, standard_error)
+            "anvil" => {
+                utility::run_anvil_command(command_arguments, standard_output, standard_error)
             }
-            "sprint" => {
-                utility::run_sprint_command(command_arguments, standard_output, standard_error)
-            }
-            "work" => utility::run_work_command(command_arguments, standard_output, standard_error),
             "skill-lint" => {
                 utility::run_skill_lint_command(command_arguments, standard_output, standard_error)
             }
@@ -163,9 +159,6 @@ impl Application {
                 standard_output,
                 standard_error,
             ),
-            "checkpoint" => {
-                utility::run_checkpoint_command(command_arguments, standard_output, standard_error)
-            }
             "design-intelligence" => utility::run_design_intelligence_command(
                 command_arguments,
                 standard_output,
@@ -177,14 +170,6 @@ impl Application {
                 standard_output,
                 standard_error,
             ),
-            "orchestration" => utility::run_orchestration_command(
-                command_arguments,
-                standard_output,
-                standard_error,
-            ),
-            "workflow" => {
-                utility::run_workflow_command(command_arguments, standard_output, standard_error)
-            }
             "gain" => utility::run_gain_command(command_arguments, standard_output, standard_error),
             "session" => {
                 utility::run_session_command(command_arguments, standard_output, standard_error)
@@ -199,10 +184,6 @@ impl Application {
             "observe" => {
                 utility::run_observe_command(command_arguments, standard_output, standard_error)
             }
-            "dispatch" => {
-                utility::run_dispatch_command(command_arguments, standard_output, standard_error)
-            }
-            "team" => utility::run_team_command(command_arguments, standard_output, standard_error),
             "flow" => self.run_flow_command(command_arguments, standard_output, standard_error),
             "telemetry" => {
                 runner::run_telemetry_command(command_arguments, standard_output, standard_error)
@@ -454,7 +435,7 @@ impl Application {
                 "repository root: {repository_root_trimmed}"
             );
         }
-        let _ = writeln!(standard_output, "claude home: {effective_claude_home}");
+        let _ = writeln!(standard_output, "keel home: {effective_claude_home}");
         let _ = writeln!(
             standard_output,
             "cache directory: {}",

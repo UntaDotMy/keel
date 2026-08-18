@@ -87,8 +87,7 @@ checking. The cost of skipping a skill that did apply is shipping a regression.
 
 ### Techniques (main-thread skills)
 - `brainstorming` — Structured brainstorming sessions
-- `writing-user-stories` — User story creation with Connextra + Gherkin
-- `running-a-sprint` — Scrum sprint management
+- `running-anvil` — Only delivery loop
 - `test-driven-development` — TDD workflow
 - `behavior-driven-development` — BDD outside-in scenarios and living docs
 - `systematic-debugging` — Root-cause debugging methodology
@@ -114,15 +113,12 @@ checking. The cost of skipping a skill that did apply is shipping a regression.
 
 ## Keel CLI Commands (use `keel run -- <command>` for compaction)
 
-- `keel workflow route|start|cockpit|finish` — Route requests and drive workflow
+- `keel anvil compile|cast|sieve|stamp|loop|run` — Only delivery loop
 - `keel review pre-commit|pre-pr` — Review gates
 - `keel run -- <command>` — Run command with token-saving compaction
 - `keel memory scope resolve|refresh` — Memory scope management
-- `keel sprint plan|status|advance|review|list` — Sprint management
-- `keel work add|list|ready|blocked|dep|discovered|close|show` — Work tracking
 - `keel recall <query>` — Full-text search over memories and working-briefs
 - `keel skill-lint` — Validate skill structure
-- `keel user-story lint` — Validate user story format
 - `keel code-search search` — Codebase search
 - `keel code-graph build|impact` — Code dependency graph
 - `keel checkpoint create|list|show|restore` — Git-backed snapshots

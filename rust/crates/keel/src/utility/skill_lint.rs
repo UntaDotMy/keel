@@ -77,7 +77,7 @@ const CORE_SKILLS: &[&str] = &[
     "systematic-debugging",
     "writing-plans",
     "executing-plans",
-    "running-a-sprint",
+    "running-anvil",
     "using-keel",
 ];
 
