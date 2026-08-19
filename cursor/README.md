@@ -8,7 +8,7 @@ Cursor (1.7+) exposes a hook system (see https://cursor.com/docs/hooks) with eve
 
 1. **`.cursorrules`** — the persistent keel iron law, skill catalog, workflow commands, and branch/commit rules, injected by Cursor as system instructions so the model has keel discipline from the first prompt. Cursor reads it from the project root (or `~/.cursorrules` globally).
 2. **`hooks/`** — a `hooks.json` + `keel-cursor.sh` script that subscribes to Cursor's hook events, wiring each to a host-neutral `keel bridge` subcommand. This delivers the same automatic behavior the hook system provides in Claude Code, Codex, and Pi: the Iron Law edit gate (blocks edits until the model has read first), compaction rerouting for noisy shell commands, observation capture, and the compaction/session-end learning cycle.
-3. **`mcp.json`** — registers the keel MCP server (`keel mcp serve`) so all 31 keel tools (`recall`, `skill_route`, `skill_get`, `sprint`, `brief_create`, `system_map`, etc.) are available as native MCP tool calls in Cursor, no CLI shell-out required for tool access. The installer merges the `keel` entry into `~/.cursor/mcp.json` (preserving your other MCP servers); there is no `alwaysLoad` equivalent — Cursor loads MCP servers on demand, toggleable via the sidebar Customize menu.
+3. **`mcp.json`** — registers the keel MCP server (`keel mcp serve`) so all keel tools (`recall`, `skill_route`, `skill_get`, `anvil`, `brief_create`, `system_map`, etc.) are available as native MCP tool calls in Cursor, no CLI shell-out required for tool access. The installer merges the `keel` entry into `~/.cursor/mcp.json` (preserving your other MCP servers); there is no `alwaysLoad` equivalent — Cursor loads MCP servers on demand, toggleable via the sidebar Customize menu.
 
 ## Prerequisites
 
@@ -102,6 +102,7 @@ After copying, on the first edit-class tool call in a fresh Cursor conversation,
 | `keel review pre-pr --base-ref origin/feat` | Review before PR |
 | `keel memory scope resolve --create-missing --refresh-system-map` | Refresh memory |
 | `keel code-search search --workspace-root "$PWD" --query "..."` | Search code |
+| `keel code-search siblings` | Completeness scan after a fix or implement |
 
 ### Branch and Commit Rules
 

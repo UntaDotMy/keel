@@ -8,10 +8,10 @@ Operate as an expert in this skill's domain. Lead with the answer a specialist w
 
 ## Resolving the `keel` binary (read before any `keel <sub>` invocation)
 
-Bare `keel` is NOT guaranteed on `PATH`. Before running any `keel sprint` / `keel memory` / `keel review` / `keel run` command a skill instructs, resolve the binary once per session in this priority order:
+Bare `keel` is NOT guaranteed on `PATH`. Before running any `keel anvil` / `keel memory` / `keel review` / `keel run` command a skill instructs, resolve the binary once per session in this priority order:
 
-1. **MCP tools first** (preferred — no PATH needed): the harness pins keel's MCP server with `alwaysLoad: true`, so `sprint`, `memory_status`, `brief_*`, `review`, `run_command`, `system_map`, `recall` etc. are available as tools. Use them instead of shelling out when the surface exists.
-2. **Installed binary**: `~/.claude/keel` (macOS/Linux) or `%USERPROFILE%\.claude\keel.exe` (Windows).
+1. **MCP tools first** (preferred — no PATH needed): the harness pins keel's MCP server with `alwaysLoad: true`, so `anvil`, `memory_status`, `brief_*`, `review`, `run_command`, `system_map`, `recall` etc. are available as tools. Use them instead of shelling out when the surface exists.
+2. **Installed binary**: `~/.keel/keel` (macOS/Linux) or `%USERPROFILE%\.keel\keel.exe` (Windows).
 3. **Source checkout**: `cargo run --quiet --bin keel -- <args>` from the repo root.
 
 If a skill writes bare `keel <sub>`, substitute the resolved path from step 2 or 3 (or use the MCP tool from step 1). Do not report a skill as broken because `keel` is "not recognized" — that is a PATH resolution step, not a defect.

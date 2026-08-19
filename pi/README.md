@@ -8,12 +8,12 @@ Pi coding agent (https://pi.dev) loads `AGENTS.md` from the project root (or `~/
 
 1. **`AGENTS.md`** — the persistent keel iron law, skill catalog, workflow commands, and branch/commit rules, loaded into the system prompt at startup so the model has keel discipline from the first prompt.
 2. **`keel-pi.ts`** — a TypeScript extension that subscribes to Pi's `session_start`, `input`/`message_start`, `tool_call`, `tool_execution_end`, `session_before_compact`, `session_compact`, and `session_shutdown` events, wiring each to a host-neutral `keel bridge` subcommand. This delivers the same automatic behavior the hook system provides in Claude Code and Codex: bootstrap context injection, the Iron Law edit gate (blocks edits until the model has read first), compaction rerouting for noisy shell commands, observation capture, and the compaction/session-end learning cycle.
-3. **`.mcp.json`** — registers keel's MCP server so its tools (recall, system_map, skill_route, sprint, etc.; full surface asserted by `tests/doc_parity_test.rs`) are directly callable by the model without spawning the keel binary per invocation.
+3. **`.mcp.json`** — registers keel's MCP server so its tools (recall, system_map, skill_route, anvil, etc.; full surface asserted by `tests/doc_parity_test.rs`) are directly callable by the model without spawning the keel binary per invocation.
 
 ## Prerequisites
 
 1. Pi coding agent installed (`npm install -g @earendil-works/pi-coding-agent`, or `pi install`).
-2. The `keel` binary installed at `~/.claude/keel` (unix) or `~/.claude/keel.exe` (win32), or on `PATH`.
+2. The `keel` binary installed at `~/.keel/keel` (unix) or `~/.keel/keel.exe` (win32), or on `PATH`.
 3. `tsx` or `node` available for TypeScript extension execution (Pi handles this natively for `*.ts` extensions in its discovery paths).
 
 ## Install
@@ -130,6 +130,7 @@ On the first edit-class tool call in a fresh session, the Iron Law gate will blo
 | `keel review pre-pr --base-ref origin/feat` | Review before PR |
 | `keel memory scope resolve --create-missing --refresh-system-map` | Refresh memory |
 | `keel code-search search --workspace-root "$PWD" --query "..."` | Search code |
+| `keel code-search siblings` | Completeness scan after a fix or implement |
 
 ### Branch and Commit Rules
 
@@ -157,8 +158,7 @@ The included `.mcp.json` (installed as `mcp.json`) registers keel's MCP server, 
 | `system_map_refresh` | Regenerate the cached workspace SYSTEM_MAP |
 | `context_brief` | Get the keel context brief (skills, memory, working brief) |
 | `cli` | Run any keel CLI subcommand |
-| `sprint` | Drive a Scrum-style sprint loop |
-| `user_story_lint` | Validate user stories against strict format |
+| `anvil` | Drive the Anvil delivery loop (compile/cast/sieve/stamp; loop and live run are CLI-only) |
 
 The MCP config uses Pi's documented structure (`{"settings": {...}, "mcpServers": {...}}`), with `idleTimeout` under `settings` and per-server options `command`/`args`/`env`/`url`/`lifecycle` (`lazy`|`eager`|`keep-alive`)/`idleTimeout`/`directTools`/`debug`. `directTools: true` exposes each keel tool as a top-level tool instead of under an `mcp_` prefix. Adjust the `command` field to `keel.exe` on Windows if installing manually.
 
@@ -206,13 +206,12 @@ Invoke any skill below by routing through the MCP `skill_route` and `skill_get` 
 - **brainstorming** -- Socratic design exploration before implementation. Restates request, confirms user story, produces agreed design.
 - **writing-plans** -- Turn agreed design into verifiable implementation plan with ordered steps and checks.
 - **executing-plans** -- Execute a plan step by step, verifying each step before the next.
-- **writing-user-stories** -- Connextra-format stories with Gherkin acceptance criteria, validated against INVEST.
 
 #### Delivery & Git
 - **finishing-a-development-branch** -- Verify, review, then present merge/PR options. Never force-push, never merge to main unilaterally.
 - **git-expert** -- Safe Git workflows: branching, commits, PRs, merges, conflict resolution, history repair.
 - **using-git-worktrees** -- Isolate feature work in its own checkout to prevent collisions with parallel work.
-- **running-a-sprint** -- Scrum-style sprint loop over confirmed user stories until every story is Done.
+- **running-anvil** -- Single delivery loop (compile → cast → sieve → stamp → loop).
 - **dispatching-parallel-agents** -- Fan out independent work to concurrent subagents. Apply the four-condition independence test first.
 - **subagent-driven-development** -- Delegate self-contained tasks to fresh-context subagents to preserve controller context.
 - **designing-agent-teams** -- Decompose large tasks into coordinated specialist agents with clean handoffs.

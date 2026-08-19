@@ -75,6 +75,7 @@ Commands referenced by AGENTS.md, with the command surface that owns them:
 - `keel run -- <command>` — direct compaction wrapper for noisy shell output.
 - `keel rewrite "<command>"` — inspection helper for the rewrite resolution.
 - `keel code-search search` — repo-local discovery before broad scans.
+- `keel code-search siblings` — completeness scan after a fix or implement.
 - `keel flow start` / `flow check` / `flow finish` — brownfield evidence gates.
 - `keel review pre-commit` / `pre-pr` / `gates check` — local review surfaces.
 - `keel git-workflow commit-message` / `pr-body` / `lint-message` / `preflight` — commit/PR text and preflight.

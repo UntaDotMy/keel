@@ -1,6 +1,6 @@
 ---
 name: domain-driven-design
-description: Domain-Driven Design (DDD) specialist. Model software around the business domain — ubiquitous language, bounded contexts, aggregates, entities/value objects, domain events, repositories, and strategic context maps — instead of around the database or framework. Use when designing complex domain logic, drawing service/module boundaries, naming domain types, introducing CQRS/event sourcing, running event storming, or when the code model drifts from how domain experts speak. Complements backend-and-data-architecture (persistence/ops) and writing-user-stories (requirements language).
+description: Domain-Driven Design (DDD) specialist. Model software around the business domain — ubiquitous language, bounded contexts, aggregates, entities/value objects, domain events, repositories, and strategic context maps — instead of around the database or framework. Use when designing complex domain logic, drawing service/module boundaries, naming domain types, introducing CQRS/event sourcing, running event storming, or when the code model drifts from how domain experts speak. Complements backend-and-data-architecture (persistence/ops) and the working brief (requirements language).
 when_to_use: Complex business domains; bounded-context or microservice boundary decisions; rich domain models vs anemic CRUD; aggregate design and consistency boundaries; ubiquitous language / glossary work; domain events, sagas, outbox; CQRS or event-sourced write models; event storming or context mapping; anti-corruption layers when integrating external systems.
 allowed-tools: Read, Grep, Glob, Edit, Write, Bash(keel memory:*), Bash(git diff:*), Bash(git status), Bash(git log:*)
 effort: high
@@ -95,7 +95,7 @@ Infrastructure (DB, queues, external APIs) implements ports
 |---|---|
 | Persistence, migrations, retries, ops | `backend-and-data-architecture` |
 | API surface of a context | `api-contract-design` |
-| Requirements language before modeling | `writing-user-stories` then this skill for the model |
+| Requirements language before modeling | working brief, then this skill for the model |
 | Outside-in scenarios / living docs | `behavior-driven-development` |
 | UI composition (not domain model) | `component-driven-development` |
 | Brownfield edit safety | `preserve-existing-flow` |

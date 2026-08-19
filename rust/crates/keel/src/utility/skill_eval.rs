@@ -80,6 +80,10 @@ const TRIGGER_FIXTURES: &[TriggerFixture] = &[
         prompt: "the test is failing intermittently, help me find the root cause",
         accept: &["systematic-debugging"],
     },
+    TriggerFixture {
+        prompt: "use anvil to implement this feature under a named bar",
+        accept: &["running-anvil"],
+    },
     // UI visual-craft: must activate the UI specialist (not silent IDF ties).
     TriggerFixture {
         prompt: "build a landing page for my beauty spa",

@@ -32,7 +32,7 @@
     "keel": {
       "command": "keel",
       "args": ["mcp", "serve"],
-      "description": "Keel CLI tools for workflow, memory, recall, and sprint management"
+      "description": "Keel CLI tools for Anvil, memory, recall, and review"
     }
   },
   "userConfig": {

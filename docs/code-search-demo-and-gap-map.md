@@ -1,7 +1,7 @@
 <!--
 Purpose: Honest code-search surface and remaining gaps versus fuller indexing tools.
 Caller: Operators and agents choosing how to search the workspace.
-Dependencies: keel code-search search (Rust utility/code_search.rs).
+Dependencies: keel code-search search|siblings (Rust utility/code_search.rs).
 Main Functions: Document the live command, path filters, skip list, and explicit non-goals.
 Side Effects: None. Documentation only.
 -->
@@ -12,6 +12,7 @@ Side Effects: None. Documentation only.
 ```bash
 keel code-search search --workspace-root "$PWD" --query "incremental lineage proof"
 keel code-search search --workspace-root "$PWD" --query "FlagSet" --path "rust/crates/keel"
+keel code-search siblings --query "the bug shape"
 ```
 
 Flags:

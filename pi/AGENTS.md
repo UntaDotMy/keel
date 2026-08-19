@@ -14,19 +14,19 @@ You are running with keel discipline. These rules are non-negotiable.
 
 ## Working Workflow
 
-- **Start work:** `keel workflow route --request "..."` then `keel workflow start --preset <preset> --request "..."`
-- **Check live state:** `keel workflow cockpit`
-- **Finish work:** `keel workflow finish --id <entry-id> --proof "tests green"`
+- **Start work:** `keel anvil compile --goal "..." --bar "..."` then `keel anvil run --dry-run`
+- **Live refine:** `keel anvil run` / `keel anvil loop` on the CLI only (not MCP)
 - **Review before PR:** `keel review pre-pr --base-ref origin/feat --format compact`
 - **Refresh memory:** `keel memory scope resolve --create-missing --refresh-system-map`
 - **Search code:** `keel code-search search --workspace-root "$PWD" --query "<query>"`
+- **Scan the class:** `keel code-search siblings` after a fix or implement
 
 ## Native Command Routing -- Must Follow First
 
 When a native keel command owns the job, use it instead of recreating the behavior with raw shell.
 
 - **Noisy shell commands:** prefer `keel run -- <command>` for test, build, lint, log, status, search, Docker, Kubernetes, Terraform, package-manager, and CI-style commands. Use `keel rewrite "<command>"` when unsure whether a command has native compaction.
-- **Repository search:** prefer `keel code-search search --workspace-root "$PWD" --query "<query>"`. Use raw `rg`, `grep`, `find`, or `git grep` only after scoped search is insufficient.
+- **Repository search:** prefer `keel code-search search --workspace-root "$PWD" --query "<query>"`. After a fix or implement, run `keel code-search siblings`. Use raw `rg`, `grep`, `find`, or `git grep` only after scoped search is insufficient.
 - **Commit/PR text:** use `keel git-workflow commit-message --from-diff` and `keel git-workflow pr-body --from-diff` before submitting. Run `keel review pre-pr` before finalizing.
 
 ## Branch and Commit Discipline
@@ -57,9 +57,8 @@ The keel MCP server provides these tools. Use them via the `mcp` proxy tool or d
 | `brief_create` | Persist a working brief so context survives compaction |
 | `system_map_refresh` | Regenerate the cached workspace SYSTEM_MAP.md |
 | `context_brief` | Get the keel context brief: iron law, skill catalog, memory health, newest brief |
-| `cli` | Run any keel CLI subcommand (review, git-workflow, workflow, memory, etc.) |
-| `sprint` | Drive a Scrum-style sprint loop (plan, advance, review, status, list) |
-| `user_story_lint` | Validate user stories against strict Agile/Jira format |
+| `cli` | Run any keel CLI subcommand (review, git-workflow, anvil, memory, etc.) |
+| `anvil` | Drive the Anvil delivery loop (compile, cast, sieve, stamp; loop/live run are CLI-only) |
 
 ## Skill Catalog
 
@@ -105,13 +104,12 @@ Invoke any skill below by routing through the MCP `skill_route` and `skill_get` 
 - **brainstorming** -- Socratic design exploration before implementation. Restates request, confirms user story, produces agreed design.
 - **writing-plans** -- Turn agreed design into verifiable implementation plan with ordered steps and checks.
 - **executing-plans** -- Execute a plan step by step, verifying each step before the next.
-- **writing-user-stories** -- Connextra-format stories with Gherkin acceptance criteria, validated against INVEST.
 
 ### Delivery & Git
 - **finishing-a-development-branch** -- Verify, review, then present merge/PR options. Never force-push, never merge to main unilaterally.
 - **git-expert** -- Safe Git workflows: branching, commits, PRs, merges, conflict resolution, history repair.
 - **using-git-worktrees** -- Isolate feature work in its own checkout to prevent collisions with parallel work.
-- **running-a-sprint** -- Scrum-style sprint loop over confirmed user stories until every story is Done.
+- **running-anvil** -- Single delivery loop (compile → cast → sieve → stamp → loop).
 - **dispatching-parallel-agents** -- Fan out independent work to concurrent subagents. Apply the four-condition independence test first.
 - **subagent-driven-development** -- Delegate self-contained tasks to fresh-context subagents to preserve controller context.
 - **designing-agent-teams** -- Decompose large tasks into coordinated specialist agents with clean handoffs.

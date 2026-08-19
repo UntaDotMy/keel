@@ -67,6 +67,7 @@ Side Effects: None — this file is informational.
 - Before editing any existing source file, run a Preserve Existing Flow check unless the change is docs-only, formatting-only, generated-only, or explicitly greenfield. The check must name the target file or function, current behavior to preserve, entry point, producer, source of truth, storage/state/queue owner, side-effect owner, consumers, cleanup/recovery path, edit boundary, validation needed, and validation evidence in `~/.claude/memories/workspaces/<workspace-slug>/flow/flow-check.json`.
 - Before each patch batch, re-read the exact target file and named function or module that will change; after each patch batch, re-read the edited target plus direct callers, direct callees, and the surrounding owner surface before expanding scope or finalizing.
 - For repo-local discovery, prefer `keel code-search search` before broad repo scans or repeated file reads; narrow with `--path` when the user already named a module, route, or directory.
+- After a fix or implement, run `keel code-search siblings` and handle every hit. A one-site change is unfinished.
 - Prefer the installed harness-home root executable when the skill pack is already synced: `~/.claude/keel` on macOS or Linux and `~/.claude/keel.exe` on Windows are the canonical direct-run paths for the managed install and the preferred global discovery paths for agents.
 - Use exact file, symbol, or keyword search first.
 - Read targeted snippets and direct callers/callees second.

@@ -44,8 +44,8 @@ were validated where executable.
    `docs/context-efficiency-playbook.md`.
 2. **Custom slash commands (discoverability gap vs. the whole field).** Added
    `/keel:workflow`, `/keel:review`, `/keel:recall`,
-   `/keel:gain`, `/keel:sprint`, `/keel:user-story` at the plugin root
-   `commands/` (six total), registered via the manifest `commands` key. Each
+   `/keel:anvil`, `/keel:review`, `/keel:recall`, `/keel:gain` at the plugin root
+   `commands/` (Anvil is the only delivery loop; sprint/user-story commands are deleted). Each
    wraps only implemented CLI surfaces with the verified flag names.
    Frontmatter validated.
 3. **Statusline savings badge (caveman/RTK-style ROI surface).**
@@ -725,10 +725,9 @@ cannot talk past**. Four differentiators hold against every comparator:
    compacted output is emitted only when strictly fewer exact tokens than raw, and
    tool output is neutralized before the model sees it. No comparator has either , 
    they treat the harness as trusted and don't measure their own token effect.
-4. **Executable requirement-format gate** (`user_story.rs` Connextra+Gherkin+INVEST
-   lint + the fail-closed `sprint review`). spec-kit and BMAD have richer gate
-   *prose*; only keel validates the spec format in code and refuses closeout
-   on an incomplete sprint.
+4. **Executable delivery gate** (`keel anvil sieve` 0-LLM gates + `keel anvil stamp`
+   + working-brief / completion-gate). spec-kit and BMAD have richer gate
+   *prose*; keel refuses closeout when the named bar's gates are still red.
 
 ### Where keel loses (honest)
 
@@ -750,8 +749,8 @@ The audit's skeptical re-read of our own post-merge code surfaced drift the merg
 introduced ,  ironic, since finding #4 was itself a doc-parity test:
 
 - **MCP tool-count drift.** CLAUDE.md claimed the server exposes **14 tools**;
-  `mcp/tools.rs` defines **16** (`sprint` + `user_story_lint` were added without
-  updating the doc). Fixed CLAUDE.md (14→16, six tool groups) and added
+  `mcp/tools.rs` defines the live tool set (Anvil, not sprint/user-story). Fixed CLAUDE.md
+  and added
   `mcp_tool_count_matches_documentation` to `tests/doc_parity_test.rs` so the count
   can no longer drift silently.
 - **Undocumented commands.** `dispatch` and `observe` were wired in `commands.rs`

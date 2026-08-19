@@ -120,7 +120,7 @@ is_keel_research_tool() {
 
 # Mirrors the Rust is_keel_research_command HITS list (hook_lifecycle/mod.rs).
 # The doc-parity test adapter_gate_lists_match_the_rust_source_of_truth enforces it.
-KEEL_RESEARCH_SUBCOMMANDS="system-map system_map recall doctor code-search code_search skill-route skill_route skill-list skill_list skill-get skill_get context-brief context_brief"
+KEEL_RESEARCH_SUBCOMMANDS="system-map system_map recall doctor code-search code_search skill-route skill_route skill-list skill_list skill-get skill_get context-brief context_brief anvil"
 is_keel_reading_command() {
   body=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
   case "$body" in

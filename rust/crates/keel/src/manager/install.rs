@@ -176,6 +176,8 @@ pub struct InstallSummary {
     /// Human-readable outcome of installing the Cowork (Claude Desktop) plugin
     /// files, or `None` when skipped. Best-effort.
     pub cowork_wiring: Option<String>,
+    /// Writes `~/.grok/hooks/keel.json` so Grok PreToolUse fires natively.
+    pub grok_wiring: Option<String>,
     /// Human-readable outcome of migrating keel-owned data out of a legacy
     /// `~/.claude` install into the host-neutral root, or `None` when there
     /// was nothing to migrate. Data-preserving by construction.
@@ -304,7 +306,11 @@ pub fn install_from_paths(
     // reverses it like every other managed artifact.
     let _synced_output_styles = sync_output_styles(&layout, &engagement_home, &mut tracker)?;
 
-    let removed_stale_files = remove_orphans(
+    // Deleted first-party surfaces (sprint / user-story / workflow) always
+    // leave the engagement home, even when --purge-stale is off. Otherwise an
+    // old install keeps teaching a loop that no longer exists.
+    let mut removed_stale_files = remove_dropped_first_party_artifacts(claude_home, Some(&layout));
+    removed_stale_files += remove_orphans(
         &engagement_home,
         &previous_files,
         &previous_skills,
@@ -351,6 +357,7 @@ pub fn install_from_paths(
     let cowork_wiring = maybe_wire_cowork(repository_root, claude_home, detected.cowork);
     let commandcode_wiring =
         maybe_wire_commandcode(repository_root, claude_home, detected.commandcode);
+    let grok_wiring = maybe_wire_grok(claude_home);
     Ok(InstallSummary {
         synced_skills,
         synced_agents,
@@ -370,6 +377,7 @@ pub fn install_from_paths(
         pi_wiring,
         commandcode_wiring,
         cowork_wiring,
+        grok_wiring,
         migration_report,
         path_wiring,
     })
@@ -629,6 +637,50 @@ pub(crate) fn maybe_wire_cursor(
         Some("nothing to copy".to_string())
     } else {
         Some(status_parts.join("; "))
+    }
+}
+
+/// Grok loads global hooks from `~/.grok/hooks/*.json`. Claude-compat also
+/// scans `~/.claude/settings.json`, but that scan can be turned off. Write a
+/// native Grok hook file so PreToolUse deny (Iron Law + Anvil) always fires.
+/// Stop must call `keel hook stop` (silent). Grok treats Stop additionalContext
+/// as "keep going"; wiring Stop to post-tool-batch loops until the host cap.
+pub(crate) fn maybe_wire_grok(claude_home: &Path) -> Option<String> {
+    if !is_standard_home(claude_home) {
+        return None;
+    }
+    let home = match claude_home.parent() {
+        Some(path) => path.to_path_buf(),
+        None => return Some("skipped (no home directory)".to_string()),
+    };
+    let grok_dir = home.join(".grok");
+    if !grok_dir.is_dir() {
+        return Some("skipped (not detected)".to_string());
+    }
+    let hooks_dir = grok_dir.join("hooks");
+    if let Err(error) = std::fs::create_dir_all(&hooks_dir) {
+        return Some(format!("hooks dir skipped ({error})"));
+    }
+    let target = hooks_dir.join("keel.json");
+    let binary = installed_executable_path(claude_home);
+    let command = format!("{} hook", display_path(&binary));
+    let payload = serde_json::json!({
+        "hooks": {
+            "SessionStart": [{ "hooks": [{ "type": "command", "command": format!("{command} session-start"), "timeout": 10 }] }],
+            "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": format!("{command} user-prompt-submit"), "timeout": 10 }] }],
+            "PreToolUse": [{ "hooks": [{ "type": "command", "command": format!("{command} pre-tool-use"), "timeout": 10 }] }],
+            "PostToolUse": [{ "hooks": [{ "type": "command", "command": format!("{command} post-tool-use"), "timeout": 10 }] }],
+            "PostToolUseFailure": [{ "hooks": [{ "type": "command", "command": format!("{command} post-tool-use-failure"), "timeout": 10 }] }],
+            "Stop": [{ "hooks": [{ "type": "command", "command": format!("{command} stop"), "timeout": 10 }] }]
+        }
+    });
+    let rendered = match serde_json::to_string_pretty(&payload) {
+        Ok(text) => text,
+        Err(error) => return Some(format!("serialize skipped ({error})")),
+    };
+    match std::fs::write(&target, rendered) {
+        Ok(()) => Some(format!("hooks -> {}", display_path(&target))),
+        Err(error) => Some(format!("hooks write skipped ({error})")),
     }
 }
 
@@ -1670,6 +1722,75 @@ fn remove_update_temp_trees(keel_home: &Path, engagement_home: &Path) {
     let _ = remove_path_if_exists(&staged.with_file_name(staged_name));
 }
 
+/// First-party skill directories deleted from the pack. Always removed from
+/// the engagement home on install/update/uninstall unless the current source
+/// pack still ships that name.
+const DROPPED_FIRST_PARTY_SKILLS: &[&str] = &["running-a-sprint", "writing-user-stories"];
+
+/// First-party slash-command files deleted from `commands/`. Same rule as
+/// [`DROPPED_FIRST_PARTY_SKILLS`].
+const DROPPED_FIRST_PARTY_COMMANDS: &[&str] = &["sprint.md", "user-story.md", "workflow.md"];
+
+/// Remove deleted first-party skills/commands from the engagement home.
+///
+/// `--purge-stale` only deletes names that were in a prior inventory. An old
+/// install that copied `sprint.md` before inventories existed (or after a
+/// failed inventory write) keeps teaching the deleted loop. This list is the
+/// product-cutover owner: always run, skip a name only when the current pack
+/// still contains it.
+fn remove_dropped_first_party_artifacts(
+    claude_home: &Path,
+    layout: Option<&RepositoryLayout>,
+) -> usize {
+    let keep_skills: BTreeSet<String> = layout
+        .map(|value| {
+            value
+                .skills
+                .iter()
+                .map(|skill| skill.name.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+    let keep_commands = current_pack_command_names(layout);
+    let mut removed = 0;
+    for name in DROPPED_FIRST_PARTY_SKILLS {
+        if keep_skills.iter().any(|skill| skill == name) {
+            continue;
+        }
+        removed +=
+            remove_path_if_exists_counted(&skills_directory(claude_home).join(name)).unwrap_or(0);
+    }
+    for name in DROPPED_FIRST_PARTY_COMMANDS {
+        if keep_commands.iter().any(|command| command == name) {
+            continue;
+        }
+        removed +=
+            remove_path_if_exists_counted(&commands_directory(claude_home).join(name)).unwrap_or(0);
+    }
+    removed
+}
+
+fn current_pack_command_names(layout: Option<&RepositoryLayout>) -> BTreeSet<String> {
+    let Some(layout) = layout else {
+        return BTreeSet::new();
+    };
+    let mut names = BTreeSet::new();
+    let source = layout.root_path.join("commands");
+    let Ok(entries) = fs::read_dir(&source) else {
+        return names;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("md") {
+            continue;
+        }
+        if let Some(name) = path.file_name().and_then(|value| value.to_str()) {
+            names.insert(name.to_string());
+        }
+    }
+    names
+}
+
 /// Drop keel-owned leftovers that still sit in the old `~/.claude` home.
 fn remove_legacy_keel_leftovers(keel_home: &Path, engagement_home: &Path) -> usize {
     if engagement_home == keel_home {
@@ -2153,7 +2274,7 @@ pub(crate) fn maybe_wire_cowork(
         "type": "stdio",
         "command": display_path(&binary),
         "args": ["mcp", "serve"],
-        "description": "Keel CLI tools for workflow, memory, recall, and sprint management"
+        "description": "Keel CLI tools for Anvil, memory, recall, and review"
     });
 
     match merge_cowork_mcp(&config_path, "keel", &mcp_entry) {
@@ -2911,6 +3032,9 @@ pub fn write_install_summary(summary: &InstallSummary, output: &mut dyn Write) {
     }
     if let Some(cowork_status) = &summary.cowork_wiring {
         let _ = writeln!(output, "  Cowork wiring: {cowork_status}");
+    }
+    if let Some(grok_status) = &summary.grok_wiring {
+        let _ = writeln!(output, "  Grok wiring: {grok_status}");
     }
     if let Some(migration) = &summary.migration_report {
         let _ = writeln!(output, "  Legacy migration: {migration}");
@@ -4278,6 +4402,7 @@ pub fn run_uninstall_command(
     removed_count += remove_wired_adapters(&claude_home);
     remove_update_temp_trees(&claude_home, &engagement_home);
     removed_count += remove_legacy_keel_leftovers(&claude_home, &engagement_home);
+    removed_count += remove_dropped_first_party_artifacts(&claude_home, None);
     let _ = writeln!(standard_output, "Uninstall complete");
     let _ = writeln!(standard_output, "  Removed files: {removed_count}");
     0
@@ -6089,6 +6214,86 @@ mod tests {
     }
 
     #[test]
+    fn install_without_purge_stale_still_removes_dropped_first_party_surfaces() {
+        let (repo, home) = unique_paths("drop-sprint");
+        seed_repo(&repo);
+        write_skill_with_reference(&repo, "reviewer", "10-r.md");
+        fs::create_dir_all(home.join("skills/running-a-sprint")).unwrap();
+        fs::write(
+            home.join("skills/running-a-sprint/SKILL.md"),
+            "old sprint\n",
+        )
+        .unwrap();
+        fs::create_dir_all(home.join("commands")).unwrap();
+        fs::write(home.join("commands/sprint.md"), "old sprint cmd\n").unwrap();
+        fs::write(home.join("commands/user-story.md"), "old story\n").unwrap();
+        fs::write(home.join("commands/workflow.md"), "old workflow\n").unwrap();
+
+        let summary =
+            install_from_paths("dev", &repo, &home, &InstallOverrides::default(), false).unwrap();
+        assert!(
+            summary.removed_stale_files >= 4,
+            "dropped first-party leftovers must be counted: {}",
+            summary.removed_stale_files
+        );
+        assert!(!home.join("skills/running-a-sprint").exists());
+        assert!(!home.join("commands/sprint.md").exists());
+        assert!(!home.join("commands/user-story.md").exists());
+        assert!(!home.join("commands/workflow.md").exists());
+        assert!(home.join("skills/reviewer/SKILL.md").is_file());
+        let _ = fs::remove_dir_all(&repo);
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn dropped_command_stays_when_current_pack_still_ships_it() {
+        let (repo, home) = unique_paths("keep-workflow-in-pack");
+        seed_repo(&repo);
+        write_skill_with_reference(&repo, "reviewer", "10-r.md");
+        let commands_source = repo.join("commands");
+        fs::create_dir_all(&commands_source).unwrap();
+        fs::write(
+            commands_source.join("workflow.md"),
+            "---\ndescription: still in pack\n---\n",
+        )
+        .unwrap();
+        install_from_paths("dev", &repo, &home, &InstallOverrides::default(), false).unwrap();
+        assert!(
+            home.join("commands/workflow.md").is_file(),
+            "a command still in the source pack must not be treated as dropped"
+        );
+        let _ = fs::remove_dir_all(&repo);
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn uninstall_removes_dropped_first_party_surfaces_missing_from_inventory() {
+        let (repo, home) = unique_paths("uninst-drop");
+        seed_repo(&repo);
+        write_skill_with_reference(&repo, "reviewer", "10-r.md");
+        install_from_paths("dev", &repo, &home, &InstallOverrides::default(), false).unwrap();
+        fs::create_dir_all(home.join("skills/writing-user-stories")).unwrap();
+        fs::write(
+            home.join("skills/writing-user-stories/SKILL.md"),
+            "old stories\n",
+        )
+        .unwrap();
+        fs::create_dir_all(home.join("commands")).unwrap();
+        fs::write(home.join("commands/sprint.md"), "old\n").unwrap();
+
+        let code = run_uninstall_command(
+            &["--claude-home".to_string(), home.display().to_string()],
+            &mut Vec::new(),
+            &mut Vec::new(),
+        );
+        assert_eq!(code, 0);
+        assert!(!home.join("skills/writing-user-stories").exists());
+        assert!(!home.join("commands/sprint.md").exists());
+        let _ = fs::remove_dir_all(&repo);
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
     fn move_path_preserving_moves_file_and_dir() {
         let dir = unique_codex_test_dir("movepath");
         let src_file = dir.join("a.txt");
@@ -6505,5 +6710,36 @@ mod tests {
             "sibling plugin sections must be untouched"
         );
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn grok_stop_hook_is_silent_not_post_tool_batch() {
+        let root = std::env::temp_dir().join(format!(
+            "keel-grok-stop-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let keel_home = root.join(".keel");
+        let grok_dir = root.join(".grok");
+        fs::create_dir_all(&keel_home).unwrap();
+        fs::create_dir_all(&grok_dir).unwrap();
+        let status = maybe_wire_grok(&keel_home).expect("wire when .grok exists");
+        assert!(
+            !status.contains("skipped"),
+            "standard .keel + detected .grok must write hooks: {status}"
+        );
+        let text = fs::read_to_string(grok_dir.join("hooks").join("keel.json")).unwrap();
+        assert!(
+            text.contains("hook stop"),
+            "Grok Stop must call silent hook stop: {text}"
+        );
+        assert!(
+            !text.contains("post-tool-batch"),
+            "Grok Stop must not inject post-tool-batch closeout: {text}"
+        );
+        let _ = fs::remove_dir_all(&root);
     }
 }

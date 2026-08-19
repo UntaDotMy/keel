@@ -32,7 +32,8 @@ The goal is to keep the supported entry points explicit for both human operators
 | `memory scope`, `memory system-map`, `memory working-brief`, `memory completion-gate`, `memory recall` | Supported | Supported | Supported | Supported | Core surfaces of the **unified** `keel memory` group. |
 | `memory research-cache`, `maintenance`, `agent-registry`, `agent-packets`, `loop-guard`, `entity`, `graph`, `retrieve`, `status`, `instincts`, `consolidate` | Supported | Supported | Supported | Supported | Family commands under the single memory group. `memory report` (alias for `status`) and `memory index` (rebuilds the recall index) are also supported; `memory hook` points to `keel hook ...`; `memory consolidate` scans family directories and reports counts/previews (status summary, not a merge/promote). |
 | `orchestration runtime-preflight`, `resume-status`, `task begin|progress|complete|list`, `checkpoint` | Supported | Supported | Supported | Supported | Orchestration ledger and snapshot surfaces. |
-| `code-search search` | Supported | Supported | Supported | Supported | The single implemented code-search subcommand (lexical substring search). Path filters accept `/` and `\` on every platform. `code-search index|demo|status|reset` are not implemented; do not call them. |
+| `code-search search` | Supported | Supported | Supported | Supported | Lexical substring search. Path filters accept `/` and `\` on every platform. `code-search index|demo|status|reset` are not implemented; do not call them. |
+| `code-search siblings` | Supported | Supported | Supported | Supported | Completeness scan: search the query (or tokens from the current git diff) and list every other in-repo copy. Writes the completeness-gate marker. Required after a fix or implement. |
 
 ## Agent execution guidance
 

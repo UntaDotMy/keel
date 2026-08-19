@@ -1345,6 +1345,11 @@ fn run_review_gates_command(
         flag_set.string_value("base-ref"),
         flag_set.string_value("surface"),
     ));
+    gate_results.push(completeness_check_gate(
+        &repository_root,
+        flag_set.string_value("base-ref"),
+        flag_set.string_value("surface"),
+    ));
 
     // E2E verification awareness (informational, non-blocking)
     if let Some(e2e_result) = check_e2e_config(&repository_root) {
@@ -2129,6 +2134,11 @@ fn run_review_surface_command(
         scan_all,
     ));
     gate_results.push(flow_check_gate(
+        &repository_root,
+        flag_set.string_value("base-ref"),
+        surface_name,
+    ));
+    gate_results.push(completeness_check_gate(
         &repository_root,
         flag_set.string_value("base-ref"),
         surface_name,
@@ -2930,6 +2940,154 @@ fn flow_check_gate(repository_root: &Path, base_ref: &str, surface_name: &str) -
             errors.join("; ")
         )),
     }
+}
+
+/// Blocking completeness gate: a source change without a fresh sibling scan
+/// is a one-site close. Same marker `keel code-search siblings` writes.
+/// Docs-only diffs pass; an unresolvable range warns (never a silent pass).
+fn completeness_check_gate(
+    repository_root: &Path,
+    base_ref: &str,
+    surface_name: &str,
+) -> GateResult {
+    let range: Vec<String> = if surface_name == "pre-commit" {
+        vec!["HEAD".to_string()]
+    } else {
+        let base = base_ref.trim();
+        let base = if base.is_empty() { "origin/main" } else { base };
+        vec![format!("{base}...HEAD")]
+    };
+
+    let Some(touched) = completeness_touched_sources(repository_root, &range) else {
+        return GateResult {
+            name: "completeness_check".to_string(),
+            status: GateStatus::Warn,
+            blocking: false,
+            details: Some(format!(
+                "could not resolve the diff range ({}); sibling-scan evidence was NOT checked. \
+                 Pass an existing --base-ref, or run the pre-commit surface.",
+                range.join(" ")
+            )),
+        };
+    };
+    if touched.is_empty() {
+        return GateResult {
+            name: "completeness_check".to_string(),
+            status: GateStatus::Pass,
+            blocking: true,
+            details: Some("no source files changed; completeness gate not applicable".to_string()),
+        };
+    }
+
+    let after_ms = newest_source_mtime_ms(repository_root, &touched);
+    let workspace = crate::runtime::display_path(repository_root);
+    if crate::runner::hook_lifecycle::completeness_scan_satisfies(&workspace, after_ms) {
+        return GateResult {
+            name: "completeness_check".to_string(),
+            status: GateStatus::Pass,
+            blocking: true,
+            details: Some(format!(
+                "{} source file(s) changed; sibling scan is current",
+                touched.len()
+            )),
+        };
+    }
+
+    GateResult {
+        name: "completeness_check".to_string(),
+        status: GateStatus::Fail,
+        blocking: true,
+        details: Some(format!(
+            "{} source file(s) changed ({}) but `keel code-search siblings` has not run since those edits. \
+             A one-site fix is unfinished. Run `keel code-search siblings --query \"<the bug shape>\"` \
+             (or MCP code_search action=siblings) and handle every hit, or mark it out of scope.",
+            touched.len(),
+            preview_touched_paths(&touched)
+        )),
+    }
+}
+
+/// Union of the named range and the working tree vs HEAD. `gates check
+/// --base-ref HEAD` uses `HEAD...HEAD` (empty); without the working-tree
+/// half a dirty tree would pass completeness without a sibling scan.
+fn completeness_touched_sources(repository_root: &Path, range: &[String]) -> Option<Vec<String>> {
+    let mut files = changed_sources_including_added(repository_root, range)?;
+    if range != ["HEAD".to_string()] {
+        if let Some(working_tree) =
+            changed_sources_including_added(repository_root, &["HEAD".to_string()])
+        {
+            for path in working_tree {
+                if !files.iter().any(|existing| existing == &path) {
+                    files.push(path);
+                }
+            }
+        }
+    }
+    Some(files)
+}
+
+fn changed_sources_including_added(
+    repository_root: &Path,
+    range: &[String],
+) -> Option<Vec<String>> {
+    let mut args = vec!["diff".to_string(), "--name-status".to_string()];
+    args.extend(range.iter().cloned());
+    let result = run_command("git", &args, Some(repository_root)).ok()?;
+    if result.code != 0 {
+        return None;
+    }
+    Some(
+        String::from_utf8_lossy(&result.stdout)
+            .lines()
+            .filter_map(completeness_source_from_name_status)
+            .collect(),
+    )
+}
+
+/// Source files whose change requires a sibling scan (added, modified, renamed).
+fn completeness_source_from_name_status(line: &str) -> Option<String> {
+    let mut parts = line.split('\t');
+    let status = parts.next()?.trim();
+    let first_path = parts.next()?.trim();
+    let path = match status.chars().next()? {
+        'M' | 'A' => first_path,
+        'R' => parts.next()?.trim(),
+        _ => return None,
+    };
+    let normalized = path.replace('\\', "/");
+    if FLOW_EXEMPT_SEGMENTS
+        .iter()
+        .any(|segment| normalized.contains(segment))
+    {
+        return None;
+    }
+    let extension = normalized
+        .rsplit('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if !FLOW_SOURCE_EXTENSIONS.contains(&extension.as_str()) {
+        return None;
+    }
+    Some(normalized)
+}
+
+fn newest_source_mtime_ms(repository_root: &Path, rel_paths: &[String]) -> u64 {
+    let mut newest = 0u64;
+    for rel in rel_paths {
+        let path = repository_root.join(rel);
+        let Ok(meta) = fs::metadata(&path) else {
+            continue;
+        };
+        let Ok(modified) = meta.modified() else {
+            continue;
+        };
+        let Ok(duration) = modified.duration_since(std::time::UNIX_EPOCH) else {
+            continue;
+        };
+        newest = newest.max(duration.as_millis() as u64);
+    }
+    newest
 }
 
 /// First few touched paths, for a gate message that stays readable on a wide diff.
@@ -4041,7 +4199,6 @@ mod tests {
             brownfield_source_from_name_status("R100\tsrc/a.rs\tsrc/b.rs"),
             Some("src/b.rs".to_string())
         );
-        // Exemptions still apply to the destination path.
         assert_eq!(
             brownfield_source_from_name_status("R050\tsrc/a.rs\tvendor/b.rs"),
             None
@@ -4050,8 +4207,72 @@ mod tests {
             brownfield_source_from_name_status("R050\tsrc/a.rs\tdocs/b.md"),
             None
         );
-        // A malformed rename line with no destination must not panic.
         assert_eq!(brownfield_source_from_name_status("R050\tonly-one"), None);
+    }
+
+    #[test]
+    fn completeness_touched_sources_includes_working_tree_when_range_is_empty() {
+        let root = std::env::current_dir().expect("cwd");
+        let from_head = changed_sources_including_added(&root, &["HEAD".to_string()]);
+        let from_empty_range = completeness_touched_sources(&root, &["HEAD...HEAD".to_string()]);
+        assert!(from_head.is_some() && from_empty_range.is_some());
+        let head = from_head.unwrap();
+        let combined = from_empty_range.unwrap();
+        for path in &head {
+            assert!(
+                combined.iter().any(|item| item == path),
+                "working-tree path {path} missing from empty-range union"
+            );
+        }
+    }
+
+    #[test]
+    fn completeness_gate_includes_added_source_unlike_flow() {
+        assert_eq!(
+            completeness_source_from_name_status("A\trust/crates/keel/src/new_module.rs"),
+            Some("rust/crates/keel/src/new_module.rs".to_string())
+        );
+        assert_eq!(
+            completeness_source_from_name_status("M\trust/crates/keel/src/review.rs"),
+            Some("rust/crates/keel/src/review.rs".to_string())
+        );
+        assert_eq!(
+            completeness_source_from_name_status("R050\told.rs\tsrc/new.rs"),
+            Some("src/new.rs".to_string())
+        );
+        assert_eq!(completeness_source_from_name_status("M\tREADME.md"), None);
+    }
+
+    #[test]
+    fn completeness_scan_satisfies_after_marker() {
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let home = std::env::temp_dir().join(format!(
+            "keel-completeness-review-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let previous = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
+        std::env::set_var("CLAUDE_TARGET_OVERRIDE", &home);
+        let workspace = home.join("ws");
+        std::fs::create_dir_all(&workspace).expect("ws");
+        let cwd = crate::runtime::display_path(&workspace);
+        assert!(!crate::runner::hook_lifecycle::completeness_scan_satisfies(
+            &cwd, 1
+        ));
+        crate::runner::hook_lifecycle::record_completeness_gate_clear_for(&workspace);
+        assert!(crate::runner::hook_lifecycle::completeness_scan_satisfies(
+            &cwd, 0
+        ));
+        match previous {
+            Some(value) => std::env::set_var("CLAUDE_TARGET_OVERRIDE", value),
+            None => std::env::remove_var("CLAUDE_TARGET_OVERRIDE"),
+        }
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     /// The artifact is workspace-global, so relevance is what stops one filled
