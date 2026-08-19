@@ -920,6 +920,12 @@ fn should_skip_entry(name: &str, path: &Path) -> bool {
                 | "build"
                 | "tmp"
                 | "coverage"
+                | "hermes-agent"
+                | "karpathy-skills-cmp"
+                | "target-test"
+                | "agent-tools"
+                | "terminals"
+                | "mcps"
         )
     } else {
         false

@@ -1001,8 +1001,13 @@ pub(crate) fn is_keel_research_command(command: &str) -> bool {
         "memory recall",
         "memory system-map",
         "memory scope",
+        "anvil",
     ];
     HITS.iter().any(|h| body.contains(h))
+}
+
+fn is_host_shell_tool_name(tool_name: &str) -> bool {
+    is_shell_tool_name(tool_name) || tool_name.eq_ignore_ascii_case("run_terminal_command")
 }
 
 /// True when this tool call is evidence that clears the iron-law gate under `mode`.
@@ -1022,7 +1027,10 @@ pub(crate) fn tool_satisfies_iron_law(
     if is_keel_research_tool_name(tool_name) {
         return true;
     }
-    if is_shell_tool_name(tool_name) {
+    if tool_is_anvil_surface(tool_name, command) {
+        return true;
+    }
+    if is_host_shell_tool_name(tool_name) {
         if let Some(cmd) = command {
             if is_keel_research_command(cmd) {
                 return true;
@@ -1039,10 +1047,10 @@ pub(crate) fn tool_satisfies_iron_law(
 fn tool_input_command(input: &JsonDocument) -> Option<&str> {
     input
         .get("tool_input")
+        .or_else(|| input.get("toolInput"))
         .and_then(|tool_input| tool_input.get("command"))
         .and_then(JsonDocument::as_str)
         .or_else(|| {
-            // Some hosts nest under `input.command`.
             input
                 .get("input")
                 .and_then(|inner| inner.get("command"))
@@ -1052,22 +1060,19 @@ fn tool_input_command(input: &JsonDocument) -> Option<&str> {
 
 /// If this PostToolUse/observe event is keel research evidence, mark the session.
 pub(crate) fn maybe_mark_iron_law_from_tool_event(input: &JsonDocument) {
+    let tool_name = hook_tool_name(input);
+    let command = tool_input_command(input);
+    let session_id = hook_session_id(input);
+    if tool_is_anvil_surface(tool_name, command) {
+        mark_anvil_satisfied(session_id);
+    }
     let mode = iron_law_gate_mode();
     if mode == IronLawGateMode::Off {
         return;
     }
-    let tool_name = input
-        .get("tool_name")
-        .and_then(JsonDocument::as_str)
-        .unwrap_or_default();
-    let command = tool_input_command(input);
     if !tool_satisfies_iron_law(mode, tool_name, command) {
         return;
     }
-    let session_id = input
-        .get("session_id")
-        .and_then(JsonDocument::as_str)
-        .unwrap_or("default");
     mark_iron_law_satisfied(session_id);
 }
 
@@ -1077,6 +1082,9 @@ pub(crate) fn maybe_mark_iron_law_from_parts(
     tool_name: &str,
     command: Option<&str>,
 ) {
+    if tool_is_anvil_surface(tool_name, command) {
+        mark_anvil_satisfied(session_id);
+    }
     let mode = iron_law_gate_mode();
     if mode == IronLawGateMode::Off {
         return;
@@ -1138,6 +1146,9 @@ fn session_has_iron_law_evidence(
 /// Gated: edit-class tools, shell commands that are **not** keel research, and
 /// Agent/Task fan-out. Not gated: Read/Grep/Glob, keel research MCP/CLI, Skill.
 pub(crate) fn tool_is_iron_law_gated(tool_name: &str, command: Option<&str>) -> bool {
+    if tool_is_anvil_surface(tool_name, command) {
+        return false;
+    }
     if is_edit_class_tool(tool_name) {
         return true;
     }
@@ -1148,10 +1159,10 @@ pub(crate) fn tool_is_iron_law_gated(tool_name: &str, command: Option<&str>) -> 
     ) {
         return true;
     }
-    if is_shell_tool_name(tool_name) {
-        // Keel research shell is the path that *clears* the gate — never block it.
+    if is_host_shell_tool_name(tool_name) {
+        // Keel research/anvil shell is the path that *clears* the gate — never block it.
         if let Some(cmd) = command {
-            if is_keel_research_command(cmd) {
+            if is_keel_research_command(cmd) || tool_is_anvil_surface(tool_name, Some(cmd)) {
                 return false;
             }
         }
@@ -1213,26 +1224,7 @@ fn run_iron_law_gate(
     let Some(reason) = iron_law_gate_decision(session_id) else {
         return 0;
     };
-
-    let deny_payload = serde_json::json!({
-        "hookSpecificOutput": {
-            "hookEventName": MANAGED_PRE_TOOL_USE_EVENT,
-            "permissionDecision": "deny",
-            "permissionDecisionReason": reason,
-        }
-    });
-
-    match serde_json::to_string_pretty(&deny_payload) {
-        Ok(rendered) => {
-            let _ = writeln!(standard_output, "{rendered}");
-        }
-        Err(error) => {
-            let _ = writeln!(
-                standard_error,
-                "Unable to render Iron Law gate payload: {error}"
-            );
-        }
-    }
+    emit_pretool_deny(reason, standard_output, standard_error);
     0
 }
 
@@ -1263,10 +1255,7 @@ fn run_hook_pre_tool_use(standard_output: &mut dyn Write, standard_error: &mut d
         }
     };
 
-    let tool_name = input
-        .get("tool_name")
-        .and_then(JsonDocument::as_str)
-        .unwrap_or_default();
+    let tool_name = hook_tool_name(&input);
 
     let command = tool_input_command(&input).unwrap_or("");
     let command_opt = if command.is_empty() {
@@ -1274,17 +1263,32 @@ fn run_hook_pre_tool_use(standard_output: &mut dyn Write, standard_error: &mut d
     } else {
         Some(command)
     };
+    let session_id = hook_session_id(&input);
 
     // Hard Iron Law: block Edit/Write, non-keel Bash, and Agent/Task until the
     // session has used a keel research tool. Text reminders alone are ignoreable;
     // this deny is what settles compliance.
     if tool_is_iron_law_gated(tool_name, command_opt) {
-        let session_id = input
-            .get("session_id")
-            .and_then(JsonDocument::as_str)
-            .unwrap_or("default");
         if iron_law_gate_decision(session_id).is_some() {
             return run_iron_law_gate(&input, standard_output, standard_error);
+        }
+        if anvil_gate_enabled()
+            && is_edit_class_tool(tool_name)
+            && !tool_is_anvil_surface(tool_name, command_opt)
+        {
+            let claude_home = resolve_claude_home("").ok();
+            let cwd = std::env::current_dir()
+                .ok()
+                .map(|path| display_path(&path))
+                .unwrap_or_default();
+            let satisfied = claude_home
+                .as_ref()
+                .map(|home| anvil_satisfied_this_session(home, session_id, &cwd))
+                .unwrap_or(false);
+            if !satisfied {
+                emit_pretool_deny(ANVIL_GATE_DENIAL, standard_output, standard_error);
+                return 0;
+            }
         }
     }
 
@@ -1309,24 +1313,7 @@ fn run_hook_pre_tool_use(standard_output: &mut dyn Write, standard_error: &mut d
                 finding.pattern
             ),
         };
-        let deny_payload = serde_json::json!({
-            "hookSpecificOutput": {
-                "hookEventName": MANAGED_PRE_TOOL_USE_EVENT,
-                "permissionDecision": "deny",
-                "permissionDecisionReason": reason,
-            }
-        });
-        match serde_json::to_string_pretty(&deny_payload) {
-            Ok(rendered) => {
-                let _ = writeln!(standard_output, "{rendered}");
-            }
-            Err(error) => {
-                let _ = writeln!(
-                    standard_error,
-                    "Unable to render destructive-command deny payload: {error}"
-                );
-            }
-        }
+        emit_pretool_deny(&reason, standard_output, standard_error);
         return 0;
     }
 
@@ -1924,9 +1911,168 @@ pub(crate) fn is_edit_class_tool(tool_name: &str) -> bool {
     let lower = tool_name.to_ascii_lowercase();
     matches!(
         lower.as_str(),
-        "edit" | "write" | "multiedit" | "notebookedit" | "apply_patch" | "str_replace" | "patch"
+        "edit"
+            | "write"
+            | "multiedit"
+            | "notebookedit"
+            | "apply_patch"
+            | "str_replace"
+            | "strreplace"
+            | "patch"
+            // Grok maps Claude Edit/Write/MultiEdit onto search_replace.
+            | "search_replace"
+            | "searchreplace"
     )
 }
+
+/// Read a hook string from Claude snake_case or Grok/Cursor camelCase.
+fn hook_str<'a>(input: &'a JsonDocument, keys: &[&str]) -> &'a str {
+    for key in keys {
+        if let Some(value) = input.get(*key).and_then(JsonDocument::as_str) {
+            if !value.is_empty() {
+                return value;
+            }
+        }
+    }
+    ""
+}
+
+fn hook_tool_name(input: &JsonDocument) -> &str {
+    hook_str(input, &["tool_name", "toolName"])
+}
+
+fn hook_session_id(input: &JsonDocument) -> &str {
+    let value = hook_str(input, &["session_id", "sessionId"]);
+    if value.is_empty() {
+        "default"
+    } else {
+        value
+    }
+}
+
+fn emit_pretool_deny(
+    reason: &str,
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) {
+    // Claude reads hookSpecificOutput.permissionDecision. Grok reads top-level
+    // decision/reason. Emit both so one payload blocks every host.
+    let deny_payload = serde_json::json!({
+        "decision": "deny",
+        "reason": reason,
+        "hookSpecificOutput": {
+            "hookEventName": MANAGED_PRE_TOOL_USE_EVENT,
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        }
+    });
+    match serde_json::to_string(&deny_payload) {
+        Ok(rendered) => {
+            let _ = writeln!(standard_output, "{rendered}");
+        }
+        Err(error) => {
+            let _ = writeln!(standard_error, "Unable to render PreToolUse deny: {error}");
+        }
+    }
+}
+
+fn tool_is_anvil_surface(tool_name: &str, command: Option<&str>) -> bool {
+    let lower = tool_name.to_ascii_lowercase();
+    if lower == "anvil"
+        || lower.ends_with("__anvil")
+        || lower.contains("keel__anvil")
+        || lower.ends_with("_anvil")
+    {
+        return true;
+    }
+    if let Some(cmd) = command {
+        let body = cmd.to_ascii_lowercase();
+        if body.contains("keel anvil") || body.contains("keel.exe anvil") {
+            return true;
+        }
+    }
+    false
+}
+
+const ANVIL_SATISFIED_DIR: &str = "anvil-satisfied";
+
+fn anvil_satisfied_path(claude_home: &Path, session_id: &str) -> PathBuf {
+    claude_home
+        .join("state")
+        .join(ANVIL_SATISFIED_DIR)
+        .join(sanitize_memory_key(session_id))
+}
+
+pub(crate) fn mark_anvil_satisfied(session_id: &str) {
+    let Ok(claude_home) = crate::runtime::resolve_claude_home("") else {
+        return;
+    };
+    let path = anvil_satisfied_path(&claude_home, session_id);
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(&path, "satisfied");
+    record_anvil_gate_clear();
+}
+
+/// Workspace marker so MCP `anvil` (no host session id) still clears the gate.
+pub fn record_anvil_gate_clear() {
+    let Ok(claude_home) = resolve_claude_home("") else {
+        return;
+    };
+    let Ok(cwd) = std::env::current_dir() else {
+        return;
+    };
+    let key = sanitize_memory_key(&display_path(&cwd));
+    let dir = claude_home.join("state").join("anvil-gate");
+    if fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let _ = fs::write(dir.join(format!("{key}.compiled")), now_ms().to_string());
+}
+
+fn anvil_workspace_marker_ms(claude_home: &Path, workspace_cwd: &str) -> Option<u64> {
+    let key = sanitize_memory_key(workspace_cwd);
+    let path = claude_home
+        .join("state")
+        .join("anvil-gate")
+        .join(format!("{key}.compiled"));
+    fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| text.trim().parse::<u64>().ok())
+}
+
+fn anvil_satisfied_this_session(claude_home: &Path, session_id: &str, workspace_cwd: &str) -> bool {
+    if anvil_satisfied_path(claude_home, session_id).exists() {
+        return true;
+    }
+    let Some(marker) = anvil_workspace_marker_ms(claude_home, workspace_cwd) else {
+        return false;
+    };
+    match session_start_ms(claude_home, session_id) {
+        Some(start) => marker.saturating_add(BRIEF_GATE_SESSION_GRACE_MS) >= start,
+        None => true,
+    }
+}
+
+fn anvil_gate_enabled() -> bool {
+    match std::env::var("KEEL_ANVIL_GATE")
+        .ok()
+        .or_else(|| std::env::var("CLAUDE_SKILLS_ANVIL_GATE").ok())
+    {
+        Some(value) => {
+            let trimmed = value.trim().to_ascii_lowercase();
+            !matches!(trimmed.as_str(), "off" | "0" | "false" | "no")
+        }
+        None => true,
+    }
+}
+
+const ANVIL_GATE_DENIAL: &str = "\
+Anvil gate: call `anvil` (compile, then run --dry-run) before editing. \
+This is the only keel delivery loop. MCP: keel__anvil action=compile then action=run args=[--dry-run]. \
+CLI: keel anvil compile --goal \"...\" --bar \"echo ok\" then keel anvil run --dry-run. \
+Set KEEL_ANVIL_GATE=off to disable.";
 
 fn system_map_refresh_threshold() -> u64 {
     user_config_or_env_u64(
@@ -2205,7 +2351,7 @@ This is the **Iron Law** of keel. It is loaded into your context at SessionStart
 - `run_command` — run noisy shell commands (test, build, lint, logs, search) through it so compacted output enters context instead of the raw stream.
 
 ## Skills & subagents
-Specialist skills are installed under `~/.claude/skills/` (lifecycle, backend, cloud, security, `reviewer`, UI/UX, `preserve-existing-flow`, systematic-debugging, TDD, migrations, and more) — the harness lists them natively each session. Invoke by bare name, e.g. `Skill("reviewer")`. For the full catalog and routing rules, call `Skill("using-keel")`. Matching subagents in `.claude/agents/` handle delegated isolated-context work via the Agent tool. About to read or edit existing code? Invoke `preserve-existing-flow` first.
+Specialist skills are installed under `~/.claude/skills/` (lifecycle, backend, cloud, security, `reviewer`, UI/UX, `preserve-existing-flow`, systematic-debugging, TDD, migrations, and more) — the harness lists them natively each session. Invoke by bare name, e.g. `Skill("reviewer")`. For the full catalog and routing rules, call `Skill("using-keel")`. Matching subagents in `.claude/agents/` handle delegated isolated-context work via the Agent tool. About to read or edit existing code? Invoke `preserve-existing-flow` first. Delivery is Anvil only (`anvil` MCP).
 
 ## Memory writes (when you learn something durable)
 Working memory dies at compaction. To persist across sessions:
@@ -2324,9 +2470,9 @@ fn user_prompt_submit_core() -> String {
          Iron Law (every turn):\n\
          1. Research-first: trust the codebase, not your knowledge base. Read SYSTEM_MAP and the owning module before claiming behavior.\n\
          2. Use keel before guessing: native keel MCP tools are always available — prefer them over ad-hoc shell or invented paths: `system_map` (workspace layout — call once per turn when you lack the map, then reuse; call again only if you created/moved/deleted files), `recall` (prior decisions/learnings — call once when you need memory, then reuse; call again only if you wrote new memory this turn), `context_brief` (iron law + skill catalog + memory health + newest brief — call first when starting a task), `skill_route`/`skill_get` (pick and load skills), `run_command` (noisy shell through compaction), `code_search` (live tree search). CLI forms (`keel memory …`, `keel doctor`, `keel code-search …`) count the same. No tool-call loops: re-calling system_map/recall with no intervening change is a loop — re-read context.\n\
-         3. Invoke any relevant skill via the Skill tool BEFORE responding — even a 1% chance it applies means use it.\n\
+         3. Invoke any relevant skill via the Skill tool BEFORE responding — even a 1% chance it applies means use it. Delivery is Anvil only (`anvil` MCP: compile then run --dry-run; loop/live run are CLI-only).\n\
          4. Understand before building: restate what the request actually asks, confirm the user story, and research what is genuinely needed before writing code — no guessing, no assuming, no building against an imagined spec. Researching first is what stops you building the wrong thing.\n\
-         5. Find the root cause, not just the surface symptom: suspicion is a hypothesis, not a finding — trace the symptom end-to-end with file:line evidence and confirm the suspect is on that path before changing it. No assumptions. No jumping from \"this may be the case\" to a patch.\n\
+         5. Find the root cause, not just the surface symptom: suspicion is a hypothesis, not a finding — trace the symptom end-to-end with file:line evidence and confirm the suspect is on that path before changing it. Then scan the class: `keel code-search siblings` (or MCP code_search action=siblings) and handle every similar, related, and leftover copy in this turn. A one-site fix is unfinished. No assumptions. No jumping from \"this may be the case\" to a patch.\n\
          6. Edit gate (STRICT): code edits are blocked until this session used a keel research tool (system_map/recall/context_brief/skill_*/code_search or matching keel CLI). Plain Read alone does not clear it.\n\
          \n\
          Memory & learning (part of the Iron Law — do not skip):\n\
@@ -2350,7 +2496,9 @@ tool runs this session (context_brief / system_map / recall / skill_route / skil
 code_search, or matching `keel …` CLI).\n\
 • Read/Grep/Glob stay allowed; they do not clear STRICT mode by themselves.\n\
 • Memory: recall before claiming prior work; write a working brief before non-trivial \
-coding; save durable learnings to disk when you learn something worth keeping.";
+coding; save durable learnings to disk when you learn something worth keeping.\n\
+• After edits: `keel code-search siblings` (MCP code_search action=siblings). Fix every \
+copy of the same shape. A one-site change is unfinished.";
 
 /// Max bytes of workspace digest to push on every UserPromptSubmit (on top of
 /// the iron-law text). Keeps per-prompt cost bounded while still *pushing* map
@@ -2586,7 +2734,7 @@ fn work_intent_pointer_for_prompt(prompt: &str) -> Option<&'static str> {
 /// The read-map / recall / write-brief / preserve-flow reminder injected for
 /// code-change prompts. A `const` so both match arms above return the exact same
 /// text and the test asserting its content has a single source of truth.
-const WORK_INTENT_REMINDER: &str = "This prompt asks you to change the codebase. Before editing: (1) read the workspace SYSTEM_MAP and the owning file — if you have not already this turn, call the keel MCP `system_map` tool to get it; never edit against an imagined version (if you already called `system_map` this turn, reuse that result; call again only if you have since created, moved, or deleted files); (2) if you have not already this turn, call `recall` to surface any prior work, decisions, or conventions on this topic (reuse the result if you already called it this turn; call again only if you wrote new memory since); (3) write a working brief with `keel memory working-brief write --request \"...\" --acceptance-criteria \"...\"` capturing what the task actually asks and how completion is judged BEFORE you start (this also clears the default-on working-brief gate); (4) if you are about to edit existing code, invoke the `preserve-existing-flow` skill first. Memory-first: if map/recall/brief already names the path, open that file — do not list the whole tree or broad-scan to rediscover known locations. Request fidelity: implement only the asked work; no invented extras. Ask when unclear: if confused, incomplete, or drift-risk, stop and ask the user before coding — do not invent the answer yourself. Never trust knowledge-base alone as this project's structure or stories — read this repo. Comments: contracts only (`@param`/`# Errors`/`// why:`), never summary restatements of the code. Understand before building — correct code that solved the wrong problem is the most expensive failure.";
+const WORK_INTENT_REMINDER: &str = "This prompt asks you to change the codebase. Before editing: (1) read the workspace SYSTEM_MAP and the owning file — if you have not already this turn, call the keel MCP `system_map` tool to get it; never edit against an imagined version (if you already called `system_map` this turn, reuse that result; call again only if you have since created, moved, or deleted files); (2) if you have not already this turn, call `recall` to surface any prior work, decisions, or conventions on this topic (reuse the result if you already called it this turn; call again only if you wrote new memory since); (3) write a working brief with `keel memory working-brief write --request \"...\" --acceptance-criteria \"...\"` capturing what the task actually asks and how completion is judged BEFORE you start (this also clears the default-on working-brief gate); (4) if you are about to edit existing code, invoke the `preserve-existing-flow` skill first. After the first site: run `keel code-search siblings` (or MCP code_search action=siblings) and handle every similar/related hit — other hosts, CLIs, tests, install/update/uninstall. A one-site fix or implement is unfinished. Memory-first: if map/recall/brief already names the path, open that file — do not list the whole tree or broad-scan to rediscover known locations. Request fidelity: implement only the asked work; no invented extras. Ask when unclear: if confused, incomplete, or drift-risk, stop and ask the user before coding — do not invent the answer yourself. Never trust knowledge-base alone as this project's structure or stories — read this repo. Comments: contracts only (`@param`/`# Errors`/`// why:`), never summary restatements of the code. Understand before building — correct code that solved the wrong problem is the most expensive failure.";
 
 /// True when `cue` (e.g. `"fix "`) appears in `lowered` used as a verb rather
 /// than a noun — that is, at least one occurrence is NOT immediately preceded by
@@ -2986,6 +3134,11 @@ pub(crate) fn gate_status_rows() -> Vec<GateStatusRow> {
             label: "research",
             max_blocks: research_gate_max_blocks(),
         },
+        GateStatusRow {
+            dir: "completeness-gate-blocks",
+            label: "completeness",
+            max_blocks: completeness_gate_max_blocks(),
+        },
     ]
 }
 
@@ -3107,6 +3260,75 @@ fn research_gate_max_blocks() -> u64 {
         .ok()
         .and_then(|value| value.trim().parse::<u64>().ok())
         .unwrap_or_else(|| default_max_blocks_for(research_gate_mode()))
+}
+
+const COMPLETENESS_GATE_ENV_VAR: &str = "CLAUDE_SKILLS_COMPLETENESS_GATE";
+const COMPLETENESS_GATE_MAX_BLOCKS_ENV_VAR: &str = "CLAUDE_SKILLS_COMPLETENESS_GATE_MAX_BLOCKS";
+
+fn completeness_gate_mode() -> GateMode {
+    match std::env::var(COMPLETENESS_GATE_ENV_VAR) {
+        Ok(value) => gate_mode_value(&value),
+        Err(_) => GateMode::Block,
+    }
+}
+
+fn completeness_gate_max_blocks() -> u64 {
+    std::env::var(COMPLETENESS_GATE_MAX_BLOCKS_ENV_VAR)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or_else(|| default_max_blocks_for(completeness_gate_mode()))
+}
+
+fn completeness_gate_blocks_path(claude_home: &Path, session_id: &str) -> PathBuf {
+    let key = if session_id.trim().is_empty() {
+        "no-session".to_string()
+    } else {
+        sanitize_memory_key(session_id)
+    };
+    claude_home
+        .join("state")
+        .join("completeness-gate-blocks")
+        .join(key)
+}
+
+pub fn record_completeness_gate_clear_for(workspace: &Path) {
+    let Ok(claude_home) = resolve_claude_home("") else {
+        return;
+    };
+    let key = sanitize_memory_key(&display_path(workspace));
+    let dir = claude_home.join("state").join("completeness-gate");
+    if fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let _ = fs::write(dir.join(format!("{key}.scanned")), now_ms().to_string());
+}
+
+/// True when `keel code-search siblings` ran for this workspace at or after `after_ms`.
+pub fn completeness_scan_satisfies(workspace_cwd: &str, after_ms: u64) -> bool {
+    let Ok(claude_home) = resolve_claude_home("") else {
+        return false;
+    };
+    completeness_marker_ms(&claude_home, workspace_cwd)
+        .map(|marker_ms| marker_ms >= after_ms)
+        .unwrap_or(false)
+}
+
+fn completeness_marker_ms(claude_home: &Path, workspace_cwd: &str) -> Option<u64> {
+    let key = sanitize_memory_key(workspace_cwd);
+    let path = claude_home
+        .join("state")
+        .join("completeness-gate")
+        .join(format!("{key}.scanned"));
+    fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| text.trim().parse::<u64>().ok())
+}
+
+fn completeness_gate_message(decision: GateDecision) -> String {
+    match decision {
+        GateDecision::Block => "Completeness gate (CLAUDE_SKILLS_COMPLETENESS_GATE): code changed without a sibling scan — escalated (bounded, cannot loop). Run `keel code-search siblings` (or MCP code_search action=siblings). Fix every copy of the same shape — other hosts, CLIs, tests, install/update/uninstall — or mark it out of scope. A one-site fix is unfinished. Set CLAUDE_SKILLS_COMPLETENESS_GATE=nudge, =off.".to_string(),
+        _ => "Completeness reminder (CLAUDE_SKILLS_COMPLETENESS_GATE): code changed without scanning siblings. Run `keel code-search siblings --query \"<the bug shape>\"` and handle every hit. This first reminder does not stop the turn, but will escalate.".to_string(),
+    }
 }
 
 fn research_gate_blocks_path(claude_home: &Path, session_id: &str) -> PathBuf {
@@ -3973,15 +4195,17 @@ fn run_hook_post_tool_batch(
     let memory_mode = memory_gate_mode();
     let learned_mode = learned_skill_gate_mode();
     let research_mode = research_gate_mode();
+    let completeness_mode = completeness_gate_mode();
     let review_on = review_mode != GateMode::Off && review_gate_max_blocks() > 0;
     let brief_on = brief_mode != GateMode::Off && brief_gate_max_blocks() > 0;
     let memory_on = memory_mode != GateMode::Off && memory_gate_max_blocks() > 0;
     let learned_on = learned_mode != GateMode::Off && learned_skill_gate_max_blocks() > 0;
     let research_on = research_mode != GateMode::Off && research_gate_max_blocks() > 0;
+    let completeness_on = completeness_mode != GateMode::Off && completeness_gate_max_blocks() > 0;
 
     // All gates off: skip stdin entirely and emit the advisory reminder. This
     // keeps the fully-disabled path cheap and side-effect-free.
-    if !review_on && !brief_on && !memory_on && !learned_on && !research_on {
+    if !review_on && !brief_on && !memory_on && !learned_on && !research_on && !completeness_on {
         return emit_post_tool_batch_advisory(standard_output, standard_error);
     }
 
@@ -4032,6 +4256,30 @@ fn run_hook_post_tool_batch(
                 return emit_gate_decision(
                     decision,
                     brief_gate_message(decision),
+                    standard_output,
+                    standard_error,
+                );
+            }
+        }
+
+        if completeness_on {
+            let scanned = completeness_marker_ms(&claude_home, &stats.last_cwd)
+                .map(|marker_ms| marker_ms >= stats.last_edit_ms)
+                .unwrap_or(false);
+            let blocks_path = completeness_gate_blocks_path(&claude_home, session_id);
+            let blocks_issued = read_counter_value(&blocks_path);
+            let decision = decide_gate(
+                completeness_mode,
+                completeness_gate_max_blocks(),
+                blocks_issued,
+                stats.count,
+                scanned,
+            );
+            if decision != GateDecision::Advisory {
+                let _ = increment_counter_file(&blocks_path);
+                return emit_gate_decision(
+                    decision,
+                    completeness_gate_message(decision),
                     standard_output,
                     standard_error,
                 );

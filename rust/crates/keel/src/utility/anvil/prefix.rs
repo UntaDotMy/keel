@@ -15,7 +15,9 @@ pub fn build_static_prefix(goal: &str, bar_dossier: &str) -> String {
     text.push_str(
         "Score protocol: <spec_score_A>LETTER</spec_score_A> <spec_score_B>LETTER</spec_score_B> etc A–T\n",
     );
-    text.push_str("Hard rules: no git, no extra files, stop when gates pass.\n");
+    text.push_str(
+        "Hard rules: no git, no extra files. A one-site change is unfinished — after writing, the supervisor runs `keel code-search siblings` in the real workspace and handles every hit (other hosts, CLIs, tests, install/update/uninstall) before stopping.\n",
+    );
     pad_to_tokens(text, 2048)
 }
 
@@ -202,6 +204,19 @@ mod tests {
     fn piece_id_after_breakpoint_does_not_change_static_hash() {
         let text = build_static_prefix("goal", "bar");
         assert_eq!(hash_static(&text), hash_static(&text));
+    }
+
+    #[test]
+    fn prefix_requires_sibling_scan() {
+        let text = build_static_prefix("goal", "bar");
+        assert!(
+            text.contains("code-search siblings"),
+            "Anvil prefix must name the completeness owner"
+        );
+        assert!(
+            text.contains("one-site"),
+            "Anvil prefix must forbid a one-site close"
+        );
     }
 
     #[test]

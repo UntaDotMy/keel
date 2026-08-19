@@ -20,6 +20,7 @@ When a native `keel` command owns the job, use it instead of recreating the beha
 
 **Before broad repository search:**
 - Prefer `keel code-search search --workspace-root "$PWD" --query "<query>"`.
+- After a fix or implement, run `keel code-search siblings` (optional `--query` of the bug shape) and handle every hit. A one-site change is unfinished.
 - Use raw `rg`, `grep`, `find`, or `git grep` only after scoped search/map context is insufficient.
 - For noisy search output, run it through `keel run --`.
 

@@ -1152,6 +1152,11 @@ fn iron_law_tool_classification_strict_requires_keel() {
 
     // Hard gate coverage: what PreToolUse will block while unsatisfied.
     assert!(tool_is_iron_law_gated("Edit", None));
+    assert!(tool_is_iron_law_gated("search_replace", None));
+    assert!(tool_is_iron_law_gated(
+        "run_terminal_command",
+        Some("cargo test")
+    ));
     assert!(tool_is_iron_law_gated("Bash", Some("cargo test")));
     assert!(tool_is_iron_law_gated("Agent", None));
     assert!(
@@ -1159,9 +1164,19 @@ fn iron_law_tool_classification_strict_requires_keel() {
         "keel research shell must not be gated"
     );
     assert!(
+        !tool_is_iron_law_gated("run_terminal_command", Some("keel anvil compile")),
+        "keel anvil on Grok shell must not be gated"
+    );
+    assert!(
+        !tool_is_iron_law_gated("keel__anvil", None),
+        "MCP anvil must not be gated"
+    );
+    assert!(
         !tool_is_iron_law_gated("Read", None),
         "Read must stay available while blocked"
     );
+    assert!(is_edit_class_tool("search_replace"));
+    assert!(is_edit_class_tool("Search_Replace"));
 }
 
 #[test]
@@ -1182,6 +1197,9 @@ fn iron_law_research_command_rejects_bypass_and_non_research_surfaces() {
     assert!(!is_keel_research_command("keel review pre-pr"));
     // Genuine standalone research still clears it.
     assert!(is_keel_research_command("keel recall borrow checker"));
+    assert!(is_keel_research_command(
+        "keel anvil compile --goal x --bar echo"
+    ));
     assert!(is_keel_research_command("keel memory recall foo"));
     assert!(is_keel_research_command(
         "keel code-search search --query x"
@@ -1809,6 +1827,7 @@ impl NewGatesSilenced {
             MEMORY_GATE_ENV_VAR,
             SPRINT_START_GATE_ENV_VAR,
             LEARNED_SKILL_GATE_ENV_VAR,
+            COMPLETENESS_GATE_ENV_VAR,
         ];
         let previous = vars
             .iter()
@@ -2442,6 +2461,7 @@ fn memory_gate_nudges_when_no_memory_saved_then_satisfied_off_and_capped() {
     let previous_memory = std::env::var(MEMORY_GATE_ENV_VAR).ok();
     let previous_research = std::env::var(RESEARCH_GATE_ENV_VAR).ok();
     let previous_story_first = std::env::var(STORY_FIRST_GATE_ENV_VAR).ok();
+    let previous_completeness = std::env::var(COMPLETENESS_GATE_ENV_VAR).ok();
     std::env::set_var("CLAUDE_TARGET_OVERRIDE", &claude_home);
     std::env::set_var(REVIEW_GATE_ENV_VAR, "off");
     std::env::set_var(BRIEF_GATE_ENV_VAR, "off");
@@ -2451,6 +2471,7 @@ fn memory_gate_nudges_when_no_memory_saved_then_satisfied_off_and_capped() {
     std::env::set_var(MEMORY_GATE_ENV_VAR, "nudge");
     std::env::set_var(RESEARCH_GATE_ENV_VAR, "off");
     std::env::set_var(STORY_FIRST_GATE_ENV_VAR, "off");
+    std::env::set_var(COMPLETENESS_GATE_ENV_VAR, "off");
 
     let session_id = "sess-memory";
     let cwd = "D:/Nasri/Project/memory-e2e";
@@ -2532,6 +2553,7 @@ fn memory_gate_nudges_when_no_memory_saved_then_satisfied_off_and_capped() {
         (MEMORY_GATE_ENV_VAR, previous_memory),
         (RESEARCH_GATE_ENV_VAR, previous_research),
         (STORY_FIRST_GATE_ENV_VAR, previous_story_first),
+        (COMPLETENESS_GATE_ENV_VAR, previous_completeness),
     ] {
         match prior {
             Some(value) => std::env::set_var(var, value),
@@ -4358,6 +4380,115 @@ fn research_gate_off_matches_advisory_path() {
         Some(value) => std::env::set_var(RESEARCH_GATE_ENV_VAR, value),
         None => std::env::remove_var(RESEARCH_GATE_ENV_VAR),
     }
+}
+
+#[test]
+fn completeness_gate_defaults_to_block_and_names_siblings() {
+    let _guard = crate::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let previous = std::env::var(COMPLETENESS_GATE_ENV_VAR).ok();
+    std::env::remove_var(COMPLETENESS_GATE_ENV_VAR);
+    assert_eq!(completeness_gate_mode(), GateMode::Block);
+    let block = completeness_gate_message(GateDecision::Block);
+    assert!(block.contains("CLAUDE_SKILLS_COMPLETENESS_GATE"));
+    assert!(block.contains("code-search siblings"));
+    assert!(block.contains("escalated"));
+    assert!(block.contains("bounded") || block.contains("cannot loop"));
+    let nudge = completeness_gate_message(GateDecision::Nudge);
+    assert!(nudge.contains("does not stop the turn"));
+    match previous {
+        Some(value) => std::env::set_var(COMPLETENESS_GATE_ENV_VAR, value),
+        None => std::env::remove_var(COMPLETENESS_GATE_ENV_VAR),
+    }
+}
+
+#[test]
+fn completeness_gate_nudges_when_edits_have_no_sibling_scan() {
+    let _guard = crate::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _silenced = NewGatesSilenced::new();
+    let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
+    let previous_completeness = std::env::var(COMPLETENESS_GATE_ENV_VAR).ok();
+    let previous_brief = std::env::var(BRIEF_GATE_ENV_VAR).ok();
+    let previous_review = std::env::var(REVIEW_GATE_ENV_VAR).ok();
+    let previous_research = std::env::var(RESEARCH_GATE_ENV_VAR).ok();
+    let claude_home = temp_brief_gate_home("e2e-completeness-nudge");
+    std::env::set_var("CLAUDE_TARGET_OVERRIDE", &claude_home);
+    std::env::set_var(COMPLETENESS_GATE_ENV_VAR, "nudge");
+    std::env::set_var(BRIEF_GATE_ENV_VAR, "off");
+    std::env::set_var(REVIEW_GATE_ENV_VAR, "off");
+    std::env::set_var(RESEARCH_GATE_ENV_VAR, "off");
+
+    let session_id = "sess-e2e-completeness-nudge";
+    let cwd = "D:/Nasri/Project/gate-completeness-e2e";
+    let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let timings_dir = claude_home.join("state").join("tool-timings");
+    std::fs::create_dir_all(&timings_dir).expect("create timings dir");
+    let row = serde_json::json!({
+        "recorded_at_ms": now_ms(),
+        "event": "PostToolUse",
+        "tool_name": "Edit",
+        "duration_ms": 5u64,
+        "session_id": session_id,
+        "cwd": cwd,
+        "effort_level": "",
+    });
+    std::fs::write(
+        timings_dir.join(format!("{date}.jsonl")),
+        format!("{row}\n"),
+    )
+    .expect("write timings row");
+
+    let stdin_json = format!("{{\"session_id\":\"{session_id}\"}}");
+    let mut out1 = Vec::new();
+    let mut err1 = Vec::new();
+    let code1 = run_hook_post_tool_batch(&mut stdin_json.as_bytes(), &mut out1, &mut err1);
+    let out1_text = String::from_utf8_lossy(&out1);
+    assert_eq!(code1, 0, "stderr: {}", String::from_utf8_lossy(&err1));
+    assert!(
+        !out1_text.contains("\"decision\""),
+        "nudge completeness gate must NOT block: {out1_text}"
+    );
+    assert!(
+        out1_text.contains("additionalContext")
+            && out1_text.contains("CLAUDE_SKILLS_COMPLETENESS_GATE"),
+        "completeness gate must name itself: {out1_text}"
+    );
+
+    crate::runner::hook_lifecycle::record_completeness_gate_clear_for(std::path::Path::new(cwd));
+    let mut out2 = Vec::new();
+    let mut err2 = Vec::new();
+    let code2 = run_hook_post_tool_batch(&mut stdin_json.as_bytes(), &mut out2, &mut err2);
+    let out2_text = String::from_utf8_lossy(&out2);
+    assert_eq!(code2, 0, "stderr: {}", String::from_utf8_lossy(&err2));
+    assert!(
+        !out2_text.contains("CLAUDE_SKILLS_COMPLETENESS_GATE"),
+        "fresh sibling scan must clear the completeness gate: {out2_text}"
+    );
+
+    match previous_home {
+        Some(value) => std::env::set_var("CLAUDE_TARGET_OVERRIDE", value),
+        None => std::env::remove_var("CLAUDE_TARGET_OVERRIDE"),
+    }
+    match previous_completeness {
+        Some(value) => std::env::set_var(COMPLETENESS_GATE_ENV_VAR, value),
+        None => std::env::remove_var(COMPLETENESS_GATE_ENV_VAR),
+    }
+    match previous_brief {
+        Some(value) => std::env::set_var(BRIEF_GATE_ENV_VAR, value),
+        None => std::env::remove_var(BRIEF_GATE_ENV_VAR),
+    }
+    match previous_review {
+        Some(value) => std::env::set_var(REVIEW_GATE_ENV_VAR, value),
+        None => std::env::remove_var(REVIEW_GATE_ENV_VAR),
+    }
+    match previous_research {
+        Some(value) => std::env::set_var(RESEARCH_GATE_ENV_VAR, value),
+        None => std::env::remove_var(RESEARCH_GATE_ENV_VAR),
+    }
+    let _ = std::fs::remove_dir_all(&claude_home);
 }
 
 #[test]

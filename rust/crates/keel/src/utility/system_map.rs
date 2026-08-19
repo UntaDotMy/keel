@@ -191,7 +191,7 @@ const APPLICATION_MARKERS: &[(&str, &str)] = &[
 fn detect_entrypoints(workspace_root: &Path) -> Vec<String> {
     let mut entrypoints = Vec::new();
     for entrypoint_name in ENTRYPOINT_FILENAMES {
-        for relative_path in collect_matching_relative_paths(workspace_root, entrypoint_name, 6, 40)
+        for relative_path in collect_matching_relative_paths(workspace_root, entrypoint_name, 4, 40)
         {
             entrypoints.push(format!("- `{relative_path}`"));
         }
@@ -284,7 +284,9 @@ fn collect_matching_relative_paths_inner(
     for entry_result in entries.flatten() {
         let child_name = entry_result.file_name().to_string_lossy().to_string();
         let child_path = entry_result.path();
-        if should_skip_workspace_entry(&child_name, &child_path) {
+        if should_skip_workspace_entry(&child_name, &child_path)
+            || should_skip_deep_scan(&child_name)
+        {
             continue;
         }
         // file_type() does NOT follow symlinks; skip any symlink so a link
@@ -352,6 +354,29 @@ fn should_skip_workspace_entry(name: &str, path: &Path) -> bool {
         ".git" | ".claude" | "target" | "node_modules" | "vendor"
     ) || (name.starts_with('.') && path.is_dir() && !matches!(name, ".github" | ".gitlab"))
         || (path.is_file() && is_probably_binary(path))
+}
+
+/// Trees that stay visible as a top-level name but must not be recursively
+/// scanned. Walking `hermes-agent` (or similar clones) on every marker
+/// search is what made Grok's `system_map` tool sit for tens of seconds.
+fn should_skip_deep_scan(name: &str) -> bool {
+    matches!(
+        name,
+        "hermes-agent"
+            | "karpathy-skills-cmp"
+            | "dist"
+            | "build"
+            | "out"
+            | "__pycache__"
+            | ".venv"
+            | "venv"
+            | "coverage"
+            | "site-packages"
+            | ".pytest-cache"
+            | "agent-tools"
+            | "terminals"
+            | "mcps"
+    )
 }
 
 fn is_probably_binary(path: &Path) -> bool {
@@ -473,6 +498,35 @@ mod tests {
         assert!(
             !map.contains("node_modules/"),
             "package.json inside node_modules/ must not leak through:\n{map}"
+        );
+
+        let _ = fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn detect_applications_skips_vendored_clone_trees() {
+        let workspace = tempdir_under("system-map-skip-hermes");
+        touch(&workspace.join("Cargo.toml"));
+        touch(
+            &workspace
+                .join("hermes-agent")
+                .join("web")
+                .join("package.json"),
+        );
+        touch(&workspace.join("hermes-agent").join("README.md"));
+
+        let map = render_system_map(&workspace);
+        assert!(
+            map.contains("- hermes-agent (dir)"),
+            "top-level clone name stays visible:\n{map}"
+        );
+        assert!(
+            !map.contains("hermes-agent/web"),
+            "must not recursively scan hermes-agent:\n{map}"
+        );
+        assert!(
+            !map.contains("hermes-agent/README"),
+            "ownership walk must skip hermes-agent:\n{map}"
         );
 
         let _ = fs::remove_dir_all(workspace);

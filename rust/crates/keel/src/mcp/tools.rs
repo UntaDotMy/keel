@@ -305,7 +305,7 @@ fn tools_list_catalog() -> Value {
             },
             {
                 "name": "anvil",
-                "description": "Drive the Anvil delivery loop (compile → cast → sieve → stamp → loop). Subcommands: compile, cast, sieve, stamp, loop, run, prefix-check. This is the only keel delivery loop.",
+                "description": "REQUIRED for any code change. compile/cast/sieve/stamp/run --dry-run/prefix-check only. Do not hand-edit first. loop and live run are CLI-only (they exceed the ~30s host MCP budget).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -317,7 +317,7 @@ fn tools_list_catalog() -> Value {
             },
             {
                 "name": "review",
-                "description": "Run keel review gates (pre-commit, pre-pr, gates check). Use to get a deterministic local quality gate with fail-closed verdicts on the current diff.",
+                "description": "MCP-safe review is `gates` only. pre-commit (fmt+clippy) and pre-pr (plus cargo test) are CLI-only — they exceed the host ~30s budget.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -331,7 +331,7 @@ fn tools_list_catalog() -> Value {
             },
             {
                 "name": "git_workflow",
-                "description": "Git workflow operations. await-ci waits for CI checks to go green and blocks (non-zero) on red/pending so you never merge blind past CI; configure/show save and recall the branch+commit workflow preference to per-workspace memory; preflight validates branch/clean state; commit-message/pr-body/lint-message generate and lint professional text.",
+                "description": "Git workflow operations. MCP-safe: preflight, configure, show, commit-message, pr-body, lint-message. await-ci is CLI-only (it polls past the host ~30s budget).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -446,14 +446,14 @@ fn tools_list_catalog() -> Value {
             },
             {
                 "name": "code_search",
-                "description": "Lexical substring search of the workspace via keel code-search (not embedding/semantic search). Returns matching file:line:snippet rows; optional path filter is cross-platform (/ and \\\\).",
+                "description": "Lexical substring search of the workspace via keel code-search (not embedding/semantic search). action=search (default) returns matching file:line:snippet rows. action=siblings scans the class after a fix or implement: query or tokens from the current git diff, lists every other in-repo copy, and clears the completeness gate. A one-site change is unfinished.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "query": { "type": "string", "description": "Search query text." },
+                        "action": { "type": "string", "enum": ["search", "siblings"], "description": "search (default) or siblings (completeness scan after a fix/implement)." },
+                        "query": { "type": "string", "description": "Search query / bug shape. Required for search; optional for siblings (falls back to git-diff tokens)." },
                         "format": { "type": "string", "description": "Output format: json or compact." }
-                    },
-                    "required": ["query"]
+                    }
                 }
             },
             {
@@ -750,7 +750,11 @@ fn dispatch_mcp_tool(tool_name: &str, arguments: &Value) -> Result<String, Strin
 /// Per-call safety net: the serve loop is concurrent, but one stuck tool would
 /// still hold an in-flight slot until this deadline fires. The worker may
 /// outlive the deadline if stuck in a native lock; the caller still recovers.
-fn run_tool_with_deadline<F>(timeout: Duration, label: &str, work: F) -> Result<String, String>
+pub(crate) fn run_tool_with_deadline<F>(
+    timeout: Duration,
+    label: &str,
+    work: F,
+) -> Result<String, String>
 where
     F: FnOnce() -> Result<String, String> + Send + 'static,
 {
@@ -993,6 +997,25 @@ fn tool_run_command(arguments: &Value) -> Result<String, String> {
             "run_command: refusing to start `keel mcp` from inside MCP (that re-enters the server and hangs)"
                 .into(),
         );
+    }
+
+    // Sync wait inherits the ~25s host budget. Long keel jobs (anvil loop,
+    // live anvil run, git-workflow await-ci) must not block this call — either
+    // refuse, or the caller already chose wait:false (handle + poll).
+    if wait {
+        let mut tokens = vec![program.clone()];
+        tokens.extend(shell_args.iter().cloned());
+        if let Some(message) = refuse_mcp_long_keel_job(&tokens) {
+            return Err(format!(
+                "{message} Or pass wait:false and poll command_output."
+            ));
+        }
+        let label_tokens: Vec<String> = label.split_whitespace().map(str::to_string).collect();
+        if let Some(message) = refuse_mcp_long_keel_job(&label_tokens) {
+            return Err(format!(
+                "{message} Or pass wait:false and poll command_output."
+            ));
+        }
     }
 
     // Token saver stays in-process (`keel run`) so MCP never re-execs this
@@ -1777,7 +1800,7 @@ fn tool_context_brief(_arguments: &Value) -> Result<String, String> {
         "skills": skills,
         "memory": memory,
         "newestBrief": newest_brief,
-        "next": "Use skill_route to pick a skill, skill_get to load its full body, recall for memory, and cli for any other keel surface.",
+        "next": "For any code change call anvil (compile then run --dry-run). Use skill_route/skill_get for domain skills, recall for memory.",
     });
     // Compact JSON: pretty context_brief was multi-line and near frame limits.
     mcp_json_compact(&payload).map_err(|error| format!("context_brief: {error}"))
@@ -1861,6 +1884,10 @@ fn tool_cli(arguments: &Value) -> Result<String, String> {
         ));
     }
 
+    if let Some(message) = refuse_mcp_long_keel_job(&args) {
+        return Err(message);
+    }
+
     // In-process: spawning current_exe() from `keel mcp serve` re-enters the
     // same binary and regularly exceeds the host's ~30s tool budget.
     run_inprocess_cli(&format!("keel {}", args.join(" ")), |out, err| {
@@ -1877,16 +1904,22 @@ fn tool_anvil(arguments: &Value) -> Result<String, String> {
         .to_string();
     if action.is_empty() {
         return Err(
-            "anvil: missing action (compile|cast|sieve|stamp|loop|run|prefix-check)".into(),
+            "anvil: missing action (compile|cast|sieve|stamp|run|prefix-check). loop is CLI-only."
+                .into(),
         );
     }
-    let mut owned = vec![action];
+    let mut owned = vec![action.clone()];
     if let Some(Value::Array(items)) = arguments.get("args") {
         for item in items {
             if let Some(text) = item.as_str() {
                 owned.push(text.to_string());
             }
         }
+    }
+    let mut tokens = vec!["anvil".to_string()];
+    tokens.extend(owned.iter().cloned());
+    if let Some(message) = refuse_mcp_long_keel_job(&tokens) {
+        return Err(message);
     }
     run_inprocess_cli("keel anvil", |out, err| {
         crate::utility::run_anvil_command(&owned, out, err)
@@ -1914,27 +1947,68 @@ fn run_keel_subcommand<S: AsRef<str>>(
     })
 }
 
+fn is_keel_binary_name(name: &str) -> bool {
+    // Split on both separators so a Windows `...\keel.exe` path still
+    // matches when this code runs on Linux/macOS CI.
+    let file = name.rsplit(['/', '\\']).next().unwrap_or(name);
+    let stem = file
+        .strip_suffix(".exe")
+        .or_else(|| file.strip_suffix(".EXE"))
+        .unwrap_or(file);
+    stem.eq_ignore_ascii_case("keel")
+}
+
 fn command_nests_mcp_serve(program: &str, args: &[String], label: &str) -> bool {
-    fn is_keel(name: &str) -> bool {
-        // Split on both separators so a Windows `...\keel.exe` path still
-        // matches when this code runs on Linux/macOS CI.
-        let file = name.rsplit(['/', '\\']).next().unwrap_or(name);
-        let stem = file
-            .strip_suffix(".exe")
-            .or_else(|| file.strip_suffix(".EXE"))
-            .unwrap_or(file);
-        stem.eq_ignore_ascii_case("keel")
-    }
-    if is_keel(program) && args.iter().any(|arg| arg == "mcp") {
+    if is_keel_binary_name(program) && args.iter().any(|arg| arg == "mcp") {
         return true;
     }
     let tokens: Vec<&str> = label.split_whitespace().collect();
     tokens
         .windows(2)
-        .any(|pair| is_keel(pair[0]) && pair[1] == "mcp")
+        .any(|pair| is_keel_binary_name(pair[0]) && pair[1] == "mcp")
 }
 
-fn mcp_child_timeout() -> Duration {
+/// Jobs whose documented wall exceeds the host MCP budget (~30s on Grok/Cursor).
+/// Shared by `anvil`, `git_workflow`, `cli`, and sync `run_command` so a model
+/// cannot bypass the dedicated refuse by going through a passthrough.
+///
+/// Tokens are either a keel argv (`["anvil","loop"]`) or a full command
+/// (`["keel","anvil","loop"]` / `C:\...\keel.exe`).
+fn refuse_mcp_long_keel_job(tokens: &[String]) -> Option<String> {
+    let parts: Vec<&str> = tokens.iter().map(String::as_str).collect();
+    if parts.is_empty() {
+        return None;
+    }
+    let rest: &[&str] = match parts.iter().position(|part| is_keel_binary_name(part)) {
+        Some(index) => &parts[index + 1..],
+        None => &parts,
+    };
+    let command = rest.first().copied().unwrap_or("");
+    let action = rest.get(1).copied().unwrap_or("");
+    if command == "anvil" && action == "loop" {
+        return Some(
+            "anvil loop: MCP refuses this action (300s wall > host ~30s budget). Run `keel anvil loop` in the CLI.".into(),
+        );
+    }
+    if command == "anvil" && action == "run" && !rest.contains(&"--dry-run") {
+        return Some(
+            "anvil run: on MCP pass --dry-run. Live run can enter the 300s loop and hang the host. CLI: `keel anvil run`.".into(),
+        );
+    }
+    if matches!(command, "git-workflow" | "git_workflow") && action == "await-ci" {
+        return Some(
+            "git_workflow await-ci: MCP refuses this action (it polls until green and exceeds the host ~30s budget). Run `keel git-workflow await-ci --watch` in the CLI.".into(),
+        );
+    }
+    if command == "review" && matches!(action, "pre-pr" | "pre-commit") {
+        return Some(format!(
+            "review {action}: MCP refuses this action (fmt/clippy/test exceeds the host ~30s budget). Run `keel review {action}` in the CLI."
+        ));
+    }
+    None
+}
+
+pub(crate) fn mcp_child_timeout() -> Duration {
     let secs = env::var("KEEL_MCP_TOOL_TIMEOUT_SECS")
         .ok()
         .and_then(|raw| raw.trim().parse::<u64>().ok())
@@ -2052,7 +2126,7 @@ fn truncate_chars(text: &str, max_chars: usize) -> (String, bool) {
     (kept, true)
 }
 
-fn truncate_mcp_text(text: &str) -> String {
+pub(crate) fn truncate_mcp_text(text: &str) -> String {
     let max_chars = max_mcp_text_chars();
     let (kept, truncated) = truncate_chars(text, max_chars);
     if !truncated {
@@ -2384,6 +2458,9 @@ fn tool_review(arguments: &Value) -> Result<String, String> {
         .get("action")
         .and_then(Value::as_str)
         .ok_or_else(|| "review: missing action (pre-commit|pre-pr|gates)".to_string())?;
+    if let Some(message) = refuse_mcp_long_keel_job(&[String::from("review"), action.to_string()]) {
+        return Err(message);
+    }
     let all_args = review_args(action, arguments);
     run_keel_subcommand("review", &all_args)
 }
@@ -2415,9 +2492,14 @@ fn tool_git_workflow(arguments: &Value) -> Result<String, String> {
         .get("action")
         .and_then(Value::as_str)
         .ok_or_else(|| {
-            "git_workflow: missing action (preflight|await-ci|configure|show|commit-message|pr-body|lint-message)"
+            "git_workflow: missing action (preflight|configure|show|commit-message|pr-body|lint-message)"
                 .to_string()
         })?;
+    if let Some(message) =
+        refuse_mcp_long_keel_job(&[String::from("git-workflow"), action.to_string()])
+    {
+        return Err(message);
+    }
     let extras = collect_extra_args(arguments);
     let mut all_args: Vec<&str> = vec![action];
     let mut owned: Vec<String> = Vec::new();
@@ -2592,12 +2674,34 @@ fn tool_doctor(arguments: &Value) -> Result<String, String> {
 }
 
 fn tool_code_search(arguments: &Value) -> Result<String, String> {
+    let action = arguments
+        .get("action")
+        .and_then(Value::as_str)
+        .unwrap_or("search")
+        .trim();
     let query = arguments
         .get("query")
         .and_then(Value::as_str)
         .unwrap_or("")
         .trim()
         .to_string();
+    if action == "siblings" {
+        let mut all_args: Vec<&str> = vec!["siblings"];
+        let mut owned: Vec<String> = Vec::new();
+        if !query.is_empty() {
+            owned.push(format!("--query={query}"));
+        }
+        if let Ok(cwd) = env::current_dir() {
+            owned.push(format!("--workspace-root={}", display_path(&cwd)));
+        }
+        if optional_string_arg(arguments, "format").is_some_and(|f| f == "json") {
+            owned.push("--json".to_string());
+        }
+        for s in &owned {
+            all_args.push(s);
+        }
+        return run_keel_subcommand("code-search", &all_args);
+    }
     if query.is_empty() {
         return Err("code_search: missing query".to_string());
     }
@@ -3004,6 +3108,134 @@ mod tests {
         assert!(
             text.contains("missing action"),
             "anvil must require action: {text}"
+        );
+    }
+
+    #[test]
+    fn refuse_mcp_long_keel_job_covers_dedicated_and_passthrough_shapes() {
+        let loop_msg = refuse_mcp_long_keel_job(&[String::from("anvil"), String::from("loop")])
+            .expect("anvil loop");
+        assert!(loop_msg.contains("anvil loop"), "{loop_msg}");
+
+        let live_run = refuse_mcp_long_keel_job(&[
+            String::from(r"C:\Users\HP\.keel\keel.exe"),
+            String::from("anvil"),
+            String::from("run"),
+        ])
+        .expect("live anvil run");
+        assert!(live_run.contains("anvil run"), "{live_run}");
+
+        assert!(
+            refuse_mcp_long_keel_job(&[
+                String::from("anvil"),
+                String::from("run"),
+                String::from("--dry-run"),
+            ])
+            .is_none(),
+            "dry-run run stays MCP-safe"
+        );
+
+        let await_ci =
+            refuse_mcp_long_keel_job(&[String::from("git-workflow"), String::from("await-ci")])
+                .expect("await-ci");
+        assert!(await_ci.contains("await-ci"), "{await_ci}");
+
+        let pre_pr = refuse_mcp_long_keel_job(&[String::from("review"), String::from("pre-pr")])
+            .expect("review pre-pr");
+        assert!(pre_pr.contains("pre-pr"), "{pre_pr}");
+
+        assert!(
+            refuse_mcp_long_keel_job(&[String::from("review"), String::from("gates")]).is_none(),
+            "review gates stays MCP-safe"
+        );
+
+        assert!(
+            refuse_mcp_long_keel_job(&[String::from("anvil"), String::from("compile")]).is_none()
+        );
+    }
+
+    #[test]
+    fn anvil_loop_and_live_run_are_mcp_errors() {
+        let loop_result = handle_tools_call(&json!({
+            "name": "anvil",
+            "arguments": { "action": "loop" }
+        }))
+        .expect("envelope");
+        assert_eq!(loop_result["isError"], json!(true));
+        let loop_text = loop_result["content"][0]["text"].as_str().unwrap_or("");
+        assert!(loop_text.contains("anvil loop"), "loop refuse: {loop_text}");
+
+        let live = handle_tools_call(&json!({
+            "name": "anvil",
+            "arguments": { "action": "run" }
+        }))
+        .expect("envelope");
+        assert_eq!(live["isError"], json!(true));
+        let live_text = live["content"][0]["text"].as_str().unwrap_or("");
+        assert!(
+            live_text.contains("--dry-run"),
+            "live run refuse: {live_text}"
+        );
+    }
+
+    #[test]
+    fn review_pre_pr_is_mcp_error() {
+        let result = handle_tools_call(&json!({
+            "name": "review",
+            "arguments": { "action": "pre-pr" }
+        }))
+        .expect("envelope");
+        assert_eq!(result["isError"], json!(true));
+        let text = result["content"][0]["text"].as_str().unwrap_or("");
+        assert!(text.contains("pre-pr"), "review pre-pr refuse: {text}");
+    }
+
+    #[test]
+    fn git_workflow_await_ci_is_mcp_error() {
+        let result = handle_tools_call(&json!({
+            "name": "git_workflow",
+            "arguments": { "action": "await-ci" }
+        }))
+        .expect("envelope");
+        assert_eq!(result["isError"], json!(true));
+        let text = result["content"][0]["text"].as_str().unwrap_or("");
+        assert!(text.contains("await-ci"), "await-ci refuse: {text}");
+    }
+
+    #[test]
+    fn cli_passthrough_refuses_the_same_long_jobs() {
+        for args in [
+            json!(["anvil", "loop"]),
+            json!(["anvil", "run"]),
+            json!(["git-workflow", "await-ci"]),
+            json!(["review", "pre-pr"]),
+            json!(["review", "pre-commit"]),
+        ] {
+            let result = handle_tools_call(&json!({
+                "name": "cli",
+                "arguments": { "args": args }
+            }))
+            .expect("envelope");
+            assert_eq!(
+                result["isError"],
+                json!(true),
+                "cli {args} should refuse: {result}"
+            );
+        }
+    }
+
+    #[test]
+    fn run_command_wait_true_refuses_long_keel_jobs() {
+        let result = handle_tools_call(&json!({
+            "name": "run_command",
+            "arguments": { "argv": ["keel", "anvil", "loop"], "wait": true }
+        }))
+        .expect("envelope");
+        assert_eq!(result["isError"], json!(true));
+        let text = result["content"][0]["text"].as_str().unwrap_or("");
+        assert!(
+            text.contains("anvil loop") && text.contains("wait:false"),
+            "sync run_command refuse: {text}"
         );
     }
 
@@ -3447,6 +3679,26 @@ mod tests {
         assert_eq!(result["isError"], json!(true));
         let text = result["content"][0]["text"].as_str().unwrap_or("");
         assert!(text.contains("missing query"), "text: {text}");
+    }
+
+    #[test]
+    fn code_search_schema_advertises_siblings() {
+        let listed = handle_tools_list();
+        let tools = listed["tools"].as_array().expect("tools array");
+        let search = tools
+            .iter()
+            .find(|tool| tool.get("name").and_then(Value::as_str) == Some("code_search"))
+            .expect("code_search listed");
+        let schema = serde_json::to_string(search.get("inputSchema").expect("schema")).unwrap();
+        assert!(schema.contains("siblings"), "schema: {schema}");
+        assert!(
+            !search
+                .get("inputSchema")
+                .and_then(|s| s.get("required"))
+                .and_then(Value::as_array)
+                .is_some_and(|req| req.iter().any(|v| v.as_str() == Some("query"))),
+            "siblings must be callable without query; search still errors at dispatch"
+        );
     }
 
     #[test]

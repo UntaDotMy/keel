@@ -690,8 +690,8 @@ mod tests {
             Some("keel review")
         );
         assert_eq!(
-            command_signature(r#"'C:\Users\HP\.claude\keel.exe' sprint status"#).as_deref(),
-            Some("keel sprint")
+            command_signature(r#"'C:\Users\HP\.keel\keel.exe' anvil compile"#).as_deref(),
+            Some("keel anvil")
         );
         assert_eq!(
             command_signature(r#""C:\tools\keel.cmd" doctor"#).as_deref(),

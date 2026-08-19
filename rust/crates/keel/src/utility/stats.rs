@@ -416,7 +416,7 @@ mod tests {
     fn gate_activity_empty_when_no_state() {
         with_isolated_home("gates-empty", |home| {
             let activity = gate_activity(home);
-            assert_eq!(activity.len(), 5);
+            assert_eq!(activity.len(), 6);
             assert!(activity.iter().all(|(_, count)| *count == 0));
         });
     }

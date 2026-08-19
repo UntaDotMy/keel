@@ -27,7 +27,7 @@ some hosts until cwd matches (fixed in pack; enforced by `doc_parity_test`).
 - `dart-and-flutter-expert` — Dart & Flutter: widget architecture (pure `build`, `const` constructors), state management (Provider/Riverpod/Bloc), jank diagnosis (`ListView.builder`, `RepaintBoundary`), isolates for >16ms work, null-safety without `!`, pubspec hygiene, platform channels, Flutter web/desktop.
 - `backend-and-data-architecture` — Backend systems, API design, and data engineering (schemas, messaging, microservice boundaries).
 - `domain-driven-design` — Domain-Driven Design (DDD): ubiquitous language, bounded contexts, aggregates, entities/value objects, domain events, context maps, strategic vs tactical design, optional CQRS/event sourcing. Use for complex domain models and service boundaries.
-- `behavior-driven-development` — Behavior-Driven Development (BDD): shared Gherkin examples, outside-in delivery, living documentation. Bridges product language to automated acceptance checks (pairs with writing-user-stories + TDD).
+- `behavior-driven-development` — Behavior-Driven Development (BDD): shared Gherkin examples, outside-in delivery, living documentation. Bridges product language to automated acceptance checks (pairs with the working brief + TDD).
 - `cloud-and-devops-expert` — Cloud infrastructure, CI/CD, and DevOps (IaC, container orchestration, progressive delivery).
 - `qa-and-automation-engineer` — QA, automated testing, and release reliability (Smoke → Functional → Integration → UI → Load → Stress → Security ladder).
 - `security-and-compliance-auditor` — Security reviews, threat modeling, compliance (SOC2, GDPR), remediation quality.

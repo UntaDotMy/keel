@@ -182,7 +182,7 @@ keel/
 └── README.md                # This file
 ```
 
-The manifest at `.codex-plugin/plugin.json` references `hooks` at `./hooks/hooks.json` and `mcpServers` at `./.mcp.json` (both default-discovered by Codex). The `.mcp.json` bundles the keel MCP server (`keel mcp serve`), exposing all 31 keel tools (`recall`, `skill_route`, `skill_get`, `sprint`, `brief_create`, etc.) as native MCP tool calls in Codex — no CLI shell-out required for tool access. Codex loads plugin-bundled MCP servers per the [official plugin spec](https://developers.openai.com/codex/plugins/build); enable/disable and tool-approval policy are controlled under `plugins.keel.mcp_servers.keel` in your Codex config without editing the plugin. (There is no `skills/` directory — keel skills are reached via the `skill_route`/`skill_get` MCP tools, not bundled as Codex skills.)
+The manifest at `.codex-plugin/plugin.json` references `hooks` at `./hooks/hooks.json` and `mcpServers` at `./.mcp.json` (both default-discovered by Codex). The `.mcp.json` bundles the keel MCP server (`keel mcp serve`), exposing all keel tools (`recall`, `skill_route`, `skill_get`, `anvil`, `brief_create`, etc.) as native MCP tool calls in Codex — no CLI shell-out required for tool access. Codex loads plugin-bundled MCP servers per the [official plugin spec](https://developers.openai.com/codex/plugins/build); enable/disable and tool-approval policy are controlled under `plugins.keel.mcp_servers.keel` in your Codex config without editing the plugin. (There is no `skills/` directory — keel skills are reached via the `skill_route`/`skill_get` MCP tools, not bundled as Codex skills.)
 
 ## Differences from the OpenCode Adapter
 

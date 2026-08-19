@@ -41,12 +41,30 @@ pub fn run_anvil_command(
         return if action.is_empty() { 1 } else { 0 };
     }
     match action {
-        "compile" => compile::run_compile(&arguments[1..], standard_output, standard_error),
-        "cast" => cast::run_cast(&arguments[1..], standard_output, standard_error),
+        "compile" => {
+            let code = compile::run_compile(&arguments[1..], standard_output, standard_error);
+            if code == 0 {
+                crate::runner::hook_lifecycle::record_anvil_gate_clear();
+            }
+            code
+        }
+        "cast" => {
+            let code = cast::run_cast(&arguments[1..], standard_output, standard_error);
+            if code == 0 {
+                crate::runner::hook_lifecycle::record_anvil_gate_clear();
+            }
+            code
+        }
         "sieve" => sieve::run_sieve(&arguments[1..], standard_output, standard_error),
         "stamp" => stamp::run_stamp(&arguments[1..], standard_output, standard_error),
         "loop" => loop_runner::run_loop(&arguments[1..], standard_output, standard_error),
-        "run" => run_orchestrator(&arguments[1..], standard_output, standard_error),
+        "run" => {
+            let code = run_orchestrator(&arguments[1..], standard_output, standard_error);
+            if code == 0 {
+                crate::runner::hook_lifecycle::record_anvil_gate_clear();
+            }
+            code
+        }
         "prefix-check" => {
             prefix::run_prefix_check(&arguments[1..], standard_output, standard_error)
         }

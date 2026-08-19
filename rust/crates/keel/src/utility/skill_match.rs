@@ -258,6 +258,19 @@ const CURATED_SKILL_TRIGGERS: &[(&str, &[&str])] = &[
             "don't break existing",
         ],
     ),
+    (
+        "running-anvil",
+        &[
+            "use anvil",
+            "run anvil",
+            "anvil compile",
+            "delivery loop",
+            "compile a named bar",
+            "multi-piece delivery",
+            "implement this change",
+            "implement this feature",
+        ],
+    ),
     // UI visual-craft asks. The two UI/UX skills share almost all their
     // vocabulary (design, ui, ux, interface, experience), so the IDF matcher
     // ties on them and correctly stays silent — leaving obvious UI prompts with
@@ -1351,6 +1364,10 @@ mod tests {
         assert_eq!(
             curated_skill_for_prompt("write a test for the parser"),
             Some("test-driven-development")
+        );
+        assert_eq!(
+            curated_skill_for_prompt("use anvil to implement this feature"),
+            Some("running-anvil")
         );
         assert_eq!(
             curated_skill_for_prompt("I need to modify the existing auth handler"),

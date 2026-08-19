@@ -61,10 +61,10 @@ downstream symptoms").
 
 ### 3b. Find every sibling instance of the same cause
 
-- A root cause is a *pattern*, not a single line. The moment you name it, grep the
-  whole repo for the same shape: the same bad call, the same missing guard, the
-  same wrong type read, the same un-migrated API. The instance you reproduced is
-  rarely the only one.
+- A root cause is a *pattern*, not a single line. The moment you name it, run
+  `keel code-search siblings --query "<the bug shape>"` (MCP `code_search`
+  action=siblings). That is the scan owner — not an optional extra grep. The
+  instance you reproduced is rarely the only one.
 - Concrete: a string-vs-number parse bug at one site usually exists at every site
   that parses that field; a renamed function breaks every caller; a wrong default
   recurs in every copy of the idiom. Fix all of them in this turn, not just the one
@@ -111,9 +111,10 @@ downstream symptoms").
 
 ## Validation
 
-Methodology skill; no `keel` subcommand. Self-check before claiming a
+§3b is enforced by `keel code-search siblings` (MCP `code_search` action=siblings).
+That command writes the completeness marker. PostToolBatch and `keel review`
+fail closed until it ran after the latest edit. Self-check before claiming a
 defect fixed: can you reproduce the original symptom, name the cause with
-`file:line`, point at the source-of-truth change, show the search that proves you
-found every sibling instance of the same cause, and show a regression test that
-fails without the fix? If any of those is missing, the bug is diagnosed at best,
-not fixed.
+`file:line`, point at the source-of-truth change, show the sibling scan hit list,
+and show a regression test that fails without the fix? If any of those is missing,
+the bug is diagnosed at best, not fixed.

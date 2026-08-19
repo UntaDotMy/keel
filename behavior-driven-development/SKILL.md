@@ -1,8 +1,8 @@
 ---
 name: behavior-driven-development
-description: Behavior-Driven Development (BDD) technique. Specify and verify software through shared examples of behavior — business-readable scenarios (Gherkin Given/When/Then), outside-in delivery, and living documentation — not through test-after or developer-only unit names. Use when aligning product/dev/QA on acceptance behavior, writing or automating scenarios, driving outside-in implementation from a failing scenario, or turning user stories into executable specs. Complements writing-user-stories (story capture), test-driven-development (unit RED-GREEN-REFACTOR), and domain-driven-design (ubiquitous language).
+description: Behavior-Driven Development (BDD) technique. Specify and verify software through shared examples of behavior — business-readable scenarios (Gherkin Given/When/Then), outside-in delivery, and living documentation — not through test-after or developer-only unit names. Use when aligning product/dev/QA on acceptance behavior, writing or automating scenarios, driving outside-in implementation from a failing scenario, or turning user stories into executable specs. Complements the working brief (requirement capture), test-driven-development (unit RED-GREEN-REFACTOR), and domain-driven-design (ubiquitous language).
 when_to_use: Acceptance criteria as executable scenarios; Cucumber/SpecFlow/Behave/Playwright BDD; outside-in feature delivery; three-amigos collaboration; living documentation; bridging product language and automated checks; ATDD-style acceptance tests first; any "what should the system do" conversation that must stay testable.
-allowed-tools: Read, Grep, Glob, Edit, Write, Bash(keel memory:*), Bash(keel user-story:*), Bash(git diff:*), Bash(git status), Bash(npm:*), Bash(yarn:*), Bash(pnpm:*), Bash(npx:*), Bash(cargo:*), Bash(pytest:*), Bash(dotnet:*)
+allowed-tools: Read, Grep, Glob, Edit, Write, Bash(keel memory:*), Bash(git diff:*), Bash(git status), Bash(npm:*), Bash(yarn:*), Bash(pnpm:*), Bash(npx:*), Bash(cargo:*), Bash(pytest:*), Bash(dotnet:*)
 effort: medium
 ---
 
@@ -20,7 +20,7 @@ BDD in practice:
 2. **Formulation** — scenarios in a shared language (usually Gherkin Given/When/Then).
 3. **Automation** — failing acceptance check → implement → green (outside-in).
 
-`writing-user-stories` captures Connextra + Gherkin as the anti-drift **spec**. This skill owns **how you develop and verify against those behaviors** day to day. `test-driven-development` owns the **unit/module** RED-GREEN-REFACTOR loop inside the red acceptance scenario.
+The working brief captures the agreed behavior as the anti-drift **spec**. This skill owns **how you develop and verify against those behaviors** day to day. `test-driven-development` owns the **unit/module** RED-GREEN-REFACTOR loop inside the red acceptance scenario.
 
 ## Research Reuse Defaults · Completion Discipline · Memory and Security Boundaries · Code Implementation Discipline
 
@@ -42,7 +42,7 @@ See `_shared/common-discipline.md` for the canonical rules. Do not invent scenar
 
 - Restate the capability as behavior: "When X, the system should Y so that Z."
 - Collect concrete examples (happy path, edge, failure). Prefer tables of examples over abstract rules alone.
-- If requirements are not yet stories, run `writing-user-stories` first and confirm with the user.
+- If requirements are not yet pinned, write a working brief first and confirm with the user.
 
 ### 2. Formulate (Gherkin)
 
@@ -66,7 +66,7 @@ Rules for good scenarios:
 Validate story format when scenarios live in user stories:
 
 ```
-keel user-story lint --file <stories.md>
+keel memory working-brief write --request "..." --acceptance-criteria "..."
 ```
 
 ### 3. Automate outside-in
@@ -85,7 +85,7 @@ keel user-story lint --file <stories.md>
 
 | Layer | Owner skill | Role in BDD |
 |---|---|---|
-| User story + Gherkin acceptance | `writing-user-stories` | Agreed intent |
+| Working brief + Gherkin acceptance | working brief | Agreed intent |
 | Automated acceptance / E2E scenario | this skill + `qa-and-automation-engineer` | Proves behavior from outside |
 | Unit / module TDD | `test-driven-development` | Designs internals under the red scenario |
 | Domain model language | `domain-driven-design` | Names and invariants match scenario language |
@@ -123,12 +123,12 @@ Capture the agreed examples as scenarios. If the user is solo, simulate the thre
 
 | Need | Skill |
 |---|---|
-| Capture and confirm stories | `writing-user-stories` |
+| Capture and confirm stories | working brief |
 | Unit RED-GREEN-REFACTOR | `test-driven-development` |
 | Domain model / ubiquitous language | `domain-driven-design` |
 | UI built component-first | `component-driven-development` |
 | Coverage strategy & release ladder | `qa-and-automation-engineer` |
-| Sprint loop over many stories | `running-a-sprint` |
+| Delivery loop over many pieces | `running-anvil` |
 
 ## Validation
 

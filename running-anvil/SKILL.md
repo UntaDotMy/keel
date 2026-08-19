@@ -40,6 +40,7 @@ keel anvil compile --goal "CLI that pretty-prints JSON logs" --bar "jq 1.7" --fi
 - Splits into smallest independently testable pieces.
 - Prefer `critic:none` whenever a gate can decide; only `blind_ab` for taste/visual/UX.
 - Emits `anvil.lock.json` (schema: `version/bar/budget/models/criteria/pieces`), `prefix.md` + `prefix.sha256` (SHA256 of static part only, ≥2048 tokens), `gates/*` per piece.
+- Prefix forbids a one-site close. Isolated-cast `echo ok` is not completeness — after the change lands, run `keel code-search siblings` in the **real** workspace and handle every hit.
 - `validate_lock`: named bar (not category word), `fetch` must be `cmd:|url:|file:|git:`, `allow_training_data:false` forbids `contributor/train/free-data` model ids.
 - If `--bar` missing, compile proposes ≤3 named fetchable bars and stops — do not invent one silently.
 - PrefixGuard renders twice; refusing if hash drifts.

@@ -1038,10 +1038,17 @@ fn handle_resources_read(params: &Value) -> Result<Value, MethodError> {
         })?;
     match uri {
         SYSTEM_MAP_RESOURCE_URI => {
-            let text = system_map_text(None).map_err(|message| MethodError {
-                code: JSON_RPC_INTERNAL_ERROR,
-                message,
-            })?;
+            // why: Grok auto-reads this resource on session start. A live
+            // walk of a large tree, or an untruncated 16KB+ frame, makes the
+            // host drop the line and wait out 30–60s. Deadline + truncate.
+            let text = match tools::run_tool_with_deadline(
+                tools::mcp_child_timeout(),
+                "resources/read system_map",
+                || system_map_text(None),
+            ) {
+                Ok(text) => tools::truncate_mcp_text(&text),
+                Err(message) => message,
+            };
             Ok(json!({
                 "contents": [
                     {
@@ -1053,15 +1060,19 @@ fn handle_resources_read(params: &Value) -> Result<Value, MethodError> {
             }))
         }
         RECALL_STATUS_RESOURCE_URI => {
-            let payload = recall_status_payload().map_err(|message| MethodError {
-                code: JSON_RPC_INTERNAL_ERROR,
-                message,
-            })?;
-            // Compact JSON: pretty multi-line resource text bloats the stdio frame.
-            let text = serde_json::to_string(&payload).map_err(|error| MethodError {
-                code: JSON_RPC_INTERNAL_ERROR,
-                message: format!("serialize recall status: {error}"),
-            })?;
+            let text = match tools::run_tool_with_deadline(
+                tools::mcp_child_timeout(),
+                "resources/read recall_status",
+                || {
+                    let payload = recall_status_payload()?;
+                    // Compact JSON: pretty multi-line resource text bloats the stdio frame.
+                    serde_json::to_string(&payload)
+                        .map_err(|error| format!("serialize recall status: {error}"))
+                },
+            ) {
+                Ok(text) => tools::truncate_mcp_text(&text),
+                Err(message) => message,
+            };
             Ok(json!({
                 "contents": [
                     {

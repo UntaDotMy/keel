@@ -101,7 +101,7 @@ const KEEL_RESEARCH_SUBCOMMANDS = [
   "system-map", "system_map", "recall", "doctor", "code-search", "code_search",
   "skill-route", "skill_route", "skill-list", "skill_list", "skill-get", "skill_get",
   "context-brief", "context_brief", "memory status", "memory recall",
-  "memory system-map", "memory scope",
+  "memory system-map", "memory scope", "anvil",
 ];
 
 function isKeelReadingCommand(command: string): boolean {
