@@ -72,8 +72,8 @@ pub fn cache_directory(
     target: &Target,
 ) -> PathBuf {
     let mut cache_path = PathBuf::from(claude_home_directory);
-    cache_path.push(".claude-skill-manager");
-    cache_path.push("bin");
+    cache_path.push("cache");
+    cache_path.push("update");
     cache_path.push(normalize_release_tag(build_version));
     cache_path.push(target.directory_name());
     cache_path
@@ -195,7 +195,7 @@ mod tests {
         let cached = cache_directory("/tmp/claude-home", "2026.03.14.0", &linux_amd64());
         assert_eq!(
             cached,
-            PathBuf::from("/tmp/claude-home/.claude-skill-manager/bin/v2026.03.14.0/linux-amd64")
+            PathBuf::from("/tmp/claude-home/cache/update/v2026.03.14.0/linux-amd64")
         );
 
         let bootstrap_cached = cache_directory(
@@ -205,9 +205,7 @@ mod tests {
         );
         assert_eq!(
             bootstrap_cached,
-            PathBuf::from(
-                "/tmp/claude-home/.claude-skill-manager/bin/bootstrap-sample-release/linux-amd64"
-            )
+            PathBuf::from("/tmp/claude-home/cache/update/bootstrap-sample-release/linux-amd64")
         );
     }
 

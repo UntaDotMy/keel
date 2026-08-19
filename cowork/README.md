@@ -12,10 +12,10 @@ integration wires.
 - **The keel MCP tools.** `keel install` registers the keel MCP server in Claude
   Desktop's `claude_desktop_config.json`, so the keel tools (recall, system-map,
   context-brief, skill routing/get/list, memory status, working-brief create/list,
-  sprint, user-story lint, and the generic CLI passthrough) are available inside
+  anvil, and the generic CLI passthrough) are available inside
   Desktop conversations.
-- **The keel CLI.** Everything the `keel` binary does (workflow, memory, recall,
-  review, sprint) is available from a terminal regardless of host.
+- **The keel CLI.** Everything the `keel` binary does (anvil, memory, recall,
+  review) is available from a terminal regardless of host.
 
 ## What is NOT available in Claude Desktop
 

@@ -1,5 +1,5 @@
 //! Purpose: Per-workspace state ledger backing the `keel workflow start|cockpit|finish` surface.
-//! Caller: utility::memory::run_workflow_command for the start, cockpit, and finish subcommands.
+//! Caller: working briefs and completion-gate timestamp/JSON helpers.
 //! Dependencies: std::fs, std::path, std::time, crate::json::{write_indented, Value}, crate::runtime::display_path.
 //! Main Functions: ledger_directory, entry_path, write_entry, read_entry, list_entries,
 //!   create_entry, close_entry, entry_to_value, current_timestamp_millis,
@@ -14,8 +14,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(test)]
 use crate::json::{write_indented, Value};
-use crate::runtime::{display_path, safe_path_segment, write_text};
+#[cfg(test)]
+use crate::runtime::write_text;
+use crate::runtime::{display_path, safe_path_segment};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Entry {
@@ -29,6 +32,7 @@ pub struct Entry {
 }
 
 pub const STATUS_OPEN: &str = "open";
+#[cfg(test)]
 pub const STATUS_CLOSED: &str = "closed";
 
 pub fn ledger_directory(claude_home: &Path) -> PathBuf {
@@ -59,10 +63,12 @@ pub fn current_timestamp_millis() -> u128 {
         .unwrap_or(0)
 }
 
+#[cfg(test)]
 pub fn next_entry_id(millis_since_epoch: u128) -> String {
     format!("wf-{millis_since_epoch:x}")
 }
 
+#[cfg(test)]
 pub fn allocate_unique_entry_id(claude_home: &Path, base_millis: u128) -> Result<String, String> {
     let base = next_entry_id(base_millis);
     if !entry_path(claude_home, &base).exists() {
@@ -77,6 +83,7 @@ pub fn allocate_unique_entry_id(claude_home: &Path, base_millis: u128) -> Result
     Err("unable to allocate unique workflow id".into())
 }
 
+#[cfg(test)]
 pub fn create_entry(id: String, request: String, preset: String, started_at: String) -> Entry {
     Entry {
         id,
@@ -89,6 +96,7 @@ pub fn create_entry(id: String, request: String, preset: String, started_at: Str
     }
 }
 
+#[cfg(test)]
 pub fn close_entry(entry: Entry, finished_at: String, proof: String) -> Entry {
     Entry {
         status: STATUS_CLOSED.into(),
@@ -98,6 +106,7 @@ pub fn close_entry(entry: Entry, finished_at: String, proof: String) -> Entry {
     }
 }
 
+#[cfg(test)]
 pub fn entry_to_value(entry: &Entry) -> Value {
     Value::Object(vec![
         ("id".into(), Value::String(entry.id.clone())),
@@ -113,6 +122,7 @@ pub fn entry_to_value(entry: &Entry) -> Value {
     ])
 }
 
+#[cfg(test)]
 pub fn write_entry(claude_home: &Path, entry: &Entry) -> Result<PathBuf, String> {
     let path = validated_entry_path(claude_home, &entry.id)?;
     let directory = ledger_directory(claude_home);
@@ -141,6 +151,7 @@ pub fn read_entry(claude_home: &Path, id: &str) -> Result<Option<Entry>, String>
     Ok(Some(entry))
 }
 
+#[cfg(test)]
 pub fn list_entries(claude_home: &Path) -> Result<Vec<Entry>, String> {
     let directory = ledger_directory(claude_home);
     if !directory.is_dir() {

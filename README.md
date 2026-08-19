@@ -76,12 +76,12 @@ The cast file ships in this repo. Render to GIF with `agg docs/demos/quickstart.
 | --- | --- |
 | Brownfield gate (unique) | `preserve-existing-flow` forces owner-path evidence before editing established source. Review gates block edits when the flow-check artifact is missing. No other harness has this. |
 | Iron-law hooks | SessionStart loads the bootstrap skill, UserPromptSubmit restates the four rules, PostToolBatch nudges a reviewer pass, PreCompact refreshes SYSTEM_MAP. |
-| Workflow CLI | `workflow start`, `workflow route`, `workflow cockpit`, `workflow finish` ,  proof-first delivery rails. |
+| Delivery loop | `keel anvil compile|cast|sieve|stamp|loop|run` ,  the only delivery loop. |
 | Review gates | `review pre-pr` / `review pre-commit`, review strictness via plugin `userConfig.review_strictness`, and CI-ready artifacts so non-trivial code never self-reviews. |
 | Memory | Working briefs, completion ledgers, scoped `SYSTEM_MAP.md`, and durable recovery state under `~/.claude/memories/`. |
 | Command compaction | `keel run -- <cmd>` produces compact output for noisy test/build/lint/log/search commands without dropping diagnostic signal. |
-| MCP server | `keel mcp serve` (stdio: **one process per host session**; concurrent in-flight tools via `KEEL_MCP_MAX_INFLIGHT`, default 64; shared recall DB uses SQLite WAL + busy_timeout) and `keel mcp serve-http` (Streamable HTTP multi-client on `127.0.0.1:3920` by default). Registered through the plugin manifest so the harness auto-discovers the tool surface (count asserted by `tests/doc_parity_test.rs` via `"inputSchema":` in `mcp/tools.rs`) ,  `recall`, `system_map`, `run_command`, `command_output`, `command_kill`, `recall_status`, `skill_route`, `skill_get`, `skill_list`, `memory_status`, `brief_list`, `brief_get`, `brief_create`, `system_map_refresh`, `context_brief`, `cli`, `sprint`, `user_story_lint`, `review`, `workflow`, `git_workflow`, `memory`, `gain`, `raw`, `config_audit`, `skill_lint`, `telemetry`, `orchestration`, `checkpoint`, `session`, `doctor`, `code_search`, `user_story`, `flow`, `work`, `code_graph`, `learn`, `observe`, `rewrite`, `skill_eval`, `dispatch`, `design_intelligence`, `stats`, `team` ,  plus system-map and recall-status resources. |
-| Slash commands | `/keel:workflow`, `/keel:review`, `/keel:recall`, `/keel:gain`, `/keel:sprint`, `/keel:user-story` ,  six discoverable `/`-menu wrappers over implemented CLI surfaces. Shipped via the plugin manifest `commands` key. |
+| MCP server | `keel mcp serve` (stdio: **one process per host session**; concurrent in-flight tools via `KEEL_MCP_MAX_INFLIGHT`, default 64; shared recall DB uses SQLite WAL + busy_timeout) and `keel mcp serve-http` (Streamable HTTP multi-client on `127.0.0.1:3920` by default). Registered through the plugin manifest so the harness auto-discovers the tool surface (count asserted by `tests/doc_parity_test.rs` via `"inputSchema":` in `mcp/tools.rs`) ,  `gauntlet`, `recall`, `system_map`, `run_command`, `command_output`, `command_kill`, `recall_status`, `skill_route`, `skill_get`, `skill_list`, `memory_status`, `brief_list`, `brief_get`, `brief_create`, `system_map_refresh`, `context_brief`, `cli`, `anvil`, `review`, `git_workflow`, `memory`, `gain`, `raw`, `config_audit`, `skill_lint`, `telemetry`, `checkpoint`, `session`, `doctor`, `code_search`, `flow`, `code_graph`, `learn`, `observe`, `rewrite`, `skill_eval`, `design_intelligence`, `stats` ,  plus system-map and recall-status resources. |
+| Slash commands | `/keel:anvil`, `/keel:review`, `/keel:recall`, `/keel:gain` ,  discoverable `/`-menu wrappers over implemented CLI surfaces. Shipped via the plugin manifest `commands` key. |
 | Specialist skills | Manifest-driven specialist profiles synced into `~/.claude/agent-profiles/*.toml`, invokable via the Skill tool. Run `keel skill-lint` for the live verified count. |
 
 
@@ -248,12 +248,10 @@ discoverable `/`-menu wrapper over an **implemented** `keel` CLI surface
 
 | Command | Wraps | Use it for |
 | --- | --- | --- |
-| `/keel:workflow [route\|start\|cockpit\|finish] <args>` | `workflow` ledger | Drive a proof-first workstream. |
+| `/keel:anvil [compile\|cast\|sieve\|stamp\|loop\|run\|prefix-check] <args>` | `anvil` | Only delivery loop (frozen prefix, PPT+EV, bounded loop). |
 | `/keel:review [pre-commit\|pre-pr\|gates] [base-ref]` | `review` gates | Deterministic local quality gate on the diff. |
 | `/keel:recall <terms>` | `memory recall` | FTS5 search over durable memory. |
 | `/keel:gain [since]` | `gain` | Report command-output compaction savings. |
-| `/keel:sprint [plan\|status\|advance\|review\|list] <args>` | `sprint` ledger | Drive a Scrum-style sprint over confirmed stories. |
-| `/keel:user-story [lint] <args>` | `user-story lint` | Validate Connextra + Gherkin + INVEST story format. |
 
 Command files live at the plugin root `commands/`. They ship through the plugin
 install path, and the native `keel install` also syncs them into

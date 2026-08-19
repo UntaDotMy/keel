@@ -19,10 +19,10 @@ use crate::runtime::{
     agent_profiles_directory, agents_directory, commands_directory, config_path,
     discover_repository_layout, display_path, executable_file_name, git_short_head,
     installed_executable_path, is_default_keel_home, is_standard_keel_home,
-    legacy_claude_executable_path, read_text_if_exists, remove_path_if_exists,
-    repository_layout_is_complete, resolve_claude_home, resolve_repository_root, run_command,
-    skills_directory, state_directory, write_lines, write_text, RepositoryLayout,
-    SKILL_SYNC_DIRECTORIES,
+    legacy_claude_executable_path, legacy_state_directory, read_text_if_exists,
+    remove_path_if_exists, repository_layout_is_complete, resolve_claude_home,
+    resolve_repository_root, run_command, skills_directory, state_directory,
+    update_cache_directory, write_lines, write_text, RepositoryLayout, SKILL_SYNC_DIRECTORIES,
 };
 
 use super::agent_config::{parse_agent_config, render_agent_toml, unix_timestamp};
@@ -277,6 +277,10 @@ pub fn install_from_paths(
     // Move keel-owned data out of a legacy ~/.claude install into the neutral
     // root; data-preserving, keel-owned names only, never overwrites.
     let migration_report = migrate_from_legacy_claude_home(claude_home, &engagement_home);
+    migrate_legacy_state_directory(claude_home);
+    if engagement_home != claude_home {
+        migrate_legacy_state_directory(&engagement_home);
+    }
     ensure_claude_home_directories(claude_home)?;
     ensure_claude_home_directories(&engagement_home)?;
     remove_deprecated_config_keys(claude_home)?;
@@ -320,6 +324,7 @@ pub fn install_from_paths(
     }
     write_install_metadata(build_version, repository_root, claude_home)?;
     write_inventories(&layout, claude_home, &tracker)?;
+    remove_update_temp_trees(claude_home, &engagement_home);
     // Put the keel home on PATH: best-effort, idempotent, and ONLY for the
     // user's default `~/.keel`. The previous guard used `is_standard_keel_home`
     // (basename-only), so test fixtures like `<tmp>/keel-home-split-<pid>/.keel`
@@ -1385,6 +1390,10 @@ const MIGRATION_DATA_NAMES: &[&str] = &[
     // NOTE: `agent-profiles` is NOT migrated. Install re-syncs it into the
     // engagement home every run, so moving it would only churn.
     ".claude-skill-manager",
+    "state",
+    "cache",
+    "workflow",
+    "anvil",
     "raw-output",
     "config.toml",
     "command-compaction-events.jsonl",
@@ -1630,6 +1639,62 @@ fn remove_legacy_binary(keel_home: &Path) -> String {
             )
         }
     }
+}
+
+/// Rename leftover `.claude-skill-manager` to `state` so inventories live
+/// under the keel-owned name. No-op when `state` already exists.
+fn migrate_legacy_state_directory(home: &Path) {
+    let current = state_directory(home);
+    let legacy = legacy_state_directory(home);
+    if current.exists() || !legacy.exists() {
+        return;
+    }
+    let _ = fs::rename(&legacy, &current);
+}
+
+/// Delete transient update extract trees. Inventories in `state/` stay.
+fn remove_update_temp_trees(keel_home: &Path, engagement_home: &Path) {
+    let _ = remove_path_if_exists(&update_cache_directory(keel_home));
+    let _ = remove_path_if_exists(&legacy_state_directory(keel_home).join("bin"));
+    if engagement_home != keel_home {
+        let _ = remove_path_if_exists(&update_cache_directory(engagement_home));
+        let _ = remove_path_if_exists(&legacy_state_directory(engagement_home).join("bin"));
+        let _ = remove_path_if_exists(&legacy_state_directory(engagement_home));
+    }
+    let staged = installed_executable_path(keel_home);
+    let mut staged_name = staged
+        .file_name()
+        .map(|name| name.to_owned())
+        .unwrap_or_default();
+    staged_name.push(".new");
+    let _ = remove_path_if_exists(&staged.with_file_name(staged_name));
+}
+
+/// Drop keel-owned leftovers that still sit in the old `~/.claude` home.
+fn remove_legacy_keel_leftovers(keel_home: &Path, engagement_home: &Path) -> usize {
+    if engagement_home == keel_home {
+        return 0;
+    }
+    let mut removed = 0;
+    for name in MIGRATION_DATA_NAMES {
+        if let Ok(count) = remove_path_if_exists_counted(&engagement_home.join(name)) {
+            removed += count;
+        }
+    }
+    for suffix in ["-wal", "-shm"] {
+        if let Ok(count) = remove_path_if_exists_counted(
+            &engagement_home.join(format!("recall-index.sqlite3{suffix}")),
+        ) {
+            removed += count;
+        }
+    }
+    if let Some(old_binary) = legacy_claude_executable_path(keel_home) {
+        if let Ok(count) = remove_path_if_exists_counted(&old_binary) {
+            removed += count;
+        }
+    }
+    removed += remove_executable_orphans(engagement_home).unwrap_or(0);
+    removed
 }
 
 /// Marker guarding the keel PATH export appended to unix shell rc files.
@@ -4211,6 +4276,8 @@ pub fn run_uninstall_command(
         return 1;
     }
     removed_count += remove_wired_adapters(&claude_home);
+    remove_update_temp_trees(&claude_home, &engagement_home);
+    removed_count += remove_legacy_keel_leftovers(&claude_home, &engagement_home);
     let _ = writeln!(standard_output, "Uninstall complete");
     let _ = writeln!(standard_output, "  Removed files: {removed_count}");
     0
@@ -5967,6 +6034,57 @@ mod tests {
             fs::read_to_string(dst.join("a/b/deep.txt")).unwrap(),
             "deep"
         );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn update_temp_trees_are_deleted_and_inventories_stay() {
+        let dir = unique_codex_test_dir("upd-cache");
+        let keel_home = dir.join(".keel");
+        let engagement = dir.join(".claude");
+        fs::create_dir_all(keel_home.join("cache/update/v1")).unwrap();
+        fs::write(keel_home.join("cache/update/v1/bin"), "tmp").unwrap();
+        fs::create_dir_all(state_directory(&keel_home)).unwrap();
+        fs::write(state_directory(&keel_home).join("managed-files.txt"), "x").unwrap();
+        fs::create_dir_all(legacy_state_directory(&engagement).join("bin")).unwrap();
+        fs::write(legacy_state_directory(&engagement).join("bin/old"), "stale").unwrap();
+        remove_update_temp_trees(&keel_home, &engagement);
+        assert!(
+            !update_cache_directory(&keel_home).exists(),
+            "keel-home update cache must be deleted"
+        );
+        assert!(
+            state_directory(&keel_home)
+                .join("managed-files.txt")
+                .is_file(),
+            "install inventories must survive cache cleanup"
+        );
+        assert!(
+            !legacy_state_directory(&engagement).exists(),
+            "leftover ~/.claude/.claude-skill-manager must be deleted"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn uninstall_removes_old_claude_home_keel_leftovers() {
+        let dir = unique_codex_test_dir("uninst-legacy");
+        let keel_home = dir.join(".keel");
+        let engagement = dir.join(".claude");
+        fs::create_dir_all(&keel_home).unwrap();
+        fs::create_dir_all(engagement.join("working-briefs")).unwrap();
+        fs::write(engagement.join("working-briefs/old.json"), "{}").unwrap();
+        fs::write(engagement.join("command-compaction-events.jsonl"), "").unwrap();
+        fs::write(engagement.join("config.toml"), "x=1").unwrap();
+        fs::write(engagement.join(executable_file_name()), "old-bin").unwrap();
+        fs::create_dir_all(engagement.join("workflow")).unwrap();
+        let removed = remove_legacy_keel_leftovers(&keel_home, &engagement);
+        assert!(removed > 0);
+        assert!(!engagement.join("working-briefs").exists());
+        assert!(!engagement.join("command-compaction-events.jsonl").exists());
+        assert!(!engagement.join("config.toml").exists());
+        assert!(!engagement.join("workflow").exists());
+        assert!(!engagement.join(executable_file_name()).exists());
         let _ = fs::remove_dir_all(&dir);
     }
 

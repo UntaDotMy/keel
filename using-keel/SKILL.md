@@ -51,7 +51,7 @@ Skipping a skill that applied ships a regression. Checking one that did not cost
 3. About to read/edit existing code? → `preserve-existing-flow` first.
 4. After implementation: run build/test/lint this turn. Non-trivial changes → reviewer / `keel review pre-pr`. Surface extra defects found; ask how to handle them.
 
-**Enforcement (default-on):** PreToolUse **denies** edit-class tools until a **keel research tool** ran this session (`system_map` / `recall` / `context_brief` / `skill_route` / `skill_get` / `code_search`, or matching `keel …` CLI). Plain Read/Grep does **not** clear STRICT mode. PostToolBatch brief/review gates default to hard feed-forward until a working brief and reviewer pass exist. Opt-down via env (`KEEL_IRON_LAW_GATE`, `CLAUDE_SKILLS_*_GATE`); never invent scope to "clear" a gate.
+**Enforcement (default-on):** PreToolUse **denies** edit-class tools until a **keel research tool** ran this session (`system_map` / `recall` / `context_brief` / `skill_route` / `skill_get` / `code_search`, or matching `keel …` CLI). Plain Read/Grep does **not** clear STRICT mode. Default is **STRICT** (keel tools satisfy); set `KEEL_IRON_LAW_GATE=verified` to require fresh external research, `=off` to disable. Iron law re-injects at SessionStart, every prompt, PostCompact, and SubagentStart — it never drops mid-work. PostToolBatch brief/review gates default to hard feed-forward until a working brief and reviewer pass exist. **Research enforcement:** `research-enforcement` skill — reuse gate → R1 authoritative live web (≥1 live pass for non-trivial external facts) → R2 community/issues → R3 broad; loop-back with refined terms until specific — never trust stale memory, never prompt the user for verifiable facts, never accept a generic answer. On error, websearch the exact error text and retry with refined prompts before patching. Anvil verification: `keel anvil sieve` (0-LLM gates) + `keel anvil stamp` (PPT+EV) then bounded `keel anvil loop` only if gates fail. Opt-down via env (`KEEL_IRON_LAW_GATE`, `CLAUDE_SKILLS_*_GATE`); never invent scope to "clear" a gate.
 
 ## Code Implementation Discipline
 
@@ -83,7 +83,11 @@ Persist across sessions: `keel memory working-brief write` before non-trivial wo
 
 ## Slash commands
 
-`/keel:workflow`, `/keel:review`, `/keel:recall`, `/keel:gain`, `/keel:sprint`, `/keel:user-story` — thin wrappers over real CLI surfaces only.
+`/keel:anvil`, `/keel:review`, `/keel:recall`, `/keel:gain` — thin wrappers over real CLI surfaces only. `keel anvil` (`compile|cast|sieve|stamp|loop|run|prefix-check`) is the single delivery loop, taught via `running-anvil`.
+
+## Delivery (Anvil — single root)
+
+`anvil` is the only delivery loop: `compile` (1 frontier call → `anvil.lock.json` + prefix + gates) → `cast` (N isolated workspaces, frozen prefix) → `sieve` (0 LLM gate run) → `stamp` (PPT+EV, 6 tags batched) → `loop` (bounded refinement, only if gates fail, max 20, delta 0.05, 300s wall) → `anvil.report.json` with metrics every run. The bank lives under `<keel-home>/memories/workspaces/<slug>/anvil/` (never the user workspace). Recall indexes that lane. Sprint, user-story, work, dispatch, workflow, orchestration, and team command surfaces are deleted.
 
 ## Workspace pointers
 

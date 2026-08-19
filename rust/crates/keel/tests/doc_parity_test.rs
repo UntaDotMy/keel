@@ -367,10 +367,9 @@ fn audit_flagged_commands_are_documented() {
     // why: a curated list, not every arm, since internal verbs like `raw` and
     // `menu` are not operator-facing and requiring docs for them is noise.
     for command in [
-        "dispatch",
+        "anvil",
         "observe",
         "eval",
-        "team",
         "design-intelligence",
         "skill-eval",
         "telemetry",

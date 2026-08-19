@@ -33,4 +33,4 @@ automatically on every call.
 ## Related Commands
 
 - `/keel:memory` — Memory scope and system-map management
-- `/keel:sprint` — Sprint backlog management
+- `/keel:anvil` — Delivery loop

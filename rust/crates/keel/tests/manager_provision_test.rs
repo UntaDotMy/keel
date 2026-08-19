@@ -97,9 +97,7 @@ fn status_uses_installed_inventory_when_source_is_unavailable() {
         String::from_utf8_lossy(&install_output.stderr)
     );
 
-    let metadata_path = claude_home
-        .join(".claude-skill-manager")
-        .join("install-metadata.txt");
+    let metadata_path = claude_home.join("state").join("install-metadata.txt");
     let metadata = fs::read_to_string(&metadata_path).expect("read install metadata");
     fs::write(
         &metadata_path,
@@ -125,15 +123,12 @@ fn status_uses_installed_inventory_when_source_is_unavailable() {
             .join("\n"),
     )
     .expect("rewrite install metadata");
-    let managed_skill_count = fs::read_to_string(
-        claude_home
-            .join(".claude-skill-manager")
-            .join("managed-skills.txt"),
-    )
-    .expect("read managed skill inventory")
-    .lines()
-    .filter(|line| !line.trim().is_empty())
-    .count();
+    let managed_skill_count =
+        fs::read_to_string(claude_home.join("state").join("managed-skills.txt"))
+            .expect("read managed skill inventory")
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .count();
 
     let status_output = Command::new(env!("CARGO_BIN_EXE_keel"))
         .arg("status")
@@ -209,15 +204,12 @@ fn status_excludes_learned_skills_from_managed_sync_count() {
         String::from_utf8_lossy(&install_output.stderr)
     );
 
-    let managed_skill_count = fs::read_to_string(
-        claude_home
-            .join(".claude-skill-manager")
-            .join("managed-skills.txt"),
-    )
-    .expect("read managed skill inventory")
-    .lines()
-    .filter(|line| !line.trim().is_empty())
-    .count();
+    let managed_skill_count =
+        fs::read_to_string(claude_home.join("state").join("managed-skills.txt"))
+            .expect("read managed skill inventory")
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .count();
 
     // Three loop-generated skills that would previously make status report
     // (managed+3)/managed and "refresh recommended".

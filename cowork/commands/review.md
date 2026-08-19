@@ -37,5 +37,4 @@ Run pre-commit or pre-PR code review.
 
 ## Related Commands
 
-- `/keel:sprint` — Sprint management
-- `/keel:workflow` — Workflow routing
+- `/keel:anvil` — Delivery loop

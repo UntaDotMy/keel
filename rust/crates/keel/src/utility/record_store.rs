@@ -75,6 +75,7 @@ impl RecordStore {
     /// Whether a record file already exists for `id`. Used by
     /// `allocate_unique_record_id` to avoid same-millisecond id collisions. An
     /// unsafe id can never exist as a stored record, so it reports `false`.
+    #[cfg(test)]
     pub fn record_exists(&self, id: &str) -> bool {
         match self.validated_record_path(id) {
             Ok(path) => path.exists(),
@@ -174,6 +175,7 @@ impl RecordStore {
 /// the same millisecond (a common case under fast test/CI execution) derive the
 /// same `<prefix>-<ms>` id and the second write silently overwrites the first.
 /// Mirrors the workflow ledger's `allocate_unique_entry_id`.
+#[cfg(test)]
 pub fn allocate_unique_record_id(store: &RecordStore, base: &str) -> String {
     if !store.record_exists(base) {
         return base.to_string();

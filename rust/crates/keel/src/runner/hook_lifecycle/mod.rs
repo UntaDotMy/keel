@@ -825,10 +825,9 @@ fn iron_law_gate_mode() -> IronLawGateMode {
     {
         Some("off") | Some("0") | Some("false") | Some("no") => IronLawGateMode::Off,
         Some("balanced") | Some("balance") | Some("any") => IronLawGateMode::Balanced,
+        Some("verified") | Some("verify") | Some("web") => IronLawGateMode::Verified,
         Some("strict") | Some("on") | Some("true") => IronLawGateMode::Strict,
-        // unset, "verified", "web", typos → verified (fail closed toward the
-        // strictest enforcement: fresh external research required before editing)
-        _ => IronLawGateMode::Verified,
+        _ => IronLawGateMode::Strict,
     }
 }
 
@@ -2973,19 +2972,9 @@ pub(crate) fn gate_status_rows() -> Vec<GateStatusRow> {
             max_blocks: brief_gate_max_blocks(),
         },
         GateStatusRow {
-            dir: "story-closeout-gate-blocks",
-            label: "story-closeout",
-            max_blocks: story_closeout_gate_max_blocks(),
-        },
-        GateStatusRow {
             dir: "memory-gate-blocks",
             label: "memory",
             max_blocks: memory_gate_max_blocks(),
-        },
-        GateStatusRow {
-            dir: "sprint-start-gate-blocks",
-            label: "sprint-start",
-            max_blocks: sprint_start_gate_max_blocks(),
         },
         GateStatusRow {
             dir: "learned-skill-gate-blocks",
@@ -2996,11 +2985,6 @@ pub(crate) fn gate_status_rows() -> Vec<GateStatusRow> {
             dir: "research-gate-blocks",
             label: "research",
             max_blocks: research_gate_max_blocks(),
-        },
-        GateStatusRow {
-            dir: "story-first-gate-blocks",
-            label: "story-first",
-            max_blocks: story_first_gate_max_blocks(),
         },
     ]
 }
@@ -3099,72 +3083,6 @@ fn review_gate_max_blocks() -> u64 {
         .ok()
         .and_then(|value| value.trim().parse::<u64>().ok())
         .unwrap_or_else(|| default_max_blocks_for(review_gate_mode()))
-}
-
-// ---- Honest-closeout story-gap gate (PostToolBatch) ----
-//
-// The end-of-turn moment where the user wants "I found these gaps, I'm not
-// done" cannot live in a Stop/SubagentStop/SessionEnd hook — those events do not
-// accept `hookSpecificOutput.additionalContext` per harness schema, so
-// they cannot inject text into the model's context. PostToolBatch is the one
-// end-of-turn event that can, so the honest-closeout gate rides here alongside
-// the brief/review gates. It is scoped to user-story work: it fires only when the
-// current workspace has an ACTIVE SPRINT (story records exist) whose stories are
-// not all Done. With no sprint it is silent, so ordinary and question turns are
-// untouched — exactly the "if based on user stories, else ignore" contract.
-const STORY_CLOSEOUT_GATE_ENV_VAR: &str = "CLAUDE_SKILLS_STORY_CLOSEOUT_GATE";
-const STORY_CLOSEOUT_GATE_MAX_BLOCKS_ENV_VAR: &str = "CLAUDE_SKILLS_STORY_CLOSEOUT_GATE_MAX_BLOCKS";
-
-/// Story-closeout gate behavior. Default `Nudge`;
-/// `CLAUDE_SKILLS_STORY_CLOSEOUT_GATE=block` makes it a hard stop; `=off` disables.
-fn story_closeout_gate_mode() -> GateMode {
-    gate_mode(STORY_CLOSEOUT_GATE_ENV_VAR)
-}
-
-fn story_closeout_gate_max_blocks() -> u64 {
-    std::env::var(STORY_CLOSEOUT_GATE_MAX_BLOCKS_ENV_VAR)
-        .ok()
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .unwrap_or_else(|| default_max_blocks_for(story_closeout_gate_mode()))
-}
-
-fn story_closeout_gate_blocks_path(claude_home: &Path, session_id: &str) -> PathBuf {
-    let key = if session_id.trim().is_empty() {
-        "no-session".to_string()
-    } else {
-        sanitize_memory_key(session_id)
-    };
-    claude_home
-        .join("state")
-        .join("story-closeout-gate-blocks")
-        .join(key)
-}
-
-/// Build the honest-closeout gate message naming each open story as a gap.
-/// Keyed on the EMITTED decision (not the mode) so an escalating gate renders
-/// the non-blocking phrasing on its first fire and the hard-stop phrasing once
-/// it escalates. Both name the loop-back action, the clearing action (finish the
-/// stories / mark them done), the bound, and the off-switch.
-fn story_closeout_gate_message(
-    decision: GateDecision,
-    open: &[crate::utility::sprint::OpenStory],
-) -> String {
-    let mut gaps = String::new();
-    for story in open {
-        gaps.push_str(&format!(
-            "\n  - [{}] {} :: {}",
-            story.state, story.id, story.story
-        ));
-    }
-    let preamble = match decision {
-        GateDecision::Block => "Honest-closeout gate (CLAUDE_SKILLS_STORY_CLOSEOUT_GATE): sprint NOT complete — escalated (imperative, still feed-forward — not a turn halt).",
-        _ => "Closeout reminder (CLAUDE_SKILLS_STORY_CLOSEOUT_GATE): sprint NOT complete.",
-    };
-    let tail = match decision {
-        GateDecision::Block => "Do NOT present this work as done. Mark each open story with `keel sprint advance --id <id> --state done` after review; `keel sprint review` clears this gate when every story is Done. Bounded per session, then lets the turn through so it cannot loop. Set CLAUDE_SKILLS_STORY_CLOSEOUT_GATE=nudge, =off.",
-        _ => "Mark each open story as not done and loop back. Use `keel sprint advance --id <id> --state done` after review; `keel sprint review` clears when all Done. This first reminder does not stop the turn, but will escalate. Set CLAUDE_SKILLS_STORY_CLOSEOUT_GATE=nudge, =block, =off.",
-    };
-    format!("{preamble} Open stories (Definition of Done not met):{gaps}\n{tail}")
 }
 
 // ---- Research gate (PostToolBatch) ----
@@ -3266,116 +3184,8 @@ fn research_gate_message(decision: GateDecision) -> String {
     }
 }
 
-// ---- Story-first gate (PostToolBatch) ----
-//
-// Fires when a session edited code but no user stories were confirmed (no
-// `user-story-confirmed` marker file exists for this session). The Iron Law
-// demands understanding before building — editing without confirmed user stories
-// means implementation may drift from what was requested. Detection: check for
-// the marker file at <claude_home>/state/story-first/<session_id>.confirmed.
-
+#[cfg(test)]
 const STORY_FIRST_GATE_ENV_VAR: &str = "CLAUDE_SKILLS_STORY_FIRST_GATE";
-const STORY_FIRST_GATE_MAX_BLOCKS_ENV_VAR: &str = "CLAUDE_SKILLS_STORY_FIRST_GATE_MAX_BLOCKS";
-
-/// Story-first gate behavior. Default `Escalate` (nudge first, block if
-/// ignored); `CLAUDE_SKILLS_STORY_FIRST_GATE=nudge` keeps it advisory-only;
-/// `=off` disables.
-fn story_first_gate_mode() -> GateMode {
-    gate_mode(STORY_FIRST_GATE_ENV_VAR)
-}
-
-fn story_first_gate_max_blocks() -> u64 {
-    std::env::var(STORY_FIRST_GATE_MAX_BLOCKS_ENV_VAR)
-        .ok()
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .unwrap_or_else(|| default_max_blocks_for(story_first_gate_mode()))
-}
-
-fn story_first_gate_blocks_path(claude_home: &Path, session_id: &str) -> PathBuf {
-    let key = if session_id.trim().is_empty() {
-        "no-session".to_string()
-    } else {
-        sanitize_memory_key(session_id)
-    };
-    claude_home
-        .join("state")
-        .join("story-first-gate-blocks")
-        .join(key)
-}
-
-/// Path to the story-confirmed marker file for a session. When this file exists,
-/// user stories were confirmed via `keel user-story lint` before implementation.
-fn story_confirmed_marker_path(claude_home: &Path, session_id: &str) -> PathBuf {
-    let key = if session_id.trim().is_empty() {
-        "no-session".to_string()
-    } else {
-        sanitize_memory_key(session_id)
-    };
-    claude_home
-        .join("state")
-        .join("story-first")
-        .join(format!("{key}.confirmed"))
-}
-
-/// Create the story-confirmed marker file indicating user stories were confirmed
-/// for this session. Called from the user-story lint success path. Best-effort:
-/// any failure is silently ignored — a missing marker only means the gate may
-/// fire once more, which the per-session cap still bounds.
-pub fn maybe_record_story_confirmed() {
-    let Ok(claude_home) = resolve_claude_home("") else {
-        return;
-    };
-    // We need a session_id but this is called from the user-story lint surface
-    // which may not have one in context. Use a sentinel that will be checked by
-    // the marker path. For now, read from the most recent tool-timings to find
-    // the active session.
-    let session_id = std::env::var("CLAUDE_SESSION_ID")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| {
-            // why: without CLAUDE_SESSION_ID, recover the session from the most
-            // recent tool-timings row *in this working directory* so a concurrent
-            // session editing another repo cannot capture this marker. Falls back
-            // to "no-session" rather than borrowing a stranger's id.
-            let cwd_key = std::env::current_dir()
-                .ok()
-                .map(|cwd| sanitize_memory_key(&display_path(&cwd)));
-            let date = chrono::Local::now().format("%Y-%m-%d").to_string();
-            let path = claude_home
-                .join("state")
-                .join("tool-timings")
-                .join(format!("{date}.jsonl"));
-            fs::read_to_string(&path)
-                .ok()
-                .and_then(|body| {
-                    body.lines().rev().find_map(|line| {
-                        let row = serde_json::from_str::<JsonDocument>(line).ok()?;
-                        let row_key =
-                            sanitize_memory_key(row.get("cwd").and_then(JsonDocument::as_str)?);
-                        if cwd_key.as_deref() == Some(row_key.as_str()) {
-                            row.get("session_id")
-                                .and_then(JsonDocument::as_str)
-                                .map(String::from)
-                        } else {
-                            None
-                        }
-                    })
-                })
-                .unwrap_or_else(|| "no-session".to_string())
-        });
-    let marker = story_confirmed_marker_path(&claude_home, &session_id);
-    if let Some(parent) = marker.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    let _ = fs::write(&marker, now_ms().to_string());
-}
-
-fn story_first_gate_message(decision: GateDecision) -> String {
-    match decision {
-        GateDecision::Block => "Story-first gate (CLAUDE_SKILLS_STORY_FIRST_GATE): code changed without confirmed user stories — escalated (imperative, still feed-forward — not a turn halt). Run `keel user-story lint` to confirm stories, then implement. Bounded per session. Set CLAUDE_SKILLS_STORY_FIRST_GATE=nudge, =off.".to_string(),
-        _ => "Story-first gate (CLAUDE_SKILLS_STORY_FIRST_GATE): code changed without confirmed user stories. Run `keel user-story lint` to confirm stories, then implement. This first reminder does not stop the turn, but will escalate. Set CLAUDE_SKILLS_STORY_FIRST_GATE=nudge, =block, =off.".to_string(),
-    }
-}
 
 const BRIEF_GATE_ENV_VAR: &str = "CLAUDE_SKILLS_BRIEF_GATE";
 const BRIEF_GATE_MAX_BLOCKS_ENV_VAR: &str = "CLAUDE_SKILLS_BRIEF_GATE_MAX_BLOCKS";
@@ -3477,46 +3287,8 @@ fn memory_gate_message(decision: GateDecision) -> String {
     }
 }
 
-// ---- Sprint-start gate (PostToolBatch) ----
-//
-// Multi-story scope (a working brief with >=2 acceptance criteria) that has no
-// sprint started yet gets nudged to plan one so each story is tracked to Done.
-// Default-on as Escalate; bounded per session; fail-open.
+#[cfg(test)]
 const SPRINT_START_GATE_ENV_VAR: &str = "CLAUDE_SKILLS_SPRINT_START_GATE";
-const SPRINT_START_GATE_MAX_BLOCKS_ENV_VAR: &str = "CLAUDE_SKILLS_SPRINT_START_GATE_MAX_BLOCKS";
-
-fn sprint_start_gate_mode() -> GateMode {
-    gate_mode(SPRINT_START_GATE_ENV_VAR)
-}
-
-fn sprint_start_gate_max_blocks() -> u64 {
-    std::env::var(SPRINT_START_GATE_MAX_BLOCKS_ENV_VAR)
-        .ok()
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .unwrap_or_else(|| default_max_blocks_for(sprint_start_gate_mode()))
-}
-
-fn sprint_start_gate_blocks_path(claude_home: &Path, session_id: &str) -> PathBuf {
-    let key = if session_id.trim().is_empty() {
-        "no-session".to_string()
-    } else {
-        sanitize_memory_key(session_id)
-    };
-    claude_home
-        .join("state")
-        .join("sprint-start-gate-blocks")
-        .join(key)
-}
-
-/// Sprint-start gate message, keyed on the emitted decision. Both variants name
-/// the clearing action (`keel sprint plan`), the working-a-sprint skill, the
-/// bound, and the off-switch.
-fn sprint_start_gate_message(decision: GateDecision) -> String {
-    match decision {
-        GateDecision::Block => "Sprint-start gate (CLAUDE_SKILLS_SPRINT_START_GATE): brief describes multi-story scope but no sprint started — escalated (imperative, still feed-forward — not a turn halt). Run `keel sprint plan` to start the sprint, then use the `running-a-sprint` skill. Bounded per session, then lets the turn through so it cannot loop. Set CLAUDE_SKILLS_SPRINT_START_GATE=nudge, =off.".to_string(),
-        _ => "Sprint-start reminder (CLAUDE_SKILLS_SPRINT_START_GATE): brief describes multi-story scope but no sprint started. Run `keel sprint plan` to start, then use the `running-a-sprint` skill. This first reminder does not stop the turn, but will escalate. Set CLAUDE_SKILLS_SPRINT_START_GATE=nudge, =block, =off.".to_string(),
-    }
-}
 
 // ---- Learned-skill reminder gate (PostToolBatch) ----
 //
@@ -3610,25 +3382,6 @@ fn memory_written_this_session(claude_home: &Path, session_start_ms: Option<u64>
     };
     match newest_memory_write_ms(claude_home) {
         Some(write_ms) => write_ms.saturating_add(BRIEF_GATE_SESSION_GRACE_MS) >= start,
-        None => false,
-    }
-}
-
-/// Whether the most recent working brief applying to `workspace_cwd` describes
-/// multi-story scope (>=2 acceptance criteria). Uses the same workspace-match
-/// rule as [`newest_brief_mtime_ms`] (empty workspace applies anywhere). Fail-open:
-/// an unreadable brief store yields `false` (not multi-story → silent).
-fn workspace_brief_is_multi_story(claude_home: &Path, workspace_cwd: &str) -> bool {
-    let Ok(briefs) = crate::utility::working_brief::list_briefs(claude_home) else {
-        return false;
-    };
-    let current_key = sanitize_memory_key(workspace_cwd);
-    // list_briefs is sorted oldest-first, so the last applicable brief is newest.
-    let newest = briefs.into_iter().rev().find(|brief| {
-        brief.workspace.trim().is_empty() || sanitize_memory_key(&brief.workspace) == current_key
-    });
-    match newest {
-        Some(brief) => brief.acceptance_criteria.len() >= 2,
         None => false,
     }
 }
@@ -4217,32 +3970,18 @@ fn run_hook_post_tool_batch(
 ) -> u8 {
     let review_mode = review_gate_mode();
     let brief_mode = brief_gate_mode();
-    let closeout_mode = story_closeout_gate_mode();
     let memory_mode = memory_gate_mode();
-    let sprint_mode = sprint_start_gate_mode();
     let learned_mode = learned_skill_gate_mode();
     let research_mode = research_gate_mode();
-    let story_first_mode = story_first_gate_mode();
     let review_on = review_mode != GateMode::Off && review_gate_max_blocks() > 0;
     let brief_on = brief_mode != GateMode::Off && brief_gate_max_blocks() > 0;
-    let closeout_on = closeout_mode != GateMode::Off && story_closeout_gate_max_blocks() > 0;
     let memory_on = memory_mode != GateMode::Off && memory_gate_max_blocks() > 0;
-    let sprint_on = sprint_mode != GateMode::Off && sprint_start_gate_max_blocks() > 0;
     let learned_on = learned_mode != GateMode::Off && learned_skill_gate_max_blocks() > 0;
     let research_on = research_mode != GateMode::Off && research_gate_max_blocks() > 0;
-    let story_first_on = story_first_mode != GateMode::Off && story_first_gate_max_blocks() > 0;
 
     // All gates off: skip stdin entirely and emit the advisory reminder. This
     // keeps the fully-disabled path cheap and side-effect-free.
-    if !review_on
-        && !brief_on
-        && !closeout_on
-        && !memory_on
-        && !sprint_on
-        && !learned_on
-        && !research_on
-        && !story_first_on
-    {
+    if !review_on && !brief_on && !memory_on && !learned_on && !research_on {
         return emit_post_tool_batch_advisory(standard_output, standard_error);
     }
 
@@ -4371,78 +4110,6 @@ fn run_hook_post_tool_batch(
                 );
             }
         }
-
-        // Sprint-start gate FOURTH (track multi-story scope as a sprint).
-        if sprint_on {
-            let multi_story = workspace_brief_is_multi_story(&claude_home, &stats.last_cwd);
-            // Satisfied when a sprint EXISTS for the workspace (Some, whether open
-            // or done). No sprint (Ok(None)) → unsatisfied → fire. Err → fail-open
-            // (treat as satisfied so an unreadable store never blocks).
-            let sprint_exists = matches!(
-                crate::utility::sprint::open_stories_for_workspace(&claude_home, &stats.last_cwd),
-                Ok(Some(_)) | Err(_)
-            );
-            // Only applicable to multi-story scope: a single-story (or no) brief
-            // never needs a sprint, so report satisfied to keep the gate silent.
-            let satisfied = !multi_story || sprint_exists;
-            let blocks_path = sprint_start_gate_blocks_path(&claude_home, session_id);
-            let blocks_issued = read_counter_value(&blocks_path);
-            let decision = decide_gate(
-                sprint_mode,
-                sprint_start_gate_max_blocks(),
-                blocks_issued,
-                stats.count,
-                satisfied,
-            );
-            if decision != GateDecision::Advisory {
-                let _ = increment_counter_file(&blocks_path);
-                return emit_gate_decision(
-                    decision,
-                    sprint_start_gate_message(decision),
-                    standard_output,
-                    standard_error,
-                );
-            }
-        }
-
-        // Story-first gate: fires when code changed but no user stories were
-        // confirmed for this session. Satisfied when the confirmed marker exists.
-        if story_first_on {
-            let marker = story_confirmed_marker_path(&claude_home, session_id);
-            let satisfied = marker.exists();
-            let blocks_path = story_first_gate_blocks_path(&claude_home, session_id);
-            let blocks_issued = read_counter_value(&blocks_path);
-            let decision = decide_gate(
-                story_first_mode,
-                story_first_gate_max_blocks(),
-                blocks_issued,
-                stats.count,
-                satisfied,
-            );
-            if decision != GateDecision::Advisory {
-                let _ = increment_counter_file(&blocks_path);
-                return emit_gate_decision(
-                    decision,
-                    story_first_gate_message(decision),
-                    standard_output,
-                    standard_error,
-                );
-            }
-        }
-    }
-
-    // Honest-closeout gate (final honesty: do not present an incomplete sprint as
-    // done). Scoped to user-story work: fires only when the workspace has an
-    // ACTIVE sprint with open stories. Silent when there is no sprint, so ordinary
-    // and question turns are untouched — independent of edit count by design.
-    if closeout_on {
-        if let Some(decision_and_message) =
-            evaluate_story_closeout_gate(&claude_home, session_id, &stats, closeout_mode)
-        {
-            let (decision, message, blocks_path) = decision_and_message;
-            let _ = increment_counter_file(&blocks_path);
-            return emit_gate_decision(decision, message, standard_output, standard_error);
-        }
     }
 
     // Learned-skill reminder (apply the loop's captured conventions). Independent
@@ -4472,68 +4139,6 @@ fn run_hook_post_tool_batch(
 
     // No gate fired → advisory reminder.
     emit_post_tool_batch_advisory(standard_output, standard_error)
-}
-
-/// Decide whether the honest-closeout gate fires this turn, returning the
-/// `(decision, message, counter_path)` when it does (so the caller increments the
-/// counter and emits) or `None` to fall through. Fail-open: any error resolving
-/// the workspace or reading the sprint store yields `None`.
-///
-/// Fires when the workspace has an active sprint (`Some(open)`) with at least one
-/// open story, the gate is under its per-session cap, and the mode is not Off.
-/// Stays silent when there is no sprint (`None`) or every story is Done
-/// (`Some(empty)`).
-fn evaluate_story_closeout_gate(
-    claude_home: &Path,
-    session_id: &str,
-    stats: &SessionEditStats,
-    mode: GateMode,
-) -> Option<(GateDecision, String, PathBuf)> {
-    // Resolve the workspace the same way the sprint CLI does so the slug — and
-    // therefore the store directory — matches the records `sprint plan` wrote.
-    // Prefer the cwd of the last edit (set when this session changed code), else
-    // the repository root, else the process cwd.
-    let workspace_root = if !stats.last_cwd.trim().is_empty() {
-        stats.last_cwd.clone()
-    } else {
-        let repo_root: Option<PathBuf> = resolve_repository_root("")
-            .ok()
-            .or_else(|| std::env::current_dir().ok());
-        match repo_root {
-            Some(path) => display_path(&path),
-            None => String::new(),
-        }
-    };
-    if workspace_root.is_empty() {
-        return None;
-    }
-    let open =
-        match crate::utility::sprint::open_stories_for_workspace(claude_home, &workspace_root) {
-            Ok(Some(open)) if !open.is_empty() => open,
-            // No active sprint, sprint complete, or read error → silent / fail-open.
-            _ => return None,
-        };
-    let blocks_path = story_closeout_gate_blocks_path(claude_home, session_id);
-    let blocks_issued = read_counter_value(&blocks_path);
-    // edit_count is passed as 1 (applicable): the gate's applicability is the
-    // active incomplete sprint, not whether this specific turn edited code, so it
-    // must fire on a no-edit closeout turn too. `satisfied` is false here because
-    // we already filtered to a non-empty open-story set.
-    let decision = decide_gate(
-        mode,
-        story_closeout_gate_max_blocks(),
-        blocks_issued,
-        1,
-        false,
-    );
-    if decision == GateDecision::Advisory {
-        return None;
-    }
-    Some((
-        decision,
-        story_closeout_gate_message(decision, &open),
-        blocks_path,
-    ))
 }
 
 /// Decide whether the learned-skill reminder fires this turn, returning the
@@ -5235,32 +4840,8 @@ fn workspace_memory_digest() -> String {
         }
     }
 
-    // 3. Open work items for THIS workspace (the dependency-aware work graph).
-    //    Pushing ready + blocked items every session is the anti-drift property:
-    //    work discovered but not finished (including `discovered-from` captures)
-    //    stays reachable across compaction instead of being dropped. Mirrors the
-    //    sprint digest but at the finer-grained task-graph level.
-    if let Ok(Some(open)) =
-        crate::utility::work_graph::open_work_items_for_workspace(&claude_home, &workspace_display)
-    {
-        if !open.is_empty() {
-            let mut lines = String::from(
-                "## Open work items (keel work — finish or explicitly defer; do not drop)",
-            );
-            for item in open.iter().take(12) {
-                let blockers = if item.open_blockers.is_empty() {
-                    "ready".to_string()
-                } else {
-                    format!("blocked on {}", item.open_blockers.join(", "))
-                };
-                lines.push_str(&format!(
-                    "\n  - [{}] {} :: {} ({blockers})",
-                    item.status, item.id, item.title
-                ));
-            }
-            sections.push(truncate_on_line_boundary(&lines, DIGEST_BRIEF_MAX_BYTES));
-        }
-    }
+    // 3. (work-graph digest removed with `keel work`; Anvil pieces/gates are the
+    //    single delivery state and are surfaced via `keel anvil` + recall.)
 
     // 4. Most recent durable memory note (includes s5 SessionEnd auto-capture).
     let store =

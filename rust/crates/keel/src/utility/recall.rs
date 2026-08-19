@@ -65,7 +65,10 @@ const SCHEMA_VERSION: &str = "2";
 /// plural root would silently skip everything `memory <family> record` writes —
 /// the primary recall surface returning zero hits with no error. Listing both
 /// keeps recall complete regardless of which tree a write landed in.
-const DEFAULT_RECALL_ROOTS: &[&str] = &["memory", "memories", "working-briefs"];
+const DEFAULT_RECALL_ROOTS: &[&str] = &["memory", "memories", "working-briefs", "anvil"];
+// why: Anvil lock/prefix/report live under memories/workspaces/<slug>/anvil/
+// so the memories root is what any CLI actually searches. The extra "anvil"
+// root stays so a leftover top-level bank is still indexed.
 
 /// Maximum number of FTS5 hits returned when `--limit` is not supplied.
 const DEFAULT_RECALL_LIMIT: usize = 20;

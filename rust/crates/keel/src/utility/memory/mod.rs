@@ -1,17 +1,14 @@
 //! Purpose: Memory and scope command handlers for workspace-scoped memory management
 //! Caller: commands.rs via utility dispatcher
 //! Dependencies: std::fs, std::io, std::path, crate::args, crate::json, crate::runtime, crate::utility::system_map, crate::utility::workflow_ledger
-//! Main Functions: run_memory_command, run_scope_command, run_system_map_command, run_workflow_command
-//! Side Effects: Creates memory directories, reads/writes system map files, reads/writes workflow ledger files
+//! Main Functions: run_memory_command, run_scope_command, run_system_map_command
+//! Side Effects: Creates memory directories, reads/writes system map files, reads/writes brief and ledger helpers
 
 mod bench;
 mod completion_gate;
-mod orchestration;
-mod routing;
 mod scope;
 pub(crate) mod shared;
 mod system_map_cmd;
-mod workflow;
 mod working_brief_cmd;
 
 #[cfg(test)]
@@ -219,22 +216,6 @@ fn run_remember_command(
         standard_output,
         standard_error,
     )
-}
-
-pub fn run_orchestration_command(
-    arguments: &[String],
-    standard_output: &mut dyn Write,
-    standard_error: &mut dyn Write,
-) -> u8 {
-    orchestration::run_orchestration_command(arguments, standard_output, standard_error)
-}
-
-pub fn run_workflow_command(
-    arguments: &[String],
-    standard_output: &mut dyn Write,
-    standard_error: &mut dyn Write,
-) -> u8 {
-    workflow::run_workflow_command(arguments, standard_output, standard_error)
 }
 
 pub fn run_bench_command(

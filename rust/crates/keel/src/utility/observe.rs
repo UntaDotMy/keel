@@ -24,7 +24,6 @@ use crate::args::FlagSet;
 use crate::json::{write_indented, Value};
 use crate::runtime::{display_path, resolve_claude_home};
 use crate::utility::recall::recall_status_snapshot;
-use crate::utility::sprint::open_stories_for_workspace;
 use crate::utility::working_brief::list_briefs;
 
 pub fn run_observe_command(
@@ -81,9 +80,6 @@ struct Observation {
     recall: Result<(u64, u128), String>,
     /// (brief_count, most_recent_request) or an error note.
     briefs: Result<(usize, Option<String>), String>,
-    /// Sprint state: None = no active sprint; Some(open) = active with this many
-    /// stories still open (0 = complete); or an error note.
-    sprint: Result<Option<usize>, String>,
     workspace_root: String,
 }
 
@@ -99,16 +95,10 @@ fn collect_observation(claude_home: &std::path::Path, workspace_root: &str) -> O
             (briefs.len(), most_recent)
         });
 
-    // open_stories returns None for "no active sprint"; Some(open) lists the
-    // not-done stories. We report the open count — the honest signal the gate
-    // uses (0 open = complete).
-    let sprint = open_stories_for_workspace(claude_home, workspace_root)
-        .map(|maybe_open| maybe_open.map(|open_stories| open_stories.len()));
-
+    // open_stories was removed with sprint; observe reports recall + briefs.
     Observation {
         recall,
         briefs,
-        sprint,
         workspace_root: workspace_root.to_string(),
     }
 }
@@ -140,15 +130,7 @@ impl Observation {
             ]),
             Err(error) => Value::Object(vec![("error".into(), Value::String(error.clone()))]),
         };
-        let sprint_value = match &self.sprint {
-            Ok(None) => Value::Object(vec![("active".into(), Value::Bool(false))]),
-            Ok(Some(open)) => Value::Object(vec![
-                ("active".into(), Value::Bool(true)),
-                ("openStories".into(), Value::Number(open.to_string())),
-                ("complete".into(), Value::Bool(*open == 0)),
-            ]),
-            Err(error) => Value::Object(vec![("error".into(), Value::String(error.clone()))]),
-        };
+        let sprint_value = Value::Object(vec![("active".into(), Value::Bool(false))]);
         Value::Object(vec![
             (
                 "workspaceRoot".into(),
@@ -156,7 +138,7 @@ impl Observation {
             ),
             ("memory".into(), recall_value),
             ("workingBriefs".into(), briefs_value),
-            ("sprint".into(), sprint_value),
+            ("anvil".into(), sprint_value),
             (
                 "tokenAnalytics".into(),
                 Value::String(
@@ -192,24 +174,7 @@ impl Observation {
             }
         }
 
-        match &self.sprint {
-            Ok(None) => {
-                let _ = writeln!(standard_output, "sprint: none active");
-            }
-            Ok(Some(open)) => {
-                if *open == 0 {
-                    let _ = writeln!(standard_output, "sprint: active, COMPLETE (0 open)");
-                } else {
-                    let _ = writeln!(
-                        standard_output,
-                        "sprint: active, {open} story(ies) still open"
-                    );
-                }
-            }
-            Err(error) => {
-                let _ = writeln!(standard_output, "sprint: unavailable ({error})");
-            }
-        }
+        let _ = writeln!(standard_output, "anvil: none active");
 
         let _ = writeln!(
             standard_output,
@@ -275,7 +240,7 @@ mod tests {
             rendered.contains("\"workingBriefs\""),
             "rendered: {rendered}"
         );
-        assert!(rendered.contains("\"sprint\""), "rendered: {rendered}");
+        assert!(rendered.contains("\"anvil\""), "rendered: {rendered}");
         // No sprint exists, so it must report inactive — not error, not crash.
         assert!(
             rendered.contains("\"active\": false"),
@@ -309,7 +274,7 @@ mod tests {
         assert!(rendered.contains("memory:"), "rendered: {rendered}");
         assert!(rendered.contains("working briefs:"), "rendered: {rendered}");
         assert!(
-            rendered.contains("sprint: none active"),
+            rendered.contains("anvil: none active"),
             "rendered: {rendered}"
         );
         // Observability must point at the token axis it deliberately does not

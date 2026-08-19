@@ -35,8 +35,7 @@ some hosts until cwd matches (fixed in pack; enforced by `doc_parity_test`).
 - `preserve-existing-flow` — Pre-edit ownership trace before changing existing behavior in a brownfield codebase.
 - `reviewer` — Production-readiness review and quality gate after implementation. Returns Pass / Conditional Pass / Fail.
 - `brainstorming` — Socratic design exploration before implementation: refine an open-ended idea into a concrete, agreed design with trade-offs, captured in the working brief before any code. The generative front half of Think-Before-Coding.
-- `writing-user-stories` — Convert a requirement-bearing prompt completely into strict Agile/Jira user stories (Connextra "As a/I want/so that" + Gherkin Given/When/Then, validated against INVEST), confirm them with the user via AskUserQuestion, and capture them in the working brief as the anti-drift spec. Runs first on any feature/change/fix ask, before brainstorming or coding. Validate format with `keel user-story lint`.
-- `running-a-sprint` — Run the confirmed user stories as a Scrum-style sprint loop: backlog → per-story implement→verify-against-Gherkin→review → LOOP until every story meets Definition of Done → increment + retro. Use for multi-story or multi-step builds that must finish completely, not partially. Backed by `keel sprint` (durable per-story state, fail-closed review gate). The orchestration layer above writing-user-stories and the implementation skills.
+- `running-anvil` — Only delivery loop: `compile` (1 frontier call → `anvil.lock.json` + prefix + gates) → `cast` (N isolated workspaces, frozen prefix) → `sieve` (0-LLM gates) → `stamp` (PPT+EV, batched 6 tags) → `loop` (bounded refinement, only if gates fail, max 20, delta 0.05, 300s wall) → `anvil.report.json` with metrics every run. Bank: `<keel-home>/memories/workspaces/<slug>/anvil/`. Backed by `keel anvil`.
 - `test-driven-development` — The tight RED-GREEN-REFACTOR loop: write the failing test first, make it pass with the minimum change, refactor under green. The per-change companion to qa-and-automation-engineer's coverage strategy.
 - `systematic-debugging` — Root-cause-first defect work: reproduce the symptom, trace it end-to-end with file:line evidence, fix the source of truth, prove it with a regression test. Use instead of patching the first suspicious line.
 - `writing-plans` — Turn an agreed design into an ordered, per-step-verifiable implementation plan (each step names its files and its check), captured in the working brief. The front half of execution.
@@ -128,12 +127,10 @@ The files below ship **only inside the keel repository** and are synced to disk 
 Thin, discoverable wrappers over the implemented `keel` CLI surfaces.
 Each command file maps only to commands that actually ship in the Rust runtime.
 
-- `/keel:workflow [route|start|cockpit|finish] <args>` — drive a proof-first workstream over the JSONL ledger.
+- `/keel:anvil [compile|cast|sieve|stamp|loop|run|prefix-check]` — only delivery loop via `keel anvil`.
 - `/keel:review [pre-commit|pre-pr|gates] [base-ref]` — run the native review gates on the current diff.
 - `/keel:recall <terms>`: FTS5 search over durable memory (working briefs, system maps, memories).
 - `/keel:gain [since]` — report command-output compaction token savings.
-- `/keel:sprint [plan|status|advance|review|list] [story-id]` — drive a Scrum-style sprint loop over confirmed user stories (fail-closed: loops until every story is Done).
-- `/keel:user-story [lint] [file-path]` — validate user stories against strict Agile/Jira format (Connextra + Gherkin + INVEST).
 
 These exist so the surface is reachable from the `/` menu, not only by the skill
 matcher or raw CLI. They never invoke planned-but-unimplemented commands.

@@ -455,7 +455,7 @@ mod tests {
     /// not crash on an empty session id. Also confirms the "not fired" state for
     /// a fresh session with no counter files.
     #[test]
-    fn bridge_gate_status_reports_all_eight_gates() {
+    fn bridge_gate_status_reports_remaining_gates() {
         let _guard = ENV_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -486,16 +486,12 @@ mod tests {
 
         let out = String::from_utf8_lossy(&stdout);
         assert_eq!(code, 0, "gate-status must exit 0: {stderr:?}");
-        // All 8 gates must appear in the output.
         for label in [
             "review",
             "working-brief",
-            "story-closeout",
             "memory",
-            "sprint-start",
             "learned-skill",
             "research",
-            "story-first",
         ] {
             assert!(
                 out.contains(&format!("{label}:")),

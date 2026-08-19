@@ -227,6 +227,7 @@ pub fn resolve_repository_root(requested_repository_root: &str) -> Result<PathBu
 /// which would wrongly get the current directory prepended. A leading `/` or `\`, a
 /// drive-letter prefix (`X:`), or a UNC root (`\\`) all count as absolute here so
 /// cross-platform callers never rebase an already-rooted path.
+#[cfg(test)]
 pub fn is_absolute_any_platform(path: &str) -> bool {
     let trimmed = path.trim();
     if trimmed.starts_with(['/', '\\']) {
@@ -441,8 +442,20 @@ pub fn agent_profiles_directory(claude_home: &Path) -> PathBuf {
     claude_home.join("agent-profiles")
 }
 
+/// Install inventories and other keel-owned state. Lives under the keel home
+/// (`~/.keel/state`), never under `~/.claude`.
 pub fn state_directory(claude_home: &Path) -> PathBuf {
+    claude_home.join("state")
+}
+
+/// Pre-split inventory directory name. Install migrates this to [`state_directory`].
+pub fn legacy_state_directory(claude_home: &Path) -> PathBuf {
     claude_home.join(".claude-skill-manager")
+}
+
+/// Transient update download/extract tree. Deleted after install/update.
+pub fn update_cache_directory(claude_home: &Path) -> PathBuf {
+    claude_home.join("cache")
 }
 
 pub fn config_path(claude_home: &Path) -> PathBuf {
@@ -1076,6 +1089,13 @@ mod keel_home_split_tests {
         assert_eq!(
             installed_executable_path(&keel_home),
             keel_home.join(executable_file_name())
+        );
+        assert_eq!(state_directory(&keel_home), keel_home.join("state"));
+        assert_eq!(update_cache_directory(&keel_home), keel_home.join("cache"));
+        assert_ne!(
+            state_directory(&keel_home),
+            PathBuf::from("/home/user/.claude/state"),
+            "keel inventories must not live under the engagement home"
         );
     }
 
