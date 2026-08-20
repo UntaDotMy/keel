@@ -458,13 +458,24 @@ fn tools_list_catalog() -> Value {
             },
             {
                 "name": "flow",
-                "description": "Preserve-Existing-Flow gate — the Iron Law's pre-edit ownership trace. Use `start` before editing an existing source file to record its owner path; `check` validates the trace still holds; `finish` clears it. Prevents blind edits to code whose ownership hasn't been traced.",
+                "description": "Preserve-Existing-Flow gate — the Iron Law's pre-edit ownership trace. Use `start` before editing an existing source file to record its owner path; `check` validates the trace still holds; `finish` validates the same evidence for closeout without deleting it. Prevents blind edits to code whose ownership hasn't been traced.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "action": { "type": "string", "enum": ["start", "check", "finish"], "description": "Flow operation to perform." },
                         "file": { "type": "string", "description": "Target source file path (for start/check). Translated to --target-file." },
                         "target_function": { "type": "string", "description": "Target function name within the file (optional, for start/check)." },
+                        "current_behavior": { "type": "string", "description": "Current behavior that must remain intact." },
+                        "entry_point": { "type": "string", "description": "Where the flow enters." },
+                        "producer": { "type": "string", "description": "Where the input or intent is produced." },
+                        "source_of_truth": { "type": "string", "description": "Owner of the final behavior decision." },
+                        "storage_state_queue_owner": { "type": "string", "description": "Owner of persistent or transient state." },
+                        "side_effect_owner": { "type": "string", "description": "Owner of writes, sends, renders, or external effects." },
+                        "consumers": { "type": "string", "description": "Comma-separated consumers." },
+                        "cleanup_recovery_path": { "type": "string", "description": "Cleanup, retry, rollback, or recovery path." },
+                        "edit_boundary": { "type": "string", "description": "Allowed edit boundary." },
+                        "validation_needed": { "type": "string", "description": "Comma-separated validation targets." },
+                        "validation_evidence": { "type": "string", "description": "Comma-separated completed validation evidence." },
                         "repo_root": { "type": "string", "description": "Repository root path. Defaults to cwd." }
                     },
                     "required": ["action"]
@@ -2721,8 +2732,6 @@ fn tool_code_search(arguments: &Value) -> Result<String, String> {
 }
 
 /// Preserve-Existing-Flow gate: the Iron Law's pre-edit ownership trace.
-/// `start` records the owning file before an edit; `check` validates evidence
-/// still holds; `finish` clears it. Routes through the compaction proxy.
 fn tool_flow(arguments: &Value) -> Result<String, String> {
     let action = arguments
         .get("action")
@@ -2732,7 +2741,10 @@ fn tool_flow(arguments: &Value) -> Result<String, String> {
     run_keel_subcommand("flow", &all_args)
 }
 
-/// Pure arg-builder for `tool_flow` (see `memory_args` for the testability rationale).
+/// Preserve-Existing-Flow gate: the Iron Law's pre-edit ownership trace.
+/// `start` records the owning file before an edit; `check` validates evidence
+/// still holds; `finish` validates the same evidence for closeout without
+/// deleting it.
 fn flow_args(action: &str, arguments: &Value) -> Vec<String> {
     let mut all_args: Vec<String> = vec![action.to_string()];
     if let Some(file) = optional_string_arg(arguments, "file") {
@@ -2740,6 +2752,23 @@ fn flow_args(action: &str, arguments: &Value) -> Vec<String> {
     }
     if let Some(target_function) = optional_string_arg(arguments, "target_function") {
         all_args.push(format!("--target-function={target_function}"));
+    }
+    for (field, flag) in [
+        ("current_behavior", "current-behavior"),
+        ("entry_point", "entry-point"),
+        ("producer", "producer"),
+        ("source_of_truth", "source-of-truth"),
+        ("storage_state_queue_owner", "storage-state-queue-owner"),
+        ("side_effect_owner", "side-effect-owner"),
+        ("consumers", "consumers"),
+        ("cleanup_recovery_path", "cleanup-recovery-path"),
+        ("edit_boundary", "edit-boundary"),
+        ("validation_needed", "validation-needed"),
+        ("validation_evidence", "validation-evidence"),
+    ] {
+        if let Some(value) = optional_string_arg(arguments, field) {
+            all_args.push(format!("--{flag}={value}"));
+        }
     }
     if let Some(root) = optional_string_arg(arguments, "repo_root") {
         all_args.push(format!("--repo-root={root}"));

@@ -14,24 +14,28 @@ pub struct SieveOutcome {
 }
 
 pub fn run_gates(gates: &[String]) -> (bool, String) {
+    run_gates_in_directory(gates, None)
+}
+
+pub fn run_gates_in_directory(
+    gates: &[String],
+    working_directory: Option<&std::path::Path>,
+) -> (bool, String) {
     let mut all_ok = true;
     let mut logs = String::new();
     for gate in gates {
-        let parts: Vec<&str> = gate.split_whitespace().collect();
-        if parts.is_empty() {
+        let trimmed = gate.trim();
+        if trimmed.is_empty() {
             continue;
         }
-        if parts[0].eq_ignore_ascii_case("echo") {
-            logs.push_str(&parts[1..].join(" "));
-            logs.push('\n');
-            continue;
+        let (program, arguments) = crate::runtime::platform_shell_command_parts(trimmed);
+        let mut command = Command::new(program);
+        command.args(arguments);
+        if let Some(directory) = working_directory {
+            command.current_dir(directory);
         }
-        let mut cmd = Command::new(parts[0]);
-        if parts.len() > 1 {
-            cmd.args(&parts[1..]);
-        }
-        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-        match cmd.output() {
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+        match command.output() {
             Ok(output) => {
                 if !output.status.success() {
                     all_ok = false;
@@ -74,7 +78,7 @@ pub fn sieve_lock(
                 spec.id
             ));
         }
-        let (pass, piece_logs) = run_gates(&gates);
+        let (pass, piece_logs) = run_gates_in_directory(&gates, Some(&paths.workspace));
         logs.push_str(&piece_logs);
         if pass && !gates.is_empty() {
             greens += 1;

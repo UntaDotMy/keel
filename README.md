@@ -62,7 +62,7 @@ The `--semantic` variant is published for `linux/amd64`, `darwin/arm64`, and `wi
 
 ## Demo
 
-A 30-second walkthrough of `workflow start -> cockpit -> finish`:
+A 30-second walkthrough of the Anvil delivery loop:
 
 ```bash
 asciinema play docs/demos/quickstart.cast
@@ -80,7 +80,7 @@ The cast file ships in this repo. Render to GIF with `agg docs/demos/quickstart.
 | Review gates | `review pre-pr` / `review pre-commit`, review strictness via plugin `userConfig.review_strictness`, and CI-ready artifacts so non-trivial code never self-reviews. |
 | Memory | Working briefs, completion ledgers, scoped `SYSTEM_MAP.md`, and durable recovery state under `~/.claude/memories/`. |
 | Command compaction | `keel run -- <cmd>` produces compact output for noisy test/build/lint/log/search commands without dropping diagnostic signal. |
-| MCP server | `keel mcp serve` (stdio: **one process per host session**; concurrent in-flight tools via `KEEL_MCP_MAX_INFLIGHT`, default 64; shared recall DB uses SQLite WAL + busy_timeout) and `keel mcp serve-http` (Streamable HTTP multi-client on `127.0.0.1:3920` by default). Registered through the plugin manifest so the harness auto-discovers the tool surface (count asserted by `tests/doc_parity_test.rs` via `"inputSchema":` in `mcp/tools.rs`) ,  `gauntlet`, `recall`, `system_map`, `run_command`, `command_output`, `command_kill`, `recall_status`, `skill_route`, `skill_get`, `skill_list`, `memory_status`, `brief_list`, `brief_get`, `brief_create`, `system_map_refresh`, `context_brief`, `cli`, `anvil`, `review`, `git_workflow`, `memory`, `gain`, `raw`, `config_audit`, `skill_lint`, `telemetry`, `checkpoint`, `session`, `doctor`, `code_search`, `flow`, `code_graph`, `learn`, `observe`, `rewrite`, `skill_eval`, `design_intelligence`, `stats` ,  plus system-map and recall-status resources. |
+| MCP server | `keel mcp serve` (stdio) and `keel mcp serve-http` (Streamable HTTP on loopback). The manifest exposes the current Rust-native tools: `recall`, `system_map`, `run_command`, `command_output`, `command_kill`, `recall_status`, `skill_route`, `skill_get`, `skill_list`, `memory_status`, `brief_list`, `brief_get`, `brief_create`, `system_map_refresh`, `context_brief`, `cli`, `anvil`, `review`, `git_workflow`, `memory`, `gain`, `raw`, `config_audit`, `skill_lint`, `telemetry`, `checkpoint`, `session`, `doctor`, `code_search`, `flow`, `code_graph`, `learn`, `observe`, `rewrite`, `skill_eval`, `design_intelligence`, and `stats`, plus `keel://system-map` and `keel://recall/status` resources. |
 | Slash commands | `/keel:anvil`, `/keel:review`, `/keel:recall`, `/keel:gain` ,  discoverable `/`-menu wrappers over implemented CLI surfaces. Shipped via the plugin manifest `commands` key. |
 | Specialist skills | Manifest-driven specialist profiles synced into `~/.claude/agent-profiles/*.toml`, invokable via the Skill tool. Run `keel skill-lint` for the live verified count. |
 
@@ -151,12 +151,12 @@ Example: a raw `cargo test --workspace` may produce `Rerun that as: keel run -- 
 | --- | --- | --- |
 | First install, no Rust required | Download a release, extract it, run `./keel install` or `.\keel.exe install` | Installs the native binary and managed skills into the harness home. |
 | Check the install | `keel status` (on PATH after install) or `~/.keel/keel status` / `%USERPROFILE%\.keel\keel.exe status` | Confirms the managed harness-home surface. |
-| Start normal work | `keel workflow start --request "..."` | The lowest-friction first run. |
-| Route a broad request first | `keel workflow route --request "..."` | Picks the recommended preset before starting. |
-| See live state | `keel workflow cockpit` | Shows stage, proof, blockers, and next command. |
-| Close a branch | `keel workflow finish` | The default closeout path. |
+| Start normal work | `keel anvil compile --goal "..." --bar "<named command>"` |
+| Run the delivery loop | `keel anvil run` |
+| Inspect live gates | `keel anvil sieve`, `keel anvil loop` |
+| Review and close | `keel review pre-pr`, `keel memory completion-gate check` |
 
-The default operator path is `workflow start -> workflow cockpit -> workflow finish`; the default closeout path is `keel workflow finish`.
+The current operator path is `anvil compile -> anvil run -> review pre-pr`.
 
 After install, the preferred global CLI path for agents on supported operating systems is:
 
@@ -314,158 +314,82 @@ Empty stdout means the hook is intentionally silent for that event.
 
 | Job | Commands |
 | --- | --- |
-| Route a broad request | `keel workflow route --request "..."` |
-| Start work | `keel workflow start --preset autopilot --request "..."` |
-| Watch live state | `keel workflow cockpit`, `keel workflow dashboard`, `keel workflow watch` |
+| Compile a delivery job | `keel anvil compile --goal "<goal>" --bar "<quality command>"` |
+| Run the delivery loop | `keel anvil run --dry-run` or `keel anvil run` |
+| Inspect deterministic gates | `keel anvil sieve` |
+| Re-run bounded refinement | `keel anvil loop` |
 | Review locally | `keel review pre-commit`, `keel review pre-pr`, `keel review gates check` |
-| Finish a workstream | `keel workflow finish --id <entry-id> --proof "..."`, `gh pr checks --watch` |
-| Compact noisy commands | `keel rewrite "cargo test --workspace"`, `keel run -- grep -RIn TODO rust` |
+| Preserve existing flow | `keel flow start`, `keel flow check`, `keel flow finish` |
+| Search related implementations | `keel code-search siblings` |
+| Compact noisy commands | `keel rewrite "cargo test --workspace"`, `keel run -- cargo test --workspace` |
 | Refresh memory map | `keel memory scope resolve --create-missing --refresh-system-map` |
-| Advanced help | `keel help advanced` |
+| Inspect learning | `keel learn status`, `keel learn run`, `keel learn dry-run` |
 
-External output-compaction tools are feature benchmarks for expected output reduction and recoverability, not runtime dependencies. The default path stays the native Rust implementation because it is integrated with the harness hooks, Preserve Existing Flow, review gates, install/update, repository instructions, raw-output recovery, and persisted `gain` analytics.
-
-See [Native Gap Map](docs/native-gap-map.md) for the anonymized comparison between external output reducers, runtime-shell peers, and the current native implementation.
-
-Route, start, watch, cockpit, and finish now share one operator-shell vocabulary: `stage`, `active_lane`, `proof_state`, `blocker`, `next_command`, and `recovery_path`. The workflow shell also keeps the active launch surface intact, so source-checkout runs use `cargo run --bin keel -- ...` and installed runs keep using the installed executable.
-
-Start with the preset-driven native CLI when the operator wants a top-layer product surface: Use `workflow route`, `workflow start --preset ...`, `workflow cockpit`, and `workflow finish` for most delivery work.
+Anvil is the only delivery loop. It compiles a named quality bar, creates isolated
+cast workspaces, runs deterministic gates, stamps survivors when required, and
+performs bounded refinement only while gates fail. It never commits or pushes.
 
 ## Daily Paths
 
-Quick labels: Feature work: Bug fixing: PR rescue: TDD-first implementation: Bounded parallel work:
-
-### Feature work
+### Feature or maintenance work
 
 ```bash
-keel workflow route --request "Add the next feature and carry it to closure"
-keel workflow start --preset autopilot --request "Add the next feature and carry it to closure"
-keel workflow cockpit
-keel workflow finish --id <entry-id> --proof "tests green"
+keel memory working-brief write --request "..." --acceptance-criteria "..."
+keel anvil compile --goal "..." --bar "cargo test --workspace --locked"
+keel anvil run
+keel code-search siblings
+keel review pre-pr
 ```
 
 ### Bug fixing
 
 ```bash
-keel workflow route --request "Trace the regression, fix the root cause, and prove it"
-keel workflow start --preset debug --request "Trace the regression, fix the root cause, and prove it"
-keel workflow cockpit
-keel workflow finish --id <entry-id> --proof "regression covered by tests"
+keel flow start --target-file rust/crates/keel/src/target.rs --target-function target
+keel flow check
+keel anvil compile --goal "reproduce and fix the regression" --bar "cargo test --workspace --locked"
+keel anvil run
+keel review pre-pr
 ```
 
-### Review
+### Test-first implementation
 
 ```bash
-keel workflow route --request "Audit the current branch and call out the real gaps"
-keel workflow start --preset review --request "Audit the current branch and call out the real gaps"
-keel workflow cockpit
-keel workflow finish --id <entry-id> --proof "review notes recorded"
+keel memory working-brief write --request "..." --acceptance-criteria "failing test; fixed behavior; regression proof"
+keel anvil compile --goal "red-green-refactor delivery" --bar "cargo test --workspace --locked"
+keel anvil run
+keel review pre-pr
 ```
-
-### TDD-first implementation
-
-```bash
-keel workflow start --preset tdd --request "Write the failing test first, implement the smallest fix that makes it pass, and close with regression proof"
-keel workflow cockpit
-keel workflow finish --id <entry-id> --proof "failing -> fix -> regression proof"
-```
-
-### Common job shapes
-
-Feature work, Bug fixing, PR rescue, TDD-first implementation, and Bounded parallel work all use the same visible loop: route, start, cockpit, prove, finish. Hosted-check failures are repaired on the same PR with `gh pr checks --watch` and another push.
 
 ### Native guidance tracks
 
-Brainstorming:
+Use the installed specialist skills for brainstorming, planning, debugging, TDD,
+review, security, and platform-specific work. The Rust runtime provides the
+mechanical proof surfaces:
 
 ```bash
-keel workflow route --request "Brainstorm the approach, compare the options, and recommend the right next lane"
+keel memory working-brief write --request "..." --acceptance-criteria "..."
+keel flow start --target-file <path> --target-function <name>
+keel anvil compile --goal "..." --bar "<named command>"
+keel anvil run
+keel memory completion-gate check
+keel review pre-pr
 ```
 
-Plan writing:
+### Continuous learning
+
+PostToolUse records behavioral observations. After every small batch of new
+signals, the learning owner runs a fail-open cycle against the same keel home,
+refreshing instincts and generated skills when trust thresholds are met.
+SessionEnd remains a final reconciliation point.
 
 ```bash
-keel workflow route --request "Write the implementation plan, file targets, proof steps, and recovery path before coding"
+keel learn status --json
+keel learn dry-run --json
+keel learn run --json
 ```
 
-Plan execution:
-
-```bash
-keel workflow start --preset autopilot --request "Carry the approved plan to closure"
-```
-
-Systematic debugging:
-
-```bash
-keel workflow start --preset debug --request "Trace the regression, find the root cause, and prove the real fix"
-```
-
-Code review:
-
-```bash
-keel workflow start --preset review --request "Review the branch, call out the real gaps, and decide if it is ready"
-```
-
-Workstream finish:
-
-```bash
-keel workflow finish --id <entry-id> --proof "tests green; review pre-pr passed"
-```
-
-### Native plan surface
-
-Use exact file targets, verification steps, and recovery checkpoints before coding.
-
-- File targets: list every expected write target before the first edit.
-- Verification steps: name the narrow proving checks first.
-- Recovery checkpoints: if interrupted, reopen the workstream with `workflow status`, `workflow cockpit`, and `workflow resume --id <entry-id>` before changing the plan.
-
-### Native engineering principles
-
-The guide now teaches TDD, YAGNI, and DRY as native workflow prompts and examples instead of pushing operators back to a standalone prompt library:
-
-- TDD:
-- YAGNI:
-- DRY:
-- TDD operator check: keep the native three-stage proof contract visible in `workflow cockpit` and `workflow finish` instead of relying on prose reminders.
-
-### Workflow presets versus lower-level primitives
-
-Keep the native CLI as the primary surface instead of drifting back toward a prompt-library-only identity. The router prints a short "Start Now" command first, keeps a scoped variant available for traceable workstreams, and cockpit shows route, active lanes, proof state, a live proof board, blockers, and the next command in one place. The branch path keeps proof-board gate status visible.
-
-Useful workflow command shelf: `keel workflow route`, `keel workflow start --preset <preset> --request "..."`, `keel workflow cockpit`, `keel workflow status`, `keel workflow dashboard`, `keel workflow watch`, `keel workflow resume --id <entry-id>`, and `keel workflow finish --id <entry-id> --proof "..."`.
-
-The dashboard includes a synthesized runtime-state summary and team-health summary so operators do not have to reconstruct that picture from raw memory artifacts. Cockpit surfaces the same runtime-state summary and team-health summary alongside the proof board, with a lighter day-to-day shell summary. Finish starts with a lighter closeout summary and records the supplied proof against the workflow ledger entry.
-
-## Presets
-
-Each preset now says what it owns, what it does not own, and what done means at that stage, so the operator can see the boundary instead of inferring it.
-
-| Preset | Use it for | Done means |
-| --- | --- | --- |
-| `autopilot` | Broad feature or maintenance work. | Working brief, completion gate, cockpit proof board, review pass, and native finish checks are current. |
-| `debug` | Stateful bugs, failing checks, and root-cause repair. | Behavior mismatch, root cause, fix, and rerun proof are visible. |
-| `tdd` | Test-first delivery. | Failing proof first, fix proof second, regression proof third. |
-| `review` | Audit, production-readiness, and merge decisions. | Findings or approval are backed by current evidence. |
-| `eco` | Bounded maintenance. | Narrowest honest proving validation passes. |
-| `parallel` | Bounded multi-lane work. | Required lanes, proof board, and blockers are terminal. |
-
-### Preset guide
-
-`autopilot`: the default first-run preset.
-When to use: broad feature or maintenance work where one owner should keep moving from alignment through closure.
-Proof it expects: the working brief, completion gate, cockpit proof board, review pass, and native finish checks stay current before closeout.
-If interrupted: reopen the workstream with `workflow status`, `workflow cockpit`, and `workflow resume --id <entry-id>`.
-
-`debug`: the focused preset for stateful bugs.
-`tdd`: the preset for test-first delivery.
-Proof it expects: failing proof first, fix proof second, regression proof third, plus the normal review and finish checks.
-`review`: the preset for audit, production-readiness, gap-finding, and final validation.
-`eco`: the lighter preset for bounded maintenance.
-`parallel`: the preset for bounded multi-lane work.
-If interrupted: recover from `workflow status`, `workflow cockpit`, and `workflow resume --id <entry-id>`.
-
-The lighter `autopilot` preset and `standard` tier power the default low-friction path.
+Generated skills are written under the Claude engagement home as
+`skills/learned-*`; manually refined generated skills are never overwritten.
 
 ## Proof Rules
 
@@ -473,19 +397,16 @@ The pack is strict on purpose:
 
 - Work is not done just because implementation happened.
 - Work is not done because one test passed or the first rerun turned green after a fix.
-- Finished work must be re-audited against the user story, PRD or spec when one exists, explicit tasks, active plan items, tracked requirements, required lanes, and closure-ready evidence.
-- The current job scope must be 100% complete for that scope.
-- After a fix, rerun the narrow proving checks and re-audit the broader impacted system.
-- Verify the relevant language, framework, runtime, and tooling release notes before non-trivial implementation.
-- Use the right inspection tool: browser automation such as Playwright for web UI, live desktop runtime with screenshots or equivalent visual evidence for desktop UI, and runtime-native inspection for CLI, services, workflows, or devices.
+- Finished work must be re-audited against the user story, explicit tasks, and closure evidence.
+- After a fix, rerun the narrow proving checks and the sibling scan.
+- Use runtime-native inspection for CLI, hook, memory, and Anvil behavior.
 
 ## Native Review and CI
 
 Review strictness is configured in `.claude-plugin/plugin.json` under `userConfig.review_strictness`. There is no separate `.claude/review.json`.
 
 - keel review pre-commit is the local pre-commit surface.
-- keel review pre-pr is the local pre-PR surface.
-- The cockpit proof view keeps a live proof board.
+- The flow-check artifact keeps the current owner path and validation evidence.
 
 ```bash
 keel review pre-commit --format compact
@@ -775,8 +696,8 @@ keel/
 
 Install `keel` when the harness needs a clearer path from request to proof:
 
-- Start work with the workflow shell.
-- Keep state in memory and cockpit surfaces.
+- Start delivery with Anvil.
+- Keep durable state in working briefs, memory, and flow evidence.
 - Compact noisy command output before it fills context.
 - Prove the branch locally and on hosted checks.
 - Finish only when the evidence says the scope is actually done.
