@@ -1672,9 +1672,9 @@ fn remove_update_temp_trees(keel_home: &Path, engagement_home: &Path) {
     let _ = remove_path_if_exists(&update_cache_directory(keel_home));
     let _ = remove_path_if_exists(&legacy_state_directory(keel_home).join("bin"));
     if engagement_home != keel_home {
-        let _ = remove_path_if_exists(&update_cache_directory(engagement_home));
-        // Only transient extraction directories are disposable. The legacy
-        // state root may contain user data and remains as a recovery copy.
+        // The neutral keel home owns the transient update cache. Never remove
+        // the host engagement home's generic cache, which may be user-owned.
+        // Only transient extraction directories are disposable.
         let _ = remove_path_if_exists(&legacy_state_directory(engagement_home).join("bin"));
         let _ = remove_path_if_exists(&state_directory(engagement_home).join("bin"));
     }
@@ -6179,6 +6179,8 @@ mod tests {
         fs::write(legacy_state_directory(&engagement).join("bin/old"), "stale").unwrap();
         fs::create_dir_all(state_directory(&engagement).join("bin")).unwrap();
         fs::write(state_directory(&engagement).join("bin/old"), "stale").unwrap();
+        fs::create_dir_all(engagement.join("cache/user")).unwrap();
+        fs::write(engagement.join("cache/user/preferences.json"), "keep").unwrap();
         fs::write(
             legacy_state_directory(&engagement).join("user-data.json"),
             "keep",
@@ -6191,6 +6193,10 @@ mod tests {
             .is_file());
         assert!(!legacy_state_directory(&engagement).join("bin").exists());
         assert!(!state_directory(&engagement).join("bin").exists());
+        assert_eq!(
+            fs::read_to_string(engagement.join("cache/user/preferences.json")).unwrap(),
+            "keep"
+        );
         assert_eq!(
             fs::read_to_string(legacy_state_directory(&engagement).join("user-data.json")).unwrap(),
             "keep"
