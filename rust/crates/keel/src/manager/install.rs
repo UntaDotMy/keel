@@ -1723,8 +1723,7 @@ fn remove_update_temp_trees(keel_home: &Path, engagement_home: &Path) {
     let _ = remove_path_if_exists(&update_cache_directory(keel_home));
     let _ = remove_path_if_exists(&legacy_state_directory(keel_home).join("bin"));
     if engagement_home != keel_home {
-        // The neutral keel home owns the transient update cache. Never remove
-        // the host engagement home's generic cache, which may be user-owned.
+        // The neutral home owns update cache; retain generic engagement cache.
         // Only transient extraction directories are disposable.
         let _ = remove_path_if_exists(&legacy_state_directory(engagement_home).join("bin"));
         let _ = remove_path_if_exists(&state_directory(engagement_home).join("bin"));
