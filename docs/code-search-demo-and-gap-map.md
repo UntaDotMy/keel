@@ -1,54 +1,83 @@
 <!--
-Purpose: Honest code-search surface and remaining gaps versus fuller indexing tools.
-Caller: Operators and agents choosing how to search the workspace.
-Dependencies: keel code-search search|siblings (Rust utility/code_search.rs).
-Main Functions: Document the live command, path filters, skip list, and explicit non-goals.
-Side Effects: None. Documentation only.
+Purpose: Document the persistent deterministic code-index and retrieval surface.
+Caller: Operators and agents locating source files, symbols, and relationships.
+Dependencies: keel code-index and code-search commands.
+Main Functions: Explain refresh, status, map, ranked search, and sibling scans.
+Side Effects: Documentation only.
 -->
-# Code Search Demo And Gap Map
+# Code Search And Workspace Index
 
-## Live surface (implemented)
+## Live surface
 
 ```bash
-keel code-search search --workspace-root "$PWD" --query "incremental lineage proof"
-keel code-search search --workspace-root "$PWD" --query "FlagSet" --path "rust/crates/keel"
+keel code-index refresh
+keel code-index status --json
+keel code-index map
+keel code-search search --query "run_recall_search" --json
+keel code-search search --query "FlagSet" --path "rust/crates/keel"
 keel code-search siblings --query "the bug shape"
 ```
 
-Flags:
+The workspace index is stored in the global per-workspace memory lane. It never
+writes generated artifacts into the repository unless an explicit output path is
+requested by another command.
 
-| Flag | Purpose |
-| --- | --- |
-| `--query` | Required substring to match (lexical, case-sensitive `contains`) |
-| `--workspace-root` | Root directory to walk (defaults to resolved repo root) |
-| `--path` | Optional path filter; `/` and `\` are treated equivalently on Windows/macOS/Linux |
+## Index contents
 
-What it does today:
+The persistent SQLite index records:
 
-- Walks the tree with a fixed skip list (`target`, `node_modules`, `.git`, research clones like `hermes-agent`, …)
-- Matches **literal substrings** in text files (not embeddings / semantic ranking)
-- Prints `relative/path:line:snippet` rows (capped)
-- Does **not** build or query a persisted index
+- eligible source and documentation files;
+- stable content hashes, size, modification time, and indexed Git commit;
+- symbols with kind, signature, documentation, and exact line ranges;
+- file and symbol chunks for context packing;
+- resolved import relationships;
+- deterministic FTS5 search entries;
+- generation and stale-state metadata.
 
-There is **no** `code-search index`, `demo`, `status`, or `reset` subcommand. Older docs that named those verbs are obsolete; use `search` only.
+Refresh is incremental by file hash and commits changes atomically. A deleted
+file removes its symbols, chunks, search entries, and relationships. Retrieval
+never falls back to a live filesystem scan.
 
-## Related surfaces
+## Search behavior
 
-| Need | Command |
-| --- | --- |
-| Structural import graph / reverse impact | `keel code-graph build`, `keel code-graph impact --changed a,b` |
-| Durable memory search | `keel memory recall <query>` |
-| Compaction of noisy `rg`/`grep` | `keel run -- rg …` |
+`code-search search` fuses four ranked channels:
 
-## Current gap notes
+1. exact symbol and qualified-name matches;
+2. FTS5 Porter/Unicode full-text matches;
+3. path and filename matches;
+4. verified graph relationships from exact symbols.
 
-- Search is lexical, not embedding-backed semantic retrieval
-- No persisted index, lineage DAG, or multi-target export
-- Skip list is name-based (not a full `.gitignore` parser); large unlisted trees can still be walked
-- Relevance scores are not produced; MCP `code_search` is the same lexical path
+The channels use weighted Reciprocal Rank Fusion, then return bounded evidence:
 
-## Why the local-first posture stays
+```text
+path:start-end [symbol] (reason) score=... snippet
+```
 
-- No hosted dependency to search the workspace
-- Agents can inspect results directly in the CLI transcript
-- Review and closeout proof stay inside the same native workflow
+`--json` returns the same path, symbol, line, score, reason, and snippet fields
+for MCP and automation callers.
+
+## Map behavior
+
+`code-index map` and the MCP `system_map` surface are generated from the same
+index. The map includes the indexed commit, generation, file inventory, symbol
+locations, and relationship evidence. Scope refresh persists the same map under
+the workspace reference lane.
+
+## Completeness behavior
+
+`code-search siblings` queries the persistent index using explicit query text or
+distinctive tokens from the current Git diff. It excludes changed files, reports
+other indexed matches, and clears the existing completeness gate only after the
+indexed scan succeeds.
+
+## Failure policy
+
+- Missing or corrupt index: return an error and require an explicit refresh.
+- Stale indexed commit: report stale status; do not silently claim freshness.
+- Deleted source: remove it from the index during refresh.
+- Unresolved external import: retain the raw import only; do not invent an edge.
+- No indexed match: return an honest empty result.
+
+The surface is local-first, deterministic, and model-free. It is designed to
+answer exact code-location and dependency questions without making the agent
+walk or guess through the repository.

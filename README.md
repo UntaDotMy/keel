@@ -43,22 +43,17 @@ The installer detects your OS and architecture, pulls the matching prebuilt bina
 
 **Install layout:** keel uses a host-neutral home so every host (claude, codex, opencode, cursor, pi, cowork) shares one install. The binary, data, and state live in `%USERPROFILE%\.keel` / `~/.keel` (override with `KEEL_HOME`); the Claude-harness engagement files (skills, agents, commands, `settings.json`, user `CLAUDE.md`) stay in `%USERPROFILE%\.claude` / `~/.claude` because the harness only reads them there. Upgrading from an older install migrates keel-owned data from `~/.claude` into `~/.keel` on the next `keel install`/`update` and removes the old `~/.claude/keel` binary, never overwriting a file that already exists at the destination. Install also adds the keel home to your PATH so `keel` works from any shell. It does **not** touch `~/.grok` sessions, and it does **not** delete chat `sessions/`, `projects/`, `file-history/`, `memories/`, or `history.jsonl`. Orphan cleanup of old managed skills is **off by default**; use `keel install --purge-stale` only when you want pack hygiene deletes (still never touches those protected paths).
 
-**Semantic (vector-recall) build.** The default binary is lexical-only (FTS5). To install the variant with built-in vector semantic recall (sqlite-vec + a 33MB BERT model baked in), pass `--semantic`:
+**Deterministic indexed retrieval.** The standard binary uses a persistent local
+workspace index for files, symbols, source chunks, paths, and verified import
+relationships. `code-search` and `SYSTEM_MAP.md` refresh the index incrementally;
+retrieval returns ranked file, symbol, line, and provenance evidence without an
+embedded model or runtime network dependency:
 
 ```bash
-# macOS / Linux
-curl -fsSL https://raw.githubusercontent.com/UntaDotMy/keel/main/install.sh | bash -s -- --semantic
+keel code-index refresh
+keel code-index status
+keel code-search search --query "run_recall_search"
 ```
-```powershell
-# Windows PowerShell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/UntaDotMy/keel/main/install.ps1))) -Semantic
-```
-```bat
-:: Windows CMD
-curl -fsSL https://raw.githubusercontent.com/UntaDotMy/keel/main/install.cmd -o install.cmd && install.cmd --semantic && del install.cmd
-```
-
-The `--semantic` variant is published for `linux/amd64`, `darwin/arm64`, and `windows/amd64`; other platforms fall back to the lexical-only binary or build from source with `cargo build --release --features semantic`.
 
 ## Demo
 
@@ -80,7 +75,7 @@ The cast file ships in this repo. Render to GIF with `agg docs/demos/quickstart.
 | Review gates | `review pre-pr` / `review pre-commit`, review strictness via plugin `userConfig.review_strictness`, and CI-ready artifacts so non-trivial code never self-reviews. |
 | Memory | Working briefs, completion ledgers, scoped `SYSTEM_MAP.md`, and durable recovery state under `~/.claude/memories/`. |
 | Command compaction | `keel run -- <cmd>` produces compact output for noisy test/build/lint/log/search commands without dropping diagnostic signal. |
-| MCP server | `keel mcp serve` (stdio) and `keel mcp serve-http` (Streamable HTTP on loopback). The manifest exposes the current Rust-native tools: `recall`, `system_map`, `run_command`, `command_output`, `command_kill`, `recall_status`, `skill_route`, `skill_get`, `skill_list`, `memory_status`, `brief_list`, `brief_get`, `brief_create`, `system_map_refresh`, `context_brief`, `cli`, `anvil`, `review`, `git_workflow`, `memory`, `gain`, `raw`, `config_audit`, `skill_lint`, `telemetry`, `checkpoint`, `session`, `doctor`, `code_search`, `flow`, `code_graph`, `learn`, `observe`, `rewrite`, `skill_eval`, `design_intelligence`, and `stats`, plus `keel://system-map` and `keel://recall/status` resources. |
+| MCP server | `keel mcp serve` (stdio) and `keel mcp serve-http` (Streamable HTTP on loopback). The manifest exposes the current Rust-native tools: `recall`, `system_map`, `run_command`, `command_output`, `command_kill`, `recall_status`, `skill_route`, `skill_get`, `skill_list`, `memory_status`, `brief_list`, `brief_get`, `brief_create`, `system_map_refresh`, `context_brief`, `cli`, `anvil`, `review`, `git_workflow`, `memory`, `gain`, `raw`, `config_audit`, `skill_lint`, `telemetry`, `checkpoint`, `session`, `doctor`, `code_search`, `code_index`, `flow`, `code_graph`, `learn`, `observe`, `rewrite`, `skill_eval`, `design_intelligence`, and `stats`, plus `keel://system-map` and `keel://recall/status` resources. |
 | Slash commands | `/keel:anvil`, `/keel:review`, `/keel:recall`, `/keel:gain` ,  discoverable `/`-menu wrappers over implemented CLI surfaces. Shipped via the plugin manifest `commands` key. |
 | Specialist skills | Manifest-driven specialist profiles synced into `~/.claude/agent-profiles/*.toml`, invokable via the Skill tool. Run `keel skill-lint` for the live verified count. |
 
@@ -320,14 +315,20 @@ Empty stdout means the hook is intentionally silent for that event.
 | Re-run bounded refinement | `keel anvil loop` |
 | Review locally | `keel review pre-commit`, `keel review pre-pr`, `keel review gates check` |
 | Preserve existing flow | `keel flow start`, `keel flow check`, `keel flow finish` |
-| Search related implementations | `keel code-search siblings` |
+| Refresh code index | `keel code-index refresh`, `keel code-index status`, `keel code-index map` |
+| Locate source evidence | `keel code-search search --query "<symbol or behavior>"`, `keel code-search siblings` |
 | Compact noisy commands | `keel rewrite "cargo test --workspace"`, `keel run -- cargo test --workspace` |
+| Run safely | `keel run -- <command>`; bounded by `KEEL_COMMAND_TIMEOUT_SECS` (default 300s) and kills timed-out process trees |
+| Inspect gate blockers | `keel review pre-pr --format compact` prints each gate status, blocking flag, and exact remediation details; `--format markdown|json` preserves full findings |
 | Refresh memory map | `keel memory scope resolve --create-missing --refresh-system-map` |
 | Inspect learning | `keel learn status`, `keel learn run`, `keel learn dry-run` |
 
 Anvil is the only delivery loop. It compiles a named quality bar, creates isolated
 cast workspaces, runs deterministic gates, stamps survivors when required, and
 performs bounded refinement only while gates fail. It never commits or pushes.
+Sieve failure output includes the exact gate command, exit code, status, and
+captured diagnostics. Runtime gate execution is timeout-bounded and terminates
+the process tree instead of leaving a hung cast behind.
 
 ## Daily Paths
 
@@ -463,9 +464,9 @@ What is implemented today:
 - `run` executes the requested command, saves `stdout.log`, `stderr.log`, `command.txt`, `meta.json`, and `compact.txt`, and returns compact output with `raw: keel raw <raw_id>`.
 - `run --json` returns `command`, `exit_code`, `adapter_name`, `compacted`, `raw_id`, `raw_path`, exact token fields, `summary`, `stdout`, and `stderr`.
 - `run --full` and `run --no-compact` pass through raw output while still recording metadata; `--adapter <name>`, `--list-adapters`, `--max-lines <n>`, and `--recovery-dir <path>` are available for debugging and control. `--errors-only` keeps only error/failure-class lines from any command (adapter-agnostic). `--ultra` uses a short failure-first body and a compact raw pointer.
-- Built-in adapters cover `tests`, `git`, `search`, `files`, `build`, `lint`, `containers`, `cloud`, `database`, `logs`, and `generic` fallback. Test adapters handle cargo/pytest/go/JS-style failure signals; git/search/files adapters summarize diffs, matches, and large reads; the `containers` adapter compacts docker/kubectl/helm; the `cloud` adapter reduces aws/az/gcloud output (structure-only JSON, secret redaction, failure-first); the `database` adapter reduces psql/mysql/sqlite3/redis-cli/mongosh result sets (header + sampled rows, structure-only JSON, credential redaction).
+- Built-in adapters cover `tests`, `git`, `search`, `files`, `build`, `lint`, `containers`, `cloud`, `database`, `logs`, and `generic`. Test adapters handle cargo/pytest/go/JS-style failure signals; git/search/files adapters summarize diffs, matches, and large reads; the `containers` adapter compacts docker/kubectl/helm; the `cloud` adapter reduces aws/az/gcloud output (structure-only JSON, secret redaction, failure-first); the `database` adapter reduces psql/mysql/sqlite3/redis-cli/mongosh result sets (header + sampled rows, structure-only JSON, credential redaction).
 - `raw <raw_id>`, `raw --path <raw_id>`, `raw list`, `raw prune --older-than 30d`, and `replay <raw_id>` provide local recovery and retention controls.
-- `rewrite --json "<command>"` returns supported/reason/rewritten-command metadata and understands common shell wrappers, environment prefixes, and pipelines by routing them through `bash -lc` when needed.
+- `rewrite --json "<command>"` returns supported/reason/rewritten-command metadata and preserves direct argv where possible; composite shell syntax uses PowerShell on Windows and Bash on Unix, while explicit MCP scripts never change shells.
 - `hook install` writes the documented global the harness lifecycle hook set, with `PreToolUse` handling block-and-rerun command compaction.
 - `hook instructions` prints the agent-facing rerun contract in markdown or JSON.
 - `gain` reads native compaction events from the harness home and reports observed commands, compacted/passthrough counts, exact tokens before/after/saved, savings percentage, adapter breakdowns, and top commands.

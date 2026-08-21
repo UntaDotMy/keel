@@ -1,5 +1,4 @@
 use std::io::Write;
-use std::process::{Command, Stdio};
 
 use crate::args::FlagSet;
 use crate::utility::anvil::filter::compress_output;
@@ -29,23 +28,23 @@ pub fn run_gates_in_directory(
             continue;
         }
         let (program, arguments) = crate::runtime::platform_shell_command_parts(trimmed);
-        let mut command = Command::new(program);
-        command.args(arguments);
-        if let Some(directory) = working_directory {
-            command.current_dir(directory);
-        }
-        command.stdout(Stdio::piped()).stderr(Stdio::piped());
-        match command.output() {
-            Ok(output) => {
-                if !output.status.success() {
+        match crate::runtime::run_command(&program, &arguments, working_directory) {
+            Ok(result) => {
+                let passed = result.code == 0;
+                if !passed {
                     all_ok = false;
                 }
-                logs.push_str(&String::from_utf8_lossy(&output.stdout));
-                logs.push_str(&String::from_utf8_lossy(&output.stderr));
+                logs.push_str(&format!(
+                    "gate={trimmed} exit_code={} status={}\n",
+                    result.code,
+                    if passed { "pass" } else { "fail" }
+                ));
+                logs.push_str(&String::from_utf8_lossy(&result.stdout));
+                logs.push_str(&String::from_utf8_lossy(&result.stderr));
             }
             Err(error) => {
                 all_ok = false;
-                logs.push_str(&error.to_string());
+                logs.push_str(&format!("gate={trimmed} status=error error={error}\n"));
             }
         }
     }
@@ -176,5 +175,20 @@ mod tests {
     fn sieve_no_gate_done_picks_green() {
         let (ok, _) = run_gates(&[]);
         assert!(ok);
+    }
+    #[test]
+    fn failed_gate_reports_command_and_exit_code() {
+        let gate = if cfg!(windows) {
+            "cmd /C exit 7"
+        } else {
+            "sh -c 'exit 7'"
+        };
+        let (ok, logs) = run_gates(&[gate.to_string()]);
+        assert!(!ok);
+        assert!(logs.contains("status=fail"), "logs: {logs}");
+        assert!(
+            logs.contains("exit_code=1") || logs.contains("exit_code=7"),
+            "logs: {logs}"
+        );
     }
 }

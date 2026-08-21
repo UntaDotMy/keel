@@ -108,7 +108,7 @@ Note: scoped tool patterns like `Bash(git diff:*)` work in SKILL.md `allowed-too
 
 **Memory ownership boundary (no double-write)**: keel and native Auto memory write to *disjoint* paths, so there is no collision to guard against. Native Auto memory owns `~/.claude/projects/<project>/memory/MEMORY.md`. keel's autonomous learning loop owns `~/.claude/memory/instincts/`, `~/.claude/skills/learned-<project>/`, and `~/.claude/agents/learned-<project>.md`; its explicit surfaces own `~/.claude/memory/`, `~/.claude/memories*/`, and `~/.claude/working-briefs/`. keel never writes the native `MEMORY.md`. The two layers are read together at SessionStart (native loads its file, keel injects its digest) and never overwrite each other.
 
-**Recall vs code-search boundary**: `recall` (FTS5 over `memory`, `memories`, `working-briefs`) is the *memory* index ,  durable notes, briefs, and learnings. It deliberately does **not** index project source, so a code question is not answered with a stale memory hit. Searching the working tree is `keel code-search search` (a fresh, gitignore-aware scan of repository files). After a fix or implement, `keel code-search siblings` lists every other in-repo copy of the same shape. Use `recall` for "what did I learn / decide / capture", `code-search` for "where in the code is X", `siblings` for "did I only fix one site". Neither is a blind scan: recall is indexed; code-search walks the live tree and skips `target/`, `node_modules/`, `.git/`, and binaries.
+**Recall vs code-search boundary**: `recall` (FTS5 over `memory`, `memories`, `working-briefs`) is the *memory* index for durable notes, briefs, and learnings. It deliberately does not index project source, so a code question is not answered with stale memory. `code-index` owns the persistent workspace index; `code-search search` queries ranked files, symbols, chunks, paths, and verified relationships from that index. `code-search siblings` uses the same index for completeness scans. Neither surface performs a hidden live-scan fallback.
 
 **MCP server**: `keel mcp serve` runs a JSON-RPC 2.0 stdio server registered through `.claude-plugin/plugin.json` `mcpServers.keel`, pinned with `alwaysLoad: true` so the harness keeps the server's tools in context instead of deferring them (`alwaysLoad` is per-server, so all tools are pinned together). The harness auto-discovers it and gets the MCP tool set plus two resources (`keel://system-map`, `keel://recall/status`). The MCP tool count is derived from `mcp/tools.rs` and asserted by `tests/doc_parity_test.rs` (the test counts `\"inputSchema\":` definitions), so the docs do not hardcode a number ,  add or remove a tool and the test stays correct. The tools fall into these groups: **awareness** (`context_brief` ,  one call returning the iron law, the full skill catalog, memory health, and the newest working brief, so the agent knows what exists even when no skill auto-loaded), **search/compaction** (`recall`, `run_command`, `recall_status`), **skills** (`skill_route`, `skill_get`, `skill_list`), **memory** (`memory_status`, `brief_list`, `brief_get`, `brief_create`), **workspace map** (`system_map`, `system_map_refresh`), **delivery** (`anvil` ,  compile→cast→sieve→stamp→loop, the only delivery loop), **delivery/quality** (`review`, `git_workflow`, `flow`, `checkpoint`, `config_audit`, `skill_lint`, `skill_eval`), **analysis/ops** (`code_search`, `code_graph`, `gain`, `session`, `raw`, `rewrite`, `telemetry`, `observe`, `learn`, `doctor`, `design_intelligence`), and a **generic passthrough** (`cli`) that runs any remaining keel subcommand in-process. The full name list lives in README's MCP row and is test-enforced against `mcp/tools.rs` by `every_mcp_tool_is_listed_in_readme`. `cli` gates destructive/management subcommands (`install`, `update`, `repair`, `uninstall`, `remove`, `validate`, `all`, `__self-replace`, `checkpoint restore`, and `hook install`/`hook uninstall`) behind an explicit `confirm: true`, and refuses `mcp` outright. The `run_command` and `cli` tools run through the same proxy capture+compaction pipeline as `keel run --`, so command-output compaction applies on the MCP surface too. The skill/memory/brief tools mirror capabilities the lifecycle hooks otherwise deliver (e.g. `skill_route` is the on-demand equivalent of the per-prompt skill-brief injection) so they stay reachable on platforms where hooks are unreliable; each is a thin wrapper over the same function that backs the corresponding CLI surface, so MCP and CLI never drift. The `initialize` handshake echoes the client's requested `protocolVersion` (falling back to the server default) so the server stays compatible as the MCP spec revises. If the server's tools ever go missing or stop loading, `keel doctor` reports the registration and its `alwaysLoad` state and `keel repair` re-pins the `~/.claude.json` entry. Tool dispatch lives in `mcp/tools.rs`; `mcp/mod.rs` keeps JSON-RPC framing, the serve loop, and the resource surface.
 
@@ -253,25 +253,17 @@ the harness's `/rewind` can), so the two are complementary.
 
 ## Code Graph
 
-`keel code-graph build|impact` is a deterministic codebase-understanding
-graph ,  the structural layer the flat `SYSTEM_MAP` and the manual
-`preserve-existing-flow` owner trace lacked. `build` scans the workspace and writes
-a JSON artifact (default: global per-workspace memory lane under
-`<claude-home>/memories/workspaces/<slug>/code-graph/code-graph.json`; pass
-`--output` for an explicit in-repo path) of nodes
-(source files with their top-level symbol definitions and import specifiers) and
-edges (cross-file `imports` dependencies). Extraction is line-based and
-dependency-free (no tree-sitter grammar, no LLM): nodes sort by path, edges by
-(from,to,kind), so two runs over the same tree produce byte-identical JSON. Edges
-are only emitted when an import resolves to a real in-repo file ,  relative JS/TS
-imports (with `index` resolution), relative Python imports (with `__init__`), and
-Rust `mod` declarations; bare/package imports stay as node `imports` strings and
-are never invented as edges, so the graph stays honest. `impact --changed a,b,c`
-rebuilds the graph and reports the transitive reverse-dependency closure (every
-in-repo file that imports the changed files, directly or indirectly), excluding the
-changed files themselves ,  the cheap "what could this edit break" query for review
-scoping. Supported languages: Rust, JavaScript/TypeScript, Python, Go (Go records
-import specifiers but does not resolve package paths to files, by design).
+`keel code-index refresh|status|map` is the primary deterministic workspace
+index. It persists files, symbols, chunks, exact ranges, paths, and verified
+relationships in the global per-workspace lane. `keel code-search` queries that
+index with exact-symbol, FTS5, path, and graph rank fusion; `SYSTEM_MAP.md` is
+generated from the same generation and commit evidence.
+
+`keel code-graph build|impact` remains the explicit review artifact for
+transitive reverse-dependency closure. Its import edges are emitted only when
+the target resolves to a real in-repo file, so unresolved package imports are
+never invented. Supported languages remain Rust, JavaScript/TypeScript, Python,
+and Go.
 
 ## Anvil
 

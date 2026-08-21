@@ -324,7 +324,9 @@ pub fn run_continuous_learning_if_due(claude_home: &Path, log: &mut dyn std::io:
             .map(|age| age > std::time::Duration::from_secs(300))
             .unwrap_or(false)
         {
-            let _ = fs::remove_file(&lock_path);
+            if let Err(error) = fs::remove_file(&lock_path) {
+                let _ = writeln!(log, "keel learn: stale lock cleanup failed: {error}");
+            }
         }
     }
     let Ok(lock) = fs::OpenOptions::new()
@@ -340,7 +342,9 @@ pub fn run_continuous_learning_if_due(claude_home: &Path, log: &mut dyn std::io:
         let _ = writeln!(log, "keel learn: continuous marker write failed: {error}");
     }
     drop(lock);
-    let _ = fs::remove_file(&lock_path);
+    if let Err(error) = fs::remove_file(&lock_path) {
+        let _ = writeln!(log, "keel learn: cycle lock cleanup failed: {error}");
+    }
     if report.instincts_recorded > 0
         || report.skills_generated > 0
         || report.agents_generated > 0

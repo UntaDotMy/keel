@@ -171,8 +171,8 @@ fn run_orchestrator(
     } else {
         let _ = writeln!(
             standard_error,
-            "anvil sieve: FAIL greens={} critic={}",
-            sieve_outcome.greens, sieve_outcome.critic
+            "anvil sieve: FAIL greens={} critic={}\n{}",
+            sieve_outcome.greens, sieve_outcome.critic, sieve_outcome.logs
         );
     }
     let sieve_ok = sieve_outcome.ok;

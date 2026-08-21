@@ -1,15 +1,16 @@
-//! Purpose: Code search command handler
-//! Caller: commands.rs via utility dispatcher
-//! Dependencies: std::io, std::fs, std::path, crate::args, crate::runtime
-//! Main Functions: run_code_search_command
-//! Side Effects: Reads repository files, writes search results to stdout
+//! Persistent indexed code search and completeness scanning.
+//!
+//! The workspace index owns source discovery. This module only parses command
+//! flags, formats ranked evidence, and keeps the existing sibling completeness
+//! contract. Retrieval errors are returned to the caller; there is no live-scan
+//! fallback.
 
-use std::fs;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::args::FlagSet;
-use crate::runtime::{display_path, resolve_repository_root};
+use crate::runtime::resolve_repository_root;
+use crate::utility::workspace_index::{self, IndexStatus, SearchHit};
 
 pub fn run_code_search_command(
     arguments: &[String],
@@ -20,10 +21,8 @@ pub fn run_code_search_command(
         let _ = writeln!(
             standard_output,
             "Usage: keel code-search search|siblings [flags]\n\
-             search     --query <text> [--workspace-root <path>] [--path <filter>]\n\
-             siblings   [--query <text>] [--workspace-root <path>]\n\
-                        Scan the class, not one hit: search the query (or tokens\n\
-                        from the current git diff) and list every other in-repo copy."
+             search     --query <text> [--workspace-root <path>] [--claude-home <path>] [--path <filter>] [--limit N] [--json]\n\
+             siblings   [--query <text>] [--workspace-root <path>] [--claude-home <path>] [--json]"
         );
         return if arguments.is_empty() { 1 } else { 0 };
     }
@@ -37,65 +36,184 @@ pub fn run_code_search_command(
     }
 }
 
+pub fn run_code_index_command(
+    arguments: &[String],
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    if arguments.is_empty() || is_help_argument(&arguments[0]) {
+        let _ = writeln!(
+            standard_output,
+            "Usage: keel code-index <refresh|status|map> [--workspace-root <path>] [--claude-home <path>] [--force] [--json]"
+        );
+        return if arguments.is_empty() { 1 } else { 0 };
+    }
+    let action = arguments[0].as_str();
+    let mut flags = FlagSet::new(format!("code-index {action}"));
+    flags.string_flag("workspace-root", "");
+    flags.string_flag("claude-home", "");
+    flags.bool_flag("force", false);
+    flags.bool_flag("json", false);
+    if let Err(error) = flags.parse(&arguments[1..]) {
+        let _ = writeln!(standard_error, "{}", error.message);
+        return 1;
+    }
+    let root = match resolve_root(
+        flags.string_value("workspace-root"),
+        "code-index",
+        standard_error,
+    ) {
+        Some(root) => root,
+        None => return 1,
+    };
+    let home = flags.string_value("claude-home");
+    match action {
+        "refresh" => match workspace_index::refresh(&root, home, flags.bool_value("force")) {
+            Ok(report) => {
+                if flags.bool_value("json") {
+                    let payload = serde_json::json!({
+                        "filesIndexed": report.files_indexed,
+                        "filesAdded": report.files_added,
+                        "filesUpdated": report.files_updated,
+                        "filesRemoved": report.files_removed,
+                        "symbolsIndexed": report.symbols_indexed,
+                        "chunksIndexed": report.chunks_indexed,
+                        "edgesIndexed": report.edges_indexed,
+                        "generation": report.generation,
+                        "indexedCommit": report.indexed_commit,
+                    });
+                    let _ = writeln!(standard_output, "{payload}");
+                } else {
+                    let _ = writeln!(
+                        standard_output,
+                        "code-index refresh: files={} added={} updated={} removed={} symbols={} chunks={} edges={} generation={} commit={}",
+                        report.files_indexed,
+                        report.files_added,
+                        report.files_updated,
+                        report.files_removed,
+                        report.symbols_indexed,
+                        report.chunks_indexed,
+                        report.edges_indexed,
+                        report.generation,
+                        report.indexed_commit
+                    );
+                }
+                0
+            }
+            Err(error) => {
+                let _ = writeln!(standard_error, "code-index refresh: {error}");
+                1
+            }
+        },
+        "status" => match workspace_index::status(&root, home) {
+            Ok(status) => {
+                render_status(&status, flags.bool_value("json"), standard_output);
+                0
+            }
+            Err(error) => {
+                let _ = writeln!(standard_error, "code-index status: {error}");
+                1
+            }
+        },
+        "map" => match workspace_index::render_map(&root, home) {
+            Ok(map) => {
+                let _ = writeln!(standard_output, "{map}");
+                0
+            }
+            Err(error) => {
+                let _ = writeln!(standard_error, "code-index map: {error}");
+                1
+            }
+        },
+        other => {
+            let _ = writeln!(standard_error, "code-index: unknown action {other}");
+            1
+        }
+    }
+}
+
 fn run_code_search_search(
     arguments: &[String],
     standard_output: &mut dyn Write,
     standard_error: &mut dyn Write,
 ) -> u8 {
-    let mut flag_set = FlagSet::new("code-search search");
-    flag_set.string_flag("query", "");
-    flag_set.string_flag("workspace-root", "");
-    flag_set.string_flag("path", "");
-    if let Err(error) = flag_set.parse(arguments) {
+    let mut flags = FlagSet::new("code-search search");
+    flags.string_flag("query", "");
+    flags.string_flag("workspace-root", "");
+    flags.string_flag("claude-home", "");
+    flags.string_flag("path", "");
+    flags.string_flag("limit", "20");
+    flags.bool_flag("json", false);
+    if let Err(error) = flags.parse(arguments) {
         let _ = writeln!(standard_error, "{}", error.message);
         return 1;
     }
-    let query = flag_set.string_value("query");
-    let workspace_root = flag_set.string_value("workspace-root");
-    let path_filter = flag_set.string_value("path");
+    let query = flags.string_value("query").trim();
     if query.is_empty() {
-        let _ = writeln!(
-            standard_error,
-            "code-search search: --query required (example: --query \"RunReview owner path\")"
-        );
+        let _ = writeln!(standard_error, "code-search search: --query required");
         return 1;
     }
-    let root = if workspace_root.is_empty() {
-        match resolve_repository_root("") {
-            Ok(path) => path,
-            Err(_) => {
-                let _ = writeln!(
-                    standard_error,
-                    "code-search search: no repository root found"
-                );
-                return 1;
-            }
-        }
-    } else {
-        PathBuf::from(workspace_root)
+    let Some(root) = resolve_root(
+        flags.string_value("workspace-root"),
+        "code-search",
+        standard_error,
+    ) else {
+        return 1;
     };
-    if !root.is_dir() {
-        let _ = writeln!(
-            standard_error,
-            "code-search search: workspace-root not a directory: {}",
-            display_path(&root)
-        );
-        return 1;
-    }
-    let mut matches = Vec::new();
-    search_files_for_query(&root, query, path_filter, &mut matches);
-    if matches.is_empty() {
-        let _ = writeln!(standard_output, "No matches found for query: {query}");
-    } else {
-        for line in &matches {
-            let _ = writeln!(standard_output, "{line}");
+    let limit = match parse_limit(flags.string_value("limit")) {
+        Ok(limit) => limit,
+        Err(error) => {
+            let _ = writeln!(standard_error, "code-search search: {error}");
+            return 1;
         }
+    };
+    let hits = match workspace_index::search(&root, flags.string_value("claude-home"), query, limit)
+    {
+        Ok(hits) => hits,
+        Err(error) => {
+            let _ = writeln!(standard_error, "code-search search: {error}");
+            return 1;
+        }
+    };
+    let path_filter = normalize_path_filter(flags.string_value("path"));
+    let hits: Vec<SearchHit> = hits
+        .into_iter()
+        .filter(|hit| {
+            path_filter.is_empty() || hit.path.to_ascii_lowercase().contains(&path_filter)
+        })
+        .collect();
+    if flags.bool_value("json") {
         let _ = writeln!(
             standard_output,
-            "\nFound {} match{}",
-            matches.len(),
-            if matches.len() == 1 { "" } else { "es" }
+            "{}",
+            serde_json::to_string(&hits_to_json(query, &hits)).unwrap_or_else(|_| "{}".to_string())
         );
+        return 0;
+    }
+    if hits.is_empty() {
+        let _ = writeln!(
+            standard_output,
+            "No indexed matches found for query: {query}"
+        );
+    } else {
+        for hit in &hits {
+            let symbol = if hit.symbol.is_empty() {
+                String::new()
+            } else {
+                format!(" [{}]", hit.symbol)
+            };
+            let snippet = if hit.snippet.is_empty() {
+                String::new()
+            } else {
+                format!(" {}", hit.snippet)
+            };
+            let _ = writeln!(
+                standard_output,
+                "{}:{}-{}{} ({}) score={:.5}{}",
+                hit.path, hit.start_line, hit.end_line, symbol, hit.reason, hit.score, snippet
+            );
+        }
+        let _ = writeln!(standard_output, "\nFound {} indexed match(es)", hits.len());
     }
     0
 }
@@ -105,66 +223,54 @@ fn run_code_search_siblings(
     standard_output: &mut dyn Write,
     standard_error: &mut dyn Write,
 ) -> u8 {
-    let mut flag_set = FlagSet::new("code-search siblings");
-    flag_set.string_flag("query", "");
-    flag_set.string_flag("workspace-root", "");
-    flag_set.bool_flag("json", false);
-    if let Err(error) = flag_set.parse(arguments) {
+    let mut flags = FlagSet::new("code-search siblings");
+    flags.string_flag("query", "");
+    flags.string_flag("workspace-root", "");
+    flags.string_flag("claude-home", "");
+    flags.bool_flag("json", false);
+    if let Err(error) = flags.parse(arguments) {
         let _ = writeln!(standard_error, "{}", error.message);
         return 1;
     }
-    let root = if flag_set.string_value("workspace-root").is_empty() {
-        match resolve_repository_root("") {
-            Ok(path) => path,
-            Err(_) => {
-                let _ = writeln!(
-                    standard_error,
-                    "code-search siblings: no repository root found"
-                );
-                return 1;
-            }
-        }
-    } else {
-        PathBuf::from(flag_set.string_value("workspace-root"))
-    };
-    if !root.is_dir() {
-        let _ = writeln!(
-            standard_error,
-            "code-search siblings: workspace-root not a directory: {}",
-            display_path(&root)
-        );
+    let Some(root) = resolve_root(
+        flags.string_value("workspace-root"),
+        "code-search siblings",
+        standard_error,
+    ) else {
         return 1;
-    }
-
-    let explicit = flag_set.string_value("query").trim().to_string();
-    let queries = if !explicit.is_empty() {
-        vec![explicit]
-    } else {
+    };
+    let explicit = flags.string_value("query").trim().to_string();
+    let queries = if explicit.is_empty() {
         queries_from_git_diff(&root)
+    } else {
+        vec![explicit]
     };
     if queries.is_empty() {
         let _ = writeln!(
             standard_error,
-            "code-search siblings: no --query and no git diff tokens. Pass --query with the bug shape (identifier, string, or call)."
+            "code-search siblings: no query or git-diff tokens"
         );
         return 1;
     }
-
     let changed = changed_paths_from_git(&root);
     let mut sibling_hits = Vec::new();
     for query in &queries {
-        let mut hits = Vec::new();
-        search_files_for_query(&root, query, "", &mut hits);
+        let hits =
+            match workspace_index::search(&root, flags.string_value("claude-home"), query, 80) {
+                Ok(hits) => hits,
+                Err(error) => {
+                    let _ = writeln!(standard_error, "code-search siblings: {error}");
+                    return 1;
+                }
+            };
         for hit in hits {
-            let file = hit.split(':').next().unwrap_or("");
-            let file_norm = file.replace('\\', "/");
-            let in_changed = changed.iter().any(|path| {
-                let norm = path.replace('\\', "/");
-                file_norm == norm || file_norm.ends_with(&norm) || norm.ends_with(&file_norm)
-            });
-            if !in_changed {
-                sibling_hits.push(format!("[{query}] {hit}"));
+            if changed.iter().any(|path| path == &hit.path) {
+                continue;
             }
+            sibling_hits.push(format!(
+                "[{query}] {}:{}-{} ({}) {}",
+                hit.path, hit.start_line, hit.end_line, hit.reason, hit.snippet
+            ));
             if sibling_hits.len() >= 80 {
                 break;
             }
@@ -173,51 +279,119 @@ fn run_code_search_siblings(
             break;
         }
     }
-
     crate::runner::hook_lifecycle::record_completeness_gate_clear_for(&root);
-
-    if flag_set.bool_value("json") {
+    if flags.bool_value("json") {
         let payload = serde_json::json!({
             "queries": queries,
             "changed": changed,
             "siblingCount": sibling_hits.len(),
             "siblings": sibling_hits,
         });
-        let _ = writeln!(
-            standard_output,
-            "{}",
-            serde_json::to_string(&payload).unwrap_or_else(|_| "{}".into())
-        );
+        let _ = writeln!(standard_output, "{payload}");
         return 0;
     }
-
     let _ = writeln!(standard_output, "code-search siblings");
     let _ = writeln!(standard_output, "queries: {}", queries.join(", "));
-    if changed.is_empty() {
-        let _ = writeln!(standard_output, "changed: (none from git diff)");
+    let changed_display = if changed.is_empty() {
+        "(none from git diff)".to_string()
     } else {
-        let _ = writeln!(standard_output, "changed: {}", changed.join(", "));
-    }
+        changed.join(", ")
+    };
+    let _ = writeln!(standard_output, "changed: {changed_display}");
     if sibling_hits.is_empty() {
-        let _ = writeln!(
-            standard_output,
-            "siblings: none outside the changed set. Still confirm edge cases (install/update/uninstall, other hosts, tests)."
-        );
+        let _ = writeln!(standard_output, "siblings: none outside the changed set.");
     } else {
         let _ = writeln!(
             standard_output,
-            "siblings: {} hit(s) outside the changed set — fix each or mark out of scope:",
+            "siblings: {} indexed hit(s) outside the changed set:",
             sibling_hits.len()
         );
         for hit in &sibling_hits {
             let _ = writeln!(standard_output, "  {hit}");
         }
     }
-    let _ = writeln!(
-        standard_output,
-        "account: a one-site fix is unfinished. Same shape on other hosts, CLIs, tests, and install/uninstall paths must be handled in this turn."
-    );
     0
+}
+
+fn resolve_root(
+    raw: &str,
+    label: &str,
+    standard_error: &mut dyn Write,
+) -> Option<std::path::PathBuf> {
+    let root = if raw.trim().is_empty() {
+        match resolve_repository_root("") {
+            Ok(root) => root,
+            Err(_) => {
+                let _ = writeln!(standard_error, "{label}: no repository root found");
+                return None;
+            }
+        }
+    } else {
+        std::path::PathBuf::from(raw)
+    };
+    if !root.is_dir() {
+        let _ = writeln!(
+            standard_error,
+            "{label}: workspace root is not a directory: {}",
+            root.display()
+        );
+        None
+    } else {
+        Some(root)
+    }
+}
+
+fn render_status(status: &IndexStatus, json: bool, output: &mut dyn Write) {
+    if json {
+        let payload = serde_json::json!({
+            "databasePath": status.database_path,
+            "workspaceRoot": status.workspace_root,
+            "indexedCommit": status.indexed_commit,
+            "generation": status.generation,
+            "files": status.file_count,
+            "symbols": status.symbol_count,
+            "chunks": status.chunk_count,
+            "edges": status.edge_count,
+            "stale": status.stale,
+        });
+        let _ = writeln!(output, "{payload}");
+    } else {
+        let _ = writeln!(
+            output,
+            "code-index status: files={} symbols={} chunks={} edges={} generation={} stale={} commit={} db={}",
+            status.file_count,
+            status.symbol_count,
+            status.chunk_count,
+            status.edge_count,
+            status.generation,
+            status.stale,
+            status.indexed_commit,
+            status.database_path.display()
+        );
+    }
+}
+
+fn hits_to_json(query: &str, hits: &[SearchHit]) -> serde_json::Value {
+    serde_json::json!({
+        "query": query,
+        "count": hits.len(),
+        "matches": hits,
+    })
+}
+
+fn parse_limit(raw: &str) -> Result<usize, String> {
+    let limit = raw
+        .trim()
+        .parse::<usize>()
+        .map_err(|_| "limit must be a positive integer".to_string())?;
+    if limit == 0 {
+        return Err("limit must be a positive integer".to_string());
+    }
+    Ok(limit.min(50))
+}
+
+fn normalize_path_filter(path_filter: &str) -> String {
+    path_filter.replace('\\', "/").to_ascii_lowercase()
 }
 
 fn queries_from_git_diff(root: &Path) -> Vec<String> {
@@ -227,9 +401,14 @@ fn queries_from_git_diff(root: &Path) -> Vec<String> {
 fn git_added_text(root: &Path) -> String {
     let mut text = String::new();
     for extra in [&[][..], &["--cached"][..]] {
-        let mut cmd = std::process::Command::new("git");
-        cmd.arg("-C").arg(root).arg("diff").arg("-U0").args(extra);
-        if let Ok(output) = cmd.output() {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .arg("diff")
+            .arg("-U0")
+            .args(extra)
+            .output();
+        if let Ok(output) = output {
             text.push_str(&String::from_utf8_lossy(&output.stdout));
         }
     }
@@ -237,11 +416,12 @@ fn git_added_text(root: &Path) -> String {
 }
 
 fn changed_paths_from_git(root: &Path) -> Vec<String> {
-    let mut cmd = std::process::Command::new("git");
-    cmd.arg("-C")
+    let output = std::process::Command::new("git")
+        .arg("-C")
         .arg(root)
-        .args(["diff", "--name-only", "HEAD"]);
-    let Ok(output) = cmd.output() else {
+        .args(["diff", "--name-only", "HEAD"])
+        .output();
+    let Ok(output) = output else {
         return Vec::new();
     };
     String::from_utf8_lossy(&output.stdout)
@@ -265,9 +445,8 @@ fn distinctive_tokens(diff: &str) -> Vec<String> {
         if !trimmed.starts_with('+') || trimmed.starts_with("+++") {
             continue;
         }
-        let body = &trimmed[1..];
         let mut current = String::new();
-        for ch in body.chars() {
+        for ch in trimmed[1..].chars() {
             if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
                 current.push(ch);
             } else if !current.is_empty() {
@@ -284,10 +463,7 @@ fn distinctive_tokens(diff: &str) -> Vec<String> {
 }
 
 fn push_token(counts: &mut Vec<(String, usize)>, raw: &str, stop: &[&str]) {
-    if raw.len() < 5 {
-        return;
-    }
-    if raw.bytes().all(|b| b.is_ascii_digit()) {
+    if raw.len() < 5 || raw.bytes().all(|byte| byte.is_ascii_digit()) {
         return;
     }
     let lower = raw.to_ascii_lowercase();
@@ -301,171 +477,6 @@ fn push_token(counts: &mut Vec<(String, usize)>, raw: &str, stop: &[&str]) {
     }
 }
 
-fn search_files_for_query(root: &Path, query: &str, path_filter: &str, matches: &mut Vec<String>) {
-    let mut candidates = Vec::new();
-    collect_search_candidates(root, &mut candidates);
-    let normalized_filter = normalize_path_filter(path_filter);
-    for path in candidates {
-        if !path_matches_filter(&path, root, &normalized_filter) {
-            continue;
-        }
-        let text = match fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(_) => continue,
-        };
-        for (line_index, line) in text.lines().enumerate() {
-            if line.contains(query) {
-                let relative_path = path.strip_prefix(root).unwrap_or(&path);
-                matches.push(format!(
-                    "{}:{}:{}",
-                    display_path(relative_path),
-                    line_index + 1,
-                    line.trim()
-                ));
-                if matches.len() >= 1000 {
-                    return;
-                }
-            }
-        }
-    }
-}
-
-/// Normalize path filters so `rust/crates/keel` matches Windows `rust\crates\keel`.
-fn normalize_path_filter(path_filter: &str) -> String {
-    path_filter.replace('\\', "/")
-}
-
-/// Cross-platform path filter: compare with `/` separators against relative and absolute forms.
-fn path_matches_filter(path: &Path, root: &Path, normalized_filter: &str) -> bool {
-    if normalized_filter.is_empty() {
-        return true;
-    }
-    let relative = path.strip_prefix(root).unwrap_or(path);
-    let relative_norm = relative.to_string_lossy().replace('\\', "/");
-    let absolute_norm = path.to_string_lossy().replace('\\', "/");
-    relative_norm.contains(normalized_filter) || absolute_norm.contains(normalized_filter)
-}
-
-fn collect_search_candidates(root: &Path, candidates: &mut Vec<PathBuf>) {
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(current) = stack.pop() {
-        if candidates.len() >= 10000 {
-            return;
-        }
-        let entries = match fs::read_dir(&current) {
-            Ok(entries) => entries,
-            Err(_) => continue,
-        };
-        for entry_result in entries.flatten() {
-            let path = entry_result.path();
-            let name = entry_result.file_name().to_string_lossy().to_string();
-            if should_skip_search_entry(&name, &path) {
-                continue;
-            }
-            // Use the dir entry's file type, which does NOT follow symlinks, and
-            // skip any symlink. is_dir()/is_file() follow links, so a symlink
-            // pointing outside the workspace would otherwise let the search
-            // recurse into and read the contents of external directories.
-            let Ok(file_type) = entry_result.file_type() else {
-                continue;
-            };
-            if file_type.is_symlink() {
-                continue;
-            }
-            if file_type.is_dir() {
-                stack.push(path);
-            } else if file_type.is_file() && !is_probably_binary(&path) {
-                candidates.push(path);
-            }
-        }
-    }
-}
-
-fn should_skip_search_entry(name: &str, path: &Path) -> bool {
-    if name.starts_with('.') && name != ".github" {
-        return true;
-    }
-    if path.is_dir() {
-        matches!(
-            name,
-            "node_modules"
-                | ".venv"
-                | "venv"
-                | "env"
-                | "vendor"
-                | "target"
-                | "target-test"
-                | ".gradle"
-                | "bin"
-                | "obj"
-                | "pkg"
-                | ".git"
-                | ".vscode"
-                | ".idea"
-                | "__pycache__"
-                | "dist"
-                | "build"
-                | "tmp"
-                | "coverage"
-                | ".next"
-                | ".nuxt"
-                | ".cache"
-                // Local research / comparison clones (gitignored, not product source).
-                | "hermes-agent"
-                | "karpathy-skills-cmp"
-                | "agent-tools"
-                | "terminals"
-                | "mcps"
-        )
-    } else {
-        name.ends_with(".log")
-            || name.ends_with(".lock")
-            || name.ends_with(".min.js")
-            || name.ends_with(".min.css")
-            || name.ends_with(".map")
-    }
-}
-
-fn is_probably_binary(path: &Path) -> bool {
-    if let Some(extension) = path.extension() {
-        let extension_str = extension.to_string_lossy();
-        matches!(
-            extension_str.as_ref(),
-            "png"
-                | "jpg"
-                | "jpeg"
-                | "gif"
-                | "bmp"
-                | "ico"
-                | "svg"
-                | "webp"
-                | "mp4"
-                | "webm"
-                | "mp3"
-                | "wav"
-                | "ogg"
-                | "pdf"
-                | "zip"
-                | "tar"
-                | "gz"
-                | "7z"
-                | "rar"
-                | "exe"
-                | "dll"
-                | "so"
-                | "dylib"
-                | "wasm"
-                | "ttf"
-                | "woff"
-                | "woff2"
-                | "eot"
-                | "otf"
-        )
-    } else {
-        false
-    }
-}
-
 fn is_help_argument(argument: &str) -> bool {
     argument == "--help" || argument == "-h" || argument == "help"
 }
@@ -473,123 +484,25 @@ fn is_help_argument(argument: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     #[test]
-    fn path_filter_matches_forward_and_backslash_forms() {
-        let root = PathBuf::from("workspace");
-        let path = root
-            .join("rust")
-            .join("crates")
-            .join("keel")
-            .join("src")
-            .join("main.rs");
-        assert!(path_matches_filter(
-            &path,
-            &root,
-            &normalize_path_filter("rust/crates/keel")
-        ));
-        assert!(path_matches_filter(
-            &path,
-            &root,
-            &normalize_path_filter(r"rust\crates\keel")
-        ));
-        assert!(!path_matches_filter(
-            &path,
-            &root,
-            &normalize_path_filter("docs/only")
-        ));
-    }
-
-    #[test]
-    fn normalize_path_filter_unifies_separators() {
+    fn path_filter_normalizes_windows_separators() {
         assert_eq!(
             normalize_path_filter(r"rust\crates\keel"),
             "rust/crates/keel"
         );
-        assert_eq!(
-            normalize_path_filter("rust/crates/keel"),
-            "rust/crates/keel"
-        );
     }
 
     #[test]
-    fn skip_list_covers_research_clones() {
-        let root =
-            std::env::temp_dir().join(format!("keel-code-search-skip-{}", std::process::id()));
-        // Best-effort cleanup of a prior crashed run; ignore missing dir.
-        fs::remove_dir_all(&root).ok();
-        fs::create_dir_all(root.join("hermes-agent")).expect("create hermes-agent");
-        fs::create_dir_all(root.join("karpathy-skills-cmp")).expect("create karpathy");
-        fs::create_dir_all(root.join("target-test")).expect("create target-test");
-        assert!(should_skip_search_entry(
-            "hermes-agent",
-            &root.join("hermes-agent")
-        ));
-        assert!(should_skip_search_entry(
-            "karpathy-skills-cmp",
-            &root.join("karpathy-skills-cmp")
-        ));
-        assert!(should_skip_search_entry(
-            "target-test",
-            &root.join("target-test")
-        ));
-        for extra in ["agent-tools", "terminals", "mcps"] {
-            fs::create_dir_all(root.join(extra)).expect("create extra skip dir");
-            assert!(
-                should_skip_search_entry(extra, &root.join(extra)),
-                "must skip {extra}"
-            );
-        }
-        fs::remove_dir_all(&root).expect("cleanup temp skip-list fixture");
+    fn distinctive_tokens_ignore_common_syntax() {
+        let tokens =
+            distinctive_tokens("+ pub fn resolve_workspace_index() {}\n+ let value = 1;\n");
+        assert_eq!(tokens, vec!["resolve_workspace_index".to_string()]);
     }
 
     #[test]
-    fn distinctive_tokens_keeps_bug_shape_not_stopwords() {
-        let diff = "\
-+    emit_pretool_deny(reason);\n\
-+    return search_replace;\n\
-+    let value = true;\n";
-        let tokens = distinctive_tokens(diff);
-        assert!(
-            tokens
-                .iter()
-                .any(|token| token == "emit_pretool_deny" || token == "search_replace"),
-            "tokens={tokens:?}"
-        );
-        assert!(!tokens
-            .iter()
-            .any(|token| token == "return" || token == "true"));
-    }
-
-    #[test]
-    fn siblings_lists_the_other_copy() {
-        let root = std::env::temp_dir().join(format!(
-            "keel-siblings-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        fs::remove_dir_all(&root).ok();
-        fs::create_dir_all(root.join("src")).expect("src");
-        fs::write(root.join("src/one.rs"), "fn unique_sibling_token() {}\n").unwrap();
-        fs::write(root.join("src/two.rs"), "fn unique_sibling_token() {}\n").unwrap();
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        let code = run_code_search_siblings(
-            &[
-                format!("--workspace-root={}", root.display()),
-                "--query=unique_sibling_token".into(),
-            ],
-            &mut stdout,
-            &mut stderr,
-        );
-        let text = String::from_utf8_lossy(&stdout);
-        assert_eq!(code, 0, "stderr={}", String::from_utf8_lossy(&stderr));
-        assert!(text.contains("unique_sibling_token"), "{text}");
-        assert!(text.contains("siblings:"), "{text}");
-        fs::remove_dir_all(&root).ok();
+    fn parse_limit_is_bounded() {
+        assert_eq!(parse_limit("100").expect("limit"), 50);
+        assert!(parse_limit("0").is_err());
     }
 }

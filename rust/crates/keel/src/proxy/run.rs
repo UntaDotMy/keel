@@ -527,7 +527,11 @@ fn shell_join(arguments: &[String]) -> String {
                         )
                 })
             {
-                format!("'{}'", argument.replace('\'', "'\\''"))
+                if cfg!(windows) {
+                    crate::runner::shell_rewrite::powershell_quote(argument)
+                } else {
+                    format!("'{}'", argument.replace('\'', "'\\''"))
+                }
             } else {
                 argument.to_string()
             }
@@ -886,6 +890,22 @@ mod tests {
             assert_eq!(program, "bash");
             assert_eq!(args[0], "-lc");
             assert_eq!(args[1], "cargo test --workspace");
+        }
+    }
+    #[test]
+    fn shell_join_quotes_windows_arguments_for_powershell() {
+        let rendered = shell_join(&[
+            "Get-Content".to_string(),
+            r"C:\Program Files\keel\settings.json".to_string(),
+        ]);
+        if cfg!(windows) {
+            assert_eq!(
+                rendered,
+                "Get-Content 'C:\\Program Files\\keel\\settings.json'"
+            );
+            assert!(!rendered.contains("'\\''"));
+        } else {
+            assert!(rendered.contains("'C:\\Program Files\\keel\\settings.json'"));
         }
     }
 

@@ -1200,10 +1200,8 @@ fn run_graph(
     }
 }
 
-/// retrieve: a cross-family read. Searches research-cache answers and entity
-/// summaries for the query terms and returns the merged hits. This is the
-/// honest, lexical version of the planned semantic retrieve — it reuses the
-/// same stores rather than introducing a vector index.
+/// Retrieve durable memory through the scoped FTS5 chunk index. Results include
+/// source paths, line evidence, ranking reasons, and the indexed retrieval stage.
 fn run_retrieve(
     command_group: &str,
     arguments: &[String],
@@ -1219,64 +1217,65 @@ fn run_retrieve(
         let _ = writeln!(standard_error, "{}", error.message);
         return 1;
     }
-    let mut query = flags.string_value("query").trim().to_lowercase();
+    let mut query = flags.string_value("query").trim().to_string();
     if query.is_empty() && !flags.positional.is_empty() {
-        query = flags.positional.join(" ").to_lowercase();
+        query = flags.positional.join(" ");
     }
-    if query.is_empty() {
+    if query.trim().is_empty() {
         let _ = writeln!(standard_error, "{label}: --query is required");
         return 1;
     }
     let Some(home) = resolve_home(flags.string_value("claude-home"), &label, standard_error) else {
         return 1;
     };
-    let terms: Vec<String> = query.split_whitespace().map(|s| s.to_string()).collect();
-    let mut hits: Vec<(String, Value)> = Vec::new();
-    for (family, text_fields) in [
-        ("research-cache", vec!["question", "answer"]),
-        ("entities", vec!["name", "summary"]),
-    ] {
-        let store = family_store(&home, command_group, family);
-        if let Ok(records) = store.list_records() {
-            for (_, record) in records {
-                let haystack = text_fields
-                    .iter()
-                    .map(|key| field(&record, key).unwrap_or(""))
-                    .collect::<Vec<_>>()
-                    .join(" ")
-                    .to_lowercase();
-                if terms.iter().all(|term| haystack.contains(term)) {
-                    hits.push((family.to_string(), record_to_value(&record)));
-                }
-            }
+    let result = match crate::utility::recall::search_recall_index(&home, &query, 20, None) {
+        Ok(Some(result)) => result,
+        Ok(None) => {
+            let _ = writeln!(standard_error, "{label}: query has no searchable terms");
+            return 1;
         }
-    }
+        Err(error) => {
+            let _ = writeln!(standard_error, "{label}: {error}");
+            return 1;
+        }
+    };
     if flags.bool_value("json") {
-        let payload = Value::Object(vec![
-            ("count".into(), Value::Number(hits.len().to_string())),
-            (
-                "hits".into(),
-                Value::Array(
-                    hits.iter()
-                        .map(|(family, value)| {
-                            Value::Object(vec![
-                                ("family".into(), Value::String(family.clone())),
-                                ("record".into(), value.clone()),
-                            ])
-                        })
-                        .collect(),
-                ),
-            ),
-        ]);
-        return render_json(standard_output, standard_error, &payload);
+        let hits = result
+            .hits
+            .iter()
+            .map(|hit| {
+                Value::Object(vec![
+                    ("path".into(), Value::String(hit.absolute_path.clone())),
+                    ("line".into(), Value::Number(hit.line.to_string())),
+                    ("score".into(), Value::Number(format!("{:.4}", hit.score))),
+                    ("snippet".into(), Value::String(hit.snippet.clone())),
+                ])
+            })
+            .collect();
+        return render_json(
+            standard_output,
+            standard_error,
+            &Value::Object(vec![
+                ("query".into(), Value::String(query)),
+                ("stage".into(), Value::String(result.stage.to_string())),
+                ("count".into(), Value::Number(result.hits.len().to_string())),
+                ("hits".into(), Value::Array(hits)),
+            ]),
+        );
     }
     let _ = writeln!(
         standard_output,
-        "{label}: {} hit(s) for \"{query}\"",
-        hits.len()
+        "{label}: {} hit(s) for \"{}\" stage={}",
+        result.hits.len(),
+        query,
+        result.stage
     );
-    for (family, _) in &hits {
-        let _ = writeln!(standard_output, "  [{family}] match");
+    for hit in &result.hits {
+        let _ = writeln!(
+            standard_output,
+            "  {}:{} score={:.4} {} {}",
+            hit.absolute_path, hit.line, hit.score, hit.snippet, result.stage
+        );
     }
     0
 }

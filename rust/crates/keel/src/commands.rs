@@ -142,6 +142,9 @@ impl Application {
             "code-search" => {
                 utility::run_code_search_command(command_arguments, standard_output, standard_error)
             }
+            "code-index" => {
+                utility::run_code_index_command(command_arguments, standard_output, standard_error)
+            }
             "code-graph" => {
                 utility::run_code_graph_command(command_arguments, standard_output, standard_error)
             }
@@ -276,16 +279,10 @@ impl Application {
         0
     }
 
-    /// Compile-time feature set of THIS binary: `semantic` when built with the
-    /// `semantic` feature (vector recall via the embedded BERT model), else
-    /// `standard`. Surfaced in `version` so operators can tell which binary is
-    /// installed — the silent semantic<->standard swap was a real support trap.
+    /// The binary has one deterministic feature set after the semantic build
+    /// removal. Keeping this explicit prevents stale installation metadata.
     fn build_feature_set() -> &'static str {
-        if cfg!(feature = "semantic") {
-            "semantic"
-        } else {
-            "standard"
-        }
+        "standard"
     }
 
     fn run_platform_command(

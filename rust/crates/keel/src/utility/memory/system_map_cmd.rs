@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use crate::args::FlagSet;
 use crate::runtime::{display_path, resolve_claude_home, resolve_repository_root};
-use crate::utility::system_map::{render_system_map, sanitize_key};
+use crate::utility::{system_map::sanitize_key, workspace_index};
 
 use super::shared::is_help_argument;
 
@@ -86,7 +86,7 @@ pub fn refresh_system_map(
     let system_map_path = reference_directory.join("SYSTEM_MAP.md");
     fs::create_dir_all(&reference_directory)
         .map_err(|error| format!("create {}: {error}", display_path(&reference_directory)))?;
-    let map_content = render_system_map(workspace_root);
+    let map_content = workspace_index::render_map(workspace_root, &claude_home.to_string_lossy())?;
     crate::runtime::write_text(&system_map_path, &map_content)
         .map_err(|error| format!("write {}: {error}", display_path(&system_map_path)))?;
     Ok(system_map_path)

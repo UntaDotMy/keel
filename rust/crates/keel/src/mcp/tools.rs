@@ -143,7 +143,7 @@ fn tools_list_catalog() -> Value {
             },
             {
                 "name": "system_map",
-                "description": "Call this BEFORE any claim about the current repository's structure or layout (\"what is this project\", \"how is this organized\", \"where does X live\") instead of guessing or reading files blind. Returns the workspace SYSTEM_MAP.md (the auto-refreshed copy under ~/.claude/memories/workspaces/<slug>/reference/SYSTEM_MAP.md, falling back to a freshly rendered map).",
+                "description": "Call this BEFORE any claim about the current repository's structure or layout (\"what is this project\", \"how is it organized\", \"where does X live\") instead of guessing or reading files blind. Returns the indexed SYSTEM_MAP.md generated from the persistent code-index generation and commit evidence.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -153,7 +153,7 @@ fn tools_list_catalog() -> Value {
             },
             {
                 "name": "run_command",
-                "description": "Prefer this over a raw shell call for noisy commands (test, build, lint, logs, search): it runs the command through the compaction proxy so compacted high-signal output enters context instead of the raw stream. Three mutually-exclusive input forms: (1) argv — program plus argument array, executed DIRECTLY with NO shell: use this whenever possible, it can never misquote or hit the wrong shell; (2) script + shell — a script string run through the NAMED shell (powershell|cmd|bash): the shell is explicit, never guessed; (3) command — legacy single string, run through the platform default shell. Output is always neutralized for prompt-injection before reaching the model. Long commands: pass wait:false to run in the background and get a commandId to poll with command_output / kill with command_kill.",
+                "description": "Run one command through the Rust-native execution owner. Prefer argv for direct execution, script+shell for an explicit PowerShell/cmd/bash script, and command only when shell syntax is required. Every child is timeout-bounded, stdout/stderr are drained, and timeout cleanup terminates the process tree. Output is neutralized for prompt injection.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -184,7 +184,7 @@ fn tools_list_catalog() -> Value {
             },
             {
                 "name": "command_kill",
-                "description": "Stop a background command started with run_command wait:false. Kills the process and reports the exit code. On Windows the whole process group dies together (Job Object), so a killed shell wrapper does not orphan the work it spawned. Safe to call on an already-finished command: it reports killed:false with the final exit code.",
+                "description": "Stop a background command started with run_command wait:false. Terminates the complete process tree and reports the exit code or cleanup error. Safe to call on an already-finished command.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -317,13 +317,12 @@ fn tools_list_catalog() -> Value {
             },
             {
                 "name": "review",
-                "description": "MCP-safe review is `gates` only. pre-commit (fmt+clippy) and pre-pr (plus cargo test) are CLI-only — they exceed the host ~30s budget.",
+                "description": "MCP review exposes the fast `gates` check. Pass repo_test_policy=skip explicitly because full cargo tests belong to CLI `review pre-pr` and exceed the host tool deadline.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "action": { "type": "string", "enum": ["pre-commit", "pre-pr", "gates"], "description": "Review action to perform." },
-                        "base_ref": { "type": "string", "description": "Base ref for diff comparison (e.g. \"origin/feat\")." },
                         "format": { "type": "string", "description": "Output format: json, markdown, or compact." },
+                        "repo_test_policy": { "type": "string", "enum": ["run", "skip"], "description": "MCP gates must use skip to stay inside the host deadline; full tests belong to CLI pre-pr." },
                         "repo_root": { "type": "string", "description": "Repository root path. Defaults to cwd." }
                     },
                     "required": ["action"]
@@ -446,7 +445,7 @@ fn tools_list_catalog() -> Value {
             },
             {
                 "name": "code_search",
-                "description": "Lexical substring search of the workspace via keel code-search (not embedding/semantic search). action=search (default) returns matching file:line:snippet rows. action=siblings scans the class after a fix or implement: query or tokens from the current git diff, lists every other in-repo copy, and clears the completeness gate. A one-site change is unfinished.",
+                "description": "Persistent deterministic workspace index over files, symbols, chunks, paths, and verified relationships. action=search returns ranked file/symbol/line evidence from indexed retrieval. action=siblings runs the indexed completeness scan after a fix or implement.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -454,6 +453,21 @@ fn tools_list_catalog() -> Value {
                         "query": { "type": "string", "description": "Search query / bug shape. Required for search; optional for siblings (falls back to git-diff tokens)." },
                         "format": { "type": "string", "description": "Output format: json or compact." }
                     }
+                }
+            },
+            {
+                "name": "code_index",
+                "description": "Build, inspect, or render the persistent deterministic workspace index used by code search and SYSTEM_MAP.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["refresh", "status", "map"], "description": "Index operation. Defaults to refresh." },
+                        "workspace_root": { "type": "string", "description": "Workspace root. Defaults to cwd." },
+                        "claude_home": { "type": "string", "description": "Harness home for the per-workspace index." },
+                        "force": { "type": "boolean", "description": "Re-index every eligible file." },
+                        "format": { "type": "string", "description": "Output format: json or compact." }
+                    },
+                    "required": ["action"]
                 }
             },
             {
@@ -689,6 +703,7 @@ const MCP_TOOL_NAMES: &[&str] = &[
     "session",
     "doctor",
     "code_search",
+    "code_index",
     "flow",
     "code_graph",
     "learn",
@@ -734,6 +749,7 @@ fn mcp_tool_handler(name: &str) -> Option<McpToolHandler> {
         "session" => tool_session,
         "doctor" => tool_doctor,
         "code_search" => tool_code_search,
+        "code_index" => tool_code_index,
         "flow" => tool_flow,
         "code_graph" => tool_code_graph,
         "learn" => tool_learn,
@@ -994,7 +1010,8 @@ fn tool_run_command(arguments: &Value) -> Result<String, String> {
                     .to_string(),
             );
         }
-        // Legacy single-string form: platform default shell, as before.
+        // Command form intentionally uses the platform-default shell because
+        // no explicit shell was supplied.
         let (program, args) = crate::runtime::platform_shell_command_parts(&command);
         (command.clone(), program, args)
     } else {
@@ -1029,30 +1046,8 @@ fn tool_run_command(arguments: &Value) -> Result<String, String> {
         }
     }
 
-    // Token saver stays in-process (`keel run`) so MCP never re-execs this
-    // binary and never hits the host tool budget from a nested serve.
-    if wait
-        && cwd
-            .as_ref()
-            .map(|path| path.as_os_str().is_empty())
-            .unwrap_or(true)
-    {
-        let mut run_args = vec!["--".to_string(), program.clone()];
-        run_args.extend(shell_args.iter().cloned());
-        let previous_hook = env::var("CLAUDE_SKILLS_HOOK").ok();
-        env::set_var("CLAUDE_SKILLS_HOOK", "mcp");
-        let result = run_inprocess_cli(&format!("keel run -- {label}"), |out, err| {
-            crate::runner::run_run_command(&run_args, out, err)
-        });
-        match previous_hook {
-            Some(value) => env::set_var("CLAUDE_SKILLS_HOOK", value),
-            None => env::remove_var("CLAUDE_SKILLS_HOOK"),
-        }
-        return result;
-    }
-
-    // Background jobs, or a cwd that must not mutate the MCP process, still
-    // spawn `keel run` (never `keel mcp`).
+    // Every command runs in a child process. This keeps timeout and process-tree
+    // cleanup authoritative; in-process execution could outlive the MCP worker.
     let executable =
         env::current_exe().map_err(|error| format!("run_command: locate self: {error}"))?;
     let mut child = Command::new(&executable);
@@ -1372,7 +1367,8 @@ fn tool_command_kill(arguments: &Value) -> Result<String, String> {
             // killing only it would orphan the real work it spawned. The
             // wrapper was started in a kill-on-close Job Object (Windows) or
             // its own process group (Unix), so the tree is reachable.
-            kill_process_tree(&mut child);
+            crate::runtime::terminate_process_tree(&mut child)
+                .map_err(|error| format!("command_kill: {error}"))?;
             let status = child.wait();
             let code = status.ok().and_then(|status| status.code()).unwrap_or(-1);
             let mut exit_guard = entry
@@ -1405,52 +1401,6 @@ fn tool_command_kill(arguments: &Value) -> Result<String, String> {
             mcp_json_compact(&payload).map_err(|error| format!("command_kill: {error}"))
         }
     }
-}
-
-/// Kill a child process AND everything it spawned, so a killed shell wrapper
-/// never orphans the real work (e.g. a `flutter analyze` it launched).
-///
-/// Windows: `taskkill /T /F /PID <root>` force-terminates the root and all
-/// its descendants by walking the process tree — no FFI needed, available on
-/// every Windows edition. Direct `Child::kill` is the fallback if taskkill is
-/// somehow unavailable.
-/// Unix: the child runs in its own process group (spawned below via
-/// `pre_exec` setsid), so `kill(-pgid, SIGKILL)` reaches the whole tree.
-#[cfg(windows)]
-fn kill_process_tree(child: &mut std::process::Child) {
-    let pid = child.id();
-    let taskkill = Command::new("taskkill")
-        .args(["/T", "/F", "/PID", &pid.to_string()])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-    if taskkill.is_err() {
-        // taskkill unavailable: degrade to killing the root process only.
-        let _ = child.kill();
-    }
-}
-
-#[cfg(unix)]
-fn kill_process_tree(child: &mut std::process::Child) {
-    let pid = child.id() as i32;
-    // Negative pid targets the process group; the child's pgid == its pid
-    // because spawn_background_command made it a group leader via setsid.
-    // (No `unsafe` here: the FFI is wrapped inside libc_kill_process_group.)
-    let group_kill = libc_kill_process_group(pid);
-    if group_kill != 0 {
-        // Process group gone or not a leader: fall back to the root.
-        let _ = child.kill();
-    }
-}
-
-#[cfg(unix)]
-fn libc_kill_process_group(pid: i32) -> i32 {
-    extern "C" {
-        fn kill(pid: i32, sig: i32) -> i32;
-    }
-    // SIGKILL = 9.
-    unsafe { kill(-pid, 9) }
 }
 
 #[cfg(unix)]
@@ -1944,14 +1894,26 @@ fn run_keel_subcommand<S: AsRef<str>>(
     subcommand: &str,
     extra_args: &[S],
 ) -> Result<String, String> {
-    if matches!(subcommand, "mcp" | "cli") {
-        return Err(format!(
-            "{subcommand}: not available through MCP (would re-enter the server)"
-        ));
-    }
     let mut args = vec![subcommand.to_string()];
-    for arg in extra_args {
-        args.push(arg.as_ref().to_string());
+    args.extend(extra_args.iter().map(|arg| arg.as_ref().to_string()));
+    if subcommand == "review" && extra_args.iter().any(|arg| arg.as_ref() == "gates") {
+        let executable =
+            env::current_exe().map_err(|error| format!("review gates: locate self: {error}"))?;
+        let result = crate::runtime::run_command_with_timeout(
+            &executable.to_string_lossy(),
+            &args,
+            None,
+            mcp_child_timeout(),
+        )
+        .map_err(|error| format!("review gates: {error}"))?;
+        let stdout = String::from_utf8_lossy(&result.stdout);
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        return Ok(render_run_command_report(
+            &format!("keel {}", args.join(" ")),
+            result.code,
+            &stdout,
+            &stderr,
+        ));
     }
     run_inprocess_cli(&format!("keel {}", args.join(" ")), |out, err| {
         crate::commands::Application::new(env!("CARGO_PKG_VERSION")).run(&args, out, err)
@@ -2088,7 +2050,7 @@ fn run_command_with_timeout_stdin(
             Ok(Some(status)) => break status,
             Ok(None) => {
                 if Instant::now() >= deadline {
-                    let _ = child.kill();
+                    let kill_error = crate::runtime::terminate_process_tree(&mut child).err();
                     let _ = child.wait();
                     let _ = stdout_handle.join();
                     let _ = stderr_handle.join();
@@ -2097,15 +2059,18 @@ fn run_command_with_timeout_stdin(
                     } else {
                         ""
                     };
+                    let suffix = kill_error
+                        .map(|error| format!("; process-tree cleanup failed: {error}"))
+                        .unwrap_or_default();
                     return Err(format!(
-                        "{label}: timed out after {}s{async_hint} (set KEEL_MCP_TOOL_TIMEOUT_SECS to raise; kill orphan `keel mcp serve` processes if tools keep hanging)",
+                        "{label}: timed out after {}s{async_hint}{suffix}; process tree was terminated",
                         timeout.as_secs()
                     ));
                 }
                 std::thread::sleep(Duration::from_millis(25));
             }
             Err(error) => {
-                let _ = child.kill();
+                let _ = crate::runtime::terminate_process_tree(&mut child); // intentional tree cleanup after wait failure
                 return Err(format!("{label}: wait: {error}"));
             }
         }
@@ -2469,6 +2434,14 @@ fn tool_review(arguments: &Value) -> Result<String, String> {
         .get("action")
         .and_then(Value::as_str)
         .ok_or_else(|| "review: missing action (pre-commit|pre-pr|gates)".to_string())?;
+    if action == "gates" && optional_string_arg(arguments, "repo_test_policy") != Some("skip") {
+        return Err(
+            "review gates: set repo_test_policy=skip for the MCP fast gate; \
+             full cargo tests are mandatory through `keel review pre-pr` in the CLI, \
+             not silently skipped."
+                .to_string(),
+        );
+    }
     if let Some(message) = refuse_mcp_long_keel_job(&[String::from("review"), action.to_string()]) {
         return Err(message);
     }
@@ -2491,6 +2464,9 @@ fn review_args(action: &str, arguments: &Value) -> Vec<String> {
     }
     if let Some(f) = optional_string_arg(arguments, "format") {
         all_args.push(format!("--format={f}"));
+    }
+    if action == "gates" {
+        all_args.push("--repo-test-policy=skip".to_string());
     }
     if let Some(root) = optional_string_arg(arguments, "repo_root") {
         all_args.push(format!("--repo-root={root}"));
@@ -2722,13 +2698,48 @@ fn tool_code_search(arguments: &Value) -> Result<String, String> {
     if let Ok(cwd) = env::current_dir() {
         owned.push(format!("--workspace-root={}", display_path(&cwd)));
     }
-    if let Some(f) = optional_string_arg(arguments, "format") {
-        owned.push(format!("--format={f}"));
+    if optional_string_arg(arguments, "format").is_some_and(|f| f == "json") {
+        owned.push("--json".to_string());
     }
     for s in &owned {
         all_args.push(s);
     }
     run_keel_subcommand("code-search", &all_args)
+}
+fn tool_code_index(arguments: &Value) -> Result<String, String> {
+    let action = arguments
+        .get("action")
+        .and_then(Value::as_str)
+        .unwrap_or("refresh")
+        .trim();
+    let mut all_args: Vec<&str> = vec![action];
+    let mut owned = Vec::new();
+    if let Some(root) = optional_string_arg(arguments, "workspace_root") {
+        owned.push(format!("--workspace-root={root}"));
+    } else if let Ok(cwd) = env::current_dir() {
+        owned.push(format!("--workspace-root={}", display_path(&cwd)));
+    }
+    if let Some(home) = optional_string_arg(arguments, "claude_home") {
+        owned.push(format!("--claude-home={home}"));
+    }
+    if arguments
+        .get("force")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        owned.push("--force".to_string());
+    }
+    if arguments
+        .get("format")
+        .and_then(Value::as_str)
+        .is_some_and(|format| format == "json")
+    {
+        owned.push("--json".to_string());
+    }
+    for value in &owned {
+        all_args.push(value);
+    }
+    run_keel_subcommand("code-index", &all_args)
 }
 
 /// Preserve-Existing-Flow gate: the Iron Law's pre-edit ownership trace.
@@ -3652,7 +3663,13 @@ mod tests {
         let args = review_args("gates", &json!({ "format": "json", "repo_root": "/tmp/x" }));
         assert_eq!(
             args,
-            vec!["gates", "check", "--format=json", "--repo-root=/tmp/x"]
+            vec![
+                "gates",
+                "check",
+                "--format=json",
+                "--repo-test-policy=skip",
+                "--repo-root=/tmp/x"
+            ]
         );
     }
 

@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use crate::args::FlagSet;
 use crate::json::{write_indented, Value};
 use crate::runtime::{display_path, resolve_claude_home, resolve_repository_root, write_text};
-use crate::utility::system_map::render_system_map;
+use crate::utility::workspace_index;
 
 use super::shared::is_help_argument;
 
@@ -112,7 +112,14 @@ fn run_scope_resolve(
         }
     }
     if flag_set.bool_value("refresh-system-map") || !system_map_path.is_file() {
-        let map_content = render_system_map(&workspace_root);
+        let map_content =
+            match workspace_index::render_map(&workspace_root, &claude_home.to_string_lossy()) {
+                Ok(content) => content,
+                Err(error) => {
+                    let _ = writeln!(standard_error, "build indexed system map: {error}");
+                    return 1;
+                }
+            };
         if let Err(error) = write_text(&system_map_path, &map_content) {
             let _ = writeln!(
                 standard_error,
