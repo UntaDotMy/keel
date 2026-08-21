@@ -280,9 +280,6 @@ pub fn install_from_paths(
     // root; data-preserving, keel-owned names only, never overwrites.
     let mut migration_report = migrate_from_legacy_claude_home(claude_home, &engagement_home);
     migrate_legacy_state_directory(claude_home);
-    if engagement_home != claude_home {
-        migrate_legacy_state_directory(&engagement_home);
-    }
     ensure_claude_home_directories(claude_home)?;
     ensure_claude_home_directories(&engagement_home)?;
     remove_deprecated_config_keys(claude_home)?;
@@ -369,6 +366,16 @@ pub fn install_from_paths(
     let commandcode_wiring =
         maybe_wire_commandcode(repository_root, claude_home, detected.commandcode);
     let grok_wiring = maybe_wire_grok(claude_home);
+    let removed_legacy_duplicates = cleanup_identical_legacy_data(claude_home, &engagement_home);
+    if removed_legacy_duplicates > 0 {
+        let report = migration_report.get_or_insert_with(String::new);
+        if !report.is_empty() {
+            report.push_str("; ");
+        }
+        report.push_str(&format!(
+            "removed {removed_legacy_duplicates} verified legacy duplicate(s)"
+        ));
+    }
     Ok(InstallSummary {
         synced_skills,
         synced_agents,
@@ -1453,7 +1460,6 @@ const MIGRATION_DATA_NAMES: &[&str] = &[
     // NOTE: `agent-profiles` is NOT migrated. Install re-syncs it into the
     // engagement home every run, so copying it would only churn.
     ".claude-skill-manager",
-    "cache",
     "workflow",
     "anvil",
     "raw-output",
@@ -1586,6 +1592,51 @@ fn files_are_identical(left: &Path, right: &Path) -> bool {
 /// Copy a file or directory tree without deleting the source.
 fn copy_path_preserving(source: &Path, destination: &Path) -> bool {
     copy_tree(source, destination) && destination.exists()
+}
+
+/// Remove only exact copies left in the legacy keel-owned lane after a
+/// successful install. Mismatches remain for recovery and manual review.
+fn cleanup_identical_legacy_data(keel_home: &Path, engagement_home: &Path) -> usize {
+    if keel_home == engagement_home {
+        return 0;
+    }
+    let mut removed = 0usize;
+    for name in MIGRATION_DATA_NAMES {
+        removed += remove_identical_legacy_tree(&engagement_home.join(name), &keel_home.join(name));
+    }
+    removed += remove_identical_legacy_tree(
+        &engagement_home.join(".claude-skill-manager"),
+        &state_directory(keel_home),
+    );
+    removed
+}
+
+fn remove_identical_legacy_tree(source: &Path, destination: &Path) -> usize {
+    if source.is_file() && destination.is_file() {
+        if !files_are_identical(source, destination) {
+            return 0;
+        }
+        return usize::from(fs::remove_file(source).is_ok());
+    }
+    if !source.is_dir() || !destination.is_dir() {
+        return 0;
+    }
+    let mut removed = 0usize;
+    let Ok(entries) = fs::read_dir(source) else {
+        return 0;
+    };
+    for entry in entries.flatten() {
+        let child_source = entry.path();
+        let child_destination = destination.join(entry.file_name());
+        removed += remove_identical_legacy_tree(&child_source, &child_destination);
+    }
+    let empty = fs::read_dir(source)
+        .map(|mut entries| entries.next().is_none())
+        .unwrap_or(false);
+    if empty {
+        removed += usize::from(fs::remove_dir(source).is_ok());
+    }
+    removed
 }
 
 /// Recursive copy for files and directories (best-effort: per-entry failures
@@ -6146,6 +6197,36 @@ mod tests {
             second.is_none(),
             "second run must be a no-op once migrated, got {second:?}"
         );
+        let _ = fs::remove_dir_all(keel_home.parent().unwrap());
+    }
+
+    #[test]
+    fn cleanup_removes_only_verified_legacy_duplicates() {
+        let (_home, keel_home, claude_home) = legacy_home_fixture("cleanup");
+        fs::create_dir_all(keel_home.join("memories")).unwrap();
+        fs::create_dir_all(claude_home.join("memories")).unwrap();
+        fs::write(keel_home.join("memories/same.md"), "same").unwrap();
+        fs::write(claude_home.join("memories/same.md"), "same").unwrap();
+        fs::write(keel_home.join("memories/different.md"), "new").unwrap();
+        fs::write(claude_home.join("memories/different.md"), "old").unwrap();
+        fs::create_dir_all(claude_home.join("cache/user")).unwrap();
+        fs::write(claude_home.join("cache/user/cache.json"), "keep").unwrap();
+        fs::create_dir_all(keel_home.join("state")).unwrap();
+        fs::create_dir_all(claude_home.join(".claude-skill-manager")).unwrap();
+        fs::write(keel_home.join("state/state.json"), "state").unwrap();
+        fs::write(
+            claude_home.join(".claude-skill-manager/state.json"),
+            "state",
+        )
+        .unwrap();
+
+        let removed = cleanup_identical_legacy_data(&keel_home, &claude_home);
+
+        assert!(removed >= 2);
+        assert!(!claude_home.join("memories/same.md").exists());
+        assert!(claude_home.join("memories/different.md").is_file());
+        assert!(claude_home.join("cache/user/cache.json").is_file());
+        assert!(!claude_home.join(".claude-skill-manager").exists());
         let _ = fs::remove_dir_all(keel_home.parent().unwrap());
     }
 
