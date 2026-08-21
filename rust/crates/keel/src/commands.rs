@@ -142,6 +142,9 @@ impl Application {
             "code-search" => {
                 utility::run_code_search_command(command_arguments, standard_output, standard_error)
             }
+            "code-index" => {
+                utility::run_code_index_command(command_arguments, standard_output, standard_error)
+            }
             "code-graph" => {
                 utility::run_code_graph_command(command_arguments, standard_output, standard_error)
             }
@@ -276,16 +279,10 @@ impl Application {
         0
     }
 
-    /// Compile-time feature set of THIS binary: `semantic` when built with the
-    /// `semantic` feature (vector recall via the embedded BERT model), else
-    /// `standard`. Surfaced in `version` so operators can tell which binary is
-    /// installed — the silent semantic<->standard swap was a real support trap.
+    /// The binary has one deterministic feature set after the semantic build
+    /// removal. Keeping this explicit prevents stale installation metadata.
     fn build_feature_set() -> &'static str {
-        if cfg!(feature = "semantic") {
-            "semantic"
-        } else {
-            "standard"
-        }
+        "standard"
     }
 
     fn run_platform_command(
@@ -501,6 +498,17 @@ impl Application {
         flag_set.string_flag("target-file", "");
         flag_set.string_flag("target-function", "");
         flag_set.string_flag("task", "");
+        flag_set.string_flag("current-behavior", "");
+        flag_set.string_flag("entry-point", "");
+        flag_set.string_flag("producer", "");
+        flag_set.string_flag("source-of-truth", "");
+        flag_set.string_flag("storage-state-queue-owner", "");
+        flag_set.string_flag("side-effect-owner", "");
+        flag_set.string_flag("consumers", "");
+        flag_set.string_flag("cleanup-recovery-path", "");
+        flag_set.string_flag("edit-boundary", "");
+        flag_set.string_flag("validation-needed", "");
+        flag_set.string_flag("validation-evidence", "");
         flag_set.bool_flag("json", false);
         if let Err(parse_error) = flag_set.parse(arguments) {
             let _ = writeln!(standard_error, "{}", parse_error.message);
@@ -517,6 +525,34 @@ impl Application {
             flag_set.string_value("target-function"),
         );
         check.task = flag_set.string_value("task").trim().to_string();
+        check.current_behavior = flag_set.string_value("current-behavior").trim().to_string();
+        check.entry_point = flag_set.string_value("entry-point").trim().to_string();
+        check.producer = flag_set.string_value("producer").trim().to_string();
+        check.source_of_truth = flag_set.string_value("source-of-truth").trim().to_string();
+        check.storage_state_queue_owner = flag_set
+            .string_value("storage-state-queue-owner")
+            .trim()
+            .to_string();
+        check.side_effect_owner = flag_set
+            .string_value("side-effect-owner")
+            .trim()
+            .to_string();
+        check.cleanup_recovery_path = flag_set
+            .string_value("cleanup-recovery-path")
+            .trim()
+            .to_string();
+        check.edit_boundary = flag_set.string_value("edit-boundary").trim().to_string();
+        let parse_list = |value: &str| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(str::to_string)
+                .collect()
+        };
+        check.consumers = parse_list(flag_set.string_value("consumers"));
+        check.validation_needed = parse_list(flag_set.string_value("validation-needed"));
+        check.validation_evidence = parse_list(flag_set.string_value("validation-evidence"));
         let artifact_path =
             match write_check(&repository_root, flag_set.string_value("output"), check) {
                 Ok(path) => path,
@@ -545,10 +581,19 @@ impl Application {
             "Created flow check artifact at {}",
             path_to_display_string(&artifact_path)
         );
-        let _ = writeln!(
-            standard_output,
-            "Fill the owner path and validation evidence before editing existing source files."
-        );
+        if let Ok(check) = load_check(&repository_root, flag_set.string_value("output")) {
+            if validate_check(check).is_empty() {
+                let _ = writeln!(
+                    standard_output,
+                    "Flow evidence is complete and ready for editing."
+                );
+            } else {
+                let _ = writeln!(
+                    standard_output,
+                    "Fill the remaining owner-path and validation evidence before editing existing source files."
+                );
+            }
+        }
         0
     }
 
@@ -676,7 +721,7 @@ fn render_flow_help(standard_output: &mut dyn Write) {
     );
     let _ = writeln!(
         standard_output,
-        "  flow start --target-file <path> [--target-function <name>] [--repo-root <path>] [--output <path>] [--json]"
+        "  flow start --target-file <path> [--target-function <name>] [--current-behavior <text>] [--entry-point <text>] [--producer <text>] [--source-of-truth <text>] [--storage-state-queue-owner <text>] [--side-effect-owner <text>] [--consumers <csv>] [--cleanup-recovery-path <text>] [--edit-boundary <text>] [--validation-needed <csv>] [--validation-evidence <csv>] [--repo-root <path>] [--output <path>] [--json]"
     );
     let _ = writeln!(
         standard_output,
@@ -846,6 +891,76 @@ mod tests {
             String::from_utf8_lossy(&finish_stdout).contains("\"valid\": true"),
             "unexpected finish stdout: {}",
             String::from_utf8_lossy(&finish_stdout)
+        );
+        let _ = std::fs::remove_dir_all(&repository_root);
+    }
+
+    #[test]
+    fn flow_start_can_write_complete_owner_evidence() {
+        let repository_root = tempdir_under("keel-flow-complete-start");
+        let artifact = repository_root
+            .join("flow-check.json")
+            .to_string_lossy()
+            .to_string();
+        let application = Application::new("test-version");
+        let arguments = vec![
+            "flow".to_string(),
+            "start".to_string(),
+            "--repo-root".to_string(),
+            repository_root.to_string_lossy().to_string(),
+            "--output".to_string(),
+            artifact.clone(),
+            "--target-file".to_string(),
+            "src/lib.rs".to_string(),
+            "--current-behavior".to_string(),
+            "Preserve the current dispatch behavior.".to_string(),
+            "--entry-point".to_string(),
+            "CLI command dispatch.".to_string(),
+            "--producer".to_string(),
+            "Application::run.".to_string(),
+            "--source-of-truth".to_string(),
+            "commands.rs.".to_string(),
+            "--storage-state-queue-owner".to_string(),
+            "No persistent state.".to_string(),
+            "--side-effect-owner".to_string(),
+            "Application::run.".to_string(),
+            "--consumers".to_string(),
+            "CLI users, integration tests".to_string(),
+            "--cleanup-recovery-path".to_string(),
+            "Return the command error and preserve the artifact.".to_string(),
+            "--edit-boundary".to_string(),
+            "Change only dispatch behavior.".to_string(),
+            "--validation-needed".to_string(),
+            "cargo test, CLI smoke".to_string(),
+            "--validation-evidence".to_string(),
+            "flow command regression test".to_string(),
+        ];
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        assert_eq!(
+            application.run(&arguments, &mut stdout, &mut stderr),
+            0,
+            "flow start stderr: {}",
+            String::from_utf8_lossy(&stderr)
+        );
+        let mut check_stdout = Vec::new();
+        let mut check_stderr = Vec::new();
+        assert_eq!(
+            application.run(
+                &[
+                    "flow".to_string(),
+                    "check".to_string(),
+                    "--repo-root".to_string(),
+                    repository_root.to_string_lossy().to_string(),
+                    "--artifact".to_string(),
+                    artifact,
+                ],
+                &mut check_stdout,
+                &mut check_stderr,
+            ),
+            0,
+            "flow check stderr: {}",
+            String::from_utf8_lossy(&check_stderr)
         );
         let _ = std::fs::remove_dir_all(&repository_root);
     }

@@ -84,29 +84,44 @@ pub fn run_loop(
         }
     };
     let piece = flags.string_value("piece").to_string();
+    let final_pass;
     let (iters, delta) = if dry_run || paths.lock_path().is_file() {
         let piece_ref = piece.clone();
-        run_bounded_loop(&cfg, || match sieve::sieve_lock(&paths, &piece_ref, &[]) {
-            Ok(outcome) => (outcome.ok, if outcome.ok { 0.9 } else { 0.3 }),
-            Err(_) => (false, 0.0),
-        })
+        let mut pass_state = false;
+        let result = run_bounded_loop(&cfg, || match sieve::sieve_lock(&paths, &piece_ref, &[]) {
+            Ok(outcome) => {
+                pass_state = outcome.ok;
+                (outcome.ok, if outcome.ok { 1.0 } else { 0.0 })
+            }
+            Err(_) => {
+                pass_state = false;
+                (false, 0.0)
+            }
+        });
+        final_pass = pass_state;
+        result
     } else {
-        run_bounded_loop(&cfg, || (true, 0.9))
+        final_pass = true;
+        run_bounded_loop(&cfg, || (true, 1.0))
     };
     let mut built = report::empty_report();
     built.loop_iterations = iters as u64;
     built.improvement_delta = delta;
-    built.gate_pass_rate = if delta >= 0.0 { 1.0 } else { 0.0 };
+    built.gate_pass_rate = if final_pass { 1.0 } else { 0.0 };
     if let Err(error) = report::write_report(&paths, &built) {
         let _ = writeln!(standard_error, "{error}");
         return 1;
     }
     let _ = writeln!(
         standard_output,
-        "anvil loop: iters={iters} delta={delta:.3} strict={strict} {}",
+        "anvil loop: iters={iters} delta={delta:.3} pass={final_pass} strict={strict} {}",
         built.metrics_line()
     );
-    0
+    if final_pass {
+        0
+    } else {
+        1
+    }
 }
 
 #[cfg(test)]

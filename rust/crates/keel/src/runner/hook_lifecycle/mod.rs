@@ -1437,11 +1437,19 @@ fn run_hook_post_tool_use(standard_error: &mut dyn Write) -> u8 {
     // once a pattern is trusted, into a generated skill. Like the timing record
     // above, any failure is logged and swallowed — learning capture must never
     // fail the hook.
-    if let Err(error) = observation::record_observation(&input) {
-        let _ = writeln!(
-            standard_error,
-            "keel post-tool-use: observation record failed: {error}"
-        );
+    match observation::record_observation(&input) {
+        Ok(true) => {
+            if let Ok(claude_home) = resolve_claude_home("") {
+                learning::run_continuous_learning_if_due(&claude_home, standard_error);
+            }
+        }
+        Ok(false) => {}
+        Err(error) => {
+            let _ = writeln!(
+                standard_error,
+                "keel post-tool-use: observation record failed: {error}"
+            );
+        }
     }
 
     // Iron Law evidence: mark session satisfied when a keel research tool
@@ -1688,11 +1696,19 @@ fn run_hook_post_tool_use_failure(standard_error: &mut dyn Write) -> u8 {
     // instinct and surfaces in the SessionStart digest, without polluting the
     // success patterns. Like the timing record, any error is logged and swallowed
     // — learning capture must never fail the hook.
-    if let Err(error) = observation::record_failure_observation(&input) {
-        let _ = writeln!(
-            standard_error,
-            "keel post-tool-use-failure: observation record failed: {error}"
-        );
+    match observation::record_failure_observation(&input) {
+        Ok(true) => {
+            if let Ok(claude_home) = resolve_claude_home("") {
+                learning::run_continuous_learning_if_due(&claude_home, standard_error);
+            }
+        }
+        Ok(false) => {}
+        Err(error) => {
+            let _ = writeln!(
+                standard_error,
+                "keel post-tool-use-failure: observation record failed: {error}"
+            );
+        }
     }
 
     0

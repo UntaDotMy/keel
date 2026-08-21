@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["rust/crates/keel", "rust/crates/keel-platform", "rust/crates/keel-releaseassets", "rust/crates/keel-professionaltext", "rust/crates/keel-flow", "rust/crates/keel-sqlite-vec"]
+members = ["rust/crates/keel", "rust/crates/keel-platform", "rust/crates/keel-releaseassets", "rust/crates/keel-professionaltext", "rust/crates/keel-flow"]
 
 [workspace.package]
 version = "0.1.0"

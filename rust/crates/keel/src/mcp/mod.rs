@@ -18,9 +18,8 @@ use std::thread;
 use serde_json::{json, Value};
 
 use crate::runtime::{display_path, resolve_claude_home};
-use crate::utility::memory::system_map_reference_directory;
 use crate::utility::recall::recall_status_snapshot;
-use crate::utility::system_map::render_system_map;
+use crate::utility::workspace_index;
 
 mod http;
 mod tools;
@@ -348,7 +347,8 @@ impl ParentWatch {
     #[cfg(windows)]
     fn capture() -> Option<Self> {
         let own = std::process::id();
-        let output = std::process::Command::new("powershell")
+        let executable = crate::runtime::powershell_executable()?;
+        let output = std::process::Command::new(executable)
             .args([
                 "-NoProfile",
                 "-NonInteractive",
@@ -383,7 +383,10 @@ impl ParentWatch {
     #[cfg(windows)]
     fn alive(&self) -> bool {
         let ppid = self.ppid;
-        let output = std::process::Command::new("powershell")
+        let Some(executable) = crate::runtime::powershell_executable() else {
+            return true;
+        };
+        let output = std::process::Command::new(executable)
             .args([
                 "-NoProfile",
                 "-NonInteractive",
@@ -1011,7 +1014,7 @@ fn handle_resources_list() -> Value {
             {
                 "uri": SYSTEM_MAP_RESOURCE_URI,
                 "name": "keel SYSTEM_MAP.md",
-                "description": "Workspace structural map (auto-refreshed under ~/.claude/memories/workspaces/<slug>/reference/SYSTEM_MAP.md, falling back to a freshly rendered map).",
+                "description": "Indexed workspace map generated from the persistent code-index generation and commit evidence.",
                 "mimeType": "text/markdown"
             },
             {
@@ -1090,37 +1093,25 @@ fn handle_resources_read(params: &Value) -> Result<Value, MethodError> {
     }
 }
 
-/// Resolve the workspace SYSTEM_MAP.md text — the cached copy under the
-/// workspace reference lane when present and non-empty, else a freshly rendered
-/// map. Shared by the `system_map` tool and the `keel://system-map`
-/// resource so both surfaces return the same content.
+/// Resolve the indexed workspace map for the `system_map` tool and resource.
+/// Index refresh failures are returned directly; no stale text or filesystem
+/// fallback is permitted.
 pub(super) fn system_map_text(workspace_override: Option<&Path>) -> Result<String, String> {
     let workspace_root = match workspace_override {
         Some(path) => path.to_path_buf(),
         None => env::current_dir().map_err(|error| format!("resolve cwd: {error}"))?,
     };
-    let claude_home =
-        resolve_claude_home("").map_err(|error| format!("resolve claude home: {error}"))?;
-    let cached_map = system_map_reference_directory(&claude_home, "memory", &workspace_root)
-        .join("SYSTEM_MAP.md");
-    if cached_map.is_file() {
-        if let Ok(text) = std::fs::read_to_string(&cached_map) {
-            if !text.trim().is_empty() {
-                return Ok(text);
-            }
-        }
-    }
-    Ok(render_system_map(&workspace_root))
+    let claude_home = resolve_claude_home("")?;
+    workspace_index::render_map(&workspace_root, &claude_home.to_string_lossy())
 }
 
 /// Build the recall index health snapshot payload. Shared by the
 /// `recall_status` / `memory_status` tools and the `keel://recall/status`
 /// resource so all surfaces report the same shape.
-#[cfg_attr(not(feature = "semantic"), allow(unused_mut))]
 pub(super) fn recall_status_payload() -> Result<Value, String> {
     let claude_home = resolve_claude_home("")?;
     let snapshot = recall_status_snapshot(&claude_home)?;
-    let mut payload = json!({
+    let payload = json!({
         "claudeHome": display_path(&snapshot.claude_home),
         "indexPath": display_path(&snapshot.index_path),
         "schemaVersion": snapshot.schema_version,
@@ -1130,12 +1121,6 @@ pub(super) fn recall_status_payload() -> Result<Value, String> {
         "updatedSinceLastSync": snapshot.updated_since_last_sync,
         "removedSinceLastSync": snapshot.removed_since_last_sync,
     });
-    #[cfg(feature = "semantic")]
-    {
-        if let Some(object) = payload.as_object_mut() {
-            object.insert("vectors".to_string(), json!(snapshot.vector_count));
-        }
-    }
     Ok(payload)
 }
 

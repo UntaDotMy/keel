@@ -83,17 +83,14 @@ pub fn write_lock(
     files: &[String],
     out_flag: &str,
 ) -> Result<String, String> {
-    let prefix = prefix::build_static_prefix(goal, bar);
+    let quality_bar = bar.trim();
+    let prefix = prefix::build_static_prefix(goal, quality_bar);
     let hash = prefix::write_prefix_files(paths, &prefix)?;
-    let fetch = if bar == "echo ok" {
-        "cmd:echo ok".to_string()
-    } else {
-        format!("cmd:{}", bar.split_whitespace().next().unwrap_or("echo"))
-    };
+    let fetch = format!("cmd:{quality_bar}");
     let lock = serde_json::json!({
         "version": 1,
         "goal": goal,
-        "bar": {"name": bar, "fetch": fetch, "compare": "stdout+exit"},
+        "bar": {"name": quality_bar, "fetch": fetch, "compare": "stdout+exit"},
         "budget": {
             "n_casts": 3,
             "k_pivots": 1,
@@ -120,7 +117,7 @@ pub fn write_lock(
         "pieces": [{
             "id": "main",
             "files": files,
-            "gates": ["echo ok"],
+            "gates": [quality_bar],
             "critic": "none"
         }]
     });
@@ -141,6 +138,7 @@ pub fn write_lock(
     }
     let gates_dir = paths.gates_dir();
     std::fs::create_dir_all(&gates_dir).map_err(|error| error.to_string())?;
-    std::fs::write(gates_dir.join("main"), "echo ok\n").map_err(|error| error.to_string())?;
+    std::fs::write(gates_dir.join("main"), format!("{quality_bar}\n"))
+        .map_err(|error| error.to_string())?;
     Ok(hash)
 }

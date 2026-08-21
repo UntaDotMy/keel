@@ -60,8 +60,8 @@ Lifecycle hooks return `hookSpecificOutput.additionalContext`. The harness adds 
 
 ## Compaction surface hierarchy
 
-- **Level 1 — Direct native wrapper:** `keel run -- <command>` is the most reliable transparent surface; it owns command execution, shell-aware parser/rewrite support, command-specific reducers, high-signal extraction, head/tail compaction, raw-output recovery, and native savings analytics in one step. Add `--stream` before `--` when bounded live progress is more important than keeping the terminal silent until final compaction.
-- **Level 2 — Rewrite helper:** `keel rewrite "<command>"` returns the resolved wrapper without executing it. It recognizes common shell wrappers, environment-prefix commands, and pipelines; shell syntax is rerouted through `bash -lc` so the wrapper executes the intended command rather than a partial token.
+- **Level 1: Direct native wrapper:** `keel run -- <command>` is the reliable transparent surface. It owns command execution, explicit shell routing, command-specific reducers, high-signal extraction, head/tail compaction, raw-output recovery, and native savings analytics. Child processes are timeout-bounded and process-tree cleanup is reported instead of hanging.
+- **Level 2: Rewrite helper:** `keel rewrite "<command>"` returns the resolved wrapper without executing it. It preserves direct argv where possible and routes composite syntax through the platform shell on Windows or Bash on Unix; explicit PowerShell/cmd/bash MCP scripts never change shells.
 - **Level 3 — Hook guidance:** `keel hook install` registers the managed lifecycle hooks described above. The `PreToolUse` hook may transparently rewrite tool input via `toolInputOverride` (not a block-and-rerun).
 - **Level 4 — Native install/update:** Use the installed Rust binary directly for update, verify, status, hooks, and compaction. Shell and PowerShell profile wrappers are not supported runtime entrypoints.
 

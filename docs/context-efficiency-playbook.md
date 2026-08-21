@@ -152,7 +152,7 @@ Use the smallest acceptable step for classification, routing, candidate filterin
 - `AGENTS.md` requires a context retrieval ladder before broad context loading
 - The Rust-native `keel install` command injects the shared execution-policy lines, including the cache-first research reuse gate, into `~/.claude/config.toml`
 - The Rust-native `keel install` command scaffolds workspace, workstream, role, agent-instance, research-cache, archive, and report directories under `~/.claude/memories/`
-- `keel code-search search` provides a native local **lexical** retrieval surface so agents can search the repo before widening to full-file reads (path filters accept `/` and `\`; there is no `index|demo|status|reset` subcommand)
+- `keel code-search search` queries the persistent local workspace index for ranked file/symbol/chunk evidence; refresh it with `keel code-index refresh` when status reports stale. There is no live-scan or legacy fallback.
 - `keel memory scope resolve` resolves scoped search order and write targets for the active workspace
 - `keel memory scope resolve` proves where the unified workspace, workstream, lane, and reference artifacts live
 - `keel memory research-cache record|lookup|stale|reward|list` provides shared record, freshness-aware lookup, stale/reward marking, and listing for reusable research (scoped per command group on disk)

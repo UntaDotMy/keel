@@ -38,14 +38,14 @@ fn starts_with_ascii_digit(value: &str) -> bool {
     }
 }
 
-fn has_semantic_version_tag_prefix(value: &str) -> bool {
+fn has_version_tag_prefix(value: &str) -> bool {
     let bytes = value.as_bytes();
     bytes.len() >= 2 && bytes[0] == b'v' && bytes[1].is_ascii_digit()
 }
 
 fn build_version_for_release_assets(build_version: &str) -> String {
     let normalized_release_tag = normalize_release_tag(build_version);
-    if has_semantic_version_tag_prefix(&normalized_release_tag) {
+    if has_version_tag_prefix(&normalized_release_tag) {
         normalized_release_tag[1..].to_string()
     } else {
         normalized_release_tag

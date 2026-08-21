@@ -91,7 +91,7 @@ pub fn run_cast(
             let (gate_ok, logs) = if dry_run {
                 (true, String::new())
             } else {
-                sieve::run_gates(&piece.gates)
+                sieve::run_gates_in_directory(&piece.gates, Some(&isolated))
             };
             let clipped = supervisor::clip_output(&logs, 4000);
             let result_dir = dir.join(format!("cast_{index}"));

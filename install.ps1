@@ -7,8 +7,7 @@
 [CmdletBinding()]
 param(
     [string]$Version = $env:CLAUDE_SKILLS_VERSION,
-    [string]$Repository = $env:CLAUDE_SKILLS_REPOSITORY,
-    [switch]$Semantic
+    [string]$Repository = $env:CLAUDE_SKILLS_REPOSITORY
 )
 
 Set-StrictMode -Version 2.0
@@ -73,8 +72,7 @@ if ($Version -eq "latest") {
 
 $AssetVersion = Get-AssetVersion -ReleaseTag $ReleaseTag
 $Architecture = Get-NormalizedArchitecture
-$ArchiveSuffix = if ($Semantic) { "_semantic" } else { "" }
-$ArchiveName = "keel_${AssetVersion}_windows_${Architecture}${ArchiveSuffix}.zip"
+$ArchiveName = "keel_${AssetVersion}_windows_${Architecture}.zip"
 $DownloadUrl = "https://github.com/$Repository/releases/download/$ReleaseTag/$ArchiveName"
 $TemporaryDirectory = Join-Path ([System.IO.Path]::GetTempPath()) ("keel-install-" + [System.Guid]::NewGuid().ToString("N"))
 

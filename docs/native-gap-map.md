@@ -35,7 +35,7 @@ This page keeps the comparison useful without hardcoding third-party project nam
 | Capability | Memory/retrieval peers | Native implementation | Gap |
 | --- | --- | --- | --- |
 | Layered durable memory | Rich typed memory and graph recall | Scoped workspace, workstream, role, agent, entity, and relation memory exist | Improve query ergonomics and recall scoring |
-| Semantic retrieval | Vector or hybrid retrieval is common in deeper systems | Local code search and memory indexing are lexical and lineage-aware | Add optional semantic ranking without requiring hosted services |
+| Deterministic hybrid retrieval | Vector or hybrid retrieval is common in deeper systems | Persistent code index, FTS5 rank fusion, chunks, paths, symbols, and graph evidence without embedded models | Expand labeled retrieval benchmarks and language-server relationships |
 | Transformation graph | Dedicated indexing tools expose transformation and export graphs | Native search has incremental lineage and demo evidence | Add explicit transformation DAG and multi-target export if needed |
 | Reproducible benchmarks | Mature peers publish narrower benchmark runners | This repo has source-backed scenarios and shared harness docs | Add recurring benchmark runs for memory and retrieval quality |
 

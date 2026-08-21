@@ -171,8 +171,8 @@ fn run_orchestrator(
     } else {
         let _ = writeln!(
             standard_error,
-            "anvil sieve: FAIL greens={} critic={}",
-            sieve_outcome.greens, sieve_outcome.critic
+            "anvil sieve: FAIL greens={} critic={}\n{}",
+            sieve_outcome.greens, sieve_outcome.critic, sieve_outcome.logs
         );
     }
     let sieve_ok = sieve_outcome.ok;
@@ -326,6 +326,38 @@ mod tests {
         assert!(!job.workspace.join("anvil").exists());
         let lock = job::load_lock(&job.paths).expect("lock");
         assert_eq!(lock["goal"], "pretty json");
+    }
+
+    #[test]
+    fn compile_bar_drives_failing_sieve_and_loop() {
+        let job = temp_job("failing-bar");
+        let (compile_code, _, compile_stderr) = run_cmd(&with_job(
+            &job,
+            vec![
+                "compile".into(),
+                "--goal".into(),
+                "failing quality bar".into(),
+                "--bar".into(),
+                "exit 7".into(),
+            ],
+        ));
+        assert_eq!(compile_code, 0, "compile stderr={compile_stderr}");
+        let lock = job::load_lock(&job.paths).expect("lock");
+        assert_eq!(lock["pieces"][0]["gates"][0], "exit 7");
+        assert_eq!(
+            std::fs::read_to_string(job.paths.gates_dir().join("main")).expect("gate"),
+            "exit 7\n"
+        );
+
+        let (sieve_code, _, sieve_stderr) = run_cmd(&with_job(&job, vec!["sieve".into()]));
+        assert_eq!(sieve_code, 1, "sieve stderr={sieve_stderr}");
+        assert!(sieve_stderr.contains("FAIL"));
+
+        let (loop_code, loop_stdout, loop_stderr) = run_cmd(&with_job(&job, vec!["loop".into()]));
+        assert_eq!(loop_code, 1, "stdout={loop_stdout} stderr={loop_stderr}");
+        assert!(loop_stdout.contains("pass=false"));
+        let report = std::fs::read_to_string(job.paths.report_path()).expect("report");
+        assert!(report.contains("\"gate_pass_rate\":0.0"));
     }
 
     #[test]

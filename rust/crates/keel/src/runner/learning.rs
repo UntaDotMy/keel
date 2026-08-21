@@ -27,7 +27,9 @@ use std::path::{Path, PathBuf};
 
 use crate::args::FlagSet;
 use crate::runner::observation::{self, Observation};
-use crate::runtime::{agents_directory, display_path, resolve_claude_home, skills_directory};
+use crate::runtime::{
+    agents_directory, display_path, resolve_claude_home, skills_directory, write_text,
+};
 use crate::utility::record_store::{field, Record, RecordStore};
 
 /// Rolling window of observation history the cycle distills each run. Older
@@ -151,7 +153,7 @@ pub fn run_learning_cycle(
 ) -> CycleReport {
     let mut report = CycleReport::default();
 
-    let observations = match observation::iter_recent_rows(options.window_days) {
+    let observations = match observation::iter_recent_rows_at(claude_home, options.window_days) {
         Ok(rows) => rows,
         Err(error) => {
             let _ = writeln!(log, "keel learn: read observations failed: {error}");
@@ -269,6 +271,95 @@ pub fn run_learning_cycle(
     }
 
     report
+}
+
+const CONTINUOUS_LEARNING_INTERVAL: usize = 3;
+const CONTINUOUS_LEARNING_WINDOW_DAYS: u64 = OBSERVE_WINDOW_DAYS;
+
+/// Run learning from the PostToolUse path after a small batch of new signals.
+///
+/// SessionEnd remains a final reconciliation point, but learning must not stay
+/// invisible until a host emits SessionEnd. The marker is scoped to the same
+/// keel home as the observations and derived artifacts, so an override home
+/// cannot consume or mutate another home's learning state.
+pub fn run_continuous_learning_if_due(claude_home: &Path, log: &mut dyn std::io::Write) {
+    if std::env::var("CLAUDE_SKILLS_LEARNING")
+        .map(|value| value.trim().eq_ignore_ascii_case("off"))
+        .unwrap_or(false)
+    {
+        return;
+    }
+    let observations =
+        match observation::iter_recent_rows_at(claude_home, CONTINUOUS_LEARNING_WINDOW_DAYS) {
+            Ok(rows) => rows,
+            Err(error) => {
+                let _ = writeln!(log, "keel learn: continuous read failed: {error}");
+                return;
+            }
+        };
+    let current_count = observations.len();
+    if current_count == 0 {
+        return;
+    }
+
+    let state_directory = claude_home.join("state").join("learning");
+    let marker_path = state_directory.join("last-observation-count");
+    let lock_path = state_directory.join("cycle.lock");
+    let previous_count = fs::read_to_string(&marker_path)
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(0);
+    if current_count < previous_count.saturating_add(CONTINUOUS_LEARNING_INTERVAL) {
+        return;
+    }
+
+    if fs::create_dir_all(&state_directory).is_err() {
+        return;
+    }
+    if let Ok(metadata) = fs::metadata(&lock_path) {
+        if metadata
+            .modified()
+            .ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .map(|age| age > std::time::Duration::from_secs(300))
+            .unwrap_or(false)
+        {
+            if let Err(error) = fs::remove_file(&lock_path) {
+                let _ = writeln!(log, "keel learn: stale lock cleanup failed: {error}");
+            }
+        }
+    }
+    let Ok(lock) = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&lock_path)
+    else {
+        return;
+    };
+
+    let report = run_learning_cycle(claude_home, &CycleOptions::default(), log);
+    if let Err(error) = write_text(&marker_path, &current_count.to_string()) {
+        let _ = writeln!(log, "keel learn: continuous marker write failed: {error}");
+    }
+    drop(lock);
+    if let Err(error) = fs::remove_file(&lock_path) {
+        let _ = writeln!(log, "keel learn: cycle lock cleanup failed: {error}");
+    }
+    if report.instincts_recorded > 0
+        || report.skills_generated > 0
+        || report.agents_generated > 0
+        || report.skills_rolled_back > 0
+    {
+        let _ = writeln!(
+            log,
+            "keel learn: continuous cycle observations={} instincts={} skills={} agents={} rolled_back={}",
+            current_count,
+            report.instincts_recorded,
+            report.skills_generated,
+            report.agents_generated,
+            report.skills_rolled_back
+        );
+    }
 }
 
 /// A2: empirical falsification of generated-skill predictions.
@@ -702,7 +793,8 @@ fn learn_status(
     standard_output: &mut dyn std::io::Write,
     standard_error: &mut dyn std::io::Write,
 ) -> u8 {
-    let observations = observation::iter_recent_rows(window_days).unwrap_or_default();
+    let observations =
+        observation::iter_recent_rows_at(claude_home, window_days).unwrap_or_default();
     let clusters = cluster_observations(&observations);
     let mut qualifying: Vec<&Cluster> = clusters
         .values()
@@ -716,6 +808,17 @@ fn learn_status(
         .iter()
         .filter(|(_, record)| field(record, "source") == Some(SOURCE_OBSERVED))
         .count();
+    let continuous_enabled = !std::env::var("CLAUDE_SKILLS_LEARNING")
+        .map(|value| value.trim().eq_ignore_ascii_case("off"))
+        .unwrap_or(false);
+    let marker_path = claude_home
+        .join("state")
+        .join("learning")
+        .join("last-observation-count");
+    let last_continuous_count = fs::read_to_string(&marker_path)
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(0);
 
     if json {
         let signals: Vec<serde_json::Value> = qualifying
@@ -735,6 +838,13 @@ fn learn_status(
             "qualifyingSignals": signals,
             "recordedInstincts": instincts.len(),
             "observedInstincts": observed_instincts,
+            "continuous": {
+                "enabled": continuous_enabled,
+                "trigger": "PostToolUse + SessionEnd",
+                "interval": CONTINUOUS_LEARNING_INTERVAL,
+                "lastObservationCount": last_continuous_count,
+                "marker": display_path(&marker_path),
+            },
         });
         match serde_json::to_string_pretty(&payload) {
             Ok(text) => {
@@ -754,6 +864,13 @@ fn learn_status(
             qualifying.len(),
             instincts.len(),
             observed_instincts
+        );
+        let _ = writeln!(
+            standard_output,
+            "  continuous learning: {} via PostToolUse + SessionEnd; cycle every {} new observation(s); last cycle count={}",
+            if continuous_enabled { "on" } else { "off" },
+            CONTINUOUS_LEARNING_INTERVAL,
+            last_continuous_count
         );
         for cluster in qualifying.iter().take(20) {
             let _ = writeln!(
@@ -1655,6 +1772,32 @@ mod tests {
             });
             observation::record_observation(&input).expect("record");
         }
+    }
+
+    #[test]
+    fn continuous_cycle_runs_after_three_new_observations() {
+        isolated_home("continuous", |root| {
+            seed_bash("continuous-project", "cargo test", 3, 2);
+            let mut log = Vec::new();
+            run_continuous_learning_if_due(root, &mut log);
+
+            let marker = root
+                .join("state")
+                .join("learning")
+                .join("last-observation-count");
+            assert_eq!(fs::read_to_string(&marker).expect("continuous marker"), "3");
+            let store = RecordStore::new(root, INSTINCT_GROUP);
+            assert!(
+                !store.list_records().expect("list instincts").is_empty(),
+                "continuous cycle must materialize an instinct"
+            );
+
+            run_continuous_learning_if_due(root, &mut log);
+            assert_eq!(
+                fs::read_to_string(&marker).expect("stable continuous marker"),
+                "3"
+            );
+        });
     }
 
     #[test]

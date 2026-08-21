@@ -17,7 +17,7 @@
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value as JsonDocument};
@@ -499,12 +499,23 @@ fn truncate_detail(text: &str) -> String {
 /// poisons a learning cycle. Returns an empty vec when nothing has been
 /// recorded yet so the engine's cold path needs no special-casing.
 pub fn iter_recent_rows(days: u64) -> std::io::Result<Vec<Observation>> {
+    let Some(claude_home) = resolve_claude_home("").ok() else {
+        return Ok(Vec::new());
+    };
+    iter_recent_rows_at(&claude_home, days)
+}
+
+/// Read observations from an explicit keel home.
+///
+/// The CLI can inspect an override home while the process environment still
+/// points at the default home. Keeping this path explicit prevents status and
+/// learning cycles from mixing signal from one home with derived state in
+/// another.
+pub fn iter_recent_rows_at(claude_home: &Path, days: u64) -> std::io::Result<Vec<Observation>> {
     if days == 0 {
         return Ok(Vec::new());
     }
-    let Some(directory) = observations_directory() else {
-        return Ok(Vec::new());
-    };
+    let directory = claude_home.join("state").join("observations");
     if !directory.exists() {
         return Ok(Vec::new());
     }

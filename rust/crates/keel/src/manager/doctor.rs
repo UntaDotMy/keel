@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use crate::runtime::{
-    config_path, display_path, installed_executable_path, resolve_claude_home,
+    display_path, installed_executable_path, resolve_claude_home,
     COMMAND_COMPACTION_EVENTS_FILE_NAME,
 };
 
@@ -26,7 +26,10 @@ pub fn run_doctor_command(
     flag_set.bool_flag("fix", false);
     flag_set.string_flag("repo-root", "");
     flag_set.string_flag("claude-home", "");
-    let _ = flag_set.parse(arguments);
+    if let Err(error) = flag_set.parse(arguments) {
+        let _ = writeln!(standard_error, "doctor: {}", error.message);
+        return 1;
+    }
     let fix = flag_set.bool_value("fix");
 
     // Forward only the flags `status` understands; `status` rejects `--fix`.
@@ -53,7 +56,6 @@ pub fn run_doctor_command(
             return 1;
         }
     };
-    let _ = config_path(&claude_home);
     let hooks_path = crate::runtime::claude_engagement_home(&claude_home)
         .join(crate::hooks::claude::SETTINGS_FILE_NAME);
     let hooks_text = fs::read_to_string(&hooks_path).unwrap_or_default();

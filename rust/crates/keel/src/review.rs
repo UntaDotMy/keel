@@ -1976,8 +1976,14 @@ fn render_gate_results(
                 };
                 let _ = writeln!(
                     standard_output,
-                    "  {}={} {}",
-                    result.name, status_str, result.blocking
+                    "  {}={} blocking={} details={}",
+                    result.name,
+                    status_str,
+                    result.blocking,
+                    result
+                        .details
+                        .clone()
+                        .unwrap_or_else(|| "no details".to_string())
                 );
             }
         }
@@ -3240,12 +3246,23 @@ fn slop_gate(
     } else if surface_name == "pre-commit" {
         crate::slop_detector::lint_working_slop(repository_root)
     } else {
-        crate::slop_detector::lint_added_slop(repository_root, base_ref)
+        let mut findings = crate::slop_detector::lint_added_slop(repository_root, base_ref);
+        findings.extend(crate::slop_detector::lint_working_slop(repository_root));
+        findings.sort_by(|left, right| {
+            left.file
+                .cmp(&right.file)
+                .then(left.line.cmp(&right.line))
+                .then(left.pattern.cmp(right.pattern))
+        });
+        findings.dedup_by(|left, right| {
+            left.file == right.file && left.line == right.line && left.pattern == right.pattern
+        });
+        findings
     };
     let status = if findings.is_empty() {
         GateStatus::Pass
     } else {
-        GateStatus::Warn
+        GateStatus::Fail
     };
     let details = if findings.is_empty() {
         "no AI-slop patterns detected".to_string()
@@ -3253,14 +3270,19 @@ fn slop_gate(
         let shown: Vec<String> = findings
             .iter()
             .take(5)
-            .map(|f| format!("{}:{} [{}] {}", f.file, f.line, f.pattern, f.message))
+            .map(|finding| {
+                format!(
+                    "{}:{} [{}] {}",
+                    finding.file, finding.line, finding.pattern, finding.message
+                )
+            })
             .collect();
         format!("{} slop finding(s): {}", findings.len(), shown.join("; "))
     };
     GateResult {
         name: "slop_detector".to_string(),
         status,
-        blocking: false,
+        blocking: !findings.is_empty(),
         details: Some(details),
     }
 }
@@ -5232,5 +5254,22 @@ mod tests {
         let results = vec![gate];
         let (blocking, _) = tally_gate_results(&results);
         assert_eq!(blocking, 0, "impact gate must never block review");
+    }
+    #[test]
+    fn compact_gate_output_includes_actionable_details() {
+        let results = vec![GateResult {
+            name: "rust_tests".to_string(),
+            status: GateStatus::Fail,
+            blocking: true,
+            details: Some(
+                "cargo test failed: see stderr; rerun cargo test --workspace".to_string(),
+            ),
+        }];
+        let mut output = Vec::new();
+        render_gate_results(&results, 1, 0, "compact", &mut output);
+        let rendered = String::from_utf8(output).expect("utf8");
+        assert!(rendered.contains("rust_tests=fail"));
+        assert!(rendered.contains("cargo test failed"));
+        assert!(rendered.contains("rerun cargo test"));
     }
 }

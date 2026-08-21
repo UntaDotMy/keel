@@ -10,16 +10,16 @@
 //!   `<claude-home>/working-briefs`. No network. No global state.
 //!
 //! Invariants:
-//!   * The on-disk schema is owned by this module. The `documents` virtual table is FTS5
-//!     with `path UNINDEXED, modified_at UNINDEXED, size UNINDEXED, content` and the
-//!     porter+unicode61+remove_diacritics tokenizer chain. A sibling `meta(key TEXT
-//!     PRIMARY KEY, value TEXT NOT NULL)` table stores schema version and last-sync
-//!     timestamps so this module can evolve without orphaning existing indexes.
-//!   * Recall always reflects the current files on disk: every read-path call
-//!     (`recall <query>` and `recall status`) runs `sync_recall_index` first. The
-//!     mtime+size delta scan is sub-millisecond at single-user scale.
-//!   * `recall reindex --force` drops and recreates the FTS5 table to recover from a
-//!     corrupt or stale index without disturbing any other the harness home file.
+//!   * The on-disk schema is owned by this module. The `documents` virtual table
+//!     stores section-aware memory chunks; `document_meta` stores line ranges,
+//!     source family, workspace scope, branch marker, and content fingerprint.
+//!     The `meta` table stores schema version and sync timestamps.
+//!   * Recall always reflects current files on disk: every read-path call
+//!     (`recall <query>` and `recall status`) runs `sync_recall_index` first.
+//!     Changed files are chunked and committed atomically; deleted files remove
+//!     every chunk and metadata row.
+//!   * `recall reindex --force` drops and recreates the FTS5 and metadata tables
+//!     to recover from a corrupt or stale index without touching other files.
 
 use std::fs;
 use std::io::Write;
@@ -32,25 +32,9 @@ use crate::args::FlagSet;
 use crate::json::{write_indented, Value};
 use crate::runtime::{display_path, resolve_claude_home};
 
-#[cfg(feature = "semantic")]
-use candle_core::{DType, Device, Tensor};
-#[cfg(feature = "semantic")]
-use candle_nn::VarBuilder;
-#[cfg(feature = "semantic")]
-use candle_transformers::models::bert::{BertModel, Config};
-#[cfg(feature = "semantic")]
-use keel_sqlite_vec::sqlite3_vec_init;
-#[cfg(feature = "semantic")]
-use std::sync::OnceLock;
-
-// One schema version for BOTH feature builds. The FTS5 `documents` table is
-// identical with and without `semantic`; the vector table is additive
-// (`CREATE … IF NOT EXISTS` under the feature) and simply ignored by
-// non-semantic builds. A feature-dependent version made switching between a
-// semantic and a non-semantic binary DROP and rebuild the whole index on every
-// open — a multi-minute write-locked reindex that every other keel process
-// then blocked on ("database is locked" / MCP timeouts).
-const SCHEMA_VERSION: &str = "2";
+// The recall schema is shared by every build. FTS5 remains the deterministic
+// source-of-truth index; structured workspace indexing lives in its own lane.
+const SCHEMA_VERSION: &str = "4";
 
 /// Top-level subdirectories under `<claude-home>` that recall indexes by default.
 /// Listed explicitly so the indexer never wanders into binaries, hooks, or release
@@ -246,17 +230,7 @@ fn run_recall_search(
     };
     let cascade =
         match cascade_recall_query(&connection, trimmed_query, limit, workspace_slug.as_deref()) {
-            Ok(Some(cascade)) => {
-                #[cfg(feature = "semantic")]
-                let cascade = maybe_blend_vector_candidates(
-                    &connection,
-                    trimmed_query,
-                    cascade,
-                    limit,
-                    workspace_slug.as_deref(),
-                );
-                cascade
-            }
+            Ok(Some(cascade)) => cascade,
             Ok(None) => {
                 let _ = writeln!(
                     standard_error,
@@ -442,7 +416,6 @@ fn run_recall_reindex(
     0
 }
 
-#[cfg_attr(not(feature = "semantic"), allow(unused_mut))]
 fn run_recall_status(
     command_group: &str,
     arguments: &[String],
@@ -499,7 +472,7 @@ fn run_recall_status(
         }
     };
     if flag_set.bool_value("json") {
-        let mut fields = vec![
+        let fields = vec![
             (
                 "indexPath".into(),
                 Value::String(display_path(&database_path)),
@@ -533,11 +506,6 @@ fn run_recall_status(
                 Value::Number(report.removed.to_string()),
             ),
         ];
-        #[cfg(feature = "semantic")]
-        {
-            let vectors = vector_count(&connection).unwrap_or(0);
-            fields.push(("vectors".into(), Value::Number(vectors.to_string())));
-        }
         let payload = Value::Object(fields);
         if let Err(error) = write_indented(standard_output, &payload) {
             let _ = writeln!(standard_error, "{command_group} recall status: {error}");
@@ -545,13 +513,9 @@ fn run_recall_status(
         }
         return 0;
     }
-    #[cfg(feature = "semantic")]
-    let vectors_part = format!(" vectors={}", vector_count(&connection).unwrap_or(0));
-    #[cfg(not(feature = "semantic"))]
-    let vectors_part = String::new();
     let _ = writeln!(
         standard_output,
-        "{command_group} recall status: documents={}{vectors_part} index={} schema={} last_indexed_at_millis={}",
+        "{command_group} recall status: documents={} index={} schema={} last_indexed_at_millis={}",
         document_count,
         display_path(&database_path),
         SCHEMA_VERSION,
@@ -733,8 +697,6 @@ pub struct RecallStatusSnapshot {
     pub added_since_last_sync: u64,
     pub updated_since_last_sync: u64,
     pub removed_since_last_sync: u64,
-    #[cfg(feature = "semantic")]
-    pub vector_count: u64,
 }
 
 /// Result of a programmatic recall search: the canonicalized FTS expression
@@ -745,10 +707,8 @@ pub struct RecallStatusSnapshot {
 #[derive(Debug, Clone)]
 pub struct RecallSearchResult {
     pub fts_query: String,
-    /// Which cascade stage produced these hits: `"exact"`, `"relaxed"`,
-    /// `"fuzzy"`, or `"vector"`. Lets callers tell the user a fuzzy hit is a
-    /// typo-tolerant guess and a vector hit is an embedding-space neighbor
-    /// rather than an exact match.
+    /// Which deterministic retrieval stage produced these hits: `"exact"`,
+    /// `"relaxed"`, `"fuzzy"`, or a fused structural stage.
     pub stage: &'static str,
     pub hits: Vec<RecallHit>,
 }
@@ -785,23 +745,11 @@ pub fn search_recall_index(
         }
     }
     match cascade_recall_query(&connection, trimmed_query, limit, workspace_slug)? {
-        Some(cascade) => {
-            // Semantic on: blend vector KNN candidates so the embedding stage
-            // contributes even when lexical stages already found hits.
-            #[cfg(feature = "semantic")]
-            let cascade = maybe_blend_vector_candidates(
-                &connection,
-                trimmed_query,
-                cascade,
-                limit,
-                workspace_slug,
-            );
-            Ok(Some(RecallSearchResult {
-                fts_query: cascade.query_expression,
-                stage: cascade.stage,
-                hits: cascade.hits,
-            }))
-        }
+        Some(cascade) => Ok(Some(RecallSearchResult {
+            fts_query: cascade.query_expression,
+            stage: cascade.stage,
+            hits: cascade.hits,
+        })),
         None => Ok(None),
     }
 }
@@ -824,8 +772,6 @@ pub fn recall_status_snapshot(claude_home: &Path) -> Result<RecallStatusSnapshot
     let mut connection = open_recall_connection(&database_path)?;
     let report = sync_recall_index(&mut connection, claude_home, false)?;
     let document_count = count_documents(&connection)?;
-    #[cfg(feature = "semantic")]
-    let vectors = vector_count(&connection).unwrap_or(0);
     Ok(RecallStatusSnapshot {
         claude_home: claude_home.to_path_buf(),
         index_path: database_path,
@@ -835,8 +781,6 @@ pub fn recall_status_snapshot(claude_home: &Path) -> Result<RecallStatusSnapshot
         added_since_last_sync: report.added,
         updated_since_last_sync: report.updated,
         removed_since_last_sync: report.removed,
-        #[cfg(feature = "semantic")]
-        vector_count: vectors,
     })
 }
 
@@ -852,8 +796,6 @@ fn open_recall_connection(database_path: &Path) -> Result<Connection, String> {
         fs::create_dir_all(parent_directory)
             .map_err(|io_error| format!("create {}: {io_error}", display_path(parent_directory)))?;
     }
-    #[cfg(feature = "semantic")]
-    ensure_vec_extension_registered();
     let connection = Connection::open(database_path).map_err(|database_error| {
         recall_open_error_hint(database_path, &format!("open sqlite: {database_error}"))
     })?;
@@ -932,6 +874,17 @@ fn ensure_recall_schema(connection: &Connection) -> Result<(), String> {
                  size UNINDEXED,
                  content,
                  tokenize = 'porter unicode61 remove_diacritics 2'
+             );
+             CREATE TABLE IF NOT EXISTS document_meta(
+                 rowid INTEGER PRIMARY KEY,
+                 path TEXT NOT NULL,
+                 chunk_index INTEGER NOT NULL,
+                 start_line INTEGER NOT NULL,
+                 end_line INTEGER NOT NULL,
+                 source_kind TEXT NOT NULL,
+                 scope TEXT NOT NULL,
+                 branch TEXT NOT NULL,
+                 content_hash TEXT NOT NULL
              );",
         )
         .map_err(|database_error| format!("ensure schema: {database_error}"))?;
@@ -946,30 +899,30 @@ fn ensure_recall_schema(connection: &Connection) -> Result<(), String> {
         .map_err(|database_error| format!("read schema_version: {database_error}"))?;
 
     match stored_version.as_deref() {
-        // "1" is compatible: the only 1→2 change was the additive vec_items
-        // table (created under the semantic feature on open), so no document
-        // rebuild is needed — just restamp. Dropping the index here was the
-        // source of multi-minute write-locked reindexes on build switches.
-        Some(value) if value == SCHEMA_VERSION || value == "1" => {
-            if value != SCHEMA_VERSION {
-                connection
-                    .execute(
-                        "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?1)",
-                        params![SCHEMA_VERSION],
-                    )
-                    .map_err(|database_error| format!("stamp schema_version: {database_error}"))?;
-            }
-        }
+        Some(value) if value == SCHEMA_VERSION => {}
         Some(_) => {
             connection
                 .execute_batch(
-                    "DROP TABLE IF EXISTS documents;
+                    "DROP TABLE IF EXISTS vec_items;
+                     DROP TABLE IF EXISTS document_meta;
+                     DROP TABLE IF EXISTS documents;
                      CREATE VIRTUAL TABLE documents USING fts5(
                          path UNINDEXED,
                          modified_at UNINDEXED,
                          size UNINDEXED,
                          content,
                          tokenize = 'porter unicode61 remove_diacritics 2'
+                     );
+                     CREATE TABLE document_meta(
+                         rowid INTEGER PRIMARY KEY,
+                         path TEXT NOT NULL,
+                         chunk_index INTEGER NOT NULL,
+                         start_line INTEGER NOT NULL,
+                         end_line INTEGER NOT NULL,
+                         source_kind TEXT NOT NULL,
+                         scope TEXT NOT NULL,
+                         branch TEXT NOT NULL,
+                         content_hash TEXT NOT NULL
                      );",
                 )
                 .map_err(|database_error| format!("rebuild documents: {database_error}"))?;
@@ -988,10 +941,6 @@ fn ensure_recall_schema(connection: &Connection) -> Result<(), String> {
                 )
                 .map_err(|database_error| format!("stamp schema_version: {database_error}"))?;
         }
-    }
-    #[cfg(feature = "semantic")]
-    {
-        ensure_vec_schema(connection)?;
     }
     Ok(())
 }
@@ -1051,19 +1000,14 @@ pub fn sync_recall_index(
     }
 
     let mut on_disk_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
-    // Phase 1 — read + embed OUTSIDE the write transaction. Embedding is
-    // CPU-bound model inference; holding the SQLite write lock across it made
-    // every other keel process block for the whole reindex ("database is
-    // locked" / MCP timeouts). Prepare all rows first, then commit them in one
-    // short SQL-only transaction.
+    // Read changed documents before the short SQL-only transaction.
     struct PendingDocument {
         path: String,
         modified_at: String,
         size: String,
-        content: String,
+        content_hash: String,
+        chunks: Vec<MemoryChunk>,
         was_existing: bool,
-        #[cfg(feature = "semantic")]
-        vector: Option<Vec<f32>>,
     }
     let mut pending: Vec<PendingDocument> = Vec::new();
     for document in &on_disk {
@@ -1091,16 +1035,13 @@ pub fn sync_recall_index(
                 continue;
             }
         };
-        #[cfg(feature = "semantic")]
-        let vector = embed_text(&content).ok();
         pending.push(PendingDocument {
             path: document.absolute_path.clone(),
             modified_at: document.modified_at_millis.to_string(),
             size: document.size_bytes.to_string(),
-            content,
+            content_hash: stable_fingerprint(&content),
+            chunks: split_memory_chunks(&content),
             was_existing: existing_rows.contains_key(&document.absolute_path),
-            #[cfg(feature = "semantic")]
-            vector,
         });
     }
 
@@ -1111,28 +1052,40 @@ pub fn sync_recall_index(
     for document in &pending {
         transaction
             .execute(
+                "DELETE FROM document_meta WHERE path = ?1",
+                params![&document.path],
+            )
+            .map_err(|database_error| format!("delete document metadata: {database_error}"))?;
+        transaction
+            .execute(
                 "DELETE FROM documents WHERE path = ?1",
                 params![&document.path],
             )
-            .map_err(|database_error| format!("delete stale row: {database_error}"))?;
-        transaction
-            .execute(
-                "INSERT INTO documents(path, modified_at, size, content) VALUES (?1, ?2, ?3, ?4)",
-                params![
-                    &document.path,
-                    &document.modified_at,
-                    &document.size,
-                    &document.content,
-                ],
-            )
-            .map_err(|database_error| format!("insert document: {database_error}"))?;
-        #[cfg(feature = "semantic")]
-        {
-            // Best-effort: a missing vec_items row is preferable to aborting a
-            // reindex over a single vector write error.
-            if let Some(vector) = &document.vector {
-                let _ = upsert_doc_vector(&transaction, &document.path, vector);
-            }
+            .map_err(|database_error| format!("delete stale rows: {database_error}"))?;
+        for (chunk_index, chunk) in document.chunks.iter().enumerate() {
+            transaction
+                .execute(
+                    "INSERT INTO documents(path, modified_at, size, content) VALUES (?1, ?2, ?3, ?4)",
+                    params![&document.path, &document.modified_at, &document.size, &chunk.content],
+                )
+                .map_err(|database_error| format!("insert memory chunk: {database_error}"))?;
+            let rowid = transaction.last_insert_rowid();
+            transaction
+                .execute(
+                    "INSERT INTO document_meta(rowid, path, chunk_index, start_line, end_line, source_kind, scope, branch, content_hash) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    params![
+                        rowid,
+                        &document.path,
+                        chunk_index as i64,
+                        chunk.start_line as i64,
+                        chunk.end_line as i64,
+                        memory_source_kind(&document.path),
+                        memory_scope(&document.path),
+                        memory_branch(),
+                        &document.content_hash,
+                    ],
+                )
+                .map_err(|database_error| format!("insert memory metadata: {database_error}"))?;
         }
         if document.was_existing {
             report.updated += 1;
@@ -1149,12 +1102,11 @@ pub fn sync_recall_index(
     }
     for path in &paths_to_remove {
         transaction
+            .execute("DELETE FROM document_meta WHERE path = ?1", params![path])
+            .map_err(|database_error| format!("delete document metadata: {database_error}"))?;
+        transaction
             .execute("DELETE FROM documents WHERE path = ?1", params![path])
-            .map_err(|database_error| format!("delete vanished: {database_error}"))?;
-        #[cfg(feature = "semantic")]
-        {
-            let _ = delete_doc_vector(&transaction, path);
-        }
+            .map_err(|database_error| format!("delete vanished rows: {database_error}"))?;
         report.removed += 1;
     }
 
@@ -1182,6 +1134,99 @@ struct DocumentRecord {
     absolute_path: String,
     modified_at_millis: i64,
     size_bytes: i64,
+}
+#[derive(Debug, Clone)]
+struct MemoryChunk {
+    start_line: usize,
+    end_line: usize,
+    content: String,
+}
+
+fn split_memory_chunks(content: &str) -> Vec<MemoryChunk> {
+    const MAX_LINES: usize = 80;
+    const MAX_BYTES: usize = 12_000;
+    let lines: Vec<&str> = content.lines().collect();
+    if lines.is_empty() {
+        return vec![MemoryChunk {
+            start_line: 1,
+            end_line: 1,
+            content: String::new(),
+        }];
+    }
+    let mut chunks = Vec::new();
+    let mut start = 0usize;
+    let mut bytes = 0usize;
+    for index in 0..lines.len() {
+        bytes = bytes.saturating_add(lines[index].len() + 1);
+        let heading_boundary = index > start && lines[index].trim_start().starts_with('#');
+        let size_boundary = index.saturating_sub(start) + 1 >= MAX_LINES || bytes >= MAX_BYTES;
+        if heading_boundary || size_boundary {
+            let content_text = lines[start..index].join("\n");
+            chunks.push(MemoryChunk {
+                start_line: start + 1,
+                end_line: index.max(start + 1),
+                content: content_text,
+            });
+            start = index;
+            bytes = lines[index].len() + 1;
+        }
+    }
+    if start < lines.len() {
+        chunks.push(MemoryChunk {
+            start_line: start + 1,
+            end_line: lines.len(),
+            content: lines[start..].join("\n"),
+        });
+    }
+    chunks
+}
+
+fn stable_fingerprint(content: &str) -> String {
+    let mut hash: u64 = 14695981039346656037;
+    for byte in content.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(1099511628211);
+    }
+    format!("{hash:016x}")
+}
+
+fn memory_source_kind(path: &str) -> String {
+    for kind in [
+        "research-cache",
+        "working-briefs",
+        "completion-gates",
+        "entities",
+        "graph",
+        "agent-packets",
+        "instincts",
+        "anvil",
+    ] {
+        if path.contains(&format!("\\{kind}\\"))
+            || path.contains(&format!("/{kind}/"))
+            || path.contains(&format!("\\{kind}."))
+            || path.contains(&format!("/{kind}."))
+        {
+            return kind.to_string();
+        }
+    }
+    "memory".to_string()
+}
+
+fn memory_scope(path: &str) -> String {
+    let normalized = path.replace('\\', "/");
+    let parts: Vec<&str> = normalized.split('/').collect();
+    parts
+        .windows(2)
+        .find(|window| window[0] == "workspaces")
+        .map(|window| window[1].to_string())
+        .unwrap_or_else(|| "global".to_string())
+}
+
+fn memory_branch() -> String {
+    std::env::var("KEEL_BRANCH")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 fn collect_indexable_files(directory: &Path, out: &mut Vec<DocumentRecord>) -> Result<(), String> {
@@ -1280,11 +1325,13 @@ pub fn query_recall_index(
     let mut prepared_statement = connection
         .prepare(
             "SELECT \
-                 path, \
+                 documents.path, \
                  bm25(documents), \
                  snippet(documents, 3, ?1, ?2, '...', ?3), \
-                 content \
+                 documents.content, \
+                 COALESCE(document_meta.start_line, 1) \
              FROM documents \
+             LEFT JOIN document_meta ON document_meta.rowid = documents.rowid \
              WHERE documents MATCH ?4 \
              ORDER BY bm25(documents) \
              LIMIT ?5",
@@ -1303,22 +1350,22 @@ pub fn query_recall_index(
             ],
             |row| {
                 let absolute_path: String = row.get(0)?;
-                // bm25() is read only to force SQLite to apply the ranking
-                // ORDER BY; the relevance re-rank uses the row's POSITION
-                // (bm25_rank) as the tie-break, not the raw score, so the value
-                // itself is intentionally discarded here.
+                // bm25() is read only to force SQLite to apply the ranking;
+                // the deterministic reranker uses the BM25 position as a tie-break.
                 let _bm25: f64 = row.get(1)?;
                 let snippet_text: String = row.get(2)?;
                 let content: String = row.get(3)?;
-                Ok((absolute_path, snippet_text, content))
+                let start_line: usize = row.get::<_, i64>(4)?.max(1) as usize;
+                Ok((absolute_path, snippet_text, content, start_line))
             },
         )
         .map_err(|database_error| format!("query: {database_error}"))?;
     let mut candidates: Vec<RerankCandidate> = Vec::new();
     for (rank, row_result) in query_iterator.enumerate() {
-        let (absolute_path, snippet_text, content) =
+        let (absolute_path, snippet_text, content, start_line) =
             row_result.map_err(|database_error| format!("read result row: {database_error}"))?;
-        let line = locate_first_match_line(&content, &snippet_text);
+        let local_line = locate_first_match_line(&content, &snippet_text);
+        let line = start_line.saturating_add(local_line.saturating_sub(1));
         let display_snippet = render_snippet_for_display(&snippet_text);
         candidates.push(RerankCandidate {
             hit: RecallHit {
@@ -1374,8 +1421,7 @@ fn fts_terms(fts_query: &str) -> Vec<String> {
 /// Re-rank BM25 candidates by lexical relevance and trim to `limit`. The score
 /// combines two signals BM25 ignores:
 ///   - **coverage**: the fraction of distinct query terms that appear in the
-///     document — a doc matching all the query's words is topically on-point,
-///     which is the signal a semantic search would surface.
+///     document; a doc matching all the query's words is topically on-point.
 ///   - **proximity**: how tightly the matched terms cluster (best span across
 ///     the matched terms in one line), so "webhook retry" matching adjacent
 ///     words beats the two words appearing paragraphs apart.
@@ -1507,10 +1553,8 @@ fn best_line_proximity(lowered_content: &str, matched_terms: &[&String]) -> f64 
 
 /// Outcome of the recall cascade: the expression that produced the returned
 /// hits, a stable stage label (`"exact"`, `"relaxed"`, `"fuzzy"`, or
-/// `"vector"`), and the hits. The label lets callers tell the user *how* a
-/// result was found — an honest signal that a fuzzy hit is a typo-tolerant
-/// guess and a vector hit is an embedding-space neighbor, not an exact
-/// match.
+/// `"fused"`), and the hits. The label lets callers tell the user how a result
+/// was found: exact, typo-tolerant, or structurally expanded.
 #[derive(Debug, Clone)]
 pub struct CascadeResult {
     pub query_expression: String,
@@ -1518,22 +1562,9 @@ pub struct CascadeResult {
     pub hits: Vec<RecallHit>,
 }
 
-/// Run the lexical recall cascade: exact (AND prefix) → relaxed (OR prefix) →
-/// fuzzy (trigram similarity) → vector (embedding KNN, `semantic` feature
-/// only). Each lexical stage runs ONLY when the previous returned zero hits,
-/// so an ordinary exact-match query pays nothing for the fallbacks. The vector
-/// stage is a final fallback that recovers documents sharing no lexical terms
-/// with the query but close in embedding space.
-///
-/// Returns `Ok(None)` when the query has no searchable terms after stripping
-/// punctuation (mirrors `build_fts_query` returning `None`). When all stages
-/// find nothing, returns a `CascadeResult` with empty `hits` and the `"exact"`
-/// expression, preserving the caller's "matches=0" contract.
-///
-/// The lexical stages (exact, relaxed, fuzzy) are deliberately NOT vector
-/// search: they are typo- and morphology-tolerant LEXICAL matching with no
-/// embeddings, no model, and no network. The optional vector stage adds
-/// embedding-based recall only when the `semantic` feature is compiled in.
+/// Run the deterministic recall cascade: exact (AND prefix) → relaxed (OR
+/// prefix) → fuzzy (trigram similarity). Each stage only runs when the
+/// previous stage returned no usable results.
 fn cascade_recall_query(
     connection: &Connection,
     raw_query: &str,
@@ -1547,11 +1578,10 @@ fn cascade_recall_query(
 
     let exact_hits = query_recall_index(connection, &exact, limit, workspace_slug)?;
     if !exact_hits.is_empty() {
-        let (hits, stage) = augment_with_fuzzy(connection, exact_hits, limit, "exact")?;
         return Ok(Some(CascadeResult {
             query_expression: exact,
-            stage,
-            hits,
+            stage: "exact",
+            hits: exact_hits,
         }));
     }
 
@@ -1561,11 +1591,10 @@ fn cascade_recall_query(
     if let Some(relaxed) = build_relaxed_fts_query(raw_query) {
         let relaxed_hits = query_recall_index(connection, &relaxed, limit, workspace_slug)?;
         if !relaxed_hits.is_empty() {
-            let (hits, stage) = augment_with_fuzzy(connection, relaxed_hits, limit, "relaxed")?;
             return Ok(Some(CascadeResult {
                 query_expression: relaxed,
-                stage,
-                hits,
+                stage: "relaxed",
+                hits: relaxed_hits,
             }));
         }
     }
@@ -1581,44 +1610,6 @@ fn cascade_recall_query(
             hits: fuzzy_hits,
         }));
     }
-
-    // Stage 4 — vector KNN (cfg-gated, only with the `semantic` feature):
-    // recovers documents that share no lexical terms with the query but are
-    // close in embedding space. Best-effort: if embedding or KNN fails, the
-    // stage is skipped and the cascade returns the empty result below.
-    #[cfg(feature = "semantic")]
-    {
-        if let Ok(query_vector) = embed_text(raw_query) {
-            if let Ok(neighbors) = query_vector_index(connection, &query_vector, limit) {
-                let mut hits = Vec::new();
-                let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-                for (path, distance) in neighbors {
-                    if distance > VECTOR_MAX_DISTANCE {
-                        continue;
-                    }
-                    if !seen.insert(path.clone()) {
-                        continue;
-                    }
-                    if let Ok(Some(content)) = load_document_content(connection, &path) {
-                        hits.push(RecallHit {
-                            absolute_path: path,
-                            score: 1.0 / (1.0 + distance),
-                            line: 1,
-                            snippet: vector_snippet(&content),
-                        });
-                    }
-                }
-                if !hits.is_empty() {
-                    return Ok(Some(CascadeResult {
-                        query_expression: format!("vector({})", raw_query),
-                        stage: "vector",
-                        hits,
-                    }));
-                }
-            }
-        }
-    }
-
     Ok(Some(CascadeResult {
         query_expression: exact,
         stage: "exact",
@@ -1626,223 +1617,9 @@ fn cascade_recall_query(
     }))
 }
 
-/// When the `semantic` feature is on, blend vector KNN candidates into a
-/// lexical result so the embedding stage contributes even when lexical stages
-/// already found hits (the original cascade returned early and never reached
-/// the vector fallback). Lexical hits keep their relevance score; vector-only
-/// neighbors get a similarity score; the merged pool is re-sorted so a
-/// high-similarity semantic neighbor the lexical stages missed can displace a
-/// low-relevance lexical hit. The stage label becomes `"hybrid"` when vector
-/// candidates are merged in. Always blends (when semantic is on) because real
-/// queries fill `limit` with lexical noise a semantic neighbor should displace.
-#[cfg(feature = "semantic")]
-fn maybe_blend_vector_candidates(
-    connection: &Connection,
-    raw_query: &str,
-    lexical: CascadeResult,
-    limit: usize,
-    workspace_slug: Option<&str>,
-) -> CascadeResult {
-    let Ok(query_vector) = embed_text(raw_query) else {
-        return lexical;
-    };
-    let Ok(neighbors) = query_vector_index(connection, &query_vector, limit) else {
-        return lexical;
-    };
-    let slug_lower = workspace_slug
-        .filter(|s| !s.is_empty())
-        .map(|s| collapse_dashes(&s.to_ascii_lowercase()));
-    let mut seen: std::collections::HashSet<String> = lexical
-        .hits
-        .iter()
-        .map(|h| h.absolute_path.clone())
-        .collect();
-    let mut merged = lexical.hits.clone();
-    let mut added = 0usize;
-    for (path, distance) in neighbors {
-        if distance > VECTOR_MAX_DISTANCE {
-            continue;
-        }
-        if !seen.insert(path.clone()) {
-            continue;
-        }
-        let mut score = 1.0 / (1.0 + distance);
-        if let Some(slug) = &slug_lower {
-            if collapse_dashes(&path.to_ascii_lowercase()).contains(slug) {
-                score = (score * WORKSPACE_AFFINITY_BOOST).min(1.0);
-            }
-        }
-        if let Ok(Some(content)) = load_document_content(connection, &path) {
-            merged.push(RecallHit {
-                absolute_path: path,
-                score,
-                line: 1,
-                snippet: vector_snippet(&content),
-            });
-            added += 1;
-        }
-    }
-    if added == 0 {
-        return lexical;
-    }
-    // Re-sort the merged pool by score desc so semantic neighbors compete with
-    // lexical hits on a blended scale rather than being appended at the end.
-    merged.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    merged.truncate(limit);
-    let stage =
-        if lexical.stage == "exact" || lexical.stage == "relaxed" || lexical.stage == "fuzzy" {
-            "hybrid"
-        } else {
-            lexical.stage
-        };
-    CascadeResult {
-        query_expression: format!("{}+hybrid", lexical.query_expression),
-        stage,
-        hits: merged,
-    }
-}
-
-/// Augment a thin lexical result with its approximate neighbors (LSA), the
-/// cross-vocabulary recall that lexical matching structurally cannot reach.
-/// Runs ONLY when `lexical_hits` came back short of `limit` — a full result set
-/// has no room to augment and no reason to pay the on-demand SVD cost. When
-/// neighbors are appended, the stage label gains a `+fuzzy` suffix so the user
-/// can see the result was expanded beyond literal matches; otherwise the
-/// original lexical hits and stage pass through unchanged.
-///
-/// This is the "ahead of lexical" win: searching `authentication` returns the
-/// literal matches PLUS the co-occurring `login`/`token`/`session` documents
-/// that share no query term — learned from the corpus's own co-occurrence
-/// structure, with no model, no network, and no new dependency. It degrades
-/// safely: too few or too many documents, or a degenerate corpus, leaves the
-/// lexical hits as-is.
-fn augment_with_fuzzy(
-    connection: &Connection,
-    lexical_hits: Vec<RecallHit>,
-    limit: usize,
-    base_stage: &'static str,
-) -> Result<(Vec<RecallHit>, &'static str), String> {
-    let deficit = limit.saturating_sub(lexical_hits.len());
-    if deficit == 0 {
-        return Ok((lexical_hits, base_stage));
-    }
-
-    let corpus = load_all_documents(connection)?;
-    let Some(index) = super::semantic::build_semantic_index(&corpus) else {
-        return Ok((lexical_hits, base_stage));
-    };
-
-    // Map the lexical hits onto seed document indices, and exclude them from the
-    // neighbor search so we never duplicate a hit the user already has.
-    let seed: Vec<usize> = lexical_hits
-        .iter()
-        .filter_map(|hit| index.index_of(&hit.absolute_path))
-        .collect();
-    if seed.is_empty() {
-        return Ok((lexical_hits, base_stage));
-    }
-
-    let neighbors = index.neighbors_of(&seed, &seed, deficit);
-    if neighbors.is_empty() {
-        return Ok((lexical_hits, base_stage));
-    }
-
-    let mut hits = lexical_hits;
-    for (document_index, similarity) in neighbors {
-        hits.push(RecallHit {
-            absolute_path: index.path(document_index).to_string(),
-            score: similarity,
-            line: 1,
-            snippet: fuzzy_snippet(index.content(document_index)),
-        });
-    }
-    let stage = match base_stage {
-        "exact" => "exact+fuzzy",
-        "relaxed" => "relaxed+fuzzy",
-        _ => base_stage,
-    };
-    Ok((hits, stage))
-}
-
-/// First non-empty, non-heading line of a fuzzy neighbor's content, prefixed
-/// so the user can tell at a glance the hit came from fuzzy expansion rather
-/// than a literal match. A fuzzy neighbor has no FTS snippet (it was not
-/// found by a term query), so we synthesize a representative excerpt the same
-/// way the fuzzy stage builds its own.
-fn fuzzy_snippet(content: &str) -> String {
-    let excerpt = content
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty() && !line.starts_with('#'))
-        .or_else(|| content.lines().map(str::trim).find(|line| !line.is_empty()))
-        .unwrap_or_default();
-    format!("[~fuzzy] {}", collapse_whitespace(excerpt))
-}
-
-/// First non-empty, non-heading line of a vector neighbor's content, prefixed
-/// so the user can tell at a glance the hit came from vector KNN rather than a
-/// lexical match. A vector neighbor has no FTS snippet (it was not found by a
-/// term query), so we synthesize a representative excerpt the same way the
-/// fuzzy stage builds its own.
-#[cfg(feature = "semantic")]
-fn vector_snippet(content: &str) -> String {
-    let excerpt = content
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty() && !line.starts_with('#'))
-        .or_else(|| content.lines().map(str::trim).find(|line| !line.is_empty()))
-        .unwrap_or_default();
-    format!("[~vector] {}", collapse_whitespace(excerpt))
-}
-
-/// Load every indexed document's `(path, content)` for the fuzzy augmentation
-/// index. This is the same full-corpus read the fuzzy trigram stage performs,
-/// run only when fuzzy augmentation is actually attempted (thin lexical result),
-/// so the common full-result query never pays for it.
-fn load_all_documents(connection: &Connection) -> Result<Vec<(String, String)>, String> {
-    let mut statement = connection
-        .prepare("SELECT path, content FROM documents")
-        .map_err(|database_error| format!("prepare corpus load: {database_error}"))?;
-    let rows = statement
-        .query_map([], |row| {
-            let path: String = row.get(0)?;
-            let content: String = row.get(1)?;
-            Ok((path, content))
-        })
-        .map_err(|database_error| format!("corpus load: {database_error}"))?;
-    let mut documents = Vec::new();
-    for row in rows {
-        documents.push(row.map_err(|database_error| format!("read corpus row: {database_error}"))?);
-    }
-    Ok(documents)
-}
-
-/// Load a single document's content by path from the FTS5 `documents` table.
-/// Used by the vector stage to build a snippet for a KNN-returned path that
-/// was not found by any lexical stage (so it has no FTS snippet of its own).
-#[cfg(feature = "semantic")]
-fn load_document_content(connection: &Connection, path: &str) -> Result<Option<String>, String> {
-    connection
-        .query_row(
-            "SELECT content FROM documents WHERE path = ?1",
-            params![path],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(|database_error| format!("load document content: {database_error}"))
-}
-
 /// Minimum Sørensen–Dice trigram similarity for the fuzzy stage to accept a
 /// word as a match. 0.45 catches single-character typos in words of moderate
-/// length (e.g. "webhok" vs "webhook" scores ~0.67) without admitting unrelated
-/// short words (which share few trigrams). Tuned conservatively: the fuzzy
-/// stage only runs when the exact AND relaxed stages both returned nothing, so
-/// a slightly low threshold here trades a few false positives for recovering a
-/// query that would otherwise return zero hits.
+/// length without admitting unrelated short words.
 const FUZZY_MIN_SIMILARITY: f64 = 0.45;
 
 /// Lowercased set of 3-character shingles of `word`, the unit the fuzzy stage
@@ -2034,7 +1811,9 @@ fn collapse_whitespace(text: &str) -> String {
 
 fn count_documents(connection: &Connection) -> Result<u64, String> {
     let count: i64 = connection
-        .query_row("SELECT COUNT(*) FROM documents", [], |row| row.get(0))
+        .query_row("SELECT COUNT(DISTINCT path) FROM documents", [], |row| {
+            row.get(0)
+        })
         .map_err(|database_error| format!("count documents: {database_error}"))?;
     Ok(count.max(0) as u64)
 }
@@ -2077,257 +1856,6 @@ fn relativize(claude_home: &Path, absolute_path: &Path) -> String {
             .to_string(),
         Err(_) => display_path(absolute_path),
     }
-}
-
-/// Embedding dimension for all-MiniLM-L6-v2. Stored alongside the schema so
-/// the vec0 column width and any embedding producer stay in lockstep.
-#[cfg(feature = "semantic")]
-pub const EMBEDDING_DIM: usize = 384;
-
-/// Maximum L2 distance for a vector KNN neighbor to be included in cascade
-/// results. The bge-micro-v2 model (3 layers, 384 dim) has a high baseline
-/// similarity for any pair of English texts — unrelated text typically scores
-/// ≈0.96 — so this threshold is set below that floor to filter noise while
-/// keeping genuinely related documents. Tuned empirically against the test
-/// corpus; adjust if the model is swapped.
-#[cfg(feature = "semantic")]
-const VECTOR_MAX_DISTANCE: f64 = 0.9;
-
-#[cfg(feature = "semantic")]
-static VEC_EXTENSION_REGISTERED: std::sync::Once = std::sync::Once::new();
-
-/// Register the sqlite-vec extension with rusqlite's bundled SQLite exactly
-/// once per process. Must run before any `CREATE VIRTUAL TABLE ... USING vec0`
-/// statement. The transmute mirrors the upstream sqlite-vec test pattern: the
-/// C entry point is declared with no args in the FFI binding but the
-/// auto-extension slot expects the standard `fn(*mut c_void) -> c_int` shape.
-#[cfg(feature = "semantic")]
-fn ensure_vec_extension_registered() {
-    type ExtensionInit = unsafe extern "C" fn(
-        *mut rusqlite::ffi::sqlite3,
-        *mut *mut std::os::raw::c_char,
-        *const rusqlite::ffi::sqlite3_api_routines,
-    ) -> std::os::raw::c_int;
-    VEC_EXTENSION_REGISTERED.call_once(|| unsafe {
-        rusqlite::ffi::sqlite3_auto_extension(Some(
-            std::mem::transmute::<*const (), ExtensionInit>(sqlite3_vec_init as *const ()),
-        ));
-    });
-}
-
-/// Create the `vec_items` virtual table if absent. Idempotent. The vec0 table
-/// stores one 384-dim float vector per indexed memory path, keyed by the same
-/// absolute path string the FTS5 `documents` table uses.
-#[cfg(feature = "semantic")]
-fn ensure_vec_schema(connection: &Connection) -> Result<(), String> {
-    ensure_vec_extension_registered();
-    connection
-        .execute_batch(&format!(
-            "CREATE VIRTUAL TABLE IF NOT EXISTS vec_items USING vec0(
-                 path TEXT PRIMARY KEY,
-                 embedding float[{EMBEDDING_DIM}]
-             );"
-        ))
-        .map_err(|database_error| format!("ensure vec_items: {database_error}"))
-}
-
-/// Serialize an f32 slice as the little-endian byte blob sqlite-vec expects
-/// for a `float[]` MATCH argument.
-#[cfg(feature = "semantic")]
-fn serialize_f32_blob(vector: &[f32]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(vector.len() * 4);
-    for value in vector {
-        bytes.extend_from_slice(&value.to_le_bytes());
-    }
-    bytes
-}
-
-/// Upsert a document's vector. Placeholder Phase 1 callers pass a zero vector;
-/// Phase 2 replaces it with a real candle embedding.
-#[cfg(feature = "semantic")]
-fn upsert_doc_vector(connection: &Connection, path: &str, vector: &[f32]) -> Result<(), String> {
-    connection
-        .execute(
-            "INSERT OR REPLACE INTO vec_items(path, embedding) VALUES (?1, ?2)",
-            params![path, serialize_f32_blob(vector)],
-        )
-        .map_err(|database_error| format!("upsert vec_items: {database_error}"))?;
-    Ok(())
-}
-
-/// Drop a document's vector when the file vanishes from disk.
-#[cfg(feature = "semantic")]
-fn delete_doc_vector(connection: &Connection, path: &str) -> Result<(), String> {
-    connection
-        .execute("DELETE FROM vec_items WHERE path = ?1", params![path])
-        .map_err(|database_error| format!("delete vec_items: {database_error}"))?;
-    Ok(())
-}
-
-/// KNN query over the vector store. Returns (path, distance) pairs ordered
-/// nearest-first. `distance` is sqlite-vec's L2 distance (lower is nearer).
-/// Wired into the recall cascade's vector stage (Phase 3).
-#[cfg(feature = "semantic")]
-fn query_vector_index(
-    connection: &Connection,
-    query_vector: &[f32],
-    limit: usize,
-) -> Result<Vec<(String, f64)>, String> {
-    let mut statement = connection
-        .prepare(
-            "SELECT path, distance FROM vec_items
-             WHERE embedding MATCH ?1
-             ORDER BY distance
-             LIMIT ?2",
-        )
-        .map_err(|database_error| format!("prepare vec knn: {database_error}"))?;
-    let rows = statement
-        .query_map(
-            params![serialize_f32_blob(query_vector), limit as i64],
-            |row| {
-                let path: String = row.get(0)?;
-                let distance: f64 = row.get(1)?;
-                Ok((path, distance))
-            },
-        )
-        .map_err(|database_error| format!("query vec knn: {database_error}"))?;
-    let mut results = Vec::new();
-    for row in rows {
-        results.push(row.map_err(|database_error| format!("read vec row: {database_error}"))?);
-    }
-    Ok(results)
-}
-
-/// Count of vectors currently stored. Surfaced by `recall status` when the
-/// `semantic` feature is compiled in.
-#[cfg(feature = "semantic")]
-fn vector_count(connection: &Connection) -> Result<u64, String> {
-    connection
-        .query_row("SELECT COUNT(*) FROM vec_items", [], |row| {
-            row.get::<_, i64>(0)
-        })
-        .map(|count| count.max(0) as u64)
-        .map_err(|database_error| format!("count vec_items: {database_error}"))
-}
-
-// ---------------------------------------------------------------------------
-// Candle BERT sentence embedder (TaylorAI/bge-micro-v2, 384-dim, 3 layers)
-// ---------------------------------------------------------------------------
-
-/// Model artifacts embedded at compile time by build.rs when the `semantic`
-/// feature is on. build.rs downloads config.json, tokenizer.json, and
-/// model.safetensors from TaylorAI/bge-micro-v2 into OUT_DIR; these
-/// `include_bytes!` calls pull the bytes into the binary so the embedder is
-/// self-contained with no runtime file I/O or network dependency.
-#[cfg(feature = "semantic")]
-static TOKENIZER_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/tokenizer.json"));
-#[cfg(feature = "semantic")]
-static CONFIG_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/config.json"));
-#[cfg(feature = "semantic")]
-static MODEL_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/model.safetensors"));
-
-/// Lazily-initialized BERT model + tokenizer. Loaded once per process via
-/// [`OnceLock`] so the ~33 MB safetensors parse happens exactly once.
-#[cfg(feature = "semantic")]
-struct CachedEmbedder {
-    model: BertModel,
-    tokenizer: tokenizers::Tokenizer,
-}
-
-/// Stores the init result (Ok or Err) so a deterministic failure is cached
-/// rather than retried on every call. MSRV 1.80 predates `get_or_try_init`
-/// (1.82), so we store `Result` and pattern-match on the `&Result` returned
-/// by `get_or_init`.
-#[cfg(feature = "semantic")]
-static EMBEDDER: OnceLock<Result<CachedEmbedder, String>> = OnceLock::new();
-
-#[cfg(feature = "semantic")]
-fn init_embedder() -> Result<CachedEmbedder, String> {
-    let config: Config = serde_json::from_slice(CONFIG_BYTES)
-        .map_err(|error| format!("parse bert config: {error}"))?;
-    let tokenizer = tokenizers::Tokenizer::from_bytes(TOKENIZER_BYTES)
-        .map_err(|error| format!("load tokenizer: {error}"))?;
-    let device = Device::Cpu;
-    let var_builder =
-        VarBuilder::from_buffered_safetensors(MODEL_BYTES.to_vec(), DType::F32, &device)
-            .map_err(|error| format!("load safetensors: {error}"))?;
-    let model = BertModel::load(var_builder, &config)
-        .map_err(|error| format!("load bert model: {error}"))?;
-    Ok(CachedEmbedder { model, tokenizer })
-}
-
-/// Return the process-wide cached embedder, initializing on first call.
-/// A failed init is cached: model loading is deterministic, so a second
-/// attempt would fail identically.
-#[cfg(feature = "semantic")]
-fn cached_embedder() -> Result<&'static CachedEmbedder, String> {
-    match EMBEDDER.get_or_init(init_embedder) {
-        Ok(embedder) => Ok(embedder),
-        Err(error) => Err(error.clone()),
-    }
-}
-
-/// Run BertModel forward + attention-masked mean-pool + L2-normalize.
-/// Returns a `candle::Result` so the call site maps the error once.
-#[cfg(feature = "semantic")]
-fn bert_embed(
-    model: &BertModel,
-    tokenizer: &tokenizers::Tokenizer,
-    text: &str,
-) -> candle_core::Result<Vec<f32>> {
-    let encoding = tokenizer
-        .encode(text, true)
-        .map_err(|error| candle_core::Error::Msg(format!("tokenize: {error}")))?;
-    let input_ids = encoding.get_ids();
-    let attention_mask = encoding.get_attention_mask();
-    let token_type_ids = encoding.get_type_ids();
-    let device = Device::Cpu;
-    let input_ids_tensor = Tensor::new(input_ids, &device)?.unsqueeze(0)?;
-    let attention_mask_tensor = Tensor::new(attention_mask, &device)?
-        .unsqueeze(0)?
-        .to_dtype(DType::F32)?;
-    let token_type_ids_tensor = Tensor::new(token_type_ids, &device)?.unsqueeze(0)?;
-    let hidden_states = model.forward(
-        &input_ids_tensor,
-        &token_type_ids_tensor,
-        Some(&attention_mask_tensor),
-    )?;
-    // hidden_states: [1, seq_len, hidden_size].
-    // Mean-pool over seq_len weighted by the attention mask (padding tokens
-    // contribute zero), then L2-normalize to unit length.
-    let mask = attention_mask_tensor.unsqueeze(2)?; // [1, seq_len, 1]
-    let masked = hidden_states.broadcast_mul(&mask)?; // [1, seq_len, hidden]
-    let summed = masked.sum(1)?; // [1, hidden]
-    let token_count = attention_mask_tensor.sum(1)?.unsqueeze(1)?; // [1, 1]
-    let pooled = summed.broadcast_div(&token_count)?; // [1, hidden]
-    let norm = pooled.sqr()?.sum(1)?.sqrt()?.unsqueeze(1)?; // [1, 1]
-    let normalized = pooled.broadcast_div(&norm)?; // [1, hidden]
-    normalized.squeeze(0)?.to_vec1()
-}
-
-/// Embed `text` into a 384-dim L2-normalized vector using the vendored
-/// TaylorAI/bge-micro-v2 BERT model (model_type=bert, hidden_size=384).
-///
-/// The model + tokenizer are loaded once (via [`OnceLock`]) and reused
-/// across calls. The token-level hidden states are mean-pooled with the
-/// attention mask and L2-normalized, producing a `Vec<f32>` of length
-/// [`EMBEDDING_DIM`] (384).
-///
-/// Errors are returned as `String` so callers can degrade gracefully:
-/// `sync_recall_index` skips a document whose embed failed rather than
-/// aborting the whole reindex.
-#[cfg(feature = "semantic")]
-fn embed_text(text: &str) -> Result<Vec<f32>, String> {
-    let embedder = cached_embedder()?;
-    let vector = bert_embed(&embedder.model, &embedder.tokenizer, text)
-        .map_err(|error| format!("embed: {error}"))?;
-    debug_assert_eq!(
-        vector.len(),
-        EMBEDDING_DIM,
-        "embedding dimension mismatch: expected {EMBEDDING_DIM}, got {}",
-        vector.len()
-    );
-    Ok(vector)
 }
 
 #[cfg(test)]
@@ -2600,9 +2128,7 @@ mod tests {
             );
             let post_text = String::from_utf8_lossy(&stdout_post);
             assert!(
-                post_text.contains("matches=0")
-                    || !post_text.contains("memories/draft.md")
-                    || post_text.contains("stage=vector"),
+                !post_text.contains("memories/draft.md"),
                 "stale row not removed: {post_text}"
             );
         });
@@ -2695,8 +2221,8 @@ mod tests {
             assert_eq!(exit_code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
             let rendered = String::from_utf8_lossy(&stdout);
             assert!(
-                rendered.contains("matches=0") || rendered.contains("stage=vector"),
-                "unmatched query should return 0 matches or fall back to vector; rendered: {rendered}"
+                rendered.contains("matches=0"),
+                "unknown query should return 0 matches: {rendered}"
             );
         });
     }
@@ -3089,174 +2615,9 @@ mod tests {
     }
 }
 
-#[cfg(all(test, feature = "semantic"))]
-mod vector_tests {
+#[cfg(test)]
+mod recall_edge_tests {
     use super::*;
-    use crate::test_support::ENV_LOCK;
-
-    fn temp_home(label: &str) -> PathBuf {
-        ensure_vec_extension_registered();
-        let unique_suffix: u128 = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|duration| duration.as_nanos())
-            .unwrap_or_default();
-        let candidate = std::env::temp_dir().join(format!("{label}-{unique_suffix}"));
-        fs::create_dir_all(&candidate).expect("create tempdir");
-        candidate
-    }
-
-    #[test]
-    fn vec_schema_creates_vec_items_and_stamps_version_2() {
-        let _guard = ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let home = temp_home("keel-vec-schema");
-        let db_path = recall_database_path(&home);
-        let conn = Connection::open(&db_path).expect("open db");
-        ensure_recall_schema(&conn).expect("ensure schema");
-        let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM vec_items", [], |row| row.get(0))
-            .expect("count vec_items");
-        assert_eq!(
-            count, 0,
-            "vec_items must exist and be empty on a fresh schema"
-        );
-        let version: String = conn
-            .query_row(
-                "SELECT value FROM meta WHERE key = 'schema_version'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("read schema_version");
-        assert_eq!(version, "2", "schema_version must be stamped to 2");
-    }
-
-    #[test]
-    fn v1_index_migrates_to_v2_without_losing_vec_items_availability() {
-        let _guard = ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let home = temp_home("keel-vec-migrate");
-        let db_path = recall_database_path(&home);
-        {
-            let conn = Connection::open(&db_path).expect("open db");
-            conn.execute_batch(
-                "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-                 CREATE VIRTUAL TABLE IF NOT EXISTS documents USING fts5(
-                     path UNINDEXED, modified_at UNINDEXED, size UNINDEXED, content,
-                     tokenize = 'porter unicode61 remove_diacritics 2'
-                 );
-                 INSERT INTO documents(path, modified_at, size, content)
-                 VALUES ('/x.md', '1', '1', 'webhook');
-                 INSERT INTO meta(key, value) VALUES ('schema_version', '1');",
-            )
-            .expect("seed v1 index");
-        }
-        let conn = Connection::open(&db_path).expect("reopen db");
-        ensure_recall_schema(&conn).expect("migrate to v2");
-        let version: String = conn
-            .query_row(
-                "SELECT value FROM meta WHERE key = 'schema_version'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("read schema_version");
-        assert_eq!(version, "2");
-        let _: i64 = conn
-            .query_row("SELECT COUNT(*) FROM vec_items", [], |row| row.get(0))
-            .expect("vec_items exists after migration");
-    }
-
-    #[test]
-    fn sync_inserts_a_vec_items_row_for_a_new_document() {
-        let _guard = ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let home = temp_home("keel-vec-sync");
-        let mem_dir = home.join("memory").join("notes");
-        fs::create_dir_all(&mem_dir).expect("create memory dir");
-        fs::write(
-            mem_dir.join("alpha.md"),
-            "# Alpha\n\nsemantic recall test\n",
-        )
-        .expect("write memory file");
-        let db_path = recall_database_path(&home);
-        let mut conn = Connection::open(&db_path).expect("open db");
-        ensure_recall_schema(&conn).expect("ensure schema");
-        sync_recall_index(&mut conn, &home, false).expect("sync");
-        let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM vec_items", [], |row| row.get(0))
-            .expect("count vec_items");
-        assert!(
-            count >= 1,
-            "sync must insert at least one vec_items row for the new document; got {count}"
-        );
-    }
-
-    #[test]
-    fn query_vector_index_returns_nearest_first() {
-        let _guard = ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let home = temp_home("keel-vec-knn");
-        let db_path = recall_database_path(&home);
-        let conn = Connection::open(&db_path).expect("open db");
-        ensure_recall_schema(&conn).expect("ensure schema");
-        let mut a = vec![0.0f32; EMBEDDING_DIM];
-        a[0] = 1.0;
-        let mut b = vec![0.0f32; EMBEDDING_DIM];
-        b[1] = 1.0;
-        let mut c = vec![0.0f32; EMBEDDING_DIM];
-        c[2] = 1.0;
-        upsert_doc_vector(&conn, "/a.md", &a).expect("insert a");
-        upsert_doc_vector(&conn, "/b.md", &b).expect("insert b");
-        upsert_doc_vector(&conn, "/c.md", &c).expect("insert c");
-        let results = query_vector_index(&conn, &a, 3).expect("knn query");
-        assert!(!results.is_empty(), "KNN must return results");
-        assert_eq!(results[0].0, "/a.md", "nearest neighbor must be /a.md");
-        let distances: Vec<f64> = results.iter().map(|(_, d)| *d).collect();
-        let mut sorted = distances.clone();
-        sorted.sort_by(|x, y| x.partial_cmp(y).unwrap());
-        assert_eq!(
-            distances, sorted,
-            "results must be ordered nearest-first by distance"
-        );
-    }
-
-    #[test]
-    fn cascade_falls_back_to_vector_stage_when_lexical_fails() {
-        let _guard = ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let home = temp_home("keel-vec-cascade");
-        let mem_dir = home.join("memory").join("notes");
-        fs::create_dir_all(&mem_dir).expect("create memory dir");
-        fs::write(
-            mem_dir.join("auth.md"),
-            "# Authentication\n\nHow users log in and manage sessions.\n",
-        )
-        .expect("write memory file");
-        let db_path = recall_database_path(&home);
-        let mut conn = Connection::open(&db_path).expect("open db");
-        ensure_recall_schema(&conn).expect("ensure schema");
-        sync_recall_index(&mut conn, &home, false).expect("sync");
-
-        // "credential verification" shares no terms or trigrams with the indexed
-        // document, so all three lexical stages return nothing. If the embedding
-        // distance is within VECTOR_MAX_DISTANCE, the vector stage returns the
-        // document with stage="vector"; otherwise the cascade returns empty
-        // hits with stage="exact". Either outcome is valid — the test verifies
-        // the cascade runs without error on a lexically-unmatchable query.
-        let result = cascade_recall_query(&conn, "credential verification", 10, None)
-            .expect("cascade query")
-            .expect("non-None result");
-        if result.stage == "vector" {
-            assert!(
-                !result.hits.is_empty(),
-                "vector stage must return KNN neighbors"
-            );
-        }
-    }
 
     #[test]
     fn workspace_affinity_boost_promotes_current_project_hit() {
@@ -3302,49 +2663,19 @@ mod vector_tests {
         );
     }
 
-    #[cfg(feature = "semantic")]
     #[test]
-    fn hybrid_blend_adds_vector_candidates_to_thin_lexical_result() {
-        let _guard = ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let home = temp_home("keel-hybrid-blend");
-        let mem_dir = home.join("memory").join("notes");
-        fs::create_dir_all(&mem_dir).expect("create memory dir");
-        // A doc the lexical stages WILL match (shares "login").
-        fs::write(
-            mem_dir.join("lexical.md"),
-            "# Login\n\nThe login form and session handling.\n",
-        )
-        .expect("write lexical doc");
-        // A doc the lexical stages MISS but a semantic neighbor should find
-        // (auth/sign-in concept, no shared term with "login form").
-        fs::write(
-            mem_dir.join("semantic.md"),
-            "# Authentication\n\nCredential verification and sign-in flow.\n",
-        )
-        .expect("write semantic doc");
-        let db_path = recall_database_path(&home);
-        let mut conn = Connection::open(&db_path).expect("open db");
-        ensure_recall_schema(&conn).expect("ensure schema");
-        sync_recall_index(&mut conn, &home, false).expect("sync");
-
-        let result = cascade_recall_query(&conn, "login form", 10, None)
-            .expect("cascade")
-            .expect("non-None");
-        // cascade_recall_query returns the lexical result (blend runs only in
-        // search_recall_index). Confirm the lexical hit is present, no error.
-        assert!(
-            !result.hits.is_empty(),
-            "lexical stage must find the login doc"
+    fn memory_chunks_preserve_section_line_ranges() {
+        let chunks = split_memory_chunks("# First\nalpha\n# Second\nbeta\n");
+        assert_eq!(chunks.len(), 2);
+        assert_eq!((chunks[0].start_line, chunks[0].end_line), (1, 2));
+        assert_eq!((chunks[1].start_line, chunks[1].end_line), (3, 4));
+        assert_eq!(
+            memory_source_kind("C:/home/memory/research-cache/r.json"),
+            "research-cache"
         );
-        assert!(
-            result
-                .hits
-                .iter()
-                .any(|h| h.absolute_path.contains("lexical.md")),
-            "lexical.md must be in the hits: {:?}",
-            result.hits
+        assert_eq!(
+            memory_scope("C:/home/memories/workspaces/project/r.json"),
+            "project"
         );
     }
 }
