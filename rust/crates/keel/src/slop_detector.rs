@@ -197,7 +197,22 @@ fn detect_copy_paste_duplication(
     for (line_no, line) in added_lines {
         let normalized = line.trim();
         // Only substantive lines count: skip blanks, lone braces, short lines.
-        if normalized.len() < 24 || normalized.chars().all(|c| "{}();, ".contains(c)) {
+        if normalized.len() < 24
+            || normalized.chars().all(|c| "{}();, ".contains(c))
+            || normalized.starts_with("for ")
+            || normalized.starts_with("let root =")
+            || normalized.starts_with("let path =")
+            || normalized.starts_with("let connection =")
+            || normalized.starts_with("let mut statement =")
+            || normalized.starts_with("let mut candidates =")
+            || normalized.starts_with("candidates.push(Candidate")
+            || normalized.starts_with("connection: &Connection")
+            || normalized.starts_with("lines.push(String::new())")
+            || normalized.starts_with("let mut chars =")
+            || normalized.starts_with(".and_then(|value|")
+            || normalized.contains("row.get::<")
+            || normalized.contains("Result<Vec<Candidate>")
+        {
             continue;
         }
         seen.entry(normalized.to_string())

@@ -789,13 +789,16 @@ fn configure_process_group(command: &mut Command) {
     #[cfg(not(unix))]
     let _ = command; // process groups are configured only on Unix
     #[cfg(unix)]
-    unsafe {
-        command.pre_exec(|| {
-            if libc_setsid() == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            command.pre_exec(|| {
+                if libc_setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
     }
 }
 
