@@ -3,7 +3,7 @@ use crate::runtime::resolve_repository_root;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
-// why: the "do not merge blind" rule. Wait for the head commit's CI checks to go
+// the "do not merge blind" rule. Wait for the head commit's CI checks to go
 // green before merging; block while any check is red or pending. No CI passes.
 
 /// Per-check status surfaced to the merge gate.
@@ -117,7 +117,7 @@ pub(crate) fn parse_glab_status(stdout: &str) -> Option<Vec<CiCheck>> {
     let mut checks = Vec::new();
     for line in stdout.lines() {
         let line = line.trim();
-        // Typical shapes: "job-name: success" or "✓ job-name  success".
+        // Typical shapes: "job-name: success" or "✓ job-name success".
         let cleaned = line
             .trim_start_matches(|c: char| !c.is_alphanumeric() && c != '_')
             .trim();
@@ -183,7 +183,7 @@ pub(crate) fn parse_gh_checks(stdout: &str) -> Option<Vec<CiCheck>> {
         if cleaned_header(line) {
             continue;
         }
-        // gh pr checks columns: NAME  STATUS  ... (whitespace/tab separated).
+        // gh pr checks columns: NAME STATUS ... (whitespace/tab separated).
         let mut columns = line.split_whitespace();
         let name = match columns.next() {
             Some(value) if !value.is_empty() => value,
@@ -318,10 +318,6 @@ pub(crate) fn run_git_workflow_await_ci(
             }
             CiQuery::Checks(checks) => {
                 // Freshness guard: right after a push the newest run still
-                // belongs to the PREVIOUS commit, so its verdict is stale —
-                // reporting it as RED makes the gate cry wolf before the new
-                // pipeline even exists. Until a run exists for the current
-                // head, treat the state as pending.
                 if !checks.is_empty() && !ci_run_matches_head(provider, repo) {
                     if !watch || started.elapsed() >= deadline {
                         let outcome = if watch {

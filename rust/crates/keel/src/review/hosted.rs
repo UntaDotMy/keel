@@ -38,9 +38,6 @@ pub(crate) fn run_review_hosted_command(
         }
     }
     // Hosted review is not wired to a real provider API: emit an honest
-    // `skipped`/`action_required` verdict instead of a false `pass`. The local
-    // gate `keel review pre-pr` is the source of truth; this surface only
-    // renders the report payload/body for CI consumption.
     let payload = Value::Object(vec![
         (
             "provider".into(),

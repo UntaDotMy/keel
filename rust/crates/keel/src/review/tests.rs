@@ -63,7 +63,7 @@ fn review_pass_clears_gate_only_on_passing_real_surface() {
     assert!(!review_pass_clears_gate("gates", 1));
     assert!(!review_pass_clears_gate("pre-pr", 2));
     assert!(!review_pass_clears_gate("pre-commit", 1));
-    // Informational surfaces review nothing → never clear.
+    // Informational surfaces review nothing and never clear the gate.
     assert!(!review_pass_clears_gate("diff", 0));
     assert!(!review_pass_clears_gate("init", 0));
 }
@@ -393,9 +393,7 @@ fn workflow_slug_is_safe_and_lowercase() {
 
 #[test]
 fn review_policy_show_succeeds_with_no_extra_args() {
-    // Regression: the handler previously required arguments.len() >= 2, so
-    // `review policy show` (the documented form, args == ["show"]) fell
-    // through to the exit-1 usage path. It must succeed and print the policy.
+    // the handler previously required arguments.len() >= 2, so
     let mut stdout: Vec<u8> = Vec::new();
     let mut stderr: Vec<u8> = Vec::new();
     let code = run_review_policy_command(&["show".to_string()], &mut stdout, &mut stderr);
@@ -939,8 +937,6 @@ fn preflight_blocks_on_unsanctioned_branch_name() {
 #[test]
 fn preflight_warns_on_integration_tier_branch() {
     // Standing on `feat` is valid only for promotion; preflight allows it
-    // through (no block) but flags it so an accidental direct commit to the
-    // tier is visible.
     let repo = init_temp_repo("tier");
     git_in(&repo, &["checkout", "-q", "-b", "feat"]);
     std::fs::write(repo.join("f.txt"), "f\n").unwrap();
@@ -1019,7 +1015,7 @@ fn preflight_warns_on_commit_subject_prefix_drift() {
     git_in(&repo, &["checkout", "-q", "-b", "add/MSG"]);
     std::fs::write(repo.join("m.txt"), "m\n").unwrap();
     git_in(&repo, &["add", "."]);
-    // Non-conventional subject → should produce a [warn], not a block.
+    // Non-conventional subject to should produce a [warn], not a block.
     git_in(&repo, &["commit", "-q", "-m", "random message no prefix"]);
 
     let (code, stdout) = run_preflight(&repo, "main");
@@ -1046,7 +1042,7 @@ fn preflight_json_format_emits_structured_payload() {
         &mut stdout,
         &mut stderr,
     );
-    // On main with no commits ahead → blocked.
+    // Main with no commits ahead is blocked.
     assert_eq!(code, 1);
     let text = String::from_utf8_lossy(&stdout);
     assert!(text.contains("\"passed\""), "stdout: {text}");

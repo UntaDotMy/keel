@@ -88,19 +88,11 @@ pub(super) fn run_hook_lifecycle(
     // Look up the canonical row once; every behaviour below comes from that row.
     let event = match event_by_slug(subcommand) {
         Some(row) => row,
-        // Unreachable in practice — `run_hook_command` only routes valid slugs to
-        // us. Falling back to SessionStart preserves the legacy default that the
-        // previous string-based mapping returned for unknown subcommands.
+        // Unreachable in practice ; `run_hook_command` only routes valid slugs to
         None => event_by_name("SessionStart").expect("SessionStart row missing"),
     };
 
     // Refresh the workspace system map at the three natural transition
-    // points: session start, before compaction (so the post-compact window
-    // resumes against a fresh map), and session end (so the next session
-    // starts from the latest layout). The agent does not have to remember
-    // to invoke `keel memory scope resolve` — these hooks fire it
-    // automatically. The single source of truth is `should_refresh_system_map`
-    // so the test for the trigger set stays pure and deterministic.
     if should_refresh_system_map(event.name) {
         let _ = refresh_memory_scope_for_current_directory(standard_error);
     }
@@ -114,13 +106,6 @@ pub(super) fn run_hook_lifecycle(
     }
 
     // PreCompact is the OTHER point the learning cycle must run. Working memory is
-    // about to be summarized away; if we waited for SessionEnd, a long session's
-    // observations accumulated before this compaction could be lost when the
-    // window is rewritten. The cycle is an idempotent upsert (it re-reads the
-    // observation window and refreshes instincts), so running it here AND at
-    // SessionEnd never double-counts — it only ensures what was learned so far is
-    // persisted before the context that produced it is compacted. Same off-switch
-    // (`CLAUDE_SKILLS_LEARNING=off`) and same fail-open contract.
     if event.name == "PreCompact" {
         run_session_end_learning(standard_error);
     }
@@ -132,9 +117,6 @@ pub(super) fn run_hook_lifecycle(
     }
 
     // Whether this event accepts `hookSpecificOutput.additionalContext`
-    // or must fall back to a top-level `systemMessage` lives on the event
-    // row, so adding a new event to the table automatically picks up the
-    // right schema.
     let payload = render_lifecycle_payload(event, &context);
 
     match serde_json::to_string_pretty(&payload) {
@@ -216,19 +198,8 @@ pub(super) fn lifecycle_additional_context(subcommand: &str) -> String {
         "post-compact" => post_compact_context(),
 
         // UserPromptSubmit is intercepted before this match in `run_hook_command`
-        // by the dedicated `run_hook_user_prompt_submit` dispatcher, which reads
-        // stdin to extract `session_id` and applies the optional
-        // compression-discipline nudge. Do NOT add an arm for "user-prompt-submit"
-        // here — if the dedicated dispatcher is ever removed by mistake the
-        // missing arm will surface as a hard test failure rather than silently
-        // falling back to a stdin-blind path that drops the nudge.
 
         // PostToolBatch fires after a batch of parallel tools resolves, just
-        // before the next model turn. This is the home for the closeout /
-        // reviewer-on-close reminder: it runs mid-turn before the next model
-        // call, so it can nudge without ever forcing an extra turn. Stop is
-        // deliberately NOT used for this — additionalContext on a Stop hook
-        // means "keep going", which loops (see the "stop" dispatch arm).
         "post-tool-batch" => post_tool_batch_context(),
 
         // SubagentStart: inject a compact iron law reminder so spawned
@@ -236,11 +207,6 @@ pub(super) fn lifecycle_additional_context(subcommand: &str) -> String {
         "subagent-start" => subagent_start_context(),
 
         // Silenced events. Stop / SubagentStop are silenced because emitting
-        // additionalContext on them forces the turn to continue (infinite
-        // loop); they are also short-circuited to exit 0 in run_hook_command,
-        // so this arm is a second line of defense. SessionEnd fires at session
-        // termination. PostToolUse and PostToolUseFailure are owned by their
-        // dedicated dispatch arms.
         "stop" | "subagent-stop" | "session-end" | "post-tool-use" | "post-tool-use-failure" => {
             String::new()
         }
@@ -326,33 +292,8 @@ Working memory dies at compaction. To persist across sessions:
 
 pub(crate) fn session_start_context() -> String {
     // SessionStart fires once per session and is the documented entry point
-    // for delivering durable model context via
-    // `hookSpecificOutput.additionalContext`. Per-prompt token cost is paid
-    // at most once per session, so this is the right place to deliver the
-    // bootstrap contract instead of restating it on every UserPromptSubmit.
-    //
-    // The bootstrap MUST be the compact contract, not the full 27KB
-    // using-keel/SKILL.md. The harness truncates additionalContext above
-    // ~10KB to a 2KB preview + a file pointer (verified against live
-    // transcripts), so dumping the full skill here meant the model only ever saw
-    // its first ~2KB. COMPACT_BOOTSTRAP keeps the operative contract under the
-    // cap so it lands in full; the complete catalog ships to disk and is loadable
-    // on demand via Skill("using-keel").
-    //
-    // Layout: compact bootstrap (iron law + Red Flags + discipline pillars + MCP
-    // tools + memory writers), the runtime-resolved memory pointer that CLAUDE.md
-    // cannot know in advance, the learned-instinct digest for the current
-    // project (the always-on tier of the learning loop — what the user
-    // reliably does here, surfaced without waiting for a skill match), and an
-    // autonomous synthesis nudge so a freshly generated skill's deterministic
-    // template gets upgraded to richer prose in the normal course of work
-    // (no manual slash). The nudge self-clears once the agent refines the skill,
-    // because the content-hash no-clobber guard then reports it as non-template.
     let mut context = format!("{COMPACT_BOOTSTRAP}\n\n{}", memory_scope_summary());
     // PUSH actual workspace memory content (map head + newest brief + most
-    // recent note) so the agent starts informed instead of having to blind-search
-    // with system_map/recall. Bounded and may be empty (fresh workspace); the
-    // truncation-cap test guards the total SessionStart size.
     let workspace_digest = workspace_memory_digest();
     if !workspace_digest.trim().is_empty() {
         context.push_str("\n\n");
@@ -361,8 +302,6 @@ pub(crate) fn session_start_context() -> String {
     if let (Ok(claude_home), Ok(cwd)) = (resolve_claude_home(""), std::env::current_dir()) {
         let cwd = cwd.to_string_lossy();
         // Instinct + synthesis are append-only extras. Cap each so a large
-        // project home cannot push SessionStart past the ~10KB host truncation
-        // ceiling (full text would be replaced by a 2KB unread preview).
         let instinct_digest = learning::project_instinct_digest(&claude_home, &cwd);
         if !instinct_digest.trim().is_empty() {
             context.push_str("\n\n");
@@ -373,9 +312,6 @@ pub(crate) fn session_start_context() -> String {
         }
         let synthesis = learning::project_synthesis_nudge(&claude_home, &cwd);
         // Synthesis nudge: refine a template-state skill's prose. Gated by
-        // CLAUDE_SKILLS_LEARNED_SKILL_ENRICH=off (mirrors CLAUDE_SKILLS_LEARNING=off).
-        // why: match the trim + case-insensitive parsing of CLAUDE_SKILLS_LEARNING
-        // so `OFF`, `Off`, or `off ` all disable the nudge (exact "off" alone did not).
         let enrichment_enabled = !std::env::var("CLAUDE_SKILLS_LEARNED_SKILL_ENRICH")
             .map(|value| value.trim().eq_ignore_ascii_case("off"))
             .unwrap_or(false);
@@ -403,8 +339,6 @@ pub(crate) fn post_compact_context() -> String {
 
     );
     // Re-PUSH the workspace digest after compaction: the original SessionStart
-    // push has dropped out of the window, so the resumed turn would otherwise be
-    // back to blind-searching. Same bounded content as session start.
     let digest = workspace_memory_digest();
     if !digest.trim().is_empty() {
         context.push_str("\n\n");
@@ -436,71 +370,7 @@ pub(super) fn subagent_start_context() -> String {
     "keel iron law for this subagent: (1) Read SYSTEM_MAP and the owning file before claiming behavior. (2) Understand before building — restate the request and research what is needed. (3) Invoke relevant skills if there is even a 1% chance one applies. (4) Find the root cause — trace with file:line evidence before changing anything. Trust the codebase, not your knowledge base. Native MCP tools available: system_map, recall, run_command.".to_string()
 }
 
-// ----- PostToolBatch enforcement gates (review gate + working-brief gate) -----
-//
 // The PostToolBatch hook fires after a batch of tool calls resolves, just
-// before the next model turn. Two gates ride here, both DEFAULT-ON, because
-// they are the only model-INDEPENDENT way to surface the Iron Law — the harness
-// hooks cannot force a Skill()/MCP/tool call, but they CAN inject a reminder
-// (and, opt-in, refuse to let a turn close) when a required artifact is missing:
-//   * Review gate — fires when this session changed code but no reviewer pass
-//     was recorded since the last edit (the BACK of the law: review before close).
-//   * Working-brief gate — fires when this session changed code but no working
-//     brief was written this session (the FRONT of the law: understand/plan before
-//     building). This is the gate that would have caught the failure that motivated
-//     it: editing files with no brief, no recall, no map read.
-//
-// FIRING BEHAVIOR — four modes per gate, selected by its env var (see
-// `GateMode` / `gate_mode`):
-//   * Escalate (DEFAULT) — the FIRST end-of-turn fire injects the gate message
-//     via `hookSpecificOutput.additionalContext` (a non-blocking nudge: the agent
-//     is TOLD to run the review / write the brief but the turn is not halted). If
-//     the requirement is STILL unmet at a later end-of-turn, the gate escalates to
-//     an imperative feed-forward reminder (still `additionalContext`, never a
-//     `decision: "block"` halt). This is the honest answer to "not optional": a
-//     hook cannot force a Skill()/tool call, but it can feed the correction
-//     forward so the turn does not close cheaply. First contact never interrupts
-//     mid-task; persistent neglect gets the imperative reminder.
-//   * Nudge (`…=nudge`, opt-down) — always a non-blocking reminder, never blocks.
-//   * Block (`…=block`, opt-up) — emit the imperative feed-forward reminder on every
-//     fire (via `additionalContext`; keel never emits `decision: "block"` because
-//     on some events it would loop — the reminder is imperative, not a halt).
-//   * Off (`…=off`/`0`/`false`/`no`, or `…_MAX_BLOCKS=0`) — disabled; only the
-//     generic advisory reminder is emitted.
-//
-// SAFETY — this is what makes a default-on gate shippable without wedging or
-// spamming anyone's session:
-//   * Bounded. Each gate fires at most `…_MAX_BLOCKS` times per session (default
-//     1 for Nudge/Block, 2 for Escalate so it can nudge once then block once) —
-//     whether nudging or blocking — then permanently falls through to the generic
-//     advisory. The issued counter strictly increases on every fire and
-//     `decide_gate` stops firing once it reaches the cap, so neither a nudge-spam
-//     loop nor an infinite Stop/PostToolBatch block loop is possible, regardless
-//     of whether the model ever satisfies the gate. This forecloses the documented
-//     stop-cascade hazard.
-//   * Fail-open everywhere. No session id, no claude_home, unreadable telemetry,
-//     or a serialization error all degrade to the advisory reminder, never to a
-//     block. A telemetry hiccup can never wedge a turn.
-//   * Switches preserved. `CLAUDE_SKILLS_REVIEW_GATE` and
-//     `CLAUDE_SKILLS_BRIEF_GATE` each take `off` (disable), `nudge` (advisory-only),
-//     `block` (always hard stop), or unset/anything else (the escalating default);
-//     `…_MAX_BLOCKS=0` is a second kill switch.
-//   * Clearable by actually doing the work. Running `keel review
-//     pre-pr|pre-commit|gates` clears the review gate; writing a working brief
-//     this session (`keel memory working-brief write`) clears the brief
-//     gate. The gates reward the real action, not a token one — though a
-//     determined model can still write a junk brief to clear the front gate, which
-//     is the acknowledged ceiling of artifact-existence enforcement.
-//
-// Default-on-as-escalate rationale: these started opt-in and almost nobody flipped
-// them on, so the law went unenforced. A revision made them default-on as a HARD
-// BLOCK — enforced but stopped work mid-task, disruptive enough that users asked it
-// to stop. The next revision made them a non-blocking NUDGE, which never disrupted
-// but was free to ignore, so "not optional" was not actually true. The resolution
-// is to ESCALATE: warn on first contact (no mid-task interruption), then refuse to
-// close cheaply if the requirement is still unmet (real enforcement). Opt-down to
-// `=nudge` for advisory-only, opt-up to `=block` for an immediate stop, `=off` to
-// disable. Loop-proof and instantly disablable in every mode.
 
 pub(super) fn should_refresh_system_map(event_name: &str) -> bool {
     matches!(
@@ -535,7 +405,7 @@ pub(super) fn maybe_self_heal_mcp_registration(standard_error: &mut dyn Write) {
         Err(_) => return,
     };
     match crate::manager::mcp_register::self_heal_registration(&claude_home) {
-        // Skipped (non-standard home) or already current → nothing to report.
+        // Skipped (non-standard home) or already current to nothing to report.
         None | Some(Ok(crate::manager::mcp_register::McpRegistration::AlreadyCurrent)) => {}
         Some(Ok(crate::manager::mcp_register::McpRegistration::Added)) => {
             let _ = writeln!(

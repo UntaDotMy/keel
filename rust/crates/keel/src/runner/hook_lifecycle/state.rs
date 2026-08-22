@@ -224,16 +224,6 @@ pub(super) const REVIEW_GATE_ENV_VAR: &str = "CLAUDE_SKILLS_REVIEW_GATE";
 pub(super) const REVIEW_GATE_MAX_BLOCKS_ENV_VAR: &str = "CLAUDE_SKILLS_REVIEW_GATE_MAX_BLOCKS";
 
 // The plugin manifest (.claude-plugin/plugin.json `userConfig`) declares three
-// user-facing knobs. The harness exports each to plugin subprocesses as
-// `CLAUDE_PLUGIN_OPTION_<KEY>` (per the official plugin reference). Without the
-// bridge below, those knobs appeared in the /plugin settings UI but had zero
-// effect on keel's behavior — the real config was the CLAUDE_SKILLS_* env vars
-// with different names and no translation layer.
-//
-// Precedence: an explicit CLAUDE_SKILLS_* var wins (operator escape hatch for
-// debugging); otherwise the userConfig value is used; otherwise the constant
-// default. This keeps the user-facing setting effective without taking away the
-// lower-level override.
 
 pub(super) const PLUGIN_REVIEW_STRICTNESS: &str = "CLAUDE_PLUGIN_OPTION_REVIEW_STRICTNESS";
 

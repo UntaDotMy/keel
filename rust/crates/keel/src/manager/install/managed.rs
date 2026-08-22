@@ -206,7 +206,7 @@ pub(crate) fn is_allowed_managed_orphan_relative(relative: &str) -> bool {
     if rel.is_empty() || rel == "." {
         return false;
     }
-    // Path traversal or absolute-like components → refuse.
+    // Path traversal or absolute-like components to refuse.
     if rel.starts_with('/')
         || rel.starts_with("..")
         || rel.contains("/../")

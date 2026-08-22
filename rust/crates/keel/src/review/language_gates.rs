@@ -20,7 +20,7 @@ pub(crate) fn run_review_gates_command(
         return 1;
     }
     let mut flag_set = review_flag_set("review gates check");
-    // why: "run" preserves this surface's long-standing behavior; the old "skip"
+    // "run" preserves this surface's long-standing behavior; the old "skip"
     // default was never read, so the documented flag controlled nothing.
     flag_set.string_flag("repo-test-policy", "run");
     flag_set.bool_flag("python-checks", false);
@@ -110,7 +110,7 @@ pub(crate) fn run_review_gates_command(
         gate_results.extend(run_go_surface_gates(&repository_root, true));
     }
 
-    // why: without this, `gates check` yields a green verdict without the
+    // without this, `gates check` yields a green verdict without the
     // owner-path evidence pre-commit and pre-pr require.
     gate_results.push(flow_check_gate(
         &repository_root,
@@ -426,8 +426,6 @@ pub(crate) fn check_mypy(repository_root: &Path) -> GateResult {
 
 pub(crate) fn check_circular_imports(repository_root: &Path) -> GateResult {
     // Detect real circular imports: build a local-module import graph and run
-    // DFS cycle detection. Replaces a prior stub that iterated files with `pass`
-    // and could never report a cycle.
     let check_script = r#"
 import ast
 import sys
@@ -550,8 +548,6 @@ sys.exit(0)
 
 pub(crate) fn check_import_safety(repository_root: &Path) -> GateResult {
     // Scan every .py for dangerous top-level imports (eval/exec/__import__/compile)
-    // and exit non-zero when any are found. Replaces a prior stub that defined
-    // check_file but never called it and exited 0 unconditionally.
     let check_script = r#"
 import ast
 import sys

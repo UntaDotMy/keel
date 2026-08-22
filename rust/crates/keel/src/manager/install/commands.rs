@@ -121,12 +121,6 @@ pub(crate) fn uninstall_managed_files(claude_home: &Path) -> Result<usize, Strin
         removed_count += remove_path_if_exists_counted(&shared_path)?;
     }
     // `managed-agents.txt` stores bare agent names (no extension), one per
-    // YAML config under `<skill>/agents/*.yaml`. Each name maps to a managed
-    // agent profile under `<home>/agent-profiles/<name>.toml` plus an
-    // optional matching directory entry under `<home>/agents/<name>` from
-    // earlier installer revisions. Subagent `.md` definitions installed by
-    // `sync_subagent_definitions` are tracked separately via
-    // `managed-files.txt` and removed by the per-file inventory loop above.
     let installed_agents = read_inventory_set(&managed_agents_inventory_path(claude_home));
     for agent_name in &installed_agents {
         let agent_path = agents_directory(claude_home).join(agent_name);
@@ -140,8 +134,6 @@ pub(crate) fn uninstall_managed_files(claude_home: &Path) -> Result<usize, Strin
         managed_agents_inventory_path(claude_home),
         managed_shared_resources_inventory_path(claude_home),
         // install-metadata.txt records repo/installed version; install writes it
-        // (install.rs), so uninstall must remove it or doctor/verify report a
-        // stale "installed" state against a now-deleted binary.
         crate::manager::verify::install_metadata_path(claude_home),
     ] {
         let _ = remove_path_if_exists_counted(&inventory)?;
@@ -216,8 +208,6 @@ pub(crate) fn remove_wired_adapters(claude_home: &Path) -> usize {
     }
 
     // Cursor hooks: install writes ~/.cursor/hooks/{hooks.json,keel-cursor.sh}.
-    // Uninstall must remove both or Cursor keeps invoking a hook that shells to
-    // the now-deleted keel binary on every tool call.
     for hook_file in [
         home.join(".cursor").join("hooks").join("hooks.json"),
         home.join(".cursor").join("hooks").join("keel-cursor.sh"),
@@ -434,9 +424,6 @@ pub fn run_uninstall_command(
     let mut flag_set = FlagSet::new("uninstall");
     flag_set.string_flag("claude-home", "");
     // Accept-and-ignore --repo-root for parity with the documented help
-    // (`uninstall [--repo-root <path>] [--claude-home <path>]`). Uninstall does
-    // not need the repository — it removes managed files from the claude home —
-    // but rejecting a flag the help advertises breaks documented invocations.
     flag_set.string_flag("repo-root", "");
     if let Err(parse_error) = flag_set.parse(arguments) {
         let _ = writeln!(standard_error, "{}", parse_error.message);
@@ -471,10 +458,6 @@ pub fn run_uninstall_command(
         }
     }
     // Strip the keel managed block from ~/.claude/CLAUDE.md, preserving
-    // any user-authored content outside the sentinels. Unlike AGENTS.md (which
-    // keel owns wholesale at this path), CLAUDE.md may hold the user's own
-    // global memory, so we only remove our block and delete the file solely when
-    // nothing else remains.
     match remove_managed_user_claude_md(&engagement_home) {
         Ok(count) => removed_count += count,
         Err(error) => {
@@ -494,8 +477,6 @@ pub fn run_uninstall_command(
         }
     }
     // Remove loop-generated skills and their paired subagents. Built-in
-    // (repo-synced) skills are identified by the absence of the learning marker
-    // and are never touched here — they were already removed by inventory above.
     match crate::runner::learning::remove_generated_artifacts(&claude_home) {
         Ok(count) => removed_count += count,
         Err(error) => {
@@ -504,9 +485,6 @@ pub fn run_uninstall_command(
         }
     }
     // Strip the managed hook stanzas from settings.json. Without this, an
-    // uninstall leaves the harness firing hooks at a now-deleted binary every
-    // session. Reuse the same removal the dedicated `hook uninstall` performs so
-    // unrelated user hooks are preserved.
     if let Err(error) =
         crate::runner::hook_lifecycle::remove_managed_hook_payload_for_home(&claude_home)
     {
@@ -514,9 +492,6 @@ pub fn run_uninstall_command(
         return 1;
     }
     // Reverse the MCP registration install wrote to ~/.claude.json. Without this,
-    // an uninstall leaves a dangling `mcpServers.keel` entry pointing at
-    // the now-deleted binary, which the harness tries to spawn every session.
-    // Preserves sibling servers and unrelated keys.
     match super::super::mcp_register::unregister_mcp_server(&claude_home) {
         Ok(super::super::mcp_register::McpUnregistration::Removed) => removed_count += 1,
         Ok(super::super::mcp_register::McpUnregistration::NotPresent) => {}
@@ -562,13 +537,6 @@ pub fn run_self_replace_command(arguments: &[String], standard_error: &mut dyn W
         match atomic_copy_executable(&source, &target) {
             Ok(()) => {
                 // The binary was just swapped in. A swap is exactly the drift
-                // vector that leaves a stale ~/.claude.json entry behind: the
-                // new binary knows about `alwaysLoad`, but nothing re-ran
-                // registration. Re-assert it now (idempotent — a no-op when the
-                // entry already matches) so the repair does not have to wait for
-                // the next SessionStart. The target is <claude_home>/keel
-                // (+ extension), so its parent is the claude home. Best-effort:
-                // a failure here must not fail the swap.
                 if let Some(claude_home) = target.parent() {
                     let _ = super::super::mcp_register::self_heal_registration(claude_home);
                 }

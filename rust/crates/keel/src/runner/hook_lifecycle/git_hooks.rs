@@ -208,7 +208,7 @@ pub(super) fn run_hook_git_hooks(
     let hooks_path_value = ".githooks";
 
     if git_config_path.exists() {
-        // why: a failed read (perms, AV lock) must never turn into an
+        // a failed read (perms, AV lock) must never turn into an
         // unconditional overwrite that replaces a real config with a stub.
         let git_config = match fs::read_to_string(&git_config_path) {
             Ok(text) => text,

@@ -16,37 +16,6 @@ pub fn publish_native_executable(
 ) -> Result<bool, String> {
     let target = detect_current_target().map_err(|error| format!("detect target: {error}"))?;
     // Three source layouts must be supported, probed in this priority order:
-    //
-    //   1. Cargo cross-build / CI: <repo_root>/target/<triple>/release/keel.exe.
-    //      Produced when `cargo build --release --target <triple>` is invoked
-    //      explicitly (the release workflow does this for cross-compile).
-    //      Probed first so a CI build that staged both layouts still picks
-    //      the targeted artifact over a host-arch leftover.
-    //
-    //   2. Cargo host-default: <repo_root>/target/release/keel.exe.
-    //      Produced by plain `cargo build --release` without `--target`,
-    //      which is what local contributors run by default. Without this
-    //      probe, `keel install` from a Cargo-direct workspace
-    //      silently returns Ok(false), prints "Published executable: false",
-    //      and leaves the previously-installed binary in place — the exact
-    //      "stale binary" regression that surfaced as `keel memory
-    //      working-brief write` returning the long-deleted "Rust native
-    //      placeholder completed without Go fallback" error against a
-    //      workspace where source had moved 18+ commits past the install.
-    //
-    //   3. Release archive bundle: <repo_root>/keel.exe. The release
-    //      workflow stages the binary at the bundle root (.github/workflows/
-    //      release.yml step "Stage release bundle"), and install.ps1/install.sh
-    //      pass that bundle directory as --repo-root. Probed last so a
-    //      Cargo-built workspace prefers its own fresh artifact over any
-    //      bundle-root leftover from a previous archive install.
-    //
-    // Without the bundle fallback, install.ps1 ran against a fresh release
-    // archive returns Ok(false) and silently leaves a stale executable on
-    // disk — the regression that reproduced "Unknown hook command:
-    // post-tool-use-failure" against a binary that predated PR #54. The
-    // fix here keeps both legacy probes intact and adds the missing
-    // host-default probe between them.
     let cargo_targeted = repository_root
         .join("target")
         .join(target.directory_name())
@@ -194,9 +163,6 @@ pub(crate) fn replace_executable_in_place(temp_path: &Path, target: &Path) -> Re
     {
         let stale_path = sibling_stale_path(target);
         // Move the running image aside so the new binary can take its name.
-        // If the file is genuinely unlocked the move-aside still succeeds; if
-        // even the rename is refused we fall back to a direct replace so a
-        // non-running target on a permissive filesystem still updates.
         if rename_with_retry(target, &stale_path).is_err() {
             return rename_with_retry(temp_path, target).inspect_err(|_| {
                 let _ = fs::remove_file(temp_path);
@@ -210,8 +176,8 @@ pub(crate) fn replace_executable_in_place(temp_path: &Path, target: &Path) -> Re
                 Ok(())
             }
             Err(error) => {
-                // Never leave the install without a binary: restore the image
-                // we moved aside, drop the staged copy, and surface the error.
+                // Never leave the install without a binary; restore the image,
+                // remove the staged copy, and surface the error.
                 let _ = fs::rename(&stale_path, target);
                 let _ = fs::remove_file(temp_path);
                 Err(error)
@@ -327,7 +293,7 @@ pub fn find_executable_orphans(claude_home: &Path) -> Vec<PathBuf> {
             ) {
                 (Some(orphan_time), Some(installed_time)) => orphan_time < installed_time,
                 // No installed executable means the .new is stranded with no
-                // active install to race with — safe to clean up.
+                // active install to race with ; safe to clean up.
                 (Some(_), None) => true,
                 _ => false,
             };

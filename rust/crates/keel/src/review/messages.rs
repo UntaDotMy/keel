@@ -11,9 +11,6 @@ pub(crate) fn render_generated_message(
     flag_set.bool_flag("from-diff", false);
     flag_set.string_flag("test-result", "");
     // `repo-root` scopes the git diff. `base-ref` selects the range the diff is
-    // computed against (committed commits ahead of the base); when a base ref is
-    // given, staging state is irrelevant. `format` selects the output rendering
-    // (commit-message/pr-body default to markdown when unset).
     flag_set.string_flag("repo-root", "");
     flag_set.string_flag("base-ref", "");
     flag_set.string_flag("format", "");

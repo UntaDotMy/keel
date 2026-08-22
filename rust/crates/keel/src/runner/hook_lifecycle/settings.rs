@@ -237,10 +237,6 @@ pub(super) fn run_hook_list(
     match fs::read_to_string(&hook_path) {
         Ok(text) => {
             // Redact secret-pattern values before printing. `settings.json`
-            // routinely carries an `env` block with a live `ANTHROPIC_AUTH_TOKEN`
-            // (and may hold API keys/passwords), and `hook list`/`show` output
-            // lands in logs, screen shares, and subagent transcripts. Printing
-            // verbatim would leak a live credential, so mask known-secret keys.
             let _ = writeln!(standard_output, "{}", redact_secrets_in_settings(&text));
 
             0
@@ -306,9 +302,7 @@ pub(super) fn redact_secrets_in_settings(raw: &str) -> String {
     match serde_json::from_str::<JsonDocument>(raw) {
         Ok(mut document) => {
             redact_secrets_in_value(&mut document, false);
-            // A re-serialization failure is implausible for a value we just
-            // parsed, but if it happens we still must not fall back to the raw
-            // (un-redacted) text — suppress instead of leaking.
+            // A re-serialization failure is implausible for a value the code just
             serde_json::to_string_pretty(&document).unwrap_or_else(|_| {
                 "[settings.json could not be re-serialized — output suppressed to prevent secret leak]"
                     .to_string()
@@ -326,16 +320,13 @@ pub(super) fn redact_secrets_in_value(value: &mut JsonDocument, parent_key_is_se
     match value {
         JsonDocument::Object(map) => {
             for (key, child) in map.iter_mut() {
-                // Once we are under a secret-named key, every descendant is
-                // sensitive — OR the carry-down in so the chain survives an
-                // intermediate object (e.g. {"api_key": {"primary": "..."}}),
-                // not just a direct string or array.
+                // Once the code are under a secret-named key, every descendant is
                 let key_is_secret = parent_key_is_secret || is_secret_key(key);
                 if key_is_secret {
                     if let JsonDocument::String(secret) = child {
                         *secret = mask_secret_value(secret);
                         // Already masked this string; skip the recursion below
-                        // so we do not walk into it a second time.
+                        // so the code do not walk into it a second time.
                         continue;
                     }
                 }
@@ -437,12 +428,6 @@ pub(super) fn run_hook_instructions(
 
 pub(super) fn render_hook_help(standard_output: &mut dyn Write) {
     // Build the slug list straight from HOOK_EVENTS so the help line
-    // cannot drift from the dispatch table. The earlier hard-coded list
-    // shipped with 14 missing slugs (post-tool-batch, user-prompt-expansion,
-    // setup, file-changed, ...) that dispatched correctly but were
-    // invisible to anyone who ran `keel hook` to learn what was
-    // available. Pulling from the table makes "advertised == dispatched"
-    // a structural property.
     let admin_verbs = [
         "install",
         "uninstall",
@@ -667,12 +652,6 @@ pub(super) fn settings_points_at_installed_executable(
     installed_executable: &Path,
 ) -> bool {
     // Casefold paths only on Windows. NTFS and `cmd /C` arguments are
-    // case-insensitive, so the rendered hook command may carry the same path
-    // with a different casing than `display_path()` returns. On Linux and
-    // macOS, filesystems are case-sensitive and `~/.claude/keel` is a
-    // genuinely different file from `~/.the harness/keel` — lowercasing
-    // would mask a real misconfiguration. `casefold` is therefore the identity
-    // on Unix and `to_ascii_lowercase` only on Windows.
     let casefold = |value: &str| -> String {
         if cfg!(windows) {
             value.to_ascii_lowercase()
@@ -683,10 +662,6 @@ pub(super) fn settings_points_at_installed_executable(
 
     let installed_normalized = casefold(&display_path(installed_executable));
     // Path matches must be full path. A file-name-only fallback would
-    // accept stale settings that point at a sibling executable (e.g.
-    // claude_home/elsewhere/keel.exe) just because the file name
-    // matches, which is exactly the misconfiguration this check is meant
-    // to catch.
 
     let Some(hooks) = document.get("hooks").and_then(JsonDocument::as_object) else {
         return false;
@@ -708,11 +683,6 @@ pub(super) fn settings_points_at_installed_executable(
                     continue;
                 }
                 // Unreachable for any entry that passed the gate above: both
-                // the args-form and legacy-string-form detectors require
-                // `command` to be a present string. Kept as a defensive skip
-                // so a future entry shape (e.g. one that ships only `args`)
-                // never panics here, and so `managed_seen` doesn't get flipped
-                // on an entry the doctor can't actually reason about.
                 let Some(command) = command_entry.get("command").and_then(JsonDocument::as_str)
                 else {
                     continue;
@@ -720,11 +690,6 @@ pub(super) fn settings_points_at_installed_executable(
                 managed_seen = true;
                 let command_normalized = casefold(command);
                 // Legacy single-string PowerShell-encoded entries embed the
-                // path inside a base64 UTF-16 LE script. Decode and match
-                // case-insensitively so doctor recognizes upgrades from older
-                // keel versions that haven't been re-installed yet.
-                // Args-form entries store the path directly in `command`, so
-                // the plain match below covers them without needing decode.
                 let decoded_normalized = decode_powershell_encoded_command(command)
                     .map(|decoded| decoded.to_ascii_lowercase());
                 let installed_for_decoded = display_path(installed_executable).to_ascii_lowercase();
@@ -925,11 +890,6 @@ pub fn remove_managed_hooks(document: &mut JsonDocument) {
     }
 
     // Drop event keys whose array is now empty so a clean uninstall leaves no
-    // trace. An event we managed but the user also added a hook to keeps its
-    // key (the retain above preserves their non-managed matcher entries); only
-    // events that became fully empty after removing our entries are pruned.
-    // An empty `"Stop": []` array carries no behavior, so removing it is safe
-    // and restores settings.json to its pre-install shape.
     hooks.retain(|_event_name, event_entries| {
         event_entries
             .as_array()
@@ -949,12 +909,6 @@ pub(super) fn append_managed_hooks(
 
     for event in HOOK_EVENTS {
         // Some events declare themselves not installable into settings.json
-        // because their canonical config requires per-repo decisions we
-        // can't make at install time (FileChanged in particular: per
-        // code.claude.com/docs/en/hooks the matcher value is the watch
-        // list, so installing with `matcher: ""` would ship dead config).
-        // Dispatch still works for ad-hoc invocations; we just skip the
-        // settings stanza.
         if !event.installs_in_settings {
             continue;
         }
@@ -975,9 +929,7 @@ pub(super) fn append_managed_hooks(
             "args": entry.args,
             "statusMessage": event.status
         });
-        // why: PostToolUse/PostToolUseFailure record timings + observations and must
-        // not add keel-spawn latency to every tool call — run them async, matching
-        // the plugin hooks.json and the CLAUDE.md contract ("runs async").
+        // PostToolUse/PostToolUseFailure record timings + observations and must
         if matches!(event.name, "PostToolUse" | "PostToolUseFailure") {
             hook_def["async"] = serde_json::json!(true);
         }

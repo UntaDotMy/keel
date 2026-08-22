@@ -82,8 +82,7 @@ pub(crate) fn run_git_workflow_preflight(
     let mut blocking: Vec<String> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
 
-    // 0. Confirm we are inside a work tree at all — otherwise every check below
-    //    is meaningless and a green result would be a lie.
+    // Confirm the repository is a work tree; otherwise a green result is invalid.
     match git_text(repo, &["rev-parse", "--is-inside-work-tree"]) {
         Some(value) if value.trim() == "true" => {}
         _ => {
@@ -96,10 +95,7 @@ pub(crate) fn run_git_workflow_preflight(
         }
     }
 
-    // 1. Branch naming. Hierarchy: main ← dev ← feat ← task/<task>
-    //    [← task/<task>/<subtask>]. Hands-on work lives under task/ (preferred)
-    //    or a legacy prefix (warn). main/master never receive direct work.
-    //    Bare `feat`/`dev` are promotion tiers only.
+    // 1. Branch naming. Hierarchy: main from dev from feat from task/<task>
     let branch = git_text(repo, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_default();
     let branch = branch.trim().to_string();
     if branch.is_empty() || branch == "HEAD" {
@@ -110,8 +106,6 @@ pub(crate) fn run_git_workflow_preflight(
         ));
     } else if matches!(branch.as_str(), "dev" | "feat") {
         // Integration tiers: valid to stand on only when promoting upward
-        // (feat→dev, dev→main). Allowed through, but flagged so an accidental
-        // direct commit to a tier is visible rather than silent.
         warnings.push(format!(
             "on integration tier '{branch}' — only valid when promoting upward (feat→dev→main), not for hands-on work"
         ));
@@ -153,8 +147,6 @@ pub(crate) fn run_git_workflow_preflight(
     }
 
     // 3 & 4. Committed history against the base ref, and a non-empty diff. Both
-    //    require the base ref to exist locally; if it does not, that itself is a
-    //    blocking condition (cannot prove the branch diverges from the base).
     if git_text(repo, &["rev-parse", "--verify", "--quiet", &base_ref]).is_none() {
         blocking.push(format!(
             "base ref '{base_ref}' not found — fetch it (e.g. `git fetch origin`) or pass --base-ref"
@@ -170,8 +162,6 @@ pub(crate) fn run_git_workflow_preflight(
             ));
         }
         // `git diff --quiet <range>` exits 0 when the trees are identical and 1
-        // when they differ. Commits that produce no net diff (merge-only or
-        // fully reverted) are worth a warning, not a block.
         if commit_count > 0 && git_exit_code(repo, &["diff", "--quiet", &range]) == Some(0) {
             warnings.push(format!(
                 "commits exist but `git diff {range}` is empty (merge-only or reverted changes)"
@@ -226,7 +216,7 @@ pub(crate) fn truncate_subject(subject: &str) -> String {
     }
 }
 
-// why: persist the chosen branch+commit workflow to the global per-workspace
+// persist the chosen branch+commit workflow to the global per-workspace
 // memory lane so it survives sessions; this records the model, not new formats.
 
 /// The four-tier model is the supported default; `configure` records the user's

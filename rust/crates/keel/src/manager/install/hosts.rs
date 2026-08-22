@@ -40,11 +40,7 @@ pub(crate) fn maybe_install_hooks(engagement_home: &Path, keel_home: &Path) -> O
         return None;
     }
     let hook_path = engagement_home.join(crate::hooks::claude::SETTINGS_FILE_NAME);
-    // Point the hooks at the binary we just published into the keel home, not at
-    // the currently-running executable (which during `update` is the freshly
-    // built release artifact in the repo target dir, and during a release-bundle
-    // install is the extracted temp binary). The published path is the stable
-    // location the harness will invoke for the lifetime of the install.
+    // Point hooks at the installed binary, not the running build artifact.
     let executable = installed_executable_path(keel_home);
     match crate::runner::hook_lifecycle::build_hooks_payload(&hook_path, &executable) {
         Ok(payload) => match write_text(&hook_path, &payload) {
@@ -73,9 +69,6 @@ pub(crate) fn maybe_wire_opencode(
     }
 
     // Derive the home that owns THIS .claude from claude_home's parent, not from
-    // the process environment. This keeps `cargo test` hermetic (a temp .claude
-    // home wires into the temp parent, never the developer's real ~/.config) and
-    // makes the wiring honest for non-default --claude-home installs.
     let home: PathBuf = match claude_home.parent() {
         Some(path) => path.to_path_buf(),
         None => return Some("skipped (no home directory)".to_string()),
@@ -87,8 +80,6 @@ pub(crate) fn maybe_wire_opencode(
     }
 
     // Copy the bridge plugin source into the OpenCode plugins directory so the
-    // bridge actually runs. Without this the dir + MCP entry exist but no plugin
-    // file loads, and none of the lifecycle wiring fires.
     let plugin_source = repository_root.join("opencode").join("keel.ts");
     let plugin_status = if plugin_source.is_file() {
         let plugin_target = plugin_dir.join("keel.ts");
@@ -193,9 +184,6 @@ pub(crate) fn maybe_wire_cursor(
     }
 
     // Cursor MCP: merge the `keel` entry into ~/.cursor/mcp.json. Cursor loads
-    // MCP servers from this file (https://cursor.com/docs/mcp). Merge, never
-    // clobber — preserve the user's other MCP servers. No alwaysLoad equivalent;
-    // Cursor loads MCP servers on demand.
     let cursor_mcp_source = repository_root.join("cursor").join("mcp.json");
     if cursor_mcp_source.is_file() {
         let mcp_target = home.join(".cursor").join("mcp.json");
@@ -224,8 +212,6 @@ pub(crate) fn maybe_wire_cursor(
             mcp_entry
         };
         // The shipped cursor/mcp.json templates a bare PATH-dependent `keel`
-        // command; rewrite it to the absolute installed binary path exactly as
-        // the codex path does (bare `keel` only works when PATH is wired).
         rewrite_mcp_entry_command(&mut mcp_entry, &display_path(&binary));
         match merge_json_mcp(&mcp_target, "mcpServers", "keel", &mcp_entry, None) {
             Ok(JsonMcpMergeResult::Added) => {
@@ -337,8 +323,6 @@ pub(crate) fn maybe_wire_pi(
     }
     if mcp_source.is_file() {
         // Pi loads MCP config from ~/.pi/agent/mcp.json (global) or
-        // .pi/mcp.json (project) — NOT ~/.config/mcp/mcp.json. See
-        // https://pi.dev/docs/latest/extensions and the settings.md reference.
         let mcp_target = home.join(".pi").join("agent").join("mcp.json");
         if let Some(parent) = mcp_target.parent() {
             let _ = std::fs::create_dir_all(parent);
@@ -378,8 +362,6 @@ pub(crate) fn maybe_wire_pi(
             mcp_entry
         };
         // The shipped pi/.mcp.json templates a bare PATH-dependent `keel`
-        // command; rewrite it to the absolute installed binary path exactly as
-        // the codex path does (bare `keel` only works when PATH is wired).
         rewrite_mcp_entry_command(&mut mcp_entry, &display_path(&binary));
         match merge_json_mcp(
             &mcp_target,
@@ -403,7 +385,7 @@ pub(crate) fn maybe_wire_pi(
     let extension_source = repository_root.join("pi").join("keel-pi.ts");
     if extension_source.is_file() {
         // Pi auto-discovers extensions from ~/.pi/agent/extensions/*.ts
-        // (global) or .pi/extensions/*.ts (project) — NOT ~/.pi/extensions/.
+        // Pi extensions may be global or project-scoped; do not use ~/.pi/extensions/.
         let extensions_dir = home.join(".pi").join("agent").join("extensions");
         let _ = std::fs::create_dir_all(&extensions_dir);
         let target = extensions_dir.join("keel-pi.ts");
@@ -544,11 +526,6 @@ pub(crate) fn maybe_wire_codex(
         }
     }
     // Codex resolves the MCP `command` via PATH only. The shipped .mcp.json
-    // uses a bare `keel`, which fails with "program not found" when
-    // ~/.claude is not on PATH (the common case on Windows, where install
-    // does not modify PATH). Rewrite the copied file's command to the
-    // absolute binary path, mirroring how OpenCode/Cursor/pi template the
-    // resolved path into their MCP config at install time.
     let mcp_target = plugin_target.join(".mcp.json");
     let binary = installed_executable_path(claude_home);
     let mcp_status = if mcp_target.is_file() {

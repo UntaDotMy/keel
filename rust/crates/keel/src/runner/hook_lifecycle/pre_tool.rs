@@ -279,7 +279,7 @@ pub(crate) fn is_keel_research_command(command: &str) -> bool {
     if !has_keel {
         return false;
     }
-    // why: a compound/chained command can smuggle a non-keel tail past the gate
+    // a compound/chained command can smuggle a non-keel tail past the gate
     // (`keel doctor && python exfil.py`); only a standalone keel invocation clears.
     if body.contains("&&")
         || body.contains("||")
@@ -292,10 +292,6 @@ pub(crate) fn is_keel_research_command(command: &str) -> bool {
         return false;
     }
     // Research / orientation subcommands that clear the edit gate. Kept in lockstep
-    // with the documented clearing set (system_map / recall / context_brief /
-    // skill_* / code_search, plus the keel memory / doctor / code-search CLI forms).
-    // Non-research management surfaces were removed: they used to clear the gate
-    // without any research happening, which made the hard enforcement a paper wall.
     const HITS: &[&str] = &[
         "system-map",
         "system_map",
@@ -430,7 +426,7 @@ pub(super) fn session_has_iron_law_evidence(
         if line.trim().is_empty() {
             continue;
         }
-        // why: the day's file holds every session's rows; a line without the id as
+        // the day's file holds every session's rows; a line without the id as
         // a substring cannot match, so skip the parse rather than just the compare.
         if !line.contains(session_id) {
             continue;
@@ -474,7 +470,7 @@ pub(crate) fn tool_is_iron_law_gated(tool_name: &str, command: Option<&str>) -> 
         return true;
     }
     if is_host_shell_tool_name(tool_name) {
-        // Keel research/anvil shell is the path that *clears* the gate — never block it.
+        // Keel research/anvil shell is the path that *clears* the gate ; never block it.
         if let Some(cmd) = command {
             if is_keel_research_command(cmd) || tool_is_anvil_surface(tool_name, Some(cmd)) {
                 return false;
@@ -498,7 +494,7 @@ pub(crate) fn iron_law_gate_decision(session_id: &str) -> Option<&'static str> {
     let claude_home = match crate::runtime::resolve_claude_home("") {
         Ok(home) => home,
         Err(error) => {
-            // why: without the home dir we cannot read the research marker; surface
+            // without the home dir the code cannot read the research marker; surface
             // the fail-open rather than silently disabling the gate.
             eprintln!(
                 "[keel] Iron Law gate could not resolve the claude home directory ({error}); allowing this tool call unverified."
@@ -583,8 +579,6 @@ pub(super) fn run_hook_pre_tool_use(
     let session_id = hook_session_id(&input);
 
     // Hard Iron Law: block Edit/Write, non-keel Bash, and Agent/Task until the
-    // session has used a keel research tool. Text reminders alone are ignoreable;
-    // this deny is what settles compliance.
     if tool_is_iron_law_gated(tool_name, command_opt) {
         if iron_law_gate_decision(session_id).is_some() {
             return run_iron_law_gate(&input, standard_output, standard_error);
@@ -615,9 +609,6 @@ pub(super) fn run_hook_pre_tool_use(
     }
 
     // Inspect EVERY segment of a compound command, not just the first supported
-    // noisy segment that `analyze_command_text`'s `effective_fields` surfaces.
-    // Without this, a destructive payload in a later segment
-    // (`cargo test && rm -rf /`) bypasses the guard entirely.
     if let Some(finding) = crate::runner::shell_rewrite::detect_destructive_in_command(command) {
         let reason = match finding.severity {
             crate::runner::shell_rewrite::DestructiveSeverity::Block => format!(
@@ -634,7 +625,7 @@ pub(super) fn run_hook_pre_tool_use(
         return 0;
     }
 
-    // why: updatedInput.command goes back to the originating tool, and a
+    // updatedInput.command goes back to the originating tool, and a
     // Bash-shaped prefix is a parse error in PowerShell.
     let rewrite = rewrite_command_text_for_shell(command, rewrite_shell_for_tool(tool_name));
 
@@ -657,7 +648,7 @@ pub(super) fn run_hook_pre_tool_use(
             },
 
             "allowRules": [
-                // why: a rule is ToolName(pattern), so Bash(...) never matches a
+                // a rule is ToolName(pattern), so Bash(...) never matches a
                 // PowerShell call; skip the leading `&` to reach the executable.
                 format!(
                     "{tool_name}({}:*)",

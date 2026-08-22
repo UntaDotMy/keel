@@ -112,43 +112,15 @@ pub fn run_hook_command(
         "pre-tool-use" => run_hook_pre_tool_use(standard_output, standard_error),
 
         // PostToolUse counts edit-class tool calls and refreshes SYSTEM_MAP.md
-        // every N edits. The lifecycle context for this event stays empty
-        // (silent per the prompt-cache budget rule), so we own the dispatch
-        // here instead of going through run_hook_lifecycle.
         "post-tool-use" => run_hook_post_tool_use(standard_error),
 
         // PostToolUseFailure carries the same `duration_ms` field PostToolUse
-        // does (CC 2.1.119) and we want failed tool timings on the same JSONL
-        // as successes so an analyzer can compare them. The event has no
-        // additionalContext to inject, so we own dispatch here too rather
-        // than letting the lifecycle wildcard route it through an empty
-        // context render. Keeping the slug in the canonical event table is
-        // still important — that table is the dispatch invariant from the
-        // earlier `Unknown hook command: post-tool-use-failure` regression.
         "post-tool-use-failure" => run_hook_post_tool_use_failure(standard_error),
 
         // Stop and SubagentStop must never return a non-zero exit code, and must
-        // never emit hookSpecificOutput.additionalContext. Two distinct hazards:
-        //   1. A non-zero exit makes the harness re-run the turn, which cascades
-        //      into a stop loop.
-        //   2. additionalContext on a Stop hook means "keep going" — emitting it
-        //      unconditionally makes the agent loop forever (finish -> inject ->
-        //      forced to continue -> finish -> inject -> ...). This was the
-        //      regression shipped in PR #121 and reverted here.
-        // The closeout reminder lives on PostToolBatch instead, which fires
-        // mid-turn before the next model call and cannot loop. Short-circuit to
-        // exit 0 with no output so no downstream change can re-introduce either
-        // hazard.
         "stop" | "subagent-stop" => 0,
 
         // Notification fires when the harness wants the user's attention
-        // (permission prompt, idle reminder). CC 2.1.141 added the
-        // `terminalSequence` field to hook JSON output for exactly this case
-        // — emitting bells/desktop notifications without a controlling
-        // terminal. We ring the BEL so the user hears it even when the
-        // terminal is in the background. Notification is documented as
-        // top-level-only (no hookSpecificOutput), so we own dispatch here
-        // rather than going through the lifecycle path.
         "notification" => run_hook_notification(standard_output),
 
         // PermissionRequest: auto-approve keel commands to reduce
@@ -177,67 +149,30 @@ pub fn run_hook_command(
         "cwd-changed" => run_hook_cwd_changed(standard_output, standard_error),
 
         // UserPromptSubmit reads the same stdin payload the harness delivers to
-        // PreToolUse so we can read `session_id` and apply the optional
-        // compression-discipline nudge when that session has accumulated enough
-        // tool-timings rows to suggest the context window is filling. The
-        // sibling function owns stdin parsing; the slug-only `run_hook_lifecycle`
-        // path stays the test surface for every event that does NOT need stdin.
-        // Stdin is injected explicitly so tests can pass `&mut std::io::empty()`
-        // to avoid blocking when cargo's parent process holds an open console
-        // handle (real symptom on Windows under PowerShell).
         "user-prompt-submit" => {
             let mut stdin = std::io::stdin().lock();
             run_hook_user_prompt_submit(&mut stdin, standard_output, standard_error)
         }
 
         // PostToolBatch reads stdin for `session_id` so the optional review gate
-        // (CLAUDE_SKILLS_REVIEW_GATE) can scope its per-session block counter and
-        // edit-vs-review telemetry. With the gate disabled (the default) this is
-        // behaviorally identical to the advisory reminder the lifecycle path
-        // emits. Stdin is injected so tests can pass `&mut std::io::empty()`.
         "post-tool-batch" => {
             let mut stdin = std::io::stdin().lock();
             run_hook_post_tool_batch(&mut stdin, standard_output, standard_error)
         }
 
         // SessionStart re-asserts the keel MCP registration before the
-        // normal lifecycle context render. This is the self-heal for a drifted
-        // ~/.claude.json entry: install/update/repair re-register, but a binary
-        // swapped in by any other path (manual copy, partial install,
-        // __self-replace) leaves a previously-written entry untouched — so an
-        // entry missing `alwaysLoad` would persist and the MCP tools would stay
-        // deferred behind ToolSearch. Running the idempotent re-registration on
-        // every session boot closes that window: it is a no-op on a healthy
-        // config and silently repairs drift on the next launch. Best-effort —
-        // a failure is reported to stderr but never changes the hook exit code,
-        // because the SessionStart context render is load-bearing and MCP is not.
-        // Routed here (not in run_hook_lifecycle) so the inner lifecycle unit
-        // test stays free of any ~/.claude.json write.
         "session-start" => {
             maybe_self_heal_mcp_registration(standard_error);
             run_hook_lifecycle("session-start", standard_output, standard_error)
         }
 
         // SessionEnd reads stdin for `session_id` so the auto-capture can scope a
-        // work summary to this session's edit-class observations and write it to
-        // memory (the "after do, save to memory" half — so the next session
-        // starts informed without the model remembering to write a note). Routed
-        // here (not the stdin-blind lifecycle path) because the summary needs the
-        // session id from the payload. The capture runs first, then the lifecycle
-        // path still performs the existing SessionEnd side effects (system-map
-        // refresh, store prunes, learning). Stdin is injected so tests can pass
-        // `&mut std::io::empty()`.
         "session-end" => {
             let mut stdin = std::io::stdin().lock();
             run_hook_session_end(&mut stdin, standard_output, standard_error)
         }
 
         // Every other slug is dispatched if and only if it appears in the canonical
-        // event table. Using the same table that drives `settings.json` installation
-        // means a stale binary cannot reject an event the install path advertises:
-        // the dispatch list IS the canonical list. This is the structural fix for
-        // the `Unknown hook command: post-tool-use-failure` regression seen on
-        // Windows when the dispatch arm and the EVENTS array drifted apart.
         other if event_by_slug(other).is_some() => {
             run_hook_lifecycle(other, standard_output, standard_error)
         }

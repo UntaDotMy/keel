@@ -18,7 +18,7 @@ pub(crate) const MIGRATION_DATA_NAMES: &[&str] = &[
     "memory",
     "sprint",
     "state",
-    // NOTE: `agent-profiles` is NOT migrated. Install re-syncs it into the
+    // `agent-profiles` is NOT migrated. Install re-syncs it into the
     // engagement home every run, so copying it would only churn.
     ".claude-skill-manager",
     "workflow",

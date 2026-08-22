@@ -154,8 +154,6 @@ pub(crate) fn user_prompt_submit_context(prompt_text: &str) -> String {
     }
 
     // PUSH workspace map/brief content every prompt (not only SessionStart).
-    // Agents ignore "call system_map"; they cannot ignore content already in
-    // context. Bounded so it does not blow the per-prompt budget.
     let digest = workspace_memory_digest();
     if !digest.trim().is_empty() {
         let pushed = truncate_on_line_boundary(&digest, USER_PROMPT_DIGEST_MAX_BYTES);
@@ -216,9 +214,6 @@ pub(super) fn mcp_tool_pointer_for_prompt(prompt: &str) -> Option<&'static str> 
     let lowered = prompt.to_ascii_lowercase();
 
     // Memory questions: the model should search its durable memory rather than
-    // claim from conversation alone. Checked first because "what did you learn
-    // about this project" mentions "project" too, and the recall answer is the
-    // better one for a memory-shaped ask.
     const MEMORY_CUES: &[&str] = &[
         "what do you remember",
         "what did you learn",
@@ -237,11 +232,6 @@ pub(super) fn mcp_tool_pointer_for_prompt(prompt: &str) -> Option<&'static str> 
     }
 
     // Repo/structure questions: the model should consult the workspace map
-    // rather than guess. The cues are phrased to catch the common shapes
-    // ("what is this project", "how is this repo structured", "what does this
-    // codebase do", "project overview", "explain the architecture") while
-    // staying narrow enough not to fire on ordinary feature work that merely
-    // mentions the word "project".
     const REPO_CUES: &[&str] = &[
         "what is this project",
         "what's this project",
@@ -299,10 +289,7 @@ pub(super) fn mcp_tool_pointer_for_prompt(prompt: &str) -> Option<&'static str> 
 pub(super) fn work_intent_pointer_for_prompt(prompt: &str) -> Option<&'static str> {
     let lowered = prompt.to_ascii_lowercase();
 
-    // Unambiguous change-intent cues — safe to match as substrings because they
-    // are imperative verbs or verb+object phrases that do not double as common
-    // nouns in question phrasing. Each is a frequent opener for a code-change
-    // request.
+    // Unambiguous change-intent cues ; safe to match as substrings because they
     const STRONG_CUES: &[&str] = &[
         "implement",
         "refactor",
@@ -330,9 +317,6 @@ pub(super) fn work_intent_pointer_for_prompt(prompt: &str) -> Option<&'static st
     }
 
     // Verbs that ALSO read as nouns ("the build", "a fix", "the patch"). Treat
-    // them as change-intent only when used as a verb — i.e. NOT immediately
-    // preceded by an article. "fix the bug" fires; "is the build passing" and
-    // "when is the fix landing" do not.
     const VERB_OR_NOUN_CUES: &[&str] = &["build ", "fix ", "fixes ", "patch "];
     if VERB_OR_NOUN_CUES
         .iter()

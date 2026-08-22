@@ -85,8 +85,6 @@ pub(super) fn run_hook_post_tool_use(standard_error: &mut dyn Write) -> u8 {
         Ok(text) => text,
 
         // PostToolUse must never fail loudly: a non-zero exit teaches the harness
-        // Code that the post-tool hook itself is broken. Log to stderr and
-        // exit 0 — the lifecycle event is observability, not a gate.
         Err(error) => {
             let _ = writeln!(
                 standard_error,
@@ -116,10 +114,6 @@ pub(super) fn run_hook_post_tool_use(standard_error: &mut dyn Write) -> u8 {
         .unwrap_or_default();
 
     // Record `duration_ms` for every tool, not just edit-class ones. CC 2.1.119
-    // documents the field as "tool execution time, excluding permission
-    // prompts and PreToolUse hooks", and we want a uniform sample so a slow
-    // Bash or Read shows up alongside slow Edits. Errors (disk full, perm)
-    // log to stderr and are swallowed — telemetry must never fail the hook.
     if let Err(error) = tool_timings::record_tool_timing("PostToolUse", &input) {
         let _ = writeln!(
             standard_error,
@@ -128,10 +122,6 @@ pub(super) fn run_hook_post_tool_use(standard_error: &mut dyn Write) -> u8 {
     }
 
     // Capture a behavioral observation for the autonomous learning loop. This
-    // is the signal `learning::run_learning_cycle` distills into instincts and,
-    // once a pattern is trusted, into a generated skill. Like the timing record
-    // above, any failure is logged and swallowed — learning capture must never
-    // fail the hook.
     match observation::record_observation(&input) {
         Ok(true) => {
             if let Ok(claude_home) = resolve_claude_home("") {
@@ -234,7 +224,7 @@ pub(super) fn run_post_tool_comment_lint(tool_name: &str, input: &JsonDocument) 
     if std::env::var("CLAUDE_SKILLS_COMMENT_LINT_GATE").as_deref() == Ok("off") {
         return None;
     }
-    // Only Edit/Write carry a file path we can scope to. Other edit-class tools
+    // Only Edit/Write carry a file path the code can scope to. Other edit-class tools
     // (apply_patch, str_replace) have no single file, so skip them to avoid noise.
     let edited_path = if matches!(tool_name, "Edit" | "Write" | "MultiEdit") {
         input
@@ -386,11 +376,6 @@ pub(super) fn run_hook_post_tool_use_failure(standard_error: &mut dyn Write) -> 
     }
 
     // Capture the FAILURE as its own behavioral observation. A failing tool call
-    // is the Reflexion-style "what goes wrong here" signal: it clusters under a
-    // distinct `… (failed)` signature so a recurring failure becomes its own
-    // instinct and surfaces in the SessionStart digest, without polluting the
-    // success patterns. Like the timing record, any error is logged and swallowed
-    // — learning capture must never fail the hook.
     match observation::record_failure_observation(&input) {
         Ok(true) => {
             if let Ok(claude_home) = resolve_claude_home("") {

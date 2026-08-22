@@ -70,7 +70,7 @@ fn stale_temp_keel_entry_detection() {
         "nonexistent keel-home-split-*/.keel must be stale"
     );
 
-    // A LIVE temp dir is NOT stale — purge must never remove a real install.
+    // A LIVE temp dir is NOT stale ; purge must never remove a real install.
     let live = temp
         .join(format!("keel-home-split-live-{}", std::process::id()))
         .join(".keel");
@@ -217,12 +217,6 @@ fn repo_version_recovers_bootstrap_commit_from_installed_metadata() {
 #[test]
 fn publish_native_executable_falls_back_to_bundle_root_binary() {
     // Release archives stage the binary at <bundle>/keel.exe and
-    // call `keel install --repo-root <bundle>`. The cargo path
-    // (<repo_root>/target/<triple>/release/<exe>) does not exist in that
-    // layout. Without the fallback, publish_native_executable returns
-    // Ok(false) and silently leaves the previously-installed binary in
-    // place — which is the regression that surfaced as "Unknown hook
-    // command: post-tool-use-failure" against a stale on-disk binary.
     let (bundle, claude_home) = unique_paths("publish-bundle-root");
     fs::create_dir_all(&bundle).unwrap();
     fs::create_dir_all(&claude_home).unwrap();
@@ -247,9 +241,6 @@ fn publish_native_executable_falls_back_to_bundle_root_binary() {
 #[test]
 fn publish_native_executable_prefers_cargo_built_over_bundle_root() {
     // When both layouts exist (a developer running `install` from a
-    // source tree with a residual sibling exe), the cargo-built binary
-    // wins — that's the freshly compiled artifact the contributor
-    // intended to install.
     let (repo, claude_home) = unique_paths("publish-prefer-cargo");
     fs::create_dir_all(&claude_home).unwrap();
 
@@ -274,16 +265,6 @@ fn publish_native_executable_prefers_cargo_built_over_bundle_root() {
 #[test]
 fn publish_native_executable_picks_up_cargo_host_default_layout() {
     // Plain `cargo build --release` (no --target) writes to
-    // <repo>/target/release/<exe>, NOT the triple-suffixed
-    // <repo>/target/<os>-<arch>/release/<exe>. Local contributors and
-    // anyone who runs `keel update` from a source tree get
-    // this layout. Without the host-default probe, publish returned
-    // Ok(false), the install summary printed "Published executable:
-    // false", and the previously-installed binary stayed in place —
-    // which is the regression that surfaced as `keel memory
-    // working-brief write` returning the long-deleted "Rust native
-    // placeholder completed without Go fallback" error against a
-    // workspace 18+ commits past the install.
     let (repo, claude_home) = unique_paths("publish-host-default");
     fs::create_dir_all(&claude_home).unwrap();
 
@@ -312,10 +293,6 @@ fn publish_native_executable_picks_up_cargo_host_default_layout() {
 #[test]
 fn publish_native_executable_prefers_cargo_targeted_over_host_default() {
     // CI / cross-compile runs use `cargo build --release --target <triple>`
-    // and may also leave a host-default artifact behind from an earlier
-    // local build. When both exist, the targeted artifact wins because
-    // it is the one the operator explicitly asked to build for the
-    // install host.
     let (repo, claude_home) = unique_paths("publish-prefer-targeted");
     fs::create_dir_all(&claude_home).unwrap();
 
@@ -346,10 +323,6 @@ fn publish_native_executable_prefers_cargo_targeted_over_host_default() {
 #[test]
 fn publish_native_executable_prefers_host_default_over_bundle_root() {
     // When a Cargo-direct workspace also has a leftover bundle-root
-    // exe (from a previous archive install staged into the same tree),
-    // the freshly built host-default artifact wins. Rationale: a
-    // contributor running `keel install` after `cargo build`
-    // expects their new binary to ship, not a stale archive sibling.
     let (repo, claude_home) = unique_paths("publish-host-over-bundle");
     fs::create_dir_all(&claude_home).unwrap();
 
@@ -374,12 +347,6 @@ fn publish_native_executable_prefers_host_default_over_bundle_root() {
 #[test]
 fn replace_executable_in_place_overwrites_existing_target() {
     // The core of the Windows re-install fix: replacing an existing
-    // installed binary must succeed and leave the new bytes in place,
-    // with no `.new` temp and no `.stale-*` sibling stranded behind on
-    // the happy path. Before the fix this went through a bare
-    // `fs::rename` that returned ERROR_ACCESS_DENIED (os error 5) when
-    // the install was launched by the running binary; the move-aside
-    // sequence avoids deleting the in-use image.
     let (dir, _) = unique_paths("replace-in-place");
     fs::create_dir_all(&dir).unwrap();
     let target = dir.join(executable_file_name());
@@ -577,11 +544,6 @@ fn delta_installer_first_install_without_inventory_creates_no_false_orphans() {
 #[test]
 fn install_into_standard_home_writes_lifecycle_hooks() {
     // Every other install test uses a home NOT named `.claude`, so
-    // `maybe_install_hooks` returns None and its write branch is never
-    // exercised. This test builds a home literally named `.claude` under a
-    // unique parent so the standard-home guard passes and the hook write
-    // path actually runs — covering the previously-untested branch where
-    // settings.json is created with the managed lifecycle stanzas.
     let suffix = format!(
         "{}-{}",
         std::process::id(),
@@ -727,7 +689,7 @@ fn strip_managed_claude_md_removes_block_keeps_user_content() {
 
 #[test]
 fn strip_managed_claude_md_all_managed_collapses_to_empty() {
-    // A file that is ONLY our block must strip to empty so the caller deletes it.
+    // A file that is ONLY the block must strip to empty so the caller deletes it.
     let only_block = format!("{}\n", managed_claude_md_block());
     let stripped = strip_managed_claude_md(&only_block);
     assert!(stripped.trim().is_empty());
@@ -736,9 +698,6 @@ fn strip_managed_claude_md_all_managed_collapses_to_empty() {
 #[test]
 fn install_into_standard_home_writes_user_claude_md() {
     // End-to-end: a real `.claude`-named home must get ~/.claude/CLAUDE.md
-    // with the managed contract, and uninstall must strip it while keeping
-    // any user content. This is the hook-independent channel that lands even
-    // when a gateway drops the hook additionalContext.
     let suffix = format!(
         "{}-{}",
         std::process::id(),
@@ -825,14 +784,6 @@ fn install_into_standard_home_writes_user_claude_md() {
 #[test]
 fn install_copies_shared_resources_alongside_skills() {
     // SKILL.md files reference _shared/common-discipline.md via relative
-    // paths. Without this install step, the on-disk layout under
-    // ~/.claude/skills/ is missing the _shared sibling and every reference
-    // resolves to a missing file. The test seeds a repo with a _shared
-    // directory and asserts the installer mirrors it into the skills
-    // directory tree, including nested files. It also asserts a renamed
-    // shared file is cleaned up by the existing per-file orphan sweep —
-    // the shared resources go through the same FileTracker as skill
-    // references, so renames behave identically.
     let (repo, home) = unique_paths("shared-resources");
     seed_repo(&repo);
     write_skill_with_reference(&repo, "reviewer", "10-r.md");
@@ -853,7 +804,7 @@ fn install_copies_shared_resources_alongside_skills() {
         "nested shared file must be installed alongside skills"
     );
 
-    // Rename and reinstall — the previously installed file should be
+    // Rename and reinstall ; the previously installed file should be
     // cleaned up exactly like a renamed skill reference.
     fs::remove_file(shared_dir.join("common-discipline.md")).unwrap();
     fs::write(
@@ -878,10 +829,6 @@ fn install_copies_shared_resources_alongside_skills() {
 #[test]
 fn reinstall_is_zero_churn_when_nothing_changed() {
     // Delta-patch guarantee: a re-install with an unchanged repo must report
-    // zero synced files across every category, including shared resources.
-    // Regression for the prior bug where sync_shared_resources returned the
-    // directory count (always 1) instead of the real change count, so the
-    // install summary always claimed churn on a no-op re-install.
     let (repo, home) = unique_paths("zero-churn");
     seed_repo(&repo);
     write_skill_with_reference(&repo, "reviewer", "10-r.md");
@@ -927,10 +874,6 @@ fn reinstall_is_zero_churn_when_nothing_changed() {
 #[test]
 fn install_removes_shared_resource_directory_when_dropped_from_repo() {
     // When the entire `_shared/` directory is removed from the repo
-    // upstream, the previously-installed copy under
-    // `<claude_home>/skills/_shared/` must be cleaned up — both files
-    // and the now-empty directory. Without the directory-level orphan
-    // sweep, an empty `_shared/` directory would persist on disk.
     let (repo, home) = unique_paths("shared-dropped");
     seed_repo(&repo);
     write_skill_with_reference(&repo, "reviewer", "10-r.md");
@@ -961,10 +904,6 @@ fn install_removes_shared_resource_directory_when_dropped_from_repo() {
 #[test]
 fn remove_executable_orphans_deletes_legacy_stale_siblings() {
     // Pre-`33bf860` installer used a `.stale-<timestamp>` naming scheme
-    // that no current code path creates. Found in the wild on user disks
-    // (e.g. C:\Users\riezh\.claude\keel.exe.stale-1778857819).
-    // Cleanup is safe because nothing in the current source ever produces
-    // these names.
     let (_repo, home) = unique_paths("orphan-stale");
     fs::create_dir_all(&home).unwrap();
     let executable = installed_executable_path(&home);
@@ -992,11 +931,6 @@ fn remove_executable_orphans_deletes_legacy_stale_siblings() {
 #[test]
 fn remove_executable_orphans_skips_fresh_dot_new_to_avoid_racing_install() {
     // atomic_copy_executable writes to a `.new` sibling before renaming
-    // over the installed executable. A concurrent install would have a
-    // `.new` newer than the installed executable; deleting it would
-    // race that install. Only an abandoned `.new` (older than the
-    // installed binary, or with no installed binary present) is safe to
-    // remove.
     let (_repo, home) = unique_paths("orphan-new-fresh");
     fs::create_dir_all(&home).unwrap();
     let executable = installed_executable_path(&home);
@@ -1021,9 +955,7 @@ fn remove_executable_orphans_skips_fresh_dot_new_to_avoid_racing_install() {
 
 #[test]
 fn remove_executable_orphans_deletes_abandoned_dot_new() {
-    // A `.new` older than the installed executable is a crash artifact —
-    // atomic_copy_executable normally removes it on failure, but a
-    // process crash between fs::copy and fs::rename can strand it.
+    // A `.new` older than the installed executable is a crash artifact ;
     let (_repo, home) = unique_paths("orphan-new-stale");
     fs::create_dir_all(&home).unwrap();
     let executable = installed_executable_path(&home);
@@ -1048,11 +980,6 @@ fn remove_executable_orphans_deletes_abandoned_dot_new() {
 #[test]
 fn install_copies_subagent_definitions_into_user_global_agents_directory() {
     // Without this step, the project-scoped `.claude/agents/<name>.md`
-    // subagent definitions only resolve when the harness spawns inside the
-    // keel checkout. Host repos see no subagents at all. The
-    // installer must mirror them under `<claude_home>/agents/<name>.md`
-    // so the Agent tool finds them globally. Renamed definitions must be
-    // cleaned up by the existing per-file orphan sweep.
     let (repo, home) = unique_paths("subagent-defs");
     seed_repo(&repo);
     write_skill_with_reference(&repo, "reviewer", "10-r.md");
@@ -1095,7 +1022,7 @@ fn install_copies_subagent_definitions_into_user_global_agents_directory() {
         "no-op reinstall must not rewrite unchanged subagent definitions"
     );
 
-    // Rename one definition and reinstall — the old file must be cleaned
+    // Rename one definition and reinstall ; the old file must be cleaned
     // up by the same per-file orphan sweep that handles skill references.
     fs::remove_file(agents_source.join("git-expert.md")).unwrap();
     fs::write(
@@ -1120,10 +1047,6 @@ fn install_copies_subagent_definitions_into_user_global_agents_directory() {
 #[test]
 fn install_copies_slash_commands_into_user_global_commands_directory() {
     // Custom slash commands live in `<repo>/commands/*.md` and ship through
-    // the plugin manifest, but the native `keel install` must also
-    // mirror them under `<claude_home>/commands/<name>.md` so
-    // `/keel:<name>` resolves globally for any host repo. Renamed
-    // commands must be cleaned up by the existing per-file orphan sweep.
     let (repo, home) = unique_paths("slash-commands");
     seed_repo(&repo);
     write_skill_with_reference(&repo, "reviewer", "10-r.md");
@@ -1172,7 +1095,7 @@ fn install_copies_slash_commands_into_user_global_commands_directory() {
         "no-op reinstall must not rewrite unchanged command definitions"
     );
 
-    // Rename one command and reinstall — the old file must be cleaned up by
+    // Rename one command and reinstall ; the old file must be cleaned up by
     // the same per-file orphan sweep that handles skill references.
     fs::remove_file(commands_source.join("recall.md")).unwrap();
     fs::write(
@@ -1222,7 +1145,7 @@ fn install_never_deletes_protected_user_data_even_if_inventory_lists_them() {
     lines.push("skills/../../history.jsonl".into());
     crate::runtime::write_lines(&inventory, &lines).unwrap();
 
-    // Reinstall with purge on — protected paths must survive.
+    // Reinstall with purge on ; protected paths must survive.
     install_from_paths("dev", &repo, &home, &InstallOverrides::default(), true).unwrap();
 
     assert_eq!(
@@ -1365,8 +1288,6 @@ fn wire_pi_returns_none_for_non_standard_home() {
 #[test]
 fn rewrite_codex_mcp_command_wrapped_shape() {
     // The shipped .mcp.json uses the wrapped mcp_servers shape with a
-    // bare PATH-dependent `keel` command; install must rewrite it to the
-    // absolute binary path.
     let mut doc = serde_json::json!({
         "mcp_servers": {
             "keel": { "command": "keel", "args": ["mcp", "serve"] }
@@ -1421,8 +1342,6 @@ fn rewrite_codex_mcp_command_absent_keel_is_noop() {
 #[test]
 fn rewrite_mcp_entry_command_rewrites_bare_command() {
     // The shipped cursor/mcp.json and pi/.mcp.json template a bare
-    // PATH-dependent `keel` command; the extracted entry must be rewritten
-    // to the absolute binary path before merging.
     let mut entry = serde_json::json!({
         "command": "keel",
         "args": ["mcp", "serve"],
@@ -1435,7 +1354,7 @@ fn rewrite_mcp_entry_command_rewrites_bare_command() {
 
 #[test]
 fn rewrite_mcp_entry_command_idempotent_and_robust() {
-    // Already-absolute command → no mutation (re-install is a no-op).
+    // Already-absolute command to no mutation (re-install is a no-op).
     let mut entry = serde_json::json!({ "command": "/x/keel", "args": [] });
     assert!(!rewrite_mcp_entry_command(&mut entry, "/x/keel"));
     // Non-object entries must not panic.

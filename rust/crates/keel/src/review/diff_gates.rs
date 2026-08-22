@@ -14,7 +14,7 @@ pub(crate) fn run_review_surface_command(
         return 1;
     }
 
-    // diff and init are informational surfaces — keep the existing pass behavior.
+    // diff and init are informational surfaces ; keep the existing pass behavior.
     if surface_name == "diff" || surface_name == "init" {
         return render_gate_result("pass", 0, flag_set.string_value("format"), standard_output);
     }
@@ -192,7 +192,7 @@ pub(crate) fn brownfield_source_from_name_status(line: &str) -> Option<String> {
     let mut parts = line.split('\t');
     let status = parts.next()?.trim();
     let first_path = parts.next()?.trim();
-    // why: a rename emits `R<score>\told\tnew`, and renaming while editing still
+    // a rename emits `R<score>\told\tnew`, and renaming while editing still
     // changes established behavior, so gate it against the destination path.
     let path = match status.chars().next()? {
         'M' => first_path,
@@ -206,7 +206,7 @@ pub(crate) fn brownfield_source_from_name_status(line: &str) -> Option<String> {
     {
         return None;
     }
-    // why: case-fold the extension so a `Foo.RS` on a case-insensitive
+    // case-fold the extension so a `Foo.RS` on a case-insensitive
     // filesystem cannot slip past the gate.
     let extension = normalized
         .rsplit('.')
@@ -272,7 +272,7 @@ pub(crate) fn flow_check_gate(
         };
 
     if errors.is_empty() {
-        // why: the artifact is workspace-global, so without this a single filled
+        // the artifact is workspace-global, so without this a single filled
         // artifact would satisfy the gate forever regardless of what changed next.
         if !artifact_targets_a_touched_file(&target_file, &touched) {
             return GateResult {

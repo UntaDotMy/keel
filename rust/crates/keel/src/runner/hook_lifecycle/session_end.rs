@@ -352,8 +352,6 @@ pub(super) fn maybe_capture_session_summary(
     }
 
     // The session id arrives on stdin (the harness writes the hook payload then
-    // closes the handle). Without it we cannot scope the summary to this
-    // session, so fail open — silently skip rather than summarize the wrong work.
     let stdin_payload = read_json_stdin_fail_open(standard_input);
     let session_id = stdin_payload
         .as_ref()
@@ -369,10 +367,6 @@ pub(super) fn maybe_capture_session_summary(
     };
 
     // Write through the family command so the capture inherits the s4 index
-    // sync. --question/--answer are the research-cache record fields; we frame
-    // the summary as a recallable Q/A note. Errors are swallowed: a failed
-    // capture must never wedge SessionEnd. stdout is discarded (the record id
-    // print is noise here); only stderr is surfaced on failure.
     let mut capture_stderr = Vec::new();
     let code = crate::utility::memory_families::run_memory_family_command(
         "memory",
@@ -635,10 +629,6 @@ pub(super) fn workspace_memory_digest() -> String {
     }
 
     // 2. Newest working brief for THIS workspace. why: fall back only to
-    //    workspace-LESS legacy briefs (pre-workspace-tagging), never to another
-    //    workspace's brief — injecting a stranger's brief as "active" bleeds intent
-    //    across projects. And skip briefs older than the staleness window so a
-    //    long-abandoned brief is not presented as active forever.
     if let Ok(briefs) = crate::utility::working_brief::list_briefs(&claude_home) {
         let newest = briefs
             .iter()
@@ -661,7 +651,7 @@ pub(super) fn workspace_memory_digest() -> String {
     }
 
     // 3. (work-graph digest removed with `keel work`; Anvil pieces/gates are the
-    //    single delivery state and are surfaced via `keel anvil` + recall.)
+    // single delivery state and are surfaced via `keel anvil` + recall.)
 
     // 4. Most recent durable memory note (includes s5 SessionEnd auto-capture).
     let store =

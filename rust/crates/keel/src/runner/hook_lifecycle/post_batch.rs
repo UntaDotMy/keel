@@ -209,12 +209,6 @@ pub(super) fn review_gate_max_blocks() -> u64 {
 }
 
 // ---- Research gate (PostToolBatch) ----
-//
-// Fires when a session edited code but used no web search or recall tool. The
-// Iron Law demands "read first" and "understand before building" — editing
-// without any research evidence means the model assumed from stale knowledge.
-// Detection: scan tool_timings JSONL for the session and check whether any tool
-// name contains "websearch", "web_fetch", "context7", or "recall".
 
 pub(super) const RESEARCH_GATE_ENV_VAR: &str = "CLAUDE_SKILLS_RESEARCH_GATE";
 
@@ -322,7 +316,7 @@ pub(super) fn research_gate_blocks_path(claude_home: &Path, session_id: &str) ->
 /// or "recall". Fail-open: any read/parse problem returns `true` so the gate
 /// degrades to advisory.
 pub(super) fn session_has_research_tool(claude_home: &Path, session_id: &str) -> bool {
-    // why: read yesterday too so research done before midnight in a session that
+    // read yesterday too so research done before midnight in a session that
     // crosses midnight still counts (matches session_start_ms's two-day span).
     let now = chrono::Local::now();
     let today = now.format("%Y-%m-%d").to_string();
@@ -354,8 +348,8 @@ pub(super) fn session_has_research_tool(claude_home: &Path, session_id: &str) ->
                 .and_then(JsonDocument::as_str)
                 .unwrap_or_default()
                 .to_ascii_lowercase();
-            // why: `webfetch` (Claude Code's tool name) has no underscore, so the
-            // `web_fetch` substring alone missed it — count both spellings.
+            // `webfetch` (Claude Code's tool name) has no underscore, so the
+            // `web_fetch` substring alone missed it ; count both spellings.
             if tool.contains("websearch")
                 || tool.contains("web_search")
                 || tool.contains("webfetch")
@@ -367,7 +361,7 @@ pub(super) fn session_has_research_tool(claude_home: &Path, session_id: &str) ->
             }
         }
     }
-    // Fail-open: if no timing file was readable we cannot prove research did not
+    // Fail-open: if no timing file was readable the code cannot prove research did not
     // happen, so keep the gate silent rather than firing spuriously.
     !any_readable
 }
@@ -402,7 +396,7 @@ pub(super) fn brief_gate_mode() -> GateMode {
             "escalate" => GateMode::Escalate,
             other => gate_mode_value(other),
         },
-        // Unset → Block (stricter than the generic gate_mode default of Escalate).
+        // Unset to Block (stricter than the generic gate_mode default of Escalate).
         Err(_) => GateMode::Block,
     }
 }
@@ -438,12 +432,6 @@ pub(super) fn brief_gate_message(decision: GateDecision) -> String {
 }
 
 // ---- Memory-save gate (PostToolBatch) ----
-//
-// A session that changed code but saved nothing durable to memory gets nudged to
-// record what it learned before it forgets mid-task — the symptom the user
-// reported. Mirrors the brief gate's "happened this session" mtime shape, scoped
-// to the surfaces a `keel memory ...` write lands in. Default-on as Escalate;
-// bounded per session; fail-open.
 
 pub(super) const MEMORY_GATE_ENV_VAR: &str = "CLAUDE_SKILLS_MEMORY_GATE";
 
@@ -483,12 +471,6 @@ pub(super) fn memory_gate_message(decision: GateDecision) -> String {
 }
 
 // ---- Learned-skill reminder gate (PostToolBatch) ----
-//
-// The learning loop generates template-state `learned-<project>` skills the agent
-// has not loaded or refined. This reminder surfaces them so the captured
-// conventions actually get applied. Default-on as Escalate for consistency, but
-// the message stays advisory (load the skill, not "you must"); independent of edit
-// count like the closeout gate. Bounded per session; fail-open.
 
 pub(super) const LEARNED_SKILL_GATE_ENV_VAR: &str = "CLAUDE_SKILLS_LEARNED_SKILL_GATE";
 
@@ -651,8 +633,6 @@ pub(super) fn session_start_ms(claude_home: &Path, session_id: &str) -> Option<u
     let today = chrono::Local::now().date_naive();
     let mut earliest: Option<u64> = None;
     // offset 0 = today, 1 = yesterday. Two days is enough to span one midnight
-    // boundary; sessions longer than that are vanishingly rare and at worst pay
-    // one bounded, clearable block.
     for offset in 0..2u64 {
         let Some(date) = today.checked_sub_days(chrono::Days::new(offset)) else {
             break;
@@ -759,16 +739,16 @@ pub(super) fn decide_gate(
     if mode == GateMode::Off || max_blocks == 0 {
         return GateDecision::Advisory;
     }
-    // No code changed this session — nothing to gate. Pure-research and
+    // No code changed this session ; nothing to gate. Pure-research and
     // question-answering turns never fire a gate.
     if edit_count == 0 {
         return GateDecision::Advisory;
     }
-    // The gate-specific requirement is already met — nothing to fire on.
+    // The gate-specific requirement is already met ; nothing to fire on.
     if satisfied {
         return GateDecision::Advisory;
     }
-    // Hard cap: stop firing once we have issued the allowed number of
+    // Hard cap: stop firing once the code have issued the allowed number of
     // nudges/blocks. This is what guarantees the gate cannot loop or spam.
     if blocks_issued >= max_blocks {
         return GateDecision::Advisory;
@@ -777,8 +757,6 @@ pub(super) fn decide_gate(
         GateMode::Nudge => GateDecision::Nudge,
         GateMode::Block => GateDecision::Block,
         // Escalate: warn on first contact, then refuse to close cheaply. The
-        // monotonic `blocks_issued` is the escalation clock — fire 0 is the
-        // nudge, every later fire is a block, all bounded by `max_blocks`.
         GateMode::Escalate => {
             if blocks_issued == 0 {
                 GateDecision::Nudge
@@ -834,9 +812,7 @@ pub(super) fn session_edit_stats(claude_home: &Path, session_id: &str) -> Sessio
         last_edit_ms: 0,
         last_cwd: String::new(),
     };
-    // why: read yesterday too so a session that crosses midnight keeps its
-    // pre-midnight edit rows; session_start_ms already spans both days, so
-    // counting only today under-fires the gates after midnight.
+    // read yesterday too so a session that crosses midnight keeps its
     let now = chrono::Local::now();
     let today = now.format("%Y-%m-%d").to_string();
     let yesterday = (now - chrono::Duration::days(1))
@@ -850,9 +826,7 @@ pub(super) fn session_edit_stats(claude_home: &Path, session_id: &str) -> Sessio
         let body = match fs::read_to_string(&path) {
             Ok(body) => body,
             Err(error) => {
-                // why: a missing file is the normal "no timings yet" case; an
-                // existing-but-unreadable file is a real fault — surface it so the
-                // gate's fail-open (count 0, several gates short-circuit) is not silent.
+                // a missing file is the normal "no timings yet" case; an
                 if path.exists() {
                     eprintln!(
                         "[keel] gate edit-count could not read {}: {error}",
@@ -1088,7 +1062,7 @@ pub(super) fn run_hook_post_tool_batch(
         .and_then(JsonDocument::as_str)
         .unwrap_or_default();
 
-    // Fail-open: without a claude_home we cannot read telemetry or the gate
+    // Fail-open: without a claude_home the code cannot read telemetry or the gate
     // counters, so degrade to advisory rather than risk a wedged turn.
     let Ok(claude_home) = resolve_claude_home("") else {
         return emit_post_tool_batch_advisory(standard_output, standard_error);
@@ -1096,10 +1070,7 @@ pub(super) fn run_hook_post_tool_batch(
 
     let stats = session_edit_stats(&claude_home, session_id);
 
-    // Edit-count gates only fire when code changed this session — pure research
-    // and question turns never trip them. The learned-skill reminder is
-    // evaluated separately below because it is edit-independent: a pending
-    // learned skill matters even on a no-edit turn.
+    // Edit-count gates only fire when code changed this session ; pure research
     if stats.count > 0 {
         // Brief gate FIRST (front of the law: understand/plan before building).
         if brief_on {
@@ -1226,8 +1197,6 @@ pub(super) fn run_hook_post_tool_batch(
     }
 
     // Learned-skill reminder (apply the loop's captured conventions). Independent
-    // of edit count like the closeout gate: a pending learned skill matters even on
-    // a no-edit turn. Silent when nothing is pending.
     if learned_on {
         if let Some(decision_and_message) =
             evaluate_learned_skill_gate(&claude_home, session_id, learned_mode)
@@ -1238,7 +1207,7 @@ pub(super) fn run_hook_post_tool_batch(
         }
     }
 
-    // No gate fired → advisory reminder.
+    // No gate fired to advisory reminder.
     emit_post_tool_batch_advisory(standard_output, standard_error)
 }
 
