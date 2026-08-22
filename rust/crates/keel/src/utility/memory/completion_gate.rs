@@ -1,16 +1,20 @@
-//! Purpose: Completion gate check command handler
+//! Purpose: Working-brief completion-gate check command handler
 //! Caller: mod.rs run_memory_command
-//! Dependencies: crate::args::FlagSet, crate::json, crate::runtime, crate::utility::workflow_ledger, crate::utility::working_brief
+//! Dependencies: crate::args::FlagSet, crate::json, crate::runtime, crate::utility::working_brief
 //! Main Functions: run_completion_gate_command
-//! Side Effects: None, read-only probes
+//! Side Effects: `--proof` persists the proof text onto the brief record itself.
+//!
+//! The gate is purely brief-based: there is no workflow ledger anymore (it was
+//! removed before release), so a fresh install passes the gate exactly when the
+//! named working brief exists. A supplied `--proof` is written into the brief's
+//! `proof` field via the working_brief storage APIs.
 
 use std::io::Write;
 
 use crate::args::FlagSet;
 use crate::json::Value;
 use crate::runtime::resolve_claude_home;
-use crate::utility::workflow_ledger::{read_entry, Entry, STATUS_OPEN};
-use crate::utility::working_brief::read_brief;
+use crate::utility::working_brief::{list_briefs, read_brief, write_brief};
 
 use super::shared::{is_help_argument, probe_marker, probe_value, render_workflow_json};
 
@@ -23,15 +27,11 @@ pub(super) fn run_completion_gate_command(
     if arguments.is_empty() || is_help_argument(&arguments[0]) {
         let _ = writeln!(
             standard_output,
-            "Usage: keel {command_group} completion-gate [check|record-requirement] ..."
+            "Usage: keel {command_group} completion-gate check [--brief-id <id>] [--proof <text>] [--claude-home <path>] [--json]"
         );
         let _ = writeln!(
             standard_output,
-            "  check --id <entry-id> [--brief-id <id>] [--proof <text>] [--claude-home <path>] [--json]"
-        );
-        let _ = writeln!(
-            standard_output,
-            "  record-requirement --id <entry-id> --requirement <text> [--status <pending|met|failed>] [--claude-home <path>] [--json]"
+            "  Without --brief-id the available brief ids are listed instead of checking."
         );
         return if arguments.is_empty() { 1 } else { 0 };
     }
@@ -42,16 +42,10 @@ pub(super) fn run_completion_gate_command(
             standard_output,
             standard_error,
         ),
-        "record-requirement" => run_completion_gate_record_requirement(
-            command_group,
-            &arguments[1..],
-            standard_output,
-            standard_error,
-        ),
         other => {
             let _ = writeln!(
                 standard_error,
-                "Unknown {command_group} completion-gate action: {other} (expected check|record-requirement)"
+                "Unknown {command_group} completion-gate action: {other} (expected check)"
             );
             1
         }
@@ -65,21 +59,12 @@ fn run_completion_gate_check(
     standard_error: &mut dyn Write,
 ) -> u8 {
     let mut flag_set = FlagSet::new("completion-gate check");
-    flag_set.string_flag("id", "");
     flag_set.string_flag("brief-id", "");
     flag_set.string_flag("proof", "");
     flag_set.string_flag("claude-home", "");
     flag_set.bool_flag("json", false);
     if let Err(parse_error) = flag_set.parse(arguments) {
         let _ = writeln!(standard_error, "{}", parse_error.message);
-        return 1;
-    }
-    let entry_id = flag_set.string_value("id").trim().to_string();
-    if entry_id.is_empty() {
-        let _ = writeln!(
-            standard_error,
-            "{command_group} completion-gate check: --id is required"
-        );
         return 1;
     }
     let claude_home = match resolve_claude_home(flag_set.string_value("claude-home")) {
@@ -93,51 +78,47 @@ fn run_completion_gate_check(
         }
     };
 
-    let entry_probe: Result<Entry, String> = match read_entry(&claude_home, &entry_id) {
-        Ok(Some(entry)) => Ok(entry),
-        Ok(None) => Err(format!("no ledger entry with id {entry_id}")),
-        Err(error) => Err(error),
-    };
-    let entry_status = match &entry_probe {
-        Ok(entry) => format!("entry {} ({})", entry.id, entry.status),
-        Err(error) => error.clone(),
-    };
-
-    let open_probe: Result<String, String> = match &entry_probe {
-        Ok(entry) if entry.status == STATUS_OPEN => Ok(STATUS_OPEN.to_string()),
-        Ok(entry) => Err(format!(
-            "entry {} is {} (expected {STATUS_OPEN})",
-            entry.id, entry.status
-        )),
-        Err(_) => Err("entry probe failed; cannot evaluate open status".to_string()),
-    };
-    let open_status = match &open_probe {
-        Ok(detail) => detail.clone(),
-        Err(error) => error.clone(),
-    };
-
+    // Brief probe: the gate condition. Without --brief-id, fail with the list
+    // of available ids so the caller can pick one instead of guessing.
     let brief_id_input = flag_set.string_value("brief-id").trim().to_string();
-    let brief_probe: Option<Result<String, String>> = if brief_id_input.is_empty() {
-        None
-    } else {
-        Some(match read_brief(&claude_home, &brief_id_input) {
-            Ok(Some(brief)) => Ok(format!("{} ({})", brief.id, brief.request)),
-            Ok(None) => Err(format!("no working brief with id {brief_id_input}")),
-            Err(error) => Err(error.to_string()),
-        })
-    };
-    let brief_status = brief_probe.as_ref().map(|probe| match probe {
-        Ok(detail) => detail.clone(),
-        Err(error) => error.clone(),
-    });
-
-    let proof_input = flag_set.string_value("proof").trim().to_string();
-    let proof_probe: Option<Result<String, String>> = if proof_input.is_empty() {
-        if flag_set.string_value("proof").is_empty() {
-            None
+    let brief_probe: Result<crate::utility::working_brief::Brief, String> =
+        if brief_id_input.is_empty() {
+            match list_briefs(&claude_home) {
+                Ok(briefs) if briefs.is_empty() => Err(
+                    "no --brief-id given and no working briefs exist; write one with \
+                     `keel memory working-brief write` first"
+                        .to_string(),
+                ),
+                Ok(briefs) => Err(format!(
+                    "no --brief-id given; available brief ids: {}",
+                    briefs
+                        .iter()
+                        .map(|brief| brief.id.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )),
+                Err(error) => Err(error.to_string()),
+            }
         } else {
-            Some(Err("proof argument is whitespace only".to_string()))
-        }
+            match read_brief(&claude_home, &brief_id_input) {
+                Ok(Some(brief)) => Ok(brief),
+                Ok(None) => Err(format!("no working brief with id {brief_id_input}")),
+                Err(error) => Err(error.to_string()),
+            }
+        };
+    let brief_status = match &brief_probe {
+        Ok(brief) => format!("{} ({})", brief.id, brief.request),
+        Err(error) => error.clone(),
+    };
+
+    // Proof probe: optional. Whitespace-only input is rejected; real text is
+    // recorded onto the brief record itself.
+    let raw_proof = flag_set.string_value("proof");
+    let proof_input = raw_proof.trim().to_string();
+    let proof_probe: Option<Result<String, String>> = if raw_proof.is_empty() {
+        None
+    } else if proof_input.is_empty() {
+        Some(Err("proof argument is whitespace only".to_string()))
     } else {
         Some(Ok(proof_input.clone()))
     };
@@ -146,23 +127,42 @@ fn run_completion_gate_check(
         Err(error) => error.clone(),
     });
 
-    let all_ok = entry_probe.is_ok()
-        && open_probe.is_ok()
-        && brief_probe.as_ref().map(Result::is_ok).unwrap_or(true)
-        && proof_probe.as_ref().map(Result::is_ok).unwrap_or(true);
+    // Persist a successful proof onto the brief record itself (the ledger that
+    // used to hold proofs was removed). Failure to persist fails the check so a
+    // claimed proof is never silently dropped.
+    let persisted_probe: Option<Result<String, String>> = match (&brief_probe, &proof_probe) {
+        (Ok(brief), Some(Ok(proof))) => {
+            let mut updated = brief.clone();
+            updated.proof = proof.clone();
+            Some(match write_brief(&claude_home, &updated) {
+                Ok(_) => Ok(format!("recorded on brief {}", updated.id)),
+                Err(error) => Err(error.to_string()),
+            })
+        }
+        _ => None,
+    };
+    let persisted_status = persisted_probe.as_ref().map(|probe| match probe {
+        Ok(detail) => detail.clone(),
+        Err(error) => error.clone(),
+    });
+
+    let all_ok = brief_probe.is_ok()
+        && proof_probe.as_ref().map(Result::is_ok).unwrap_or(true)
+        && persisted_probe.as_ref().map(Result::is_ok).unwrap_or(true);
 
     if flag_set.bool_value("json") {
         let mut fields: Vec<(String, Value)> = vec![
             ("ok".into(), Value::Bool(all_ok)),
-            ("id".into(), Value::String(entry_id.clone())),
-            ("entry".into(), probe_value(&entry_probe, &entry_status)),
-            ("open".into(), probe_value(&open_probe, &open_status)),
+            (
+                "workingBrief".into(),
+                probe_value(&brief_probe, &brief_status),
+            ),
         ];
-        if let (Some(probe), Some(status)) = (&brief_probe, &brief_status) {
-            fields.push(("workingBrief".into(), probe_value(probe, status)));
-        }
         if let (Some(probe), Some(status)) = (&proof_probe, &proof_status) {
             fields.push(("proof".into(), probe_value(probe, status)));
+        }
+        if let (Some(probe), Some(status)) = (&persisted_probe, &persisted_status) {
+            fields.push(("proofPersisted".into(), probe_value(probe, status)));
         }
         let exit = render_workflow_json(standard_output, standard_error, &Value::Object(fields));
         return if all_ok { exit } else { 1 };
@@ -170,26 +170,14 @@ fn run_completion_gate_check(
 
     let _ = writeln!(
         standard_output,
-        "{command_group} completion-gate check: id={entry_id} status={}",
+        "{command_group} completion-gate check: brief={brief_id_input} status={}",
         if all_ok { "ok" } else { "fail" }
     );
     let _ = writeln!(
         standard_output,
-        "  entry: {} -> {entry_status}",
-        probe_marker(&entry_probe)
+        "  working-brief: {} -> {brief_status}",
+        probe_marker(&brief_probe)
     );
-    let _ = writeln!(
-        standard_output,
-        "  open: {} -> {open_status}",
-        probe_marker(&open_probe)
-    );
-    if let (Some(probe), Some(status)) = (&brief_probe, &brief_status) {
-        let _ = writeln!(
-            standard_output,
-            "  working-brief: {} -> {status}",
-            probe_marker(probe)
-        );
-    }
     if let (Some(probe), Some(status)) = (&proof_probe, &proof_status) {
         let _ = writeln!(
             standard_output,
@@ -197,163 +185,23 @@ fn run_completion_gate_check(
             probe_marker(probe)
         );
     }
+    if let (Some(probe), Some(status)) = (&persisted_probe, &persisted_status) {
+        let _ = writeln!(
+            standard_output,
+            "  proof-persisted: {} -> {status}",
+            probe_marker(probe)
+        );
+    }
     if !all_ok {
         let _ = writeln!(
             standard_output,
-            "  hint: resolve failing probes before running keel workflow finish --id {entry_id} --proof \"...\""
+            "  hint: resolve the failing probes above, then re-run with --proof \"...\""
         );
         return 1;
     }
     let _ = writeln!(
         standard_output,
-        "  hint: ready to close with keel workflow finish --id {entry_id} --proof \"...\""
+        "  hint: brief verified — close out the task via `keel review pre-pr`"
     );
-    0
-}
-
-fn run_completion_gate_record_requirement(
-    command_group: &str,
-    arguments: &[String],
-    standard_output: &mut dyn Write,
-    standard_error: &mut dyn Write,
-) -> u8 {
-    let mut flag_set = FlagSet::new("completion-gate record-requirement");
-    flag_set.string_flag("id", "");
-    flag_set.string_flag("requirement", "");
-    flag_set.string_flag("status", "pending");
-    flag_set.string_flag("claude-home", "");
-    flag_set.bool_flag("json", false);
-    if let Err(parse_error) = flag_set.parse(arguments) {
-        let _ = writeln!(standard_error, "{}", parse_error.message);
-        return 1;
-    }
-    let entry_id = flag_set.string_value("id").trim().to_string();
-    if entry_id.is_empty() {
-        let _ = writeln!(
-            standard_error,
-            "{command_group} completion-gate record-requirement: --id is required"
-        );
-        return 1;
-    }
-    let requirement = flag_set.string_value("requirement").trim().to_string();
-    if requirement.is_empty() {
-        let _ = writeln!(
-            standard_error,
-            "{command_group} completion-gate record-requirement: --requirement is required"
-        );
-        return 1;
-    }
-    let status = flag_set.string_value("status").trim().to_string();
-    let claude_home = match resolve_claude_home(flag_set.string_value("claude-home")) {
-        Ok(path) => path,
-        Err(error) => {
-            let _ = writeln!(
-                standard_error,
-                "{command_group} completion-gate record-requirement: {error}"
-            );
-            return 1;
-        }
-    };
-
-    match read_entry(&claude_home, &entry_id) {
-        Ok(Some(_)) => {}
-        Ok(None) => {
-            let _ = writeln!(
-                standard_error,
-                "{command_group} completion-gate record-requirement: no ledger entry with id {entry_id}"
-            );
-            return 1;
-        }
-        Err(error) => {
-            let _ = writeln!(
-                standard_error,
-                "{command_group} completion-gate record-requirement: {error}"
-            );
-            return 1;
-        }
-    }
-
-    let now_millis = crate::utility::workflow_ledger::current_timestamp_millis();
-    let dir = claude_home
-        .join(command_group)
-        .join("completion-gate-requirements");
-    if let Err(error) = std::fs::create_dir_all(&dir) {
-        let _ = writeln!(
-            standard_error,
-            "{command_group} completion-gate record-requirement: create {}: {error}",
-            crate::runtime::display_path(&dir)
-        );
-        return 1;
-    }
-    // Allocate a collision-free requirement ID. Two requirements created in the
-    // same millisecond would otherwise overwrite each other (same cgr-<hex> id).
-    // Mirrors workflow_ledger::allocate_unique_entry_id's counter-suffix approach.
-    let base = format!("cgr-{now_millis:x}");
-    let requirement_id = if !dir.join(format!("{base}.json")).exists() {
-        base
-    } else {
-        let mut chosen = base.clone();
-        for counter in 1..1000u32 {
-            let candidate = format!("{base}-{counter}");
-            if !dir.join(format!("{candidate}.json")).exists() {
-                chosen = candidate;
-                break;
-            }
-        }
-        chosen
-    };
-    let file_path = dir.join(format!("{requirement_id}.json"));
-    let payload = Value::Object(vec![
-        (
-            "requirementId".into(),
-            Value::String(requirement_id.clone()),
-        ),
-        ("entryId".into(), Value::String(entry_id.clone())),
-        ("requirement".into(), Value::String(requirement.clone())),
-        ("status".into(), Value::String(status.clone())),
-        (
-            "createdAt".into(),
-            Value::String(crate::utility::workflow_ledger::format_timestamp_iso8601(
-                now_millis,
-            )),
-        ),
-    ]);
-    let mut serialized = Vec::<u8>::new();
-    if let Err(error) = crate::json::write_indented(&mut serialized, &payload) {
-        let _ = writeln!(
-            standard_error,
-            "{command_group} completion-gate record-requirement: serialize: {error}"
-        );
-        return 1;
-    }
-    if let Err(error) = std::fs::write(&file_path, &serialized) {
-        let _ = writeln!(
-            standard_error,
-            "{command_group} completion-gate record-requirement: write {}: {error}",
-            crate::runtime::display_path(&file_path)
-        );
-        return 1;
-    }
-
-    if flag_set.bool_value("json") {
-        let json_payload = Value::Object(vec![
-            ("recorded".into(), Value::Bool(true)),
-            (
-                "requirementId".into(),
-                Value::String(requirement_id.clone()),
-            ),
-            ("entryId".into(), Value::String(entry_id.clone())),
-            ("requirement".into(), Value::String(requirement.clone())),
-            ("status".into(), Value::String(status.clone())),
-        ]);
-        return render_workflow_json(standard_output, standard_error, &json_payload);
-    }
-
-    let _ = writeln!(
-        standard_output,
-        "{command_group} completion-gate record-requirement: requirement_id={requirement_id} entry_id={entry_id}"
-    );
-    let _ = writeln!(standard_output, "  requirement: {requirement}");
-    let _ = writeln!(standard_output, "  status: {status}");
     0
 }

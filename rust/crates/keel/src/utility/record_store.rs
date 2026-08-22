@@ -1,26 +1,28 @@
-//! Purpose: Generic scoped JSON record store shared by the memory/orchestration command
-//!   families (orchestration task, research-cache, loop-guard, agent-packets, agent-registry,
-//!   entity, graph). One file per record under `<claude-home>/<group-path>/<id>.json`.
-//! Caller: utility::memory handlers for the planned command families.
-//! Dependencies: std::fs, std::path, crate::json::{write_indented, Value},
-//!   crate::runtime::display_path, crate::utility::workflow_ledger::parse_object_of_strings.
-//! Main Functions: RecordStore::new, write_record, read_record, list_records, delete_record,
-//!   record_to_value, join_lines, split_lines.
+//! Purpose: Generic scoped JSON record store shared by the memory command
+//!   families (research-cache, loop-guard, agent-packets, agent-registry,
+//!   entity, graph) plus the flat key=string parser and timestamp helpers the
+//!   brief/record stores share (relocated here from the deleted workflow ledger).
+//! Caller: utility::memory handlers, working_brief, memory_families, working_brief_cmd.
+//! Dependencies: std::fs, std::path, std::time, crate::json::{write_indented, Value},
+//!   crate::runtime::display_path.
+//! Main Functions: RecordStore::new, write_record, read_record, list_records,
+//!   delete_record, record_to_value, join_lines, split_lines,
+//!   parse_object_of_strings, current_timestamp_millis, format_timestamp_iso8601.
 //! Side Effects: Reads and writes flat-string JSON files under the scoped group directory.
 //!   No global state.
 //!
 //! Storage shape: each record is an ordered list of (key, string-value) pairs. Multi-line
 //! fields are joined with `\n` so the file stays parseable by the shared
-//! `parse_object_of_strings` key=string reader. This mirrors `working_brief` and
-//! `workflow_ledger` rather than introducing a second serialization concept.
+//! `parse_object_of_strings` key=string reader. This mirrors `working_brief`
+//! rather than introducing a second serialization concept.
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::error::KeelError;
 use crate::json::{write_indented, Value};
 use crate::runtime::{display_path, safe_path_segment, write_text};
-use crate::utility::workflow_ledger::parse_object_of_strings;
 
 /// An ordered collection of string fields backing one stored record.
 pub type Record = Vec<(String, String)>;
@@ -69,17 +71,6 @@ impl RecordStore {
             None => Err(KeelError::Custom(format!(
                 "invalid record id {id:?}: must be a single safe path segment"
             ))),
-        }
-    }
-
-    /// Whether a record file already exists for `id`. Used by
-    /// `allocate_unique_record_id` to avoid same-millisecond id collisions. An
-    /// unsafe id can never exist as a stored record, so it reports `false`.
-    #[cfg(test)]
-    pub fn record_exists(&self, id: &str) -> bool {
-        match self.validated_record_path(id) {
-            Ok(path) => path.exists(),
-            Err(_) => false,
         }
     }
 
@@ -170,26 +161,6 @@ impl RecordStore {
     }
 }
 
-/// Return an id that does not yet exist in `store`, starting from `base` and
-/// appending `-1`, `-2`, ... on collision. Without this, two records created in
-/// the same millisecond (a common case under fast test/CI execution) derive the
-/// same `<prefix>-<ms>` id and the second write silently overwrites the first.
-/// Mirrors the workflow ledger's `allocate_unique_entry_id`.
-#[cfg(test)]
-pub fn allocate_unique_record_id(store: &RecordStore, base: &str) -> String {
-    if !store.record_exists(base) {
-        return base.to_string();
-    }
-    for counter in 1..10_000u32 {
-        let candidate = format!("{base}-{counter}");
-        if !store.record_exists(&candidate) {
-            return candidate;
-        }
-    }
-    // Astronomically unlikely; fall back to the base rather than loop forever.
-    base.to_string()
-}
-
 /// Look up a single field value from a record by key.
 pub fn field<'a>(record: &'a Record, key: &str) -> Option<&'a str> {
     record
@@ -243,6 +214,187 @@ pub fn split_lines(joined: &str) -> Vec<String> {
         .map(|line| line.trim().to_string())
         .filter(|line| !line.is_empty())
         .collect()
+}
+
+/// Milliseconds since the Unix epoch. Shared id/clock source for the brief and
+/// record stores (relocated from the deleted workflow ledger).
+pub(crate) fn current_timestamp_millis() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0)
+}
+
+/// Render epoch millis as `YYYY-MM-DDTHH:MM:SSZ` (UTC, no external time crate).
+pub(crate) fn format_timestamp_iso8601(millis_since_epoch: u128) -> String {
+    let total_seconds = (millis_since_epoch / 1000) as i64;
+    let (year, month, day, hour, minute, second) = unix_seconds_to_civil(total_seconds);
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+}
+
+/// Days-based civil-from-days algorithm (Howard Hinnant), unchanged from its
+/// previous home in the workflow ledger.
+fn unix_seconds_to_civil(unix_seconds: i64) -> (i32, u32, u32, u32, u32, u32) {
+    let seconds_per_day: i64 = 86400;
+    let days_since_epoch = unix_seconds.div_euclid(seconds_per_day);
+    let time_of_day = unix_seconds.rem_euclid(seconds_per_day);
+    let z = days_since_epoch + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let day_of_era = z - era * 146097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36524 - day_of_era / 146096) / 365;
+    let civil_year_basis = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_phase = (5 * day_of_year + 2) / 153;
+    let day = (day_of_year - (153 * month_phase + 2) / 5 + 1) as u32;
+    let month = if month_phase < 10 {
+        (month_phase + 3) as u32
+    } else {
+        (month_phase - 9) as u32
+    };
+    let year = (civil_year_basis + if month <= 2 { 1 } else { 0 }) as i32;
+    let hour = (time_of_day / 3600) as u32;
+    let minute = ((time_of_day % 3600) / 60) as u32;
+    let second = (time_of_day % 60) as u32;
+    (year, month, day, hour, minute, second)
+}
+
+/// Parse the flat key=string JSON dialect the brief and record stores write:
+/// an object whose values are all string literals. Relocated verbatim from the
+/// deleted workflow ledger so every flat store shares one parser.
+pub(crate) fn parse_object_of_strings(text: &str) -> Result<Vec<(String, String)>, String> {
+    let bytes = text.as_bytes();
+    let mut index = 0;
+    skip_whitespace(bytes, &mut index);
+    if index >= bytes.len() || bytes[index] != b'{' {
+        return Err("expected '{'".into());
+    }
+    index += 1;
+    let mut fields = Vec::new();
+    loop {
+        skip_whitespace(bytes, &mut index);
+        if index >= bytes.len() {
+            return Err("unterminated object".into());
+        }
+        if bytes[index] == b'}' {
+            return Ok(fields);
+        }
+        let key = parse_string_literal(bytes, &mut index)?;
+        skip_whitespace(bytes, &mut index);
+        if index >= bytes.len() || bytes[index] != b':' {
+            return Err(format!("expected ':' after key {key:?}"));
+        }
+        index += 1;
+        skip_whitespace(bytes, &mut index);
+        let value = parse_string_literal(bytes, &mut index)?;
+        fields.push((key, value));
+        skip_whitespace(bytes, &mut index);
+        if index >= bytes.len() {
+            return Err("unterminated object".into());
+        }
+        match bytes[index] {
+            b',' => {
+                index += 1;
+                continue;
+            }
+            b'}' => return Ok(fields),
+            other => return Err(format!("expected ',' or '}}', got {:?}", other as char)),
+        }
+    }
+}
+
+fn parse_string_literal(bytes: &[u8], index: &mut usize) -> Result<String, String> {
+    if *index >= bytes.len() || bytes[*index] != b'"' {
+        return Err("expected string literal".into());
+    }
+    *index += 1;
+    let mut output = String::new();
+    while *index < bytes.len() {
+        let byte = bytes[*index];
+        if byte == b'"' {
+            *index += 1;
+            return Ok(output);
+        }
+        if byte == b'\\' {
+            *index += 1;
+            if *index >= bytes.len() {
+                return Err("trailing backslash in string literal".into());
+            }
+            match bytes[*index] {
+                b'"' => output.push('"'),
+                b'\\' => output.push('\\'),
+                b'/' => output.push('/'),
+                b'n' => output.push('\n'),
+                b'r' => output.push('\r'),
+                b't' => output.push('\t'),
+                b'b' => output.push('\x08'),
+                b'f' => output.push('\x0c'),
+                b'u' => {
+                    if *index + 4 >= bytes.len() {
+                        return Err("incomplete \\u escape".into());
+                    }
+                    let hex_text = std::str::from_utf8(&bytes[*index + 1..*index + 5])
+                        .map_err(|_| "non-utf8 in \\u escape".to_string())?;
+                    let code_point = u32::from_str_radix(hex_text, 16)
+                        .map_err(|_| format!("invalid \\u hex: {hex_text}"))?;
+                    // A surrogate (0xD800..=0xDFFF) is only valid as the high half
+                    // of a UTF-16 surrogate pair: it must be followed by a `\uLOW`
+                    // escape whose code point is the low half (0xDC00..=0xDFFF).
+                    // The pair combines into one astral-plane scalar.
+                    if (0xD800..=0xDBFF).contains(&code_point) {
+                        let high = code_point;
+                        if *index + 10 >= bytes.len()
+                            || bytes[*index + 5] != b'\\'
+                            || bytes[*index + 6] != b'u'
+                        {
+                            return Err("lone high surrogate in \\u escape".into());
+                        }
+                        let low_hex = std::str::from_utf8(&bytes[*index + 7..*index + 11])
+                            .map_err(|_| "non-utf8 in \\u low surrogate".to_string())?;
+                        let low = u32::from_str_radix(low_hex, 16)
+                            .map_err(|_| format!("invalid \\u hex: {low_hex}"))?;
+                        if !(0xDC00..=0xDFFF).contains(&low) {
+                            return Err("invalid low surrogate after high surrogate".into());
+                        }
+                        let scalar = 0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00);
+                        let character = char::from_u32(scalar)
+                            .ok_or_else(|| "surrogate pair out of range".to_string())?;
+                        output.push(character);
+                        // Advance past the low half's `\u` + 4 hex (6 bytes). The
+                        // shared `*index += 4` below covers the high half's hex and
+                        // the shared `*index += 1` covers the high half's `u`.
+                        *index += 6;
+                    } else if (0xDC00..=0xDFFF).contains(&code_point) {
+                        return Err("lone low surrogate in \\u escape".into());
+                    } else if let Some(character) = char::from_u32(code_point) {
+                        output.push(character);
+                    }
+                    *index += 4;
+                }
+                other => return Err(format!("invalid escape \\{}", other as char)),
+            }
+            *index += 1;
+        } else {
+            let remainder = std::str::from_utf8(&bytes[*index..])
+                .map_err(|_| "invalid utf8 in string literal".to_string())?;
+            let character = remainder
+                .chars()
+                .next()
+                .ok_or_else(|| "empty string literal body".to_string())?;
+            output.push(character);
+            *index += character.len_utf8();
+        }
+    }
+    Err("unterminated string literal".into())
+}
+
+fn skip_whitespace(bytes: &[u8], index: &mut usize) {
+    while *index < bytes.len() {
+        match bytes[*index] {
+            b' ' | b'\t' | b'\n' | b'\r' => *index += 1,
+            _ => break,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -307,10 +459,6 @@ mod tests {
                 store.delete_record(evil).is_err(),
                 "delete must reject id {evil:?}"
             );
-            assert!(
-                !store.record_exists(evil),
-                "record_exists must be false for unsafe id {evil:?}"
-            );
         }
         // No file was created outside the store directory.
         assert!(!home.join("escape.json").exists());
@@ -368,29 +516,6 @@ mod tests {
     }
 
     #[test]
-    fn allocate_unique_record_id_appends_counter_on_collision() {
-        let home = temp_home("alloc-unique");
-        let store = RecordStore::new(&home, "orchestration/tasks");
-        // First allocation of an unused base returns it verbatim.
-        let first = allocate_unique_record_id(&store, "task-abc");
-        assert_eq!(first, "task-abc");
-        store
-            .write_record(&first, &vec![("id".into(), first.clone())])
-            .expect("write first");
-        // Same base now collides -> appends -1.
-        let second = allocate_unique_record_id(&store, "task-abc");
-        assert_eq!(second, "task-abc-1");
-        store
-            .write_record(&second, &vec![("id".into(), second.clone())])
-            .expect("write second");
-        // And again -> -2. This is exactly the same-millisecond case that made
-        // two `task begin` calls collapse into one record on Linux/macOS CI.
-        let third = allocate_unique_record_id(&store, "task-abc");
-        assert_eq!(third, "task-abc-2");
-        let _ = fs::remove_dir_all(&home);
-    }
-
-    #[test]
     fn record_to_value_expands_list_suffix_fields() {
         let record: Record = vec![
             ("id".into(), "x".into()),
@@ -407,5 +532,26 @@ mod tests {
         assert!(rendered.contains("\"two\""));
         // The `[]` suffix must not leak into the rendered key.
         assert!(!rendered.contains("tags[]"));
+    }
+
+    #[test]
+    fn format_timestamp_iso8601_renders_epoch() {
+        assert_eq!(format_timestamp_iso8601(0), "1970-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn parse_object_of_strings_reads_flat_objects_only() {
+        let fields = parse_object_of_strings("{\"id\": \"a\", \"note\": \"line\\nnext\"}")
+            .expect("parse flat object");
+        assert_eq!(
+            fields,
+            vec![
+                ("id".to_string(), "a".to_string()),
+                ("note".to_string(), "line\nnext".to_string()),
+            ]
+        );
+        // Non-string values and non-objects are outside the dialect.
+        assert!(parse_object_of_strings("{\"n\": 1}").is_err());
+        assert!(parse_object_of_strings("[]").is_err());
     }
 }

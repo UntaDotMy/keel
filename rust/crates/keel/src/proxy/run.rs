@@ -403,16 +403,11 @@ pub fn run_proxy(
 /// Mirrors what the user would see if they had run the program directly: stdio
 /// inherited, no capture, no analytics, exit code propagated. Falls back to a
 /// platform shell wrapper if the arguments contain shell metacharacters that
-/// only a shell can interpret (`|`, `&&`, `>`, env-var assignments, etc.).
+/// only a shell can interpret; detection is the single authoritative
+/// `classify::contains_shell_syntax`, shared with the capture path so both
+/// paths agree on what needs a shell.
 fn run_proxy_passthrough(command_arguments: &[String], standard_error: &mut dyn Write) -> u8 {
-    let needs_shell = command_arguments.iter().any(|argument| {
-        argument.chars().any(|character| {
-            matches!(
-                character,
-                '|' | '&' | ';' | '<' | '>' | '`' | '$' | '(' | ')'
-            )
-        })
-    });
+    let needs_shell = crate::proxy::classify::contains_shell_syntax(command_arguments);
 
     let (program, args) = if needs_shell {
         crate::runtime::platform_shell_command_parts(&shell_join(command_arguments))

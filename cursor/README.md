@@ -13,7 +13,7 @@ Cursor (1.7+) exposes a hook system (see https://cursor.com/docs/hooks) with eve
 ## Prerequisites
 
 1. Cursor IDE installed (1.7+ for hooks; `.cursorrules` works on any version).
-2. The `keel` binary installed at `~/.claude/keel` (unix) or `~/.claude/keel.exe` (win32), or on `PATH`.
+2. The `keel` binary installed at `~/.keel/keel` (unix) or `~/.keel/keel.exe` (win32), or on `PATH`.
 3. `jq` on `PATH` (required by `keel-cursor.sh` for safe JSON parsing and output escaping). On Windows, install via `winget install jqlang.jq` or `scoop install jq`. If `jq` is absent the hook script fails open (emits `{}`) and only the static `.cursorrules` layer is active.
 
 ## Install
@@ -91,14 +91,10 @@ After copying, on the first edit-class tool call in a fresh Cursor conversation,
 3. **Native commands before raw shell.** Use `keel run -- <command>` for noisy commands. Never run raw and compact after.
 4. **Find the root cause.** Trace symptoms end-to-end with file:line evidence before changing anything.
 
-### Workflow Commands
+### Key Commands
 
 | Command | Use |
 |---|---|
-| `keel workflow route --request "..."` | Route a broad request to a preset |
-| `keel workflow start --preset <preset> --request "..."` | Start work |
-| `keel workflow cockpit` | View live state |
-| `keel workflow finish --id <id> --proof "..."` | Finish a workstream |
 | `keel review pre-pr --base-ref origin/feat` | Review before PR |
 | `keel memory scope resolve --create-missing --refresh-system-map` | Refresh memory |
 | `keel code-search search --workspace-root "$PWD" --query "..."` | Search code |

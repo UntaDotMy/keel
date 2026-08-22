@@ -9,7 +9,7 @@ allowed-tools: Read, Bash(keel anvil:*), Bash(keel memory:*), Bash(keel review:*
 Run the Anvil delivery loop. Arguments: **$ARGUMENTS**
 
 Use the installed binary path (bare `keel` is not guaranteed on PATH):
-`~/.claude/keel` (macOS/Linux), `%USERPROFILE%\.claude\keel.exe`
+`~/.keel/keel` (macOS/Linux), `%USERPROFILE%\.keel\keel.exe`
 (Windows), or `cargo run --bin keel --` from a source checkout.
 
 - `compile --goal "..." --bar "..."` — write lock + prefix + gates to the global bank

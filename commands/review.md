@@ -9,7 +9,7 @@ allowed-tools: Read, Bash(keel review:*), Bash(git diff:*), Bash(git status)
 Run a keel native review surface. Arguments: **$ARGUMENTS**
 
 Use the installed binary path (bare `keel` is not guaranteed on PATH):
-`~/.claude/keel` (macOS/Linux), `%USERPROFILE%\.claude\keel.exe`
+`~/.keel/keel` (macOS/Linux), `%USERPROFILE%\.keel\keel.exe`
 (Windows), or `cargo run --bin keel --` from a source checkout.
 
 Map the surface in `$0` to the matching native subcommand:

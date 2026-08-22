@@ -32,7 +32,7 @@ pub fn classify_command(command_arguments: &[String]) -> Option<CommandAst> {
                 )
             })
             .unwrap_or(false),
-        has_shell_syntax(command_arguments),
+        contains_shell_syntax(command_arguments),
     ))
 }
 
@@ -128,10 +128,31 @@ fn effective_command_fields(words: &[String], depth: usize) -> Vec<String> {
     }
 }
 
-fn has_shell_syntax(words: &[String]) -> bool {
-    words
-        .iter()
-        .any(|word| matches!(word.as_str(), "|" | "||" | "&&" | ";" | "<" | ">" | ">>"))
+/// Authoritative shell-syntax detector for proxy execution decisions. BOTH
+/// call sites — capture wrapping (`run_proxy`) and transparent passthrough
+/// (`run_proxy_passthrough`) — must use this single function so a command
+/// never direct-execs with argv only a shell could interpret.
+///
+/// Operators match whole tokens: a pipe inside one argv word (e.g. a quoted
+/// `rg "error|warning"`) is data, not syntax. Numbered/dup redirects (`2>`,
+/// `&>`, `2>&1`, glued or bare) and substitution/grouping characters
+/// (`$`, backtick, parens) are detected anywhere in a token.
+pub(crate) fn contains_shell_syntax(words: &[String]) -> bool {
+    words.iter().any(|word| {
+        matches!(
+            word.as_str(),
+            "|" | "||" | "&&" | "&" | ";" | "<" | ">" | ">>"
+        ) || looks_like_redirect(word)
+            || word
+                .chars()
+                .any(|character| matches!(character, '$' | '`' | '(' | ')'))
+    })
+}
+
+fn looks_like_redirect(word: &str) -> bool {
+    let stripped = word.trim_start_matches(|character: char| character.is_ascii_digit());
+    let after_dup = stripped.strip_prefix('&').unwrap_or(stripped);
+    after_dup.starts_with('>')
 }
 
 /// Case-insensitive base-name used by classification matchers (`bash`, `sudo`,
@@ -192,7 +213,7 @@ fn split_shell_words(command: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::classify_command;
+    use super::{classify_command, contains_shell_syntax};
     use crate::proxy::command_ast::CommandKind;
 
     fn args(values: &[&str]) -> Vec<String> {
@@ -265,5 +286,35 @@ mod tests {
         assert!(ast.shell_wrapped);
         assert_eq!(ast.program, "cargo");
         assert_eq!(ast.detected_kind, CommandKind::Test);
+    }
+
+    #[test]
+    fn redirects_and_substitution_are_shell_syntax() {
+        // Regression: `2>`-class redirects and backtick substitution were only
+        // detected by the passthrough path, so the capture path direct-execed
+        // `prog arg 2> err.log` with literal argv. Both paths now share one
+        // detector and must agree.
+        for argv in [
+            vec!["prog", "arg", "2>", "err.log"],
+            vec!["prog", "arg", "2>err.log"],
+            vec!["prog", "arg", "&>all.log"],
+            vec!["prog", "arg", "2>&1"],
+            vec!["prog", "`sub`"],
+            vec!["echo", "$(date)"],
+            vec!["prog", "subshell", "(a; b)"],
+        ] {
+            let ast = classify_command(&args(&argv)).expect("ast");
+            assert!(ast.has_shell_syntax, "expected shell syntax: {argv:?}");
+            assert!(
+                contains_shell_syntax(&args(&argv)),
+                "passthrough detector must agree: {argv:?}"
+            );
+        }
+        // Data tokens stay shell-free: pipes inside a single quoted word are
+        // argv, not syntax. (`>=1.2` is NOT shell-free — an unquoted `>` is a
+        // real stdout redirect — and is asserted in the shell-syntax list.)
+        let argv = vec!["rg", "error|warning", "src"];
+        let ast = classify_command(&args(&argv)).expect("ast");
+        assert!(!ast.has_shell_syntax, "expected shell-free: {argv:?}");
     }
 }

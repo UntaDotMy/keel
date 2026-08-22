@@ -36,14 +36,13 @@ were validated where executable.
 
 1. **Doc/impl drift fixed (highest-leverage).** The operating doctrine commanded
    several CLI calls that the Rust runtime returns "not implemented" for
-   (`orchestration task|checkpoint`, `memory research-cache|maintenance|loop-guard|agent-packets`).
+   (`orchestration task|checkpoint`, `memory research-cache|maintenance|loop-guard|agent-packets`) (stale follow-up: the whole `orchestration` group was later removed before release — none of it ships).
    Marked them planned and routed the intent through implemented surfaces
    (`working-brief`, `completion-gate`, `recall`, plus L1 files). Files:
    `AGENTS/references/30-execution-strategy.md`, `_shared/common-discipline.md`,
    `docs/runtime-guardrails-and-memory-protocols.md`,
    `docs/context-efficiency-playbook.md`.
 2. **Custom slash commands (discoverability gap vs. the whole field).** Added
-   `/keel:workflow`, `/keel:review`, `/keel:recall`,
    `/keel:anvil`, `/keel:review`, `/keel:recall`, `/keel:gain` at the plugin root
    `commands/` (Anvil is the only delivery loop; sprint/user-story commands are deleted). Each
    wraps only implemented CLI surfaces with the verified flag names.
@@ -88,11 +87,11 @@ below was implemented and verified with `cargo build` + `cargo test --workspace`
    or silently rewrite on-screen text). The opt-out invariant test was renamed to
    `only_known_events_opt_out_of_install` and pins both `FileChanged` and
    `MessageDisplay`.
-3. **Planned memory/orchestration commands implemented.** On a new shared
+3. **Planned memory/orchestration commands implemented.** (Partially stale: the `orchestration` half was removed before release and does not ship; the `memory` families below did ship.) On a new shared
    `RecordStore` primitive (`utility/record_store.rs`) and a new
    `utility/memory_families.rs` module:
-   - `orchestration task begin|progress|complete|list` and `orchestration checkpoint`
-     (JSONL task ledger + snapshot), in `utility/memory.rs`.
+   - ~~`orchestration task begin|progress|complete|list` and `orchestration checkpoint`
+     (JSONL task ledger + snapshot), in `utility/memory.rs`.~~ (stale: removed before release, not shipped.)
    - `memory research-cache|maintenance|agent-registry|agent-packets|loop-guard|entity|graph|retrieve|status`.
    The two command groups are isolated on disk (`<group>/<family>/`). `memory
    report` now aliases the family status summary, `memory index` rebuilds the
@@ -150,8 +149,8 @@ below was implemented and verified with `cargo build` + `cargo test --workspace`
     re-review of the producing stage after any fix. Replaces the single
     undifferentiated pass so a polished implementation of the wrong spec cannot
     pass on code quality alone.
-13. **Git-backed code checkpoints (`/rewind` analog).** New `utility/checkpoint.rs`
-    + `keel checkpoint create|list|show|restore`: snapshots tracked
+13. ~~**Git-backed code checkpoints (`/rewind` analog).**~~ (Stale: not shipped —
+    `utility/checkpoint.rs` + `keel checkpoint create|list|show|restore` were removed before release.) What was described: snapshots tracked
     working-tree changes via `git stash create` pinned under
     `refs/claude-checkpoints/<id>`, lists/shows them, and restores one. Restore is
     the only destructive verb ,  gated behind `--confirm` and an automatic
@@ -187,7 +186,7 @@ below was implemented and verified with `cargo build` + `cargo test --workspace`
     skill-creation-from-behavior; superpowers does it as an offline batch, and
     the harness/caveman/RTK/ohmyclaude do not do it at all.
 
-Prior non-Rust work (doc/impl drift fixes, the six slash commands, the
+Prior non-Rust work (doc/impl drift fixes, the four slash commands, the
 cross-platform statusline savings badge, and hook-count doc accuracy) shipped
 earlier in the same pass and remains in place; the doctrine docs were then
 reconciled to describe these commands as implemented rather than planned.

@@ -1,5 +1,5 @@
 {
-  "_comment": "keel MCP server registration for Cursor. Cursor loads MCP config from ~/.cursor/mcp.json (global) or .cursor/mcp.json (project) — see https://cursor.com/docs/mcp. The structure is {mcpServers: {<name>: {command, args, env}}}. Cursor resolves 'keel' on PATH; the keel installer places the binary at ~/.claude/keel (unix) or ~/.claude/keel.exe (win32) and on PATH. There is no alwaysLoad equivalent — Cursor loads MCP servers on demand; enable/disable is via the Cursor sidebar Customize menu. The keel installer merges the 'keel' entry into your existing mcp.json (never clobbers other servers) and uninstall removes only the 'keel' entry.",
+  "_comment": "keel MCP server registration for Cursor. Cursor loads MCP config from ~/.cursor/mcp.json (global) or .cursor/mcp.json (project) — see https://cursor.com/docs/mcp. The structure is {mcpServers: {<name>: {command, args, env}}}. Cursor resolves 'keel' on PATH; the keel installer places the binary at ~/.keel/keel (unix) or ~/.keel/keel.exe (win32) and on PATH. There is no alwaysLoad equivalent — Cursor loads MCP servers on demand; enable/disable is via the Cursor sidebar Customize menu. The keel installer merges the 'keel' entry into your existing mcp.json (never clobbers other servers) and uninstall removes only the 'keel' entry.",
   "mcpServers": {
     "keel": {
       "command": "keel",

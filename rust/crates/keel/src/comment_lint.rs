@@ -266,6 +266,12 @@ pub fn scan_prose_diff(diff: &str) -> Vec<FileCommentFinding> {
             added_lines.clear();
             continue;
         }
+        // Header guard (mirrors scan_unified_diff): a deleted file's
+        // `+++ /dev/null` must never parse as added prose attributed to the
+        // previous file.
+        if line.starts_with("+++ ") || line.starts_with("--- ") {
+            continue;
+        }
         if line.starts_with("@@") {
             // Flush the prior hunk before resetting the cursor, so each hunk
             // lints with its own base line. Mirrors scan_unified_diff above.
@@ -279,7 +285,7 @@ pub fn scan_prose_diff(diff: &str) -> Vec<FileCommentFinding> {
             continue;
         }
         if let Some(added) = line.strip_prefix('+') {
-            if !added.starts_with("+++") && in_prose {
+            if in_prose {
                 added_lines.push((new_line_cursor, added.to_string()));
             }
             new_line_cursor += 1;
@@ -308,7 +314,8 @@ fn promote(file: &str, finding: CommentFinding) -> FileCommentFinding {
 }
 
 /// Read the new-file start line from a hunk header tail like ` -1,0 +42,3 @@`.
-fn parse_hunk_new_start(rest: &str) -> Option<usize> {
+/// Shared with slop_detector's diff scanner.
+pub(crate) fn parse_hunk_new_start(rest: &str) -> Option<usize> {
     let plus = rest.split('+').nth(1)?;
     let digits: String = plus.chars().take_while(|c| c.is_ascii_digit()).collect();
     digits.parse().ok()
@@ -521,5 +528,45 @@ mod tests {
                 panic!("second hunk slop must report at line 100, got: {findings:?}")
             });
         assert_eq!(hunk2.line, 100);
+    }
+
+    #[test]
+    fn prose_diff_never_lints_header_lines_as_content() {
+        // Regression: `strip_prefix('+')` turned a deleted file's
+        // `+++ /dev/null` header into "content" attributed to the previous
+        // file. Any `+++ `/`--- ` line is a header, never prose; the header
+        // payload below carries slop vocabulary so a violation is observable.
+        let diff = "\
++++ b/docs/guide.md
+@@ -0,0 +1,1 @@
++Clean technical summary of the release.
++++ Let's delve into how we leverage this seamlessly — robust!
+@@ -1,2 +0,0 @@
+-Let's delve into old slop text.
+";
+        let findings = scan_prose_diff(diff);
+        assert!(
+            findings.is_empty(),
+            "header lines must never be linted as prose: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn prose_diff_never_lints_deleted_markdown_body() {
+        // A deleted file's removed body is grandfathered like any `-` line,
+        // even when it is pure slop.
+        let diff = "\
+diff --git a/docs/old.md b/docs/old.md
+deleted file mode 100644
+--- a/docs/old.md
++++ /dev/null
+@@ -1,1 +0,0 @@
+-Let's delve into how we leverage this seamlessly — robust and scalable.
+";
+        let findings = scan_prose_diff(diff);
+        assert!(
+            findings.is_empty(),
+            "removed markdown body must not be linted: {findings:?}"
+        );
     }
 }

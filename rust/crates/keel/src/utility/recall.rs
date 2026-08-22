@@ -524,6 +524,9 @@ fn run_recall_status(
     0
 }
 
+/// Deliberate divergence vs `code_search::parse_limit`: recall is error-facing
+/// (bad --limit fails loudly, no cap), while code-search silently caps its
+/// display limit at 50 for search results. Do not unify.
 fn parse_limit(raw_value: &str) -> Result<usize, String> {
     let trimmed = raw_value.trim();
     if trimmed.is_empty() {
@@ -1182,12 +1185,7 @@ fn split_memory_chunks(content: &str) -> Vec<MemoryChunk> {
 }
 
 fn stable_fingerprint(content: &str) -> String {
-    let mut hash: u64 = 14695981039346656037;
-    for byte in content.as_bytes() {
-        hash ^= *byte as u64;
-        hash = hash.wrapping_mul(1099511628211);
-    }
-    format!("{hash:016x}")
+    crate::utility::hashing::fnv1a64_hex(content)
 }
 
 fn memory_source_kind(path: &str) -> String {

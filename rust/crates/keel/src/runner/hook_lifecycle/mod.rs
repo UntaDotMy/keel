@@ -441,7 +441,19 @@ fn run_hook_git_hooks(
     let hooks_path_value = ".githooks";
 
     if git_config_path.exists() {
-        let git_config = fs::read_to_string(&git_config_path).unwrap_or_default();
+        // why: a failed read (perms, AV lock) must never turn into an
+        // unconditional overwrite that replaces a real config with a stub.
+        let git_config = match fs::read_to_string(&git_config_path) {
+            Ok(text) => text,
+            Err(error) => {
+                let _ = writeln!(
+                    standard_error,
+                    "Refusing to edit {}: unreadable ({error})",
+                    display_path(&git_config_path)
+                );
+                return 1;
+            }
+        };
         let updated_config = set_core_hooks_path(&git_config, hooks_path_value);
         if let Err(e) = fs::write(&git_config_path, &updated_config) {
             let _ = writeln!(standard_error, "Failed to update .git/config: {}", e);
@@ -3115,8 +3127,8 @@ const GATE_DEFAULT_MAX_BLOCKS: u64 = 1;
 /// row carries the counter directory name, a display label, and the gate's
 /// env-aware max-blocks cap (the real cap, not the flat default). This is the
 /// single source the native hook path and the bridge host path must both use so
-/// `keel bridge gate-status` reports the same 8 gates the native PostToolBatch
-/// fires — previously the bridge hardcoded 3 of 8 and compared against a flat 1.
+/// `keel bridge gate-status` reports the same 6 gates the native PostToolBatch
+/// fires — previously the bridge hardcoded a subset and compared against a flat 1.
 pub(crate) struct GateStatusRow {
     pub dir: &'static str,
     pub label: &'static str,
@@ -3422,9 +3434,6 @@ fn research_gate_message(decision: GateDecision) -> String {
     }
 }
 
-#[cfg(test)]
-const STORY_FIRST_GATE_ENV_VAR: &str = "CLAUDE_SKILLS_STORY_FIRST_GATE";
-
 const BRIEF_GATE_ENV_VAR: &str = "CLAUDE_SKILLS_BRIEF_GATE";
 const BRIEF_GATE_MAX_BLOCKS_ENV_VAR: &str = "CLAUDE_SKILLS_BRIEF_GATE_MAX_BLOCKS";
 
@@ -3524,9 +3533,6 @@ fn memory_gate_message(decision: GateDecision) -> String {
         _ => "Memory-save reminder (CLAUDE_SKILLS_MEMORY_GATE): code changed without saving to memory. Use `keel memory research-cache record` for research findings, or `keel memory maintenance append-working-buffer` for working notes. Either clears the gate. This first reminder does not stop the turn, but will escalate. Set CLAUDE_SKILLS_MEMORY_GATE=nudge, =block, =off.".to_string(),
     }
 }
-
-#[cfg(test)]
-const SPRINT_START_GATE_ENV_VAR: &str = "CLAUDE_SKILLS_SPRINT_START_GATE";
 
 // ---- Learned-skill reminder gate (PostToolBatch) ----
 //
@@ -3986,108 +3992,6 @@ fn review_gate_message(decision: GateDecision) -> String {
 /// Emit the advisory PostToolBatch reminder (the default, gate-disabled path and
 /// every fail-open branch). Mirrors the lifecycle render so the output is
 /// identical to what `run_hook_lifecycle("post-tool-batch")` produces.
-const CHECKPOINT_ADVISORY_ENV_VAR: &str = "CLAUDE_SKILLS_CHECKPOINT_ADVISORY";
-/// Edits between checkpoint advisories in one session (throttle).
-const CHECKPOINT_ADVISORY_EDIT_INTERVAL: usize = 10;
-/// Modified/staged files that make a snapshot worth nudging.
-const CHECKPOINT_ADVISORY_MIN_DIRTY_FILES: usize = 3;
-
-fn checkpoint_advisory_enabled() -> bool {
-    std::env::var(CHECKPOINT_ADVISORY_ENV_VAR).as_deref() != Ok("off")
-}
-
-fn checkpoint_advisory_counter_path(claude_home: &Path, session_id: &str) -> PathBuf {
-    let key = if session_id.trim().is_empty() {
-        "no-session".to_string()
-    } else {
-        sanitize_memory_key(session_id)
-    };
-    claude_home
-        .join("state")
-        .join("checkpoint-advisory")
-        .join(key)
-}
-
-/// Modified/staged file count in `workspace` (`git status --porcelain -uno`), or
-/// None when it is not a git repository or git fails (fail-open: no nudge).
-fn uncommitted_file_count(workspace: &str) -> Option<usize> {
-    let repo = std::path::PathBuf::from(workspace);
-    let result = crate::runtime::run_command(
-        "git",
-        &[
-            "status".to_string(),
-            "--porcelain=v1".to_string(),
-            "-uno".to_string(),
-        ],
-        Some(&repo),
-    )
-    .ok()?;
-    if result.code != 0 {
-        return None;
-    }
-    let count = String::from_utf8_lossy(&result.stdout)
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .count();
-    Some(count)
-}
-
-/// Checkpoint advisory: when this session edited code and uncommitted work piles
-/// up, remind (throttled, non-blocking) to snapshot with `keel checkpoint create`
-/// so a misstep is reversible. Returns `Some(0)` after emitting, replacing the
-/// generic advisory for this batch; `None` falls through to it. Fail-open: any
-/// error leaves the turn untouched. Off-switch: CLAUDE_SKILLS_CHECKPOINT_ADVISORY=off.
-fn maybe_emit_checkpoint_advisory(
-    claude_home: &Path,
-    session_id: &str,
-    stats: &SessionEditStats,
-    standard_output: &mut dyn Write,
-    standard_error: &mut dyn Write,
-) -> Option<u8> {
-    if !checkpoint_advisory_enabled() {
-        return None;
-    }
-    if stats.count == 0 || stats.last_cwd.trim().is_empty() {
-        return None;
-    }
-    let counter_path = checkpoint_advisory_counter_path(claude_home, session_id);
-    let last_advised_at = read_counter_value(&counter_path);
-    if (stats.count as u64) < last_advised_at + CHECKPOINT_ADVISORY_EDIT_INTERVAL as u64 {
-        return None;
-    }
-    let dirty = uncommitted_file_count(&stats.last_cwd)?;
-    if dirty < CHECKPOINT_ADVISORY_MIN_DIRTY_FILES {
-        return None;
-    }
-    let _ = increment_counter_file(&counter_path);
-    let message = format!(
-        "keel checkpoint reminder: {} file(s) uncommitted in {} after {} edit(s) this session. Run `keel checkpoint create` to snapshot before continuing so a misstep is reversible. Advisory; set CLAUDE_SKILLS_CHECKPOINT_ADVISORY=off to silence.",
-        dirty,
-        display_path(&std::path::PathBuf::from(&stats.last_cwd)),
-        stats.count
-    );
-    let payload = serde_json::json!({
-        "hookSpecificOutput": {
-            "hookEventName": "PostToolBatch",
-            "additionalContext": message,
-        },
-        "suppressOutput": true,
-    });
-    match serde_json::to_string_pretty(&payload) {
-        Ok(rendered) => {
-            let _ = writeln!(standard_output, "{rendered}");
-            Some(0)
-        }
-        Err(error) => {
-            let _ = writeln!(
-                standard_error,
-                "Unable to render checkpoint advisory output: {error}"
-            );
-            None
-        }
-    }
-}
-
 fn emit_post_tool_batch_advisory(
     standard_output: &mut dyn Write,
     standard_error: &mut dyn Write,
@@ -4181,12 +4085,14 @@ fn emit_post_tool_batch_nudge(
     }
 }
 
-/// PostToolBatch dispatcher running the three default-on enforcement gates.
+/// PostToolBatch dispatcher running the enforcement gates: working-brief,
+/// completeness, review, memory-save, research, and learned-skill.
 ///
 /// Reads stdin for `session_id` (the harness delivers the hook payload there,
 /// same as UserPromptSubmit). Evaluates the working-brief gate FIRST (the front
 /// of the Iron Law — understand before building), then the review gate (the
-/// back — review before close), then the honest-closeout gate.
+/// back — review before close), with completeness, memory-save, research, and
+/// learned-skill checks interleaved.
 ///
 /// Each gate fires at most once per turn and is independently bounded by its own
 /// per-session counter. The DEFAULT firing behavior is ESCALATE: the first fire
@@ -4246,10 +4152,10 @@ fn run_hook_post_tool_batch(
 
     let stats = session_edit_stats(&claude_home, session_id);
 
-    // Brief and review gates only fire when code changed this session — pure
-    // research and question turns never trip them. The honest-closeout gate is
-    // evaluated separately below because it keys off sprint state, not edits: an
-    // incomplete sprint matters at closeout even on a no-edit summary turn.
+    // Edit-count gates only fire when code changed this session — pure research
+    // and question turns never trip them. The learned-skill reminder is
+    // evaluated separately below because it is edit-independent: a pending
+    // learned skill matters even on a no-edit turn.
     if stats.count > 0 {
         // Brief gate FIRST (front of the law: understand/plan before building).
         if brief_on {
@@ -4389,18 +4295,6 @@ fn run_hook_post_tool_batch(
         }
     }
 
-    // Checkpoint advisory (protect uncommitted work): throttled, non-blocking,
-    // and last so it never starves a real gate. Falls through on no signal.
-    if let Some(code) = maybe_emit_checkpoint_advisory(
-        &claude_home,
-        session_id,
-        &stats,
-        standard_output,
-        standard_error,
-    ) {
-        return code;
-    }
-
     // No gate fired → advisory reminder.
     emit_post_tool_batch_advisory(standard_output, standard_error)
 }
@@ -4518,7 +4412,7 @@ fn prune_observations_store(standard_error: &mut dyn Write) {
 /// `<claude_home>/state/`.
 ///
 /// why: the one-file-per-session markers (iron-law satisfaction, per-gate block
-/// counters, review-gate, story-first) were never pruned, so they grew unbounded
+/// counters, review-gate) were never pruned, so they grew unbounded
 /// and a stale shared "default" iron-law marker could satisfy the gate across
 /// id-less sessions forever. Bounding them by mtime caps both the growth and that
 /// cross-session leak. Errors swallowed like the other prunes.
@@ -4547,7 +4441,7 @@ fn prune_state_marker_stores(standard_error: &mut dyn Write) {
         let name = entry.file_name().to_string_lossy().to_string();
         let is_marker_dir = matches!(
             name.as_str(),
-            IRON_LAW_SATISFIED_DIR | IRON_LAW_LEGACY_GATE_DIR | "review-gate" | "story-first"
+            IRON_LAW_SATISFIED_DIR | IRON_LAW_LEGACY_GATE_DIR | "review-gate"
         ) || name.ends_with("-gate-blocks");
         if !is_marker_dir {
             continue;

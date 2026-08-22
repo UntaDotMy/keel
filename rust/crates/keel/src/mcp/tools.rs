@@ -10,7 +10,7 @@
 //!   the `system_map_text`/`recall_status_payload` helpers (also used by the
 //!   resources surface), and the `JSON_RPC_INVALID_PARAMS` code; the utility
 //!   layer (`recall`, `skill_match`, `working_brief`, `memory_families`,
-//!   `memory`, `workflow_ledger`) for the capabilities each tool wraps.
+//!   `memory`, `record_store`) for the capabilities each tool wraps.
 //! Side Effects: `recall`/`recall_status`/`memory_status` open the recall SQLite
 //!   index; `run_command` executes a user-supplied shell command via the proxy;
 //!   `cli` shells out to any non-refused keel subcommand (destructive
@@ -39,11 +39,11 @@ use crate::runtime::{display_path, resolve_claude_home, safe_path_segment};
 use crate::utility::memory::refresh_system_map;
 use crate::utility::memory_families::family_counts;
 use crate::utility::recall::{collapse_dashes, search_recall_index, RecallSearchResult};
+use crate::utility::record_store::{current_timestamp_millis, format_timestamp_iso8601};
 use crate::utility::skill_match::{
     installed_skill_path, match_skill_for_prompt, skill_catalog, skill_full_body,
     skill_inline_brief,
 };
-use crate::utility::workflow_ledger::{current_timestamp_millis, format_timestamp_iso8601};
 use crate::utility::working_brief::{create_brief, list_briefs, read_brief, write_brief, Brief};
 
 use super::{recall_status_payload, system_map_text, MethodError, JSON_RPC_INVALID_PARAMS};
@@ -293,7 +293,7 @@ fn tools_list_catalog() -> Value {
             },
             {
                 "name": "cli",
-                "description": "Run any keel CLI subcommand and get its compacted output — the full toolkit surface including families without a dedicated tool (bridge, eval, bench, hook list/diagnose, status, platform, ...). Pass the subcommand and flags as `args`. Read/inspection subcommands run in-process; destructive or management subcommands (install, update, repair, uninstall, validate, all, self-replace, `checkpoint restore`, and `hook install`/`hook uninstall`) require `confirm: true`. The `mcp` and `cli` subcommands are refused so the MCP server cannot re-enter itself. Prefer dedicated tools (recall, observe, rewrite, skill_eval, anvil, design_intelligence, ...) when one fits; use cli for everything else.",
+                "description": "Run any keel CLI subcommand and get its compacted output — the full toolkit surface including families without a dedicated tool (bridge, eval, hook list/diagnose, status, platform, ...). Pass the subcommand and flags as `args`. Read/inspection subcommands run in-process; destructive or management subcommands (install, update, repair, uninstall, validate, all, self-replace, and `hook install`/`hook uninstall`) require `confirm: true`. The `mcp` and `cli` subcommands are refused so the MCP server cannot re-enter itself. Prefer dedicated tools (recall, observe, rewrite, skill_eval, anvil, design_intelligence, ...) when one fits; use cli for everything else.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -409,19 +409,6 @@ fn tools_list_catalog() -> Value {
                 }
             },
 
-            {
-                "name": "checkpoint",
-                "description": "Create/restore checkpoints for workflow state. Use to snapshot progress or recover from interruption.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "action": { "type": "string", "enum": ["create", "list", "show", "restore"], "description": "Checkpoint operation." },
-                        "id": { "type": "string", "description": "Checkpoint id." },
-                        "confirm": { "type": "boolean", "description": "Required true for restore (destructive). Default false." }
-                    },
-                    "required": ["action"]
-                }
-            },
             {
                 "name": "session",
                 "description": "View session history. Shows recent sessions with message counts, date ranges, and agents used.",
@@ -699,7 +686,6 @@ const MCP_TOOL_NAMES: &[&str] = &[
     "config_audit",
     "skill_lint",
     "telemetry",
-    "checkpoint",
     "session",
     "doctor",
     "code_search",
@@ -745,7 +731,6 @@ fn mcp_tool_handler(name: &str) -> Option<McpToolHandler> {
         "config_audit" => tool_config_audit,
         "skill_lint" => tool_skill_lint,
         "telemetry" => tool_telemetry,
-        "checkpoint" => tool_checkpoint,
         "session" => tool_session,
         "doctor" => tool_doctor,
         "code_search" => tool_code_search,
@@ -1621,6 +1606,7 @@ fn brief_to_json(brief: &Brief) -> Value {
         "acceptanceCriteria": brief.acceptance_criteria,
         "assumptions": brief.assumptions,
         "workspace": brief.workspace,
+        "proof": brief.proof,
         "createdAt": brief.created_at,
     })
 }
@@ -1782,9 +1768,9 @@ const CLI_REFUSED_SUBCOMMANDS: &[&str] = &["mcp"];
 /// tree destructively. The `cli` tool runs these only when the caller passes
 /// `confirm: true`, so a model cannot silently reinstall, repair, uninstall, or
 /// restore over a working tree. Read/inspection subcommands are not listed and
-/// run directly. Two further actions are gated by second-arg checks in
-/// [`tool_cli`] rather than whole-group entries here, because their group also
-/// has read-only members: `checkpoint restore` and `hook install`/`hook uninstall`.
+/// run directly. One further action is gated by a second-arg check in
+/// [`tool_cli`] rather than a whole-group entry, because the group also
+/// has read-only members: `hook install`/`hook uninstall`.
 /// `verify` is intentionally absent — it is a read-only diff/audit pass.
 const CLI_CONFIRM_SUBCOMMANDS: &[&str] = &[
     "install",
@@ -1801,8 +1787,8 @@ const CLI_CONFIRM_SUBCOMMANDS: &[&str] = &[
 /// the dedicated tools do not, so the MCP surface matches the CLI surface
 /// without one wrapper per subcommand. Output is the same compacted report shape
 /// as `run_command`. Destructive/management subcommands require `confirm: true`;
-/// `checkpoint restore` (overwrites the working tree) and `hook install`/`hook
-/// uninstall` (mutate global settings.json) are gated the same way.
+/// `hook install`/`hook uninstall` (mutate global settings.json) are gated the
+/// same way by a second-arg check.
 fn tool_cli(arguments: &Value) -> Result<String, String> {
     let args: Vec<String> = match arguments.get("args") {
         Some(Value::Array(items)) => items
@@ -1828,17 +1814,13 @@ fn tool_cli(arguments: &Value) -> Result<String, String> {
         .and_then(Value::as_bool)
         .unwrap_or(false);
 
-    // Two subcommand GROUPS gate on a second-arg action rather than the whole
-    // group, because the group also has read-only members:
-    //   * `checkpoint restore` overwrites the working tree (list/show/create are safe).
+    // The hook GROUP gates on a second-arg action rather than a whole-group
+    // entry, because the group also has read-only members:
     //   * `hook install`/`hook uninstall` mutate the global ~/.claude/settings.json
     //     (list/show/diagnose/instructions are read-only).
     let second_arg = args.get(1).map(String::as_str).unwrap_or("");
-    let is_checkpoint_restore = subcommand == "checkpoint" && second_arg == "restore";
     let is_hook_mutating = subcommand == "hook" && matches!(second_arg, "install" | "uninstall");
-    let needs_confirm = CLI_CONFIRM_SUBCOMMANDS.contains(&subcommand.as_str())
-        || is_checkpoint_restore
-        || is_hook_mutating;
+    let needs_confirm = CLI_CONFIRM_SUBCOMMANDS.contains(&subcommand.as_str()) || is_hook_mutating;
     if needs_confirm && !confirm {
         return Err(format!(
             "cli: subcommand {subcommand:?} is destructive/management — re-call with confirm:true to run it"
@@ -2609,30 +2591,6 @@ fn tool_telemetry(arguments: &Value) -> Result<String, String> {
     run_keel_subcommand("telemetry", &all_args)
 }
 
-fn tool_checkpoint(arguments: &Value) -> Result<String, String> {
-    let action = arguments
-        .get("action")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "checkpoint: missing action (create|list|show|restore)".to_string())?;
-    if action == "restore" && !optional_bool_arg(arguments, "confirm").unwrap_or(false) {
-        return Err(
-            "checkpoint: restore is destructive — re-call with confirm:true to run it".to_string(),
-        );
-    }
-    let mut all_args: Vec<&str> = vec![action];
-    let mut owned: Vec<String> = Vec::new();
-    if let Some(i) = optional_string_arg(arguments, "id") {
-        owned.push(format!("--id={i}"));
-    }
-    if Some(true) == optional_bool_arg(arguments, "confirm") {
-        owned.push("--confirm".to_string());
-    }
-    for s in &owned {
-        all_args.push(s);
-    }
-    run_keel_subcommand("checkpoint", &all_args)
-}
-
 fn tool_session(arguments: &Value) -> Result<String, String> {
     let mut all_args: Vec<&str> = Vec::new();
     let mut owned: Vec<String> = Vec::new();
@@ -3109,8 +3067,8 @@ mod tests {
     fn cli_allowlist_covers_agent_critical_subcommand_families() {
         // Policy proof (no re-exec): agent-critical families are not refused and
         // are not whole-group confirm-gated. Live binary smoke is in mcp-smoke.log.
-        // Dedicated MCP tools cover observe/rewrite/skill_eval/dispatch/design_intelligence;
-        // bridge/eval/bench/team/hook remain via-cli.
+        // Dedicated MCP tools cover observe/rewrite/skill_eval/design_intelligence;
+        // bridge/eval/hook remain via-cli.
         for sub in [
             "observe",
             "rewrite",
@@ -3119,7 +3077,6 @@ mod tests {
             "design-intelligence",
             "bridge",
             "eval",
-            "bench",
             "hook",
         ] {
             assert!(
@@ -3467,18 +3424,6 @@ mod tests {
     }
 
     #[test]
-    fn cli_gates_checkpoint_restore_but_not_checkpoint_list() {
-        // `checkpoint restore` overwrites the working tree → gated. Other
-        // checkpoint actions are not gated by the confirm rule (they still run;
-        // here we only assert the gate decision, so use a no-confirm restore).
-        let restore = json!({ "name": "cli", "arguments": { "args": ["checkpoint", "restore", "--id", "x"] } });
-        let result = handle_tools_call(&restore).expect("envelope present");
-        assert_eq!(result["isError"], json!(true));
-        let text = result["content"][0]["text"].as_str().unwrap_or("");
-        assert!(text.contains("confirm:true"), "restore must gate: {text}");
-    }
-
-    #[test]
     fn cli_gates_hook_install_and_uninstall() {
         // `hook install`/`hook uninstall` mutate the global settings.json, so they
         // are gated by a second-arg check even though the `hook` group has
@@ -3569,6 +3514,7 @@ mod tests {
             acceptance_criteria: vec!["tests pass".to_string()],
             assumptions: vec!["x is y".to_string()],
             workspace: "/repo".to_string(),
+            proof: String::new(),
             created_at: "2026-06-08T00:00:00Z".to_string(),
         };
         let value = brief_to_json(&brief);
@@ -3579,6 +3525,7 @@ mod tests {
         assert_eq!(value["assumptions"], json!(["x is y"]));
         assert_eq!(value["workspace"], json!("/repo"));
         assert_eq!(value["createdAt"], json!("2026-06-08T00:00:00Z"));
+        assert_eq!(value["proof"], json!(""));
     }
 
     #[test]
@@ -3697,25 +3644,6 @@ mod tests {
         assert_eq!(result["isError"], json!(true));
         let text = result["content"][0]["text"].as_str().unwrap_or("");
         assert!(text.contains("missing action"), "text: {text}");
-    }
-
-    #[test]
-    fn checkpoint_requires_action() {
-        let params = json!({ "name": "checkpoint", "arguments": {} });
-        let result = handle_tools_call(&params).expect("envelope present");
-        assert_eq!(result["isError"], json!(true));
-        let text = result["content"][0]["text"].as_str().unwrap_or("");
-        assert!(text.contains("missing action"), "text: {text}");
-    }
-
-    #[test]
-    fn checkpoint_restore_requires_confirm() {
-        let params =
-            json!({ "name": "checkpoint", "arguments": { "action": "restore", "id": "cp-1" } });
-        let result = handle_tools_call(&params).expect("envelope present");
-        assert_eq!(result["isError"], json!(true));
-        let text = result["content"][0]["text"].as_str().unwrap_or("");
-        assert!(text.contains("confirm:true"), "text: {text}");
     }
 
     #[test]

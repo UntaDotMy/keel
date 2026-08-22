@@ -1,11 +1,13 @@
 //! Purpose: Diff-scoped AI-slop detector — scans added lines for the 5 most
 //! common AI-generated code smells (dead defensive code, over-commenting,
-//! phantom flags, hallucinated APIs, N+1 query patterns).
-//! Caller: review.rs surface commands (pre-commit, pre-pr) as a Warn-level gate.
-//! Dependencies: runtime::run_command for git diff.
+//! phantom flags, hallucinated APIs, N+1 query patterns) plus whole-tree N+1.
+//! Caller: review.rs surface commands (pre-commit, pre-pr) as a Warn-level gate
+//! (findings never block; heuristic false positives must not strand commits).
+//! Dependencies: runtime::run_command for git diff; comment_lint's shared
+//! hunk-header parser.
 //! Main Functions: scan_added_lines_for_slop, scan_unified_diff_for_slop.
 //! Side Effects: Reads git diff via run_command; pure analysis otherwise.
-
+use crate::comment_lint::parse_hunk_new_start;
 use std::path::Path;
 
 use crate::runtime::run_command;
@@ -163,9 +165,6 @@ fn detect_slop_patterns(
     added_lines: &[(usize, String)],
     findings: &mut Vec<SlopFinding>,
 ) {
-    if file.ends_with("/slop_detector.rs") || file.ends_with("\\slop_detector.rs") {
-        return;
-    }
     detect_dead_defensive_code(file, added_lines, findings);
     detect_over_commenting(file, added_lines, findings);
     detect_phantom_flags(file, added_lines, findings);
@@ -196,22 +195,11 @@ fn detect_copy_paste_duplication(
     let mut seen: std::collections::HashMap<String, Vec<usize>> = std::collections::HashMap::new();
     for (line_no, line) in added_lines {
         let normalized = line.trim();
-        // Only substantive lines count: skip blanks, lone braces, short lines.
+        // Only substantive lines count: skip blanks, lone braces, short lines,
+        // and `for ` loop headers (structural repetition, not copy-paste).
         if normalized.len() < 24
             || normalized.chars().all(|c| "{}();, ".contains(c))
             || normalized.starts_with("for ")
-            || normalized.starts_with("let root =")
-            || normalized.starts_with("let path =")
-            || normalized.starts_with("let connection =")
-            || normalized.starts_with("let mut statement =")
-            || normalized.starts_with("let mut candidates =")
-            || normalized.starts_with("candidates.push(Candidate")
-            || normalized.starts_with("connection: &Connection")
-            || normalized.starts_with("lines.push(String::new())")
-            || normalized.starts_with("let mut chars =")
-            || normalized.starts_with(".and_then(|value|")
-            || normalized.contains("row.get::<")
-            || normalized.contains("Result<Vec<Candidate>")
         {
             continue;
         }
@@ -274,6 +262,8 @@ fn detect_dead_defensive_code(
     }
 }
 
+// NOTE: `contains` matches anywhere in the line, not just the discard site —
+// a needle can exempt an unrelated `let _ =` on the same line.
 fn intentional_output_discard(line: &str) -> bool {
     line.contains("writeln!(")
         || line.contains("write!(")
@@ -283,7 +273,6 @@ fn intentional_output_discard(line: &str) -> bool {
         || line.contains("read_to_string(")
         || line.contains(".kill()")
         || line.contains(".wait()")
-        || line.contains("render_help_surface(")
         || line.contains("remove_dir_all(")
         || line.contains("remove_dir(")
         || line.contains("remove_path_if_exists(")
@@ -291,9 +280,6 @@ fn intentional_output_discard(line: &str) -> bool {
         || line.contains("fs::write(")
         || line.contains("write_text(")
         || line.contains("fs::rename(")
-        || line.contains("config_path(")
-        || line.contains("set_var(")
-        || line.contains("remove_var(")
 }
 
 fn detect_over_commenting(
@@ -310,6 +296,13 @@ fn detect_over_commenting(
         if trimmed.starts_with("///") || trimmed.starts_with("//!") {
             comment_run = 0;
             code_after_run = 0;
+            continue;
+        }
+        // Rust attributes (`#[derive(..)]`, `#[serde(..)]`, `#[test]`) start
+        // with `#` but are code, not comments: count them as neither so they
+        // neither extend nor reset a comment run. Python `@decorator` lines
+        // keep their current (code) classification.
+        if trimmed.starts_with("#[") {
             continue;
         }
         let is_comment = trimmed.starts_with("//")
@@ -395,17 +388,8 @@ fn detect_hallucinated_apis(
 ) {
     for (line_no, line) in added_lines {
         let trimmed = line.trim();
-        if trimmed.contains(".fetch_all()") {
-            findings.push(SlopFinding {
-                file: file.to_string(),
-                line: *line_no,
-                pattern: "hallucinated-api",
-                severity: "warn",
-                message:
-                    "`.fetch_all()` is not a standard method on most types; verify this API exists"
-                        .to_string(),
-            });
-        }
+        // `.fetch_all()` is sqlx's canonical method and was removed as a
+        // needle after flagging legitimate code.
         if trimmed.contains("dotenv().unwrap()") {
             findings.push(SlopFinding {
                 file: file.to_string(),
@@ -417,6 +401,8 @@ fn detect_hallucinated_apis(
                         .to_string(),
             });
         }
+        // Limitation: single-line analysis only — a multi-line `let` binding
+        // whose `?`/`match` handling sits on a later line evades this check.
         if trimmed.contains("serde_json::from_str(")
             && !trimmed.contains('?')
             && !trimmed.contains("match ")
@@ -508,13 +494,6 @@ fn detect_n_plus_one_queries(
             }
         }
     }
-}
-
-/// Read the new-file start line from a hunk header tail like ` -1,0 +42,3 @@`.
-fn parse_hunk_new_start(rest: &str) -> Option<usize> {
-    let plus = rest.split('+').nth(1)?;
-    let digits: String = plus.chars().take_while(|c| c.is_ascii_digit()).collect();
-    digits.parse().ok()
 }
 
 #[cfg(test)]
@@ -647,6 +626,27 @@ mod tests {
     }
 
     #[test]
+    fn over_commenting_rust_attributes_do_not_extend_comment_run() {
+        // `#[serde(...)]` lines are attributes, not comments: 4 of them plus a
+        // fn must not trip the 4+-comment-run rule.
+        let diff = "+++ b/src/x.rs\n@@ -0,0 +1,5 @@\n+#[derive(Debug, Clone)]\n+#[serde(rename_all = \"snake_case\")]\n+#[serde(deny_unknown_fields)]\n+#[non_exhaustive]\n+pub struct Config {\n";
+        let findings = scan_unified_diff_for_slop(diff);
+        assert!(
+            !findings.iter().any(|f| f.pattern == "over-commenting"),
+            "attribute runs must not count as comments: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn over_commenting_five_plain_comments_still_flagged() {
+        let diff = "+++ b/src/x.rs\n@@ -0,0 +1,6 @@\n+// first\n+// second\n+// third\n+// fourth\n+// fifth\n+let x = compute();\n";
+        let findings = scan_unified_diff_for_slop(diff);
+        assert!(
+            findings.iter().any(|f| f.pattern == "over-commenting"),
+            "plain comment run followed by code must still fire: {findings:?}"
+        );
+    }
+    #[test]
     fn over_commenting_two_comments_is_not_flagged() {
         let diff = "+++ b/src/x.rs\n@@ -0,0 +1,3 @@\n+// validate input\n+// before processing\n+let x = validate(data);\n";
         let findings = scan_unified_diff_for_slop(diff);
@@ -681,14 +681,15 @@ mod tests {
     // --- Pattern 4: Hallucinated APIs ---
 
     #[test]
-    fn hallucinated_fetch_all_is_flagged() {
-        let diff = "+++ b/src/x.rs\n@@ -0,0 +1,1 @@\n+let items = db.fetch_all();\n";
+    fn sqlx_fetch_all_is_not_flagged() {
+        // `.fetch_all()` is sqlx's canonical method; the old needle was a
+        // false positive on legitimate code.
+        let diff =
+            "+++ b/src/x.rs\n@@ -0,0 +1,1 @@\n+let items = conn.fetch_all(\"SELECT 1\").await?;\n";
         let findings = scan_unified_diff_for_slop(diff);
         assert!(
-            findings
-                .iter()
-                .any(|f| f.pattern == "hallucinated-api" && f.message.contains("fetch_all")),
-            "expected fetch_all finding: {findings:?}"
+            !findings.iter().any(|f| f.pattern == "hallucinated-api"),
+            "sqlx fetch_all must not be flagged: {findings:?}"
         );
     }
 

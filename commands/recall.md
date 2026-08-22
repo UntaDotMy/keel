@@ -12,8 +12,8 @@ Run the native recall search using the installed binary (the bare name `keel`
 is not guaranteed on PATH — prefer the explicit installed path). The query is a
 positional argument, not a flag:
 
-- macOS / Linux: `~/.claude/keel memory recall "$ARGUMENTS"`
-- Windows: `%USERPROFILE%\.claude\keel.exe memory recall "$ARGUMENTS"`
+- macOS / Linux: `~/.keel/keel memory recall "$ARGUMENTS"`
+- Windows: `%USERPROFILE%\.keel\keel.exe memory recall "$ARGUMENTS"`
 - Source checkout: `cargo run --bin keel -- memory recall "$ARGUMENTS"`
 
 Add `--limit N` to cap results and `--json` for structured output.

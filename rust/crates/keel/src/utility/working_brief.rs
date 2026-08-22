@@ -1,15 +1,15 @@
 //! Purpose: Per-workspace working-brief storage backing the `keel memory working-brief` surface.
 //! Caller: utility::memory::run_memory_command for the working-brief subcommand.
 //! Dependencies: std::fs, std::path, crate::json::{write_indented, Value}, crate::runtime::display_path,
-//!   crate::utility::workflow_ledger::parse_object_of_strings.
-//! Main Functions: brief_directory, brief_path, write_brief, read_brief, list_briefs,
+//!   crate::utility::record_store::parse_object_of_strings.
+//! Main Functions: brief_directory, brief_path, write_brief, read_brief,
 //!   create_brief, brief_to_value, parse_brief_text.
 //! Side Effects: Reads and writes JSON files under `<claude-home>/working-briefs/`. No global state.
 //!
 //! Storage shape: one JSON file per brief at `<claude-home>/working-briefs/<id>.json`.
 //! Files contain a flat object whose multi-line fields (constraints, acceptance criteria,
 //! assumptions) are joined with `\n` so the parser stays the simple key=string parser shared
-//! with workflow_ledger.
+//! with the shared record-store parser.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use crate::error::KeelError;
 use crate::json::{write_indented, Value};
 use crate::runtime::{display_path, safe_path_segment, write_text};
-use crate::utility::workflow_ledger::parse_object_of_strings;
+use crate::utility::record_store::parse_object_of_strings;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Brief {
@@ -35,6 +35,10 @@ pub struct Brief {
     /// written for an unrelated project.
     pub workspace: String,
     pub created_at: String,
+    /// Completion-gate proof recorded on this brief by
+    /// `memory completion-gate check --proof`. Empty until a gate check with a
+    /// proof succeeds; replaces the deleted workflow ledger's proof column.
+    pub proof: String,
 }
 
 pub fn brief_directory(claude_home: &Path) -> PathBuf {
@@ -77,6 +81,7 @@ pub fn create_brief(
         assumptions,
         workspace,
         created_at,
+        proof: String::new(),
     }
 }
 
@@ -114,6 +119,7 @@ pub fn brief_to_value(brief: &Brief) -> Value {
                     .collect(),
             ),
         ),
+        ("proof".into(), Value::String(brief.proof.clone())),
         ("workspace".into(), Value::String(brief.workspace.clone())),
         ("createdAt".into(), Value::String(brief.created_at.clone())),
     ])
@@ -136,6 +142,7 @@ fn brief_to_storage_value(brief: &Brief) -> Value {
             Value::String(brief.assumptions.join("\n")),
         ),
         ("workspace".into(), Value::String(brief.workspace.clone())),
+        ("proof".into(), Value::String(brief.proof.clone())),
         ("createdAt".into(), Value::String(brief.created_at.clone())),
     ])
 }
@@ -217,6 +224,7 @@ pub fn parse_brief_text(text: &str) -> Result<Brief, KeelError> {
         acceptance_criteria: Vec::new(),
         assumptions: Vec::new(),
         workspace: String::new(),
+        proof: String::new(),
         created_at: String::new(),
     };
     for (key, value) in fields {
@@ -226,6 +234,7 @@ pub fn parse_brief_text(text: &str) -> Result<Brief, KeelError> {
             "constraints" => brief.constraints = split_lines(&value),
             "acceptanceCriteria" => brief.acceptance_criteria = split_lines(&value),
             "assumptions" => brief.assumptions = split_lines(&value),
+            "proof" => brief.proof = value,
             "workspace" => brief.workspace = value,
             "createdAt" => brief.created_at = value,
             _ => {}

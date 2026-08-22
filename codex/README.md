@@ -164,7 +164,7 @@ Every bridge call uses `execFileSync` with `timeout: 500` — Node.js built-in t
 
 ### Binary resolution
 
-Prefer the explicit `~/.claude/keel` path (with `.exe` suffix on win32). Fall back to bare command name for PATH lookup. Resolved once at script init.
+Prefer the explicit `~/.keel/keel` path (with `.exe` suffix on win32). Fall back to bare command name for PATH lookup. Resolved once at script init.
 
 ### Plugin environment variables
 

@@ -26,6 +26,94 @@ use crate::{manager, mcp, review, runner, utility};
 
 const FOUNDATION_PHASE_NAME: &str = "phase-1-foundation";
 
+/// Single source of truth for user-facing top-level command names.
+///
+/// Consumed by (a) the unknown-command fallback below (nearest-name suggestions)
+/// and (b) the help parity tests in `help.rs`, which check both directions:
+/// every advertised help line's first token is a member, and every member is
+/// advertised. When you add a match arm in `Application::run`, add its name here
+/// in the same commit — the tests fail if either side drifts.
+/// Short aliases (`st`, `v`, `remove`) and the internal `__self-replace` arm are
+/// intentionally excluded.
+pub(crate) const TOP_LEVEL_COMMANDS: &[&str] = &[
+    "help",
+    "version",
+    "platform",
+    "bootstrap-info",
+    "all",
+    "install",
+    "update",
+    "status",
+    "doctor",
+    "repair",
+    "verify",
+    "uninstall",
+    "validate",
+    "menu",
+    "review",
+    "git-workflow",
+    "run",
+    "rewrite",
+    "raw",
+    "replay",
+    "hook",
+    "bridge",
+    "learn",
+    "code-search",
+    "code-index",
+    "code-graph",
+    "anvil",
+    "skill-lint",
+    "skill-eval",
+    "config-audit",
+    "design-intelligence",
+    "memory",
+    "gain",
+    "session",
+    "stats",
+    "eval",
+    "observe",
+    "flow",
+    "telemetry",
+    "mcp",
+];
+
+/// Nearest known commands for the unknown-command fallback, by edit distance.
+/// Distance ≤ 2 catches typos (`memroy`, `code-serach`) without flooding the
+/// error with unrelated suggestions; at most three are shown.
+fn nearest_top_level_commands(input: &str) -> Vec<&'static str> {
+    let input = input.trim().to_lowercase();
+    let mut scored: Vec<(usize, &'static str)> = TOP_LEVEL_COMMANDS
+        .iter()
+        .map(|command| (edit_distance(&input, command), *command))
+        .filter(|(distance, _)| *distance <= 2)
+        .collect();
+    scored.sort();
+    scored.truncate(3);
+    scored.into_iter().map(|(_, command)| command).collect()
+}
+
+/// Levenshtein edit distance for nearest-command suggestions. Inputs are short
+/// (a command name vs a user token), so the O(len_a*len_b) table is fine.
+fn edit_distance(left: &str, right: &str) -> usize {
+    let left: Vec<char> = left.chars().collect();
+    let right: Vec<char> = right.chars().collect();
+    let mut previous: Vec<usize> = (0..=right.len()).collect();
+    for (i, l) in left.iter().enumerate() {
+        let mut current = vec![i + 1];
+        for (j, r) in right.iter().enumerate() {
+            let substitution = previous[j] + usize::from(l != r);
+            current.push(
+                (*current.last().unwrap_or(&0) + 1)
+                    .min(previous[j + 1] + 1)
+                    .min(substitution),
+            );
+        }
+        previous = current;
+    }
+    previous[right.len()]
+}
+
 pub struct Application {
     pub build_version: String,
     pub default_repository_slug: String,
@@ -180,9 +268,6 @@ impl Application {
             "stats" => {
                 utility::run_stats_command(command_arguments, standard_output, standard_error)
             }
-            "bench" => {
-                utility::run_bench_command(command_arguments, standard_output, standard_error)
-            }
             "eval" => utility::run_eval_command(command_arguments, standard_output, standard_error),
             "observe" => {
                 utility::run_observe_command(command_arguments, standard_output, standard_error)
@@ -200,6 +285,10 @@ impl Application {
                     standard_error,
                     "Unknown command: {command_name}. The Rust runtime has no Go fallback."
                 );
+                let near = nearest_top_level_commands(&command_name);
+                if !near.is_empty() {
+                    let _ = writeln!(standard_error, "Did you mean: {}?", near.join(", "));
+                }
                 let _ = render_help_surface(standard_error, false);
                 1
             }
@@ -1000,6 +1089,46 @@ mod tests {
             "unexpected stderr: {}",
             String::from_utf8_lossy(&stderr)
         );
+    }
+
+    #[test]
+    fn top_level_commands_have_no_duplicates() {
+        let mut seen = std::collections::BTreeSet::new();
+        for command in TOP_LEVEL_COMMANDS {
+            assert!(
+                seen.insert(*command),
+                "TOP_LEVEL_COMMANDS lists `{command}` twice"
+            );
+        }
+    }
+
+    #[test]
+    fn top_level_commands_all_have_a_literal_dispatch_arm() {
+        // Pragmatic pin: parse this file's source and require each name to
+        // appear in a match-arm line (contains `=>`; covers multi-line and
+        // single-line arms alike). This catches a const entry whose arm was
+        // renamed or deleted without updating the const — the exact drift that
+        // let phantom commands survive.
+        let source = include_str!("commands.rs");
+        for command in TOP_LEVEL_COMMANDS {
+            let arm_label = format!("\"{command}\"");
+            assert!(
+                source
+                    .lines()
+                    .any(|line| line.contains(&arm_label) && line.contains("=>")),
+                "`{command}` is in TOP_LEVEL_COMMANDS but has no dispatch arm in commands.rs"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_top_level_command_suggests_nearest_names() {
+        assert_eq!(nearest_top_level_commands("memroy"), vec!["memory"]);
+        assert_eq!(
+            nearest_top_level_commands("code-serach"),
+            vec!["code-search"]
+        );
+        assert!(nearest_top_level_commands("zzzzzzzz").is_empty());
     }
 
     fn write_complete_flow_check_for_tests(repository_root: &Path, artifact_path: &str) {

@@ -3259,10 +3259,12 @@ fn slop_gate(
         });
         findings
     };
+    // Warn-level by design: heuristic findings must surface, never strand a
+    // commit on a false positive.
     let status = if findings.is_empty() {
         GateStatus::Pass
     } else {
-        GateStatus::Fail
+        GateStatus::Warn
     };
     let details = if findings.is_empty() {
         "no AI-slop patterns detected".to_string()
@@ -3282,7 +3284,7 @@ fn slop_gate(
     GateResult {
         name: "slop_detector".to_string(),
         status,
-        blocking: !findings.is_empty(),
+        blocking: false,
         details: Some(details),
     }
 }

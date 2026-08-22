@@ -1315,12 +1315,7 @@ fn canonical_workspace_root(root: &Path) -> Result<PathBuf, String> {
 }
 
 fn stable_hash(value: &str) -> String {
-    let mut hash: u64 = 14695981039346656037;
-    for byte in value.as_bytes() {
-        hash ^= *byte as u64;
-        hash = hash.wrapping_mul(1099511628211);
-    }
-    format!("{hash:016x}")
+    crate::utility::hashing::fnv1a64_hex(value)
 }
 
 fn truncate_utf8(value: &str, max_bytes: usize) -> String {

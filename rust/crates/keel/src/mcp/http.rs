@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use std::env;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -57,18 +57,21 @@ pub(super) fn serve_http(
     let _ = standard_output.flush();
 
     let sessions: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
-    let max_inflight = super::max_inflight();
+    // Mirror the stdio loop's KEEL_MCP_MAX_INFLIGHT contract (mod.rs):
+    // bound concurrent in-flight request handling on HTTP too.
+    let inflight = Arc::new(InflightGuard::new(super::max_inflight()));
 
     for connection in listener.incoming() {
         match connection {
             Ok(stream) => {
                 let sessions = Arc::clone(&sessions);
+                let inflight = Arc::clone(&inflight);
                 let _ = stream.set_read_timeout(Some(Duration::from_secs(60)));
                 let _ = stream.set_write_timeout(Some(Duration::from_secs(60)));
                 let spawn = thread::Builder::new()
                     .name("keel-mcp-http".into())
                     .spawn(move || {
-                        if let Err(error) = handle_connection(stream, sessions, max_inflight) {
+                        if let Err(error) = handle_connection(stream, sessions, inflight) {
                             // Connection-level errors stay local; no shared stderr.
                             let _ = error;
                         }
@@ -109,7 +112,7 @@ fn allow_remote_bind() -> bool {
 fn handle_connection(
     mut stream: TcpStream,
     sessions: Arc<Mutex<HashSet<String>>>,
-    _max_inflight: usize,
+    inflight: Arc<InflightGuard>,
 ) -> std::io::Result<()> {
     let mut buffer = Vec::new();
     let mut chunk = [0u8; 4096];
@@ -152,11 +155,74 @@ fn handle_connection(
                     .unwrap_or(&[])
                     .to_vec()
             };
+            // Bound in-flight request handling; the permit releases on drop
+            // when this connection's handler returns.
+            let _permit = inflight.acquire();
             respond(&mut stream, &headers, &body, &sessions)?;
             return Ok(());
         }
     }
     Ok(())
+}
+
+/// Bounds concurrent in-flight request handling on the HTTP transport,
+/// mirroring the stdio loop's `KEEL_MCP_MAX_INFLIGHT` contract (mod.rs,
+/// default 64). Over-cap waiters park on the condvar until a slot frees;
+/// connection socket timeouts bound how long a waiter can stay parked.
+struct InflightGuard {
+    capacity: usize,
+    in_flight: Mutex<usize>,
+    slot_freed: Condvar,
+}
+
+impl InflightGuard {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            in_flight: Mutex::new(0),
+            slot_freed: Condvar::new(),
+        }
+    }
+
+    /// Block until an in-flight slot is free, then take it. The returned
+    /// permit releases the slot on drop and wakes one waiter.
+    fn acquire(self: &Arc<Self>) -> InflightPermit {
+        let mut current = self.lock();
+        while *current >= self.capacity {
+            current = self
+                .slot_freed
+                .wait(current)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+        *current += 1;
+        InflightPermit {
+            guard: Arc::clone(self),
+        }
+    }
+
+    /// Test observation only; production paths rely on acquire/permit drop.
+    #[cfg(test)]
+    fn in_flight(&self) -> usize {
+        *self.lock()
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, usize> {
+        self.in_flight
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+struct InflightPermit {
+    guard: Arc<InflightGuard>,
+}
+
+impl Drop for InflightPermit {
+    fn drop(&mut self) {
+        let mut current = self.guard.lock();
+        *current -= 1;
+        self.guard.slot_freed.notify_one();
+    }
 }
 
 struct HttpHeaders {
@@ -515,7 +581,8 @@ mod tests {
         let sessions_accept = Arc::clone(&sessions);
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().expect("accept");
-            handle_connection(stream, sessions_accept, 8).expect("handle");
+            handle_connection(stream, sessions_accept, Arc::new(InflightGuard::new(8)))
+                .expect("handle");
         });
 
         thread::sleep(Duration::from_millis(20));
@@ -545,7 +612,8 @@ mod tests {
         let sessions_accept = Arc::clone(&sessions);
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().expect("accept");
-            handle_connection(stream, sessions_accept, 8).expect("handle");
+            handle_connection(stream, sessions_accept, Arc::new(InflightGuard::new(8)))
+                .expect("handle");
         });
         thread::sleep(Duration::from_millis(20));
         let mut client = TcpStream::connect(addr).expect("connect");
@@ -578,5 +646,39 @@ mod tests {
             result["result"]["serverInfo"]["version"],
             json!(super::super::MCP_SERVER_VERSION)
         );
+    }
+
+    #[test]
+    fn inflight_guard_counts_acquires_and_releases() {
+        let guard = Arc::new(InflightGuard::new(2));
+        let first = guard.acquire();
+        let second = guard.acquire();
+        assert_eq!(guard.in_flight(), 2);
+        drop(second);
+        assert_eq!(guard.in_flight(), 1);
+        drop(first);
+        assert_eq!(guard.in_flight(), 0);
+    }
+
+    #[test]
+    fn inflight_guard_blocks_at_capacity_then_wakes() {
+        let guard = Arc::new(InflightGuard::new(1));
+        let held = guard.acquire();
+
+        let waiter = {
+            let guard = Arc::clone(&guard);
+            thread::spawn(move || {
+                let permit = guard.acquire();
+                (permit, guard.in_flight())
+            })
+        };
+        // Waiter must stay parked while the slot is held — in_flight stays at
+        // capacity instead of exceeding it.
+        thread::sleep(Duration::from_millis(50));
+        assert_eq!(guard.in_flight(), 1);
+
+        drop(held);
+        let (_, observed) = waiter.join().expect("waiter");
+        assert_eq!(observed, 1, "waiter woke and took exactly one slot");
     }
 }

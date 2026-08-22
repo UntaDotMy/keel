@@ -1294,7 +1294,6 @@ mod tests {
             "config_audit",
             "skill_lint",
             "telemetry",
-            "checkpoint",
             "session",
             "doctor",
             "code_search",

@@ -46,17 +46,17 @@ Use a scoped working buffer when context gets crowded:
 
 Treat compaction as a normal lifecycle event, not as a surprise failure:
 
-- The model should not wait to "notice" compaction from the chat transcript. On every non-trivial turn, run `keel orchestration resume-status` first.
-- When the runtime tool surface, unified-exec health, or child-agent controls are uncertain, run `keel orchestration runtime-preflight` first and follow its preferred tool routing before opening new long-running work.
-- If the runtime can provide continuity markers such as a runtime session id, conversation id, turn id, or visible-history digest, pass them to `resume-status` and `start-run`. Marker mismatches are the explicit signal that continuity broke.
+- The model should not wait to "notice" compaction from the chat transcript. On every non-trivial turn, reconstruct state from the durable artifacts first (`SESSION-STATE.md`, the scoped working brief via `keel memory working-brief list`, `working-buffer.md`).
+- When the runtime tool surface, unified-exec health, or child-agent controls are uncertain, run `keel doctor` first and follow its recommended next command before opening new long-running work.
+- If the runtime can provide continuity markers such as a runtime session id, conversation id, turn id, or visible-history digest, record them in `SESSION-STATE.md` so recovery can key off them. Marker mismatches are the explicit signal that continuity broke.
 - If the runtime cannot provide continuity markers, do not bluff. Exact automatic-versus-manual compaction detection is unavailable, so the workflow must fall back to artifact-first recovery on every long-running turn.
-- Before manual compaction, and whenever automatic compaction risk is rising, run `keel orchestration checkpoint` to persist a snapshot (open tasks, open workflows, working-brief count, and an optional `--note`) and report the current durable state. It composes the implemented surfaces below rather than owning a separate store, so the snapshot is an honest count of what is actually persisted:
+- Before manual compaction, and whenever automatic compaction risk is rising, refresh the durable artifacts so they hold an honest snapshot of current state (open tasks, working-brief count) and report it:
   - `SESSION-STATE.md` for durable corrections, decisions, names, and exact values
   - the scoped working-brief artifact (for example `working-brief.json` or `working-brief-<agent-instance>.json`) for the user story, acceptance criteria, and plan items
   - `working-buffer.md` for the latest in-flight breadcrumbs
   - `completion-gate.json` for the exact requirement status
   - the scoped execution-trace artifact (for example `execution-trace.json` or `execution-trace-<agent-instance>.json`) for the latest admitted route plan and execution evidence
-- After compaction, resets, or `resume-status` continuity warnings, reload those scoped files before resuming implementation.
+- After compaction, resets, or continuity warnings, reload those scoped files before resuming implementation.
 - Reacquire the exact code surface with `keel code-search search` instead of replaying broad transcript history from memory.
 - If the reloaded artifacts and current repo state still leave business intent ambiguous, stop and use `request_user_input` or ask the user directly before continuing.
 - Treat compaction recovery as complete only when the active task list, current requirement states, and next proving validation target are all reconstructed explicitly.

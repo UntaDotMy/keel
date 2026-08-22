@@ -83,17 +83,5 @@
       "manualTrigger": "Before finishing a code change, run: keel review pre-commit --format compact",
       "timing": "Before each next model turn after tool use"
     }
-  },
-  "workflowCommands": {
-    "description": "keel workflow commands that Pi Agent users can run directly via bash or the MCP cli tool.",
-    "commands": {
-      "route": "keel workflow route --request \"...\"",
-      "start": "keel workflow start --preset <preset> --request \"...\"",
-      "cockpit": "keel workflow cockpit",
-      "finish": "keel workflow finish --id <entry-id> --proof \"tests green\"",
-      "review": "keel review pre-pr --base-ref origin/feat --format compact",
-      "memory": "keel memory scope resolve --create-missing --refresh-system-map",
-      "search": "keel code-search search --workspace-root \"$PWD\" --query \"<query>\""
-    }
   }
 }

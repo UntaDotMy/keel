@@ -1,5 +1,5 @@
 //! Purpose: Shared helpers used across memory submodules
-//! Caller: scope, system_map_cmd, working_brief_cmd, completion_gate, orchestration, workflow
+//! Caller: scope, system_map_cmd, working_brief_cmd, completion_gate
 //! Dependencies: crate::json
 //! Main Functions: is_help_argument, render_workflow_json, probe_marker, probe_value
 //! Side Effects: None, pure helpers
