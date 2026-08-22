@@ -1292,7 +1292,7 @@ fn iron_law_gate_denies_without_evidence_and_does_not_ack_on_deny() {
     let previous_mode = std::env::var(IRON_LAW_GATE_ENV_VAR).ok();
     std::env::set_var("CLAUDE_TARGET_OVERRIDE", &claude_home);
     // Explicit Strict: this test exercises Strict behavior (the gate default is
-    // Verified, asserted in iron_law_gate_mode_default_is_verified).
+    // Strict, asserted in iron_law_gate_mode_defaults_to_strict).
     std::env::set_var(IRON_LAW_GATE_ENV_VAR, "strict");
 
     let session = "sess-iron-law-strict";
@@ -1335,7 +1335,7 @@ fn iron_law_gate_denies_without_evidence_and_does_not_ack_on_deny() {
 }
 
 #[test]
-fn iron_law_gate_mode_default_is_verified() {
+fn iron_law_gate_mode_defaults_to_strict() {
     let _guard = crate::test_support::ENV_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1416,31 +1416,6 @@ fn verified_mode_requires_web_research_not_internal_state() {
 }
 
 #[test]
-fn checkpoint_advisory_env_gate_and_thresholds() {
-    let _guard = crate::test_support::ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let previous = std::env::var(CHECKPOINT_ADVISORY_ENV_VAR).ok();
-    // Default on.
-    std::env::remove_var(CHECKPOINT_ADVISORY_ENV_VAR);
-    assert!(checkpoint_advisory_enabled(), "default must be enabled");
-    // Explicit off.
-    std::env::set_var(CHECKPOINT_ADVISORY_ENV_VAR, "off");
-    assert!(!checkpoint_advisory_enabled());
-    // A real git workspace reports a file count (this repo has edits).
-    std::env::set_var(CHECKPOINT_ADVISORY_ENV_VAR, "");
-    std::env::remove_var(CHECKPOINT_ADVISORY_ENV_VAR);
-    // Non-git dir -> None (fail-open, no nudge).
-    let home = temp_brief_gate_home("checkpoint-non-git");
-    assert_eq!(uncommitted_file_count(&home.to_string_lossy()), None);
-    std::fs::remove_dir_all(&home).ok();
-    match previous {
-        Some(value) => std::env::set_var(CHECKPOINT_ADVISORY_ENV_VAR, value),
-        None => std::env::remove_var(CHECKPOINT_ADVISORY_ENV_VAR),
-    }
-}
-
-#[test]
 fn gate_cannot_loop_terminates_at_cap() {
     // THE TERMINATION PROOF. Simulate the worst case: the gate stays enabled,
     // code stays changed, and the requirement is NEVER satisfied
@@ -1480,13 +1455,9 @@ fn run_hook_post_tool_batch_both_gates_off_matches_advisory_path() {
     let previous_review = std::env::var(REVIEW_GATE_ENV_VAR).ok();
     let previous_brief = std::env::var(BRIEF_GATE_ENV_VAR).ok();
     let previous_research = std::env::var(RESEARCH_GATE_ENV_VAR).ok();
-    let previous_story_first = std::env::var(STORY_FIRST_GATE_ENV_VAR).ok();
-    let previous_closeout = std::env::var(STORY_FIRST_GATE_ENV_VAR).ok();
     std::env::set_var(REVIEW_GATE_ENV_VAR, "off");
     std::env::set_var(BRIEF_GATE_ENV_VAR, "off");
     std::env::set_var(RESEARCH_GATE_ENV_VAR, "off");
-    std::env::set_var(STORY_FIRST_GATE_ENV_VAR, "off");
-    std::env::set_var(STORY_FIRST_GATE_ENV_VAR, "off");
 
     let mut gate_stdin = std::io::empty();
     let mut gate_out = Vec::new();
@@ -1508,14 +1479,6 @@ fn run_hook_post_tool_batch_both_gates_off_matches_advisory_path() {
     match previous_research {
         Some(value) => std::env::set_var(RESEARCH_GATE_ENV_VAR, value),
         None => std::env::remove_var(RESEARCH_GATE_ENV_VAR),
-    }
-    match previous_story_first {
-        Some(value) => std::env::set_var(STORY_FIRST_GATE_ENV_VAR, value),
-        None => std::env::remove_var(STORY_FIRST_GATE_ENV_VAR),
-    }
-    match previous_closeout {
-        Some(value) => std::env::set_var(STORY_FIRST_GATE_ENV_VAR, value),
-        None => std::env::remove_var(STORY_FIRST_GATE_ENV_VAR),
     }
 
     assert_eq!(gate_code, 0);
@@ -1825,7 +1788,6 @@ impl NewGatesSilenced {
     fn new() -> Self {
         let vars = [
             MEMORY_GATE_ENV_VAR,
-            SPRINT_START_GATE_ENV_VAR,
             LEARNED_SKILL_GATE_ENV_VAR,
             COMPLETENESS_GATE_ENV_VAR,
         ];
@@ -1906,15 +1868,11 @@ fn run_hook_post_tool_batch_brief_gate_nudges_in_nudge_mode_then_falls_through()
     let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
     let previous_review = std::env::var(REVIEW_GATE_ENV_VAR).ok();
     let previous_brief = std::env::var(BRIEF_GATE_ENV_VAR).ok();
-    let previous_closeout = std::env::var(STORY_FIRST_GATE_ENV_VAR).ok();
     let previous_research = std::env::var(RESEARCH_GATE_ENV_VAR).ok();
-    let previous_story_first = std::env::var(STORY_FIRST_GATE_ENV_VAR).ok();
     std::env::set_var("CLAUDE_TARGET_OVERRIDE", &claude_home);
     std::env::set_var(REVIEW_GATE_ENV_VAR, "off");
     std::env::set_var(BRIEF_GATE_ENV_VAR, "nudge");
     std::env::set_var(RESEARCH_GATE_ENV_VAR, "off");
-    std::env::set_var(STORY_FIRST_GATE_ENV_VAR, "off");
-    std::env::set_var(STORY_FIRST_GATE_ENV_VAR, "off");
 
     // Seed one edit-class timing row for this session so stats.count > 0 and
     // session_start_ms resolves. No brief is written → gate must fire.
@@ -2026,14 +1984,6 @@ fn run_hook_post_tool_batch_brief_gate_nudges_in_nudge_mode_then_falls_through()
         Some(value) => std::env::set_var(RESEARCH_GATE_ENV_VAR, value),
         None => std::env::remove_var(RESEARCH_GATE_ENV_VAR),
     }
-    match previous_story_first {
-        Some(value) => std::env::set_var(STORY_FIRST_GATE_ENV_VAR, value),
-        None => std::env::remove_var(STORY_FIRST_GATE_ENV_VAR),
-    }
-    match previous_closeout {
-        Some(value) => std::env::set_var(STORY_FIRST_GATE_ENV_VAR, value),
-        None => std::env::remove_var(STORY_FIRST_GATE_ENV_VAR),
-    }
     let _ = std::fs::remove_dir_all(&claude_home);
 }
 
@@ -2055,14 +2005,10 @@ fn run_hook_post_tool_batch_brief_gate_blocks_by_default() {
     let previous_review = std::env::var(REVIEW_GATE_ENV_VAR).ok();
     let previous_brief = std::env::var(BRIEF_GATE_ENV_VAR).ok();
     let previous_research = std::env::var(RESEARCH_GATE_ENV_VAR).ok();
-    let previous_story_first = std::env::var(STORY_FIRST_GATE_ENV_VAR).ok();
-    let previous_closeout = std::env::var(STORY_FIRST_GATE_ENV_VAR).ok();
     std::env::set_var("CLAUDE_TARGET_OVERRIDE", &claude_home);
     std::env::set_var(REVIEW_GATE_ENV_VAR, "off"); // isolate the brief gate
     std::env::remove_var(BRIEF_GATE_ENV_VAR); // default → Block
     std::env::set_var(RESEARCH_GATE_ENV_VAR, "off");
-    std::env::set_var(STORY_FIRST_GATE_ENV_VAR, "off");
-    std::env::set_var(STORY_FIRST_GATE_ENV_VAR, "off");
 
     let session_id = "sess-e2e-block-default";
     let date = chrono::Local::now().format("%Y-%m-%d").to_string();
@@ -2150,14 +2096,6 @@ fn run_hook_post_tool_batch_brief_gate_blocks_by_default() {
         Some(value) => std::env::set_var(RESEARCH_GATE_ENV_VAR, value),
         None => std::env::remove_var(RESEARCH_GATE_ENV_VAR),
     }
-    match previous_story_first {
-        Some(value) => std::env::set_var(STORY_FIRST_GATE_ENV_VAR, value),
-        None => std::env::remove_var(STORY_FIRST_GATE_ENV_VAR),
-    }
-    match previous_closeout {
-        Some(value) => std::env::set_var(STORY_FIRST_GATE_ENV_VAR, value),
-        None => std::env::remove_var(STORY_FIRST_GATE_ENV_VAR),
-    }
     let _ = std::fs::remove_dir_all(&claude_home);
 }
 
@@ -2185,14 +2123,10 @@ fn run_hook_post_tool_batch_review_gate_nudges_in_nudge_mode_then_falls_through(
     let previous_review = std::env::var(REVIEW_GATE_ENV_VAR).ok();
     let previous_brief = std::env::var(BRIEF_GATE_ENV_VAR).ok();
     let previous_research = std::env::var(RESEARCH_GATE_ENV_VAR).ok();
-    let previous_story_first = std::env::var(STORY_FIRST_GATE_ENV_VAR).ok();
-    let previous_closeout = std::env::var(STORY_FIRST_GATE_ENV_VAR).ok();
     std::env::set_var("CLAUDE_TARGET_OVERRIDE", &claude_home);
     std::env::set_var(BRIEF_GATE_ENV_VAR, "off"); // isolate the review gate
     std::env::set_var(REVIEW_GATE_ENV_VAR, "nudge"); // explicit advisory-only mode
     std::env::set_var(RESEARCH_GATE_ENV_VAR, "off");
-    std::env::set_var(STORY_FIRST_GATE_ENV_VAR, "off");
-    std::env::set_var(STORY_FIRST_GATE_ENV_VAR, "off");
 
     // Seed one edit-class timing row. No `.reviewed` marker is written → the
     // review gate sees an unreviewed edit and must fire.
@@ -2303,14 +2237,6 @@ fn run_hook_post_tool_batch_review_gate_nudges_in_nudge_mode_then_falls_through(
     match previous_research {
         Some(value) => std::env::set_var(RESEARCH_GATE_ENV_VAR, value),
         None => std::env::remove_var(RESEARCH_GATE_ENV_VAR),
-    }
-    match previous_story_first {
-        Some(value) => std::env::set_var(STORY_FIRST_GATE_ENV_VAR, value),
-        None => std::env::remove_var(STORY_FIRST_GATE_ENV_VAR),
-    }
-    match previous_closeout {
-        Some(value) => std::env::set_var(STORY_FIRST_GATE_ENV_VAR, value),
-        None => std::env::remove_var(STORY_FIRST_GATE_ENV_VAR),
     }
     let _ = std::fs::remove_dir_all(&claude_home);
 }
@@ -2455,22 +2381,16 @@ fn memory_gate_nudges_when_no_memory_saved_then_satisfied_off_and_capped() {
     let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
     let previous_review = std::env::var(REVIEW_GATE_ENV_VAR).ok();
     let previous_brief = std::env::var(BRIEF_GATE_ENV_VAR).ok();
-    let previous_closeout = std::env::var(STORY_FIRST_GATE_ENV_VAR).ok();
-    let previous_sprint = std::env::var(SPRINT_START_GATE_ENV_VAR).ok();
     let previous_learned = std::env::var(LEARNED_SKILL_GATE_ENV_VAR).ok();
     let previous_memory = std::env::var(MEMORY_GATE_ENV_VAR).ok();
     let previous_research = std::env::var(RESEARCH_GATE_ENV_VAR).ok();
-    let previous_story_first = std::env::var(STORY_FIRST_GATE_ENV_VAR).ok();
     let previous_completeness = std::env::var(COMPLETENESS_GATE_ENV_VAR).ok();
     std::env::set_var("CLAUDE_TARGET_OVERRIDE", &claude_home);
     std::env::set_var(REVIEW_GATE_ENV_VAR, "off");
     std::env::set_var(BRIEF_GATE_ENV_VAR, "off");
-    std::env::set_var(STORY_FIRST_GATE_ENV_VAR, "off");
-    std::env::set_var(SPRINT_START_GATE_ENV_VAR, "off");
     std::env::set_var(LEARNED_SKILL_GATE_ENV_VAR, "off");
     std::env::set_var(MEMORY_GATE_ENV_VAR, "nudge");
     std::env::set_var(RESEARCH_GATE_ENV_VAR, "off");
-    std::env::set_var(STORY_FIRST_GATE_ENV_VAR, "off");
     std::env::set_var(COMPLETENESS_GATE_ENV_VAR, "off");
 
     let session_id = "sess-memory";
@@ -2547,12 +2467,9 @@ fn memory_gate_nudges_when_no_memory_saved_then_satisfied_off_and_capped() {
     for (var, prior) in [
         (REVIEW_GATE_ENV_VAR, previous_review),
         (BRIEF_GATE_ENV_VAR, previous_brief),
-        (STORY_FIRST_GATE_ENV_VAR, previous_closeout),
-        (SPRINT_START_GATE_ENV_VAR, previous_sprint),
         (LEARNED_SKILL_GATE_ENV_VAR, previous_learned),
         (MEMORY_GATE_ENV_VAR, previous_memory),
         (RESEARCH_GATE_ENV_VAR, previous_research),
-        (STORY_FIRST_GATE_ENV_VAR, previous_story_first),
         (COMPLETENESS_GATE_ENV_VAR, previous_completeness),
     ] {
         match prior {
@@ -2576,16 +2493,12 @@ fn learned_skill_gate_nudges_when_pending_then_silent_off_and_capped() {
     let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
     let previous_review = std::env::var(REVIEW_GATE_ENV_VAR).ok();
     let previous_brief = std::env::var(BRIEF_GATE_ENV_VAR).ok();
-    let previous_closeout = std::env::var(STORY_FIRST_GATE_ENV_VAR).ok();
     let previous_memory = std::env::var(MEMORY_GATE_ENV_VAR).ok();
-    let previous_sprint = std::env::var(SPRINT_START_GATE_ENV_VAR).ok();
     let previous_learned = std::env::var(LEARNED_SKILL_GATE_ENV_VAR).ok();
     std::env::set_var("CLAUDE_TARGET_OVERRIDE", &claude_home);
     std::env::set_var(REVIEW_GATE_ENV_VAR, "off");
     std::env::set_var(BRIEF_GATE_ENV_VAR, "off");
-    std::env::set_var(STORY_FIRST_GATE_ENV_VAR, "off");
     std::env::set_var(MEMORY_GATE_ENV_VAR, "off");
-    std::env::set_var(SPRINT_START_GATE_ENV_VAR, "off");
     std::env::set_var(LEARNED_SKILL_GATE_ENV_VAR, "nudge");
 
     // Pending learned skill (no edit row needed — the gate is edit-independent).
@@ -2664,9 +2577,7 @@ fn learned_skill_gate_nudges_when_pending_then_silent_off_and_capped() {
     for (var, prior) in [
         (REVIEW_GATE_ENV_VAR, previous_review),
         (BRIEF_GATE_ENV_VAR, previous_brief),
-        (STORY_FIRST_GATE_ENV_VAR, previous_closeout),
         (MEMORY_GATE_ENV_VAR, previous_memory),
-        (SPRINT_START_GATE_ENV_VAR, previous_sprint),
         (LEARNED_SKILL_GATE_ENV_VAR, previous_learned),
     ] {
         match prior {
@@ -4290,13 +4201,9 @@ fn research_gate_nudges_when_no_research_before_edit() {
     let previous_research = std::env::var(RESEARCH_GATE_ENV_VAR).ok();
     let previous_brief = std::env::var(BRIEF_GATE_ENV_VAR).ok();
     let previous_review = std::env::var(REVIEW_GATE_ENV_VAR).ok();
-    let previous_story_first = std::env::var(STORY_FIRST_GATE_ENV_VAR).ok();
-    let previous_closeout = std::env::var(STORY_FIRST_GATE_ENV_VAR).ok();
     std::env::set_var(RESEARCH_GATE_ENV_VAR, "nudge");
     std::env::set_var(BRIEF_GATE_ENV_VAR, "off");
     std::env::set_var(REVIEW_GATE_ENV_VAR, "off");
-    std::env::set_var(STORY_FIRST_GATE_ENV_VAR, "off");
-    std::env::set_var(STORY_FIRST_GATE_ENV_VAR, "off");
 
     let temp = std::env::temp_dir().join("keel-research-gate-test");
     let claude_home = temp.join("claude-home");
@@ -4345,14 +4252,6 @@ fn research_gate_nudges_when_no_research_before_edit() {
     match previous_review {
         Some(value) => std::env::set_var(REVIEW_GATE_ENV_VAR, value),
         None => std::env::remove_var(REVIEW_GATE_ENV_VAR),
-    }
-    match previous_story_first {
-        Some(value) => std::env::set_var(STORY_FIRST_GATE_ENV_VAR, value),
-        None => std::env::remove_var(STORY_FIRST_GATE_ENV_VAR),
-    }
-    match previous_closeout {
-        Some(value) => std::env::set_var(STORY_FIRST_GATE_ENV_VAR, value),
-        None => std::env::remove_var(STORY_FIRST_GATE_ENV_VAR),
     }
     let _ = std::fs::remove_dir_all(&temp);
 }
@@ -4546,6 +4445,57 @@ fn git_hooks_install_sets_core_hookspath_in_repo_config() {
     assert!(
         config_content.contains(".githooks"),
         ".git/config hooksPath should point to .githooks: {config_content}"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
+#[test]
+fn git_hooks_install_refuses_to_clobber_unreadable_config() {
+    let _guard = crate::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let unique = format!("git-hooks-unreadable-{}", std::process::id());
+    let temp = std::env::temp_dir().join(unique);
+    let repo_root = temp.join("repo");
+    let githooks_dir = repo_root.join(".githooks");
+    let git_config = repo_root.join(".git").join("config");
+
+    std::fs::create_dir_all(&githooks_dir).unwrap();
+    std::fs::write(
+        githooks_dir.join("pre-commit"),
+        "#!/bin/sh\necho pre-commit",
+    )
+    .unwrap();
+    std::fs::write(githooks_dir.join("pre-push"), "#!/bin/sh\necho pre-push").unwrap();
+    // A directory at the config path makes fs::read_to_string fail while
+    std::fs::create_dir(repo_root.join(".git")).unwrap();
+    // A directory simulates an unreadable config path without platform ACLs.
+    // `Path::exists` remains true, so install must refuse to clobber it.
+    std::fs::create_dir(&git_config).unwrap();
+
+    let mut stdout: Vec<u8> = Vec::new();
+    let mut stderr: Vec<u8> = Vec::new();
+    let code = run_hook_command(
+        &[
+            "git-hooks".to_string(),
+            "install".to_string(),
+            "--repo-root".to_string(),
+            repo_root.to_string_lossy().to_string(),
+        ],
+        &mut stdout,
+        &mut stderr,
+    );
+
+    assert_eq!(
+        code, 1,
+        "an existing but unreadable .git/config must fail the install, not clobber it"
+    );
+    let stderr_str = String::from_utf8_lossy(&stderr);
+    assert!(
+        stderr_str.contains("Refusing to edit"),
+        "error must name the refusal: {stderr_str}"
     );
 
     let _ = std::fs::remove_dir_all(&temp);

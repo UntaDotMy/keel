@@ -41,9 +41,9 @@
      --acceptance-criteria "working-brief show returns req-1." \
      --constraints "No drift between brief and live work."
    ```
-15. For non-trivial tasks that already have a workflow ledger entry (one created by `keel workflow start` in the active lane), surface the scoped completion gate before delivering the final answer. `completion-gate check` is read-only and exits 1 if the id has no entry, so this step only runs when the main lane has already opened the ledger:
+15. For non-trivial tasks tracked in a scoped working brief, surface the completion gate before delivering the final answer:
    ```bash
-   keel memory completion-gate check --id <entry-id> --proof "Evidence summary."
+   keel memory completion-gate check --brief-id <brief-id> --proof "Evidence summary."
    ```
 16. When a memory write is requested, report what changed and which scoped files were touched before final delivery.
 17. Archive overflow from L1 memory files instead of letting always-read files grow without bound. Move stale entries into the scoped `archive/` folder with the `Write` tool.

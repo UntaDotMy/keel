@@ -574,14 +574,25 @@ fn read_adapter(path: &Path, adapter: &str) -> String {
 
 /// The gate-clearing subcommand list, parsed out of the Rust source of truth.
 fn rust_research_subcommands(repo_root: &Path) -> BTreeSet<String> {
-    let source =
-        fs::read_to_string(repo_root.join("rust/crates/keel/src/runner/hook_lifecycle/mod.rs"))
-            .expect("read hook_lifecycle/mod.rs");
+    let source = fs::read_to_string(
+        repo_root.join("rust/crates/keel/src/runner/hook_lifecycle/pre_tool.rs"),
+    )
+    .expect("read hook lifecycle pre_tool.rs");
     let start = source
         .find("const HITS: &[&str] = &[")
         .expect("locate the HITS list in is_keel_research_command");
     let body = &source[start..];
     let end = body.find("];").expect("HITS list terminator");
+    quoted_literals(&body[..end])
+}
+fn shared_ts_research_subcommands(repo_root: &Path) -> BTreeSet<String> {
+    let source = fs::read_to_string(repo_root.join("_shared/ts/bridge-core.ts"))
+        .expect("read shared TypeScript bridge core");
+    let start = source
+        .find("const KEEL_RESEARCH_SUBCOMMANDS = [")
+        .expect("locate shared TypeScript research list");
+    let body = &source[start..];
+    let end = body.find("];").expect("shared TypeScript list terminator");
     quoted_literals(&body[..end])
 }
 
@@ -613,6 +624,11 @@ fn quoted_literals(text: &str) -> BTreeSet<String> {
 fn adapter_gate_lists_match_the_rust_source_of_truth() {
     let repo_root = repository_root();
     let expected = rust_research_subcommands(&repo_root);
+    let shared_ts = shared_ts_research_subcommands(&repo_root);
+    assert_eq!(
+        shared_ts, expected,
+        "shared TypeScript bridge list must mirror the Rust source"
+    );
     assert!(
         expected.contains("recall") && !expected.contains("help"),
         "parser looks stale; got {expected:?}"
@@ -623,29 +639,25 @@ fn adapter_gate_lists_match_the_rust_source_of_truth() {
 
         // Shell keeps the list in one space-separated string on a single line;
         // TypeScript uses one literal per entry up to the closing `];`.
-        let actual: BTreeSet<String> =
-            if adapter.ends_with(".sh") {
-                let line = text
-                    .lines()
-                    .find(|line| line.trim_start().starts_with("KEEL_RESEARCH_SUBCOMMANDS="))
-                    .unwrap_or_else(|| {
-                        panic!("{adapter} must declare KEEL_RESEARCH_SUBCOMMANDS on one line")
-                    });
-                quoted_literals(line)
-                    .iter()
-                    .flat_map(|value| value.split_whitespace())
-                    .map(str::to_string)
-                    .collect()
-            } else {
-                let start = text.find("KEEL_RESEARCH_SUBCOMMANDS = [").unwrap_or_else(|| {
-                panic!("{adapter} must declare KEEL_RESEARCH_SUBCOMMANDS mirroring the Rust list")
-            });
-                let body = &text[start..];
-                let end = body
-                    .find("];")
-                    .expect("KEEL_RESEARCH_SUBCOMMANDS terminator");
-                quoted_literals(&body[..end])
-            };
+        let actual: BTreeSet<String> = if adapter.ends_with(".sh") {
+            let line = text
+                .lines()
+                .find(|line| line.trim_start().starts_with("KEEL_RESEARCH_SUBCOMMANDS="))
+                .unwrap_or_else(|| {
+                    panic!("{adapter} must declare KEEL_RESEARCH_SUBCOMMANDS on one line")
+                });
+            quoted_literals(line)
+                .iter()
+                .flat_map(|value| value.split_whitespace())
+                .map(str::to_string)
+                .collect()
+        } else if text.contains("../_shared/ts/bridge-core")
+            && text.contains("isKeelReadingCommand")
+        {
+            shared_ts.clone()
+        } else {
+            panic!("{adapter} must import the shared bridge research list");
+        };
 
         // The shell adapter cannot express the two-word entries in its
         // whitespace-split list, so it matches them in a separate `case`.
@@ -673,8 +685,9 @@ fn adapter_gate_lists_match_the_rust_source_of_truth() {
              A looser adapter list writes the shared marker and unlocks the Rust gate too."
         );
 
-        let rejects_compound =
-            text.contains("$(") && (text.contains("[&|;`\\n]") || text.contains("*\"&\"*"));
+        let rejects_compound = (text.contains("../_shared/ts/bridge-core")
+            && text.contains("isKeelReadingCommand"))
+            || (text.contains("$(") && (text.contains("[&|;`\\n]") || text.contains("*\"&\"*")));
         assert!(
             rejects_compound,
             "{adapter} must reject compound commands so `keel doctor && curl evil` cannot \

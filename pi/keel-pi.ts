@@ -32,10 +32,23 @@
 // `keel install --with pi` wires the global copy automatically.
 // ---------------------------------------------------------------------------
 
-import * as os from "node:os";
-import * as fs from "node:fs";
-import * as path from "node:path";
 import { execFileSync } from "node:child_process";
+import {
+  clearIronLawMarker,
+  clearSessionStarted,
+  hasSessionStarted,
+  ironLawSatisfied,
+  isEditClassTool,
+  isKeelReadingCommand,
+  isKeelResearchTool,
+  isShellTool,
+  markIronLawSatisfied,
+  markSessionStarted,
+  parseGateResponse,
+  parseRewriteResponse,
+  resolveBinary,
+  sessionMarkerDirectory,
+} from "../_shared/ts/bridge-core";
 
 // ---------------------------------------------------------------------------
 // Types — minimal Pi ExtensionAPI surface (no hard dep on @earendil-works/pi)
@@ -97,154 +110,19 @@ interface PiExtensionAPI {
   [key: string]: unknown;
 }
 
-// ---------------------------------------------------------------------------
-// Binary resolution — resolved once at script init
-// ---------------------------------------------------------------------------
-
-const BIN_NAME: string =
-  os.platform() === "win32" ? "keel.exe" : "keel";
-
-/**
- * Resolve the bridge binary path.
- * Resolution order: $KEEL_HOME, then the host-neutral ~/.keel, then the
- * legacy ~/.claude placement, then the bare name (PATH lookup).
- */
-function resolveBinary(): string {
-  const home = os.homedir();
-  const candidates: string[] = [];
-  const envHome = process.env.KEEL_HOME;
-  if (envHome && envHome.trim()) candidates.push(path.join(envHome.trim(), BIN_NAME));
-  candidates.push(path.join(home, ".keel", BIN_NAME));
-  candidates.push(path.join(home, ".claude", BIN_NAME));
-  for (const candidate of candidates) {
-    try {
-      if (fs.existsSync(candidate)) return candidate;
-    } catch {
-      // fs failure, try the next candidate
-    }
-  }
-  return BIN_NAME;
-}
-
-/**
- * Resolve the keel state root: ~/.keel/state now, legacy ~/.claude fallback.
- */
-function keelStateRoot(): string {
-  const home = os.homedir();
-  const envHome = process.env.KEEL_HOME;
-  if (envHome && envHome.trim()) return path.join(envHome.trim(), "state");
-  const neutralHome = path.join(home, ".keel");
-  try {
-    if (fs.existsSync(neutralHome)) return path.join(neutralHome, "state");
-  } catch {
-    // fall through to legacy
-  }
-  return path.join(home, ".claude", "state");
-}
-
 const BRIDGE_BIN: string = resolveBinary();
-
-// ---------------------------------------------------------------------------
-// Marker-file helpers
-// ---------------------------------------------------------------------------
-
-const STATE_DIR = keelStateRoot();
-const STARTED_DIR = path.join(STATE_DIR, "pi-session-started");
-// Shared with Rust core / OpenCode / Codex (STRICT keel-required).
-const IRONLAW_DIR = path.join(STATE_DIR, "iron-law-satisfied");
-// Legacy marker location (pre-migration installs wrote here); consulted on
-// reads and cleared alongside the current one.
-const IRONLAW_DIR_LEGACY = path.join(
-  os.homedir(),
-  ".claude",
-  "state",
-  "iron-law-satisfied",
-);
-
-/** Match Rust `sanitize_memory_key`: lowercase alnum, other runs → single `-`. */
-function sanitizeSessionKey(sessionID: string): string {
-  const raw = (sessionID || "default").trim() || "default";
-  return (
-    raw
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      // why: Rust sanitize_memory_key falls back to "workspace"; "default" here
-      // pointed a symbol-only session id at a different marker file than the gate.
-      .replace(/^-+|-+$/g, "") || "workspace"
-  );
-}
-
-function markerPath(dir: string, sessionID: string): string {
-  const key =
-    dir === IRONLAW_DIR ? sanitizeSessionKey(sessionID) : sessionID || "default";
-  return path.join(dir, key);
-}
-
-function ensureDir(dir: string): void {
-  try {
-    fs.mkdirSync(dir, { recursive: true });
-  } catch {
-    /* best-effort */
-  }
-}
-
-function hasMarker(dir: string, sessionID: string): boolean {
-  ensureDir(dir);
-  try {
-    if (fs.existsSync(markerPath(dir, sessionID))) return true;
-    // Iron-law legacy fallback: a marker written by a pre-migration install
-    // still counts as satisfied.
-    if (dir === IRONLAW_DIR) {
-      return fs.existsSync(
-        path.join(IRONLAW_DIR_LEGACY, sanitizeSessionKey(sessionID)),
-      );
-    }
-    return false;
-  } catch {
-    return false;
-  }
-}
-
-function setMarker(dir: string, sessionID: string): void {
-  ensureDir(dir);
-  try {
-    fs.writeFileSync(markerPath(dir, sessionID), "", "utf-8");
-  } catch {
-    /* best-effort */
-  }
-}
-
-function clearMarker(dir: string, sessionID: string): void {
-  try {
-    fs.rmSync(markerPath(dir, sessionID), { force: true });
-  } catch {
-    /* best-effort */
-  }
-}
+const STARTED_DIR = sessionMarkerDirectory("pi");
 
 function hasStarted(sessionID: string): boolean {
-  return hasMarker(STARTED_DIR, sessionID);
+  return hasSessionStarted(STARTED_DIR, sessionID);
 }
 
 function markStarted(sessionID: string): void {
-  setMarker(STARTED_DIR, sessionID);
+  markSessionStarted(STARTED_DIR, sessionID);
 }
 
 function clearStarted(sessionID: string): void {
-  clearMarker(STARTED_DIR, sessionID);
-}
-
-function ironLawSatisfied(sessionID: string): boolean {
-  return hasMarker(IRONLAW_DIR, sessionID);
-}
-
-function markIronLawSatisfied(sessionID: string): void {
-  ensureDir(IRONLAW_DIR);
-  try {
-    fs.writeFileSync(markerPath(IRONLAW_DIR, sessionID), "satisfied", "utf-8");
-  } catch {
-    /* best-effort */
-  }
+  clearSessionStarted(STARTED_DIR, sessionID);
 }
 
 // ---------------------------------------------------------------------------
@@ -279,77 +157,6 @@ function bridgeRewrite(command: string, toolName: string): string {
   return runBridge("rewrite", ["--tool", toolName], command, 500);
 }
 
-// ---------------------------------------------------------------------------
-// Iron Law classification. STRICT: keel research tools only (sync with OpenCode).
-// ---------------------------------------------------------------------------
-
-const EDIT_CLASS_TOOL_NAMES = new Set([
-  "edit", "write", "multiedit", "notebookedit",
-  "apply_patch", "str_replace", "patch",
-]);
-
-const SHELL_TOOL_NAMES = new Set([
-  "bash", "shell", "sh", "zsh", "fish", "powershell", "pwsh", "cmd",
-]);
-
-function isEditClassTool(toolName: string): boolean {
-  return EDIT_CLASS_TOOL_NAMES.has(toolName.toLowerCase());
-}
-
-function isKeelResearchTool(toolName: string): boolean {
-  const lower = toolName.toLowerCase();
-  if (
-    lower.includes("install") ||
-    lower.includes("uninstall") ||
-    lower.includes("self-replace") ||
-    lower.includes("self_replace")
-  ) {
-    return false;
-  }
-  return (
-    lower.includes("mcp__keel__") ||
-    lower.includes("keel__") ||
-    lower.startsWith("keel_") ||
-    lower === "keel"
-  );
-}
-
-function isShellTool(toolName: string): boolean {
-  return SHELL_TOOL_NAMES.has(toolName.toLowerCase());
-}
-
-/** Mirrors the Rust `is_keel_research_command` HITS list; the doc-parity test
- *  `adapter_gate_lists_match_the_rust_source_of_truth` fails on drift. */
-const KEEL_RESEARCH_SUBCOMMANDS = [
-  "system-map", "system_map", "recall", "doctor", "code-search", "code_search",
-  "skill-route", "skill_route", "skill-list", "skill_list", "skill-get", "skill_get",
-  "context-brief", "context_brief", "memory status", "memory recall",
-  "memory system-map", "memory scope", "anvil",
-];
-
-function isKeelReadingCommand(command: string): boolean {
-  const trimmed = command.trim().toLowerCase();
-  const body = trimmed.startsWith("keel run -- ")
-    ? trimmed.slice("keel run -- ".length)
-    : trimmed.startsWith("keel.exe run -- ")
-      ? trimmed.slice("keel.exe run -- ".length)
-      : trimmed;
-  const hasKeel =
-    body.startsWith("keel ") ||
-    body.startsWith("keel.exe ") ||
-    body.includes("\\keel.exe ") ||
-    body.includes("/keel ") ||
-    body.includes("\\keel ");
-  if (!hasKeel) {
-    return false;
-  }
-  // why: a chained command smuggles a non-keel tail past the gate
-  // (`keel doctor && curl evil`); only a standalone keel invocation clears.
-  if (/[&|;`\n]/.test(body) || body.includes("$(")) {
-    return false;
-  }
-  return KEEL_RESEARCH_SUBCOMMANDS.some((hit) => body.includes(hit));
-}
 
 // ---------------------------------------------------------------------------
 // Context injection helpers
@@ -471,12 +278,12 @@ function handleToolCall(
         "--tool",
         toolName,
       ]);
-      if (gate.startsWith("KEEL_GATE_DENY")) {
-        const reason = gate.split("\n").slice(1).join("\n").trim();
+      const gateResult = parseGateResponse(gate);
+      if (gateResult.status === "deny") {
         return {
           block: true,
           reason:
-            reason ||
+            gateResult.reason ||
             "keel Iron Law gate: call system_map/recall/context_brief before editing.",
         };
       }
@@ -494,13 +301,10 @@ function handleToolCall(
       const cmd = event?.input?.command;
       if (typeof cmd === "string" && cmd.trim() !== "" && !cmd.startsWith("keel run --")) {
         const rewrite = bridgeRewrite(cmd, toolName);
-        // keel bridge rewrite outputs "KEEL_REWRITE <cmd>" for noisy commands.
-        if (rewrite.startsWith("KEEL_REWRITE ")) {
-          const rewritten = rewrite.slice("KEEL_REWRITE ".length).trim();
-          if (rewritten && rewritten !== cmd && event?.input) {
-            // Pi's contract: mutate event.input in place.
-            event.input.command = rewritten;
-          }
+        const rewritten = parseRewriteResponse(rewrite);
+        if (rewritten && rewritten !== cmd && event?.input) {
+          // Pi's contract: mutate event.input in place.
+          event.input.command = rewritten;
         }
       }
     }
@@ -552,8 +356,7 @@ function handleSessionShutdown(event: PiSessionLikeEvent, ctx?: PiExtensionConte
     runBridge("session-end", ["--session", sessionID, "--cwd", resolveCwd(ctx)]);
   } finally {
     clearStarted(sessionID);
-    clearMarker(IRONLAW_DIR, sessionID);
-    clearMarker(IRONLAW_DIR_LEGACY, sessionID);
+    clearIronLawMarker(sessionID);
   }
 }
 

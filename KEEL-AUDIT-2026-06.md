@@ -149,8 +149,8 @@ The user asked about Headroom. Not identical to `headroom` on GitHub by headroom
 | Config security audit | ✅ `keel config-audit`, exit 2 | ❌ | ✅ AgentShield, 1,282 tests | ❌ |
 | Adversarial agent pipeline | ✅ `adversarial-security-review` skill | ❌ | ✅ AgentShield `--opus` 3-agent | ❌ |
 | **Orchestration** | | | | |
-| Real git worktree dispatch | ✅ `keel dispatch`, fail-closed merge | ❌ | ❌ (markdown only) | ❌ |
-| Git-backed code checkpoints | ✅ `keel checkpoint` | ❌ | ❌ | ❌ |
+| Real git worktree dispatch | ❌ Not shipped in the current native core | ❌ | ❌ (markdown only) | ❌ |
+| Git-backed code checkpoints | ❌ Not shipped in the current native core | ❌ | ❌ | ❌ |
 | Parallel agent independence test | ✅ `dispatching-parallel-agents` skill | ❌ | ❌ model-instruction | ❌ |
 | Remote persistent agents | ❌ | ❌ | ❌ | ✅ Dark Factory (tmux) |
 | **Quality** | | | | |
@@ -232,7 +232,7 @@ The existing competitive-gap doc correctly flags star counts as unreliable. My v
 ### Don't ship (deliberate scope)
 6. **GUI dashboard** — contradicts the terminal-native, CLI-first posture. CLI output is already structured JSON for tooling.
 7. **271-skill breadth** — the curated skill pack with lint validation (live count via `keel skill-lint`; do not hardcode) is superior to ECC's unenforced volume. Quality over quantity is a defensible moat.
-8. **Dark Factory remote agents** — SAW's tmux-based remote agents are useful but outside keel's single-binary stance. The dispatch system (`keel dispatch`) handles parallel worktree isolation locally.
+8. **Dark Factory remote agents:** SAW's tmux-based remote agents are useful but outside keel's single-binary stance. Parallel worktree isolation is outside the current native core.
 
 ### Investigate
 9. **RTK's `rtk read`** — RTK offers smart file reading (`rtk read file.rs -l aggressive` with signature-only mode) and `rtk smart` (two-line code summary). Keel's proxy doesn't intercept Read tool calls (by harness design), but offering a `keel read` compact alternative could add value for the harness's built-in Read calls. Requires understanding whether the harness allows tool-output hooks for Read.

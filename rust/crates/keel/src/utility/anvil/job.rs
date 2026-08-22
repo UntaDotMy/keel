@@ -101,6 +101,58 @@ pub fn load_lock(paths: &JobPaths) -> Result<JsonValue, String> {
     validate_lock(&text)
 }
 
+/// Truthful anvil axis for the stats/observe dashboards: one `(id, state)`
+/// pair per workspace lane holding an anvil lock under
+/// `<home>/memories/workspaces/<slug>/anvil/`. `workspace_root` scopes the
+/// lookup to that single workspace; `None` scans every lane. A job is
+/// "complete" only when its `anvil.report.json` exists, "active" otherwise.
+/// Returns an empty vec when no job was run; callers omit the axis instead of
+/// printing a fabricated none-active placeholder.
+pub fn active_jobs_summary(
+    claude_home: &Path,
+    workspace_root: Option<&Path>,
+) -> Vec<(String, String)> {
+    let workspaces = claude_home.join("memories").join("workspaces");
+    let lanes: Vec<PathBuf> = match workspace_root {
+        Some(root) => vec![workspaces
+            .join(crate::utility::system_map::sanitize_key(
+                &root.to_string_lossy(),
+            ))
+            .join("anvil")],
+        None => std::fs::read_dir(&workspaces)
+            .map(|entries| {
+                entries
+                    .filter_map(std::result::Result::ok)
+                    .map(|entry| entry.path().join("anvil"))
+                    .filter(|lane| lane.is_dir())
+                    .collect()
+            })
+            .unwrap_or_default(),
+    };
+    let mut jobs = Vec::new();
+    for lane in lanes {
+        if !lane.join("anvil.lock.json").is_file() {
+            continue;
+        }
+        let id = lane
+            .parent()
+            .and_then(|parent| parent.file_name())
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_default();
+        if id.is_empty() {
+            continue;
+        }
+        let state = if lane.join("anvil.report.json").is_file() {
+            "complete"
+        } else {
+            "active"
+        };
+        jobs.push((id, state.to_string()));
+    }
+    jobs.sort();
+    jobs
+}
+
 #[derive(Debug)]
 pub struct PieceSpec {
     pub id: String,
@@ -200,6 +252,61 @@ mod tests {
         assert!(paths.dir.to_string_lossy().contains("workspaces"));
         assert!(!paths.dir.starts_with(&workspace));
         let _ = std::fs::remove_dir_all(&workspace);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn active_jobs_summary_reports_lock_and_report_state() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let workspace = std::env::temp_dir().join(format!("anvil-sum-ws-{stamp}"));
+        let home = std::env::temp_dir().join(format!("anvil-sum-home-{stamp}"));
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        let paths = JobPaths::from_resolved(workspace.clone(), home.clone());
+
+        // No lock yet: the axis must be empty, never fabricated.
+        assert!(active_jobs_summary(&home, Some(&workspace)).is_empty());
+
+        paths.ensure_dir().unwrap();
+        std::fs::write(paths.lock_path(), "{}").unwrap();
+        let summary = active_jobs_summary(&home, Some(&workspace));
+        let lane_id = sanitize_key(&workspace.to_string_lossy());
+        assert_eq!(summary, vec![(lane_id.clone(), "active".to_string())]);
+
+        std::fs::write(paths.report_path(), "{}").unwrap();
+        let summary = active_jobs_summary(&home, Some(&workspace));
+        assert_eq!(summary, vec![(lane_id, "complete".to_string())]);
+        let _ = std::fs::remove_dir_all(&workspace);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn active_jobs_summary_scans_all_lanes_when_unscoped() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let home = std::env::temp_dir().join(format!("anvil-sum-scan-{stamp}"));
+        let workspaces = home.join("memories").join("workspaces");
+        for slug in ["b-slug", "a-slug"] {
+            let lane = workspaces.join(slug).join("anvil");
+            std::fs::create_dir_all(&lane).unwrap();
+            std::fs::write(lane.join("anvil.lock.json"), "{}").unwrap();
+        }
+        // A lane without a lock is not a job.
+        std::fs::create_dir_all(workspaces.join("empty-slug").join("anvil")).unwrap();
+
+        let summary = active_jobs_summary(&home, None);
+        assert_eq!(
+            summary,
+            vec![
+                ("a-slug".to_string(), "active".to_string()),
+                ("b-slug".to_string(), "active".to_string()),
+            ]
+        );
         let _ = std::fs::remove_dir_all(&home);
     }
 

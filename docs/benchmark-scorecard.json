@@ -247,13 +247,13 @@
         "hosted_checks_total": 6,
         "hosted_checks_passed": 6,
         "fix_commits": 0,
-        "user_visible_improvement": "shorter first-run route command and clearer mode explanation"
+        "user_visible_improvement": "shorter first-run Anvil command and clearer mode explanation"
       },
       "required_commands": [
         "cargo test --workspace",
         "cargo test --workspace",
         "cargo test --workspace",
-        "cargo run --bin keel -- review pre-pr --base-ref origin/main --repo-root . --issue-id 40 --pr-title \"feat: improve workflow route first-run UX\"",
+        "cargo run --bin keel -- anvil compile --goal \"improve first-run route UX\" --workspace-root .",
         "cargo run --bin keel -- git-workflow preflight --repo-root . --base-ref origin/main"
       ],
       "demo_doc": "docs/demo-greenfield-feature-flow.md"
@@ -415,7 +415,7 @@
     },
     {
       "scenario_id": "regression_hardening_autopilot_defaults",
-      "title": "Default bare workflow start to autopilot standard and harden the regression guard",
+      "title": "Anvil compile defaults and regression guard",
       "style_targets": ["runtime-shell comparator", "workflow-teaching comparator"],
       "category": "regression_hardening",
       "source_pr": 45,
@@ -428,7 +428,7 @@
         "hosted_checks_total": 6,
         "hosted_checks_passed": 6,
         "fix_commits": 1,
-        "regression_guard": "workflow start defaults are covered by direct app tests and benchmark-facing contract tests"
+        "regression_guard": "Anvil compile defaults are covered by direct app tests and benchmark-facing contract tests"
       },
       "required_commands": [
         "cargo test --workspace",

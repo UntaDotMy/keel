@@ -508,9 +508,12 @@ fn score_skill(
 }
 
 /// Split a `---\n...\n---\n` leading frontmatter block from the body. Returns
-/// `None` when the file does not start with a frontmatter fence.
-fn split_frontmatter(text: &str) -> Option<(String, String)> {
-    let trimmed_start = text.trim_start_matches(['\u{feff}', ' ', '\t']);
+/// `None` when the file does not start with a frontmatter fence. Canonical
+/// implementation shared with `skill_match`; the leading trim is the superset
+/// of both former copies (BOM, space, tab, CR, LF) so CRLF/BOM files parse the
+/// same on every caller.
+pub(crate) fn split_frontmatter(text: &str) -> Option<(String, String)> {
+    let trimmed_start = text.trim_start_matches(['\u{feff}', ' ', '\t', '\n', '\r']);
     if !trimmed_start.starts_with("---") {
         return None;
     }
@@ -518,16 +521,21 @@ fn split_frontmatter(text: &str) -> Option<(String, String)> {
     let after_open = trimmed_start.split_once('\n').map(|(_, rest)| rest)?;
     // Find the closing fence at the start of a line.
     let mut frontmatter = String::new();
-    let mut remaining_lines = after_open.lines();
-    let mut closed = false;
     let mut consumed = 0usize;
-    for line in remaining_lines.by_ref() {
-        consumed += line.len() + 1;
-        if line.trim() == "---" {
+    let mut closed = false;
+    // split_inclusive keeps each line's terminator so `consumed` stays exact
+    // across CRLF and LF inputs alike.
+    for line in after_open.split_inclusive('\n') {
+        consumed += line.len();
+        let without_newline = line.strip_suffix('\n').unwrap_or(line);
+        let content = without_newline
+            .strip_suffix('\r')
+            .unwrap_or(without_newline);
+        if content.trim() == "---" {
             closed = true;
             break;
         }
-        frontmatter.push_str(line);
+        frontmatter.push_str(content);
         frontmatter.push('\n');
     }
     if !closed {
@@ -664,6 +672,24 @@ mod tests {
         let skill_path = skill_dir.join("SKILL.md");
         fs::write(&skill_path, contents).expect("write skill");
         (root, skill_path)
+    }
+
+    #[test]
+    fn split_frontmatter_agrees_across_callers_on_crlf_and_bom() {
+        // CRLF line endings + BOM + a leading blank line: the superset trim
+        // must make skill_lint and skill_match parse the same fields.
+        let text =
+            "\u{feff}\r\n---\r\nname: reviewer\r\ndescription: Reviews code.\r\n---\r\nbody\r\n";
+        let (frontmatter, body) = split_frontmatter(text).expect("frontmatter parsed");
+        assert!(
+            frontmatter.contains("name: reviewer"),
+            "frontmatter: {frontmatter}"
+        );
+        assert_eq!(
+            crate::utility::skill_match::split_frontmatter(text),
+            Some(frontmatter)
+        );
+        assert!(body.starts_with("body"));
     }
 
     #[test]

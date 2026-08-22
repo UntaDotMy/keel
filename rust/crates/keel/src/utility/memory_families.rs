@@ -4,7 +4,7 @@
 //! Caller: utility::memory::run_memory_command dispatch for the `memory` command group.
 //! Dependencies: crate::args::FlagSet, crate::json::{write_indented, Value},
 //!   crate::runtime::{display_path, resolve_claude_home}, crate::utility::record_store,
-//!   crate::utility::workflow_ledger timestamp helpers.
+//!   crate::utility::record_store timestamp helpers.
 //! Main Functions: run_memory_family_command (the single dispatch entry the memory module calls).
 //! Side Effects: Reads and writes flat-string JSON records under
 //!   `<claude-home>/<group>/<family>/<id>.json`. No global state.
@@ -23,8 +23,8 @@ use crate::runtime::{display_path, resolve_claude_home};
 use crate::utility::memory::shared::{
     is_help_argument as is_help, render_workflow_json as render_json,
 };
+use crate::utility::record_store::{current_timestamp_millis, format_timestamp_iso8601};
 use crate::utility::record_store::{field, join_lines, record_to_value, Record, RecordStore};
-use crate::utility::workflow_ledger::{current_timestamp_millis, format_timestamp_iso8601};
 
 /// Dispatch entry for the memory command families. `family` is the already-matched
 /// subcommand name (`research-cache`, `entity`, ...) and `arguments` is everything
@@ -1707,22 +1707,13 @@ fn set_field(record: &mut Record, key: &str, value: String) {
 /// Turn arbitrary text into a filesystem-safe record id (used for keyed records
 /// like registry-by-name, entity-by-type-name, loop-guard-by-signature).
 fn sanitize_id(value: &str) -> String {
-    let mut id = String::new();
-    let mut previous_dash = false;
-    for character in value.chars() {
-        if character.is_ascii_alphanumeric() {
-            id.push(character.to_ascii_lowercase());
-            previous_dash = false;
-        } else if !previous_dash {
-            id.push('-');
-            previous_dash = true;
-        }
-    }
-    let trimmed = id.trim_matches('-').to_string();
-    if trimmed.is_empty() {
+    // Thin wrapper over the canonical system_map slug; family record ids fall
+    // back to "record" instead of the empty string.
+    let id = crate::utility::system_map::sanitize_key(value);
+    if id.is_empty() {
         "record".to_string()
     } else {
-        trimmed
+        id
     }
 }
 

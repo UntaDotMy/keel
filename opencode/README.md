@@ -22,7 +22,7 @@ Copy-Item opencode\keel.ts $env:USERPROFILE\.config\opencode\plugins\
 
 OpenCode auto-loads `.ts` files from `~/.config/opencode/plugins/` at startup. No build step required — OpenCode runs TypeScript directly via Bun.
 
-Prerequisite: the `keel` binary must be installed at `~/.claude/keel` (unix) or `~/.claude/keel.exe` (win32), or on `PATH`. The plugin resolves the binary once at init, preferring the explicit `~/.claude/` path.
+Prerequisite: the `keel` binary must be installed at `~/.keel/keel` (unix) or `~/.keel/keel.exe` (win32), or on `PATH`. The plugin resolves the binary once at init, preferring the explicit `~/.keel/` path.
 
 ## Event → Bridge Call Mapping
 
@@ -59,7 +59,7 @@ The `session.compacted` event (fire-and-forget) runs `bridge pre-compact` (learn
 
 ### Binary resolution
 
-Prefer the explicit `~/.claude/keel` path (with `.exe` suffix on win32). Fall back to bare command name for PATH lookup by Bun shell. Resolved once at plugin init.
+Prefer the explicit `~/.keel/keel` path (with `.exe` suffix on win32). Fall back to bare command name for PATH lookup by Bun shell. Resolved once at plugin init.
 
 ### 500ms hard timeout
 

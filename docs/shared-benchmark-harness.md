@@ -74,12 +74,12 @@ swarm-automation comparator's public automation surface is a useful comparator f
 
 | swarm-automation comparator primitive | Public swarm-automation comparator surface | Nearest `keel` surface | Where it belongs |
 | --- | --- | --- | --- |
-| `PhaseRunner` | `spawn`, `task`, `board`, `lifecycle` | `workflow route`, `workflow start`, `workflow cockpit`, `workflow finish` | benchmark harness |
+| `PhaseRunner` | `spawn`, `task`, `board`, `lifecycle` | Anvil delivery-loop stages (`keel anvil compile|cast|sieve|stamp|run`) | benchmark harness |
 | `ArtifactStore` | JSON outputs, snapshots, board exports, plan and task files | benchmark scorecard JSON, audit bundles, release-proof bundles | benchmark harness |
 | `ContractExecutor` | `task create`, `task update`, `board show`, `plan approve` | Rust tests under `rust/crates/` | benchmark harness |
 | `ContextRecovery` | `context conflicts`, `context inject`, `team restore`, `ralph-loop` | workflow recovery, working buffer, completion gate, runtime preflight | workflow docs |
 | `ExitJournal` | snapshots, gource, board history, shutdown and idle records | release-proof bundle and audit summaries | workflow docs |
-| `Orchestrator` | `team spawn-team`, `inbox`, `task`, `board`, `lifecycle` | workflow route, workflow start, workflow cockpit, workflow finish | workflow docs |
+| `Orchestrator` | `team spawn-team`, `inbox`, `task`, `board`, `lifecycle` | specialist agent profiles and `keel bridge` lifecycle events | workflow docs |
 | `Roles` | agent types, profiles, presets | named skill progression and presets | workflow docs |
 | `Spawner` | `swarm-automation comparator spawn`, `swarm-automation comparator launch` | multi-agent lanes and worker spawning | benchmark harness and workflow docs |
 | `Strategies` | profiles, presets, plan flow, board workflow | benchmark scenario families and workflow presets | workflow docs |

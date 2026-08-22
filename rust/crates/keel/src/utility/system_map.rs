@@ -19,6 +19,19 @@ pub fn sanitize_key(value: &str) -> String {
     collapse_separator_runs(&raw_key)
 }
 
+/// Canonical slug core behind [`sanitize_key`]: same normalization, bounded to
+/// `max_len` characters so callers with directory-length constraints (code-graph
+/// and design-intelligence workspace lanes) reuse one implementation instead of
+/// carrying private copies.
+pub fn bounded_slug(value: &str, max_len: usize) -> String {
+    let slug = sanitize_key(value);
+    if slug.chars().count() <= max_len {
+        slug
+    } else {
+        slug.chars().take(max_len).collect()
+    }
+}
+
 fn collapse_separator_runs(value: &str) -> String {
     let mut collapsed = String::new();
     let mut previous_was_separator = false;

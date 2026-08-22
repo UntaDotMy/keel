@@ -49,7 +49,8 @@ pub fn run_doctor_command(
     if status_code != 0 {
         return status_code;
     }
-    let claude_home = match resolve_claude_home("") {
+    // why: the checks below must honor --claude-home, not just the status summary.
+    let claude_home = match resolve_claude_home(claude_home_arg) {
         Ok(path) => path,
         Err(error) => {
             let _ = writeln!(standard_error, "{error}");
@@ -1090,5 +1091,49 @@ mod tests {
             "{report}"
         );
         let _ = fs::remove_dir_all(claude_home.parent().unwrap());
+    }
+    #[test]
+    fn claude_home_flag_reaches_doctor_checks_not_just_status_summary() {
+        // Doctor checks must use the custom home, not the default home.
+        // This test ensures every probe honors `--claude-home`.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        let custom_home = std::env::temp_dir().join(format!(
+            "keel-doctor-flaghome-{}-{nanos}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&custom_home).expect("create custom home");
+        // A non-`.keel` root doubles as its own engagement home, so
+        // settings.json sits directly inside it (claude_engagement_home).
+        fs::write(
+            custom_home.join(crate::hooks::claude::SETTINGS_FILE_NAME),
+            b"{}",
+        )
+        .unwrap();
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = run_doctor_command(
+            "test",
+            &[
+                "--claude-home".to_string(),
+                custom_home.to_string_lossy().to_string(),
+            ],
+            &mut out,
+            &mut err,
+        );
+        let output = String::from_utf8(out).expect("utf8");
+        assert_eq!(code, 0, "stderr: {}", String::from_utf8_lossy(&err));
+        let expected_label = crate::runtime::display_path(&custom_home);
+        assert!(
+            output.contains(&format!("[ok] keel home exists: {expected_label}")),
+            "home check must target the --claude-home value; output: {output}"
+        );
+        assert!(
+            output.contains("[ok] ~/.claude/settings.json exists"),
+            "settings.json check must target the --claude-home value; output: {output}"
+        );
+        let _ = fs::remove_dir_all(&custom_home);
     }
 }

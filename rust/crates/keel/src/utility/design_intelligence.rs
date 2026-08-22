@@ -886,6 +886,8 @@ enum PersistOutcome {
 }
 
 fn safe_slug(raw: &str) -> String {
+    // Keep slug punctuation compact; drop unsupported characters rather than
+    // inserting separators, and keep this distinct from `sanitize_key`.
     let mut out = String::new();
     for ch in raw.chars() {
         if ch.is_ascii_alphanumeric() {
@@ -905,23 +907,11 @@ fn safe_slug(raw: &str) -> String {
 /// Slug a workspace path into a single safe directory segment (same scheme as
 /// code-graph / SYSTEM_MAP lanes).
 fn workspace_slug(raw: &str) -> String {
-    let mut slug = String::with_capacity(raw.len());
-    let mut last_was_dash = false;
-    for ch in raw.chars() {
-        if ch.is_ascii_alphanumeric() {
-            slug.push(ch.to_ascii_lowercase());
-            last_was_dash = false;
-        } else if !last_was_dash {
-            slug.push('-');
-            last_was_dash = true;
-        }
-    }
-    let trimmed = slug.trim_matches('-');
-    let bounded: String = trimmed.chars().take(64).collect();
-    if bounded.is_empty() {
+    let slug = crate::utility::system_map::bounded_slug(raw, 64);
+    if slug.is_empty() {
         "workspace".to_string()
     } else {
-        bounded
+        slug
     }
 }
 
@@ -954,8 +944,7 @@ fn persist_design_system(
         };
         (master, page_path)
     } else {
-        // Default: global per-workspace memory lane — never create design-system/
-        // inside the user project.
+        // Persist by workspace in the global memory lane, never in the project.
         let claude_home = resolve_claude_home("")
             .map_err(|error| format!("resolve claude home for default persist path: {error}"))?;
         let workspace_root = resolve_repository_root("")
@@ -1433,7 +1422,7 @@ fn append_markdown_list(markdown: &mut String, label: &str, items: &[String]) {
 }
 
 fn is_help_argument(argument: &str) -> bool {
-    argument == "--help" || argument == "-h" || argument == "help"
+    crate::utility::memory::shared::is_help_argument(argument)
 }
 
 #[cfg(test)]

@@ -307,9 +307,9 @@ Automation cannot prove semantic singlefeature scope perfectly. Human review and
 - If the task is tracked in phases or priorities such as P0, P1, and P2, do not advance to the next layer until the current layer is fully complete and re-audited.
 - If the audit still shows an open task, active plan item, unresolved requirement, non-terminal required lane, or missing proof, the work is not finished.
 - Do not trust the first green rerun after a fix as closure by itself; rerun the narrow proving checks and re-audit the broader impacted system before handoff.
-- Use \`keel workflow route\` when the request is broad and the right lane is not obvious yet; the route surface should explain why the recommended path fits the job before any stateful work begins.
-- Use \`keel workflow cockpit\` for the live operator console with stage, active entries, blockers, and the next command, \`keel workflow status\` and \`keel workflow dashboard\` for the broader ledger state, and \`keel workflow watch\` for ongoing lane health.
-- Use \`keel workflow finish --id <entry-id> --proof "..."\` when the workstream is ready to close so the closure proof lands on the workflow ledger entry. Use \`keel workflow resume --id <entry-id>\` to reopen a tracked workstream.
+- Open a tracked working brief before stateful work begins: \`keel memory working-brief write --request "..." --constraints "..." --acceptance-criteria "..."\` (\`keel memory working-brief list\` to review open briefs). The brief keeps scope and acceptance evidence explicit.
+- Carry the delivery loop through Anvil: \`keel anvil compile\` and \`keel anvil run\`; use \`keel anvil sieve\` / \`keel anvil stamp\` when the delivery ran through Anvil.
+- Close out with proof: gate the branch with \`keel review pre-pr\`, then clear the honest-closeout gate with \`keel memory completion-gate check --brief-id <brief-id> --proof "..."\`.
 
 ## Spawned Agent Discipline
 

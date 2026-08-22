@@ -5,7 +5,8 @@
 //! Side Effects: None; raw recovery is owned by proxy::run.
 
 use crate::adapters::common::{
-    compact_json_structure, dedup_lines, make_result, normalized_command, strip_ansi_escape,
+    compact_json_structure, dedup_lines, make_result, normalized_command, redact_possible_secret,
+    strip_ansi_escape,
 };
 use crate::proxy::adapter::{CommandAdapter, CompactResult};
 use crate::proxy::command_ast::CommandAst;
@@ -103,16 +104,28 @@ fn compact_stream(text: &str, label: &str) -> String {
 
 fn compact_edges(text: &str, label: &str, max_lines: usize) -> String {
     let lines: Vec<&str> = text.lines().collect();
+    // At or below the cap, preserve raw output.
+    // This matches common::compact_edges' un-compacted path.
     if lines.len() <= max_lines {
         return text.to_string();
     }
 
+    // Above the cap, redact edge lines as common::compact_edges does.
+    // The compact result is sent to model context.
     let edge = EDGE_LINES.min(max_lines / 2).max(5);
     let omitted = lines.len().saturating_sub(edge * 2);
     format!(
         "{}\n... omitted {omitted} {label} lines; raw output saved for recovery ...\n{}",
-        lines[..edge].join("\n"),
-        lines[lines.len() - edge..].join("\n")
+        lines[..edge]
+            .iter()
+            .map(|line| redact_possible_secret(line))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        lines[lines.len() - edge..]
+            .iter()
+            .map(|line| redact_possible_secret(line))
+            .collect::<Vec<_>>()
+            .join("\n")
     )
 }
 
@@ -148,7 +161,7 @@ fn signal_lines(text: &str, max_lines: usize) -> Vec<(usize, String)> {
         .iter()
         .any(|needle| normalized.contains(needle));
         if is_signal && seen.insert(trimmed.to_string()) {
-            selected.push((index + 1, trimmed.to_string()));
+            selected.push((index + 1, redact_possible_secret(trimmed)));
         }
         if selected.len() >= max_lines {
             break;
@@ -181,6 +194,30 @@ mod tests {
         assert!(rendered.lines().count() < 200);
         assert!(rendered.contains("expected 201 got 500"));
         assert!(rendered.contains("raw: keel raw test-raw"));
+    }
+
+    #[test]
+    fn generic_compact_redacts_secrets_in_signal_and_edge_lines() {
+        // Redact signal and edge lines before exposing generic output.
+        let mut stdout = String::new();
+        for index in 0..100 {
+            stdout.push_str(&format!("noise line {index}\n"));
+        }
+        stdout.push_str("ERROR export OPENAI_API_KEY=sk-secret-value-1234567890abcdef\n");
+        for index in 0..100 {
+            stdout.push_str(&format!("tail noise {index}\n"));
+        }
+        let meta = meta(stdout.len());
+        let result = GenericAdapter.compact(stdout.as_bytes(), b"", 1, &meta);
+        let rendered = crate::proxy::render::render_compact_result(&result);
+        assert!(
+            rendered.contains("[redacted possible secret"),
+            "secret line must be redacted: {rendered}"
+        );
+        assert!(
+            !rendered.contains("sk-secret-value-1234567890abcdef"),
+            "raw secret must not reach the compact result"
+        );
     }
 
     fn meta(stdout_bytes: usize) -> RunMeta {

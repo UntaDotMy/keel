@@ -85,10 +85,10 @@ Do not re-run the original raw command unless the wrapper itself fails for a rea
 
 ### Compaction surface hierarchy
 
-- **Level 1 — Direct native wrapper:** `keel run -- <command>` is the most reliable transparent surface; it owns command execution, shell-aware parser/rewrite support, command-specific semantic reducers, high-signal error/warning extraction, noisy-output head/tail compaction, raw-output recovery, and native savings analytics in one step. Use `keel run --stream -- <command>` only when bounded live progress is needed.
+- **Level 1: Direct native wrapper:** `keel run -- <command>` is the most reliable transparent surface; it owns command execution, shell-aware parser/rewrite support, command-specific semantic reducers, high-signal error/warning extraction, noisy-output head/tail compaction, raw-output recovery, and native savings analytics in one step. Use `keel run --stream -- <command>` only when bounded live progress is needed.
 - **Level 2 — Rewrite helper:** `keel rewrite "<command>"` returns the resolved wrapper for inspection or scripting. It recognizes common shell wrappers, environment prefixes, and pipelines, and routes shell syntax through `bash -lc`.
 - **Level 3 — Hook guidance:** `keel hook install` registers native harness lifecycle hooks for `PreToolUse`, `PermissionRequest`, `PostToolUse`, `PreCompact`, `PostCompact`, `SessionStart`, `UserPromptSubmit`, and `Stop` in `~/.claude/hooks.json`. `PreToolUse` owns token-saving interception because it must run before noisy Bash output exists; the other lifecycle hooks are native no-op/checkpoint surfaces for memory and recovery wiring. The hook may return `permissionDecision: "allow"` with a `toolInputOverride` that transparently wraps the command (not a block-and-rerun).
-- **Level 4 — Native install/update:** Use the installed Rust binary directly (`~/.claude/keel` or `%USERPROFILE%\.claude\keel.exe`) for update, verify, status, hooks, and compaction. Shell and PowerShell wrapper launchers are not supported runtime entrypoints.
+- **Level 4: Native install/update:** Use the installed Rust binary directly (`~/.keel/keel` or `%USERPROFILE%\.keel\keel.exe`) for update, verify, status, hooks, and compaction. Shell and PowerShell wrapper launchers are not supported runtime entrypoints.
 
 For agent-facing instructions, `keel hook instructions` prints the same usage contract in `markdown` (default) or `--format json`. The same contract is also tracked in [`docs/hook-usage.md`](../../docs/hook-usage.md).
 

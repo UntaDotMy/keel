@@ -78,19 +78,9 @@ fn resolve_artifact_path(
 /// alphanumeric runs collapse to `-`). Falls back to a length-bounded segment so
 /// the join can never escape the lane.
 fn workspace_slug(raw: &str) -> String {
-    let mut slug = String::with_capacity(raw.len());
-    let mut last_was_dash = false;
-    for ch in raw.chars() {
-        if ch.is_ascii_alphanumeric() {
-            slug.push(ch.to_ascii_lowercase());
-            last_was_dash = false;
-        } else if !last_was_dash {
-            slug.push('-');
-            last_was_dash = true;
-        }
-    }
-    let trimmed = slug.trim_matches('-');
-    let bounded: String = trimmed.chars().take(64).collect();
+    // Canonical system_map normalization, bounded to 64 chars like the other
+    // per-workspace lanes, then pinned to a safe single path segment.
+    let bounded = crate::utility::system_map::bounded_slug(raw, 64);
     safe_path_segment(&bounded).unwrap_or_else(|| "workspace".to_string())
 }
 

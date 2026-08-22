@@ -1,6 +1,6 @@
 //! Purpose: `keel stats`, a single dashboard over the axes that today live in
 //!   separate commands: token savings (`gain`), tool timings (`telemetry`),
-//!   gate/enforcement activity, recall/memory health, and sprint/work progress.
+//!   gate/enforcement activity, recall/memory health, and anvil job progress.
 //!   It answers "what has keel done, what did it save, what did it catch" in one
 //!   compact read instead of four invocations.
 //! Caller: commands.rs `stats` dispatch, MCP `stats` tool.
@@ -22,6 +22,7 @@ use crate::json::{write_indented, Value};
 use crate::runner::hook_lifecycle::gate_status_rows;
 use crate::runner::telemetry::{aggregate_rows, read_rows};
 use crate::runtime::{display_path, resolve_claude_home, COMMAND_COMPACTION_EVENTS_FILE_NAME};
+use crate::utility::anvil::job::active_jobs_summary;
 use crate::utility::gain::parse_gain_summary;
 use crate::utility::recall::recall_status_snapshot;
 
@@ -107,7 +108,7 @@ struct StatsSnapshot {
     gates: Vec<(String, u64)>,
     recall_documents: Option<u64>,
     recall_last_indexed_ms: u128,
-    anvil: Option<Vec<(String, String)>>,
+    anvil_jobs: Vec<(String, String)>,
 }
 
 /// Read the compaction event log under `claude_home` and reuse the `gain`
@@ -143,7 +144,7 @@ fn telemetry_day_files(claude_home: &Path, days: u64) -> Vec<PathBuf> {
 
 fn collect_snapshot(
     claude_home: &Path,
-    _workspace_root: &str,
+    workspace_root: &str,
     days: u64,
     top_count: usize,
 ) -> StatsSnapshot {
@@ -173,7 +174,9 @@ fn collect_snapshot(
         Err(_) => (None, 0),
     };
 
-    let anvil: Option<Vec<(String, String)>> = None;
+    // Real anvil state, scoped to the requested workspace. Empty means nothing
+    // was ever run there; renderers must omit the axis instead of faking one.
+    let anvil_jobs = active_jobs_summary(claude_home, Some(Path::new(workspace_root)));
 
     StatsSnapshot {
         tokens_saved: gain.tokens_saved,
@@ -186,7 +189,7 @@ fn collect_snapshot(
         gates,
         recall_documents,
         recall_last_indexed_ms,
-        anvil,
+        anvil_jobs,
     }
 }
 
@@ -271,18 +274,12 @@ impl StatsSnapshot {
                 let _ = writeln!(standard_output, "  memory: index unavailable");
             }
         }
-        match &self.anvil {
-            None => {
-                let _ = writeln!(standard_output, "  anvil: none active");
-            }
-            Some(open) if open.is_empty() => {
-                let _ = writeln!(standard_output, "  anvil: complete");
-            }
-            Some(open) => {
-                let _ = writeln!(standard_output, "  anvil: {} open", open.len());
-                for (id, state) in open.iter().take(5) {
-                    let _ = writeln!(standard_output, "    {id} [{state}]");
-                }
+        // Honest axis: nothing to report when no anvil job was ever run in
+        // this workspace, so the lines are omitted entirely.
+        if !self.anvil_jobs.is_empty() {
+            let _ = writeln!(standard_output, "  anvil: {} job(s)", self.anvil_jobs.len());
+            for (id, state) in self.anvil_jobs.iter().take(5) {
+                let _ = writeln!(standard_output, "    {id} [{state}]");
             }
         }
     }
@@ -319,23 +316,9 @@ impl StatsSnapshot {
                 ])
             })
             .collect::<Vec<_>>();
-        let open_stories = self
-            .anvil
-            .as_ref()
-            .map(|stories| {
-                stories
-                    .iter()
-                    .map(|(id, state)| {
-                        Value::Object(vec![
-                            ("id".into(), Value::String(id.clone())),
-                            ("state".into(), Value::String(state.clone())),
-                        ])
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-
-        Value::Object(vec![
+        // Omit the anvil axis when no jobs are active.
+        // Absence is the truthful "nothing was run" signal.
+        let mut fields = vec![
             ("days".into(), Value::Number(days.to_string())),
             (
                 "tokensSaved".into(),
@@ -371,8 +354,21 @@ impl StatsSnapshot {
                 "recallLastIndexedMs".into(),
                 Value::Number(self.recall_last_indexed_ms.to_string()),
             ),
-            ("openStories".into(), Value::Array(open_stories)),
-        ])
+        ];
+        if !self.anvil_jobs.is_empty() {
+            let jobs = self
+                .anvil_jobs
+                .iter()
+                .map(|(id, state)| {
+                    Value::Object(vec![
+                        ("id".into(), Value::String(id.clone())),
+                        ("state".into(), Value::String(state.clone())),
+                    ])
+                })
+                .collect::<Vec<_>>();
+            fields.push(("anvilJobs".into(), Value::Array(jobs)));
+        }
+        Value::Object(fields)
     }
 }
 
@@ -448,16 +444,41 @@ mod tests {
             assert!(rendered.contains("commands:"), "rendered: {rendered}");
             assert!(rendered.contains("gates:"), "rendered: {rendered}");
             assert!(rendered.contains("memory:"), "rendered: {rendered}");
-            assert!(rendered.contains("anvil:"), "rendered: {rendered}");
+            // Honest axis: with no anvil job ever run, the anvil lines are
+            // omitted entirely instead of printing a fabricated placeholder.
+            assert!(!rendered.contains("anvil:"), "rendered: {rendered}");
         });
     }
 
     #[test]
-    fn json_payload_carries_all_axes() {
+    fn snapshot_reports_real_anvil_jobs_for_seeded_store() {
+        with_isolated_home("render-seeded", |home| {
+            let workspace_root = "C:/anvil-stats-ws";
+            let lane = home
+                .join("memories")
+                .join("workspaces")
+                .join("c-anvil-stats-ws")
+                .join("anvil");
+            fs::create_dir_all(&lane).expect("seed lane");
+            fs::write(lane.join("anvil.lock.json"), "{}").expect("seed lock");
+
+            let snapshot = collect_snapshot(home, workspace_root, 7, 5);
+            let mut out: Vec<u8> = Vec::new();
+            snapshot.render_text(&mut out, 7);
+            let rendered = String::from_utf8_lossy(&out);
+            assert!(rendered.contains("anvil: 1 job(s)"), "rendered: {rendered}");
+            assert!(
+                rendered.contains("c-anvil-stats-ws [active]"),
+                "rendered: {rendered}"
+            );
+        });
+    }
+
+    #[test]
+    fn json_payload_omits_anvil_axis_when_empty_and_carries_it_when_seeded() {
         with_isolated_home("json", |home| {
             let snapshot = collect_snapshot(home, "", 7, 5);
-            let payload = snapshot.to_json(7);
-            let Value::Object(map) = &payload else {
+            let Value::Object(map) = snapshot.to_json(7) else {
                 panic!("expected object payload");
             };
             let keys: Vec<&str> = map.iter().map(|(key, _)| key.as_str()).collect();
@@ -468,10 +489,28 @@ mod tests {
                 "topTools",
                 "gates",
                 "recallDocuments",
-                "openStories",
             ] {
                 assert!(keys.contains(&expected), "missing {expected}: {keys:?}");
             }
+            // Nothing ran here, so the anvil key is absent rather than fake.
+            assert!(!keys.contains(&"openStories"), "keys: {keys:?}");
+            assert!(!keys.contains(&"anvilJobs"), "keys: {keys:?}");
+        });
+
+        with_isolated_home("json-seeded", |home| {
+            let lane = home
+                .join("memories")
+                .join("workspaces")
+                .join("c-anvil-stats-ws")
+                .join("anvil");
+            fs::create_dir_all(&lane).expect("seed lane");
+            fs::write(lane.join("anvil.lock.json"), "{}").expect("seed lock");
+
+            let snapshot = collect_snapshot(home, "C:/anvil-stats-ws", 7, 5);
+            let Value::Object(map) = snapshot.to_json(7) else {
+                panic!("expected object payload");
+            };
+            assert!(map.iter().any(|(key, _)| key == "anvilJobs"));
         });
     }
 }

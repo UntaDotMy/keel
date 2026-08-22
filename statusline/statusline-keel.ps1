@@ -5,7 +5,7 @@
 .DESCRIPTION
   Caller: the harness statusLine command on Windows, e.g. settings.json:
     { "type": "command",
-      "command": "powershell -NoProfile -ExecutionPolicy Bypass -File %USERPROFILE%\\.claude\\statusline-keel.ps1" }
+      "command": "powershell -NoProfile -ExecutionPolicy Bypass -File %USERPROFILE%\\.keel\\statusline-keel.ps1" }
   Input : the harness pipes session JSON on stdin (model, context_window, ...).
   Output: one status line on stdout. Degrades gracefully — if the binary or gain
           data is unavailable the savings badge is omitted, and the line never
@@ -31,13 +31,25 @@ if ($raw) {
     }
 }
 
-# Locate the installed keel binary (best-effort, never required).
+# Locate installed keel (KEEL_HOME, ~/.keel, then PATH; best effort).
 function Resolve-Binary {
-    $claudeHome = $env:USERPROFILE
-    if (-not $claudeHome) { $claudeHome = $env:HOME }
-    if ($claudeHome) {
-        $candidate = Join-Path $claudeHome '.claude\keel.exe'
-        if (Test-Path $candidate) { return $candidate }
+    if ($env:KEEL_HOME) {
+        foreach ($candidate in @(
+            (Join-Path $env:KEEL_HOME 'keel.exe'),
+            (Join-Path $env:KEEL_HOME 'keel')
+        )) {
+            if (Test-Path $candidate) { return $candidate }
+        }
+    }
+    $homeDir = $env:USERPROFILE
+    if (-not $homeDir) { $homeDir = $env:HOME }
+    if ($homeDir) {
+        foreach ($candidate in @(
+            (Join-Path $homeDir '.keel\keel.exe'),
+            (Join-Path $homeDir '.keel\keel')
+        )) {
+            if (Test-Path $candidate) { return $candidate }
+        }
     }
     $onPath = Get-Command 'keel' -ErrorAction SilentlyContinue
     if ($onPath) { return $onPath.Source }

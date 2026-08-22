@@ -1,21 +1,17 @@
 //! Purpose: `observe` — a single local session-health surface that composes the
 //!   axes the existing analytics commands do NOT cover. `gain` and `session`
 //!   already report the token-savings axis thoroughly; this command surfaces
-//!   memory/recall health, working-brief presence, and sprint progress in one
-//!   read, and points at `gain`/`session` for tokens rather than re-parsing the
-//!   compaction event log. The competitive audit flagged the absence of any
-//!   unified observability surface over telemetry + sprint/brief state; this is
-//!   the CLI answer (a local dashboard can render this JSON later).
+//!   memory/recall health, working-brief presence, and real anvil job state in
+//!   one read, and points at `gain`/`session` for tokens rather than re-parsing
+//!   the compaction event log.
 //! Caller: commands.rs `observe` dispatch.
-//! Dependencies: the recall, working_brief, and sprint utility surfaces, plus
-//!   the shared args/json/runtime helpers.
+//! Dependencies: the recall, anvil job-store, and working_brief utility
+//!   surfaces, plus the shared args/json/runtime helpers.
 //! Side Effects: read-only. `recall_status_snapshot` opens (and lazily syncs)
 //!   the recall index; everything else reads files. No writes, no network.
 //!
-//! Design: every datum here is pulled from a function that already backs another
-//! command, so `observe` cannot drift from `recall status`, `sprint status`, or
-//! the working-brief surface — it is an aggregating read, not a second source of
-//! truth.
+//! Design: reuse existing command data so `observe` cannot drift from its
+//! source surfaces; this command is an aggregating read, not a second source.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -23,6 +19,7 @@ use std::path::PathBuf;
 use crate::args::FlagSet;
 use crate::json::{write_indented, Value};
 use crate::runtime::{display_path, resolve_claude_home};
+use crate::utility::anvil::job::active_jobs_summary;
 use crate::utility::recall::recall_status_snapshot;
 use crate::utility::working_brief::list_briefs;
 
@@ -48,8 +45,8 @@ pub fn run_observe_command(
         }
     };
 
-    // Workspace root defaults to the current directory (the workspace the sprint
-    // store is keyed on), matching how the sprint surface resolves it.
+    // Workspace root defaults to the current directory (the key the anvil job
+    // store is slugged on), matching how the anvil surface resolves it.
     let workspace_root = {
         let flag = flag_set.string_value("workspace-root").trim().to_string();
         if flag.is_empty() {
@@ -76,10 +73,13 @@ pub fn run_observe_command(
 /// not open) degrades to a clear note rather than failing the whole command —
 /// observability must not go dark because one source had a hiccup.
 struct Observation {
-    /// (document_count, last_indexed_at_millis) or an error note.
+    /// (document_count, last_indexed_at_ms) or an error note.
     recall: Result<(u64, u128), String>,
-    /// (brief_count, most_recent_request) or an error note.
+    /// (brief count, most recent request line) or an error note.
     briefs: Result<(usize, Option<String>), String>,
+    /// (id, state) per anvil job in this workspace; empty means none was ever run,
+    /// and renderers omit the axis instead of fabricating a placeholder.
+    anvil_jobs: Vec<(String, String)>,
     workspace_root: String,
 }
 
@@ -95,10 +95,11 @@ fn collect_observation(claude_home: &std::path::Path, workspace_root: &str) -> O
             (briefs.len(), most_recent)
         });
 
-    // open_stories was removed with sprint; observe reports recall + briefs.
+    let anvil_jobs = active_jobs_summary(claude_home, Some(std::path::Path::new(workspace_root)));
     Observation {
         recall,
         briefs,
+        anvil_jobs,
         workspace_root: workspace_root.to_string(),
     }
 }
@@ -130,22 +131,33 @@ impl Observation {
             ]),
             Err(error) => Value::Object(vec![("error".into(), Value::String(error.clone()))]),
         };
-        let sprint_value = Value::Object(vec![("active".into(), Value::Bool(false))]);
-        Value::Object(vec![
+        let mut fields = vec![
             (
                 "workspaceRoot".into(),
                 Value::String(self.workspace_root.clone()),
             ),
             ("memory".into(), recall_value),
             ("workingBriefs".into(), briefs_value),
-            ("anvil".into(), sprint_value),
-            (
-                "tokenAnalytics".into(),
-                Value::String(
-                    "see `keel gain` and `keel session` for the token-savings axis".into(),
-                ),
-            ),
-        ])
+        ];
+        // Honest axis: omit the anvil key entirely when nothing was ever run.
+        if !self.anvil_jobs.is_empty() {
+            let jobs = self
+                .anvil_jobs
+                .iter()
+                .map(|(id, state)| {
+                    Value::Object(vec![
+                        ("id".into(), Value::String(id.clone())),
+                        ("state".into(), Value::String(state.clone())),
+                    ])
+                })
+                .collect::<Vec<_>>();
+            fields.push(("anvilJobs".into(), Value::Array(jobs)));
+        }
+        fields.push((
+            "tokenAnalytics".into(),
+            Value::String("see `keel gain` and `keel session` for the token-savings axis".into()),
+        ));
+        Value::Object(fields)
     }
 
     fn render_text(&self, standard_output: &mut dyn Write) {
@@ -173,8 +185,13 @@ impl Observation {
                 let _ = writeln!(standard_output, "working briefs: unavailable ({error})");
             }
         }
-
-        let _ = writeln!(standard_output, "anvil: none active");
+        // Omit the anvil axis when no jobs are active.
+        // Do not print a fabricated placeholder.
+        if !self.anvil_jobs.is_empty() {
+            for (id, state) in &self.anvil_jobs {
+                let _ = writeln!(standard_output, "anvil: {id} [{state}]");
+            }
+        }
 
         let _ = writeln!(
             standard_output,
@@ -234,23 +251,20 @@ mod tests {
         );
         assert_eq!(code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
         let rendered = String::from_utf8_lossy(&stdout);
-        // All three non-token axes must be present even on an empty home.
+        // Memory and briefs are always present; the anvil axis is omitted on an
+        // empty home instead of reporting a fabricated inactive placeholder.
         assert!(rendered.contains("\"memory\""), "rendered: {rendered}");
         assert!(
             rendered.contains("\"workingBriefs\""),
             "rendered: {rendered}"
         );
-        assert!(rendered.contains("\"anvil\""), "rendered: {rendered}");
-        // No sprint exists, so it must report inactive — not error, not crash.
-        assert!(
-            rendered.contains("\"active\": false"),
-            "empty home must show no active sprint; rendered: {rendered}"
-        );
+        assert!(!rendered.contains("\"anvil\""), "rendered: {rendered}");
+        assert!(!rendered.contains("\"active\""), "rendered: {rendered}");
         let _ = fs::remove_dir_all(home.parent().unwrap());
     }
 
     #[test]
-    fn observe_text_surface_names_all_axes_and_points_to_gain() {
+    fn observe_text_omits_anvil_axis_when_nothing_ran_and_points_to_gain() {
         let _guard = ENV_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -273,10 +287,8 @@ mod tests {
         let rendered = String::from_utf8_lossy(&stdout);
         assert!(rendered.contains("memory:"), "rendered: {rendered}");
         assert!(rendered.contains("working briefs:"), "rendered: {rendered}");
-        assert!(
-            rendered.contains("anvil: none active"),
-            "rendered: {rendered}"
-        );
+        // Honest axis: no fabricated "none active" line on an empty workspace.
+        assert!(!rendered.contains("anvil:"), "rendered: {rendered}");
         // Observability must point at the token axis it deliberately does not
         // duplicate, so a user knows where to look.
         assert!(
@@ -284,6 +296,47 @@ mod tests {
             "observe must point at gain for the token axis; rendered: {rendered}"
         );
         let _ = fs::remove_dir_all(home.parent().unwrap());
+    }
+
+    #[test]
+    fn observe_reports_seeded_anvil_job() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root = tempdir_under("keel-observe-seeded");
+        let home = root.join("home");
+        fs::create_dir_all(&home).expect("create home");
+        // Seed the anvil job store for this exact workspace slug.
+        let slug = crate::utility::system_map::sanitize_key(&home.to_string_lossy());
+        let lane = home
+            .join("memories")
+            .join("workspaces")
+            .join(&slug)
+            .join("anvil");
+        fs::create_dir_all(&lane).expect("seed lane");
+        fs::write(lane.join("anvil.lock.json"), "{}").expect("seed lock");
+
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let code = run_observe_command(
+            &[
+                "--json".to_string(),
+                "--claude-home".to_string(),
+                home.to_string_lossy().to_string(),
+                "--workspace-root".to_string(),
+                home.to_string_lossy().to_string(),
+            ],
+            &mut stdout,
+            &mut stderr,
+        );
+        assert_eq!(code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
+        let rendered = String::from_utf8_lossy(&stdout);
+        assert!(
+            rendered.contains("\"anvilJobs\""),
+            "seeded job must appear; rendered: {rendered}"
+        );
+        assert!(rendered.contains("\"active\""), "rendered: {rendered}");
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

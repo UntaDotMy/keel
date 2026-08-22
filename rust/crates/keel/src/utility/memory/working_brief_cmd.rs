@@ -99,7 +99,7 @@ fn run_working_brief_write(
             return 1;
         }
     };
-    let now_millis = crate::utility::workflow_ledger::current_timestamp_millis();
+    let now_millis = crate::utility::record_store::current_timestamp_millis();
     let entry_id = flag_set.string_value("id").trim().to_string();
     let entry_id = if entry_id.is_empty() {
         format!("wb-{now_millis:x}")
@@ -121,7 +121,7 @@ fn run_working_brief_write(
         split_csv_lines(flag_set.string_value("acceptance-criteria")),
         split_csv_lines(flag_set.string_value("assumptions")),
         workspace,
-        crate::utility::workflow_ledger::format_timestamp_iso8601(now_millis),
+        crate::utility::record_store::format_timestamp_iso8601(now_millis),
     );
     let path = match write_brief(&claude_home, &brief) {
         Ok(path) => path,
@@ -356,9 +356,9 @@ fn run_working_brief_record_summary(
             return 1;
         }
     };
-    let now_millis = crate::utility::workflow_ledger::current_timestamp_millis();
+    let now_millis = crate::utility::record_store::current_timestamp_millis();
     let summary_id = format!("wbs-{now_millis:x}");
-    let created_at = crate::utility::workflow_ledger::format_timestamp_iso8601(now_millis);
+    let created_at = crate::utility::record_store::format_timestamp_iso8601(now_millis);
     let store = crate::utility::record_store::RecordStore::new(
         &claude_home,
         &format!("{command_group}/working-brief-summaries"),

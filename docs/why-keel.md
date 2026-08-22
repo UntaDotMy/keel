@@ -11,7 +11,7 @@ Comparisons reference native harness primitives, a runtime-shell comparator, and
 ## When to Choose keel
 
 Choose keel when you need:
-- A specific structured path: start with `workflow start`, progress through `workflow cockpit`, end with `workflow finish`
+- A specific structured path: open a working brief with `keel memory working-brief write`, carry it through the Anvil loop (`keel anvil compile`, `keel anvil run`), prove it with `keel review pre-pr`, and close it with `keel memory completion-gate check`
 - Deterministic local review gates before treating a PR as real
 - Explicit hosted-check discipline after the PR opens
 - Durable artifacts for briefs, requirements, lanes, and closure
@@ -23,7 +23,7 @@ Choose keel when you need:
 Raw the harness provides powerful primitives. keel adds a stricter operator layer on top.
 
 **keel strengths:**
-- Operator-first workflow routing, cockpit, and finish commands
+- Operator-first delivery loop through Anvil plus tracked working briefs and completion gates
 - Tracked completion-gate artifacts instead of chat-only closure claims
 - Native pre-commit and pre-PR review surfaces
 - Hosted-check fix-loop guidance with branch-closeout discipline

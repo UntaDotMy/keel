@@ -1021,29 +1021,10 @@ pub fn tokenize(text: &str) -> HashSet<String> {
 
 /// Split a `---\n...\n---\n` leading frontmatter block. Returns the frontmatter
 /// body (between the fences), or `None` when the file does not open with a
-/// fence. Mirrors the parser in `skill_lint` but returns only the part this
-/// module needs.
-fn split_frontmatter(text: &str) -> Option<String> {
-    let trimmed_start = text.trim_start_matches(['\u{feff}', ' ', '\t', '\n', '\r']);
-    if !trimmed_start.starts_with("---") {
-        return None;
-    }
-    let after_open = trimmed_start.split_once('\n').map(|(_, rest)| rest)?;
-    let mut frontmatter = String::new();
-    let mut closed = false;
-    for line in after_open.lines() {
-        if line.trim() == "---" {
-            closed = true;
-            break;
-        }
-        frontmatter.push_str(line);
-        frontmatter.push('\n');
-    }
-    if closed {
-        Some(frontmatter)
-    } else {
-        None
-    }
+/// fence. Delegates to the canonical `skill_lint` implementation so both
+/// callers agree on trim boundaries (BOM/space/tab/CR/LF).
+pub(crate) fn split_frontmatter(text: &str) -> Option<String> {
+    crate::utility::skill_lint::split_frontmatter(text).map(|(frontmatter, _)| frontmatter)
 }
 
 /// Read a top-level `key: value` frontmatter field. Ignores indented lines so a

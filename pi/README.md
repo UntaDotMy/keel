@@ -119,14 +119,10 @@ On the first edit-class tool call in a fresh session, the Iron Law gate will blo
 2. **Invoke relevant skills.** If there is even a 1% chance a skill applies, use the Skill tool before writing code or giving a final answer.
 3. **Find the root cause.** Trace the symptom end-to-end with file:line evidence and confirm the suspect is on that path before changing anything.
 
-### Workflow Commands
+### Key Commands
 
 | Command | Use |
 |---|---|
-| `keel workflow route --request "..."` | Route a broad request to a preset |
-| `keel workflow start --preset <preset> --request "..."` | Start work |
-| `keel workflow cockpit` | View live state |
-| `keel workflow finish --id <id> --proof "..."` | Finish a workstream |
 | `keel review pre-pr --base-ref origin/feat` | Review before PR |
 | `keel memory scope resolve --create-missing --refresh-system-map` | Refresh memory |
 | `keel code-search search --workspace-root "$PWD" --query "..."` | Search code |

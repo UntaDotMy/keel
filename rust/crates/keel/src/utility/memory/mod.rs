@@ -1,10 +1,9 @@
 //! Purpose: Memory and scope command handlers for workspace-scoped memory management
 //! Caller: commands.rs via utility dispatcher
-//! Dependencies: std::fs, std::io, std::path, crate::args, crate::json, crate::runtime, crate::utility::system_map, crate::utility::workflow_ledger
+//! Dependencies: std::fs, std::io, std::path, crate::args, crate::json, crate::runtime, crate::utility::system_map, crate::utility::record_store
 //! Main Functions: run_memory_command, run_scope_command, run_system_map_command
-//! Side Effects: Creates memory directories, reads/writes system map files, reads/writes brief and ledger helpers
+//! Side Effects: Creates memory directories, reads/writes system map files, reads/writes brief and record helpers
 
-mod bench;
 mod completion_gate;
 mod scope;
 pub(crate) mod shared;
@@ -218,14 +217,6 @@ fn run_remember_command(
     )
 }
 
-pub fn run_bench_command(
-    arguments: &[String],
-    standard_output: &mut dyn Write,
-    standard_error: &mut dyn Write,
-) -> u8 {
-    bench::run_bench_command(arguments, standard_output, standard_error)
-}
-
 fn run_consolidate_command(
     command_group: &str,
     arguments: &[String],
@@ -255,7 +246,6 @@ fn run_consolidate_command(
         "loop-guard",
         "instincts",
         "working-brief-summaries",
-        "completion-gate-requirements",
     ];
     let mut total_consolidated: usize = 0;
     let mut family_summaries: Vec<(String, usize, String)> = Vec::new();
@@ -280,7 +270,7 @@ fn run_consolidate_command(
             .iter()
             .take(3)
             .filter_map(|text| {
-                let fields = crate::utility::workflow_ledger::parse_object_of_strings(text).ok()?;
+                let fields = crate::utility::record_store::parse_object_of_strings(text).ok()?;
                 let title = fields
                     .iter()
                     .find(|(k, _)| {

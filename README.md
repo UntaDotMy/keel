@@ -55,16 +55,6 @@ keel code-index status
 keel code-search search --query "run_recall_search"
 ```
 
-## Demo
-
-A 30-second walkthrough of the Anvil delivery loop:
-
-```bash
-asciinema play docs/demos/quickstart.cast
-```
-
-The cast file ships in this repo. Render to GIF with `agg docs/demos/quickstart.cast docs/demos/quickstart.gif` if your viewer prefers a static asset.
-
 ## What You Get
 
 | Surface | What it gives you |
@@ -236,7 +226,7 @@ Manual prune (any time):
 
 ## Slash Commands
 
-When installed as a plugin, keel registers six namespaced slash commands
+When installed as a plugin, keel registers four namespaced slash commands
 (see the `commands` key in `.claude-plugin/plugin.json`). Each is a thin,
 discoverable `/`-menu wrapper over an **implemented** `keel` CLI surface
 ,  none of them invoke planned-but-unimplemented commands.
@@ -592,7 +582,6 @@ keel memory completion-gate check --id <entry-id> --proof "tests green"
 Advanced memory and search surfaces:
 
 - The unified `keel memory` group implements `scope`, `system-map`, `working-brief`, `completion-gate check`, and `recall`, plus family commands `research-cache` (record/lookup/stale/reward/list), `maintenance` (append-working-buffer/trim/recalibrate), `agent-registry` (register/list), `agent-packets` (build/show/list), `loop-guard` (record/check), `entity` (upsert/list/query), `graph` (add/list/query), `retrieve` (cross-family lexical search), and `status`. Family records live under the unified memory layout (see `docs/memory-families-usage.md`).
-- The `orchestration` group implements `runtime-preflight`, `resume-status`, `task` (begin/progress/complete/list), and `checkpoint`.
 - `memory report` (alias for `status`), `memory index` (rebuilds the recall index), and `instincts` are also implemented. `memory hook` is intentionally not a memory subcommand; it points to `keel hook ...`. `memory working-brief record-summary`, `memory completion-gate record-requirement`, and `consolidate` are also implemented.
 - Code-search details: [./docs/code-search-demo-and-gap-map.md](./docs/code-search-demo-and-gap-map.md).
 
@@ -637,9 +626,9 @@ The managed install mirrors the specialist lanes (one profile per specialist, ro
 
 Routine work stays in the main lane. Specialist profiles are for the moments where domain ownership or independent verification is worth the extra context.
 
-## Legacy Command Compatibility
+## Native Command Surface
 
-The native CLI is the primary surface. Most subcommand shapes earlier docs referenced are now implemented: `orchestration task begin|progress|complete|list`, `orchestration checkpoint`, and unified `memory` family verbs (`research-cache|maintenance|agent-registry|agent-packets|loop-guard|entity|graph|retrieve|status|instincts`) all work today, as do `memory report` (alias for `status`) and `memory index`. `memory working-brief record-summary`, `memory completion-gate record-requirement`, and `consolidate` are also implemented. `memory hook` points you to `keel hook ...`. The full working surface is listed above and in `keel help advanced`.
+The native CLI is the primary surface. The unified `memory` family verbs (`research-cache|maintenance|agent-registry|agent-packets|loop-guard|entity|graph|retrieve|status|instincts`) all work today, as do `memory report` (alias for `status`) and `memory index`. `memory working-brief record-summary`, `memory completion-gate record-requirement`, and `consolidate` are also implemented. `memory hook` points to `keel hook ...`. The full working surface is listed above and in `keel help advanced`.
 
 ## Documentation Map
 

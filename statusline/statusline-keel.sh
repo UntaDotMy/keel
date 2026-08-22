@@ -3,7 +3,7 @@
 #   compaction-savings badge (caveman/RTK-style ROI surface) sourced from
 #   `keel gain --json` when the binary is reachable.
 # Caller: the harness statusLine command
-#   (settings.json: {"type":"command","command":"~/.claude/statusline-keel.sh"}).
+#   (settings.json: {"type":"command","command":"~/.keel/statusline-keel.sh"}).
 # Input: the harness pipes session JSON on stdin (model, context_window, cwd, ...).
 # Output: one status line on stdout. Degrades gracefully — if the binary or gain
 #   data is unavailable the savings badge is omitted, and the line never errors
@@ -31,12 +31,19 @@ json_number() {
 model="$(json_value display_name)"
 used_pct="$(json_number used_percentage)"
 
-# Locate the installed keel binary (best-effort, never required).
+# Locate installed keel (KEEL_HOME, ~/.keel, then PATH; best effort).
 resolve_binary() {
   local home_dir="${HOME:-${USERPROFILE:-}}"
+  if [ -n "${KEEL_HOME:-}" ]; then
+    for candidate in \
+      "$KEEL_HOME/keel" \
+      "$KEEL_HOME/keel.exe"; do
+      if [ -x "$candidate" ]; then printf '%s' "$candidate"; return 0; fi
+    done
+  fi
   for candidate in \
-    "$home_dir/.claude/keel" \
-    "$home_dir/.claude/keel.exe"; do
+    "$home_dir/.keel/keel" \
+    "$home_dir/.keel/keel.exe"; do
     if [ -x "$candidate" ]; then printf '%s' "$candidate"; return 0; fi
   done
   if command -v keel >/dev/null 2>&1; then printf '%s' "keel"; return 0; fi

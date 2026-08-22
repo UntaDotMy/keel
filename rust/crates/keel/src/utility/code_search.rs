@@ -379,6 +379,8 @@ fn hits_to_json(query: &str, hits: &[SearchHit]) -> serde_json::Value {
     })
 }
 
+/// Deliberate divergence vs `recall::parse_limit`: search silently caps the
+/// display limit at 50, while recall is error-facing with no cap. Do not unify.
 fn parse_limit(raw: &str) -> Result<usize, String> {
     let limit = raw
         .trim()
@@ -478,7 +480,7 @@ fn push_token(counts: &mut Vec<(String, usize)>, raw: &str, stop: &[&str]) {
 }
 
 fn is_help_argument(argument: &str) -> bool {
-    argument == "--help" || argument == "-h" || argument == "help"
+    crate::utility::memory::shared::is_help_argument(argument)
 }
 
 #[cfg(test)]

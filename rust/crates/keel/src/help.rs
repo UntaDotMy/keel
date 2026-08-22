@@ -30,7 +30,7 @@ pub fn render_help_surface<W: Write + ?Sized>(
     writeln!(output_writer, "  help advanced")?;
     writeln!(
         output_writer,
-        "  Use this when you need orchestration or memory internals instead of the default operator path."
+        "  Use this when you need memory or anvil internals instead of the default operator path."
     )?;
     if include_advanced {
         writeln!(output_writer)?;
@@ -55,7 +55,7 @@ fn write_help_lines<W: Write + ?Sized>(output_writer: &mut W, lines_body: &str) 
 
 /// Parse the leading command tokens from a help line.
 ///
-/// Help lines look like `  orchestration runtime-preflight [--claude-home <path>] [--json]`.
+/// Help lines look like `  memory scope resolve [--workspace-root <path>] [--json]`.
 /// The first run of non-flag, non-bracket tokens is the command name. We stop at the first
 /// token that starts with `[`, `<`, or `--` — those are flag/argument descriptors.
 #[cfg(test)]
@@ -137,11 +137,11 @@ mod tests {
     /// but for the operator-tier help surface in `help_operator.txt`.
     ///
     /// The operator file mixes top-level commands (help, version, install, ...) with
-    /// group commands (memory, orchestration, workflow). Top-level commands
+    /// group commands (memory). Top-level commands
     /// are matched in `commands.rs` directly and don't have the phantom-subcommand
     /// failure mode this test guards against, so we only inspect lines whose first
     /// token is a group dispatcher. Group-command lines may use pipe-separated
-    /// alternations (e.g. `workflow start|resume|finish`); each alternative is tested
+    /// alternations (e.g. `memory working-brief|completion-gate`); each alternative is tested
     /// independently.
     #[test]
     fn every_advertised_operator_command_routes_to_real_dispatcher() {
@@ -155,6 +155,10 @@ mod tests {
                 continue;
             }
             let group = tokens[0].clone();
+            assert!(
+                crate::commands::TOP_LEVEL_COMMANDS.contains(&group.as_str()),
+                "help_operator.txt advertises `{group}`, which is not dispatched by commands.rs"
+            );
             if group != "memory" {
                 continue;
             }
@@ -217,54 +221,14 @@ mod tests {
     /// again.
     #[test]
     fn every_dispatched_top_level_command_is_advertised() {
-        // Curated list of user-facing top-level match arms from commands.rs,
-        // excluding short aliases (st, v, remove) and the internal __self-replace.
-        let dispatched = [
-            "help",
-            "version",
-            "platform",
-            "bootstrap-info",
-            "all",
-            "install",
-            "update",
-            "status",
-            "doctor",
-            "repair",
-            "validate",
-            "verify",
-            "uninstall",
-            "menu",
-            "review",
-            "git-workflow",
-            "run",
-            "rewrite",
-            "raw",
-            "replay",
-            "hook",
-            "bridge",
-            "learn",
-            "code-search",
-            "code-graph",
-            "skill-lint",
-            "skill-eval",
-            "config-audit",
-            "anvil",
-            "telemetry",
-            "observe",
-            "design-intelligence",
-            "memory",
-            "gain",
-            "session",
-            "bench",
-            "eval",
-            "flow",
-            "mcp",
-        ];
+        // Single-sourced from commands.rs so a new dispatch arm cannot ship
+        // unadvertised (the blind spot that hid checkpoint/code-index).
+        let dispatched = crate::commands::TOP_LEVEL_COMMANDS;
         let combined_help = format!(
             "{}\n{}",
             OPERATOR_HELP_COMMAND_LINES, ADVANCED_HELP_COMMAND_LINES
         );
-        for command in &dispatched {
+        for command in dispatched.iter().copied() {
             // A command is "advertised" if it appears as the first token of some
             // help line (so `hook` matches `  hook install|...` but not a flag).
             let advertised = combined_help.lines().any(|line| {
@@ -274,7 +238,7 @@ mod tests {
             assert!(
                 advertised,
                 "dispatched top-level command `{command}` is missing from both help surfaces. \
-                 Add it to help_operator.txt (or help_advanced.txt for orchestration/memory internals)."
+                 Add it to help_operator.txt (or help_advanced.txt for memory/anvil internals)."
             );
         }
     }

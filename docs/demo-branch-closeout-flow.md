@@ -37,12 +37,14 @@ gh pr create --base main --head feat/comparison-and-release-docs --title "docs(r
 gh pr checks 33 --watch
 ~~~
 
-Representative workflow-surface equivalent:
+Current Anvil-first equivalent:
 
 ~~~bash
-keel workflow worktree start --repo-root . --path ../feature-branch --branch feat/feature-branch --workstream-key feature-branch
-keel workflow cockpit --workstream-key feature-branch
-keel workflow finish --workstream-key feature-branch
+keel memory working-brief write --request "comparison and release docs"
+keel anvil compile --goal "comparison and release docs" --workspace-root .
+keel anvil run --dry-run --workspace-root .
+keel review pre-pr --repo-root . --base-ref origin/main --format markdown
+keel memory completion-gate check --brief-id <id> --proof "review and hosted checks passed"
 ~~~
 
 ## Success metrics
