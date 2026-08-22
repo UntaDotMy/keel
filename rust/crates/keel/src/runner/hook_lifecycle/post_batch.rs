@@ -748,8 +748,8 @@ pub(super) fn decide_gate(
     if satisfied {
         return GateDecision::Advisory;
     }
-    // Hard cap: stop firing once the code have issued the allowed number of
-    // nudges/blocks. This is what guarantees the gate cannot loop or spam.
+    // Hard cap: stop firing after the allowed number of nudges or blocks.
+    // This prevents gate loops and repeated reminders.
     if blocks_issued >= max_blocks {
         return GateDecision::Advisory;
     }

@@ -88,7 +88,7 @@ pub(super) fn run_hook_lifecycle(
     // Look up the canonical row once; every behaviour below comes from that row.
     let event = match event_by_slug(subcommand) {
         Some(row) => row,
-        // Unreachable in practice ; `run_hook_command` only routes valid slugs to
+        // Unknown slugs fall back to the canonical SessionStart event.
         None => event_by_name("SessionStart").expect("SessionStart row missing"),
     };
 

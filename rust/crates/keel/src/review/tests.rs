@@ -393,7 +393,7 @@ fn workflow_slug_is_safe_and_lowercase() {
 
 #[test]
 fn review_policy_show_succeeds_with_no_extra_args() {
-    // the handler previously required arguments.len() >= 2, so
+    // The handler accepts the documented one-argument `review policy show` form.
     let mut stdout: Vec<u8> = Vec::new();
     let mut stderr: Vec<u8> = Vec::new();
     let code = run_review_policy_command(&["show".to_string()], &mut stdout, &mut stderr);

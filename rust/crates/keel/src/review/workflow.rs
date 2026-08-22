@@ -146,7 +146,7 @@ pub(crate) fn run_git_workflow_preflight(
         None => blocking.push("could not read `git status`".to_string()),
     }
 
-    // 3 & 4. Committed history against the base ref, and a non-empty diff. Both
+    // Validate the base ref before evaluating committed history and the diff.
     if git_text(repo, &["rev-parse", "--verify", "--quiet", &base_ref]).is_none() {
         blocking.push(format!(
             "base ref '{base_ref}' not found — fetch it (e.g. `git fetch origin`) or pass --base-ref"

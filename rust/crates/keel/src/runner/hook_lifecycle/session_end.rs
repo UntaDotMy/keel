@@ -628,7 +628,7 @@ pub(super) fn workspace_memory_digest() -> String {
         }
     }
 
-    // 2. Newest working brief for THIS workspace. why: fall back only to
+    // Use workspace-matching briefs; legacy briefs are fallback-only.
     if let Ok(briefs) = crate::utility::working_brief::list_briefs(&claude_home) {
         let newest = briefs
             .iter()

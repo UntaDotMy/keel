@@ -216,7 +216,8 @@ fn repo_version_recovers_bootstrap_commit_from_installed_metadata() {
 
 #[test]
 fn publish_native_executable_falls_back_to_bundle_root_binary() {
-    // Release archives stage the binary at <bundle>/keel.exe and
+    // Release archives stage the binary at `<bundle>/keel.exe`; the fallback
+    // handles that layout when no Cargo target artifact exists.
     let (bundle, claude_home) = unique_paths("publish-bundle-root");
     fs::create_dir_all(&bundle).unwrap();
     fs::create_dir_all(&claude_home).unwrap();
@@ -264,7 +265,7 @@ fn publish_native_executable_prefers_cargo_built_over_bundle_root() {
 
 #[test]
 fn publish_native_executable_picks_up_cargo_host_default_layout() {
-    // Plain `cargo build --release` (no --target) writes to
+    // Plain `cargo build --release` writes the host-default target layout.
     let (repo, claude_home) = unique_paths("publish-host-default");
     fs::create_dir_all(&claude_home).unwrap();
 
@@ -543,7 +544,7 @@ fn delta_installer_first_install_without_inventory_creates_no_false_orphans() {
 
 #[test]
 fn install_into_standard_home_writes_lifecycle_hooks() {
-    // Every other install test uses a home NOT named `.claude`, so
+    // Standard-home installs exercise the lifecycle hook write branch.
     let suffix = format!(
         "{}-{}",
         std::process::id(),

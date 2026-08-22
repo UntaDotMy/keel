@@ -302,7 +302,7 @@ pub(super) fn redact_secrets_in_settings(raw: &str) -> String {
     match serde_json::from_str::<JsonDocument>(raw) {
         Ok(mut document) => {
             redact_secrets_in_value(&mut document, false);
-            // A re-serialization failure is implausible for a value the code just
+            // Suppress serialization failures instead of returning raw secrets.
             serde_json::to_string_pretty(&document).unwrap_or_else(|_| {
                 "[settings.json could not be re-serialized — output suppressed to prevent secret leak]"
                     .to_string()
@@ -320,13 +320,12 @@ pub(super) fn redact_secrets_in_value(value: &mut JsonDocument, parent_key_is_se
     match value {
         JsonDocument::Object(map) => {
             for (key, child) in map.iter_mut() {
-                // Once the code are under a secret-named key, every descendant is
+                // Secret parent keys mask all descendant values.
                 let key_is_secret = parent_key_is_secret || is_secret_key(key);
                 if key_is_secret {
                     if let JsonDocument::String(secret) = child {
                         *secret = mask_secret_value(secret);
-                        // Already masked this string; skip the recursion below
-                        // so the code do not walk into it a second time.
+                        // Skip recursion after masking a secret string.
                         continue;
                     }
                 }
@@ -689,7 +688,7 @@ pub(super) fn settings_points_at_installed_executable(
                 };
                 managed_seen = true;
                 let command_normalized = casefold(command);
-                // Legacy single-string PowerShell-encoded entries embed the
+                // Decode legacy PowerShell entries before comparing executable paths.
                 let decoded_normalized = decode_powershell_encoded_command(command)
                     .map(|decoded| decoded.to_ascii_lowercase());
                 let installed_for_decoded = display_path(installed_executable).to_ascii_lowercase();

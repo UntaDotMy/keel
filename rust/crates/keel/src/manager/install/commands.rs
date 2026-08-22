@@ -476,7 +476,7 @@ pub fn run_uninstall_command(
             return 1;
         }
     }
-    // Remove loop-generated skills and their paired subagents. Built-in
+    // Remove loop-generated skills and their paired subagents.
     match crate::runner::learning::remove_generated_artifacts(&claude_home) {
         Ok(count) => removed_count += count,
         Err(error) => {

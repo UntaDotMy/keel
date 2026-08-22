@@ -578,7 +578,7 @@ pub(super) fn run_hook_pre_tool_use(
     };
     let session_id = hook_session_id(&input);
 
-    // Hard Iron Law: block Edit/Write, non-keel Bash, and Agent/Task until the
+    // Hard Iron Law blocks edit tools until research evidence exists.
     if tool_is_iron_law_gated(tool_name, command_opt) {
         if iron_law_gate_decision(session_id).is_some() {
             return run_iron_law_gate(&input, standard_output, standard_error);

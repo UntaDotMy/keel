@@ -68,7 +68,7 @@ pub(crate) fn maybe_wire_opencode(
         return Some("skipped (not detected)".to_string());
     }
 
-    // Derive the home that owns THIS .claude from claude_home's parent, not from
+    // Derive the owning home from `claude_home.parent()`, not process globals.
     let home: PathBuf = match claude_home.parent() {
         Some(path) => path.to_path_buf(),
         None => return Some("skipped (no home directory)".to_string()),
@@ -79,7 +79,7 @@ pub(crate) fn maybe_wire_opencode(
         return Some(format!("plugin dir skipped ({error})"));
     }
 
-    // Copy the bridge plugin source into the OpenCode plugins directory so the
+    // Copy the OpenCode bridge plugin so its lifecycle wiring can run.
     let plugin_source = repository_root.join("opencode").join("keel.ts");
     let plugin_status = if plugin_source.is_file() {
         let plugin_target = plugin_dir.join("keel.ts");
@@ -322,7 +322,7 @@ pub(crate) fn maybe_wire_pi(
         }
     }
     if mcp_source.is_file() {
-        // Pi loads MCP config from ~/.pi/agent/mcp.json (global) or
+        // Pi reads MCP config from the global or project-scoped path.
         let mcp_target = home.join(".pi").join("agent").join("mcp.json");
         if let Some(parent) = mcp_target.parent() {
             let _ = std::fs::create_dir_all(parent);
