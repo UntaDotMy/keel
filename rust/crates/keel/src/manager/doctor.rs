@@ -1094,9 +1094,8 @@ mod tests {
     }
     #[test]
     fn claude_home_flag_reaches_doctor_checks_not_just_status_summary() {
-        // why: doctor resolved its own checks with an empty override, so with
-        // --claude-home X the status summary inspected X while every later
-        // check (settings.json, binary, MCP, bridges) inspected the default.
+        // Doctor checks must use the custom home, not the default home.
+        // This test ensures every probe honors `--claude-home`.
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())

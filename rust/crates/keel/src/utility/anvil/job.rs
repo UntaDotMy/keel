@@ -106,8 +106,8 @@ pub fn load_lock(paths: &JobPaths) -> Result<JsonValue, String> {
 /// `<home>/memories/workspaces/<slug>/anvil/`. `workspace_root` scopes the
 /// lookup to that single workspace; `None` scans every lane. A job is
 /// "complete" only when its `anvil.report.json` exists, "active" otherwise.
-/// Returns an empty vec when nothing was ever run — callers must omit the
-/// axis rather than print a fabricated none-active placeholder.
+/// Returns an empty vec when no job was run; callers omit the axis instead of
+/// printing a fabricated none-active placeholder.
 pub fn active_jobs_summary(
     claude_home: &Path,
     workspace_root: Option<&Path>,

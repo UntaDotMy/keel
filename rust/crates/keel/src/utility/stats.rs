@@ -316,8 +316,8 @@ impl StatsSnapshot {
                 ])
             })
             .collect::<Vec<_>>();
-        // Omit the anvil axis entirely when nothing is active — absence is the
-        // truthful "nothing was ever run here" signal.
+        // Omit the anvil axis when no jobs are active.
+        // Absence is the truthful "nothing was run" signal.
         let mut fields = vec![
             ("days".into(), Value::Number(days.to_string())),
             (

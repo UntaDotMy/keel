@@ -266,9 +266,7 @@ pub fn scan_prose_diff(diff: &str) -> Vec<FileCommentFinding> {
             added_lines.clear();
             continue;
         }
-        // Header guard (mirrors scan_unified_diff): a deleted file's
-        // `+++ /dev/null` must never parse as added prose attributed to the
-        // previous file.
+        // Skip file headers so deleted-file markers are not linted as prose.
         if line.starts_with("+++ ") || line.starts_with("--- ") {
             continue;
         }
@@ -532,10 +530,8 @@ mod tests {
 
     #[test]
     fn prose_diff_never_lints_header_lines_as_content() {
-        // Regression: `strip_prefix('+')` turned a deleted file's
-        // `+++ /dev/null` header into "content" attributed to the previous
-        // file. Any `+++ `/`--- ` line is a header, never prose; the header
-        // payload below carries slop vocabulary so a violation is observable.
+        // Regression guard: file headers must not become prose content.
+        // The payload tests that behavior with slop vocabulary.
         let diff = "\
 +++ b/docs/guide.md
 @@ -0,0 +1,1 @@

@@ -7,7 +7,7 @@ This demo captures a real closure fix where hosted reviewer proof had to count w
 - PR: [#38](https://github.com/UntaDotMy/keel/pull/38)
 - Branch: `fix/reviewer-closure-proof`
 - Merge time: `2026-04-07T02:14:24Z`
-- Problem shape: orchestration task completion refused to close even after hosted review was green because closure logic expected a reviewer lane registry entry instead of honoring the recorded proof source
+- Problem shape: multi-agent completion refused to close after hosted review was green because the proof source was not connected to the completion gate
 
 ## What actually happened
 
@@ -25,9 +25,11 @@ The repair loop did all of the following:
 
 ~~~bash
 cargo test --workspace
-cargo run --bin keel -- memory completion-gate check --workspace-root . --workstream-key feat-workflow-start-defaults --require-closure-ready
+cargo run --bin keel -- memory working-brief write --request "repair closure proof"
+cargo run --bin keel -- anvil compile --goal "repair closure proof" --workspace-root .
 cargo run --bin keel -- review pre-pr --repo-root . --base-ref origin/main --format markdown
 cargo run --bin keel -- git-workflow preflight --repo-root . --base-ref origin/main
+cargo run --bin keel -- memory completion-gate check --brief-id <id> --proof "review proof recorded"
 ~~~
 
 ## Success metrics

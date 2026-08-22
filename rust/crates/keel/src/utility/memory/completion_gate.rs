@@ -127,9 +127,8 @@ fn run_completion_gate_check(
         Err(error) => error.clone(),
     });
 
-    // Persist a successful proof onto the brief record itself (the ledger that
-    // used to hold proofs was removed). Failure to persist fails the check so a
-    // claimed proof is never silently dropped.
+    // Persist the proof on the brief; failure fails the check.
+    // A claimed proof must never be silently dropped.
     let persisted_probe: Option<Result<String, String>> = match (&brief_probe, &proof_probe) {
         (Ok(brief), Some(Ok(proof))) => {
             let mut updated = brief.clone();

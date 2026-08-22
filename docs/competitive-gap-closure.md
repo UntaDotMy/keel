@@ -35,13 +35,12 @@ All changes below are markdown/JSON/shell only (no Rust recompile required) and
 were validated where executable.
 
 1. **Doc/impl drift fixed (highest-leverage).** The operating doctrine commanded
-   several CLI calls that the Rust runtime returns "not implemented" for
-   (`orchestration task|checkpoint`, `memory research-cache|maintenance|loop-guard|agent-packets`) (stale follow-up: the whole `orchestration` group was later removed before release — none of it ships).
-   Marked them planned and routed the intent through implemented surfaces
-   (`working-brief`, `completion-gate`, `recall`, plus L1 files). Files:
+   several retired CLI surfaces that the Rust runtime no longer ships.
+   The remaining `memory` family verbs are implemented and the intent is routed
+   through `working-brief`, `completion-gate`, `recall`, plus L1 files. Files:
    `AGENTS/references/30-execution-strategy.md`, `_shared/common-discipline.md`,
-   `docs/runtime-guardrails-and-memory-protocols.md`,
    `docs/context-efficiency-playbook.md`.
+   `docs/runtime-guardrails-and-memory-protocols.md`.
 2. **Custom slash commands (discoverability gap vs. the whole field).** Added
    `/keel:anvil`, `/keel:review`, `/keel:recall`, `/keel:gain` at the plugin root
    `commands/` (Anvil is the only delivery loop; sprint/user-story commands are deleted). Each
@@ -87,16 +86,15 @@ below was implemented and verified with `cargo build` + `cargo test --workspace`
    or silently rewrite on-screen text). The opt-out invariant test was renamed to
    `only_known_events_opt_out_of_install` and pins both `FileChanged` and
    `MessageDisplay`.
-3. **Planned memory/orchestration commands implemented.** (Partially stale: the `orchestration` half was removed before release and does not ship; the `memory` families below did ship.) On a new shared
-   `RecordStore` primitive (`utility/record_store.rs`) and a new
-   `utility/memory_families.rs` module:
-   - ~~`orchestration task begin|progress|complete|list` and `orchestration checkpoint`
-     (JSONL task ledger + snapshot), in `utility/memory.rs`.~~ (stale: removed before release, not shipped.)
+3. **Planned memory commands implemented.** On a new shared `RecordStore`
+   primitive (`utility/record_store.rs`) and a new `utility/memory_families.rs`
+   module, the shipped memory families remain available:
+   - The earlier orchestration/task-ledger and snapshot proposal was removed
+     before release and is not part of the native core.
    - `memory research-cache|maintenance|agent-registry|agent-packets|loop-guard|entity|graph|retrieve|status`.
-   The two command groups are isolated on disk (`<group>/<family>/`). `memory
-   report` now aliases the family status summary, `memory index` rebuilds the
-   FTS5 recall index, and `memory hook` redirects to the real `keel
-   hook` lifecycle surface (it was never a memory concept).
+   The memory groups are isolated on disk (`<group>/<family>/`). `memory report`
+   aliases the family status summary, `memory index` rebuilds the FTS5 recall index,
+   and `memory hook` redirects to the real `keel hook` lifecycle surface.
 4. **Learning loop (ECC Instincts-style).** `memory instincts
    record|reinforce|penalize|list|promote` in `memory_families.rs`:
    confidence-scored patterns keyed by trigger that reinforce/penalize over time
@@ -149,14 +147,10 @@ below was implemented and verified with `cargo build` + `cargo test --workspace`
     re-review of the producing stage after any fix. Replaces the single
     undifferentiated pass so a polished implementation of the wrong spec cannot
     pass on code quality alone.
-13. ~~**Git-backed code checkpoints (`/rewind` analog).**~~ (Stale: not shipped —
-    `utility/checkpoint.rs` + `keel checkpoint create|list|show|restore` were removed before release.) What was described: snapshots tracked
-    working-tree changes via `git stash create` pinned under
-    `refs/claude-checkpoints/<id>`, lists/shows them, and restores one. Restore is
-    the only destructive verb ,  gated behind `--confirm` and an automatic
-    pre-restore safety snapshot so the restore itself is reversible. An external
-    binary cannot hook the harness's edit tool the way native `/rewind` does, but git
-    is the real code-undo; this exposes it as a first-class checkpoint surface.
+13. ~~**Git-backed code checkpoints (`/rewind` analog).**~~ Not shipped: the
+    planned snapshot surface was removed before release. Current recovery uses
+    the anvil bank, raw-output retention, working briefs, and the existing review
+    gates rather than a separate checkpoint product.
 14. **Autonomous learning loop (Hermes/ECC headline parity ,  the biggest gap closed).**
     The prior `memory instincts` CLI (item 4) was the *data model* for instincts,
     but every transition was operator-driven ,  nothing observed behavior or

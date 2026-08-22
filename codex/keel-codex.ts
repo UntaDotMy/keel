@@ -15,10 +15,23 @@
 //   hooks/keel-codex.ts          — this file (the adapter script)
 // ---------------------------------------------------------------------------
 
-import * as os from "node:os";
 import * as fs from "node:fs";
-import * as path from "node:path";
 import { execFileSync } from "node:child_process";
+import {
+  clearIronLawMarker,
+  clearSessionStarted,
+  hasSessionStarted,
+  isEditClassTool,
+  isKeelReadingCommand,
+  isKeelResearchTool,
+  isShellTool,
+  markIronLawSatisfied,
+  markSessionStarted,
+  parseGateResponse,
+  parseRewriteResponse,
+  resolveBinary,
+  sessionMarkerDirectory,
+} from "../_shared/ts/bridge-core";
 
 // ---------------------------------------------------------------------------
 // Types — Codex hook stdin payload (subset we use)
@@ -43,240 +56,21 @@ interface CodexHookInput {
   [key: string]: unknown;
 }
 
-// ---------------------------------------------------------------------------
-// Binary resolution — resolved once at script init
-// ---------------------------------------------------------------------------
-
-const BIN_NAME: string =
-  os.platform() === "win32" ? "keel.exe" : "keel";
-
-/**
- * Resolve the bridge binary path.
- * Resolution order: $KEEL_HOME, ~/.keel, legacy ~/.claude, then PATH.
- */
-function resolveBinary(): string {
-  const home = os.homedir();
-  const candidates: string[] = [];
-  const envHome = process.env.KEEL_HOME;
-  if (envHome && envHome.trim()) candidates.push(path.join(envHome.trim(), BIN_NAME));
-  candidates.push(path.join(home, ".keel", BIN_NAME));
-  candidates.push(path.join(home, ".claude", BIN_NAME));
-  for (const candidate of candidates) {
-    try {
-      if (fs.existsSync(candidate)) return candidate;
-    } catch {
-      // fs failure, try the next candidate
-    }
-  }
-  return BIN_NAME;
-}
-
-/**
- * Resolve the keel state root: ~/.keel/state now, legacy ~/.claude fallback.
- */
-function keelStateRoot(): string {
-  const home = os.homedir();
-  const envHome = process.env.KEEL_HOME;
-  if (envHome && envHome.trim()) return path.join(envHome.trim(), "state");
-  const neutralHome = path.join(home, ".keel");
-  try {
-    if (fs.existsSync(neutralHome)) return path.join(neutralHome, "state");
-  } catch {
-    // fall through to legacy
-  }
-  return path.join(home, ".claude", "state");
-}
-
 const BRIDGE_BIN: string = resolveBinary();
-
-// ---------------------------------------------------------------------------
-// Marker-file helpers — guard session-start to once per session
-// ---------------------------------------------------------------------------
-
-const MARKER_DIR = path.join(keelStateRoot(), "codex-session-started");
-
-function markerPath(sessionID: string): string {
-  return path.join(MARKER_DIR, sessionID);
-}
-
-function ensureMarkerDir(): void {
-  try {
-    fs.mkdirSync(MARKER_DIR, { recursive: true });
-  } catch {
-    /* best-effort */
-  }
-}
+const STARTED_DIR = sessionMarkerDirectory("codex");
 
 function hasStarted(sessionID: string): boolean {
-  ensureMarkerDir();
-  try {
-    return fs.existsSync(markerPath(sessionID));
-  } catch {
-    return false;
-  }
+  return hasSessionStarted(STARTED_DIR, sessionID);
 }
 
 function markStarted(sessionID: string): void {
-  ensureMarkerDir();
-  try {
-    fs.writeFileSync(markerPath(sessionID), "", "utf-8");
-  } catch {
-    /* best-effort */
-  }
+  markSessionStarted(STARTED_DIR, sessionID);
 }
 
 function clearMarker(sessionID: string): void {
-  try {
-    fs.rmSync(markerPath(sessionID), { force: true });
-  } catch {
-    /* best-effort */
-  }
+  clearSessionStarted(STARTED_DIR, sessionID);
 }
 
-// ---------------------------------------------------------------------------
-// Iron Law markers — SHARED with Rust core:
-// ~/.claude/state/iron-law-satisfied/<sanitized-session>
-// STRICT default: only keel research tools clear the marker (not plain Read).
-// ---------------------------------------------------------------------------
-
-const IRONLAW_DIR = path.join(keelStateRoot(), "iron-law-satisfied");
-
-// Legacy marker location (pre-migration installs wrote here); checked on
-// reads so old-home gate satisfaction survives the move to ~/.keel.
-const IRONLAW_DIR_LEGACY = path.join(
-  os.homedir(),
-  ".claude",
-  "state",
-  "iron-law-satisfied",
-);
-
-/** Match Rust `sanitize_memory_key`: lowercase alnum, other runs → single `-`. */
-function sanitizeSessionKey(sessionID: string): string {
-  const raw = (sessionID || "default").trim() || "default";
-  return (
-    raw
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      // why: Rust sanitize_memory_key falls back to "workspace"; "default" here
-      // pointed a symbol-only session id at a different marker file than the gate.
-      .replace(/^-+|-+$/g, "") || "workspace"
-  );
-}
-
-function ironLawMarkerPath(sessionID: string): string {
-  return path.join(IRONLAW_DIR, sanitizeSessionKey(sessionID));
-}
-
-function ensureIronLawDir(): void {
-  try {
-    fs.mkdirSync(IRONLAW_DIR, { recursive: true });
-  } catch {
-    /* best-effort */
-  }
-}
-
-function ironLawSatisfied(sessionID: string): boolean {
-  ensureIronLawDir();
-  try {
-    if (fs.existsSync(ironLawMarkerPath(sessionID))) return true;
-    // Legacy home fallback: a marker written by a pre-migration install
-    // still counts as satisfied.
-    return fs.existsSync(
-      path.join(IRONLAW_DIR_LEGACY, sanitizeSessionKey(sessionID)),
-    );
-  } catch {
-    return false;
-  }
-}
-
-function markIronLawSatisfied(sessionID: string): void {
-  ensureIronLawDir();
-  try {
-    fs.writeFileSync(ironLawMarkerPath(sessionID), "satisfied", "utf-8");
-  } catch {
-    /* best-effort */
-  }
-}
-
-/** Remove the session's Iron Law satisfaction marker at session end, so a
- *  reused session id does not inherit a stale "satisfied" state. Mirrors the
- *  filesystem cleanup the OpenCode, Pi, and Cursor adapters do; there is no
- *  bridge or CLI subcommand for marker cleanup, and the marker is a plain file
- *  this adapter already owns. */
-function clearIronLawMarker(sessionID: string): void {
-  try {
-    fs.rmSync(ironLawMarkerPath(sessionID), { force: true });
-    fs.rmSync(path.join(IRONLAW_DIR_LEGACY, sanitizeSessionKey(sessionID)), {
-      force: true,
-    });
-  } catch {
-    /* best-effort */
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Tool classification — Iron Law gate. Kept in sync with opencode/keel.ts.
-// ---------------------------------------------------------------------------
-
-const EDIT_CLASS_TOOL_NAMES = new Set([
-  "edit", "write", "multiedit", "notebookedit",
-  "apply_patch", "str_replace", "patch",
-]);
-
-function isEditClassTool(toolName: string): boolean {
-  return EDIT_CLASS_TOOL_NAMES.has(toolName.toLowerCase());
-}
-
-function isKeelResearchTool(toolName: string): boolean {
-  const lower = toolName.toLowerCase();
-  if (
-    lower.includes("install") ||
-    lower.includes("uninstall") ||
-    lower.includes("self-replace") ||
-    lower.includes("self_replace")
-  ) {
-    return false;
-  }
-  return (
-    lower.includes("mcp__keel__") ||
-    lower.includes("keel__") ||
-    lower.startsWith("keel_") ||
-    lower === "keel"
-  );
-}
-
-/** Mirrors the Rust `is_keel_research_command` HITS list; the doc-parity test
- *  `adapter_gate_lists_match_the_rust_source_of_truth` fails on drift. */
-const KEEL_RESEARCH_SUBCOMMANDS = [
-  "system-map", "system_map", "recall", "doctor", "code-search", "code_search",
-  "skill-route", "skill_route", "skill-list", "skill_list", "skill-get", "skill_get",
-  "context-brief", "context_brief", "memory status", "memory recall",
-  "memory system-map", "memory scope", "anvil",
-];
-
-function isKeelReadingCommand(command: string): boolean {
-  const trimmed = command.trim().toLowerCase();
-  const body = trimmed.startsWith("keel run -- ")
-    ? trimmed.slice("keel run -- ".length)
-    : trimmed.startsWith("keel.exe run -- ")
-      ? trimmed.slice("keel.exe run -- ".length)
-      : trimmed;
-  const hasKeel =
-    body.startsWith("keel ") ||
-    body.startsWith("keel.exe ") ||
-    body.includes("\\keel.exe ") ||
-    body.includes("/keel ") ||
-    body.includes("\\keel ");
-  if (!hasKeel) {
-    return false;
-  }
-  // why: a chained command smuggles a non-keel tail past the gate
-  // (`keel doctor && curl evil`); only a standalone keel invocation clears.
-  if (/[&|;`\n]/.test(body) || body.includes("$(")) {
-    return false;
-  }
-  return KEEL_RESEARCH_SUBCOMMANDS.some((hit) => body.includes(hit));
-}
 
 // Codex PreToolUse deny output: a hookSpecificOutput with permissionDecision
 // "deny" blocks the tool call and surfaces the reason to the model. Per the
@@ -368,13 +162,6 @@ function handleUserPromptSubmit(input: CodexHookInput): string {
   ]);
 }
 
-const SHELL_TOOL_NAMES = new Set([
-  "bash", "shell", "sh", "zsh", "fish", "powershell", "pwsh", "cmd",
-]);
-
-function isShellTool(toolName: string): boolean {
-  return SHELL_TOOL_NAMES.has(toolName.toLowerCase());
-}
 
 function extractCommand(toolInput: unknown): string {
   if (toolInput && typeof toolInput === "object" && "command" in toolInput) {
@@ -434,14 +221,14 @@ function handlePreToolUse(input: CodexHookInput, isPre: boolean): string {
       ["--session", sessionID, "--cwd", cwd, "--tool", toolName],
       5000,
     );
-    if (gate.startsWith("KEEL_GATE_DENY")) {
-      const reason = gate.split("\n").slice(1).join("\n").trim();
+    const gateResult = parseGateResponse(gate);
+    if (gateResult.status === "deny") {
       return denyOutput(
-        reason ||
+        gateResult.reason ||
           "keel Iron Law gate: call system_map/recall/context_brief before editing.",
       );
     }
-    if (!gate.startsWith("KEEL_GATE_ALLOW")) {
+    if (gateResult.status !== "allow") {
       // Timeout/error/unexpected output — fail closed.
       return denyOutput(
         "keel Iron Law gate could not be evaluated (keel did not respond in time). Retry the edit; if it persists, run `keel doctor`.",
@@ -453,18 +240,17 @@ function handlePreToolUse(input: CodexHookInput, isPre: boolean): string {
   if (isShellTool(toolName)) {
     const command = extractCommand(input.tool_input);
     if (command) {
-      const rewrite = runBridgeWithStdin("rewrite", ["--tool", toolName], command);
-      if (rewrite.startsWith("KEEL_REWRITE ")) {
-        const rewritten = rewrite.slice("KEEL_REWRITE ".length).trim();
-        if (rewritten) {
-          return JSON.stringify({
-            hookSpecificOutput: {
-              hookEventName: "PreToolUse",
-              permissionDecision: "allow",
-              updatedInput: { command: rewritten },
-            },
-          });
-        }
+      const rewritten = parseRewriteResponse(
+        runBridgeWithStdin("rewrite", ["--tool", toolName], command),
+      );
+      if (rewritten) {
+        return JSON.stringify({
+          hookSpecificOutput: {
+            hookEventName: "PreToolUse",
+            permissionDecision: "allow",
+            updatedInput: { command: rewritten },
+          },
+        });
       }
     }
   }

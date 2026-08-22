@@ -128,10 +128,8 @@ fn effective_command_fields(words: &[String], depth: usize) -> Vec<String> {
     }
 }
 
-/// Authoritative shell-syntax detector for proxy execution decisions. BOTH
-/// call sites — capture wrapping (`run_proxy`) and transparent passthrough
-/// (`run_proxy_passthrough`) — must use this single function so a command
-/// never direct-execs with argv only a shell could interpret.
+/// Detect shell syntax for both proxy wrapping and passthrough.
+/// Both paths must share this function to avoid unsafe direct execution.
 ///
 /// Operators match whole tokens: a pipe inside one argv word (e.g. a quoted
 /// `rg "error|warning"`) is data, not syntax. Numbered/dup redirects (`2>`,
@@ -290,10 +288,7 @@ mod tests {
 
     #[test]
     fn redirects_and_substitution_are_shell_syntax() {
-        // Regression: `2>`-class redirects and backtick substitution were only
-        // detected by the passthrough path, so the capture path direct-execed
-        // `prog arg 2> err.log` with literal argv. Both paths now share one
-        // detector and must agree.
+        // Capture and passthrough paths must agree on shell syntax.
         for argv in [
             vec!["prog", "arg", "2>", "err.log"],
             vec!["prog", "arg", "2>err.log"],
@@ -310,9 +305,8 @@ mod tests {
                 "passthrough detector must agree: {argv:?}"
             );
         }
-        // Data tokens stay shell-free: pipes inside a single quoted word are
-        // argv, not syntax. (`>=1.2` is NOT shell-free — an unquoted `>` is a
-        // real stdout redirect — and is asserted in the shell-syntax list.)
+        // Pipes inside one quoted word are data, not shell syntax.
+        // An unquoted `>` remains a redirect and is tested above.
         let argv = vec!["rg", "error|warning", "src"];
         let ast = classify_command(&args(&argv)).expect("ast");
         assert!(!ast.has_shell_syntax, "expected shell-free: {argv:?}");

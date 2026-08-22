@@ -626,9 +626,9 @@ The managed install mirrors the specialist lanes (one profile per specialist, ro
 
 Routine work stays in the main lane. Specialist profiles are for the moments where domain ownership or independent verification is worth the extra context.
 
-## Legacy Command Compatibility
+## Native Command Surface
 
-The native CLI is the primary surface. The unified `memory` family verbs (`research-cache|maintenance|agent-registry|agent-packets|loop-guard|entity|graph|retrieve|status|instincts`) all work today, as do `memory report` (alias for `status`) and `memory index`. `memory working-brief record-summary`, `memory completion-gate record-requirement`, and `consolidate` are also implemented. `memory hook` points you to `keel hook ...`. Earlier docs referenced an `orchestration` command group (`orchestration task ...`, `orchestration checkpoint`) and `keel checkpoint`; those surfaces were removed before release and do not exist. The full working surface is listed above and in `keel help advanced`.
+The native CLI is the primary surface. The unified `memory` family verbs (`research-cache|maintenance|agent-registry|agent-packets|loop-guard|entity|graph|retrieve|status|instincts`) all work today, as do `memory report` (alias for `status`) and `memory index`. `memory working-brief record-summary`, `memory completion-gate record-requirement`, and `consolidate` are also implemented. `memory hook` points to `keel hook ...`. The full working surface is listed above and in `keel help advanced`.
 
 ## Documentation Map
 

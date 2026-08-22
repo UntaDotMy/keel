@@ -7,13 +7,15 @@ This demo captures a real regression-hardening pass for an operator-visible defa
 ## Scenario
 
 - PR: [#45](https://github.com/UntaDotMy/keel/pull/45)
-- Branch: `feat/workflow-start-autopilot-defaults`
+- Branch: `feat/anvil-compile-defaults`
 - Merge time: `2026-04-07T04:53:36Z`
-- Problem shape: make bare `workflow start` feel lower-friction for first-run users while proving the new default with explicit regression coverage
+- Problem shape: make the first-run Anvil compile path lower-friction while proving the new default with explicit regression coverage
 
 ## What actually happened
 
-PR `#45` changed the bare `workflow start` behavior so it defaults to the `autopilot` preset with the `standard` tier when users do not specify those values explicitly.
+PR `#45` changed the Anvil compile defaults so users get a predictable
+first-run goal and standard validation tier when they do not specify optional
+values explicitly.
 
 The branch mattered as a regression-hardening shape because the user-visible default needed deterministic proof:
 
@@ -27,6 +29,7 @@ The branch mattered as a regression-hardening shape because the user-visible def
 ~~~bash
 cargo test --workspace
 cargo test --workspace
+cargo run --bin keel -- anvil compile --goal "first-run default" --workspace-root .
 cargo run --bin keel -- git-workflow preflight --repo-root . --base-ref origin/main
 ~~~
 

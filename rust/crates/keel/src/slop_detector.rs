@@ -262,8 +262,8 @@ fn detect_dead_defensive_code(
     }
 }
 
-// NOTE: `contains` matches anywhere in the line, not just the discard site —
-// a needle can exempt an unrelated `let _ =` on the same line.
+// `contains` matches anywhere in the line, so unrelated `let _ =` text
+// on the same line can exempt the discard site.
 fn intentional_output_discard(line: &str) -> bool {
     line.contains("writeln!(")
         || line.contains("write!(")
@@ -298,10 +298,8 @@ fn detect_over_commenting(
             code_after_run = 0;
             continue;
         }
-        // Rust attributes (`#[derive(..)]`, `#[serde(..)]`, `#[test]`) start
-        // with `#` but are code, not comments: count them as neither so they
-        // neither extend nor reset a comment run. Python `@decorator` lines
-        // keep their current (code) classification.
+        // Rust attributes start with `#` but are code, not comments.
+        // Count them as neither; Python decorators keep code classification.
         if trimmed.starts_with("#[") {
             continue;
         }
@@ -401,8 +399,7 @@ fn detect_hallucinated_apis(
                         .to_string(),
             });
         }
-        // Limitation: single-line analysis only — a multi-line `let` binding
-        // whose `?`/`match` handling sits on a later line evades this check.
+        // Analyze one line only; multiline bindings can evade this check.
         if trimmed.contains("serde_json::from_str(")
             && !trimmed.contains('?')
             && !trimmed.contains("match ")

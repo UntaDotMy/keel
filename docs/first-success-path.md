@@ -29,7 +29,7 @@ keel memory working-brief write --request "Compare the current repo, fix the big
 keel memory working-brief list
 ```
 
-Hold onto the brief id — the completion gate at closeout checks against it.
+Hold onto the brief id; the completion gate at closeout checks against it.
 
 ### 3. Carry the change through the Anvil delivery loop
 

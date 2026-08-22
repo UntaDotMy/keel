@@ -529,7 +529,7 @@ fn completion_gate_check_passes_on_fresh_install_and_persists_proof() {
     assert!(output.contains("proof: ok"), "stdout: {output}");
     assert!(output.contains("proof-persisted: ok"), "stdout: {output}");
 
-    // The proof lives on the brief record itself — there is no ledger anymore.
+    // The proof is stored on the brief record; no ledger remains.
     let stored = crate::utility::working_brief::read_brief(&claude_home, "wb-pass")
         .expect("read brief")
         .expect("brief exists");

@@ -104,14 +104,14 @@ fn compact_stream(text: &str, label: &str) -> String {
 
 fn compact_edges(text: &str, label: &str, max_lines: usize) -> String {
     let lines: Vec<&str> = text.lines().collect();
-    // Under the cap we pass raw through untouched, matching
-    // common::compact_edges: this is the "not compacted" path.
+    // At or below the cap, preserve raw output.
+    // This matches common::compact_edges' un-compacted path.
     if lines.len() <= max_lines {
         return text.to_string();
     }
 
-    // Over the cap, redact edge lines like common::compact_edges does — the
-    // compact result is what reaches model context.
+    // Above the cap, redact edge lines as common::compact_edges does.
+    // The compact result is sent to model context.
     let edge = EDGE_LINES.min(max_lines / 2).max(5);
     let omitted = lines.len().saturating_sub(edge * 2);
     format!(
@@ -198,9 +198,7 @@ mod tests {
 
     #[test]
     fn generic_compact_redacts_secrets_in_signal_and_edge_lines() {
-        // Regression: the generic adapter pushed raw signal lines while
-        // common::filter_lines redacted, so unmatched commands could leak
-        // TOKEN=/AWS_-style secrets into model context.
+        // Redact signal and edge lines before exposing generic output.
         let mut stdout = String::new();
         for index in 0..100 {
             stdout.push_str(&format!("noise line {index}\n"));

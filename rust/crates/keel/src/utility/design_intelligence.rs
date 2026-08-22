@@ -886,9 +886,8 @@ enum PersistOutcome {
 }
 
 fn safe_slug(raw: &str) -> String {
-    // Deliberately NOT the system_map slug: punctuation other than - _ space is
-    // dropped (not dashed) so names like "Design System.v2" stay compact in
-    // persisted page filenames. Do not unify with sanitize_key.
+    // Keep slug punctuation compact; drop unsupported characters rather than
+    // inserting separators, and keep this distinct from `sanitize_key`.
     let mut out = String::new();
     for ch in raw.chars() {
         if ch.is_ascii_alphanumeric() {
@@ -945,8 +944,7 @@ fn persist_design_system(
         };
         (master, page_path)
     } else {
-        // Default: global per-workspace memory lane — never create design-system/
-        // inside the user project.
+        // Persist by workspace in the global memory lane, never in the project.
         let claude_home = resolve_claude_home("")
             .map_err(|error| format!("resolve claude home for default persist path: {error}"))?;
         let workspace_root = resolve_repository_root("")

@@ -10,10 +10,8 @@
 //! Side Effects: read-only. `recall_status_snapshot` opens (and lazily syncs)
 //!   the recall index; everything else reads files. No writes, no network.
 //!
-//! Design: every datum here is pulled from a function that already backs another
-//! command, so `observe` cannot drift from `recall status`, `anvil run`, or the
-//! working-brief surface — it is an aggregating read, not a second source of
-//! truth.
+//! Design: reuse existing command data so `observe` cannot drift from its
+//! source surfaces; this command is an aggregating read, not a second source.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -187,8 +185,8 @@ impl Observation {
                 let _ = writeln!(standard_output, "working briefs: unavailable ({error})");
             }
         }
-        // Honest axis: nothing active means no anvil lines at all — never a
-        // fabricated "none active" placeholder.
+        // Omit the anvil axis when no jobs are active.
+        // Do not print a fabricated placeholder.
         if !self.anvil_jobs.is_empty() {
             for (id, state) in &self.anvil_jobs {
                 let _ = writeln!(standard_output, "anvil: {id} [{state}]");

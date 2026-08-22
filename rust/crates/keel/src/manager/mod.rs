@@ -26,11 +26,11 @@ use crate::runtime::{
     display_path, read_text_if_exists, resolve_claude_home, resolve_repository_root,
     skills_directory,
 };
-
 use install::{
     install_from_flags, repo_version_for_source, repo_version_from_metadata_or_build,
     write_install_summary,
 };
+
 use verify::{
     count_installed_skills, count_learned_skills, count_managed_skills, install_metadata_path,
     metadata_value, stale_managed_skill_names,

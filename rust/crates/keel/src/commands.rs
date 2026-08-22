@@ -31,8 +31,8 @@ const FOUNDATION_PHASE_NAME: &str = "phase-1-foundation";
 /// Consumed by (a) the unknown-command fallback below (nearest-name suggestions)
 /// and (b) the help parity tests in `help.rs`, which check both directions:
 /// every advertised help line's first token is a member, and every member is
-/// advertised. When you add a match arm in `Application::run`, add its name here
-/// in the same commit — the tests fail if either side drifts.
+/// advertised. Keep this list synchronized with `Application::run`; parity
+/// tests detect missing or extra dispatch arms.
 /// Short aliases (`st`, `v`, `remove`) and the internal `__self-replace` arm are
 /// intentionally excluded.
 pub(crate) const TOP_LEVEL_COMMANDS: &[&str] = &[
@@ -1104,11 +1104,8 @@ mod tests {
 
     #[test]
     fn top_level_commands_all_have_a_literal_dispatch_arm() {
-        // Pragmatic pin: parse this file's source and require each name to
-        // appear in a match-arm line (contains `=>`; covers multi-line and
-        // single-line arms alike). This catches a const entry whose arm was
-        // renamed or deleted without updating the const — the exact drift that
-        // let phantom commands survive.
+        // Parse source and require each command name in a dispatch arm.
+        // This catches stale entries that would create phantom commands.
         let source = include_str!("commands.rs");
         for command in TOP_LEVEL_COMMANDS {
             let arm_label = format!("\"{command}\"");

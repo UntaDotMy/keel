@@ -15,9 +15,9 @@
   },
   {
     "id": "legacy-task-lifecycle-flag-friction",
-    "title": "Legacy orchestration task flags and complete-phase wording failed instead of resolving to the current lifecycle model",
+    "title": "Legacy task-lifecycle flags and complete-phase wording failed instead of resolving to the current lifecycle model",
     "severity": "medium",
     "status": "closed",
-    "resolution": "Added lifecycle flag aliases, implicit task and requirement identifier derivation, and complete-phase normalization with regression tests."
+    "resolution": "Mapped lifecycle flags to the current native completion flow and added regression tests."
   }
 ]

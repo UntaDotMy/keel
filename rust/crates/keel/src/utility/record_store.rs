@@ -337,10 +337,8 @@ fn parse_string_literal(bytes: &[u8], index: &mut usize) -> Result<String, Strin
                         .map_err(|_| "non-utf8 in \\u escape".to_string())?;
                     let code_point = u32::from_str_radix(hex_text, 16)
                         .map_err(|_| format!("invalid \\u hex: {hex_text}"))?;
-                    // A surrogate (0xD800..=0xDFFF) is only valid as the high half
-                    // of a UTF-16 surrogate pair: it must be followed by a `\uLOW`
-                    // escape whose code point is the low half (0xDC00..=0xDFFF).
-                    // The pair combines into one astral-plane scalar.
+                    // High surrogates require a following low surrogate escape.
+                    // Combine the pair into one scalar.
                     if (0xD800..=0xDBFF).contains(&code_point) {
                         let high = code_point;
                         if *index + 10 >= bytes.len()
@@ -360,9 +358,8 @@ fn parse_string_literal(bytes: &[u8], index: &mut usize) -> Result<String, Strin
                         let character = char::from_u32(scalar)
                             .ok_or_else(|| "surrogate pair out of range".to_string())?;
                         output.push(character);
-                        // Advance past the low half's `\u` + 4 hex (6 bytes). The
-                        // shared `*index += 4` below covers the high half's hex and
-                        // the shared `*index += 1` covers the high half's `u`.
+                        // Advance past the low surrogate escape; shared increments
+                        // handle the high surrogate prefix and hex digits.
                         *index += 6;
                     } else if (0xDC00..=0xDFFF).contains(&code_point) {
                         return Err("lone low surrogate in \\u escape".into());

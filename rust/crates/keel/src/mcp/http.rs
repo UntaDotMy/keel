@@ -672,8 +672,8 @@ mod tests {
                 (permit, guard.in_flight())
             })
         };
-        // Waiter must stay parked while the slot is held — in_flight stays at
-        // capacity instead of exceeding it.
+        // The waiter remains parked while the slot is held.
+        // Capacity must not be exceeded.
         thread::sleep(Duration::from_millis(50));
         assert_eq!(guard.in_flight(), 1);
 

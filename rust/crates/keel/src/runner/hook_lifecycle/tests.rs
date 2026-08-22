@@ -4471,8 +4471,8 @@ fn git_hooks_install_refuses_to_clobber_unreadable_config() {
     std::fs::write(githooks_dir.join("pre-push"), "#!/bin/sh\necho pre-push").unwrap();
     // A directory at the config path makes fs::read_to_string fail while
     std::fs::create_dir(repo_root.join(".git")).unwrap();
-    // Path::exists still reports true — a portable stand-in for a perms/AV-lock
-    // read error (no platform-specific ACL or file-lock work needed).
+    // A directory simulates an unreadable config path without platform ACLs.
+    // `Path::exists` remains true, so install must refuse to clobber it.
     std::fs::create_dir(&git_config).unwrap();
 
     let mut stdout: Vec<u8> = Vec::new();
