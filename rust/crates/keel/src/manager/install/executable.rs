@@ -1,4 +1,5 @@
 // Installer executable publication helpers.
+#[cfg(windows)]
 use super::super::agent_config::unix_timestamp;
 use super::*;
 use crate::runtime::{
