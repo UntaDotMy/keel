@@ -276,13 +276,10 @@ pub fn install_from_paths(
     // dirs that migration mistakes for existing destinations.
     fs::create_dir_all(claude_home)
         .map_err(|error| format!("create {}: {error}", display_path(claude_home)))?;
-    // Move keel-owned data out of a legacy ~/.claude install into the neutral
+    // Copy keel-owned data out of a legacy ~/.claude install into the neutral
     // root; data-preserving, keel-owned names only, never overwrites.
-    let migration_report = migrate_from_legacy_claude_home(claude_home, &engagement_home);
+    let mut migration_report = migrate_from_legacy_claude_home(claude_home, &engagement_home);
     migrate_legacy_state_directory(claude_home);
-    if engagement_home != claude_home {
-        migrate_legacy_state_directory(&engagement_home);
-    }
     ensure_claude_home_directories(claude_home)?;
     ensure_claude_home_directories(&engagement_home)?;
     remove_deprecated_config_keys(claude_home)?;
@@ -322,6 +319,17 @@ pub fn install_from_paths(
 
     write_managed_config(claude_home)?;
     let published_executable = publish_native_executable(repository_root, claude_home)?;
+    if published_executable {
+        // Remove only after the replacement binary is safely published.
+        let binary_outcome = remove_legacy_binary(claude_home);
+        if !binary_outcome.is_empty() {
+            let report = migration_report.get_or_insert_with(String::new);
+            if !report.is_empty() {
+                report.push_str("; ");
+            }
+            report.push_str(&binary_outcome);
+        }
+    }
     // Sweep both homes: the legacy binary parks as a `.stale-*` sibling in
     // ~/.claude (Windows cannot delete a mapped image), so sweep there too.
     let mut removed_executable_orphans = remove_executable_orphans(claude_home)?;
@@ -358,6 +366,16 @@ pub fn install_from_paths(
     let commandcode_wiring =
         maybe_wire_commandcode(repository_root, claude_home, detected.commandcode);
     let grok_wiring = maybe_wire_grok(claude_home);
+    let removed_legacy_duplicates = cleanup_identical_legacy_data(claude_home, &engagement_home);
+    if removed_legacy_duplicates > 0 {
+        let report = migration_report.get_or_insert_with(String::new);
+        if !report.is_empty() {
+            report.push_str("; ");
+        }
+        report.push_str(&format!(
+            "removed {removed_legacy_duplicates} verified legacy duplicate(s)"
+        ));
+    }
     Ok(InstallSummary {
         synced_skills,
         synced_agents,
@@ -1431,8 +1449,8 @@ fn remove_codex_marketplace_entry(marketplace_path: &Path) -> usize {
 }
 
 /// Top-level names under a legacy `~/.claude` home that keel owns (creates
-/// and reads) and that the claude harness never reads. These move to the
-/// host-neutral root during migration; harness-owned engagement surfaces stay.
+/// and reads) and that the claude harness never reads. These are copied to
+/// the host-neutral root during migration; the legacy source remains intact.
 const MIGRATION_DATA_NAMES: &[&str] = &[
     "working-briefs",
     "memories",
@@ -1440,10 +1458,8 @@ const MIGRATION_DATA_NAMES: &[&str] = &[
     "sprint",
     "state",
     // NOTE: `agent-profiles` is NOT migrated. Install re-syncs it into the
-    // engagement home every run, so moving it would only churn.
+    // engagement home every run, so copying it would only churn.
     ".claude-skill-manager",
-    "state",
-    "cache",
     "workflow",
     "anvil",
     "raw-output",
@@ -1452,13 +1468,12 @@ const MIGRATION_DATA_NAMES: &[&str] = &[
     "recall-index.sqlite3",
 ];
 
-/// Migrate keel-owned data out of a legacy `~/.claude` install into the
-/// host-neutral root and remove the old binary placement. Runs on every
-/// install/update; a no-op once the old home holds nothing keel-owned.
+/// Copy keel-owned data from a legacy `~/.claude` install into the
+/// host-neutral root. Runs on every install/update while retaining the legacy
+/// data and binary as recovery copies until the install completes.
 ///
-/// Data-preserving by construction: each name moves only when the
-/// destination is absent (existing destination wins, never overwritten), and
-/// a move failure degrades to "skipped", never an install error.
+/// Destination content wins conflicts. Any copy failure is reported and never
+/// converted into source deletion.
 fn migrate_from_legacy_claude_home(keel_home: &Path, engagement_home: &Path) -> Option<String> {
     if !is_standard_keel_home(keel_home) || engagement_home == keel_home {
         return None;
@@ -1476,73 +1491,60 @@ fn migrate_from_legacy_claude_home(keel_home: &Path, engagement_home: &Path) -> 
         }
         let destination = keel_home.join(name);
         if destination.exists() && destination.is_dir() && source.is_dir() {
-            // File-level merge: destination files win on exact-path conflicts;
-            // everything else moves over, and nothing is ever deleted.
-            let (merged, conflicts) = merge_tree_preserving(&source, &destination);
-            moved += merged;
+            // Copy into the neutral root while retaining the legacy source as
+            // a recovery copy. Install must never make migration destructive.
+            let (copied, conflicts) = copy_tree_preserving(&source, &destination);
+            moved += copied;
             if conflicts > 0 {
                 skipped += 1;
-            }
-            if is_empty_directory(&source) {
-                let _ = fs::remove_dir(&source);
             }
             continue;
         }
         if destination.exists() {
-            // Type mismatch (file vs directory) or a destination file: never
-            // overwrite; leave both copies for the operator.
+            // Type mismatch or existing destination: preserve both copies and
+            // report the conflict for explicit operator reconciliation.
+            if source.is_file()
+                && destination.is_file()
+                && files_are_identical(&source, &destination)
+            {
+                continue;
+            }
             skipped += 1;
             continue;
         }
-        if move_path_preserving(&source, &destination) {
+        if copy_path_preserving(&source, &destination) {
             moved += 1;
         } else {
             skipped += 1;
         }
     }
-    // SQLite WAL sidecars must travel with the database, or a mid-transaction
-    // migration loses committed-but-unmerged rows.
+    // SQLite WAL sidecars are copied with the database. The legacy sidecars
+    // remain available if the install fails or the new index is incomplete.
     for suffix in ["-wal", "-shm"] {
         let source = legacy.join(format!("recall-index.sqlite3{suffix}"));
         if source.exists() {
             let destination = keel_home.join(format!("recall-index.sqlite3{suffix}"));
-            if !destination.exists() && move_path_preserving(&source, &destination) {
+            if !destination.exists() && copy_path_preserving(&source, &destination) {
                 moved += 1;
             }
         }
     }
-    let binary_outcome = remove_legacy_binary(keel_home);
-    if moved == 0 && skipped == 0 && binary_outcome.is_empty() {
+    if moved == 0 && skipped == 0 {
         return None;
     }
-    let mut report = format!("moved {moved} item(s) from {}", display_path(legacy));
+    let mut report = format!("copied {moved} item(s) from {}", display_path(legacy));
     if skipped > 0 {
         report.push_str(&format!(
-            ", skipped {skipped} (destination exists or move failed)"
+            ", skipped {skipped} (destination exists or copy failed; legacy data retained)"
         ));
-    }
-    if !binary_outcome.is_empty() {
-        report.push_str(&format!("; {binary_outcome}"));
     }
     Some(report)
 }
 
-/// True when `directory` exists, is a directory, and holds no entries.
-fn is_empty_directory(directory: &Path) -> bool {
-    directory.is_dir()
-        && fs::read_dir(directory)
-            .map(|entries| entries.count() == 0)
-            .unwrap_or(false)
-}
-
-/// Merge a legacy directory tree into an existing destination directory
-/// without ever deleting destination content. Returns `(moved, conflicts)`
-/// where `moved` counts files/directories relocated and `conflicts` counts
-/// exact-path collisions (a source and destination file with the same
-/// relative path). Destination files win every conflict; conflicting source
-/// files stay in place for the operator to reconcile.
-fn merge_tree_preserving(source: &Path, destination: &Path) -> (usize, usize) {
-    let mut moved = 0usize;
+/// Copy a legacy directory tree into an existing destination without deleting
+/// either side. Returns `(copied, conflicts)`.
+fn copy_tree_preserving(source: &Path, destination: &Path) -> (usize, usize) {
+    let mut copied = 0usize;
     let mut conflicts = 0usize;
     let Ok(entries) = fs::read_dir(source) else {
         return (0, 0);
@@ -1552,51 +1554,34 @@ fn merge_tree_preserving(source: &Path, destination: &Path) -> (usize, usize) {
         let child_destination = destination.join(entry.file_name());
         if child_source.is_dir() {
             if child_destination.is_dir() {
-                // Recurse: merge nested directories level by level.
-                let (child_moved, child_conflicts) =
-                    merge_tree_preserving(&child_source, &child_destination);
-                moved += child_moved;
+                let (child_copied, child_conflicts) =
+                    copy_tree_preserving(&child_source, &child_destination);
+                copied += child_copied;
                 conflicts += child_conflicts;
-                if is_empty_directory(&child_source) {
-                    let _ = fs::remove_dir(&child_source);
-                }
             } else if child_destination.exists() {
                 conflicts += 1;
-            } else if fs::rename(&child_source, &child_destination).is_ok()
-                || copy_tree(&child_source, &child_destination)
-            {
-                moved += 1;
+            } else if copy_tree(&child_source, &child_destination) {
+                copied += 1;
             } else {
                 conflicts += 1;
             }
         } else if child_destination.is_file() {
-            // Exact-path conflict: byte-identical copies are provable
-            // duplicates (safe to remove); otherwise the destination wins.
-            if files_are_identical(&child_source, &child_destination) {
-                if fs::remove_file(&child_source).is_ok() {
-                    moved += 1;
-                } else {
-                    conflicts += 1;
-                }
-            } else {
+            if !files_are_identical(&child_source, &child_destination) {
                 conflicts += 1;
             }
         } else if child_destination.exists() {
             conflicts += 1;
-        } else if fs::rename(&child_source, &child_destination).is_ok()
-            || copy_tree(&child_source, &child_destination)
-        {
-            moved += 1;
+        } else if copy_tree(&child_source, &child_destination) {
+            copied += 1;
         } else {
             conflicts += 1;
         }
     }
-    (moved, conflicts)
+    (copied, conflicts)
 }
 
 /// True when both paths are files with identical bytes. Any read error
-/// conservatively answers `false` so a never-read file is treated as a
-/// genuine conflict and never deleted.
+/// conservatively answers `false` so a never-read file is never discarded.
 fn files_are_identical(left: &Path, right: &Path) -> bool {
     match (fs::read(left), fs::read(right)) {
         (Ok(a), Ok(b)) => a == b,
@@ -1604,25 +1589,54 @@ fn files_are_identical(left: &Path, right: &Path) -> bool {
     }
 }
 
-/// Move a file or directory tree. Rename first (same volume, atomic); on
-/// cross-volume failure fall back to copy-then-remove. Never overwrites the
-/// destination; callers check that before calling.
-fn move_path_preserving(source: &Path, destination: &Path) -> bool {
-    if fs::rename(source, destination).is_ok() {
-        return true;
+/// Copy a file or directory tree without deleting the source.
+fn copy_path_preserving(source: &Path, destination: &Path) -> bool {
+    copy_tree(source, destination) && destination.exists()
+}
+
+/// Remove only exact copies left in the legacy keel-owned lane after a
+/// successful install. Mismatches remain for recovery and manual review.
+fn cleanup_identical_legacy_data(keel_home: &Path, engagement_home: &Path) -> usize {
+    if keel_home == engagement_home {
+        return 0;
     }
-    if !copy_tree(source, destination) {
-        return false;
+    let mut removed = 0usize;
+    for name in MIGRATION_DATA_NAMES {
+        removed += remove_identical_legacy_tree(&engagement_home.join(name), &keel_home.join(name));
     }
-    // Verify the copy landed before touching the source.
-    if !destination.exists() {
-        return false;
+    removed += remove_identical_legacy_tree(
+        &engagement_home.join(".claude-skill-manager"),
+        &state_directory(keel_home),
+    );
+    removed
+}
+
+fn remove_identical_legacy_tree(source: &Path, destination: &Path) -> usize {
+    if source.is_file() && destination.is_file() {
+        if !files_are_identical(source, destination) {
+            return 0;
+        }
+        return usize::from(fs::remove_file(source).is_ok());
     }
-    if source.is_dir() {
-        fs::remove_dir_all(source).is_ok()
-    } else {
-        fs::remove_file(source).is_ok()
+    if !source.is_dir() || !destination.is_dir() {
+        return 0;
     }
+    let mut removed = 0usize;
+    let Ok(entries) = fs::read_dir(source) else {
+        return 0;
+    };
+    for entry in entries.flatten() {
+        let child_source = entry.path();
+        let child_destination = destination.join(entry.file_name());
+        removed += remove_identical_legacy_tree(&child_source, &child_destination);
+    }
+    let empty = fs::read_dir(source)
+        .map(|mut entries| entries.next().is_none())
+        .unwrap_or(false);
+    if empty {
+        removed += usize::from(fs::remove_dir(source).is_ok());
+    }
+    removed
 }
 
 /// Recursive copy for files and directories (best-effort: per-entry failures
@@ -1704,14 +1718,15 @@ fn migrate_legacy_state_directory(home: &Path) {
     let _ = fs::rename(&legacy, &current);
 }
 
-/// Delete transient update extract trees. Inventories in `state/` stay.
+/// Delete transient update extract trees while retaining legacy state files.
 fn remove_update_temp_trees(keel_home: &Path, engagement_home: &Path) {
     let _ = remove_path_if_exists(&update_cache_directory(keel_home));
     let _ = remove_path_if_exists(&legacy_state_directory(keel_home).join("bin"));
     if engagement_home != keel_home {
-        let _ = remove_path_if_exists(&update_cache_directory(engagement_home));
+        // The neutral home owns update cache; retain generic engagement cache.
+        // Only transient extraction directories are disposable.
         let _ = remove_path_if_exists(&legacy_state_directory(engagement_home).join("bin"));
-        let _ = remove_path_if_exists(&legacy_state_directory(engagement_home));
+        let _ = remove_path_if_exists(&state_directory(engagement_home).join("bin"));
     }
     let staged = installed_executable_path(keel_home);
     let mut staged_name = staged
@@ -3366,7 +3381,11 @@ fn remove_wired_adapters(claude_home: &Path) -> usize {
     removed
 }
 
-fn copy_file_if_changed(source: &Path, target: &Path) -> Result<bool, String> {
+fn copy_file_if_changed(
+    source: &Path,
+    target: &Path,
+    tracker: &FileTracker<'_>,
+) -> Result<bool, String> {
     if target.is_file() {
         let source_bytes =
             fs::read(source).map_err(|error| format!("read {}: {error}", display_path(source)))?;
@@ -3375,6 +3394,12 @@ fn copy_file_if_changed(source: &Path, target: &Path) -> Result<bool, String> {
         if source_bytes == target_bytes {
             return Ok(false);
         }
+        backup_target_before_overwrite(tracker, target)?;
+    } else if target.exists() {
+        return Err(format!(
+            "managed target is not a file: {}",
+            display_path(target)
+        ));
     }
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent)
@@ -3390,15 +3415,42 @@ fn copy_file_if_changed(source: &Path, target: &Path) -> Result<bool, String> {
     Ok(true)
 }
 
-fn write_text_if_changed(path: &Path, content: &str) -> Result<bool, String> {
+fn write_text_if_changed(
+    path: &Path,
+    content: &str,
+    tracker: &FileTracker<'_>,
+) -> Result<bool, String> {
     if path.is_file() {
         let existing = read_text_if_exists(path).unwrap_or_default();
         if existing == content {
             return Ok(false);
         }
+        backup_target_before_overwrite(tracker, path)?;
+    } else if path.exists() {
+        return Err(format!(
+            "managed target is not a file: {}",
+            display_path(path)
+        ));
     }
     write_text(path, content)?;
     Ok(true)
+}
+
+fn backup_target_before_overwrite(
+    tracker: &FileTracker<'_>,
+    target_path: &Path,
+) -> Result<(), String> {
+    let relative_name = target_path
+        .strip_prefix(tracker.claude_home)
+        .map_err(|_| {
+            format!(
+                "managed target is outside home: {}",
+                display_path(target_path)
+            )
+        })?
+        .to_string_lossy()
+        .replace('\\', "/");
+    backup_file_before_managed_overwrite(tracker.claude_home, target_path, &relative_name)
 }
 
 fn sync_directory_delta(
@@ -3424,7 +3476,7 @@ fn sync_directory_delta(
         if file_type.is_dir() {
             changed += sync_directory_delta(&source_path, &target_path, tracker)?;
         } else if file_type.is_file() {
-            if copy_file_if_changed(&source_path, &target_path)? {
+            if copy_file_if_changed(&source_path, &target_path, tracker)? {
                 changed += 1;
             }
             tracker.record(&target_path);
@@ -3450,12 +3502,7 @@ fn sync_root_files(
     for root_file_name in &layout.root_files {
         let source_path = layout.root_path.join(root_file_name);
         let target_path = claude_home.join(root_file_name);
-        // If the user already has a different copy, snapshot it under backups/
-        // before overwrite so install never silently destroys their edits.
-        if target_path.is_file() {
-            let _ = backup_file_before_managed_overwrite(claude_home, &target_path, root_file_name);
-        }
-        if copy_file_if_changed(&source_path, &target_path)? {
+        if copy_file_if_changed(&source_path, &target_path, tracker)? {
             synced_count += 1;
         }
         tracker.record(&target_path);
@@ -3463,20 +3510,48 @@ fn sync_root_files(
     Ok(synced_count)
 }
 
-/// Best-effort snapshot of an existing file before managed overwrite.
-/// Writes to `<claude_home>/backups/install-<ts>/<relative>`. Errors are
-/// returned but callers treat backup as best-effort.
+/// Mandatory snapshot of an existing file before managed overwrite.
+/// Each install gets a unique backup directory; backup failure aborts install.
 fn backup_file_before_managed_overwrite(
     claude_home: &Path,
     target_path: &Path,
     relative_name: &str,
 ) -> Result<(), String> {
     let existing = match fs::read(target_path) {
-        Ok(bytes) if !bytes.is_empty() => bytes,
-        _ => return Ok(()),
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(format!(
+                "read existing managed file {}: {error}",
+                display_path(target_path)
+            ))
+        }
     };
+    let backups_root = claude_home.join("backups");
+    fs::create_dir_all(&backups_root).map_err(|error| {
+        format!(
+            "create backup root {}: {error}",
+            display_path(&backups_root)
+        )
+    })?;
     let stamp = unix_timestamp();
-    let backup_root = claude_home.join("backups").join(format!("install-{stamp}"));
+    let mut attempt = 0usize;
+    let backup_root = loop {
+        let candidate =
+            backups_root.join(format!("install-{stamp}-{}-{attempt}", std::process::id()));
+        match fs::create_dir(&candidate) {
+            Ok(()) => break candidate,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                attempt = attempt.saturating_add(1);
+            }
+            Err(error) => {
+                return Err(format!(
+                    "create backup directory {}: {error}",
+                    display_path(&candidate)
+                ))
+            }
+        }
+    };
     let backup_path = backup_root.join(relative_name.replace('/', std::path::MAIN_SEPARATOR_STR));
     if let Some(parent) = backup_path.parent() {
         fs::create_dir_all(parent)
@@ -3496,7 +3571,11 @@ fn sync_skills(
     for skill in &layout.skills {
         let target_skill_directory = skills_directory(claude_home).join(&skill.name);
         let target_skill_file = target_skill_directory.join("SKILL.md");
-        if copy_file_if_changed(&skill.skill_path.join("SKILL.md"), &target_skill_file)? {
+        if copy_file_if_changed(
+            &skill.skill_path.join("SKILL.md"),
+            &target_skill_file,
+            tracker,
+        )? {
             synced_count += 1;
         }
         tracker.record(&target_skill_file);
@@ -3543,7 +3622,7 @@ fn sync_agents(
             let toml_content = render_agent_toml(&parsed, &agent_config.agent_name)?;
             let target_path = agent_profiles_directory(claude_home)
                 .join(format!("{}.toml", agent_config.agent_name));
-            if write_text_if_changed(&target_path, &toml_content)? {
+            if write_text_if_changed(&target_path, &toml_content, tracker)? {
                 synced_count += 1;
             }
             tracker.record(&target_path);
@@ -3587,7 +3666,7 @@ fn sync_subagent_definitions(
             None => continue,
         };
         let target_path = target_directory.join(&file_name);
-        if copy_file_if_changed(&source_path, &target_path)? {
+        if copy_file_if_changed(&source_path, &target_path, tracker)? {
             synced_count += 1;
         }
         tracker.record(&target_path);
@@ -3632,7 +3711,7 @@ fn sync_commands(
             None => continue,
         };
         let target_path = target_directory.join(&file_name);
-        if copy_file_if_changed(&source_path, &target_path)? {
+        if copy_file_if_changed(&source_path, &target_path, tracker)? {
             synced_count += 1;
         }
         tracker.record(&target_path);
@@ -3670,7 +3749,7 @@ fn sync_output_styles(
             None => continue,
         };
         let target_path = target_directory.join(&file_name);
-        if copy_file_if_changed(&source_path, &target_path)? {
+        if copy_file_if_changed(&source_path, &target_path, tracker)? {
             synced_count += 1;
         }
         tracker.record(&target_path);
@@ -5997,31 +6076,26 @@ mod tests {
     }
 
     #[test]
-    fn migration_moves_keel_owned_data_to_neutral_home() {
-        let (_home, keel_home, claude_home) = legacy_home_fixture("move");
-        // Seed legacy data that keel owns.
+    fn migration_copies_keel_owned_data_and_retains_legacy_source() {
+        let (_home, keel_home, claude_home) = legacy_home_fixture("copy");
         fs::create_dir_all(claude_home.join("working-briefs")).unwrap();
         fs::write(claude_home.join("working-briefs/brief.json"), "{}").unwrap();
         fs::write(claude_home.join("config.toml"), "x = 1").unwrap();
         fs::create_dir_all(claude_home.join("memories")).unwrap();
 
         let report = migrate_from_legacy_claude_home(&keel_home, &claude_home);
-        assert!(report.is_some(), "migration must report when it moves data");
-
+        assert!(report.is_some(), "migration must report copied data");
         assert!(keel_home.join("working-briefs/brief.json").is_file());
         assert!(keel_home.join("config.toml").is_file());
         assert!(keel_home.join("memories").is_dir());
-        // Sources are gone from the legacy home.
-        assert!(!claude_home.join("working-briefs").exists());
-        assert!(!claude_home.join("config.toml").exists());
+        assert!(claude_home.join("working-briefs/brief.json").is_file());
+        assert!(claude_home.join("config.toml").is_file());
         let _ = fs::remove_dir_all(keel_home.parent().unwrap());
     }
 
     #[test]
-    fn migration_merges_legacy_dir_into_existing_destination() {
+    fn migration_merges_legacy_dir_without_removing_source() {
         let (_home, keel_home, claude_home) = legacy_home_fixture("nooverwrite");
-        // Both homes hold working-briefs: the merge keeps the destination
-        // file AND brings the legacy file over.
         fs::create_dir_all(keel_home.join("working-briefs")).unwrap();
         fs::write(keel_home.join("working-briefs/new.json"), "kept").unwrap();
         fs::create_dir_all(claude_home.join("working-briefs")).unwrap();
@@ -6035,13 +6109,9 @@ mod tests {
         );
         assert_eq!(
             fs::read_to_string(keel_home.join("working-briefs/old.json")).unwrap(),
-            "legacy",
-            "legacy data must land beside the existing destination content"
+            "legacy"
         );
-        assert!(
-            !claude_home.join("working-briefs").exists(),
-            "a fully merged legacy directory must be removed"
-        );
+        assert!(claude_home.join("working-briefs/old.json").is_file());
         let _ = fs::remove_dir_all(keel_home.parent().unwrap());
     }
 
@@ -6092,15 +6162,11 @@ mod tests {
     }
 
     #[test]
-    fn migration_replaces_empty_destination_dir_but_keeps_non_empty() {
-        // Ordering regression: an empty scaffolded destination gets replaced
-        // by legacy data; a non-empty one merges, nothing overwritten.
+    fn migration_copies_empty_and_non_empty_destinations_without_deleting_sources() {
         let (_home, keel_home, claude_home) = legacy_home_fixture("emptydest");
-        // Empty scaffolded destination + real legacy data -> moved.
-        fs::create_dir_all(keel_home.join("memories")).unwrap(); // empty
+        fs::create_dir_all(keel_home.join("memories")).unwrap();
         fs::create_dir_all(claude_home.join("memories")).unwrap();
         fs::write(claude_home.join("memories/note.md"), "real").unwrap();
-        // Non-empty destination + legacy data with a DISTINCT path -> merged.
         fs::create_dir_all(keel_home.join("raw-output")).unwrap();
         fs::write(keel_home.join("raw-output/new.json"), "fresh").unwrap();
         fs::create_dir_all(claude_home.join("raw-output")).unwrap();
@@ -6108,22 +6174,14 @@ mod tests {
 
         let report = migrate_from_legacy_claude_home(&keel_home, &claude_home);
         assert!(report.is_some());
-        // Empty destination was replaced by the real data.
         assert_eq!(
             fs::read_to_string(keel_home.join("memories/note.md")).unwrap(),
             "real"
         );
-        assert!(!claude_home.join("memories").exists());
-        // Non-empty destination merged: BOTH files present, legacy dir removed.
+        assert!(claude_home.join("memories/note.md").is_file());
         assert!(keel_home.join("raw-output/new.json").is_file());
-        assert!(
-            keel_home.join("raw-output/old.json").is_file(),
-            "legacy data with a distinct path must merge into the destination"
-        );
-        assert!(
-            !claude_home.join("raw-output").exists(),
-            "a fully merged legacy directory must be removed"
-        );
+        assert!(keel_home.join("raw-output/old.json").is_file());
+        assert!(claude_home.join("raw-output/old.json").is_file());
         let _ = fs::remove_dir_all(keel_home.parent().unwrap());
     }
 
@@ -6138,6 +6196,36 @@ mod tests {
             second.is_none(),
             "second run must be a no-op once migrated, got {second:?}"
         );
+        let _ = fs::remove_dir_all(keel_home.parent().unwrap());
+    }
+
+    #[test]
+    fn cleanup_removes_only_verified_legacy_duplicates() {
+        let (_home, keel_home, claude_home) = legacy_home_fixture("cleanup");
+        fs::create_dir_all(keel_home.join("memories")).unwrap();
+        fs::create_dir_all(claude_home.join("memories")).unwrap();
+        fs::write(keel_home.join("memories/same.md"), "same").unwrap();
+        fs::write(claude_home.join("memories/same.md"), "same").unwrap();
+        fs::write(keel_home.join("memories/different.md"), "new").unwrap();
+        fs::write(claude_home.join("memories/different.md"), "old").unwrap();
+        fs::create_dir_all(claude_home.join("cache/user")).unwrap();
+        fs::write(claude_home.join("cache/user/cache.json"), "keep").unwrap();
+        fs::create_dir_all(keel_home.join("state")).unwrap();
+        fs::create_dir_all(claude_home.join(".claude-skill-manager")).unwrap();
+        fs::write(keel_home.join("state/state.json"), "state").unwrap();
+        fs::write(
+            claude_home.join(".claude-skill-manager/state.json"),
+            "state",
+        )
+        .unwrap();
+
+        let removed = cleanup_identical_legacy_data(&keel_home, &claude_home);
+
+        assert!(removed >= 2);
+        assert!(!claude_home.join("memories/same.md").exists());
+        assert!(claude_home.join("memories/different.md").is_file());
+        assert!(claude_home.join("cache/user/cache.json").is_file());
+        assert!(!claude_home.join(".claude-skill-manager").exists());
         let _ = fs::remove_dir_all(keel_home.parent().unwrap());
     }
 
@@ -6158,9 +6246,8 @@ mod tests {
         );
         let _ = fs::remove_dir_all(&dir);
     }
-
     #[test]
-    fn update_temp_trees_are_deleted_and_inventories_stay() {
+    fn update_temp_trees_are_deleted_but_legacy_state_stays() {
         let dir = unique_codex_test_dir("upd-cache");
         let keel_home = dir.join(".keel");
         let engagement = dir.join(".claude");
@@ -6170,20 +6257,29 @@ mod tests {
         fs::write(state_directory(&keel_home).join("managed-files.txt"), "x").unwrap();
         fs::create_dir_all(legacy_state_directory(&engagement).join("bin")).unwrap();
         fs::write(legacy_state_directory(&engagement).join("bin/old"), "stale").unwrap();
+        fs::create_dir_all(state_directory(&engagement).join("bin")).unwrap();
+        fs::write(state_directory(&engagement).join("bin/old"), "stale").unwrap();
+        fs::create_dir_all(engagement.join("cache/user")).unwrap();
+        fs::write(engagement.join("cache/user/preferences.json"), "keep").unwrap();
+        fs::write(
+            legacy_state_directory(&engagement).join("user-data.json"),
+            "keep",
+        )
+        .unwrap();
         remove_update_temp_trees(&keel_home, &engagement);
-        assert!(
-            !update_cache_directory(&keel_home).exists(),
-            "keel-home update cache must be deleted"
+        assert!(!update_cache_directory(&keel_home).exists());
+        assert!(state_directory(&keel_home)
+            .join("managed-files.txt")
+            .is_file());
+        assert!(!legacy_state_directory(&engagement).join("bin").exists());
+        assert!(!state_directory(&engagement).join("bin").exists());
+        assert_eq!(
+            fs::read_to_string(engagement.join("cache/user/preferences.json")).unwrap(),
+            "keep"
         );
-        assert!(
-            state_directory(&keel_home)
-                .join("managed-files.txt")
-                .is_file(),
-            "install inventories must survive cache cleanup"
-        );
-        assert!(
-            !legacy_state_directory(&engagement).exists(),
-            "leftover ~/.claude/.claude-skill-manager must be deleted"
+        assert_eq!(
+            fs::read_to_string(legacy_state_directory(&engagement).join("user-data.json")).unwrap(),
+            "keep"
         );
         let _ = fs::remove_dir_all(&dir);
     }
@@ -6291,15 +6387,39 @@ mod tests {
     }
 
     #[test]
-    fn move_path_preserving_moves_file_and_dir() {
-        let dir = unique_codex_test_dir("movepath");
+    fn copy_path_preserving_keeps_source_and_destination() {
+        let dir = unique_codex_test_dir("copypath");
         let src_file = dir.join("a.txt");
         let dst_file = dir.join("b.txt");
         fs::write(&src_file, "hello").unwrap();
-        assert!(move_path_preserving(&src_file, &dst_file));
-        assert!(!src_file.exists());
+        assert!(copy_path_preserving(&src_file, &dst_file));
+        assert!(src_file.is_file());
         assert_eq!(fs::read_to_string(&dst_file).unwrap(), "hello");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn managed_overwrite_keeps_previous_bytes_in_unique_backup() {
+        let home = unique_codex_test_dir("managed-backup");
+        let source = home.join("source.txt");
+        let target = home.join("target.txt");
+        fs::write(&source, "new").unwrap();
+        fs::write(&target, "old").unwrap();
+        let tracker = FileTracker::new(&home);
+
+        assert!(copy_file_if_changed(&source, &target, &tracker).unwrap());
+        assert_eq!(fs::read_to_string(&target).unwrap(), "new");
+        let backup_files: Vec<PathBuf> = fs::read_dir(home.join("backups"))
+            .unwrap()
+            .flat_map(|entry| {
+                fs::read_dir(entry.unwrap().path())
+                    .unwrap()
+                    .map(|nested| nested.unwrap().path())
+            })
+            .collect();
+        assert_eq!(backup_files.len(), 1);
+        assert_eq!(fs::read_to_string(&backup_files[0]).unwrap(), "old");
+        let _ = fs::remove_dir_all(&home);
     }
 
     #[test]
