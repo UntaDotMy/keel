@@ -22,8 +22,9 @@ Each run writes a ledger under `<claude-home>/state/review-closeout/<review-id>.
 Repository-wide static findings can be carried in the tracked
 `review-closeout-baseline.json` file without weakening dynamic gates. Baseline
 entries use exact finding IDs, require a reviewer, reason, and RFC3339 expiry,
-and only cover `comment:`, `prose:`, and `slop:` findings. Gate, wiring,
-evidence, requirement, and CI findings remain blocking.
+and only cover static `comment:`, `prose:`, `slop:`, and their aggregate
+comment/prose gate findings. Gate, wiring, evidence, requirement, and CI
+findings remain blocking.
 
 Generate or refresh the baseline only from a clean tree:
 

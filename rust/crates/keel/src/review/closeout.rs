@@ -261,6 +261,10 @@ fn baseline_eligible(finding: &ReviewFinding) -> bool {
     finding.rule.starts_with("comment:")
         || finding.rule.starts_with("prose:")
         || finding.rule.starts_with("slop:")
+        || matches!(
+            finding.rule.as_str(),
+            "gate:comment_style" | "gate:prose_style"
+        )
 }
 
 fn build_review_baseline(
@@ -1787,6 +1791,25 @@ mod tests {
         .expect("baseline");
         assert_eq!(baseline.finding_ids.len(), 1);
         assert!(baseline.finding_ids[0].starts_with("comment-style-"));
+    }
+
+    #[test]
+    fn baseline_generation_includes_comment_and_prose_gate_summaries() {
+        let mut aggregate = finding(
+            &stable_finding_id("gate:comment_style", "review/comment_style", None, "gate"),
+            ReviewFindingStatus::Open,
+        );
+        aggregate.rule = "gate:comment_style".to_string();
+        let baseline = build_review_baseline(
+            &[aggregate],
+            "head-a",
+            "reviewer",
+            "historical static findings",
+            "2027-08-24T00:00:00Z",
+        )
+        .expect("baseline");
+        assert_eq!(baseline.finding_ids.len(), 1);
+        assert!(baseline.finding_ids[0].starts_with("gate-comment_style-"));
     }
 
     #[test]
