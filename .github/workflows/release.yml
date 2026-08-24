@@ -22,6 +22,7 @@ on:
         type: string
 
 permissions:
+  actions: read
   contents: write
 
 concurrency:
@@ -114,6 +115,33 @@ jobs:
         with:
           fetch-depth: 0
       # Metadata only — no rustc needed for tag normalization.
+      - name: Require exact-head validation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          max_attempts=60
+          for attempt in $(seq 1 "$max_attempts"); do
+            latest="$(gh run list --workflow validate.yml --commit "$GITHUB_SHA" --limit 20 --json status,conclusion,headSha,databaseId \
+              | jq -r --arg sha "$GITHUB_SHA" '[.[] | select(.headSha == $sha)] | sort_by(.databaseId) | last // empty | [.status, .conclusion, .databaseId] | @tsv')"
+            if [[ -z "$latest" ]]; then
+              echo "Validate has not reported HEAD $GITHUB_SHA (attempt $attempt/$max_attempts)."
+            else
+              IFS=$'\t' read -r status conclusion run_id <<<"$latest"
+              if [[ "$status" == "completed" && "$conclusion" == "success" ]]; then
+                echo "Validate run $run_id passed for exact HEAD $GITHUB_SHA."
+                exit 0
+              fi
+              if [[ "$status" == "completed" ]]; then
+                echo "::error::Validate run $run_id for HEAD $GITHUB_SHA concluded $conclusion."
+                exit 1
+              fi
+              echo "Validate run $run_id is $status (attempt $attempt/$max_attempts)."
+            fi
+            sleep 30
+          done
+          echo "::error::Timed out waiting for successful Validate evidence for exact HEAD $GITHUB_SHA."
+          exit 1
       - name: Resolve release metadata
         id: release-metadata
         shell: bash
@@ -191,7 +219,7 @@ jobs:
 
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
-      - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
           toolchain: stable
           target: ${{ matrix.target }}
@@ -319,11 +347,69 @@ jobs:
           $source = "dist/${{ matrix.os_name }}-${{ matrix.arch }}"
           $dest = "dist/keel_${build_version}_${{ matrix.os_name }}_${{ matrix.arch }}.zip"
           Compress-Archive -Path "$source\*" -DestinationPath "$dest" -Force
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: release-${{ matrix.os_name }}-${{ matrix.arch }}
           path: dist/keel_${{ needs.release-preflight.outputs.build_version }}_${{ matrix.os_name }}_${{ matrix.arch }}.*
           if-no-files-found: error
+
+  release-smoke:
+    name: Smoke ${{ matrix.os_name }}-${{ matrix.arch }}
+    needs: [changes, release-preflight, build]
+    if: needs.changes.outputs.release == 'true'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            os_name: linux
+            arch: amd64
+          - os: macos-latest
+            os_name: darwin
+            arch: amd64
+          - os: windows-latest
+            os_name: windows
+            arch: amd64
+    steps:
+      - name: Download platform archive
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: release-${{ matrix.os_name }}-${{ matrix.arch }}
+          merge-multiple: true
+          path: artifact
+      - name: Exercise Unix install path
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle_root="$RUNNER_TEMP/keel-bundle"
+          keel_home="$RUNNER_TEMP/keel-home/.keel"
+          mkdir -p "$bundle_root" "$keel_home"
+          archive="$(find artifact -maxdepth 1 -type f -name '*.tar.gz' -print -quit)"
+          tar xzf "$archive" -C "$bundle_root"
+          "$bundle_root/keel" install --repo-root "$bundle_root" --claude-home "$keel_home" --no-purge
+          "$bundle_root/keel" status --repo-root "$bundle_root" --claude-home "$keel_home"
+          "$bundle_root/keel" verify --repo-root "$bundle_root" --claude-home "$keel_home"
+          "$bundle_root/keel" doctor --repo-root "$bundle_root" --claude-home "$keel_home"
+      - name: Exercise Windows install path
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $bundleRoot = Join-Path $env:RUNNER_TEMP "keel-bundle"
+          $keelHome = Join-Path $env:RUNNER_TEMP "keel-home\.keel"
+          New-Item -ItemType Directory -Force -Path $bundleRoot, $keelHome | Out-Null
+          $archive = Get-ChildItem artifact -Filter "*.zip" | Select-Object -First 1
+          Expand-Archive -Path $archive.FullName -DestinationPath $bundleRoot -Force
+          $binary = Join-Path $bundleRoot "keel.exe"
+          & $binary install --repo-root $bundleRoot --claude-home $keelHome --no-purge
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $binary status --repo-root $bundleRoot --claude-home $keelHome
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $binary verify --repo-root $bundleRoot --claude-home $keelHome
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $binary doctor --repo-root $bundleRoot --claude-home $keelHome
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   publish:
     name: Publish GitHub Release
@@ -331,6 +417,7 @@ jobs:
       - changes
       - release-preflight
       - build
+      - release-smoke
     if: needs.changes.outputs.release == 'true'
     runs-on: ubuntu-latest
     env:
@@ -339,7 +426,7 @@ jobs:
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
       - name: Download all artifacts
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           pattern: release-*
           merge-multiple: true

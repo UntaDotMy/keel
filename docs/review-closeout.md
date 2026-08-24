@@ -17,6 +17,24 @@ the default output format is `json`.
 
 Each run writes a ledger under `<claude-home>/state/review-closeout/<review-id>.json`. Without an explicit review id, the id is derived from the current `HEAD` (for example, `review-<12-char-sha>`). The JSON result includes the ledger path, status, findings, requirements, and gate snapshots.
 
+## Reviewed baseline
+
+Repository-wide static findings can be carried in the tracked
+`review-closeout-baseline.json` file without weakening dynamic gates. Baseline
+entries use exact finding IDs, require a reviewer, reason, and RFC3339 expiry,
+and only cover `comment:`, `prose:`, and `slop:` findings. Gate, wiring,
+evidence, requirement, and CI findings remain blocking.
+
+Generate or refresh the baseline only from a clean tree:
+
+```text
+keel review closeout --repo-root <path> --brief-id <id> --proof "static findings reviewed" --write-baseline --baseline-reviewer "name" --baseline-reason "historical repository-wide static findings" --baseline-expires "2027-01-01T00:00:00Z"
+```
+
+Baseline files expire and must be renewed through a reviewed change. A changed
+file, line, rule, or message produces a new finding ID and is not suppressed by
+the old baseline.
+
 ## Findings and the fix loop
 
 Finding statuses are `open`, `closed`, or `stale`. Findings use stable

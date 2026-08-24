@@ -330,7 +330,12 @@ fn tools_list_catalog() -> Value {
                         "brief_id": { "type": "string", "description": "Working-brief id whose acceptance criteria closeout checks." },
                         "proof": { "type": "string", "description": "Evidence text attached to closeout acceptance criteria." },
                         "strict": { "type": "boolean", "description": "Require a brief and treat missing closeout evidence as a blocking finding." },
-                        "require_ci": { "type": "boolean", "description": "Require exact-head CI proof before closeout passes." }
+                        "require_ci": { "type": "boolean", "description": "Require exact-head CI proof before closeout passes." },
+                        "baseline": { "type": "string", "description": "Repository-relative reviewed baseline JSON path. Defaults to review-closeout-baseline.json." },
+                        "baseline_reviewer": { "type": "string", "description": "Reviewer identity required when writing a baseline." },
+                        "baseline_reason": { "type": "string", "description": "Reason recorded in a reviewed baseline." },
+                        "baseline_expires": { "type": "string", "description": "RFC3339 expiry required for a reviewed baseline." },
+                        "write_baseline": { "type": "boolean", "description": "Write an exact-ID baseline for eligible static findings after a clean scan." }
                     },
                     "required": ["action"]
                 }
@@ -2495,6 +2500,10 @@ fn review_closeout_args(executable: &Path, arguments: &Value) -> Vec<String> {
         ("brief_id", "--brief-id"),
         ("proof", "--proof"),
         ("format", "--format"),
+        ("baseline", "--baseline"),
+        ("baseline_reviewer", "--baseline-reviewer"),
+        ("baseline_reason", "--baseline-reason"),
+        ("baseline_expires", "--baseline-expires"),
     ] {
         if let Some(value) = optional_string_arg(arguments, key) {
             args.push(format!("{flag}={value}"));
@@ -2505,6 +2514,9 @@ fn review_closeout_args(executable: &Path, arguments: &Value) -> Vec<String> {
     }
     if optional_bool_arg(arguments, "require_ci").unwrap_or(false) {
         args.push("--require-ci".to_string());
+    }
+    if optional_bool_arg(arguments, "write_baseline").unwrap_or(false) {
+        args.push("--write-baseline".to_string());
     }
     args
 }
@@ -3708,6 +3720,11 @@ mod tests {
             "proof",
             "strict",
             "require_ci",
+            "baseline",
+            "baseline_reviewer",
+            "baseline_reason",
+            "baseline_expires",
+            "write_baseline",
             "format",
         ] {
             assert!(
@@ -3727,8 +3744,13 @@ mod tests {
                 "brief_id": "wb-123",
                 "proof": "$(echo pwned); & not-a-command",
                 "format": "compact",
+                "baseline": "review-closeout-baseline.json",
+                "baseline_reviewer": "reviewer@example.test",
+                "baseline_reason": "historical static findings",
+                "baseline_expires": "2027-01-01T00:00:00Z",
                 "strict": true,
                 "require_ci": true,
+                "write_baseline": true,
             }),
         );
         assert_eq!(
@@ -3742,8 +3764,13 @@ mod tests {
                 "--brief-id=wb-123",
                 "--proof=$(echo pwned); & not-a-command",
                 "--format=compact",
+                "--baseline=review-closeout-baseline.json",
+                "--baseline-reviewer=reviewer@example.test",
+                "--baseline-reason=historical static findings",
+                "--baseline-expires=2027-01-01T00:00:00Z",
                 "--strict",
                 "--require-ci",
+                "--write-baseline",
             ]
         );
         assert_eq!(
