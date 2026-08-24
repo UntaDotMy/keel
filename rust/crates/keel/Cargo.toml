@@ -21,7 +21,7 @@ rand = "0.8"
 regex = { workspace = true }
 thiserror = "2"
 toml = { workspace = true }
-which = "7"
+which = "8"
 
 
 [dev-dependencies]
