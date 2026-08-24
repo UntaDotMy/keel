@@ -12,6 +12,89 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
 use std::time::Duration;
+fn remove_owned_file_if_marked(path: &Path, marker: &str) -> usize {
+    let Ok(content) = read_text_if_exists(path) else {
+        return 0;
+    };
+    if !content.contains(marker) {
+        return 0;
+    }
+    remove_path_if_exists_counted(path).unwrap_or(0)
+}
+fn remove_empty_directory(path: &Path) -> usize {
+    if !path.is_dir() {
+        return 0;
+    }
+    let Ok(mut entries) = fs::read_dir(path) else {
+        return 0;
+    };
+    if entries.next().is_some() {
+        return 0;
+    }
+    fs::remove_dir(path).map(|_| 1).unwrap_or(0)
+}
+
+fn remove_managed_cursor_hooks(path: &Path) -> usize {
+    let Ok(text) = read_text_if_exists(path) else {
+        return 0;
+    };
+    let Ok(mut document) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return 0;
+    };
+    let (changed, hooks_empty) = {
+        let Some(hooks) = document
+            .get_mut("hooks")
+            .and_then(serde_json::Value::as_object_mut)
+        else {
+            return 0;
+        };
+        let mut changed = false;
+        for entries in hooks.values_mut() {
+            let Some(entries) = entries.as_array_mut() else {
+                continue;
+            };
+            let original_len = entries.len();
+            entries.retain(|entry| {
+                !entry
+                    .get("command")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|command| command.contains("keel-cursor.sh"))
+            });
+            changed |= entries.len() != original_len;
+        }
+        let hooks_empty = hooks.values().all(|entries| {
+            entries
+                .as_array()
+                .map(|array| array.is_empty())
+                .unwrap_or(false)
+        });
+        (changed, hooks_empty)
+    };
+    if !changed {
+        return 0;
+    }
+    let only_cursor_metadata = hooks_empty
+        && document
+            .as_object()
+            .map(|object| {
+                object
+                    .keys()
+                    .all(|key| matches!(key.as_str(), "version" | "hooks"))
+            })
+            .unwrap_or(false);
+    if only_cursor_metadata {
+        return remove_path_if_exists_counted(path).unwrap_or(0);
+    }
+    let Ok(rendered) = serde_json::to_string_pretty(&document) else {
+        return 0;
+    };
+    if write_text(path, &rendered).is_ok() {
+        1
+    } else {
+        0
+    }
+}
+
 pub fn write_install_summary(summary: &InstallSummary, output: &mut dyn Write) {
     let _ = writeln!(output, "Native Rust install complete");
     let _ = writeln!(output);
@@ -166,15 +249,26 @@ pub(crate) fn remove_wired_adapters(claude_home: &Path) -> usize {
         .join("opencode")
         .join("plugins")
         .join("keel.ts");
-    removed += remove_path_if_exists_counted(&plugin_file).unwrap_or(0);
+    removed += remove_owned_file_if_marked(&plugin_file, "bridge-core");
 
     let opencode_config = home.join(".config").join("opencode").join("opencode.json");
     removed += remove_json_mcp_entry(&opencode_config, "mcp");
 
     let codex_dir = home.join(".codex").join("plugins").join("keel");
-    if codex_dir.is_dir() {
-        removed += remove_path_if_exists_counted(&codex_dir).unwrap_or(0);
+    for (relative, marker) in [
+        ("hooks/hooks.json", "keel-codex.ts"),
+        ("keel-codex.ts", "keel Codex CLI Plugin"),
+        (
+            ".codex-plugin/plugin.json",
+            "\"mcpServers\": \"./.mcp.json\"",
+        ),
+        (".mcp.json", "keel MCP server registration"),
+    ] {
+        removed += remove_owned_file_if_marked(&codex_dir.join(relative), marker);
     }
+    removed += remove_empty_directory(&codex_dir.join("hooks"));
+    removed += remove_empty_directory(&codex_dir.join(".codex-plugin"));
+    removed += remove_empty_directory(&codex_dir);
 
     // Codex discovery surfaces written by maybe_wire_codex: leaving either
     // behind makes Codex try to load a plugin whose files no longer exist.
@@ -202,18 +296,15 @@ pub(crate) fn remove_wired_adapters(claude_home: &Path) -> usize {
     // Cowork's Desktop config uses the standard mcpServers container.
     let desktop_config = claude_desktop_config_path(&home);
     removed += remove_json_mcp_entry(&desktop_config, "mcpServers");
-    let legacy_cowork_dir = home.join(".claude").join("plugins").join("keel-cowork");
-    if legacy_cowork_dir.is_dir() {
-        removed += remove_path_if_exists_counted(&legacy_cowork_dir).unwrap_or(0);
-    }
+    // The legacy Cowork plugin path was never owned by the current installer;
+    // leave it untouched rather than deleting a user-created directory.
 
-    // Cursor hooks: install writes ~/.cursor/hooks/{hooks.json,keel-cursor.sh}.
-    for hook_file in [
-        home.join(".cursor").join("hooks").join("hooks.json"),
-        home.join(".cursor").join("hooks").join("keel-cursor.sh"),
-    ] {
-        removed += remove_path_if_exists_counted(&hook_file).unwrap_or(0);
-    }
+    // Cursor hooks: remove only Keel's hook entries and script.
+    removed += remove_managed_cursor_hooks(&home.join(".cursor").join("hooks.json"));
+    removed += remove_owned_file_if_marked(
+        &home.join(".cursor").join("hooks").join("keel-cursor.sh"),
+        "keel Cursor",
+    );
 
     let cursor_mcp = home.join(".cursor").join("mcp.json");
     removed += remove_json_mcp_entry(&cursor_mcp, "mcpServers");
@@ -243,13 +334,11 @@ pub(crate) fn remove_wired_adapters(claude_home: &Path) -> usize {
             .join("keel-pi.ts"),
         home.join(".pi").join("extensions").join("keel-pi.ts"),
     ] {
-        removed += remove_path_if_exists_counted(&ext).unwrap_or(0);
+        removed += remove_owned_file_if_marked(&ext, "keel Pi Agent Extension");
     }
-
-    // Command Code (cmdc): remove the mod + MCP entry installed by
-    // maybe_wire_commandcode, so nothing spawns the deleted keel binary.
+    // Command Code (cmdc): remove only the shipped mod; preserve custom files.
     let cmdc_mod = home.join(".commandcode").join("mods").join("keel-cmdc.ts");
-    removed += remove_path_if_exists_counted(&cmdc_mod).unwrap_or(0);
+    removed += remove_owned_file_if_marked(&cmdc_mod, "keel Command Code (cmdc) Mod");
 
     let cmdc_mcp = home.join(".commandcode").join("mcp.json");
     removed += remove_json_mcp_entry(&cmdc_mcp, "mcpServers");

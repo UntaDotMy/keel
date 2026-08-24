@@ -1,5 +1,6 @@
 use serde_json::Value;
 
+use crate::runtime::write_text;
 use crate::utility::anvil::job;
 
 pub struct Report {
@@ -49,6 +50,6 @@ impl Report {
 
 pub fn write_report(paths: &job::JobPaths, report: &Report) -> Result<(), String> {
     paths.ensure_dir()?;
-    std::fs::write(paths.report_path(), report.to_json().to_string())
+    write_text(&paths.report_path(), &report.to_json().to_string())
         .map_err(|error| format!("anvil.report.json: {error}"))
 }

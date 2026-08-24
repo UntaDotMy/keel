@@ -1,6 +1,6 @@
 ---
 name: authentication-and-identity
-description: Designs and implements authentication and identity flows: OAuth2 and OpenID Connect (OIDC) authorization-code with PKCE, client-credentials, and device flows, SSO and SAML federation, session management, JWT and opaque token issuance, token validation, and rotation, refresh token rotation with reuse detection, MFA, passkeys, and WebAuthn, password hashing with argon2 and bcrypt, and secure cookie and CSRF handling. Use when you need to build login, session, token, or SSO flows rather than audit them.
+description: Designs and implements authentication and identity flows: OAuth2 and OpenID Connect (OIDC) authorization-code with PKCE, client-credentials, and device flows, SSO and SAML federation, session management, JWT and opaque token issuance, token validation, and rotation, refresh token rotation with reuse detection, MFA, passkeys, and WebAuthn, password hashing with argon2 and bcrypt, and secure cookie and CSRF handling. Use when you need to build login, session, token, or SSO flows.
 when_to_use: Building login, session, token, OAuth2/OIDC, SSO, MFA, or password-storage flows.
 allowed-tools: Read, Grep, Glob, Edit, Write, Bash(keel memory:*), Bash(git diff:*), Bash(git status), Bash(npm:*), Bash(node:*), Bash(npx:*), Bash(python:*), Bash(curl:*), Bash(openssl:*)
 effort: medium

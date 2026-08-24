@@ -30,9 +30,9 @@ Copy all three layers into your home directory:
 # Rules layer
 cp cursor/.cursorrules ~/.cursorrules
 
-# Hooks layer
+# Hooks config lives at ~/.cursor/hooks.json; the script stays in ~/.cursor/hooks.
 mkdir -p ~/.cursor/hooks
-cp cursor/hooks/hooks.json    ~/.cursor/hooks/
+cp cursor/hooks/hooks.json    ~/.cursor/hooks.json
 cp cursor/hooks/keel-cursor.sh ~/.cursor/hooks/
 chmod +x ~/.cursor/hooks/keel-cursor.sh
 
@@ -49,9 +49,9 @@ On Windows PowerShell:
 # Rules layer
 Copy-Item cursor\.cursorrules "$env:USERPROFILE\.cursorrules"
 
-# Hooks layer
+# Hooks config lives at $env:USERPROFILE\.cursor\hooks.json.
 New-Item -ItemType Directory -Path "$env:USERPROFILE\.cursor\hooks" -Force
-Copy-Item cursor\hooks\hooks.json    "$env:USERPROFILE\.cursor\hooks\"
+Copy-Item cursor\hooks\hooks.json    "$env:USERPROFILE\.cursor\hooks.json"
 Copy-Item cursor\hooks\keel-cursor.sh "$env:USERPROFILE\.cursor\hooks\"
 
 # MCP layer (merge manually, or let `keel install --with cursor` do it)
@@ -62,16 +62,16 @@ if (-not (Test-Path "$env:USERPROFILE\.cursor\mcp.json")) {
 }
 ```
 
-Cursor watches `~/.cursor/hooks/hooks.json` and reloads it automatically. The hook commands reference `~/.cursor/hooks/keel-cursor.sh` via `bash`, so Cursor must be able to spawn `bash` (available via Git Bash on Windows, native on macOS/Linux).
+Cursor watches `~/.cursor/hooks.json` and reloads it automatically. The hook commands reference `~/.cursor/hooks/keel-cursor.sh` via `bash`, so Cursor must be able to spawn `bash` (available via Git Bash on Windows, native on macOS/Linux).
 
 ### Option B: Project-scoped
 
-Copy `.cursorrules` into your project root (Cursor discovers it natively), and place the hooks under `<project>/.cursor/hooks/`:
+Copy `.cursorrules` into your project root (Cursor discovers it natively), put the hook config at `<project>/.cursor/hooks.json`, and place the script under `<project>/.cursor/hooks/`:
 
 ```bash
 cp cursor/.cursorrules /path/to/your/project/
 mkdir -p /path/to/your/project/.cursor/hooks
-cp cursor/hooks/hooks.json    /path/to/your/project/.cursor/hooks/
+cp cursor/hooks/hooks.json    /path/to/your/project/.cursor/hooks.json
 cp cursor/hooks/keel-cursor.sh /path/to/your/project/.cursor/hooks/
 chmod +x /path/to/your/project/.cursor/hooks/keel-cursor.sh
 ```

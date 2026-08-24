@@ -2,6 +2,7 @@ use std::io::Write;
 use std::path::Path;
 
 use crate::args::FlagSet;
+use crate::runtime::write_text;
 use crate::utility::anvil::job;
 use crate::utility::anvil::lock::validate_lock;
 use crate::utility::anvil::prefix;
@@ -132,13 +133,13 @@ pub fn write_lock(
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
-    std::fs::write(&path, lock_text).map_err(|error| format!("lock write: {error}"))?;
+    write_text(&path, &lock_text).map_err(|error| format!("lock write: {error}"))?;
     if path != paths.lock_path() {
-        std::fs::copy(&path, paths.lock_path()).map_err(|error| error.to_string())?;
+        write_text(&paths.lock_path(), &lock_text).map_err(|error| error.to_string())?;
     }
     let gates_dir = paths.gates_dir();
     std::fs::create_dir_all(&gates_dir).map_err(|error| error.to_string())?;
-    std::fs::write(gates_dir.join("main"), format!("{quality_bar}\n"))
+    write_text(&gates_dir.join("main"), &format!("{quality_bar}\n"))
         .map_err(|error| error.to_string())?;
     Ok(hash)
 }

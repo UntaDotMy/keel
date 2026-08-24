@@ -49,7 +49,43 @@ pub(crate) fn rewrite_mcp_entry_command(entry: &mut serde_json::Value, absolute:
 pub(crate) enum JsonMcpMergeResult {
     Added,
     AlreadyCurrent,
-    Updated,
+}
+fn command_basename(command: &str) -> String {
+    command
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(command)
+        .to_ascii_lowercase()
+}
+
+fn is_keel_command(command: &str) -> bool {
+    matches!(command_basename(command).as_str(), "keel" | "keel.exe")
+}
+
+fn is_mcp_serve_args(args: Option<&serde_json::Value>) -> bool {
+    args.and_then(serde_json::Value::as_array)
+        .and_then(|values| Some((values.first()?.as_str()?, values.get(1)?.as_str()?)))
+        .map(|(command, subcommand)| command == "mcp" && subcommand == "serve")
+        .unwrap_or(false)
+}
+
+fn mcp_entry_is_managed(entry: &serde_json::Value) -> bool {
+    let Some(server) = entry.as_object() else {
+        return false;
+    };
+    if let Some(command) = server.get("command").and_then(serde_json::Value::as_str) {
+        return is_keel_command(command) && is_mcp_serve_args(server.get("args"));
+    }
+    let Some(command) = server.get("command").and_then(serde_json::Value::as_array) else {
+        return false;
+    };
+    command
+        .first()
+        .and_then(serde_json::Value::as_str)
+        .map(is_keel_command)
+        .unwrap_or(false)
+        && command.get(1).and_then(serde_json::Value::as_str) == Some("mcp")
+        && command.get(2).and_then(serde_json::Value::as_str) == Some("serve")
 }
 
 /// Merge one MCP server entry into a host JSON container.
@@ -89,13 +125,9 @@ pub(crate) fn merge_json_mcp(
         if existing == entry {
             return Ok(JsonMcpMergeResult::AlreadyCurrent);
         }
-        current.insert(server_key.to_string(), entry.clone());
-        write_text(
-            config_path,
-            &serde_json::to_string_pretty(&document)
-                .map_err(|error| format!("serialize error: {error}"))?,
-        )?;
-        return Ok(JsonMcpMergeResult::Updated);
+        return Err(format!(
+            "existing {container_key}.{server_key} differs; preserving user configuration"
+        ));
     }
     current.insert(server_key.to_string(), entry.clone());
     write_text(
@@ -124,6 +156,12 @@ pub(crate) fn remove_json_mcp_entry(path: &Path, container_key: &str) -> usize {
     else {
         return 0;
     };
+    let Some(existing) = container.get("keel") else {
+        return 0;
+    };
+    if !mcp_entry_is_managed(existing) {
+        return 0;
+    }
     if container.remove("keel").is_none() {
         return 0;
     }

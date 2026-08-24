@@ -135,9 +135,9 @@ pub fn installed_skill_path(claude_home: &Path, skill_name: &str) -> Option<std:
     }
 }
 
-/// Pure two-tier resolution over an already-loaded skill corpus: the IDF
-/// statistical matcher first, then the curated cross-cutting fallback (only for a
-/// curated skill that is actually present in `skills`). Extracted from
+/// Pure operation-aware resolution over an already-loaded skill corpus: the
+/// security-audit boundary first, then IDF statistical scoring, then the curated
+/// cross-cutting fallback (only for a curated skill present in `skills`). Extracted
 /// [`match_skill_for_prompt`] so the exact production decision can be driven over
 /// a fixture corpus with no IO — this is what the behavioral skill-eval
 /// (`keel skill-eval`) asserts against, so the eval tests the real
@@ -145,6 +145,14 @@ pub fn installed_skill_path(claude_home: &Path, skill_name: &str) -> Option<std:
 pub fn resolve_skill_for_prompt(prompt: &str, skills: &[SkillTerms]) -> Option<SkillMatch> {
     if prompt.trim().is_empty() || skills.is_empty() {
         return None;
+    }
+    if security_audit_override(prompt)
+        .is_some_and(|name| skills.iter().any(|skill| skill.name == name))
+    {
+        return Some(SkillMatch {
+            name: "security-and-compliance-auditor".to_string(),
+            score: 0.0,
+        });
     }
     if let Some(found) = score_prompt_against_skills(prompt, skills) {
         return Some(found);
@@ -167,6 +175,39 @@ pub fn resolve_skill_for_prompt(prompt: &str, skills: &[SkillTerms]) -> Option<S
         });
     }
     None
+}
+
+/// Operation intent outranks protocol vocabulary for security audits. Auth
+/// implementation and audit skills necessarily share OAuth/token terms, so the
+/// explicit read-only audit operation must be resolved before IDF scoring.
+fn security_audit_override(prompt: &str) -> Option<&'static str> {
+    let tokens = tokenize(prompt);
+    let audit = [
+        "audit",
+        "auditing",
+        "review",
+        "threat",
+        "compliance",
+        "vulnerability",
+    ]
+    .iter()
+    .any(|token| tokens.contains(*token));
+    let auth = [
+        "oauth",
+        "oidc",
+        "authentication",
+        "auth",
+        "token",
+        "tokens",
+        "refresh",
+    ]
+    .iter()
+    .any(|token| tokens.contains(*token));
+    if audit && auth {
+        Some("security-and-compliance-auditor")
+    } else {
+        None
+    }
 }
 
 /// Curated cross-cutting skill triggers, evaluated only when the statistical
@@ -1529,6 +1570,30 @@ mod tests {
         assert_eq!(
             curated_skill_for_prompt("map the user journey"),
             Some("ux-research-and-experience-strategy")
+        );
+    }
+
+    #[test]
+    fn auth_audit_operation_precedes_protocol_vocabulary() {
+        let corpus = vec![
+            skill(
+                "authentication-and-identity",
+                "build OAuth OIDC authentication and token refresh flows",
+                "building login and session flows",
+            ),
+            skill(
+                "security-and-compliance-auditor",
+                "security review and compliance evidence for authentication and OAuth",
+                "auditing auth and exploitability",
+            ),
+        ];
+        assert_eq!(
+            resolve_skill_for_prompt(
+                "audit our OAuth/OIDC authentication and token refresh rotation",
+                &corpus,
+            )
+            .map(|found| found.name),
+            Some("security-and-compliance-auditor".to_string())
         );
     }
 

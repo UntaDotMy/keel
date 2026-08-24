@@ -1,6 +1,7 @@
 use std::io::Write;
 
 use crate::args::FlagSet;
+use crate::runtime::write_text;
 use crate::utility::anvil::job;
 
 pub fn build_static_prefix(goal: &str, bar_dossier: &str) -> String {
@@ -37,6 +38,17 @@ fn pad_to_tokens(mut text: String, min_tokens: usize) -> String {
 pub fn hash_static(prefix: &str) -> String {
     sha256_hex(prefix.as_bytes())
 }
+fn verify_prefix_hash(prefix: &str, expected: &str) -> Result<String, String> {
+    let actual = hash_static(prefix);
+    if expected.trim() != actual {
+        return Err(format!(
+            "anvil prefix-check: prefix.sha256 mismatch (expected {}, actual {})",
+            expected.trim(),
+            actual
+        ));
+    }
+    Ok(actual)
+}
 
 pub fn write_prefix_files(paths: &job::JobPaths, prefix: &str) -> Result<String, String> {
     let first = hash_static(prefix);
@@ -45,9 +57,9 @@ pub fn write_prefix_files(paths: &job::JobPaths, prefix: &str) -> Result<String,
         return Err("anvil prefix: PrefixGuard hash drifted".into());
     }
     paths.ensure_dir()?;
-    std::fs::write(paths.prefix_path(), prefix)
+    write_text(&paths.prefix_path(), prefix)
         .map_err(|error| format!("anvil prefix.md: {error}"))?;
-    std::fs::write(paths.prefix_hash_path(), format!("{first}\n"))
+    write_text(&paths.prefix_hash_path(), &format!("{first}\n"))
         .map_err(|error| format!("anvil prefix.sha256: {error}"))?;
     Ok(first)
 }
@@ -66,36 +78,55 @@ pub fn run_prefix_check(
         return 1;
     }
     let supplied = flags.string_value("prefix").to_string();
-    let prefix = if supplied.is_empty() {
+    let (prefix, expected_hash) = if supplied.is_empty() {
         match job::JobPaths::resolve(
             flags.string_value("workspace-root"),
             flags.string_value("claude-home"),
         ) {
-            Ok(paths) => match std::fs::read_to_string(paths.prefix_path()) {
-                Ok(text) => text,
-                Err(_) => {
-                    let _ = writeln!(
-                        standard_error,
-                        "anvil prefix-check: provide --prefix or compile first"
-                    );
-                    return 1;
-                }
-            },
+            Ok(paths) => {
+                let prefix = match std::fs::read_to_string(paths.prefix_path()) {
+                    Ok(text) => text,
+                    Err(_) => {
+                        let _ = writeln!(
+                            standard_error,
+                            "anvil prefix-check: provide --prefix or compile first"
+                        );
+                        return 1;
+                    }
+                };
+                let expected = match std::fs::read_to_string(paths.prefix_hash_path()) {
+                    Ok(text) => text,
+                    Err(_) => {
+                        let _ = writeln!(
+                            standard_error,
+                            "anvil prefix-check: prefix.sha256 is missing"
+                        );
+                        return 1;
+                    }
+                };
+                (prefix, Some(expected))
+            }
             Err(error) => {
                 let _ = writeln!(standard_error, "{error}");
                 return 1;
             }
         }
     } else {
-        supplied
+        (supplied, None)
     };
-    let first = hash_static(&prefix);
+    let actual = hash_static(&prefix);
+    if let Some(expected) = expected_hash {
+        if let Err(error) = verify_prefix_hash(&prefix, &expected) {
+            let _ = writeln!(standard_error, "{error}");
+            return 1;
+        }
+    }
     let second = hash_static(&prefix);
-    if first != second {
+    if actual != second {
         let _ = writeln!(standard_error, "anvil prefix-check: hash drifted");
         return 1;
     }
-    let _ = writeln!(standard_output, "prefix sha256: {first}");
+    let _ = writeln!(standard_output, "prefix sha256: {actual}");
     0
 }
 
@@ -225,5 +256,12 @@ mod tests {
             sha256_hex(b""),
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         );
+    }
+    #[test]
+    fn persisted_hash_mismatch_is_rejected() {
+        let prefix = build_static_prefix("goal", "bar");
+        let hash = hash_static(&prefix);
+        assert!(verify_prefix_hash(&prefix, &hash).is_ok());
+        assert!(verify_prefix_hash(&prefix, "0".repeat(64).as_str()).is_err());
     }
 }

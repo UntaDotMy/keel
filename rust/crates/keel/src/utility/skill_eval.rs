@@ -64,7 +64,7 @@ const TRIGGER_FIXTURES: &[TriggerFixture] = &[
     },
     TriggerFixture {
         prompt: "audit our oauth and oidc authentication and token refresh rotation",
-        accept: &["authentication-and-identity"],
+        accept: &["security-and-compliance-auditor"],
     },
     TriggerFixture {
         prompt: "design the websocket realtime connection lifecycle and reconnection backoff",

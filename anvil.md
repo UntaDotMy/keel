@@ -215,11 +215,11 @@ Winner is $\text{argmax}(w_i / c_i)$.
 
 ### 4.2 Cast (`anvil cast`)
 
-* Creates $N$ isolated directories (`tempfile::TempDir`). Prewarms prompt cache once per job.
-* Launches $N$ parallel builder tasks using `tokio::spawn`.
-* Available builder tools: `read_file`, `write_file`, `run` (scoped to workspace directory; wrapped by Supervisor/filter). No git operations allowed.
-* If gates fail during cast, up to `builder_retries` (max 2) are permitted, passing back only the truncated failing gate output.
-
+* Creates $N$ isolated directories and copies only lock-listed source files.
+* Non-dry casts require `KEEL_ANVIL_BUILDER_ARGV`, a JSON argv array for the host builder command. Arguments may use `{workspace}`, `{piece}`, and `{gates}` placeholders.
+* The configured builder runs with the isolated workspace as its current directory and a 300-second bounded process timeout. Missing configuration fails before a cast result is written.
+* `--dry-run` is the offline path; it creates the workspace scaffold without invoking a builder.
+* Builder output is clipped before deterministic gates run. Git commit, push, rebase, and branch operations remain the builder's responsibility to avoid.
 ### 4.3 Sieve (`anvil sieve`)
 
 * Runs gate commands deterministically via `tokio::process::Command` with timeouts.

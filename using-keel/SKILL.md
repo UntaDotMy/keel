@@ -2,7 +2,7 @@
 name: using-keel
 description: Bootstrap skill loaded at every SessionStart. Establishes the research-first operating contract — trust the codebase over knowledge-base recall, invoke relevant skills before responding, find the root problem before coding. Lists every keel skill and subagent so the model knows what is invokable. Read once per session and applied to every prompt thereafter.
 when_to_use: Always. This skill is auto-loaded at SessionStart and frames every other skill in this repo.
-allowed-tools: Read, Grep, Glob, Bash(keel memory:*)
+allowed-tools: Read, Grep, Glob, Bash(keel memory:*), Bash(keel code-search siblings:*), Bash(keel review pre-pr), Bash(keel anvil:*)
 effort: low
 ---
 

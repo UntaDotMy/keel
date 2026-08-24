@@ -1197,9 +1197,11 @@ fn iron_law_research_command_rejects_bypass_and_non_research_surfaces() {
     assert!(!is_keel_research_command("keel review pre-pr"));
     // Genuine standalone research still clears it.
     assert!(is_keel_research_command("keel recall borrow checker"));
-    assert!(is_keel_research_command(
+    assert!(!is_keel_research_command(
         "keel anvil compile --goal x --bar echo"
     ));
+    assert!(is_keel_research_command("keel anvil prefix-check"));
+    assert!(is_keel_research_command("keel anvil sieve"));
     assert!(is_keel_research_command("keel memory recall foo"));
     assert!(is_keel_research_command(
         "keel code-search search --query x"

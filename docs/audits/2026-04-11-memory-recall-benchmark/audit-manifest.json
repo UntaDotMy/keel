@@ -1,9 +1,19 @@
 {
+  "schema_version": 2,
   "bundle_id": "2026-04-11-memory-recall-benchmark",
   "bundle_type": "memory_recall_benchmark",
+  "bundle_status": "historical",
+  "current_snapshot_claim": false,
+  "repository_slug": "UntaDotMy/keel",
+  "audited_revision": "bc6dad0b7e78bce1cf9a6fdbebc6cb8e15c86f6d",
   "generated_at": "2026-04-11T00:00:00Z",
+  "auditor": "memory recall benchmark bundle",
+  "auditor_version": "not-recorded",
+  "severity_scale": ["low", "medium", "high", "critical"],
+  "finding_schema": ["id", "title", "severity", "status", "evidence_paths", "remediation_state"],
   "summary_path": "docs/audits/2026-04-11-memory-recall-benchmark/audit-summary.md",
   "findings_path": "docs/audits/2026-04-11-memory-recall-benchmark/findings.json",
   "regression_proof_path": "docs/audits/2026-04-11-memory-recall-benchmark/regression-proof.md",
-  "remediation_map_path": "docs/audits/2026-04-11-memory-recall-benchmark/remediation-map.md"
+  "remediation_map_path": "docs/audits/2026-04-11-memory-recall-benchmark/remediation-map.md",
+  "historical_note": "This bundle documents the audited revision above and is not current proof for later repository revisions."
 }

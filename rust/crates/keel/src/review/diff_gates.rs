@@ -245,10 +245,10 @@ pub(crate) fn flow_check_gate(
     let Some(touched) = modified_existing_sources(repository_root, &range) else {
         return GateResult {
             name: "flow_check".to_string(),
-            status: GateStatus::Warn,
-            blocking: false,
+            status: GateStatus::Fail,
+            blocking: true,
             details: Some(format!(
-                "could not resolve the diff range ({}); brownfield evidence was NOT checked. \
+                "could not resolve the diff range ({}); brownfield evidence cannot be checked. \
                  Pass an existing --base-ref, or run the pre-commit surface.",
                 range.join(" ")
             )),
@@ -339,10 +339,10 @@ pub(crate) fn completeness_check_gate(
     let Some(touched) = completeness_touched_sources(repository_root, &range) else {
         return GateResult {
             name: "completeness_check".to_string(),
-            status: GateStatus::Warn,
-            blocking: false,
+            status: GateStatus::Fail,
+            blocking: true,
             details: Some(format!(
-                "could not resolve the diff range ({}); sibling-scan evidence was NOT checked. \
+                "could not resolve the diff range ({}); sibling-scan evidence cannot be checked. \
                  Pass an existing --base-ref, or run the pre-commit surface.",
                 range.join(" ")
             )),

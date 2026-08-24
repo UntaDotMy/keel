@@ -52,7 +52,7 @@ cmdc --mod ./commandcode/keel-cmdc.ts
 |---|---|---|
 | SessionStart context | `cmd.hooks({onSessionStart})` | `bridge session-start --session <id> --cwd <cwd>` (once per session) |
 | Per-prompt memory push | `cmd.hooks({transformContext})` (after compaction) | `bridge user-prompt --session --cwd --prompt` |
-| **Post-compact continuity** | `cmd.on('compaction_start')` + `cmd.on('compaction_done')` | `bridge post-compact --session --cwd` (learning checkpoint + memory digest re-push) |
+| **Post-compact continuity** | `cmd.on('compaction_start')` + `cmd.on('compaction_done')` | `compaction_start` → `bridge pre-compact`; `compaction_done` → `bridge post-compact` (memory digest re-push) |
 | Iron Law gate | `cmd.hooks({beforeToolCall})` | `bridge pre-tool-use --session --cwd --tool <name>` (`KEEL_GATE_DENY` → block) |
 | `run_command` compaction wrapper | `cmd.hooks({beforeToolCall})` (shell tools) | `bridge rewrite --tool <name>` (stdin) → `KEEL_REWRITE <cmd>` |
 | Observation | `cmd.hooks({afterToolCall})` | `bridge observe --session --cwd --tool <name> [--failed]` |
@@ -64,8 +64,8 @@ Command Code compacts history when the context window fills. The on-disk transcr
 
 The mod closes that gap the same way the Claude Code PreCompact/PostCompact hooks do:
 
-- `compaction_start` fires the `bridge post-compact` learning checkpoint (persists what was learned before the window is rewritten).
-- `compaction_done` calls `bridge post-compact` again and keeps the returned memory digest (workspace scope summary + map/brief digest).
+- `compaction_start` fires `bridge pre-compact` (persists what was learned before the window is rewritten).
+- `compaction_done` calls `bridge post-compact` and keeps the returned memory digest (workspace scope summary + map/brief digest).
 - The next run's `transformContext` re-injects that digest as the first user block, so the agent resumes knowing the job. The durable transcript is never touched.
 
 ## Iron Law gate

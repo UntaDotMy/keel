@@ -5,9 +5,7 @@ import {
   hasSessionStarted,
   isEditClassTool,
   isKeelReadingCommand,
-  isKeelResearchTool,
   isShellTool,
-  markIronLawSatisfied,
   markSessionStarted,
   parseGateResponse,
   parseRewriteResponse,
@@ -161,20 +159,6 @@ const KeelPlugin: Plugin = async ({ client, directory, $ }) => {
       const sessionID: string =
         (input as { sessionID?: string })?.sessionID ?? "";
 
-      // STRICT: only keel research tools clear the shared session marker.
-      // Plain Read/Grep is allowed but does NOT satisfy (matches Rust default).
-      if (isKeelResearchTool(toolName)) {
-        markIronLawSatisfied(sessionID);
-        return;
-      }
-      if (isShellTool(toolName)) {
-        const command: string =
-          (output as { args?: { command?: string } })?.args?.command ?? "";
-        if (command && isKeelReadingCommand(command)) {
-          markIronLawSatisfied(sessionID);
-          return;
-        }
-      }
 
       // Edit-class: Rust core is source of truth (evidence-based deny). This
       // gate is fail-CLOSED: an empty result means the bridge timed out or
@@ -209,7 +193,7 @@ const KeelPlugin: Plugin = async ({ client, directory, $ }) => {
         const command: string =
           (output as { args?: { command?: string } })?.args?.command ?? "";
         if (!command) return;
-
+        const readingCommand = isKeelReadingCommand(command);
         // why: the local marker check here never consulted the Rust core, so
         // KEEL_IRON_LAW_GATE=off/balanced was ignored on this host.
         const gate = await runBridge(
@@ -221,7 +205,9 @@ const KeelPlugin: Plugin = async ({ client, directory, $ }) => {
         if (gateResult.status === "deny") {
           throw new Error(
             gateResult.reason ||
-              "keel Iron Law gate: call system_map/recall/context_brief before running shell commands.",
+              (readingCommand
+                ? "keel reading command gate denied this command."
+                : "keel Iron Law gate: call system_map/recall/context_brief before running shell commands."),
           );
         }
         if (gateResult.status !== "allow") {
@@ -234,8 +220,34 @@ const KeelPlugin: Plugin = async ({ client, directory, $ }) => {
           await runBridgeWithStdin("rewrite", ["--tool", toolName], command),
         );
         if (rewritten) {
-          (output as { args: { command: string } }).args.command = rewritten;
+          output.args.command = rewritten;
         }
+      }
+    },
+    "tool.execute.after": async (input, output) => {
+      try {
+        const metadata = output.metadata;
+        const failed =
+          metadata != null &&
+          typeof metadata === "object" &&
+          "error" in metadata &&
+          metadata.error != null;
+        const stdin = JSON.stringify({
+          output: output.output,
+          metadata: output.metadata,
+        });
+        const args = [
+          "--session",
+          input.sessionID,
+          "--cwd",
+          cwd,
+          "--tool",
+          input.tool,
+        ];
+        if (failed) args.push("--failed");
+        await runBridgeWithStdin("observe", args, stdin);
+      } catch (e) {
+        console.error("[keel-plugin] tool.execute.after error:", e);
       }
     },
 
@@ -247,40 +259,15 @@ const KeelPlugin: Plugin = async ({ client, directory, $ }) => {
       (async () => {
         try {
           switch (event.type) {
-            // ---- Tool observation (non-blocking side-effect) ----
-            case "tool.execute.after": {
-              // why: session id came from `properties` while tool/input came from
-              // the event root, so one was always undefined. Read both shapes.
-              type ToolEventFields = {
-                tool?: string;
-                input?: unknown;
-                failed?: boolean;
-                sessionID?: string;
-              };
-              const root = event as unknown as ToolEventFields;
-              const props = (event.properties ?? {}) as ToolEventFields;
-              const toolName = props.tool ?? root.tool ?? "";
-              const payload = props.input ?? root.input;
-              const failed = props.failed ?? root.failed;
-              const stdin = payload != null ? JSON.stringify(payload) : "{}";
-              const obsArgs = [
-                "--session",
-                props.sessionID ?? root.sessionID ?? "",
-                "--cwd",
-                cwd,
-                "--tool",
-                toolName,
-              ];
-              if (failed) obsArgs.push("--failed");
-              await runBridgeWithStdin("observe", obsArgs, stdin);
-              break;
-            }
-
-            // ---- Session deleted: run session-end (learning + save) ----
             case "session.deleted": {
+              const properties = event.properties;
               const sid =
-                (event.properties as { sessionID?: string })?.sessionID ??
-                "";
+                properties != null &&
+                typeof properties === "object" &&
+                "sessionID" in properties &&
+                typeof properties.sessionID === "string"
+                  ? properties.sessionID
+                  : "";
               await runBridge("session-end", [
                 "--session",
                 sid,

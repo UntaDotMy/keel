@@ -493,6 +493,8 @@ Limitations and safety:
 - Token counts use `tiktoken-rs` with the `o200k_base` tokenizer; compatibility JSON fields may still be named `estimated_tokens_*`, but their values are exact tokenizer counts.
 - Raw output stays local and is not uploaded, but it can contain secrets; manage retention with `keel raw prune --older-than 30d`.
 - Compaction redacts obvious secret-looking lines in compact output, but raw recovery preserves what the command printed locally.
+- Remote `keel mcp serve-http` stays loopback-only by default. Enabling remote binding requires `KEEL_MCP_HTTP_AUTH_TOKEN`; browser origins must be listed in `KEEL_MCP_HTTP_ALLOWED_ORIGINS`.
+- MCP `run_command` is restricted to the current workspace or `KEEL_MCP_ALLOWED_ROOTS`. Shell, interpreter, network, and destructive commands require `confirm: true` plus `KEEL_MCP_ALLOW_UNSAFE_COMMANDS=1`.
 
 ### Hook path
 

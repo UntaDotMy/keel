@@ -1,0 +1,140 @@
+{
+  "codex": [
+    {
+      "name": "session-start",
+      "input": {
+        "hook_event_name": "SessionStart",
+        "session_id": "codex-session-1",
+        "cwd": "/workspace/project",
+        "source": "startup"
+      },
+      "required_fields": ["hook_event_name", "session_id", "cwd", "source"]
+    },
+    {
+      "name": "prompt",
+      "input": {
+        "hook_event_name": "UserPromptSubmit",
+        "session_id": "codex-session-1",
+        "cwd": "/workspace/project",
+        "prompt": "inspect the owning module first"
+      },
+      "required_fields": ["hook_event_name", "session_id", "cwd", "prompt"]
+    },
+    {
+      "name": "pre-tool",
+      "input": {
+        "hook_event_name": "PreToolUse",
+        "session_id": "codex-session-1",
+        "cwd": "/workspace/project",
+        "tool_name": "Bash",
+        "tool_input": {"command": "printf test"}
+      },
+      "required_fields": ["hook_event_name", "session_id", "cwd", "tool_name", "tool_input"]
+    },
+    {
+      "name": "post-tool-failure",
+      "input": {
+        "hook_event_name": "PostToolUse",
+        "session_id": "codex-session-1",
+        "cwd": "/workspace/project",
+        "tool_name": "Bash",
+        "tool_response": {"isError": true, "error": "command failed"}
+      },
+      "required_fields": ["hook_event_name", "session_id", "cwd", "tool_name", "tool_response"]
+    },
+    {
+      "name": "post-compact",
+      "input": {
+        "hook_event_name": "PostCompact",
+        "session_id": "codex-session-1",
+        "cwd": "/workspace/project",
+        "source": "compact"
+      },
+      "required_fields": ["hook_event_name", "session_id", "cwd", "source"]
+    }
+  ],
+  "cursor": [
+    {
+      "name": "pre-tool",
+      "input": {
+        "hook_event_name": "preToolUse",
+        "conversation_id": "cursor-conversation-1",
+        "cwd": "/workspace/project",
+        "tool_name": "Shell",
+        "tool_input": {"command": "printf test"}
+      },
+      "required_fields": ["hook_event_name", "conversation_id", "cwd", "tool_name", "tool_input"]
+    },
+    {
+      "name": "post-tool",
+      "input": {
+        "hook_event_name": "postToolUse",
+        "conversation_id": "cursor-conversation-1",
+        "cwd": "/workspace/project",
+        "tool_name": "Shell",
+        "tool_input": {"command": "printf test"},
+        "tool_output": {"exit_code": 0}
+      },
+      "required_fields": ["hook_event_name", "conversation_id", "cwd", "tool_name", "tool_input", "tool_output"]
+    },
+    {
+      "name": "session-end",
+      "input": {
+        "hook_event_name": "sessionEnd",
+        "conversation_id": "cursor-conversation-1",
+        "cwd": "/workspace/project"
+      },
+      "required_fields": ["hook_event_name", "conversation_id", "cwd"]
+    }
+  ],
+  "opencode": [
+    {
+      "name": "chat-message",
+      "input": {"sessionID": "opencode-session-1"},
+      "output": {"parts": [{"type": "text", "text": "inspect the owning module first"}]},
+      "required_input_fields": ["sessionID"],
+      "required_output_fields": ["parts"]
+    },
+    {
+      "name": "tool-before",
+      "input": {"sessionID": "opencode-session-1", "tool": "bash", "callID": "call-1"},
+      "output": {"args": {"command": "printf test"}},
+      "required_input_fields": ["sessionID", "tool", "callID"],
+      "required_output_fields": ["args"]
+    },
+    {
+      "name": "tool-after",
+      "input": {"sessionID": "opencode-session-1", "tool": "bash", "callID": "call-1"},
+      "output": {"output": "test\n", "metadata": {"exitCode": 0}},
+      "required_input_fields": ["sessionID", "tool", "callID"],
+      "required_output_fields": ["output", "metadata"]
+    },
+    {
+      "name": "session-deleted",
+      "event": {"type": "session.deleted", "properties": {"sessionID": "opencode-session-1"}},
+      "required_event_fields": ["type", "properties"]
+    }
+  ],
+  "commandcode": [
+    {
+      "name": "session-start",
+      "event": {"source": "startup"},
+      "required_event_fields": ["source"]
+    },
+    {
+      "name": "before-tool",
+      "event": {"toolName": "bash", "input": {"command": "printf test"}},
+      "required_event_fields": ["toolName", "input"]
+    },
+    {
+      "name": "after-tool",
+      "event": {"toolName": "bash", "input": {"command": "printf test"}, "result": {"stdout": "test\n"}},
+      "required_event_fields": ["toolName", "input", "result"]
+    },
+    {
+      "name": "compaction",
+      "event": {"phase": "compaction_start"},
+      "required_event_fields": ["phase"]
+    }
+  ]
+}

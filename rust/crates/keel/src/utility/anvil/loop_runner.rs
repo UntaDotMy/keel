@@ -2,6 +2,7 @@ use std::io::Write;
 use std::time::{Duration, Instant};
 
 use crate::args::FlagSet;
+use crate::utility::anvil::cast;
 use crate::utility::anvil::job;
 use crate::utility::anvil::report;
 use crate::utility::anvil::sieve;
@@ -50,6 +51,15 @@ where
     }
     (iterations, improvement)
 }
+fn refinement_gates(paths: &job::JobPaths, piece: &str) -> Result<Vec<String>, String> {
+    let lock = job::load_lock(paths)?;
+    let pieces = job::pieces_from_lock(&lock, piece)?;
+    let gates: Vec<String> = pieces.into_iter().flat_map(|piece| piece.gates).collect();
+    if gates.is_empty() {
+        return Err("anvil loop: no refinement gates are configured".to_string());
+    }
+    Ok(gates)
+}
 
 pub fn run_loop(
     arguments: &[String],
@@ -85,7 +95,7 @@ pub fn run_loop(
     };
     let piece = flags.string_value("piece").to_string();
     let final_pass;
-    let (iters, delta) = if dry_run || paths.lock_path().is_file() {
+    let (iters, delta) = if dry_run {
         let piece_ref = piece.clone();
         let mut pass_state = false;
         let result = run_bounded_loop(&cfg, || match sieve::sieve_lock(&paths, &piece_ref, &[]) {
@@ -100,9 +110,56 @@ pub fn run_loop(
         });
         final_pass = pass_state;
         result
+    } else if paths.lock_path().is_file() {
+        let workspace = paths.out_dir().join("workspace");
+        if !workspace.is_dir() {
+            let _ = writeln!(
+                standard_error,
+                "anvil loop: no promoted winner workspace at {}",
+                workspace.display()
+            );
+            return 1;
+        }
+        let gates = match refinement_gates(&paths, &piece) {
+            Ok(gates) => gates,
+            Err(error) => {
+                let _ = writeln!(standard_error, "{error}");
+                return 1;
+            }
+        };
+        let builder_piece = if piece.is_empty() {
+            "all".to_string()
+        } else {
+            piece.clone()
+        };
+        let mut pass_state = false;
+        let mut builder_error = None;
+        let result = run_bounded_loop(&cfg, || {
+            match cast::run_builder(&workspace, &builder_piece, &gates) {
+                Ok(_) => {
+                    let (pass, _) = sieve::run_gates_in_directory(&gates, Some(&workspace));
+                    pass_state = pass;
+                    (pass, if pass { 1.0 } else { 0.0 })
+                }
+                Err(error) => {
+                    builder_error = Some(error);
+                    pass_state = false;
+                    (false, 0.0)
+                }
+            }
+        });
+        if let Some(error) = builder_error {
+            let _ = writeln!(standard_error, "{error}");
+        }
+        final_pass = pass_state;
+        result
     } else {
-        final_pass = true;
-        run_bounded_loop(&cfg, || (true, 1.0))
+        let _ = writeln!(
+            standard_error,
+            "anvil loop: missing lock at {}",
+            paths.lock_path().display()
+        );
+        return 1;
     };
     let mut built = report::empty_report();
     built.loop_iterations = iters as u64;

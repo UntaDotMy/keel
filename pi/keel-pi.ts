@@ -40,9 +40,7 @@ import {
   ironLawSatisfied,
   isEditClassTool,
   isKeelReadingCommand,
-  isKeelResearchTool,
   isShellTool,
-  markIronLawSatisfied,
   markSessionStarted,
   parseGateResponse,
   parseRewriteResponse,
@@ -252,71 +250,73 @@ function handleToolCall(
   event: PiToolCallEvent,
   ctx?: PiExtensionContext,
 ): { block: true; reason: string } | undefined {
+  const sessionID = resolveSessionId(event as PiSessionLikeEvent, ctx);
+  const toolName = (event?.toolName || "").toLowerCase();
+  const editTool = isEditClassTool(toolName);
+  const shellTool = isShellTool(toolName);
   try {
-    const sessionID = resolveSessionId(event as PiSessionLikeEvent, ctx);
-    const toolName = (event?.toolName || "").toLowerCase();
-
-    // STRICT: only keel research tools clear the shared marker (not plain Read).
-    if (isKeelResearchTool(toolName)) {
-      markIronLawSatisfied(sessionID);
-      return undefined;
-    }
-    if (isShellTool(toolName)) {
-      const cmd = event?.input?.command;
-      if (typeof cmd === "string" && isKeelReadingCommand(cmd)) {
-        markIronLawSatisfied(sessionID);
-      }
-    }
-
-    // Edit-class: prefer Rust core decision; also block when local marker absent.
-    if (isEditClassTool(toolName)) {
-      const gate = runBridge("pre-tool-use", [
+    const command = shellTool && typeof event?.input?.command === "string"
+      ? event.input.command
+      : "";
+    const readingCommand = command ? isKeelReadingCommand(command) : false;
+    if (editTool || shellTool) {
+      const gateArgs = [
         "--session",
         sessionID,
         "--cwd",
         resolveCwd(ctx),
         "--tool",
         toolName,
-      ]);
-      const gateResult = parseGateResponse(gate);
+      ];
+      if (command) gateArgs.push("--command", command);
+      const gateResult = parseGateResponse(runBridge("pre-tool-use", gateArgs, 5000));
       if (gateResult.status === "deny") {
         return {
           block: true,
           reason:
             gateResult.reason ||
-            "keel Iron Law gate: call system_map/recall/context_brief before editing.",
+            (readingCommand
+              ? "keel reading command gate denied this operation."
+              : "keel Iron Law gate: call system_map/recall/context_brief before the operation."),
         };
       }
-      if (!ironLawSatisfied(sessionID)) {
+      if (gateResult.status !== "allow") {
         return {
           block: true,
           reason:
-            "IRON LAW ENFORCED (STRICT): Use a keel tool first (MCP system_map, recall, context_brief, skill_route, or `keel doctor` / `keel code-search`). Plain Read does not clear the gate.",
+            "keel Iron Law gate could not be evaluated; retry after running `keel doctor`.",
         };
       }
     }
 
-    // --- Compaction reroute for shell tools. ---
-    if (isShellTool(toolName)) {
-      const cmd = event?.input?.command;
-      if (typeof cmd === "string" && cmd.trim() !== "" && !cmd.startsWith("keel run --")) {
-        const rewrite = bridgeRewrite(cmd, toolName);
-        const rewritten = parseRewriteResponse(rewrite);
-        if (rewritten && rewritten !== cmd && event?.input) {
-          // Pi's contract: mutate event.input in place.
-          event.input.command = rewritten;
-        }
-      }
+    if (editTool && !ironLawSatisfied(sessionID)) {
+      return {
+        block: true,
+        reason:
+          "IRON LAW ENFORCED (STRICT): Use a keel reading tool before editing.",
+      };
     }
 
-    // Returning undefined allows execution (with any in-place mutation).
+    if (shellTool && command && !command.startsWith("keel run --")) {
+      const rewritten = parseRewriteResponse(runBridge("rewrite", [
+        "--tool",
+        toolName,
+        "--command",
+        command,
+      ], 500));
+      if (rewritten && rewritten !== command && event?.input) {
+        event.input.command = rewritten;
+      }
+    }
     return undefined;
   } catch (err) {
-    // Fail open — let the original tool call run unchanged.
-    console.warn(
-      "[keel] unexpected error in tool_call handler; passing through",
-      err,
-    );
+    if (editTool || shellTool) {
+      return {
+        block: true,
+        reason: "keel adapter gate failed closed; retry after running `keel doctor`.",
+      };
+    }
+    console.warn("[keel] unexpected error in tool_call handler", err);
     return undefined;
   }
 }
@@ -338,6 +338,8 @@ function handleToolExecutionEnd(
     resolveCwd(ctx),
     "--tool",
     event?.toolName ?? "",
+    "--phase",
+    "post",
   ];
   if (event?.error) args.push("--failed");
   runBridge("observe", args, "{}", 500);

@@ -29,8 +29,9 @@ use std::path::{Path, PathBuf};
 
 use crate::args::FlagSet;
 use crate::runtime::{
-    display_path, resolve_claude_home, resolve_repository_root, safe_path_segment,
+    display_path, resolve_claude_home, resolve_repository_root, safe_path_segment, write_text,
 };
+use crate::utility::hashing::fnv1a64_hex;
 
 /// Schema version of the emitted artifact. Bump when the JSON shape changes so a
 /// reader can refuse an incompatible graph rather than misparse it.
@@ -112,6 +113,7 @@ struct Edge {
 /// The whole graph, ready to serialize.
 pub struct CodeGraph {
     root: PathBuf,
+    source_fingerprint: String,
     nodes: Vec<Node>,
     edges: Vec<Edge>,
 }
@@ -230,7 +232,7 @@ fn run_build(
             return 1;
         }
     }
-    if let Err(error) = fs::write(&output_path, format!("{serialized}\n")) {
+    if let Err(error) = write_text(&output_path, &format!("{serialized}\n")) {
         let _ = writeln!(
             standard_error,
             "code-graph build: write {}: {error}",
@@ -357,6 +359,7 @@ pub fn build_graph(root: &Path) -> CodeGraph {
     let mut path_set: BTreeSet<String> = BTreeSet::new();
     let mut nodes: Vec<Node> = Vec::new();
     let mut raw_imports: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut source_material = String::new();
 
     for absolute in &files {
         let relative = match absolute.strip_prefix(root) {
@@ -370,6 +373,7 @@ pub fn build_graph(root: &Path) -> CodeGraph {
             Ok(text) => text,
             Err(_) => continue,
         };
+        source_material.push_str(&format!("{}:{}\n{}\n", relative, text.len(), text));
         let mut defines = extract_definitions(lang, &text);
         defines.sort();
         defines.dedup();
@@ -415,6 +419,7 @@ pub fn build_graph(root: &Path) -> CodeGraph {
 
     CodeGraph {
         root: root.to_path_buf(),
+        source_fingerprint: fnv1a64_hex(&source_material),
         nodes,
         edges,
     }
@@ -483,6 +488,7 @@ impl CodeGraph {
             "version": GRAPH_VERSION,
             "generator": "keel-code-graph",
             "root": display_path(&self.root),
+            "sourceFingerprint": self.source_fingerprint,
             "fileCount": self.nodes.len(),
             "edgeCount": self.edges.len(),
             "nodes": nodes,
@@ -495,54 +501,75 @@ impl CodeGraph {
     pub fn from_json_file(path: &Path) -> Option<Self> {
         let text = fs::read_to_string(path).ok()?;
         let value: serde_json::Value = serde_json::from_str(&text).ok()?;
-        let version = value.get("version")?.as_u64()?;
-        if version != GRAPH_VERSION {
+        if value.get("version")?.as_u64()? != GRAPH_VERSION {
+            return None;
+        }
+        let root = PathBuf::from(value.get("root")?.as_str()?);
+        if !root.is_dir() {
+            return None;
+        }
+        let source_fingerprint = value.get("sourceFingerprint")?.as_str()?.to_string();
+        if build_graph(&root).source_fingerprint != source_fingerprint {
             return None;
         }
         let nodes: Vec<Node> = value
             .get("nodes")?
             .as_array()?
             .iter()
-            .filter_map(|n| {
+            .map(|node| {
+                let id = node.get("id")?.as_str()?.to_string();
+                let lang = match node.get("lang")?.as_str()? {
+                    "rust" => "rust",
+                    "javascript" => "javascript",
+                    "typescript" => "typescript",
+                    "python" => "python",
+                    "go" => "go",
+                    _ => return None,
+                };
+                let defines = node
+                    .get("defines")?
+                    .as_array()?
+                    .iter()
+                    .map(|value| value.as_str().map(String::from))
+                    .collect::<Option<Vec<_>>>()?;
+                let imports = node
+                    .get("imports")?
+                    .as_array()?
+                    .iter()
+                    .map(|value| value.as_str().map(String::from))
+                    .collect::<Option<Vec<_>>>()?;
                 Some(Node {
-                    id: n.get("id")?.as_str()?.to_string(),
-                    lang: match n.get("lang")?.as_str()? {
-                        "rust" => "rust",
-                        "javascript" => "javascript",
-                        "typescript" => "typescript",
-                        "python" => "python",
-                        "go" => "go",
-                        _ => return None,
-                    },
-                    defines: n
-                        .get("defines")?
-                        .as_array()?
-                        .iter()
-                        .filter_map(|d| d.as_str().map(String::from))
-                        .collect(),
-                    imports: n
-                        .get("imports")?
-                        .as_array()?
-                        .iter()
-                        .filter_map(|i| i.as_str().map(String::from))
-                        .collect(),
+                    id,
+                    lang,
+                    defines,
+                    imports,
                 })
             })
-            .collect();
+            .collect::<Option<Vec<_>>>()?;
         let edges: Vec<Edge> = value
             .get("edges")?
             .as_array()?
             .iter()
-            .filter_map(|e| {
+            .map(|edge| {
+                let kind = edge.get("kind")?.as_str()?;
+                if kind != "imports" {
+                    return None;
+                }
                 Some(Edge {
-                    from: e.get("from")?.as_str()?.to_string(),
-                    to: e.get("to")?.as_str()?.to_string(),
+                    from: edge.get("from")?.as_str()?.to_string(),
+                    to: edge.get("to")?.as_str()?.to_string(),
                     kind: "imports",
                 })
             })
-            .collect();
+            .collect::<Option<Vec<_>>>()?;
+        if value.get("fileCount")?.as_u64()? != nodes.len() as u64
+            || value.get("edgeCount")?.as_u64()? != edges.len() as u64
+        {
+            return None;
+        }
         Some(CodeGraph {
-            root: PathBuf::new(),
+            root,
+            source_fingerprint,
             nodes,
             edges,
         })
@@ -1176,6 +1203,30 @@ mod tests {
         let impacted = loaded.impact_of(&["c.ts".to_string()]);
         assert_eq!(impacted, vec!["a.ts".to_string(), "b.ts".to_string()]);
 
+        let _ = fs::remove_dir_all(root);
+    }
+    #[test]
+    fn from_json_file_rejects_stale_source_fingerprint() {
+        let root = tempdir("stale");
+        write(&root, "main.rs", "fn main() {}\n");
+        let graph = build_graph(&root);
+        let artifact = root.join("code-graph.json");
+        fs::write(&artifact, serde_json::to_string(&graph.to_json()).unwrap()).unwrap();
+        write(&root, "main.rs", "fn main() { println!(\"changed\"); }\n");
+        assert!(CodeGraph::from_json_file(&artifact).is_none());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn from_json_file_rejects_malformed_nodes() {
+        let root = tempdir("malformed-node");
+        let graph = build_graph(&root);
+        let mut value = graph.to_json();
+        value["nodes"] = serde_json::json!([{"id": "bad"}]);
+        value["fileCount"] = serde_json::json!(1);
+        let artifact = root.join("code-graph.json");
+        fs::write(&artifact, serde_json::to_string(&value).unwrap()).unwrap();
+        assert!(CodeGraph::from_json_file(&artifact).is_none());
         let _ = fs::remove_dir_all(root);
     }
 

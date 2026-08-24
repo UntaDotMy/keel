@@ -4,13 +4,27 @@
     "severity": "medium",
     "surface": "memory",
     "finding": "keel has deterministic scoped recall but still lacks the semantic recall layer that the memory-product comparator class ships through vector-backed retrieval.",
-    "comparator": "memory-product comparator"
+    "comparator": "memory-product comparator",
+    "status": "open",
+    "remediation_state": "tracked-open",
+    "evidence_paths": [
+      "docs/audits/2026-04-11-memory-recall-benchmark/audit-summary.md",
+      "docs/audits/2026-04-11-memory-recall-benchmark/remediation-map.md",
+      "docs/audits/2026-04-11-memory-recall-benchmark/regression-proof.md"
+    ]
   },
   {
     "id": "memory-benchmark-gap-public-benchmark-runner",
     "severity": "medium",
     "surface": "memory",
     "finding": "keel now ships a source-backed benchmark bundle, but memory-product comparator still exposes the more memory-specific public benchmark runner and hook-driven runtime posture.",
-    "comparator": "memory-product comparator"
+    "comparator": "memory-product comparator",
+    "status": "open",
+    "remediation_state": "tracked-open",
+    "evidence_paths": [
+      "docs/audits/2026-04-11-memory-recall-benchmark/audit-summary.md",
+      "docs/audits/2026-04-11-memory-recall-benchmark/remediation-map.md",
+      "docs/audits/2026-04-11-memory-recall-benchmark/regression-proof.md"
+    ]
   }
 ]

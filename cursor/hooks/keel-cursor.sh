@@ -26,6 +26,11 @@
 # ---------------------------------------------------------------------------
 
 set -euo pipefail
+# Keep the shell declaration in parity with Rust and bridge-core. Multi-word
+# forms are documented here so the parity test cannot silently lose them.
+KEEL_RESEARCH_SUBCOMMANDS="system-map system_map recall doctor code-search code_search skill-route skill_route skill-list skill_list skill-get skill_get context-brief context_brief"
+# Multi-word research forms: memory status, memory recall, memory system-map,
+# memory scope, anvil prefix-check, anvil sieve.
 
 # Resolve the keel binary: KEEL_HOME → ~/.keel → ~/.claude → PATH.
 if [ -n "${KEEL_HOME:-}" ] && [ -x "$KEEL_HOME/keel" ]; then
@@ -90,59 +95,38 @@ mkdir -p "$MARKER_DIR" 2>/dev/null || true
 MARKER="$MARKER_DIR/$SESSION_KEY"
 STARTED_DIR="$STATE_ROOT/cursor-session-started"
 mkdir -p "$STARTED_DIR" 2>/dev/null || true
-STARTED_MARKER="$STARTED_DIR/$SESSION_ID"
+STARTED_MARKER="$STARTED_DIR/$SESSION_KEY"
 
 is_edit_class_tool() {
   case "$1" in
-    Write|Edit|Delete|StrReplace|MultiEdit|NotebookEdit) return 0 ;;
+    Write|Edit|Delete|StrReplace|MultiEdit|NotebookEdit|ApplyPatch|Patch|SearchReplace) return 0 ;;
     *) return 1 ;;
   esac
 }
 
-# Map a Cursor tool name to the canonical keel/Rust gated tool name so the Iron
-# Law gate actually recognizes it. Cursor uses StrReplace where the Rust gated
-# set uses str_replace; Write/Edit/MultiEdit/NotebookEdit already lowercase-match
-# ("multiedit"/"notebookedit"). Delete is not in the Rust gated set at all, so it
-# relies on the local-marker fallback in the edit-class branch below.
 canonical_keel_tool() {
   case "$1" in
     StrReplace) echo "str_replace" ;;
+    SearchReplace) echo "search_replace" ;;
+    ApplyPatch) echo "apply_patch" ;;
     *) echo "$1" ;;
   esac
 }
 
-is_keel_research_tool() {
+is_shell_tool() {
   case "$1" in
-    *keel*|*KEEL*) return 0 ;;
+    Shell|Bash|PowerShell|Command|Terminal) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+is_compound_command() {
+  # Keep the local fail-closed guard aligned with Rust's `[&|;`\n]` parser.
+  case "$1" in
+    *'&&'*|*'||'*|*';'*|*'|'*|*'`'*|*'$('*|*$'\n'*) return 0 ;;
     *) return 1 ;;
   esac
 }
 
-# Mirrors the Rust is_keel_research_command HITS list (hook_lifecycle/mod.rs).
-# The doc-parity test adapter_gate_lists_match_the_rust_source_of_truth enforces it.
-KEEL_RESEARCH_SUBCOMMANDS="system-map system_map recall doctor code-search code_search skill-route skill_route skill-list skill_list skill-get skill_get context-brief context_brief anvil"
-is_keel_reading_command() {
-  body=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
-  case "$body" in
-    "keel run -- "*) body=${body#keel run -- } ;;
-    "keel.exe run -- "*) body=${body#keel.exe run -- } ;;
-  esac
-  case "$body" in
-    "keel "*|"keel.exe "*|*"/keel "*|*"/keel.exe "*) : ;;
-    *) return 1 ;;
-  esac
-  # why: a chained command smuggles a non-keel tail past the gate.
-  case "$body" in
-    *"&"*|*"|"*|*";"*|*'`'*|*'$('*) return 1 ;;
-  esac
-  for hit in $KEEL_RESEARCH_SUBCOMMANDS; do
-    case "$body" in *"$hit"*) return 0 ;; esac
-  done
-  case "$body" in
-    *"memory status"*|*"memory recall"*|*"memory system-map"*|*"memory scope"*) return 0 ;;
-  esac
-  return 1
-}
 
 # --- Lifecycle events: dispatch to keel bridge, no output needed. ---
 case "$HOOK_EVENT" in
@@ -165,7 +149,7 @@ case "$HOOK_EVENT" in
     ;;
   postToolUse)
     # Observation capture (fire-and-forget). stdin payload to bridge observe.
-    printf '%s' "$INPUT" | "$KEEL_BIN" bridge observe --session "$SESSION_ID" --cwd "$CWD" --tool "$TOOL_NAME" >/dev/null 2>&1 || true
+    printf '%s' "$INPUT" | "$KEEL_BIN" bridge observe --session "$SESSION_ID" --cwd "$CWD" --tool "$TOOL_NAME" --phase post >/dev/null 2>&1 || true
     echo '{}'
     exit 0
     ;;
@@ -175,22 +159,47 @@ esac
 
 # Session-start (once per session): bootstrap + digest + MCP self-heal.
 if [ ! -f "$STARTED_MARKER" ]; then
-  "$KEEL_BIN" bridge session-start --session "$SESSION_ID" --cwd "$CWD" >/dev/null 2>&1 || true
-  : > "$STARTED_MARKER" 2>/dev/null || true
-fi
-
-# STRICT: only keel research tools clear the shared marker (not plain Read).
-if is_keel_research_tool "$TOOL_NAME"; then
-  printf 'satisfied' > "$MARKER" 2>/dev/null || true
-fi
-
-# Shell tools running keel reading commands also satisfy the gate.
-if [ "$TOOL_NAME" = "Shell" ] && [ -n "$CMD" ]; then
-  if is_keel_reading_command "$CMD"; then
-    printf 'satisfied' > "$MARKER" 2>/dev/null || true
+  if "$KEEL_BIN" bridge session-start --session "$SESSION_ID" --cwd "$CWD" >/dev/null 2>&1; then
+    : > "$STARTED_MARKER" 2>/dev/null || true
   fi
 fi
+if is_shell_tool "$TOOL_NAME" && is_compound_command "$CMD"; then
+  "$JQ_BIN" -n --arg msg "Compound shell commands are denied by the keel gate." '{
+    "permission": "deny",
+    "user_message": $msg,
+    "agent_message": $msg
+  }'
+  exit 0
+fi
 
+
+if is_shell_tool "$TOOL_NAME"; then
+  CANON_TOOL=$(canonical_keel_tool "$TOOL_NAME")
+  GATE_ARGS=(--session "$SESSION_ID" --cwd "$CWD" --tool "$CANON_TOOL")
+  [ -n "$CMD" ] && GATE_ARGS+=(--command "$CMD")
+  GATE=$("$KEEL_BIN" bridge pre-tool-use "${GATE_ARGS[@]}" 2>/dev/null) || GATE=""
+  case "$GATE" in
+    KEEL_GATE_DENY*)
+      REASON=$(printf '%s' "$GATE" | sed '1d')
+      [ -z "$REASON" ] && REASON="IRON LAW shell gate denied this command."
+      "$JQ_BIN" -n --arg msg "$REASON" '{
+        "permission": "deny",
+        "user_message": $msg,
+        "agent_message": $msg
+      }'
+      exit 0
+      ;;
+    KEEL_GATE_ALLOW*) ;;
+    *)
+      "$JQ_BIN" -n --arg msg "IRON LAW shell gate could not be evaluated." '{
+        "permission": "deny",
+        "user_message": $msg,
+        "agent_message": $msg
+      }'
+      exit 0
+      ;;
+  esac
+fi
 # Iron Law: deny edit-class tools via Rust core (evidence-based; no ack-on-deny).
 if is_edit_class_tool "$TOOL_NAME"; then
   # Map the Cursor tool name to the canonical name so the Rust gate recognizes

@@ -30,10 +30,10 @@ The current workspace evidence for this repo includes:
 
 ## Current Bundle Status
 
-- Audit bundle format: published in [docs/audit-bundle-format.md](./audit-bundle-format.md)
-- Source-backed audit bundle artifact: published in [docs/audits/2026-04-08-repo-governance-and-static-safety/audit-summary.md](./audits/2026-04-08-repo-governance-and-static-safety/audit-summary.md)
+- Audit bundle format: version 2 in [docs/audit-bundle-format.md](./audit-bundle-format.md)
+- Historical source-backed bundle: [2026-04-08 governance audit](./audits/2026-04-08-repo-governance-and-static-safety/audit-summary.md), audited revision `5e0bcb33f20ba626ca3e32657ae6f1c8350b9b2c`
+- Current snapshot claim: not made by the historical bundles
 - Numeric security score claim: not allowed yet
-- Static-safety and governance bundle status: source-backed and published for the current repo snapshot.
 
 ## Release Bar For Future Security Claims
 
@@ -45,4 +45,4 @@ Before publishing a numeric score or a named findings list, add a durable audit 
 - linked remediation commits or file references
 - regression validation that proves each fix stayed closed
 
-The repo now ships a source-backed governance and static-safety bundle for the current snapshot, but broader security posture is **partially implemented and only partially proven** until a deeper audit artifact covers scanner identity, revision-specific findings, and closure evidence across the full security surface.
+The repo ships historical source-backed bundles with explicit audited revisions. Broader security posture remains **partially proven** until a current revision-specific bundle records scanner identity, findings, remediation state, and regression evidence across the full security surface.

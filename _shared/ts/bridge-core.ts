@@ -14,7 +14,18 @@ export function resolveBinary(): string {
   candidates.push(path.join(home, ".claude", BIN_NAME));
   for (const candidate of candidates) {
     try {
-      if (fs.existsSync(candidate)) return candidate;
+      const usable =
+        os.platform() === "win32"
+          ? fs.existsSync(candidate)
+          : (() => {
+              try {
+                fs.accessSync(candidate, fs.constants.X_OK);
+                return true;
+              } catch {
+                return false;
+              }
+            })();
+      if (usable) return candidate;
     } catch {
       // fs failure, try the next candidate
     }
@@ -98,15 +109,15 @@ export function clearMarker(dir: string, sessionID: string, sanitize = false): v
 }
 
 export function hasSessionStarted(dir: string, sessionID: string): boolean {
-  return hasMarker(dir, sessionID);
+  return hasMarker(dir, sessionID, true);
 }
 
 export function markSessionStarted(dir: string, sessionID: string): void {
-  setMarker(dir, sessionID);
+  setMarker(dir, sessionID, "", true);
 }
 
 export function clearSessionStarted(dir: string, sessionID: string): void {
-  clearMarker(dir, sessionID);
+  clearMarker(dir, sessionID, true);
 }
 
 export function ironLawSatisfied(sessionID: string): boolean {
@@ -130,19 +141,23 @@ export function clearIronLawMarker(sessionID: string): void {
   clearMarker(legacyIronLawMarkerDirectory(), sessionID, true);
 }
 
-const EDIT_CLASS_TOOL_NAMES = new Set([
-  "edit", "write", "multiedit", "notebookedit", "apply_patch", "str_replace", "patch",
-]);
-const SHELL_TOOL_NAMES = new Set([
-  "bash", "shell", "sh", "zsh", "fish", "powershell", "pwsh", "cmd",
-]);
+const EDIT_CLASS_TOOL_NAMES: Record<string, true> = {
+  edit: true, write: true, multiedit: true, multi_edit: true,
+  notebookedit: true, notebook_edit: true, apply_patch: true, applypatch: true,
+  str_replace: true, strreplace: true, search_replace: true, searchreplace: true,
+  patch: true,
+};
+const SHELL_TOOL_NAMES: Record<string, true> = {
+  bash: true, shell: true, sh: true, zsh: true, fish: true,
+  powershell: true, pwsh: true, cmd: true,
+};
 
 export function isEditClassTool(toolName: string): boolean {
-  return EDIT_CLASS_TOOL_NAMES.has(toolName.toLowerCase());
+  return EDIT_CLASS_TOOL_NAMES[toolName.toLowerCase()] === true;
 }
 
 export function isShellTool(toolName: string): boolean {
-  return SHELL_TOOL_NAMES.has(toolName.toLowerCase());
+  return SHELL_TOOL_NAMES[toolName.toLowerCase()] === true;
 }
 
 export function isKeelResearchTool(toolName: string): boolean {
@@ -167,25 +182,59 @@ const KEEL_RESEARCH_SUBCOMMANDS = [
   "system-map", "system_map", "recall", "doctor", "code-search", "code_search",
   "skill-route", "skill_route", "skill-list", "skill_list", "skill-get", "skill_get",
   "context-brief", "context_brief", "memory status", "memory recall",
-  "memory system-map", "memory scope", "anvil",
+  "memory system-map", "memory scope", "anvil prefix-check", "anvil sieve",
 ];
 
+function shellCommandWords(command: string): string[] {
+  const words: string[] = [];
+  let current = "";
+  let quote = "";
+  for (let index = 0; index < command.length; index += 1) {
+    const character = command[index];
+    if (quote) {
+      if (character === quote) {
+        quote = "";
+      } else {
+        current += character;
+      }
+      continue;
+    }
+    if (character === "'" || character === "\"") {
+      quote = character;
+      continue;
+    }
+    if (/\s/.test(character)) {
+      if (current) {
+        words.push(current);
+        current = "";
+      }
+      continue;
+    }
+    if ("&|;`\n".includes(character) || (character === "$" && command[index + 1] === "(")) {
+      return [];
+    }
+    current += character;
+  }
+  if (quote) return [];
+  if (current) words.push(current);
+  return words;
+}
+
+function isKeelExecutable(value: string): boolean {
+  const basename = value.replace(/\\/g, "/").split("/").pop() ?? value;
+  return basename === "keel" || basename === "keel.exe";
+}
+
 export function isKeelReadingCommand(command: string): boolean {
-  const trimmed = command.trim().toLowerCase();
-  const body = trimmed.startsWith("keel run -- ")
-    ? trimmed.slice("keel run -- ".length)
-    : trimmed.startsWith("keel.exe run -- ")
-      ? trimmed.slice("keel.exe run -- ".length)
-      : trimmed;
-  const hasKeel =
-    body.startsWith("keel ") ||
-    body.startsWith("keel.exe ") ||
-    body.includes("\\keel.exe ") ||
-    body.includes("/keel ") ||
-    body.includes("\\keel ");
-  if (!hasKeel) return false;
-  if (/[&|;`\n]/.test(body) || body.includes("$(")) return false;
-  return KEEL_RESEARCH_SUBCOMMANDS.some((hit) => body.includes(hit));
+  let words = shellCommandWords(command.trim().toLowerCase());
+  if (words.length >= 3 && isKeelExecutable(words[0]) && words[1] === "run" && words[2] === "--") {
+    words = words.slice(3);
+  }
+  if (words.length < 2 || !isKeelExecutable(words[0])) return false;
+  const subcommand = words.slice(1).join(" ");
+  return KEEL_RESEARCH_SUBCOMMANDS.some(
+    (hit) => subcommand === hit || subcommand.startsWith(`${hit} `),
+  );
 }
 
 export type GateResponse = "allow" | "deny" | "unknown";

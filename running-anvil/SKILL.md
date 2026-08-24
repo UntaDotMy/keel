@@ -1,8 +1,8 @@
 ---
 name: running-anvil
-description: Run the Anvil single-root delivery loop — compile a named bar into lock+prefix+gates with one frontier call, cast N isolated workspaces from a frozen prefix, sieve with deterministic 0-LLM gates, stamp with PPT logprob verifier (EV over A–T), and bounded-loop refine only if gates still fail. The only keel delivery loop — replaces sprint/gauntlet/work fully.
+description: Use when delivering any non-trivial build, fix, or multi-piece change with a named bar, isolated casts, deterministic gates, and bounded refinement. Run the Anvil single-root delivery loop — compile a named bar into lock+prefix+gates with one frontier call, cast N isolated workspaces from a frozen prefix, sieve with deterministic 0-LLM gates, stamp with PPT logprob verifier (EV over A–T), and bounded-loop refine only if gates still fail. The only keel delivery loop — replaces sprint/gauntlet/work fully.
 when_to_use: Any non-trivial build, fix, or multi-piece delivery — ambitious artifacts, feature drops, bug fixes, hardening passes where selection under a named bar + bounded iteration matters. All new work must use Anvil; sprint/gauntlet/work are deleted legacy surfaces.
-allowed-tools: Read, Grep, Glob, Bash(keel anvil:*), Bash(keel memory:*), Bash(keel review:*)
+allowed-tools: Read, Grep, Glob, Bash(keel anvil:*), Bash(keel code-search siblings:*), Bash(keel memory:*), Bash(keel review:*)
 effort: medium
 ---
 

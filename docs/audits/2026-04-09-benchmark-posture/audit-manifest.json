@@ -1,8 +1,15 @@
 {
+  "schema_version": 2,
+  "bundle_id": "2026-04-09-benchmark-posture",
+  "bundle_status": "historical",
+  "current_snapshot_claim": false,
   "repository_slug": "UntaDotMy/keel",
   "audited_revision": "f1fdcf71db094e240b94eaa5dc2f9dea46345c18",
   "generated_at": "2026-04-09",
   "auditor": "the harness CLI repository audit bundle",
+  "auditor_version": "not-recorded",
+  "severity_scale": ["low", "medium", "high", "critical"],
+  "finding_schema": ["id", "title", "severity", "status", "evidence_paths", "remediation_state"],
   "scope": [
     "benchmark posture",
     "shared benchmark harness posture",
@@ -15,5 +22,6 @@
     "docs/audits/2026-04-09-benchmark-posture/remediation-map.md",
     "docs/audits/2026-04-09-benchmark-posture/regression-proof.md",
     "docs/audits/2026-04-09-benchmark-posture/audit-manifest.json"
-  ]
+  ],
+  "historical_note": "This bundle documents the audited revision above and is not current proof for later repository revisions."
 }

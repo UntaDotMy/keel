@@ -1,4 +1,5 @@
 // Installer tests.
+use super::commands::remove_wired_adapters;
 use super::*;
 use crate::runtime::{
     display_path, executable_file_name, installed_executable_path, legacy_state_directory,
@@ -26,6 +27,39 @@ fn merge_json_mcp_opencode_preserves_existing_keys_and_adds_keel() {
     assert_eq!(parsed["theme"], "dark");
     assert_eq!(parsed["mcp"]["existing"]["command"][0], "foo");
     assert_eq!(parsed["mcp"]["keel"]["command"][0], "bin");
+    let _ = fs::remove_dir_all(&dir);
+}
+#[test]
+fn merge_json_mcp_preserves_conflicting_user_entry() {
+    let dir = std::env::temp_dir().join(format!("ulw-mcp-conflict-{}", std::process::id()));
+    let _ = fs::create_dir_all(&dir);
+    let config = dir.join("mcp.json");
+    fs::write(
+        &config,
+        r#"{"mcp":{"keel":{"type":"local","command":["user-keel","serve"],"enabled":true}}}"#,
+    )
+    .unwrap();
+    let entry = serde_json::json!({"type":"local","command":["bin","mcp","serve"],"enabled":true});
+    let result = merge_json_mcp(&config, "mcp", "keel", &entry, None);
+    assert!(result.is_err());
+    let text = fs::read_to_string(&config).unwrap();
+    assert!(text.contains("user-keel"));
+    assert!(!text.contains("\"bin\""));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn remove_json_mcp_entry_preserves_unmanaged_entry() {
+    let dir = std::env::temp_dir().join(format!("ulw-mcp-remove-{}", std::process::id()));
+    let _ = fs::create_dir_all(&dir);
+    let config = dir.join("mcp.json");
+    fs::write(
+        &config,
+        r#"{"mcpServers":{"keel":{"type":"stdio","command":"user-keel","args":["serve"]}}}"#,
+    )
+    .unwrap();
+    assert_eq!(remove_json_mcp_entry(&config, "mcpServers"), 0);
+    assert!(fs::read_to_string(&config).unwrap().contains("user-keel"));
     let _ = fs::remove_dir_all(&dir);
 }
 
@@ -137,6 +171,84 @@ fn wire_opencode_lands_under_claude_home_parent_not_env_home() {
 
     let _ = fs::remove_dir_all(&base);
     let _ = fs::remove_dir_all(&repo);
+}
+#[test]
+fn wire_opencode_preserves_custom_plugin_file() {
+    let base = std::env::temp_dir().join(format!("ulw-wire-owner-{}", std::process::id()));
+    let claude_home = base.join(".claude");
+    let repo = create_minimal_layout("wire-opencode-owner-repo");
+    let source = repo.join("opencode").join("keel.ts");
+    let _ = fs::create_dir_all(source.parent().unwrap());
+    fs::write(&source, "export default shippedPlugin;\n").unwrap();
+    let target = base
+        .join(".config")
+        .join("opencode")
+        .join("plugins")
+        .join("keel.ts");
+    let _ = fs::create_dir_all(target.parent().unwrap());
+    fs::write(&target, "export default userPlugin;\n").unwrap();
+
+    let summary = maybe_wire_opencode(&repo, &claude_home, true).unwrap();
+    assert!(summary.contains("user-customized"));
+    assert_eq!(
+        fs::read_to_string(&target).unwrap(),
+        "export default userPlugin;\n"
+    );
+
+    let _ = fs::remove_dir_all(&base);
+    let _ = fs::remove_dir_all(&repo);
+}
+#[test]
+fn remove_wired_adapters_preserves_custom_files_and_hooks() {
+    let base = std::env::temp_dir().join(format!("ulw-unwire-owner-{}", std::process::id()));
+    let claude_home = base.join(".claude");
+    let opencode_plugin = base
+        .join(".config")
+        .join("opencode")
+        .join("plugins")
+        .join("keel.ts");
+    let _ = fs::create_dir_all(opencode_plugin.parent().unwrap());
+    fs::write(&opencode_plugin, "export default customPlugin;\n").unwrap();
+
+    let cursor_dir = base.join(".cursor");
+    let _ = fs::create_dir_all(cursor_dir.join("hooks"));
+    fs::write(
+        cursor_dir.join("hooks.json"),
+        r#"{"version":1,"hooks":{"preToolUse":[{"command":"custom-hook"} ,{"command":"bash ~/.cursor/hooks/keel-cursor.sh"}]}}"#,
+    )
+    .unwrap();
+    fs::write(
+        cursor_dir.join("hooks").join("keel-cursor.sh"),
+        "#!/bin/sh\ncustom cursor hook\n",
+    )
+    .unwrap();
+
+    let pi_extension = base
+        .join(".pi")
+        .join("agent")
+        .join("extensions")
+        .join("keel-pi.ts");
+    let _ = fs::create_dir_all(pi_extension.parent().unwrap());
+    fs::write(&pi_extension, "// keel Pi Agent Extension\n").unwrap();
+
+    let cmdc_mod = base.join(".commandcode").join("mods").join("keel-cmdc.ts");
+    let _ = fs::create_dir_all(cmdc_mod.parent().unwrap());
+    fs::write(&cmdc_mod, "// keel Command Code (cmdc) Mod\n").unwrap();
+
+    let removed = remove_wired_adapters(&claude_home);
+    assert!(removed >= 2);
+    assert_eq!(
+        fs::read_to_string(&opencode_plugin).unwrap(),
+        "export default customPlugin;\n"
+    );
+    assert!(fs::read_to_string(cursor_dir.join("hooks.json"))
+        .unwrap()
+        .contains("custom-hook"));
+    assert!(cursor_dir.join("hooks").join("keel-cursor.sh").is_file());
+    assert!(!pi_extension.exists());
+    assert!(!cmdc_mod.exists());
+
+    let _ = fs::remove_dir_all(&base);
 }
 
 #[test]
@@ -1342,8 +1454,9 @@ fn rewrite_codex_mcp_command_absent_keel_is_noop() {
 
 #[test]
 fn rewrite_mcp_entry_command_rewrites_bare_command() {
-    // The shipped cursor/mcp.json and pi/.mcp.json template a bare
+    // The shipped cursor/mcp.json and pi/.mcp.json template a stdio entry.
     let mut entry = serde_json::json!({
+        "type": "stdio",
         "command": "keel",
         "args": ["mcp", "serve"],
     });
@@ -1375,7 +1488,7 @@ fn wire_cursor_rewrites_mcp_command_to_absolute() {
     let _ = fs::create_dir_all(repo.join("cursor"));
     let _ = fs::write(
         repo.join("cursor").join("mcp.json"),
-        r#"{"mcpServers":{"keel":{"command":"keel","args":["mcp","serve"]}}}"#,
+        r#"{"mcpServers":{"keel":{"type":"stdio","command":"keel","args":["mcp","serve"]}}}"#,
     );
 
     let summary = maybe_wire_cursor(&repo, &claude_home, true);
@@ -1390,6 +1503,7 @@ fn wire_cursor_rewrites_mcp_command_to_absolute() {
     let command = doc["mcpServers"]["keel"]["command"]
         .as_str()
         .expect("cursor entry must have a command");
+    assert_eq!(doc["mcpServers"]["keel"]["type"], "stdio");
     assert_ne!(command, "keel", "must not keep the bare template command");
     assert_eq!(
         command,

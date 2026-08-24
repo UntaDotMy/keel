@@ -4,13 +4,24 @@
     "title": "Current governance and static-safety audit bundle was not yet published",
     "severity": "medium",
     "status": "closed",
-    "resolution": "Published the current audit bundle and linked it from the security audit status page."
+    "remediation_state": "closed",
+    "evidence_paths": [
+      "docs/audits/2026-04-08-repo-governance-and-static-safety/audit-summary.md",
+      "docs/audits/2026-04-08-repo-governance-and-static-safety/remediation-map.md",
+      "docs/audits/2026-04-08-repo-governance-and-static-safety/regression-proof.md"
+    ],
+    "resolution": "Published the historical audit bundle and linked it from the security audit status page."
   },
   {
     "id": "legacy-memory-command-friction",
     "title": "Legacy memory command forms failed instead of mapping to the current native CLI surface",
     "severity": "medium",
     "status": "closed",
+    "remediation_state": "closed",
+    "evidence_paths": [
+      "rust/crates/keel/src/utility/memory",
+      "docs/audits/2026-04-08-repo-governance-and-static-safety/regression-proof.md"
+    ],
     "resolution": "Added compatibility aliases for working-brief save, validation-plan, and completion-gate upsert with regression tests."
   },
   {
@@ -18,6 +29,11 @@
     "title": "Legacy task-lifecycle flags and complete-phase wording failed instead of resolving to the current lifecycle model",
     "severity": "medium",
     "status": "closed",
+    "remediation_state": "closed",
+    "evidence_paths": [
+      "rust/crates/keel/src/commands.rs",
+      "docs/audits/2026-04-08-repo-governance-and-static-safety/regression-proof.md"
+    ],
     "resolution": "Mapped lifecycle flags to the current native completion flow and added regression tests."
   }
 ]

@@ -23,9 +23,7 @@ import {
   hasSessionStarted,
   isEditClassTool,
   isKeelReadingCommand,
-  isKeelResearchTool,
   isShellTool,
-  markIronLawSatisfied,
   markSessionStarted,
   parseGateResponse,
   parseRewriteResponse,
@@ -38,22 +36,42 @@ import {
 // ---------------------------------------------------------------------------
 
 interface CodexHookInput {
-  event: string;
+  // Official Codex fields. Legacy aliases remain accepted for older hosts.
+  hook_event_name?: string;
+  event?: string;
   session_id?: string;
   cwd?: string;
-  // SessionStart fields
-  start_source?: string; // "startup" | "resume" | "clear" | "compact"
-  // PreToolUse / PostToolUse fields
+  source?: string; // "startup" | "resume" | "clear" | "compact"
+  start_source?: string;
+  tool_name?: string;
   tool?: string;
   tool_input?: unknown;
+  tool_response?: unknown;
   failed?: boolean;
-  // UserPromptSubmit fields
   prompt?: string;
-  // Stop fields
   turn_data?: Record<string, unknown>;
-  // PreCompact / PostCompact fields
   trigger?: string; // "manual" | "auto"
   [key: string]: unknown;
+}
+
+function eventName(input: CodexHookInput): string {
+  return input.hook_event_name ?? input.event ?? "";
+}
+
+function toolName(input: CodexHookInput): string {
+  return input.tool_name ?? input.tool ?? "";
+}
+
+
+function toolFailed(input: CodexHookInput): boolean {
+  if (typeof input.failed === "boolean") {
+    return input.failed;
+  }
+  if (input.tool_response && typeof input.tool_response === "object") {
+    const response = input.tool_response as Record<string, unknown>;
+    return response.isError === true || response.error != null;
+  }
+  return false;
 }
 
 const BRIDGE_BIN: string = resolveBinary();
@@ -172,16 +190,18 @@ function extractCommand(toolInput: unknown): string {
 }
 
 function handlePreToolUse(input: CodexHookInput, isPre: boolean): string {
-  // PostToolUse (isPre === false) only records observations — no gate, no rewrite.
+  // PostToolUse only records the official tool_response payload.
   if (!isPre) {
     const sessionID = input.session_id ?? "unknown";
     const cwd = input.cwd ?? process.cwd();
-    const toolName = input.tool ?? "";
-    const stdin = input.tool_input != null
-      ? JSON.stringify(input.tool_input)
-      : "{}";
-    const args = ["--session", sessionID, "--cwd", cwd, "--tool", toolName];
-    if (input.failed) args.push("--failed");
+    const currentToolName = toolName(input);
+    const observation = input.tool_response ?? input.tool_input;
+    const stdin = observation != null ? JSON.stringify(observation) : "{}";
+    const args = [
+      "--session", sessionID, "--cwd", cwd, "--tool", currentToolName,
+      "--phase", "post",
+    ];
+    if (toolFailed(input)) args.push("--failed");
     runBridgeWithStdin("observe", args, stdin);
     return "";
   }
@@ -189,36 +209,26 @@ function handlePreToolUse(input: CodexHookInput, isPre: boolean): string {
   // --- PreToolUse: Iron Law enforcement first, then observe + rewrite. ---
   const sessionID = input.session_id ?? "unknown";
   const cwd = input.cwd ?? process.cwd();
-  const toolName = input.tool ?? "";
+  const currentToolName = toolName(input);
 
-  // STRICT: only keel research tools clear the shared session marker.
-  if (isKeelResearchTool(toolName)) {
-    markIronLawSatisfied(sessionID);
-  }
-  if (isShellTool(toolName)) {
-    const command = extractCommand(input.tool_input);
-    if (command && isKeelReadingCommand(command)) {
-      markIronLawSatisfied(sessionID);
-    }
-  }
 
-  // Fire-and-forget observation (also marks iron-law in Rust on keel tools).
+  // Fire-and-forget pre-tool observation; it cannot satisfy the post-tool marker.
   const stdin = input.tool_input != null
     ? JSON.stringify(input.tool_input)
     : "{}";
-  const observeArgs = ["--session", sessionID, "--cwd", cwd, "--tool", toolName];
-  if (input.failed) observeArgs.push("--failed");
+  const observeArgs = [
+    "--session", sessionID, "--cwd", cwd, "--tool", currentToolName,
+    "--phase", "pre",
+  ];
+  if (toolFailed(input)) observeArgs.push("--failed");
   runBridgeWithStdin("observe", observeArgs, stdin);
 
   // Edit-class: Rust core is source of truth (evidence-based deny). This gate
-  // is fail-CLOSED: an empty result means the bridge timed out or errored, and
-  // an unevaluated Iron Law gate must BLOCK the edit — never silently allow it.
-  // A 500ms budget is too tight for a cold keel.exe (Windows Defender scan on
-  // first run), so the gate call gets a larger budget than the advisory calls.
-  if (isEditClassTool(toolName)) {
+  // is fail-CLOSED: an empty result means the bridge timed out or errored.
+  if (isEditClassTool(currentToolName)) {
     const gate = runBridge(
       "pre-tool-use",
-      ["--session", sessionID, "--cwd", cwd, "--tool", toolName],
+      ["--session", sessionID, "--cwd", cwd, "--tool", currentToolName],
       5000,
     );
     const gateResult = parseGateResponse(gate);
@@ -229,19 +239,38 @@ function handlePreToolUse(input: CodexHookInput, isPre: boolean): string {
       );
     }
     if (gateResult.status !== "allow") {
-      // Timeout/error/unexpected output — fail closed.
       return denyOutput(
         "keel Iron Law gate could not be evaluated (keel did not respond in time). Retry the edit; if it persists, run `keel doctor`.",
       );
     }
   }
 
-  // Compaction reroute for shell tools.
-  if (isShellTool(toolName)) {
+  // Shell tools use the same Rust gate before compaction rewrite.
+  if (isShellTool(currentToolName)) {
     const command = extractCommand(input.tool_input);
+    const readingCommand = command ? isKeelReadingCommand(command) : false;
+    const gateArgs = [
+      "--session", sessionID, "--cwd", cwd, "--tool", currentToolName,
+    ];
+    if (command) gateArgs.push("--command", command);
+    const gate = runBridge("pre-tool-use", gateArgs, 5000);
+    const gateResult = parseGateResponse(gate);
+    if (gateResult.status === "deny") {
+      return denyOutput(
+        gateResult.reason ||
+          (readingCommand
+            ? "keel reading command gate denied this command."
+            : "keel Iron Law gate: call system_map/recall/context_brief before running shell commands."),
+      );
+    }
+    if (gateResult.status !== "allow") {
+      return denyOutput(
+        "keel Iron Law shell gate could not be evaluated. Retry after running `keel doctor`.",
+      );
+    }
     if (command) {
       const rewritten = parseRewriteResponse(
-        runBridgeWithStdin("rewrite", ["--tool", toolName], command),
+        runBridgeWithStdin("rewrite", ["--tool", currentToolName], command),
       );
       if (rewritten) {
         return JSON.stringify({
@@ -340,7 +369,7 @@ function main(): void {
   let contextText = "";
 
   try {
-    switch (input.event) {
+    switch (eventName(input)) {
       case "SessionStart":
         contextText = handleSessionStart(input);
         break;
@@ -356,9 +385,18 @@ function main(): void {
       case "PreCompact":
         contextText = handlePreCompact(input);
         break;
-      case "PostCompact":
-        handlePostCompact(input);
+      case "PostCompact": {
+        const postCompactContext = handlePostCompact(input);
+        contextText = postCompactContext
+          ? JSON.stringify({
+              hookSpecificOutput: {
+                hookEventName: "PostCompact",
+                additionalContext: postCompactContext,
+              },
+            })
+          : "";
         break;
+      }
       case "Stop":
         contextText = handleStop(input);
         break;
@@ -366,7 +404,7 @@ function main(): void {
         handleSessionEnd(input);
         break;
       default:
-        // Unknown event — exit silently
+        // Unknown event — exit silently.
         break;
     }
   } catch {

@@ -164,6 +164,7 @@ fn run_bridge_observe(
     let mut flags = bridge_flag_set("bridge observe");
     flags.string_flag("tool", "");
     flags.bool_flag("failed", false);
+    flags.string_flag("phase", "post");
     if let Err(parse_error) = flags.parse(arguments) {
         let _ = writeln!(standard_error, "{}", parse_error.message);
     }
@@ -171,6 +172,7 @@ fn run_bridge_observe(
 
     let tool_name = flags.string_value("tool");
     let failed = flags.bool_value("failed");
+    let phase = flags.string_value("phase");
 
     // Read tool input JSON from stdin.
     let mut tool_input_json = String::new();
@@ -187,9 +189,8 @@ fn run_bridge_observe(
         }
     };
 
-    // Iron Law evidence (strict: keel research tools; balanced: host reads too).
-    // Mark even when observation write fails — gate satisfaction is independent.
-    if !failed {
+    // Iron Law evidence is written only from successful post-tool observations.
+    if phase == "post" && !failed {
         let command = extract_command_from_observe_payload(&tool_input_json);
         let session_id = if session.is_empty() {
             "default"

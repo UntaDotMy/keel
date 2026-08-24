@@ -94,22 +94,36 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
 
-  # Summary gate also waits for the adapter surface when product paths change.
+  # Summary gate waits for every product-validation job.
   ci-gate:
     name: CI gate
-    needs: [changes, validate-adapters]
+    needs:
+      - changes
+      - validate-adapters
+      - validate-linux
+      - validate-windows
+      - validate-macos
+      - validate-msrv
+      - security-audit
     if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Report scope
         run: |
-          if [ "${{ needs.changes.outputs.code }}" = "true" ] \
-            && [ "${{ needs.validate-adapters.result }}" != "success" ]; then
-            echo "Adapter validation failed for a product change." >&2
-            exit 1
-          fi
           if [ "${{ needs.changes.outputs.code }}" = "true" ]; then
-            echo "Code/product paths changed — full Validate matrix will run."
+            for result in \
+              "${{ needs.validate-adapters.result }}" \
+              "${{ needs.validate-linux.result }}" \
+              "${{ needs.validate-windows.result }}" \
+              "${{ needs.validate-macos.result }}" \
+              "${{ needs.validate-msrv.result }}" \
+              "${{ needs.security-audit.result }}"; do
+              if [ "$result" != "success" ]; then
+                echo "A required product-validation job concluded $result." >&2
+                exit 1
+              fi
+            done
+            echo "All product-validation jobs passed."
           else
             echo "No code/product paths changed — skipping cargo/clippy/test matrix."
             echo "Docs-only or non-product files only."
@@ -124,7 +138,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
           toolchain: stable
-      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
           key: validate-linux
@@ -134,25 +148,25 @@ jobs:
         # why: without --all-targets clippy skips test code, so lint failures in
         # tests reach main while CI stays green.
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - name: Check MSRV
-        shell: bash
-        run: |
-          MSRV=$(grep -m1 '^rust-version' Cargo.toml | sed 's/.*"\([0-9.]*\)".*/\1/')
-          if [ -z "$MSRV" ]; then
-            echo "No rust-version set in Cargo.toml — skipping MSRV check."
-            exit 0
-          fi
-          RUSTC_VERSION=$(rustc --version | awk '{print $2}')
-          echo "Required MSRV: $MSRV"
-          echo "Installed rustc: $RUSTC_VERSION"
-          if printf '%s\n' "$MSRV" "$RUSTC_VERSION" | sort -V | head -n1 | grep -q "$MSRV"; then
-            echo "MSRV check passed."
-          else
-            echo "::error::rustc $RUSTC_VERSION is below MSRV $MSRV"
-            exit 1
-          fi
       - name: Run tests
         run: cargo test --locked
+
+  validate-msrv:
+    name: validate-msrv
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: "1.80"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          cache-on-failure: true
+          key: validate-msrv
+      - name: Run tests on declared MSRV
+        run: cargo test --workspace --locked
 
   validate-windows:
     needs: changes
@@ -163,7 +177,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
           toolchain: stable
-      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
           key: validate-windows
@@ -197,7 +211,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
           toolchain: stable
-      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
           key: validate-macos
@@ -218,6 +232,12 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: "1.4.0"
+      - name: Install OpenCode dependencies
+        working-directory: opencode
+        run: bun install --frozen-lockfile
+      - name: Audit OpenCode dependencies
+        working-directory: opencode
+        run: bun audit
       - name: Check TypeScript adapter syntax
         run: |
           bun --check _shared/ts/bridge-core.ts
@@ -227,6 +247,8 @@ jobs:
           bun --check commandcode/keel-cmdc.ts
       - name: Check Unix statusline syntax
         run: bash -n statusline/statusline-keel.sh
+      - name: Run host adapter contract fixtures
+        run: bun test tests/host-adapter-contracts.test.ts
 
   security-audit:
     needs: changes

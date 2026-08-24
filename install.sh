@@ -61,6 +61,29 @@ need_command curl
 need_command tar
 need_command mktemp
 
+verify_sha256() {
+  local checksum_path=$1
+  local target_path=$2
+  local expected actual
+  expected="$(awk 'NF { print tolower($1); exit }' "$checksum_path")"
+  if [[ ! "$expected" =~ ^[0-9a-f]{64}$ ]]; then
+    printf 'Invalid SHA-256 checksum for %s\n' "$target_path" >&2
+    exit 1
+  fi
+  if command -v sha256sum >/dev/null 2>&1; then
+    actual="$(sha256sum "$target_path" | awk '{print tolower($1)}')"
+  elif command -v shasum >/dev/null 2>&1; then
+    actual="$(shasum -a 256 "$target_path" | awk '{print tolower($1)}')"
+  else
+    printf 'No SHA-256 verifier (sha256sum or shasum) is available.\n' >&2
+    exit 1
+  fi
+  if [ "$actual" != "$expected" ]; then
+    printf 'SHA-256 mismatch for %s\n' "$target_path" >&2
+    exit 1
+  fi
+}
+
 
 os="$(detect_os)"
 arch="$(detect_arch)"
@@ -86,11 +109,15 @@ cleanup() {
 trap cleanup EXIT
 
 archive_path="${temporary_directory}/${archive_name}"
+checksum_path="${temporary_directory}/${archive_name}.sha256"
 extract_directory="${temporary_directory}/extract"
 mkdir -p "$extract_directory"
 
 printf 'Downloading keel %s for %s-%s...\n' "$release_tag" "$os" "$arch"
 curl -fL --retry 3 --retry-delay 2 -o "$archive_path" "$download_url"
+curl -fL --retry 3 --retry-delay 2 -o "$checksum_path" "${download_url}.sha256"
+verify_sha256 "$checksum_path" "$archive_path"
+printf 'Verified SHA-256 for %s.\n' "$archive_name"
 
 tar -xzf "$archive_path" -C "$extract_directory"
 

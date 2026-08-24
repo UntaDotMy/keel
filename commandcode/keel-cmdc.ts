@@ -8,9 +8,7 @@ import {
   ironLawSatisfied,
   isEditClassTool,
   isKeelReadingCommand,
-  isKeelResearchTool,
   isShellTool,
-  markIronLawSatisfied,
   parseGateResponse,
   parseRewriteResponse,
   resolveBinary,
@@ -160,16 +158,28 @@ export default function keelCmdcMod(cmd: ModApi): void {
       const sessionId = sessionIdFor(cmd.cwd);
       const tool = String(toolName);
 
-      // Keel research tools (MCP / tool) clear the shared marker.
-      if (isKeelResearchTool(tool)) {
-        markIronLawSatisfied(sessionId);
-      }
-
-      // Shell keel reading commands also clear it.
       if (isShellTool(tool)) {
         const command = typeof input?.command === "string" ? input.command : "";
-        if (command && isKeelReadingCommand(command)) {
-          markIronLawSatisfied(sessionId);
+        const readingCommand = command ? isKeelReadingCommand(command) : false;
+        const gateArgs = ["--session", sessionId, "--cwd", cmd.cwd, "--tool", tool];
+        if (command) gateArgs.push("--command", command);
+        const gateResult = parseGateResponse(runBridge("pre-tool-use", gateArgs, 5000));
+        if (gateResult.status === "deny") {
+          return {
+            block: true,
+            additionalContext:
+              gateResult.reason ||
+              (readingCommand
+                ? "keel reading command gate denied this command."
+                : "keel Iron Law shell gate denied this command."),
+          };
+        }
+        if (gateResult.status !== "allow") {
+          return {
+            block: true,
+            additionalContext:
+              "keel Iron Law shell gate could not be evaluated. Retry after running `keel doctor`.",
+          };
         }
         if (command) {
           const rewritten = parseRewriteResponse(
@@ -181,33 +191,28 @@ export default function keelCmdcMod(cmd: ModApi): void {
         }
       }
 
-      // Edit-class: Rust core is source of truth. Fail-CLOSED: a timeout/error
-      // blocks the edit. Never silently allow an unevaluated gate.
-      if (isEditClassTool(tool)) {
-        // Local marker fast-path: a session already satisfied does not need a
-        // 5s bridge round-trip per edit.
-        if (!ironLawSatisfied(sessionId)) {
-          const gate = runBridge(
-            "pre-tool-use",
-            ["--session", sessionId, "--cwd", cmd.cwd, "--tool", tool],
-            5000,
-          );
-          const gateResult = parseGateResponse(gate);
-          if (gateResult.status === "deny") {
-            return {
-              block: true,
-              additionalContext:
-                gateResult.reason ||
-                "keel Iron Law gate: call system_map/recall/context_brief before editing.",
-            };
-          }
-          if (gateResult.status !== "allow") {
-            return {
-              block: true,
-              additionalContext:
-                "keel Iron Law gate could not be evaluated (keel did not respond in time). Retry the edit; if it persists, run `keel doctor`.",
-            };
-          }
+      // Edit-class: Rust core is source of truth. Fail-CLOSED on timeout/error.
+      if (isEditClassTool(tool) && !ironLawSatisfied(sessionId)) {
+        const gate = runBridge(
+          "pre-tool-use",
+          ["--session", sessionId, "--cwd", cmd.cwd, "--tool", tool],
+          5000,
+        );
+        const gateResult = parseGateResponse(gate);
+        if (gateResult.status === "deny") {
+          return {
+            block: true,
+            additionalContext:
+              gateResult.reason ||
+              "keel Iron Law gate: call system_map/recall/context_brief before editing.",
+          };
+        }
+        if (gateResult.status !== "allow") {
+          return {
+            block: true,
+            additionalContext:
+              "keel Iron Law gate could not be evaluated (keel did not respond in time). Retry the edit; if it persists, run `keel doctor`.",
+          };
         }
       }
 
@@ -221,7 +226,10 @@ export default function keelCmdcMod(cmd: ModApi): void {
       const sessionId = sessionIdFor(cmd.cwd);
       const tool = String(toolName);
       const payload = JSON.stringify(input ?? {});
-      const args = ["--session", sessionId, "--cwd", cmd.cwd, "--tool", tool];
+      const args = [
+        "--session", sessionId, "--cwd", cmd.cwd, "--tool", tool,
+        "--phase", "post",
+      ];
       if (isError) args.push("--failed");
       runBridge("observe", args, 500, payload);
     },

@@ -23,8 +23,10 @@ use crate::runtime::{display_path, resolve_claude_home};
 use crate::utility::memory::shared::{
     is_help_argument as is_help, render_workflow_json as render_json,
 };
-use crate::utility::record_store::{current_timestamp_millis, format_timestamp_iso8601};
-use crate::utility::record_store::{field, join_lines, record_to_value, Record, RecordStore};
+use crate::utility::record_store::{
+    current_timestamp_millis, field, format_timestamp_iso8601, join_lines, record_to_value,
+    unique_timestamped_id, Record, RecordStore,
+};
 
 /// Dispatch entry for the memory command families. `family` is the already-matched
 /// subcommand name (`research-cache`, `entity`, ...) and `arguments` is everything
@@ -81,11 +83,7 @@ fn family_store(claude_home: &Path, command_group: &str, family: &str) -> Record
 }
 
 fn now_id(prefix: &str) -> (String, String) {
-    let millis = current_timestamp_millis();
-    (
-        format!("{prefix}-{millis:x}"),
-        format_timestamp_iso8601(millis),
-    )
+    unique_timestamped_id(prefix)
 }
 
 // ---------------------------------------------------------------------------

@@ -1,100 +1,9 @@
-use std::collections::HashMap;
 use std::io::Write;
 
 use crate::args::FlagSet;
+use crate::runtime::write_text;
 use crate::utility::anvil::job;
 use crate::utility::anvil::supervisor;
-
-pub fn ev_score(logprobs: &[(char, f64)], phi: &dyn Fn(char) -> f64) -> f64 {
-    logprobs
-        .iter()
-        .map(|(letter, prob)| prob * phi(*letter))
-        .sum()
-}
-
-pub fn bradley_terry(r_a: f64, r_b: f64) -> f64 {
-    1.0 / (1.0 + (-(r_a - r_b)).exp())
-}
-
-pub struct PptResult {
-    pub winner: usize,
-    #[allow(dead_code)]
-    pub comparisons: usize,
-}
-
-pub fn ppt_pick(n: usize, k: usize, p_matrix: &dyn Fn(usize, usize) -> f64) -> PptResult {
-    if n == 0 {
-        return PptResult {
-            winner: 0,
-            comparisons: 0,
-        };
-    }
-    let mut wins = vec![0.0; n];
-    let mut counts = vec![0usize; n];
-    let mut comps = HashMap::new();
-    let ring: Vec<usize> = (0..n).collect();
-    for i in 0..n {
-        let a = ring[i];
-        let b = ring[(i + 1) % n];
-        let key = (a.min(b), a.max(b));
-        let p = *comps.entry(key).or_insert_with(|| p_matrix(a, b));
-        let p_ab = if a < b { p } else { 1.0 - p };
-        wins[a] += p_ab;
-        wins[b] += 1.0 - p_ab;
-        counts[a] += 1;
-        counts[b] += 1;
-    }
-    let mut order: Vec<usize> = (0..n).collect();
-    order.sort_by(|a, b| {
-        let sa = if counts[*a] > 0 {
-            wins[*a] / counts[*a] as f64
-        } else {
-            0.0
-        };
-        let sb = if counts[*b] > 0 {
-            wins[*b] / counts[*b] as f64
-        } else {
-            0.0
-        };
-        sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
-    });
-    let pivots: Vec<usize> = order[..k.min(n)].to_vec();
-    let non_pivots: Vec<usize> = (0..n).filter(|x| !pivots.contains(x)).collect();
-    for np in &non_pivots {
-        for pv in &pivots {
-            let a = *np;
-            let b = *pv;
-            let key = (a.min(b), a.max(b));
-            if comps.contains_key(&key) {
-                continue;
-            }
-            let p = p_matrix(a, b);
-            let p_ab = if a < b { p } else { 1.0 - p };
-            wins[a] += p_ab;
-            wins[b] += 1.0 - p_ab;
-            counts[a] += 1;
-            counts[b] += 1;
-            comps.insert(key, p);
-        }
-    }
-    let mut best = 0;
-    let mut best_score: f64 = -1.0;
-    for i in 0..n {
-        let score = if counts[i] > 0 {
-            wins[i] / counts[i] as f64
-        } else {
-            0.0
-        };
-        if score > best_score {
-            best_score = score;
-            best = i;
-        }
-    }
-    PptResult {
-        winner: best,
-        comparisons: comps.len(),
-    }
-}
 
 pub fn run_stamp(
     arguments: &[String],
@@ -129,61 +38,54 @@ pub fn run_stamp(
         .as_ref()
         .and_then(|value| list_cast_ids(value).ok())
         .unwrap_or_default();
-    if !dry_run && casts.len() < 2 {
-        if casts.len() == 1 {
-            if let Some(value) = paths.as_ref() {
-                if let Err(error) = promote_winner(value, 0) {
-                    let _ = writeln!(standard_error, "{error}");
-                    return 1;
-                }
-            }
-            let _ = writeln!(
-                standard_output,
-                "anvil stamp: winner=0 K=0 mode=single (skip PPT, <2 survivors)"
-            );
-            return 0;
-        }
+    if dry_run {
+        let _ = writeln!(
+            standard_output,
+            "anvil stamp: dry-run casts={} strict={} mode=evidence",
+            casts.len(),
+            strict
+        );
+        return 0;
+    }
+    if casts.is_empty() {
         let _ = writeln!(standard_error, "anvil stamp: no survivors to score");
         return 1;
     }
-    let n = if casts.len() >= 2 {
-        casts.len()
-    } else if strict {
-        3
-    } else {
-        2
+    let evidence = match load_cast_evidence(paths.as_ref().expect("paths for non-dry run")) {
+        Ok(value) => value,
+        Err(error) => {
+            let _ = writeln!(standard_error, "{error}");
+            return 1;
+        }
     };
-    let k = if strict { 2usize } else { 1usize };
-    let strengths: Vec<f64> = (0..n).map(|i| 0.9 - (i as f64) * 0.2).collect();
-    let phi = |letter: char| (letter as u8 - b'A' + 1) as f64;
-    let high = ev_score(&[('T', 0.7), ('A', 0.3)], &phi);
-    let low = ev_score(&[('A', 0.7), ('T', 0.3)], &phi);
-    let pair = bradley_terry(high, low);
-    let picked = ppt_pick(n, k, &|a, b| {
-        if strengths[a] > strengths[b] {
-            pair
-        } else {
-            1.0 - pair
+    let winner = match pick_evidence_winner(&evidence) {
+        Ok(value) => value,
+        Err(error) => {
+            let _ = writeln!(standard_error, "{error}");
+            return 1;
         }
-    });
-    if let Some(value) = paths.as_ref() {
-        if !dry_run && !casts.is_empty() {
-            if let Err(error) = promote_winner(value, picked.winner) {
-                let _ = writeln!(standard_error, "{error}");
-                return 1;
-            }
-        }
+    };
+    let winner_evidence = &evidence[winner];
+    let value = paths.as_ref().expect("paths for non-dry run");
+    if let Err(error) = promote_winner(value, winner) {
+        let _ = writeln!(standard_error, "{error}");
+        return 1;
     }
-    let mode = "ppt";
     let line = format!(
-        "anvil stamp: EV high={high:.2} low={low:.2} p={pair:.2} winner={} K={k} mode={mode}",
-        picked.winner
+        "anvil stamp: winner={} gate_ok={} clipped_len={} strict={} mode=evidence",
+        winner_evidence.id, winner_evidence.gate_ok, winner_evidence.clipped_len, strict
     );
     let _ = writeln!(standard_output, "{line}");
     let _ = writeln!(
         standard_output,
         "{}",
-        supervisor::clip_output(&format!("winner {}", picked.winner), 4000)
+        supervisor::clip_output(
+            &format!(
+                "winner {} gate_ok={} clipped_len={}",
+                winner_evidence.id, winner_evidence.gate_ok, winner_evidence.clipped_len
+            ),
+            4000
+        )
     );
     0
 }
@@ -204,26 +106,102 @@ fn list_cast_ids(paths: &job::JobPaths) -> Result<Vec<String>, String> {
     ids.sort();
     Ok(ids)
 }
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CastEvidence {
+    id: String,
+    gate_ok: bool,
+    clipped_len: usize,
+}
+
+fn load_cast_evidence(paths: &job::JobPaths) -> Result<Vec<CastEvidence>, String> {
+    let ids = list_cast_ids(paths)?;
+    if ids.is_empty() {
+        return Err("anvil stamp: no cast evidence found".to_string());
+    }
+    ids.into_iter()
+        .map(|id| {
+            let path = paths.dir.join(&id).join("result.json");
+            let text = std::fs::read_to_string(&path)
+                .map_err(|error| format!("anvil stamp: read {id} evidence: {error}"))?;
+            let value: serde_json::Value = serde_json::from_str(&text)
+                .map_err(|error| format!("anvil stamp: parse {id} evidence: {error}"))?;
+            let gate_ok = value
+                .get("gate_ok")
+                .and_then(serde_json::Value::as_bool)
+                .ok_or_else(|| format!("anvil stamp: {id} evidence lacks gate_ok"))?;
+            let clipped_len = value
+                .get("clipped_len")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| format!("anvil stamp: {id} evidence lacks clipped_len"))?
+                as usize;
+            Ok(CastEvidence {
+                id,
+                gate_ok,
+                clipped_len,
+            })
+        })
+        .collect()
+}
+fn pick_evidence_winner(evidence: &[CastEvidence]) -> Result<usize, String> {
+    let mut winner: Option<usize> = None;
+    for (index, candidate) in evidence.iter().enumerate() {
+        let better = winner.map_or(true, |current| {
+            let incumbent = &evidence[current];
+            (candidate.gate_ok && !incumbent.gate_ok)
+                || (candidate.gate_ok == incumbent.gate_ok
+                    && (candidate.clipped_len < incumbent.clipped_len
+                        || (candidate.clipped_len == incumbent.clipped_len
+                            && candidate.id < incumbent.id)))
+        });
+        if better {
+            winner = Some(index);
+        }
+    }
+    winner.ok_or_else(|| "anvil stamp: no cast evidence to rank".to_string())
+}
 
 fn promote_winner(paths: &job::JobPaths, winner: usize) -> Result<(), String> {
     let out = paths.out_dir();
-    std::fs::create_dir_all(&out).map_err(|error| error.to_string())?;
     let result = paths.dir.join(format!("cast_{winner}")).join("result.json");
-    if result.is_file() {
-        std::fs::copy(&result, out.join("result.json")).map_err(|error| error.to_string())?;
-        if let Ok(text) = std::fs::read_to_string(&result) {
-            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
-                if let Some(workspace) = value.get("workspace").and_then(|item| item.as_str()) {
-                    crate::utility::anvil::workspace::copy_tree(
-                        std::path::Path::new(workspace),
-                        &out.join("workspace"),
-                    )?;
-                }
-            }
-        }
+    if !result.is_file() {
+        return Err(format!(
+            "anvil stamp: missing cast evidence {}",
+            result.display()
+        ));
     }
-    std::fs::write(out.join("winner.txt"), format!("cast_{winner}\n"))
-        .map_err(|error| error.to_string())?;
+    let result_text = std::fs::read_to_string(&result)
+        .map_err(|error| format!("anvil stamp: read result: {error}"))?;
+    let value: serde_json::Value = serde_json::from_str(&result_text)
+        .map_err(|error| format!("anvil stamp: parse result: {error}"))?;
+    let workspace = value
+        .get("workspace")
+        .and_then(|item| item.as_str())
+        .ok_or_else(|| "anvil stamp: result lacks workspace".to_string())?;
+
+    let staging = out.with_file_name(format!("anvil_out.tmp-{}", std::process::id()));
+    if staging.exists() {
+        std::fs::remove_dir_all(&staging).map_err(|error| error.to_string())?;
+    }
+    std::fs::create_dir_all(&staging).map_err(|error| error.to_string())?;
+    if let Err(error) = write_text(&staging.join("result.json"), &result_text)
+        .and_then(|_| {
+            crate::utility::anvil::workspace::copy_tree(
+                std::path::Path::new(workspace),
+                &staging.join("workspace"),
+            )
+        })
+        .and_then(|_| write_text(&staging.join("winner.txt"), &format!("cast_{winner}\n")))
+    {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(error);
+    }
+    if out.exists() {
+        std::fs::remove_dir_all(&out).map_err(|error| error.to_string())?;
+    }
+    if let Err(error) = std::fs::rename(&staging, &out) {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(error.to_string());
+    }
     Ok(())
 }
 
@@ -232,34 +210,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ev_ranks_correctly() {
-        let phi = |letter: char| (letter as u8 - b'A' + 1) as f64;
-        let high = vec![('T', 0.9), ('A', 0.1)];
-        let low = vec![('A', 0.9), ('T', 0.1)];
-        assert!(ev_score(&high, &phi) > ev_score(&low, &phi));
-    }
-
-    #[test]
-    fn ppt_picks_argmax() {
-        let strengths = [0.9, 0.5, 0.2];
-        let result = ppt_pick(3, 1, &|a, b| {
-            if strengths[a] > strengths[b] {
-                0.8
-            } else {
-                0.2
-            }
-        });
-        assert_eq!(result.winner, 0);
-        assert!(result.comparisons <= 5);
-    }
-
-    #[test]
-    fn ppt_pair_cache_no_dup() {
-        let calls = std::cell::Cell::new(0);
-        let _ = ppt_pick(3, 1, &|_, _| {
-            calls.set(calls.get() + 1);
-            0.5
-        });
-        assert!(calls.get() <= 5);
+    fn evidence_ranking_prefers_passing_small_output() {
+        let evidence = vec![
+            CastEvidence {
+                id: "cast_0".into(),
+                gate_ok: false,
+                clipped_len: 10,
+            },
+            CastEvidence {
+                id: "cast_1".into(),
+                gate_ok: true,
+                clipped_len: 100,
+            },
+            CastEvidence {
+                id: "cast_2".into(),
+                gate_ok: true,
+                clipped_len: 20,
+            },
+        ];
+        assert_eq!(pick_evidence_winner(&evidence).expect("winner"), 2);
     }
 }

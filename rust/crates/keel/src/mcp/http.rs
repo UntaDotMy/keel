@@ -42,6 +42,13 @@ pub(super) fn serve_http(
         );
         return 1;
     }
+    if allow_remote_bind() && configured_auth_token().is_none() {
+        let _ = writeln!(
+            standard_error,
+            "serve-http: KEEL_MCP_HTTP_AUTH_TOKEN is required when remote HTTP is enabled"
+        );
+        return 1;
+    }
 
     let listener = match TcpListener::bind(addr) {
         Ok(listener) => listener,
@@ -107,6 +114,38 @@ fn allow_remote_bind() -> bool {
         env::var("KEEL_MCP_HTTP_ALLOW_REMOTE").as_deref(),
         Ok("1") | Ok("true") | Ok("yes")
     )
+}
+fn configured_auth_token() -> Option<String> {
+    env::var("KEEL_MCP_HTTP_AUTH_TOKEN")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn authorization_header_matches(header: Option<&str>, expected: &str) -> bool {
+    let Some(provided) = header
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(str::trim)
+    else {
+        return false;
+    };
+    if provided.is_empty() || expected.is_empty() {
+        return false;
+    }
+    let provided_bytes = provided.as_bytes();
+    let expected_bytes = expected.as_bytes();
+    let mut difference = (provided_bytes.len() ^ expected_bytes.len()) as u8;
+    for index in 0..provided_bytes.len().max(expected_bytes.len()) {
+        difference |= provided_bytes.get(index).copied().unwrap_or_default()
+            ^ expected_bytes.get(index).copied().unwrap_or_default();
+    }
+    difference == 0
+}
+
+fn remote_http_authorized(header: Option<&str>) -> bool {
+    configured_auth_token()
+        .map(|expected| authorization_header_matches(header, &expected))
+        .unwrap_or(false)
 }
 
 fn handle_connection(
@@ -231,6 +270,8 @@ struct HttpHeaders {
     origin: Option<String>,
     content_length: Option<usize>,
     accept: String,
+    authorization: Option<String>,
+    protocol_version: Option<String>,
     session_id: Option<String>,
 }
 
@@ -250,6 +291,8 @@ fn parse_headers(text: &str) -> HttpHeaders {
     let mut origin = None;
     let mut content_length = None;
     let mut accept = String::new();
+    let mut authorization = None;
+    let mut protocol_version = None;
     let mut session_id = None;
     for line in lines {
         if let Some((name, value)) = line.split_once(':') {
@@ -259,6 +302,8 @@ fn parse_headers(text: &str) -> HttpHeaders {
                 "origin" => origin = Some(value.to_string()),
                 "content-length" => content_length = value.parse().ok(),
                 "accept" => accept = value.to_string(),
+                "authorization" => authorization = Some(value.to_string()),
+                "mcp-protocol-version" => protocol_version = Some(value.to_string()),
                 "mcp-session-id" => session_id = Some(value.to_string()),
                 _ => {}
             }
@@ -270,24 +315,96 @@ fn parse_headers(text: &str) -> HttpHeaders {
         origin,
         content_length,
         accept,
+        authorization,
+        protocol_version,
         session_id,
     }
+}
+
+fn accepts_streamable_http(accept: &str) -> bool {
+    let mut accepts_json = false;
+    let mut accepts_sse = false;
+    for media_type in accept.split(',') {
+        match media_type.trim().split(';').next().unwrap_or("").trim() {
+            "application/json" => accepts_json = true,
+            "text/event-stream" => accepts_sse = true,
+            _ => {}
+        }
+    }
+    accepts_json && accepts_sse
+}
+
+fn supported_http_protocol_version(version: &str) -> bool {
+    matches!(version, "2025-03-26" | "2025-11-25")
+}
+
+fn exact_origin_host(origin: &str) -> Option<String> {
+    let authority = origin
+        .strip_prefix("http://")
+        .or_else(|| origin.strip_prefix("https://"))?;
+    if authority.is_empty()
+        || authority
+            .chars()
+            .any(|character| matches!(character, '/' | '?' | '#' | '@'))
+    {
+        return None;
+    }
+
+    let host = if let Some(bracketed) = authority.strip_prefix('[') {
+        let end = bracketed.find(']')?;
+        let host = &bracketed[..end];
+        let suffix = &bracketed[end + 1..];
+        if !suffix.is_empty() {
+            let port = suffix.strip_prefix(':')?;
+            if port.is_empty() || port.parse::<u16>().is_err() {
+                return None;
+            }
+        }
+        host
+    } else {
+        if authority.matches(':').count() > 1 {
+            return None;
+        }
+        match authority.rsplit_once(':') {
+            Some((host, port)) => {
+                if port.is_empty() || port.parse::<u16>().is_err() {
+                    return None;
+                }
+                host
+            }
+            None => authority,
+        }
+    };
+
+    if host.is_empty() {
+        return None;
+    }
+    Some(host.to_ascii_lowercase())
+}
+
+fn local_origin_allowed(origin: &str) -> bool {
+    matches!(
+        exact_origin_host(origin).as_deref(),
+        Some("localhost") | Some("127.0.0.1") | Some("::1")
+    )
+}
+
+fn remote_origin_allowed(origin: &str) -> bool {
+    if !allow_remote_bind() {
+        return false;
+    }
+    env::var("KEEL_MCP_HTTP_ALLOWED_ORIGINS")
+        .ok()
+        .map(|allowed| allowed.split(',').any(|value| value.trim() == origin))
+        .unwrap_or(false)
 }
 
 fn origin_allowed(origin: Option<&str>) -> bool {
     match origin {
         None => true,
         Some("null") => true,
-        Some(o)
-            if o.starts_with("http://127.0.0.1")
-                || o.starts_with("http://localhost")
-                || o.starts_with("https://127.0.0.1")
-                || o.starts_with("https://localhost")
-                || o.starts_with("http://[::1]") =>
-        {
-            true
-        }
-        Some(_) if allow_remote_bind() => true,
+        Some(value) if local_origin_allowed(value) => true,
+        Some(value) if remote_origin_allowed(value) => true,
         Some(_) => false,
     }
 }
@@ -298,6 +415,15 @@ fn respond(
     body: &[u8],
     sessions: &Arc<Mutex<HashSet<String>>>,
 ) -> std::io::Result<()> {
+    if allow_remote_bind() && !remote_http_authorized(headers.authorization.as_deref()) {
+        return write_http(
+            stream,
+            401,
+            "text/plain; charset=utf-8",
+            None,
+            b"Unauthorized",
+        );
+    }
     if !origin_allowed(headers.origin.as_deref()) {
         let err = json!({
             "jsonrpc": "2.0",
@@ -359,6 +485,26 @@ fn handle_post(
     body: &[u8],
     sessions: &Arc<Mutex<HashSet<String>>>,
 ) -> std::io::Result<()> {
+    if !accepts_streamable_http(&headers.accept) {
+        return write_http(
+            stream,
+            406,
+            "text/plain; charset=utf-8",
+            None,
+            b"Accept must include application/json and text/event-stream",
+        );
+    }
+    if let Some(version) = headers.protocol_version.as_deref() {
+        if !supported_http_protocol_version(version) {
+            return write_http(
+                stream,
+                400,
+                "text/plain; charset=utf-8",
+                None,
+                b"Unsupported MCP-Protocol-Version",
+            );
+        }
+    }
     if let Some(id) = headers.session_id.as_ref() {
         let known = sessions.lock().map(|g| g.contains(id)).unwrap_or(false);
         if !known {
@@ -512,9 +658,11 @@ fn write_http(
         200 => "OK",
         202 => "Accepted",
         400 => "Bad Request",
+        401 => "Unauthorized",
         403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
+        406 => "Not Acceptable",
         413 => "Payload Too Large",
         _ => "Error",
     };
@@ -566,11 +714,53 @@ mod tests {
     }
 
     #[test]
+    fn streamable_http_header_contract_is_explicit() {
+        assert!(accepts_streamable_http(
+            "application/json, text/event-stream"
+        ));
+        assert!(accepts_streamable_http(
+            "text/event-stream; charset=utf-8, application/json"
+        ));
+        assert!(!accepts_streamable_http("application/json"));
+        assert!(!accepts_streamable_http("text/event-stream"));
+        assert!(!accepts_streamable_http(""));
+        assert!(supported_http_protocol_version("2025-03-26"));
+        assert!(supported_http_protocol_version("2025-11-25"));
+        assert!(!supported_http_protocol_version("2099-01-01"));
+    }
+
+    #[test]
+    fn bearer_authorization_requires_exact_token() {
+        assert!(authorization_header_matches(
+            Some("Bearer secret"),
+            "secret"
+        ));
+        assert!(!authorization_header_matches(None, "secret"));
+        assert!(!authorization_header_matches(
+            Some("Basic secret"),
+            "secret"
+        ));
+        assert!(!authorization_header_matches(
+            Some("Bearer other"),
+            "secret"
+        ));
+        assert!(authorization_header_matches(
+            Some("Bearer secret "),
+            "secret"
+        ));
+    }
+
+    #[test]
     fn origin_allows_localhost_and_rejects_foreign() {
         assert!(origin_allowed(None));
         assert!(origin_allowed(Some("http://127.0.0.1:3000")));
-        assert!(origin_allowed(Some("http://localhost")));
+        assert!(origin_allowed(Some("https://localhost:8443")));
+        assert!(origin_allowed(Some("http://[::1]:3920")));
         assert!(!origin_allowed(Some("https://evil.example")));
+        assert!(!origin_allowed(Some("http://localhost.evil")));
+        assert!(!origin_allowed(Some("http://127.0.0.1.evil")));
+        assert!(!origin_allowed(Some("http://localhost/path")));
+        assert!(!origin_allowed(Some("http://user@localhost")));
     }
 
     #[test]
