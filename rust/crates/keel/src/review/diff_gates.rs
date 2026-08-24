@@ -2,6 +2,48 @@ use super::*;
 use crate::runtime::resolve_repository_root;
 use std::fs;
 
+pub(crate) fn collect_review_gate_results(
+    repository_root: &Path,
+    base_ref: &str,
+    surface_name: &str,
+    scan_all: bool,
+    include_tests: bool,
+    include_impact: bool,
+) -> Vec<GateResult> {
+    // Auto language gates (.githooks markers). Missing tools = non-blocking Blocked.
+    let mut gate_results = run_rust_surface_gates(repository_root, include_tests);
+    gate_results.extend(run_python_surface_gates(repository_root, include_tests));
+    gate_results.extend(run_js_surface_gates(repository_root, include_tests));
+    gate_results.extend(run_go_surface_gates(repository_root, include_tests));
+    gate_results.extend(run_cpp_surface_gates(repository_root, include_tests));
+    gate_results.push(comment_style_gate(
+        repository_root,
+        base_ref,
+        surface_name,
+        scan_all,
+    ));
+    gate_results.push(prose_style_gate(
+        repository_root,
+        base_ref,
+        surface_name,
+        scan_all,
+    ));
+    gate_results.push(slop_gate(repository_root, base_ref, surface_name, scan_all));
+    gate_results.push(flow_check_gate(repository_root, base_ref, surface_name));
+    gate_results.push(completeness_check_gate(
+        repository_root,
+        base_ref,
+        surface_name,
+    ));
+    if include_impact {
+        gate_results.push(impact_gate(repository_root, base_ref, surface_name));
+    }
+    if let Some(e2e_result) = check_e2e_config(repository_root) {
+        gate_results.push(e2e_result);
+    }
+    gate_results
+}
+
 pub(crate) fn run_review_surface_command(
     surface_name: &str,
     arguments: &[String],
@@ -27,54 +69,17 @@ pub(crate) fn run_review_surface_command(
         }
     };
 
-    let include_tests = surface_name == "pre-pr";
     // --all scans the whole tracked tree (cleanup mode) instead of only added
     // diff lines, so pre-existing slop/comments/prose are caught too.
     let scan_all = flag_set.bool_value("all");
-    // Auto language gates (.githooks markers). Missing tools = non-blocking Blocked.
-    let mut gate_results = run_rust_surface_gates(&repository_root, include_tests);
-    gate_results.extend(run_python_surface_gates(&repository_root, include_tests));
-    gate_results.extend(run_js_surface_gates(&repository_root, include_tests));
-    gate_results.extend(run_go_surface_gates(&repository_root, include_tests));
-    gate_results.extend(run_cpp_surface_gates(&repository_root, include_tests));
-    gate_results.push(comment_style_gate(
+    let gate_results = collect_review_gate_results(
         &repository_root,
         flag_set.string_value("base-ref"),
         surface_name,
         scan_all,
-    ));
-    gate_results.push(prose_style_gate(
-        &repository_root,
-        flag_set.string_value("base-ref"),
-        surface_name,
-        scan_all,
-    ));
-    gate_results.push(slop_gate(
-        &repository_root,
-        flag_set.string_value("base-ref"),
-        surface_name,
-        scan_all,
-    ));
-    gate_results.push(flow_check_gate(
-        &repository_root,
-        flag_set.string_value("base-ref"),
-        surface_name,
-    ));
-    gate_results.push(completeness_check_gate(
-        &repository_root,
-        flag_set.string_value("base-ref"),
-        surface_name,
-    ));
-    if flag_set.bool_value("impact") {
-        gate_results.push(impact_gate(
-            &repository_root,
-            flag_set.string_value("base-ref"),
-            surface_name,
-        ));
-    }
-    if let Some(e2e_result) = check_e2e_config(&repository_root) {
-        gate_results.push(e2e_result);
-    }
+        surface_name == "pre-pr",
+        flag_set.bool_value("impact"),
+    );
     let (blocking_findings, warnings) = tally_gate_results(&gate_results);
 
     render_gate_results(

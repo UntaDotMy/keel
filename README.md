@@ -635,6 +635,7 @@ The native CLI is the primary surface. The unified `memory` family verbs (`resea
 | Topic | Link |
 | --- | --- |
 | First Success Path | [./docs/first-success-path.md](./docs/first-success-path.md) |
+| Review closeout | [./docs/review-closeout.md](./docs/review-closeout.md) |
 | Workflow rules | [./WORKFLOW.md](./WORKFLOW.md) |
 | Agent rules | [./AGENTS.md](./AGENTS.md) |
 | Compatibility matrix | [./docs/compatibility-matrix.md](./docs/compatibility-matrix.md) |
