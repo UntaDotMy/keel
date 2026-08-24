@@ -141,7 +141,12 @@ mod tests {
     fn rejects_absolute_and_parent_paths() {
         assert!(safe_relative_path("../outside").is_err());
         assert!(safe_relative_path("/outside").is_err());
-        assert!(safe_relative_path("C:\\outside").is_err());
+        let absolute = if cfg!(windows) {
+            r"C:\outside"
+        } else {
+            "/outside"
+        };
+        assert!(safe_relative_path(absolute).is_err());
         assert!(safe_relative_path("src/main.rs").is_ok());
     }
 

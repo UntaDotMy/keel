@@ -2061,6 +2061,8 @@ mod tests {
                 .join("outside.md");
             fs::write(&outside, "# outside secret\n").expect("outside file");
             let link = claude_home.join("memories").join("linked.md");
+            fs::create_dir_all(link.parent().expect("memory link parent"))
+                .expect("create memory link parent");
             std::os::unix::fs::symlink(&outside, &link).expect("symlink");
 
             let database_path = recall_database_path(claude_home);
