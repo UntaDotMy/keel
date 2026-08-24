@@ -145,6 +145,12 @@ jobs:
       - name: Resolve release metadata
         id: release-metadata
         shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          HEAD_SHA: ${{ github.sha }}
+          RELEASE_TAG_INPUT: ${{ inputs.release_tag }}
         run: |
           normalize_release_tag() {
             local raw=$1
@@ -159,13 +165,19 @@ jobs:
             printf '%s\n' "$raw"
           }
 
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            release_tag="$(normalize_release_tag "${{ github.event.inputs.release_tag }}")"
-          elif [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
-            release_tag="$(normalize_release_tag "${GITHUB_REF_NAME}")"
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            raw_release_tag="$RELEASE_TAG_INPUT"
+          elif [[ "$REF_TYPE" == "tag" ]]; then
+            raw_release_tag="$REF_NAME"
           else
-            # Fallback for unexpected triggers; prefer explicit tag or dispatch input.
-            release_tag="bootstrap-${GITHUB_SHA::12}"
+            raw_release_tag="bootstrap-${HEAD_SHA::12}"
+          fi
+
+          release_tag="$(normalize_release_tag "$raw_release_tag")"
+          if [[ ! "$release_tag" =~ ^v[0-9][A-Za-z0-9._-]*$ \
+            && ! "$release_tag" =~ ^bootstrap-[0-9a-f]{12,64}$ ]]; then
+            echo "::error::Invalid release tag: $release_tag" >&2
+            exit 1
           fi
 
           if [[ "$release_tag" == v[0-9]* ]]; then
@@ -182,6 +194,11 @@ jobs:
     needs: [changes, release-preflight]
     if: needs.changes.outputs.release == 'true'
     runs-on: ${{ matrix.os }}
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+      attestations: write
     strategy:
       fail-fast: false
       matrix:
@@ -191,31 +208,37 @@ jobs:
             os_name: linux
             arch: amd64
             executable: keel
+            archive_extension: tar.gz
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
             os_name: linux
             arch: arm64
             executable: keel
+            archive_extension: tar.gz
           - target: x86_64-apple-darwin
             os: macos-latest
             os_name: darwin
             arch: amd64
             executable: keel
+            archive_extension: tar.gz
           - target: aarch64-apple-darwin
             os: macos-latest
             os_name: darwin
             arch: arm64
             executable: keel
+            archive_extension: tar.gz
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             os_name: windows
             arch: amd64
             executable: keel.exe
+            archive_extension: zip
           - target: aarch64-pc-windows-msvc
             os: windows-latest
             os_name: windows
             arch: arm64
             executable: keel.exe
+            archive_extension: zip
 
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
@@ -223,7 +246,7 @@ jobs:
         with:
           toolchain: stable
           target: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
           key: release-${{ matrix.target }}
@@ -251,17 +274,6 @@ jobs:
           mkdir -p "$target_dir"
           cp "target/${{ matrix.target }}/release/${{ matrix.executable }}" "$target_dir/"
           cp *.md "$target_dir/" || true
-          cp -R docs "$target_dir/docs" || true
-          # Strip trailing slash from `*/` so cp -R preserves skill dir names
-          # (else contents flatten into target root and install fails).
-          skill_count=0
-          for dir in */; do
-            dir="${dir%/}"
-            if [ -f "${dir}/SKILL.md" ]; then
-              cp -R "$dir" "$target_dir/"
-              skill_count=$((skill_count + 1))
-            fi
-          done
           # Stage cross-skill resource directories that SKILL.md files
           # reference via relative paths (for example _shared/common-discipline.md).
           # Mirrors SHARED_RESOURCE_DIRECTORIES in rust/.../runtime.rs — keep in
@@ -331,7 +343,7 @@ jobs:
             "repository_slug": "${{ github.repository }}",
             "release_tag": "${{ needs.release-preflight.outputs.release_tag }}",
             "build_version": "${build_version}",
-            "archive_file_name": "keel_${build_version}_${{ matrix.os_name }}_${{ matrix.arch }}.${{ matrix.os_name == 'windows' && 'zip' || 'tar.gz' }}"
+          "archive_file_name": "keel_${build_version}_${{ matrix.os_name }}_${{ matrix.arch }}.${{ matrix.archive_extension }}"
           }
           EOF
       - name: Package (Unix)
@@ -347,6 +359,31 @@ jobs:
           $source = "dist/${{ matrix.os_name }}-${{ matrix.arch }}"
           $dest = "dist/keel_${build_version}_${{ matrix.os_name }}_${{ matrix.arch }}.zip"
           Compress-Archive -Path "$source\*" -DestinationPath "$dest" -Force
+      - name: Generate archive checksum (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          archive="dist/keel_${{ needs.release-preflight.outputs.build_version }}_${{ matrix.os_name }}_${{ matrix.arch }}.${{ matrix.archive_extension }}"
+          sha256sum "$archive" > "$archive.sha256"
+      - name: Generate archive checksum (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $archive = "dist/keel_${{ needs.release-preflight.outputs.build_version }}_${{ matrix.os_name }}_${{ matrix.arch }}.${{ matrix.archive_extension }}"
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
+          "$hash  $(Split-Path -Leaf $archive)" | Set-Content -NoNewline "$archive.sha256"
+      - name: Generate SPDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          path: dist/${{ matrix.os_name }}-${{ matrix.arch }}
+          format: spdx-json
+          output-file: dist/keel_${{ needs.release-preflight.outputs.build_version }}_${{ matrix.os_name }}_${{ matrix.arch }}.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+      - name: Attest release archive
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: dist/keel_${{ needs.release-preflight.outputs.build_version }}_${{ matrix.os_name }}_${{ matrix.arch }}.${{ matrix.archive_extension }}
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: release-${{ matrix.os_name }}-${{ matrix.arch }}
@@ -371,6 +408,15 @@ jobs:
           - os: windows-latest
             os_name: windows
             arch: amd64
+          - os: ubuntu-24.04-arm
+            os_name: linux
+            arch: arm64
+          - os: macos-14
+            os_name: darwin
+            arch: arm64
+          - os: windows-11-arm
+            os_name: windows
+            arch: arm64
     steps:
       - name: Download platform archive
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -431,6 +477,127 @@ jobs:
           pattern: release-*
           merge-multiple: true
           path: release-assets
+      - name: Build release proof bundle
+        shell: bash
+        env:
+          REPOSITORY: ${{ github.repository }}
+          SOURCE_SHA: ${{ github.sha }}
+          RELEASE_RUN_ID: ${{ github.run_id }}
+          RELEASE_TAG: ${{ needs.release-preflight.outputs.release_tag }}
+          BUILD_VERSION: ${{ needs.release-preflight.outputs.build_version }}
+        run: |
+          set -euo pipefail
+          proof_root="release-proof"
+          mkdir -p "$proof_root"
+
+          validate_runs="${RUNNER_TEMP}/validate-runs.json"
+          gh run list \
+            --workflow validate.yml \
+            --commit "$SOURCE_SHA" \
+            --limit 20 \
+            --json databaseId,status,conclusion,headSha \
+            > "$validate_runs"
+          validate_run_id="$(jq -r \
+            --arg sha "$SOURCE_SHA" \
+            '[.[] | select(.headSha == $sha and .status == "completed" and .conclusion == "success")] \
+             | sort_by(.databaseId) | last | .databaseId // empty' \
+            "$validate_runs")"
+          if [[ -z "$validate_run_id" ]]; then
+            echo "No successful exact-head Validate run found for $SOURCE_SHA." >&2
+            exit 1
+          fi
+
+          validate_url="https://github.com/${REPOSITORY}/actions/runs/${validate_run_id}"
+          release_url="https://github.com/${REPOSITORY}/actions/runs/${RELEASE_RUN_ID}"
+          cat > "$proof_root/validation-summary.md" <<EOF
+          # Validation summary
+
+          - Source commit: $SOURCE_SHA
+          - Validate run: [$validate_run_id]($validate_url)
+          - Release preflight required successful exact-head validation.
+          - Locked Rust validation and platform matrix are defined in \`.github/workflows/validate.yml\`.
+          EOF
+
+          cat > "$proof_root/review-summary.md" <<EOF
+          # Review summary
+
+          - Source commit: $SOURCE_SHA
+          - Review policy: native \`keel review pre-pr\` and strict closeout.
+          - Review contract: \`docs/review-closeout.md\`.
+          - Reviewed static baseline: \`review-closeout-baseline.json\`.
+          - This file records the governing policy; it does not claim that a
+            release job substituted for an independent review.
+          EOF
+
+          {
+            echo "# Hosted check status"
+            echo
+            echo "- Release run: [$RELEASE_RUN_ID]($release_url)"
+            echo "- Source commit: $SOURCE_SHA"
+            echo
+            echo "## Jobs"
+            gh run view "$RELEASE_RUN_ID" --json jobs \
+              --jq '.jobs[] | "- \(.name): \(.conclusion)"';
+          } > "$proof_root/hosted-check-status.md"
+
+          {
+            echo "# Benchmark status snapshot"
+            echo
+            echo "- Source commit: $SOURCE_SHA"
+            echo "- Snapshot source: \`docs/benchmark-scorecard.json\`"
+            echo
+            echo '```json'
+            cat docs/benchmark-scorecard.json
+            echo '```';
+          } > "$proof_root/benchmark-status-snapshot.md"
+
+          jq -n \
+            --arg release_tag "$RELEASE_TAG" \
+            --arg build_version "$BUILD_VERSION" \
+            --arg source_sha "$SOURCE_SHA" \
+            --arg release_run_id "$RELEASE_RUN_ID" \
+            --arg validate_run_id "$validate_run_id" \
+            --arg repository "$REPOSITORY" \
+            --arg release_url "$release_url" \
+            --arg validate_url "$validate_url" \
+            '{
+              schema_version: 1,
+              repository: $repository,
+              release_tag: $release_tag,
+              build_version: $build_version,
+              source_sha: $source_sha,
+              release_run_id: $release_run_id,
+              validate_run_id: $validate_run_id,
+              release_workflow_url: $release_url,
+              validate_workflow_url: $validate_url,
+              proof_files: [
+                "validation-summary.md",
+                "review-summary.md",
+                "hosted-check-status.md",
+                "benchmark-status-snapshot.md",
+                "release-proof-manifest.json"
+              ]
+            }' > "$proof_root/release-proof-manifest.json"
+
+          for required in \
+            validation-summary.md \
+            review-summary.md \
+            hosted-check-status.md \
+            benchmark-status-snapshot.md \
+            release-proof-manifest.json; do
+            test -s "$proof_root/$required"
+          done
+
+          tar czf "release-assets/keel_release-proof_${BUILD_VERSION}.tar.gz" \
+            -C "$proof_root" .
+      - name: Stage verified installer scripts
+        shell: bash
+        run: |
+          set -euo pipefail
+          for installer in install.sh install.ps1 install.cmd; do
+            cp "$installer" "release-assets/$installer"
+            sha256sum "$installer" > "release-assets/$installer.sha256"
+          done
       - name: Create or update GitHub release
         shell: bash
         run: |

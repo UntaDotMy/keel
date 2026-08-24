@@ -1,7 +1,7 @@
 //! Purpose: Agent config parsing and TOML rendering for keel manager.
 //! Caller: install.rs via sync_agents.
 //! Dependencies: std::fs, std::time, crate::runtime.
-//! Main Functions: parse_agent_config, extract_quoted_yaml_value, decode_basic_json_string, render_agent_toml, escape_toml_string, unix_timestamp.
+//! Main Functions: parse_agent_config, extract_quoted_yaml_value, extract_yaml_bool, decode_basic_json_string, render_agent_toml, escape_toml_string, unix_timestamp.
 //! Side Effects: Reads agent config YAML files, renders TOML agent profiles.
 
 use std::fs;
@@ -11,8 +11,10 @@ use crate::runtime::{display_path, AgentConfig};
 
 #[derive(Default)]
 pub struct ParsedAgentConfig {
+    pub display_name: String,
     pub reasoning_effort: String,
     pub short_description: String,
+    pub allow_implicit_invocation: bool,
     pub default_prompt: String,
 }
 
@@ -20,10 +22,13 @@ pub fn parse_agent_config(agent_config: &AgentConfig) -> Result<ParsedAgentConfi
     let text = fs::read_to_string(&agent_config.config_path)
         .map_err(|error| format!("read {}: {error}", display_path(&agent_config.config_path)))?;
     Ok(ParsedAgentConfig {
+        display_name: extract_quoted_yaml_value(&text, "display_name").unwrap_or_default(),
         reasoning_effort: extract_quoted_yaml_value(&text, "reasoning_effort")
             .unwrap_or_else(|| "high".to_string()),
         short_description: extract_quoted_yaml_value(&text, "short_description")
             .unwrap_or_default(),
+        allow_implicit_invocation: extract_yaml_bool(&text, "allow_implicit_invocation")
+            .unwrap_or(false),
         default_prompt: extract_quoted_yaml_value(&text, "default_prompt").ok_or_else(|| {
             format!(
                 "missing default_prompt in {}",
@@ -53,6 +58,17 @@ pub fn extract_quoted_yaml_value(text: &str, key: &str) -> Option<String> {
     }
     None
 }
+pub fn extract_yaml_bool(text: &str, key: &str) -> Option<bool> {
+    match extract_quoted_yaml_value(text, key)?
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
+}
 
 fn decode_basic_json_string(value: &str) -> String {
     value
@@ -70,6 +86,12 @@ pub fn render_agent_toml(config: &ParsedAgentConfig, agent_name: &str) -> Result
     }
     let mut lines = Vec::new();
     lines.push(format!("name = \"{}\"", escape_toml_string(agent_name)));
+    if !config.display_name.trim().is_empty() {
+        lines.push(format!(
+            "display_name = \"{}\"",
+            escape_toml_string(&config.display_name)
+        ));
+    }
     lines.push(format!(
         "model_reasoning_effort = \"{}\"",
         escape_toml_string(&config.reasoning_effort)
@@ -80,6 +102,10 @@ pub fn render_agent_toml(config: &ParsedAgentConfig, agent_name: &str) -> Result
             escape_toml_string(&config.short_description)
         ));
     }
+    lines.push(format!(
+        "allow_implicit_invocation = {}",
+        config.allow_implicit_invocation
+    ));
     lines.push("developer_instructions = '''".to_string());
     lines.push(config.default_prompt.clone());
     lines.push("'''".to_string());

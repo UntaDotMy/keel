@@ -4,14 +4,14 @@
     "preToolUse": [
       {
         "command": "bash ~/.cursor/hooks/keel-cursor.sh",
-        "matcher": "Write|Edit|Delete|Shell|Read|Grep",
+        "matcher": "Write|Edit|Delete|StrReplace|MultiEdit|NotebookEdit|ApplyPatch|Patch|SearchReplace|Shell|Bash|PowerShell|Command|Terminal|Read|Grep",
         "timeout": 5
       }
     ],
     "postToolUse": [
       {
         "command": "bash ~/.cursor/hooks/keel-cursor.sh",
-        "matcher": "Shell",
+        "matcher": "Shell|Bash|PowerShell|Command|Terminal",
         "timeout": 5
       }
     ],

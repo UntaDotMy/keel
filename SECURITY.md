@@ -13,8 +13,8 @@ This repository manages local harness skill-pack install and validation flows, g
 ## Reporting a Vulnerability
 
 - Do not open a public issue for a suspected security vulnerability until the impact is understood.
-- Prefer GitHub private vulnerability reporting when it is available for this repository.
-- If private reporting is not available, contact the repository owner through GitHub first and share only the minimum reproduction needed.
+- GitHub private vulnerability reporting is enabled for this repository; use the repository Security tab to submit a report.
+- If the private channel is unavailable, contact the repository owner through GitHub and share only the minimum reproduction needed.
 
 Include:
 

@@ -71,7 +71,7 @@ pub fn run_doctor_command(
         "[ok] binary: {}",
         display_path(&std::env::current_exe().unwrap_or_else(|_| PathBuf::from("keel")))
     );
-    let raw_store = crate::proxy::raw_store::RawStore::new();
+    let raw_store = crate::proxy::raw_store::RawStore::with_root(claude_home.join("raw-output"));
     let raw_writable = fs::create_dir_all(raw_store.root())
         .and_then(|_| {
             let probe = raw_store.root().join(".doctor-write-probe");
@@ -580,6 +580,7 @@ fn probe_mcp_initialize(command: &str, args: &[String]) -> bool {
     use std::sync::mpsc;
     use std::time::Duration;
 
+    const MAX_PROBE_OUTPUT_BYTES: usize = 256 * 1024;
     let mut child = match Command::new(command)
         .args(args)
         .stdin(Stdio::piped())
@@ -606,16 +607,26 @@ fn probe_mcp_initialize(command: &str, args: &[String]) -> bool {
         // stdin drops here so the server sees EOF and exits after answering.
     }
 
-    // Read the child's stdout on a worker thread so the wait is bounded.
     let (sender, receiver) = mpsc::channel::<String>();
-    if let Some(mut stdout) = child.stdout.take() {
+    let reader = child.stdout.take().map(|mut stdout| {
         std::thread::spawn(move || {
             use std::io::Read;
-            let mut buffer = String::new();
-            let _ = stdout.read_to_string(&mut buffer);
-            let _ = sender.send(buffer);
-        });
-    }
+            let mut buffer = Vec::new();
+            let mut chunk = [0u8; 8192];
+            loop {
+                match stdout.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(count) => {
+                        if buffer.len() < MAX_PROBE_OUTPUT_BYTES {
+                            let remaining = MAX_PROBE_OUTPUT_BYTES - buffer.len();
+                            buffer.extend_from_slice(&chunk[..count.min(remaining)]);
+                        }
+                    }
+                }
+            }
+            let _ = sender.send(String::from_utf8_lossy(&buffer).into_owned());
+        })
+    });
 
     let responded = match receiver.recv_timeout(Duration::from_secs(5)) {
         Ok(response) => response.contains("protocolVersion") && response.contains("\"result\""),
@@ -623,9 +634,15 @@ fn probe_mcp_initialize(command: &str, args: &[String]) -> bool {
         Err(_) => false,
     };
 
-    // Always reap the child so the probe leaves no lingering process.
-    let _ = child.kill();
+    // why: teardown errors are intentionally ignored after the probe result;
+    // cleanup must not replace the health signal or strand a child process.
+    let _ = crate::runtime::terminate_process_tree(&mut child);
     let _ = child.wait();
+    if let Some(reader) = reader {
+        // why: the bounded reader has no useful result after the probe; join it
+        // so its thread cannot outlive the doctor command.
+        let _ = reader.join();
+    }
     responded
 }
 
@@ -692,7 +709,10 @@ fn report_mcp_registration(standard_output: &mut dyn Write, claude_home: &std::p
 /// so an operator can see, at a glance, which bridge hosts are wired. Read-only.
 /// `claude_home` is the standard `~/.claude`; each host's files live under
 /// `claude_home.parent()` (the user home), mirroring the installer's paths.
-fn report_bridge_host_wiring(standard_output: &mut dyn Write, claude_home: &std::path::Path) {
+pub(crate) fn report_bridge_host_wiring(
+    standard_output: &mut dyn Write,
+    claude_home: &std::path::Path,
+) {
     let _ = writeln!(standard_output, "Bridge hosts:");
     let home = match claude_home.parent() {
         Some(path) => path,
@@ -860,9 +880,10 @@ fn report_bridge_host_wiring(standard_output: &mut dyn Write, claude_home: &std:
         ),
     );
 
-    // Cursor: .cursorrules + hooks dir + mcp.json keel entry.
+    // Cursor: .cursorrules + hooks.json + hook script + mcp.json keel entry.
     let cursor_rules = home.join(".cursorrules");
-    let cursor_hooks = home.join(".cursor").join("hooks").join("hooks.json");
+    let cursor_hooks = home.join(".cursor").join("hooks.json");
+    let cursor_script = home.join(".cursor").join("hooks").join("keel-cursor.sh");
     let cursor_mcp_json = home.join(".cursor").join("mcp.json");
     let cursor_mcp = if cursor_mcp_json.is_file() {
         fs::read_to_string(&cursor_mcp_json)
@@ -876,7 +897,7 @@ fn report_bridge_host_wiring(standard_output: &mut dyn Write, claude_home: &std:
     report_host(
         standard_output,
         "cursor",
-        cursor_rules.is_file() && cursor_hooks.is_file(),
+        cursor_rules.is_file() && cursor_hooks.is_file() && cursor_script.is_file(),
         cursor_mcp,
     );
 }

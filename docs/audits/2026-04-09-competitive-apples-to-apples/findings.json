@@ -4,6 +4,12 @@
     "title": "The native workflow shell still trails runtime-shell comparator on setup, doctor, HUD, and team-runtime ergonomics",
     "severity": "medium",
     "status": "open",
+    "remediation_state": "tracked-open",
+    "evidence_paths": [
+      "docs/audits/2026-04-09-competitive-apples-to-apples/audit-summary.md",
+      "docs/audits/2026-04-09-competitive-apples-to-apples/remediation-map.md",
+      "docs/audits/2026-04-09-competitive-apples-to-apples/regression-proof.md"
+    ],
     "resolution": "Track under todo priority 2 and keep the proof-first closeout advantage while making the operator shell lighter."
   },
   {
@@ -11,6 +17,12 @@
     "title": "The native workflow surface still trails workflow-teaching comparator on explicit brainstorming, planning, debugging, review, and branch-finish teaching",
     "severity": "medium",
     "status": "open",
+    "remediation_state": "tracked-open",
+    "evidence_paths": [
+      "docs/audits/2026-04-09-competitive-apples-to-apples/audit-summary.md",
+      "docs/audits/2026-04-09-competitive-apples-to-apples/remediation-map.md",
+      "docs/audits/2026-04-09-competitive-apples-to-apples/regression-proof.md"
+    ],
     "resolution": "Track under todo priority 3 and add first-class native plan and debug guidance instead of relying on doctrine alone."
   },
   {
@@ -18,6 +30,12 @@
     "title": "The current durable-memory product is durable but not yet benchmarked or as semantically rich as memory-product comparator",
     "severity": "high",
     "status": "open",
+    "remediation_state": "tracked-open",
+    "evidence_paths": [
+      "docs/audits/2026-04-09-competitive-apples-to-apples/audit-summary.md",
+      "docs/audits/2026-04-09-competitive-apples-to-apples/remediation-map.md",
+      "docs/audits/2026-04-09-competitive-apples-to-apples/regression-proof.md"
+    ],
     "resolution": "Track under todo priority 4 and add benchmarked recall, deeper semantic retrieval, and deliberate memory-product features."
   },
   {
@@ -25,6 +43,12 @@
     "title": "The current code-search surface is useful but does not yet match indexing comparator on incremental semantic indexing, lineage, and query parity",
     "severity": "high",
     "status": "open",
+    "remediation_state": "tracked-open",
+    "evidence_paths": [
+      "docs/audits/2026-04-09-competitive-apples-to-apples/audit-summary.md",
+      "docs/audits/2026-04-09-competitive-apples-to-apples/remediation-map.md",
+      "docs/audits/2026-04-09-competitive-apples-to-apples/regression-proof.md"
+    ],
     "resolution": "Track under todo priority 5 and evolve code-search toward incremental semantic indexing with explicit lineage."
   },
   {
@@ -32,6 +56,11 @@
     "title": "Older repo wording used the legacy workflow-teaching label instead of the live public workflow-teaching comparator repo identity used by this audit",
     "severity": "low",
     "status": "closed",
+    "remediation_state": "closed",
+    "evidence_paths": [
+      "docs/audits/2026-04-09-competitive-apples-to-apples/audit-summary.md",
+      "docs/audits/2026-04-09-competitive-apples-to-apples/regression-proof.md"
+    ],
     "resolution": "Closed after shared benchmark docs and tests were updated to use anonymized workflow-teaching comparator wording without preserving the older hardcoded project label."
   }
 ]

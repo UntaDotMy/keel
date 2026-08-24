@@ -9,6 +9,7 @@ use std::io::Write;
 use crate::args::FlagSet;
 use crate::json::Value;
 use crate::runtime::{display_path, resolve_claude_home};
+use crate::utility::record_store::unique_timestamped_id;
 use crate::utility::working_brief::{
     brief_directory, brief_to_value, create_brief, list_briefs, read_brief, write_brief, Brief,
 };
@@ -99,12 +100,12 @@ fn run_working_brief_write(
             return 1;
         }
     };
-    let now_millis = crate::utility::record_store::current_timestamp_millis();
-    let entry_id = flag_set.string_value("id").trim().to_string();
-    let entry_id = if entry_id.is_empty() {
-        format!("wb-{now_millis:x}")
+    let (generated_id, created_at) = unique_timestamped_id("wb");
+    let explicit_id = flag_set.string_value("id").trim().to_string();
+    let entry_id = if explicit_id.is_empty() {
+        generated_id
     } else {
-        entry_id
+        explicit_id
     };
     // Capture the workspace this brief belongs to so the default-on working-brief
     // gate can scope "did this workspace get a brief this session" instead of
@@ -121,7 +122,7 @@ fn run_working_brief_write(
         split_csv_lines(flag_set.string_value("acceptance-criteria")),
         split_csv_lines(flag_set.string_value("assumptions")),
         workspace,
-        crate::utility::record_store::format_timestamp_iso8601(now_millis),
+        created_at,
     );
     let path = match write_brief(&claude_home, &brief) {
         Ok(path) => path,

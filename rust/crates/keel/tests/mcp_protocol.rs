@@ -3,9 +3,9 @@
 //!   the framing, dispatcher arms, and stdin EOF handling all line up with
 //!   what the in-process unit tests verify under `src/mcp/mod.rs`.
 //! Caller: `cargo test -p keel --test mcp_protocol`.
-//! Dependencies: serde_json for request/response framing, the cargo-injected
-//!   `CARGO_BIN_EXE_keel` env var for the binary under test, the
-//!   stdlib `Command`/`BufReader` plumbing for stdio.
+//! Dependencies: serde_json for request/response framing, Cargo's optional
+//!   `CARGO_BIN_EXE_keel` path or the target/debug fallback for the binary under
+//!   test, and stdlib `Command`/`BufReader` plumbing for stdio.
 //! Main Functions: `mcp_serve_initialize_then_tools_list_round_trip`,
 //!   `mcp_serve_tools_call_recall_status_returns_text_payload`,
 //!   `mcp_serve_resources_list_includes_system_map_and_recall_status`,
@@ -23,7 +23,18 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 
-const BINARY_ENV_VAR: &str = "CARGO_BIN_EXE_keel";
+const CARGO_BIN_EXE_KEEL: Option<&str> = option_env!("CARGO_BIN_EXE_keel");
+
+fn keel_binary_path() -> PathBuf {
+    if let Some(path) = CARGO_BIN_EXE_KEEL {
+        return PathBuf::from(path);
+    }
+    let mut path = env::current_exe().expect("resolve integration test executable");
+    path.pop(); // deps/
+    path.pop(); // target/debug/
+    path.push(if cfg!(windows) { "keel.exe" } else { "keel" });
+    path
+}
 
 struct McpServerProcess {
     child: Child,
@@ -33,8 +44,7 @@ struct McpServerProcess {
 
 impl McpServerProcess {
     fn spawn(claude_home: &Path) -> Self {
-        let binary_path = env::var(BINARY_ENV_VAR)
-            .unwrap_or_else(|_| panic!("{BINARY_ENV_VAR} env var should be set by cargo test"));
+        let binary_path = keel_binary_path();
         let mut command = Command::new(binary_path);
         command.arg("mcp").arg("serve");
         command.env("CLAUDE_TARGET_OVERRIDE", claude_home);

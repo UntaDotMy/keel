@@ -332,6 +332,16 @@ pub fn stable_finding_id(rule: &str, file: &str, line: Option<usize>, message: &
 pub fn stable_requirement_id(text: &str) -> String {
     format!("requirement-{}", fnv1a64_hex(&normalize_identifier(text)))
 }
+fn requirement_proof(proof: &str, requirement_id: &str) -> Option<String> {
+    proof.lines().find_map(|line| {
+        let (id, evidence) = line.split_once('=')?;
+        if id.trim() != requirement_id {
+            return None;
+        }
+        let evidence = evidence.trim();
+        (!evidence.is_empty()).then(|| evidence.to_string())
+    })
+}
 
 pub fn scope_fingerprint(head_sha: &str, changed_paths: &[String], dirty_status: &str) -> String {
     let mut sorted_paths = changed_paths.to_vec();
@@ -1027,10 +1037,14 @@ fn exact_ci_evidence(repository_root: &Path, head_sha: &str) -> (bool, String) {
         &[
             "run".to_string(),
             "list".to_string(),
+            "--workflow".to_string(),
+            "validate.yml".to_string(),
+            "--commit".to_string(),
+            head_sha.to_string(),
             "--limit".to_string(),
-            "1".to_string(),
+            "20".to_string(),
             "--json".to_string(),
-            "headSha".to_string(),
+            "databaseId,headSha,status,conclusion".to_string(),
         ],
         Some(repository_root),
     ) {
@@ -1051,38 +1065,53 @@ fn exact_ci_evidence(repository_root: &Path, head_sha: &str) -> (bool, String) {
         Ok(value) => value,
         Err(error) => return (false, format!("gh run list returned invalid JSON: {error}")),
     };
-    let Some(actual_sha) = parsed
-        .as_array()
-        .and_then(|runs| runs.first())
-        .and_then(|run| run.get("headSha"))
-        .and_then(serde_json::Value::as_str)
-    else {
+    let selected = parsed.as_array().and_then(|runs| {
+        runs.iter()
+            .filter(|run| {
+                run.get("headSha")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|sha| sha.eq_ignore_ascii_case(head_sha))
+            })
+            .max_by_key(|run| {
+                run.get("databaseId")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0)
+            })
+    });
+    let Some(run) = selected else {
         return (
             false,
-            format!("gh run list returned no head SHA for {head_sha}"),
+            format!("no Validate run found for exact HEAD {head_sha}"),
         );
     };
-    if !actual_sha.eq_ignore_ascii_case(head_sha) {
+    let run_id = run
+        .get("databaseId")
+        .map(serde_json::Value::to_string)
+        .unwrap_or_else(|| "unknown".to_string());
+    let status = run
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let conclusion = run
+        .get("conclusion")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    if status != "completed" {
         return (
             false,
-            format!("latest GitHub run is for {actual_sha}, not HEAD {head_sha}"),
+            format!("GitHub Validate run {run_id} for HEAD {head_sha} is {status}"),
         );
     }
-
-    match query_provider_checks(provider, Some(repository_root)) {
-        CiQuery::Checks(checks) => match evaluate_checks(&checks) {
-            CiVerdict::Green => (true, format!("GitHub checks green for HEAD {head_sha}")),
-            CiVerdict::Pending => (false, format!("GitHub checks pending for HEAD {head_sha}")),
-            CiVerdict::Red => (false, format!("GitHub checks failed for HEAD {head_sha}")),
-            CiVerdict::NoChecks => (
-                false,
-                format!("GitHub returned no checks for HEAD {head_sha}"),
-            ),
-        },
-        CiQuery::Error => (
+    if conclusion == "success" {
+        (
+            true,
+            format!("GitHub Validate run {run_id} green for HEAD {head_sha}"),
+        )
+    } else {
+        (
             false,
-            format!("GitHub checks could not be queried for HEAD {head_sha}"),
-        ),
+            format!("GitHub Validate run {run_id} for HEAD {head_sha} concluded {conclusion}"),
+        )
     }
 }
 pub(crate) fn run_review_closeout_command(
@@ -1222,17 +1251,37 @@ pub(crate) fn run_review_closeout_command(
                 current_requirements = brief
                     .acceptance_criteria
                     .iter()
-                    .map(|text| ReviewRequirement {
-                        id: stable_requirement_id(text),
-                        text: text.clone(),
-                        status: ReviewFindingStatus::Open,
-                        evidence: if proof.is_empty() {
-                            Vec::new()
-                        } else {
-                            vec![proof.to_string()]
-                        },
+                    .map(|text| {
+                        let id = stable_requirement_id(text);
+                        ReviewRequirement {
+                            id,
+                            text: text.clone(),
+                            status: ReviewFindingStatus::Open,
+                            evidence: requirement_proof(proof, &stable_requirement_id(text))
+                                .into_iter()
+                                .collect(),
+                        }
                     })
                     .collect();
+                for requirement in &current_requirements {
+                    if requirement.evidence.is_empty() {
+                        current_findings.push(finding(
+                            "requirement:evidence",
+                            ReviewSeverity::Major,
+                            "working-brief",
+                            None,
+                            format!(
+                                "acceptance criterion {} lacks criterion-specific proof",
+                                requirement.id
+                            ),
+                            format!(
+                                "provide `{}=<command or artifact evidence>` in --proof",
+                                requirement.id
+                            ),
+                            &head_sha,
+                        ));
+                    }
+                }
             }
             Ok(None) => current_findings.push(finding(
                 "requirement:brief",
@@ -1449,7 +1498,6 @@ pub(crate) fn run_review_closeout_command(
         baseline_status = "written";
     }
 
-    let proof = flags.string_value("proof").trim();
     let reconciled_findings = reconcile_findings(prior_findings, &current_findings, &head_sha);
     let (reconciled_findings, baseline_suppressed) =
         apply_review_baseline(reconciled_findings, baseline.as_ref(), &head_sha);
@@ -1468,7 +1516,11 @@ pub(crate) fn run_review_closeout_command(
         blocking: baseline_error.is_some(),
         details: baseline_details.or_else(|| baseline_error.clone()),
     });
-    if !proof.is_empty()
+    let all_requirements_proven = !current_requirements.is_empty()
+        && current_requirements
+            .iter()
+            .all(|requirement| !requirement.evidence.is_empty());
+    if all_requirements_proven
         && reconciled_findings
             .iter()
             .all(|finding| finding.status == ReviewFindingStatus::Closed)
@@ -1634,6 +1686,16 @@ mod tests {
             stable_finding_id("R-1", "src/lib.rs", Some(10), "must be fixed"),
             stable_finding_id("R-1", "src/lib.rs", Some(42), "must be fixed")
         );
+    }
+    #[test]
+    fn criterion_proof_requires_matching_requirement_id() {
+        let id = stable_requirement_id("compile");
+        assert_eq!(
+            requirement_proof(&format!("{id}=cargo test passed"), &id),
+            Some("cargo test passed".to_string())
+        );
+        assert_eq!(requirement_proof("generic proof", &id), None);
+        assert_eq!(requirement_proof("other=proof", &id), None);
     }
 
     #[test]

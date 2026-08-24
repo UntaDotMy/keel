@@ -8,6 +8,8 @@ use crate::runtime::resolve_claude_home;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
+#[cfg(unix)]
+use std::io::Write;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -91,6 +93,43 @@ pub struct RawEntry {
     pub path: PathBuf,
     pub meta: Option<RunMeta>,
 }
+#[cfg(unix)]
+fn restrict_directory(path: &std::path::Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut permissions = fs::metadata(path)?.permissions();
+    permissions.set_mode(0o700);
+    fs::set_permissions(path, permissions)
+}
+
+#[cfg(not(unix))]
+fn restrict_directory(path: &std::path::Path) -> io::Result<()> {
+    // Windows user-profile ACLs are inherited from the private profile root;
+    // still verify the directory exists before publishing artifacts.
+    fs::metadata(path).map(|_| ())
+}
+
+#[cfg(unix)]
+fn write_private(path: &std::path::Path, bytes: &[u8]) -> io::Result<()> {
+    use std::fs::OpenOptions;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(bytes)?;
+    let mut permissions = file.metadata()?.permissions();
+    permissions.set_mode(0o600);
+    fs::set_permissions(path, permissions)
+}
+
+#[cfg(not(unix))]
+fn write_private(path: &std::path::Path, bytes: &[u8]) -> io::Result<()> {
+    fs::write(path, bytes)
+}
 
 impl RawStore {
     pub fn new() -> Self {
@@ -110,8 +149,12 @@ impl RawStore {
 
     pub fn save(&self, meta: &mut RunMeta, run: &RawRun) -> std::io::Result<()> {
         let date = chrono::Local::now().format("%Y-%m-%d").to_string();
-        let dir = self.root.join(date).join(&meta.raw_id);
+        let day_dir = self.root.join(date);
+        let dir = day_dir.join(&meta.raw_id);
         fs::create_dir_all(&dir)?;
+        restrict_directory(&self.root)?;
+        restrict_directory(&day_dir)?;
+        restrict_directory(&dir)?;
 
         // Defense-in-depth: never write an unbounded stream to disk. The capture
         // chokepoint already caps, but a direct RawRun caller could bypass it.
@@ -125,12 +168,12 @@ impl RawStore {
         } else {
             &run.stderr[..]
         };
-        fs::write(dir.join("stdout.log"), stdout_bytes)?;
-        fs::write(dir.join("stderr.log"), stderr_bytes)?;
-        fs::write(dir.join("command.txt"), &meta.command)?;
+        write_private(&dir.join("stdout.log"), stdout_bytes)?;
+        write_private(&dir.join("stderr.log"), stderr_bytes)?;
+        write_private(&dir.join("command.txt"), meta.command.as_bytes())?;
 
         let meta_json = serde_json::to_string_pretty(meta)?;
-        fs::write(dir.join("meta.json"), meta_json)?;
+        write_private(&dir.join("meta.json"), meta_json.as_bytes())?;
 
         meta.raw_path = dir;
         Ok(())
@@ -140,9 +183,11 @@ impl RawStore {
         if meta.raw_path.as_os_str().is_empty() {
             return Ok(());
         }
-        fs::write(&meta.compact_path, compact_output)?;
+        restrict_directory(&self.root)?;
+        restrict_directory(&meta.raw_path)?;
+        write_private(&meta.compact_path, compact_output.as_bytes())?;
         let meta_json = serde_json::to_string_pretty(meta)?;
-        fs::write(meta.raw_path.join("meta.json"), meta_json)?;
+        write_private(&meta.raw_path.join("meta.json"), meta_json.as_bytes())?;
         Ok(())
     }
 
@@ -293,14 +338,17 @@ impl RawStore {
     }
 
     fn write_prune_stamp(&self) {
-        if fs::create_dir_all(&self.root).is_err() {
+        if fs::create_dir_all(&self.root).is_err() || restrict_directory(&self.root).is_err() {
             return;
         }
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let _ = fs::write(self.root.join(".last-auto-prune"), now.to_string());
+        let _ = write_private(
+            &self.root.join(".last-auto-prune"),
+            now.to_string().as_bytes(),
+        );
     }
 }
 
@@ -404,6 +452,77 @@ mod tests {
             b"stdout"
         );
         assert!(store.find_dir(&meta.raw_id).expect("dir").is_dir());
+        let _ = std::fs::remove_dir_all(root);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn raw_store_artifacts_are_private_at_rest() {
+        use std::os::unix::fs::PermissionsExt;
+
+        fn mode(path: &std::path::Path) -> u32 {
+            std::fs::metadata(path)
+                .expect("metadata")
+                .permissions()
+                .mode()
+                & 0o777
+        }
+
+        let root =
+            std::env::temp_dir().join(format!("keel-raw-store-permissions-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let store = RawStore::with_root(root.clone());
+        let mut meta = RunMeta {
+            raw_id: "20260512-permissions".to_string(),
+            command: "printf secret".to_string(),
+            program: "printf".to_string(),
+            args: vec!["secret".to_string()],
+            cwd: PathBuf::from("."),
+            started_at: 1,
+            duration_ms: 2,
+            exit_code: 0,
+            adapter_name: "generic".to_string(),
+            raw_path: PathBuf::new(),
+            compact_path: PathBuf::new(),
+            agent: "test".to_string(),
+            workspace: PathBuf::from("."),
+            stdout_bytes: 6,
+            stderr_bytes: 0,
+            compact_stdout_bytes: 0,
+            compact_stderr_bytes: 0,
+            estimated_tokens_before: 1,
+            estimated_tokens_after: 1,
+            estimated_tokens_saved: 0,
+            savings_pct: 0.0,
+            compacted: false,
+        };
+        store
+            .save(
+                &mut meta,
+                &RawRun {
+                    stdout: b"secret".to_vec(),
+                    stderr: Vec::new(),
+                    exit_code: 0,
+                },
+            )
+            .expect("save");
+        meta.compact_path = meta.raw_path.join("compact.txt");
+        store.save_compact(&meta, "secret").expect("compact");
+        store.write_prune_stamp();
+
+        let day = meta.raw_path.parent().expect("day");
+        assert_eq!(mode(&root), 0o700);
+        assert_eq!(mode(day), 0o700);
+        assert_eq!(mode(&meta.raw_path), 0o700);
+        for file in [
+            "stdout.log",
+            "stderr.log",
+            "command.txt",
+            "meta.json",
+            "compact.txt",
+        ] {
+            assert_eq!(mode(&meta.raw_path.join(file)), 0o600, "{file}");
+        }
+        assert_eq!(mode(&root.join(".last-auto-prune")), 0o600);
         let _ = std::fs::remove_dir_all(root);
     }
 

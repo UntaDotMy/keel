@@ -74,16 +74,29 @@ $AssetVersion = Get-AssetVersion -ReleaseTag $ReleaseTag
 $Architecture = Get-NormalizedArchitecture
 $ArchiveName = "keel_${AssetVersion}_windows_${Architecture}.zip"
 $DownloadUrl = "https://github.com/$Repository/releases/download/$ReleaseTag/$ArchiveName"
+$ChecksumUrl = "$DownloadUrl.sha256"
 $TemporaryDirectory = Join-Path ([System.IO.Path]::GetTempPath()) ("keel-install-" + [System.Guid]::NewGuid().ToString("N"))
 
 try {
     New-Item -ItemType Directory -Path $TemporaryDirectory | Out-Null
     $ArchivePath = Join-Path $TemporaryDirectory $ArchiveName
+    $ChecksumPath = Join-Path $TemporaryDirectory "$ArchiveName.sha256"
     $ExtractDirectory = Join-Path $TemporaryDirectory "extract"
     New-Item -ItemType Directory -Path $ExtractDirectory | Out-Null
 
     Write-Host "Downloading keel $ReleaseTag for windows-$Architecture..."
     Invoke-WebRequest -Uri $DownloadUrl -OutFile $ArchivePath -Headers @{ "User-Agent" = "keel-installer" }
+    Invoke-WebRequest -Uri $ChecksumUrl -OutFile $ChecksumPath -Headers @{ "User-Agent" = "keel-installer" }
+
+    $ExpectedHash = ((Get-Content -LiteralPath $ChecksumPath -Raw).Trim() -split "\s+")[0].ToUpperInvariant()
+    if ($ExpectedHash -notmatch "^[0-9A-F]{64}$") {
+        throw "Invalid SHA-256 checksum for $ArchiveName."
+    }
+    $ActualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $ArchivePath).Hash.ToUpperInvariant()
+    if ($ActualHash -ne $ExpectedHash) {
+        throw "SHA-256 mismatch for $ArchiveName."
+    }
+    Write-Host "Verified SHA-256 for $ArchiveName."
 
     Expand-Archive -Path $ArchivePath -DestinationPath $ExtractDirectory -Force
 

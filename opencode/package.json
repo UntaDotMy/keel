@@ -6,6 +6,6 @@
   "type": "module",
   "main": "keel.ts",
   "devDependencies": {
-    "@opencode-ai/plugin": "^1.0.0"
+    "@opencode-ai/plugin": "1.18.21"
   }
 }

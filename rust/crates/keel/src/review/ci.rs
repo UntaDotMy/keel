@@ -455,8 +455,12 @@ pub(crate) fn ci_run_matches_head(provider: CiProvider, repo: Option<&Path>) -> 
                 &[
                     "run".to_string(),
                     "list".to_string(),
+                    "--workflow".to_string(),
+                    "validate.yml".to_string(),
+                    "--commit".to_string(),
+                    head.clone(),
                     "--limit".to_string(),
-                    "1".to_string(),
+                    "20".to_string(),
                     "--json".to_string(),
                     "headSha".to_string(),
                 ],

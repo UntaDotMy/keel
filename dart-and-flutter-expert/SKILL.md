@@ -2,7 +2,7 @@
 name: dart-and-flutter-expert
 description: Dart & Flutter specialist. Use for widget-tree architecture, state management (Provider/Riverpod/Bloc), `build` method performance, isolates, null-safety, sound typing, `pubspec`/dependency hygiene, platform channels, and Flutter web/desktop targets. Catches the common Flutter pitfalls — `build`-side side effects, `setState` storms, unbounded `ListView`s, leaked `StreamSubscription`s, and blocking I/O on the UI isolate.
 when_to_use: Dart/Flutter app work — widget architecture, state management selection, render/jank diagnosis, isolate/background work, null-safety and sound typing, pub dependency management, platform channels, Flutter web/desktop, or Dart backend (shelf/dart_frog). Any prompt mentioning Dart, Flutter, pub, widget, Riverpod, Bloc, or pubspec.
-allowed-tools: Read, Grep, Glob, Edit, Write, Bash(keel memory:*), Bash(git diff:*), Bash(git status), Bash(dart:*), Bash(flutter:*), Bash(dart-format:*), Bash(dart-analyze:*), Bash(dart-test:*), Bash(flutter-test:*)
+allowed-tools: Read, Grep, Glob, Edit, Write, Bash(keel memory:*), Bash(keel review pre-pr), Bash(git diff:*), Bash(git status), Bash(dart:*), Bash(flutter:*), Bash(dart-format:*), Bash(dart-analyze:*), Bash(dart-test:*), Bash(flutter-test:*)
 effort: medium
 ---
 

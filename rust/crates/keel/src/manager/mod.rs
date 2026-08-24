@@ -338,5 +338,7 @@ pub fn run_status_command(
     let _ = writeln!(standard_output);
     let _ = writeln!(standard_output, "Runtime:");
     let _ = writeln!(standard_output, "  implementation: rust");
+    let _ = writeln!(standard_output);
+    doctor::report_bridge_host_wiring(standard_output, &claude_home);
     0
 }

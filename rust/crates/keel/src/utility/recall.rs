@@ -971,20 +971,26 @@ pub fn sync_recall_index(
     force_full_rescan: bool,
 ) -> Result<SyncReport, String> {
     let mut report = SyncReport::default();
-    let mut existing_rows: std::collections::HashMap<String, (i64, i64)> =
+    let mut existing_rows: std::collections::HashMap<String, (i64, i64, String)> =
         std::collections::HashMap::new();
     {
         let mut select_statement = connection
-            .prepare("SELECT path, modified_at, size FROM documents")
+            .prepare(
+                "SELECT d.path, d.modified_at, d.size, \
+                 COALESCE(MAX(m.content_hash), '') \
+                 FROM documents d LEFT JOIN document_meta m ON m.path = d.path \
+                 GROUP BY d.path, d.modified_at, d.size",
+            )
             .map_err(|database_error| format!("prepare select: {database_error}"))?;
         let row_iterator = select_statement
             .query_map([], |row| {
                 let path: String = row.get(0)?;
                 let modified_at_text: String = row.get(1)?;
                 let size_text: String = row.get(2)?;
+                let content_hash: String = row.get(3)?;
                 let modified_at = modified_at_text.parse::<i64>().unwrap_or(0);
                 let size_bytes = size_text.parse::<i64>().unwrap_or(0);
-                Ok((path, (modified_at, size_bytes)))
+                Ok((path, (modified_at, size_bytes, content_hash)))
             })
             .map_err(|database_error| format!("query existing: {database_error}"))?;
         for row_result in row_iterator {
@@ -1016,10 +1022,21 @@ pub fn sync_recall_index(
     for document in &on_disk {
         on_disk_paths.insert(document.absolute_path.clone());
         let needs_write = match existing_rows.get(&document.absolute_path) {
-            Some((stored_modified_at, stored_size)) => {
-                force_full_rescan
+            Some((stored_modified_at, stored_size, stored_hash)) => {
+                if force_full_rescan
                     || *stored_modified_at != document.modified_at_millis
                     || *stored_size != document.size_bytes
+                {
+                    true
+                } else {
+                    match fs::read_to_string(&document.absolute_path) {
+                        Ok(content) => stable_fingerprint(&content) != stored_hash.as_str(),
+                        Err(_) => {
+                            report.skipped += 1;
+                            false
+                        }
+                    }
+                }
             }
             None => true,
         };
@@ -1238,17 +1255,24 @@ fn collect_indexable_files(directory: &Path, out: &mut Vec<DocumentRecord>) -> R
             Err(_) => continue,
         };
         let entry_path = entry.path();
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(_) => continue,
+        };
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
+            collect_indexable_files(&entry_path, out)?;
+            continue;
+        }
+        if !file_type.is_file() {
+            continue;
+        }
         let metadata = match entry.metadata() {
             Ok(metadata) => metadata,
             Err(_) => continue,
         };
-        if metadata.is_dir() {
-            collect_indexable_files(&entry_path, out)?;
-            continue;
-        }
-        if !metadata.is_file() {
-            continue;
-        }
         let extension = entry_path
             .extension()
             .and_then(|os_str| os_str.to_str())
@@ -2023,6 +2047,33 @@ mod tests {
                     .any(|hit| hit.absolute_path.contains("rc-42.json")),
                 "reindex_after_write must index the new record so it is found with no read-path sync; hits: {:?}",
                 hits.iter().map(|h| &h.absolute_path).collect::<Vec<_>>()
+            );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recall_skips_symlinked_memory_files() {
+        run_with_home("keel-recall-symlink", |claude_home| {
+            let outside = claude_home
+                .parent()
+                .expect("temporary parent")
+                .join("outside.md");
+            fs::write(&outside, "# outside secret\n").expect("outside file");
+            let link = claude_home.join("memories").join("linked.md");
+            fs::create_dir_all(link.parent().expect("memory link parent"))
+                .expect("create memory link parent");
+            std::os::unix::fs::symlink(&outside, &link).expect("symlink");
+
+            let database_path = recall_database_path(claude_home);
+            let mut connection = open_recall_connection(&database_path).expect("open recall index");
+            sync_recall_index(&mut connection, claude_home, true).expect("sync recall");
+            let query = build_fts_query("outside secret").expect("query");
+            let hits = query_recall_index(&connection, &query, 20, None).expect("search");
+            assert!(
+                hits.iter()
+                    .all(|hit| !hit.absolute_path.contains("linked.md")),
+                "symlinked memory file must not be indexed: {hits:?}"
             );
         });
     }

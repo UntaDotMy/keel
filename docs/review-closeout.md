@@ -17,6 +17,19 @@ the default output format is `json`.
 
 Each run writes a ledger under `<claude-home>/state/review-closeout/<review-id>.json`. Without an explicit review id, the id is derived from the current `HEAD` (for example, `review-<12-char-sha>`). The JSON result includes the ledger path, status, findings, requirements, and gate snapshots.
 
+### Criterion-bound proof
+
+With a working brief, `--proof` must contain one non-empty evidence line for
+each acceptance criterion. Use the requirement IDs shown in JSON output:
+
+```text
+requirement-<id>=cargo test --workspace --locked passed
+requirement-<id>=hosted run https://github.com/org/repo/actions/runs/123
+```
+
+Closeout keeps each evidence line attached to its criterion. One generic
+sentence is not sufficient and cannot close every requirement.
+
 ## Reviewed baseline
 
 Repository-wide static findings can be carried in the tracked

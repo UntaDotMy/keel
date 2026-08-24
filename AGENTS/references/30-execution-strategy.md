@@ -320,7 +320,7 @@ REPEAT UNTIL CLEAN:
 
 **Mistake & Solution Memory (Crucial):**
 - If an error, bug, or mistake requires significant effort to resolve, you MUST record the mistake and its verified solution to `.claude_lessons.md`.
-- Tool-usage mistakes count here too: if `js_repl`, `exec_command`, `write_stdin`, `apply_patch`, or another tool was used incorrectly and the correction is reusable, record it as a mistake with the tool name and prevention note.
+- Tool-usage mistakes count here too: if the persistent `eval`, `bash`, `hub`, `edit`, or another harness tool was used incorrectly and the correction is reusable, record it as a mistake with the tool name and prevention note.
 - Follow the **Memory Schema & Pruning** rules above (Consolidate, Deduplicate, Index) to prevent file bloat. This ensures the system explicitly learns without exhausting the context window.
 
 **Common issues to fix:**

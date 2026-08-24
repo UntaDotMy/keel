@@ -30,7 +30,7 @@ use std::env;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc, Condvar, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -61,6 +61,8 @@ use super::{recall_status_payload, system_map_text, MethodError, JSON_RPC_INVALI
 /// even when the server would eventually answer. Prefer CLI for multi-minute
 /// builds; raise via env only when the host budget is known to be higher.
 const DEFAULT_MCP_CHILD_TIMEOUT_SECS: u64 = 25;
+const MCP_TOOL_WORKER_COUNT: usize = 8;
+const MCP_TOOL_QUEUE_CAPACITY: usize = 64;
 
 /// Test-visible handle on the per-tool deadline so sibling modules can assert
 /// relationships against it without re-hardcoding the number.
@@ -166,7 +168,8 @@ fn tools_list_catalog() -> Value {
                         "input": { "type": "string", "description": "Alias for command." },
                         "cwd": { "type": "string", "description": "Working directory for the command. Defaults to the server's cwd." },
                         "wait": { "type": "boolean", "description": "Default true: wait for the command to finish and return its output. false: start in the background and return a commandId immediately — use for commands that may outlive the tool timeout (long builds, analyze)." },
-                        "json": { "type": "boolean", "description": "Return the output as a JSON object (command, exit_code, stdout, stderr) instead of the text report. Default false." }
+                        "json": { "type": "boolean", "description": "Return the output as a JSON object (command, exit_code, stdout, stderr) instead of the text report. Default false." },
+                        "confirm": { "type": "boolean", "description": "Required for shell/interpreter/network/destructive commands together with KEEL_MCP_ALLOW_UNSAFE_COMMANDS=1." }
                     }
                 }
             },
@@ -770,10 +773,36 @@ fn dispatch_mcp_tool(tool_name: &str, arguments: &Value) -> Result<String, Strin
     }
 }
 
-/// Run an in-process tool body on a worker thread and return by `timeout`.
-/// Per-call safety net: the serve loop is concurrent, but one stuck tool would
-/// still hold an in-flight slot until this deadline fires. The worker may
-/// outlive the deadline if stuck in a native lock; the caller still recovers.
+type ToolJob = Box<dyn FnOnce() + Send + 'static>;
+
+struct ToolExecutor {
+    sender: mpsc::SyncSender<ToolJob>,
+}
+
+static TOOL_EXECUTOR: LazyLock<ToolExecutor> = LazyLock::new(|| {
+    let (sender, receiver) = mpsc::sync_channel::<ToolJob>(MCP_TOOL_QUEUE_CAPACITY);
+    let receiver = Arc::new(Mutex::new(receiver));
+    for index in 0..MCP_TOOL_WORKER_COUNT {
+        let receiver = Arc::clone(&receiver);
+        let _ = std::thread::Builder::new()
+            .name(format!("keel-mcp-tool-{index}"))
+            .spawn(move || loop {
+                let job = receiver
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .recv();
+                match job {
+                    Ok(job) => job(),
+                    Err(_) => break,
+                }
+            });
+    }
+    ToolExecutor { sender }
+});
+
+/// Run an in-process tool body on a bounded worker pool and return by `timeout`.
+/// A timed-out body may finish in its pool worker, but cannot create an
+/// unbounded thread per request or hold the caller's result channel open.
 pub(crate) fn run_tool_with_deadline<F>(
     timeout: Duration,
     label: &str,
@@ -783,23 +812,30 @@ where
     F: FnOnce() -> Result<String, String> + Send + 'static,
 {
     let (tx, rx) = mpsc::channel();
-    std::thread::Builder::new()
-        .name(format!("keel-mcp-{label}"))
-        .spawn(move || {
-            let _ = tx.send(work());
-        })
-        .map_err(|error| format!("{label}: spawn tool worker: {error}"))?;
+    let job: ToolJob = Box::new(move || {
+        let _ = tx.send(work());
+    });
+    TOOL_EXECUTOR
+        .sender
+        .try_send(job)
+        .map_err(|error| match error {
+            mpsc::TrySendError::Full(_) => {
+                format!("{label}: tool executor queue is full; retry later")
+            }
+            mpsc::TrySendError::Disconnected(_) => {
+                format!("{label}: tool executor is unavailable")
+            }
+        })?;
 
     match rx.recv_timeout(timeout) {
         Ok(result) => result,
         Err(mpsc::RecvTimeoutError::Timeout) => Err(format!(
-            "{label}: timed out after {}s (set KEEL_MCP_TOOL_TIMEOUT_SECS to raise; \
-             prefer skill_route over skill_list; kill orphan `keel mcp serve` if calls keep hanging)",
+            "{label}: timed out after {}s; the bounded tool worker continues safely",
             timeout.as_secs()
         )),
-        Err(mpsc::RecvTimeoutError::Disconnected) => {
-            Err(format!("{label}: tool worker disconnected without a result"))
-        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(format!(
+            "{label}: tool worker disconnected without a result"
+        )),
     }
 }
 
@@ -937,10 +973,149 @@ fn first_string_field(arguments: &Value, names: &[&str]) -> String {
     }
     String::new()
 }
+fn unsafe_mcp_commands_enabled() -> bool {
+    matches!(
+        env::var("KEEL_MCP_ALLOW_UNSAFE_COMMANDS").as_deref(),
+        Ok("1") | Ok("true") | Ok("yes")
+    )
+}
+
+fn mcp_allowed_roots() -> Result<Vec<PathBuf>, String> {
+    let current = env::current_dir().map_err(|error| format!("resolve MCP cwd: {error}"))?;
+    let mut roots = vec![current
+        .canonicalize()
+        .map_err(|error| format!("canonicalize MCP root: {error}"))?];
+    if let Ok(extra_roots) = env::var("KEEL_MCP_ALLOWED_ROOTS") {
+        let separator = if cfg!(windows) { ';' } else { ':' };
+        for raw_root in extra_roots.split(separator) {
+            let trimmed = raw_root.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            roots.push(
+                PathBuf::from(trimmed)
+                    .canonicalize()
+                    .map_err(|error| format!("canonicalize MCP allowed root {trimmed}: {error}"))?,
+            );
+        }
+    }
+    Ok(roots)
+}
+
+fn validate_mcp_cwd(cwd: Option<PathBuf>) -> Result<PathBuf, String> {
+    let target = cwd.unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let canonical = target
+        .canonicalize()
+        .map_err(|error| format!("run_command: cwd is unavailable: {error}"))?;
+    if mcp_allowed_roots()?
+        .iter()
+        .any(|root| canonical.starts_with(root))
+    {
+        Ok(canonical)
+    } else {
+        Err(format!(
+            "run_command: cwd {} is outside the MCP allowed roots",
+            display_path(&canonical)
+        ))
+    }
+}
+
+fn command_base_name(program: &str) -> String {
+    Path::new(program)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(program)
+        .trim_end_matches(".exe")
+        .to_ascii_lowercase()
+}
+
+fn command_requires_confirmation(
+    program: &str,
+    arguments: &[String],
+    label: &str,
+    shell_form: bool,
+) -> bool {
+    if shell_form {
+        return true;
+    }
+    let mut fields = Vec::with_capacity(arguments.len() + 1);
+    fields.push(program.to_string());
+    fields.extend(arguments.iter().cloned());
+    if crate::runner::shell_rewrite::detect_destructive_command(&fields).is_some()
+        || crate::runner::shell_rewrite::detect_destructive_in_command(label).is_some()
+    {
+        return true;
+    }
+    let base = command_base_name(program);
+    if matches!(
+        base.as_str(),
+        "bash"
+            | "sh"
+            | "zsh"
+            | "fish"
+            | "cmd"
+            | "powershell"
+            | "pwsh"
+            | "python"
+            | "python3"
+            | "node"
+            | "deno"
+            | "bun"
+            | "ruby"
+            | "perl"
+            | "php"
+            | "curl"
+            | "wget"
+            | "ssh"
+            | "scp"
+            | "rsync"
+            | "nc"
+            | "netcat"
+            | "rm"
+            | "del"
+            | "erase"
+            | "copy"
+            | "cp"
+            | "mv"
+            | "move"
+            | "chmod"
+            | "chown"
+            | "dd"
+            | "fdisk"
+            | "parted"
+            | "diskpart"
+            | "format"
+    ) {
+        return true;
+    }
+    base == "git" && arguments.first().map(String::as_str) == Some("push")
+}
+
+fn enforce_run_command_policy(
+    program: &str,
+    arguments: &[String],
+    label: &str,
+    shell_form: bool,
+    confirm: bool,
+) -> Result<(), String> {
+    if !command_requires_confirmation(program, arguments, label, shell_form) {
+        return Ok(());
+    }
+    if !unsafe_mcp_commands_enabled() {
+        return Err(
+            "run_command: unsafe command requires KEEL_MCP_ALLOW_UNSAFE_COMMANDS=1".to_string(),
+        );
+    }
+    if !confirm {
+        return Err("run_command: unsafe command requires confirm:true".to_string());
+    }
+    Ok(())
+}
 
 fn tool_run_command(arguments: &Value) -> Result<String, String> {
     let argv: Option<Vec<String>> =
         string_list_field(arguments, "argv").or_else(|| string_list_field(arguments, "args"));
+    let direct_argv = argv.is_some();
     let script = arguments
         .get("script")
         .and_then(Value::as_str)
@@ -966,6 +1141,7 @@ fn tool_run_command(arguments: &Value) -> Result<String, String> {
         .filter(|value| !value.is_empty())
         .map(PathBuf::from);
     let wait = optional_bool_arg(arguments, "wait").unwrap_or(true);
+    let confirm = optional_bool_arg(arguments, "confirm").unwrap_or(false);
 
     // Three mutually exclusive input forms. Exactly one must be present; each
     // maps to (label, program, args) for the child. No fallback between forms:
@@ -1016,6 +1192,7 @@ fn tool_run_command(arguments: &Value) -> Result<String, String> {
             "run_command: missing input — pass argv (or args[]), script+shell, or command (aliases: cmd, input, args as a string)".to_string(),
         );
     };
+    let cwd = validate_mcp_cwd(cwd)?;
 
     if command_nests_mcp_serve(&program, &shell_args, &label) {
         return Err(
@@ -1023,6 +1200,8 @@ fn tool_run_command(arguments: &Value) -> Result<String, String> {
                 .into(),
         );
     }
+
+    enforce_run_command_policy(&program, &shell_args, &label, !direct_argv, confirm)?;
 
     // Sync wait inherits the ~25s host budget. Long keel jobs (anvil loop,
     // live anvil run, git-workflow await-ci) must not block this call — either
@@ -1054,9 +1233,7 @@ fn tool_run_command(arguments: &Value) -> Result<String, String> {
     for argument in &shell_args {
         child.arg(argument);
     }
-    if let Some(directory) = &cwd {
-        child.current_dir(directory);
-    }
+    child.current_dir(&cwd);
     child.env("CLAUDE_SKILLS_HOOK", "mcp");
     child.stdin(Stdio::null());
     child.stdout(Stdio::piped());
@@ -1108,6 +1285,7 @@ fn tool_run_command(arguments: &Value) -> Result<String, String> {
 /// Cap per captured stream of a background command. Beyond this the buffer
 /// stops growing and a one-time marker records the truncation.
 const BACKGROUND_STREAM_CAP_CHARS: usize = 2_000_000;
+type ReaderState = Arc<(Mutex<usize>, Condvar)>;
 
 struct BackgroundCommand {
     label: String,
@@ -1119,6 +1297,7 @@ struct BackgroundCommand {
     /// when the process ends and records the exit code in `exit`.
     child: Arc<Mutex<Option<std::process::Child>>>,
     exit: Arc<Mutex<Option<i32>>>,
+    readers_done: ReaderState,
 }
 
 fn background_registry() -> &'static Mutex<std::collections::HashMap<String, Arc<BackgroundCommand>>>
@@ -1177,11 +1356,20 @@ fn spawn_background_command(mut child: Command, label: &str) -> Result<String, S
         stderr: Arc::new(Mutex::new(String::new())),
         child: Arc::new(Mutex::new(Some(spawned))),
         exit: Arc::new(Mutex::new(None)),
+        readers_done: Arc::new((Mutex::new(2), Condvar::new())),
     });
     let command_id = next_background_id();
 
-    background_reader_thread(Arc::clone(&entry.stdout), stdout_pipe);
-    background_reader_thread(Arc::clone(&entry.stderr), stderr_pipe);
+    background_reader_thread(
+        Arc::clone(&entry.stdout),
+        Arc::clone(&entry.readers_done),
+        stdout_pipe,
+    );
+    background_reader_thread(
+        Arc::clone(&entry.stderr),
+        Arc::clone(&entry.readers_done),
+        stderr_pipe,
+    );
 
     // Reaper: poll try_wait until the child exits (or kill takes it), then
     // record the exit code. Consistent with run_command_with_timeout_stdin's
@@ -1213,6 +1401,7 @@ fn spawn_background_command(mut child: Command, label: &str) -> Result<String, S
                 }
             };
             if let Some(code) = outcome {
+                wait_for_background_readers(&reaper_entry.readers_done);
                 let mut exit_guard = reaper_entry
                     .exit
                     .lock()
@@ -1230,9 +1419,13 @@ fn spawn_background_command(mut child: Command, label: &str) -> Result<String, S
     Ok(command_id)
 }
 
-/// Chunked reader: appends to the shared buffer as data arrives so
-/// command_output can report live progress. Stops growing at the cap.
-fn background_reader_thread(buffer: Arc<Mutex<String>>, mut pipe: impl Read + Send + 'static) {
+/// Chunked reader: appends to the shared buffer as data arrives. Completion is
+/// signaled before the reaper publishes a terminal exit code.
+fn background_reader_thread(
+    buffer: Arc<Mutex<String>>,
+    readers_done: ReaderState,
+    mut pipe: impl Read + Send + 'static,
+) {
     let _ = std::thread::spawn(move || {
         let mut chunk = [0u8; 8192];
         loop {
@@ -1252,7 +1445,35 @@ fn background_reader_thread(buffer: Arc<Mutex<String>>, mut pipe: impl Read + Se
                 }
             }
         }
+        let (remaining, notify) = &*readers_done;
+        let mut remaining = remaining
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *remaining = remaining.saturating_sub(1);
+        notify.notify_all();
     });
+}
+
+fn wait_for_background_readers(readers_done: &ReaderState) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let (remaining, notify) = &**readers_done;
+    let mut remaining = remaining
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    while *remaining > 0 {
+        let now = Instant::now();
+        if now >= deadline {
+            break;
+        }
+        let wait_for = deadline.saturating_duration_since(now);
+        let (guard, result) = notify
+            .wait_timeout(remaining, wait_for)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        remaining = guard;
+        if result.timed_out() {
+            break;
+        }
+    }
 }
 
 fn tool_command_output(arguments: &Value) -> Result<String, String> {
@@ -1364,10 +1585,22 @@ fn tool_command_kill(arguments: &Value) -> Result<String, String> {
             // killing only it would orphan the real work it spawned. The
             // wrapper was started in a kill-on-close Job Object (Windows) or
             // its own process group (Unix), so the tree is reachable.
-            crate::runtime::terminate_process_tree(&mut child)
-                .map_err(|error| format!("command_kill: {error}"))?;
-            let status = child.wait();
-            let code = status.ok().and_then(|status| status.code()).unwrap_or(-1);
+            if let Err(error) = crate::runtime::terminate_process_tree(&mut child) {
+                let mut child_guard = entry
+                    .child
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if child_guard.is_none() {
+                    *child_guard = Some(child);
+                }
+                return Err(format!("command_kill: {error}"));
+            }
+            let code = child
+                .wait()
+                .map_err(|error| format!("command_kill: wait: {error}"))?
+                .code()
+                .unwrap_or(-1);
+            wait_for_background_readers(&entry.readers_done);
             let mut exit_guard = entry
                 .exit
                 .lock()
@@ -3284,6 +3517,37 @@ mod tests {
                 "cli {args} should refuse: {result}"
             );
         }
+    }
+
+    #[test]
+    fn run_command_policy_requires_explicit_unsafe_opt_in() {
+        assert!(command_requires_confirmation(
+            "python",
+            &["-c".to_string(), "print(1)".to_string()],
+            "python -c print(1)",
+            false
+        ));
+        assert!(command_requires_confirmation(
+            "bash",
+            &["-lc".to_string(), "echo ok".to_string()],
+            "[bash] echo ok",
+            true
+        ));
+        assert!(!command_requires_confirmation(
+            "cargo",
+            &["test".to_string()],
+            "cargo test",
+            false
+        ));
+        let error = enforce_run_command_policy(
+            "python",
+            &["-c".to_string(), "print(1)".to_string()],
+            "python -c print(1)",
+            false,
+            true,
+        )
+        .expect_err("unsafe command should require environment opt-in");
+        assert!(error.contains("KEEL_MCP_ALLOW_UNSAFE_COMMANDS"));
     }
 
     #[test]

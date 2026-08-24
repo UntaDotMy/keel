@@ -33,6 +33,28 @@ fn install_generates_reasoning_without_model_pin() {
         "generated reviewer profile should preserve high reasoning:\n{reviewer_profile}"
     );
     assert!(
+        reviewer_profile.contains("display_name = \"Reviewer\""),
+        "generated reviewer profile should preserve interface.display_name:\n{reviewer_profile}"
+    );
+    assert!(
+        reviewer_profile.contains("allow_implicit_invocation = false"),
+        "generated reviewer profile should preserve policy.allow_implicit_invocation:\n{reviewer_profile}"
+    );
+    let api_profile = fs::read_to_string(
+        claude_home
+            .join("agent-profiles")
+            .join("api-contract-design.toml"),
+    )
+    .expect("read generated API profile");
+    assert!(
+        api_profile.contains("display_name = \"API Contract Design\""),
+        "generated API profile should preserve interface.display_name:\n{api_profile}"
+    );
+    assert!(
+        api_profile.contains("allow_implicit_invocation = true"),
+        "generated API profile should preserve policy.allow_implicit_invocation:\n{api_profile}"
+    );
+    assert!(
         !reviewer_profile
             .lines()
             .any(|line| line.starts_with("model = ")),

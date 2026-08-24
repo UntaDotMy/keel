@@ -1,8 +1,15 @@
 {
+  "schema_version": 2,
+  "bundle_id": "2026-04-09-competitive-apples-to-apples",
+  "bundle_status": "historical",
+  "current_snapshot_claim": false,
   "repository_slug": "UntaDotMy/keel",
   "audited_revision": "6832b0e70bd76861c3cdf5db4883427783dc7f3e",
   "generated_at": "2026-04-09",
   "auditor": "the harness CLI competitive audit bundle",
+  "auditor_version": "not-recorded",
+  "severity_scale": ["low", "medium", "high", "critical"],
+  "finding_schema": ["id", "title", "severity", "status", "evidence_paths", "remediation_state"],
   "scope": [
     "workflow operator shell",
     "workflow teaching posture",
@@ -16,5 +23,6 @@
     "docs/audits/2026-04-09-competitive-apples-to-apples/remediation-map.md",
     "docs/audits/2026-04-09-competitive-apples-to-apples/regression-proof.md",
     "docs/audits/2026-04-09-competitive-apples-to-apples/audit-manifest.json"
-  ]
+  ],
+  "historical_note": "This bundle documents the audited revision above and is not current proof for later repository revisions."
 }

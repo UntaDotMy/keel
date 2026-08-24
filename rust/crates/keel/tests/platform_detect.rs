@@ -411,13 +411,13 @@ fn uninstall_removes_opencode_mcp_entry() {
 
 #[test]
 fn uninstall_removes_cursor_hooks() {
-    // install↔uninstall symmetry: install writes ~/.cursor/hooks/{hooks.json,
-    // keel-cursor.sh}, so uninstall must remove both or Cursor keeps invoking a
-    // hook that shells to the now-deleted keel binary on every tool call.
+    // install↔uninstall symmetry: install writes ~/.cursor/hooks.json and
+    // ~/.cursor/hooks/keel-cursor.sh, so uninstall must remove both or Cursor
+    // keeps invoking a hook that shells to the now-deleted keel binary.
     let repo = repository_root();
     let (home, claude_home) = fake_home_with_claude("keel-uninstall-cursor-hooks");
     run_install(&repo, &claude_home, &["--with", "cursor"]);
-    let hooks_json = home.join(".cursor").join("hooks").join("hooks.json");
+    let hooks_json = home.join(".cursor").join("hooks.json");
     let hook_script = home.join(".cursor").join("hooks").join("keel-cursor.sh");
     assert!(
         hooks_json.is_file(),

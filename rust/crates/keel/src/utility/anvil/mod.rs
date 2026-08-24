@@ -274,6 +274,27 @@ mod tests {
             String::from_utf8_lossy(err.get_ref()).into_owned(),
         )
     }
+    static BUILDER_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn with_builder<F: FnOnce() -> R, R>(run: F) -> R {
+        let _guard = match BUILDER_ENV_LOCK.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let previous = std::env::var("KEEL_ANVIL_BUILDER_ARGV").ok();
+        let builder = if cfg!(windows) {
+            r#"["cmd.exe","/C","echo built>built.txt"]"#
+        } else {
+            r#"["sh","-c","printf built > built.txt"]"#
+        };
+        std::env::set_var("KEEL_ANVIL_BUILDER_ARGV", builder);
+        let result = run();
+        match previous {
+            Some(value) => std::env::set_var("KEEL_ANVIL_BUILDER_ARGV", value),
+            None => std::env::remove_var("KEEL_ANVIL_BUILDER_ARGV"),
+        }
+        result
+    }
 
     #[test]
     fn empty_action_prints_usage_and_fails() {
@@ -355,9 +376,9 @@ mod tests {
 
         let (loop_code, loop_stdout, loop_stderr) = run_cmd(&with_job(&job, vec!["loop".into()]));
         assert_eq!(loop_code, 1, "stdout={loop_stdout} stderr={loop_stderr}");
-        assert!(loop_stdout.contains("pass=false"));
-        let report = std::fs::read_to_string(job.paths.report_path()).expect("report");
-        assert!(report.contains("\"gate_pass_rate\":0.0"));
+        assert!(loop_stdout.is_empty());
+        assert!(loop_stderr.contains("no promoted winner workspace"));
+        assert!(!job.paths.report_path().is_file());
     }
 
     #[test]
@@ -376,7 +397,7 @@ mod tests {
     }
 
     #[test]
-    fn live_cast_without_keys_uses_host_cli() {
+    fn live_cast_uses_configured_host_builder() {
         let job = temp_job("cast-host");
         let _ = run_cmd(&with_job(
             &job,
@@ -388,9 +409,8 @@ mod tests {
                 "echo ok".into(),
             ],
         ));
-        let (code, stdout, stderr) = run_cmd(&with_job(&job, vec!["cast".into()]));
+        let (code, stdout, stderr) = with_builder(|| run_cmd(&with_job(&job, vec!["cast".into()])));
         assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
-        assert!(stdout.contains("host-cli"));
         assert!(job.paths.dir.join("cast_0").join("result.json").is_file());
         assert!(!job.workspace.join("anvil").exists());
         let result = std::fs::read_to_string(job.paths.dir.join("cast_0").join("result.json"))
@@ -399,6 +419,7 @@ mod tests {
         let isolated = value["workspace"].as_str().unwrap_or("");
         assert!(isolated.contains("cast_0"));
         assert!(std::path::Path::new(isolated).starts_with(&job.paths.dir));
+        assert!(std::path::Path::new(isolated).join("built.txt").is_file());
     }
 
     #[test]
@@ -484,7 +505,7 @@ mod tests {
     }
 
     #[test]
-    fn stamp_without_keys_uses_local_ppt() {
+    fn stamp_uses_evidence_winner() {
         let job = temp_job("stamp-host");
         let _ = run_cmd(&with_job(
             &job,
@@ -499,40 +520,43 @@ mod tests {
         let _ = run_cmd(&with_job(&job, vec!["cast".into(), "--dry-run".into()]));
         let (code, stdout, stderr) = run_cmd(&with_job(&job, vec!["stamp".into()]));
         assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
-        assert!(stdout.contains("mode=ppt"));
+        assert!(stdout.contains("mode=evidence"));
         assert!(job.paths.out_dir().join("winner.txt").is_file());
         assert!(!job.workspace.join("anvil").exists());
     }
 
     #[test]
-    fn dry_run_stamp_uses_ppt_not_stub() {
+    fn dry_run_stamp_uses_evidence() {
         let (code, stdout, _) = run_cmd(&["stamp".into(), "--dry-run".into()]);
         assert_eq!(code, 0);
-        assert!(stdout.contains("mode=ppt"));
+        assert!(stdout.contains("mode=evidence"));
         assert!(!stdout.contains("stub"));
-        assert!(stdout.contains("K=1"));
+        assert!(stdout.contains("strict=false"));
     }
 
     #[test]
-    fn dry_run_stamp_strict_uses_k2() {
+    fn dry_run_stamp_strict_reports_strict_mode() {
         let (code, stdout, _) = run_cmd(&["stamp".into(), "--dry-run".into(), "--strict".into()]);
         assert_eq!(code, 0);
-        assert!(stdout.contains("K=2"));
+        assert!(stdout.contains("mode=evidence"));
+        assert!(stdout.contains("strict=true"));
     }
 
     #[test]
-    fn live_run_without_keys_uses_host_cli() {
+    fn live_run_uses_configured_host_builder() {
         let job = temp_job("run-host");
-        let (code, stdout, stderr) = run_cmd(&with_job(
-            &job,
-            vec![
-                "run".into(),
-                "--goal".into(),
-                "offline anvil demo".into(),
-                "--bar".into(),
-                "echo ok".into(),
-            ],
-        ));
+        let (code, stdout, stderr) = with_builder(|| {
+            run_cmd(&with_job(
+                &job,
+                vec![
+                    "run".into(),
+                    "--goal".into(),
+                    "offline anvil demo".into(),
+                    "--bar".into(),
+                    "echo ok".into(),
+                ],
+            ))
+        });
         assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
         assert!(job.paths.report_path().is_file());
         assert!(!job.workspace.join("anvil").exists());

@@ -47,6 +47,8 @@ const DEFAULT_MAX_INFLIGHT: usize = 64;
 /// a constant bump each time. Current spec revision: 2025-11-25
 /// (see code.claude.com/docs/en/mcp and modelcontextprotocol.io/specification).
 pub(super) const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
+pub(super) const MCP_LEGACY_PROTOCOL_VERSION: &str = "2024-11-05";
+pub(super) const MCP_PREVIOUS_PROTOCOL_VERSION: &str = "2025-03-26";
 
 /// Server identity returned in the `initialize` response. The version mirrors
 /// the workspace package version so plugin manifests and the server agree on
@@ -987,14 +989,18 @@ fn handle_method(method: &str, params: &Value) -> Result<Value, MethodError> {
 }
 
 fn handle_initialize(params: &Value) -> Value {
-    // Per the MCP lifecycle spec, echo the client's requested protocolVersion
-    // when present so the negotiated session version matches what the client
-    // asked for; fall back to our latest supported version when the client
-    // omits it. A non-string value is ignored in favor of the fallback.
-    let negotiated = params
-        .get("protocolVersion")
-        .and_then(Value::as_str)
-        .unwrap_or(MCP_PROTOCOL_VERSION);
+    let requested = params.get("protocolVersion").and_then(Value::as_str);
+    let negotiated = match requested {
+        Some(version)
+            if matches!(
+                version,
+                MCP_LEGACY_PROTOCOL_VERSION | MCP_PREVIOUS_PROTOCOL_VERSION | MCP_PROTOCOL_VERSION
+            ) =>
+        {
+            version
+        }
+        _ => MCP_PROTOCOL_VERSION,
+    };
     json!({
         "protocolVersion": negotiated,
         "serverInfo": {

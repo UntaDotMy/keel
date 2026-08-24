@@ -2,7 +2,7 @@
 name: critic
 description: Proactive in-flight critic that catches blind-code, no-test, no-memory, and skipped-workflow patterns DURING and BEFORE work — not after. Use when implementation is underway or about to start, to surface problems early enough to fix them cheaply. Distinct from reviewer (post-implementation gate) and deliberation (multi-expert disagreement). Emits structured findings and routes them to receiving-code-review for the implementation author to act on.
 when_to_use: Proactive critique during/before implementation — catch blind code, missing tests, missing memory capture, and skipped workflow BEFORE the work is closed.
-allowed-tools: Read, Grep, Glob, Bash(git diff:*), Bash(git status), Bash(git log -5:*), Bash(keel recall:*), Bash(keel memory working-brief list:*), Bash(keel memory system-map show:*)
+allowed-tools: Read, Grep, Glob, Bash(git diff:*), Bash(git status), Bash(git log -5:*), Bash(keel recall:*), Bash(keel memory working-brief list:*), Bash(keel memory system-map show:*), Bash(keel memory working-brief write:*), Bash(keel flow start:*), Bash(keel flow check:*), Bash(keel review pre-pr:*), Bash(keel review gates check:*)
 argument-hint: "[scope-or-file]"
 effort: medium
 ---

@@ -73,13 +73,13 @@ Invoke any skill below with the Skill tool before writing code in its domain.
 - **brainstorming** — Socratic design exploration before implementation. Restates request, confirms user story, produces agreed design.
 - **writing-plans** — Turn agreed design into verifiable implementation plan with ordered steps and checks.
 - **executing-plans** — Execute a plan step by step, verifying each step before the next.
-- **writing-user-stories** — Connextra-format stories with Gherkin acceptance criteria, validated against INVEST.
+- **behavior-driven-development** — BDD scenarios and Gherkin acceptance criteria driven outside-in.
 
 ### Delivery & Git
 - **finishing-a-development-branch** — Verify, review, then present merge/PR options. Never force-push, never merge to -main unilaterally.
 - **git-expert** — Safe Git workflows: branching, commits, PRs, merges, conflict resolution, history repair.
 - **using-git-worktrees** — Isolate feature work in its own checkout to prevent collisions with parallel work.
-- **running-a-sprint** — Scrum-style sprint loop over confirmed user stories until every story is Done.
+- **running-anvil** — Single-root compile/cast/sieve/stamp/loop delivery under a named bar.
 - **dispatching-parallel-agents** — Fan out independent work to concurrent subagents. Apply the four-condition independence test first.
 - **subagent-driven-development** — Delegate self-contained tasks to fresh-context subagents to preserve controller context.
 - **designing-agent-teams** — Decompose large tasks into coordinated specialist agents with clean handoffs.

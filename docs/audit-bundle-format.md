@@ -6,6 +6,14 @@ The same format also applies when benchmark posture claims need a durable, sourc
 
 The goal is to make any numeric trust claim or named findings list source-backed, reviewable, and consumable by both humans and AI agents without requiring hidden context from a prior chat or an untracked scanner run.
 
+## Schema version 2
+
+Published bundles use `schema_version: 2`. Historical bundles retain their
+original audited revision but must set `bundle_status: "historical"` and
+`current_snapshot_claim: false`; they are not evidence for later repository
+revisions. When the audit tool version was not recorded, use the explicit value
+`"not-recorded"` rather than implying a current tool version.
+
 ## Required files
 
 Every published audit bundle should include these files:
@@ -20,14 +28,16 @@ Every published audit bundle should include these files:
 
 Every audit bundle should record:
 
+- `schema_version`
+- `bundle_status` (`current` or `historical`)
 - repository slug
 - audited revision or release tag
 - audit date
-- auditor identity, tool, or agent name and version
+- auditor identity and tool/agent version
 - finding severity scale
 - closure status for each finding
 - exact evidence paths or URLs
-
+- remediation state for each finding
 ## Publication rules
 
 - Do not publish a numeric score unless the matching audit bundle exists.

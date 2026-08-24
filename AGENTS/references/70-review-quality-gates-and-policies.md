@@ -105,12 +105,11 @@ Do not pin a model to achieve these settings. Preserve reasoning effort in repo-
 
 - Do not pin a specific model inside root the harness `agents/claude.yaml` files or generated agent-profile TOML. Let the workspace default model handle that choice.
 - Keep root the harness skill `reasoning_effort` at the repo-managed specialist baseline (`high`) for deeper review and verification passes.
-- Sync the 24 skill-owned agent profiles into `~/.claude/agent-profiles/*.toml` with their skill instructions attached, `model_reasoning_effort = "high"`, and no `model = ...` entry.
+- Sync the 26 skill-owned agent profiles into `~/.claude/agent-profiles/*.toml` with their skill instructions attached, `model_reasoning_effort = "high"`, and no `model = ...` entry.
 - A local `memory-status-reporter` override from `~/.claude/.claude-skill-manager/local-home-agent-overrides.json` may narrow only that profile to `low` reasoning unless the user explicitly changes local policy.
 - When any the harness skill executes tools in this runtime, let the harness choose the best supported tool
   surface for the task.
-- Use `js_repl` with `claude.tool(...)` when it is the clearest fit or when the runtime explicitly
-  requires it, but do not hard-require `js_repl` for every tool call.
+- Use the current harness tool surface (`eval`, `bash`, `hub`, or native keel commands) when it is the clearest fit; do not require one tool for every call.
 
 ## Git Identity Policy
 

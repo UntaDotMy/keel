@@ -18,6 +18,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::error::KeelError;
@@ -223,6 +224,16 @@ pub(crate) fn current_timestamp_millis() -> u128 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis())
         .unwrap_or(0)
+}
+static NEXT_GENERATED_ID: AtomicU64 = AtomicU64::new(1);
+
+pub(crate) fn unique_timestamped_id(prefix: &str) -> (String, String) {
+    let millis = current_timestamp_millis();
+    let nonce = NEXT_GENERATED_ID.fetch_add(1, Ordering::Relaxed);
+    (
+        format!("{prefix}-{millis:x}-{}-{nonce:x}", std::process::id()),
+        format_timestamp_iso8601(millis),
+    )
 }
 
 /// Render epoch millis as `YYYY-MM-DDTHH:MM:SSZ` (UTC, no external time crate).
@@ -534,6 +545,13 @@ mod tests {
     #[test]
     fn format_timestamp_iso8601_renders_epoch() {
         assert_eq!(format_timestamp_iso8601(0), "1970-01-01T00:00:00Z");
+    }
+    #[test]
+    fn generated_ids_are_unique_within_one_clock_tick() {
+        let ids: std::collections::HashSet<String> = (0..128)
+            .map(|_| unique_timestamped_id("record").0)
+            .collect();
+        assert_eq!(ids.len(), 128);
     }
 
     #[test]

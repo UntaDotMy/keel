@@ -311,7 +311,8 @@ pub(crate) fn is_keel_research_command(command: &str) -> bool {
         "memory recall",
         "memory system-map",
         "memory scope",
-        "anvil",
+        "anvil prefix-check",
+        "anvil sieve",
     ];
     HITS.iter().any(|h| body.contains(h))
 }

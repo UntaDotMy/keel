@@ -835,7 +835,7 @@ pub fn terminate_process_tree(child: &mut Child) -> Result<(), String> {
 
 #[cfg(unix)]
 fn libc_setsid() -> i32 {
-    unsafe extern "C" {
+    extern "C" {
         fn setsid() -> i32;
     }
     unsafe { setsid() }
@@ -843,7 +843,7 @@ fn libc_setsid() -> i32 {
 
 #[cfg(unix)]
 fn libc_kill_process_group(pid: i32) -> i32 {
-    unsafe extern "C" {
+    extern "C" {
         fn kill(pid: i32, signal: i32) -> i32;
     }
     unsafe { kill(-pid, 9) }

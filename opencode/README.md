@@ -30,8 +30,7 @@ Prerequisite: the `keel` binary must be installed at `~/.keel/keel` (unix) or `~
 |---|---|---|---|
 | `chat.message` (1st per session) | `bridge session-start` — injects bootstrap + workspace digest | Before model sees message | Yes (awaited, 500ms timeout) |
 | `chat.message` (every) | `bridge user-prompt` — injects iron law + skill brief | Before model sees message | Yes (awaited, 500ms timeout) |
-| `event` type=`tool.execute.after` | `bridge observe` — records tool observation | After tool completes | No (fire-and-forget) |
-| `event` type=`session.compacted` | `bridge pre-compact` (learning checkpoint before window rewrite) + `bridge post-compact` (post-compaction context) | On compaction event | No (fire-and-forget) |
+| `tool.execute.after` (named hook) | `bridge observe` — records tool output and metadata | After tool completes | No (fire-and-forget) |
 | `experimental.session.compacting` | `bridge pre-compact` (learning) + `bridge post-compact` (injects context into compaction summary) | During compaction prompt generation | Yes (awaited, 500ms timeout) |
 | `event` type=`session.deleted` | `bridge session-end` — learning + save session summary | On session deletion | No (fire-and-forget) |
 
@@ -49,9 +48,9 @@ The first `chat.message` per session calls `bridge session-start` and caches via
 
 `bridge session-end` fires on `session.deleted`, not `session.idle`. The `session.idle` event fires after every turn and would cause excessive bridge calls. `session.deleted` fires once when the user explicitly ends or deletes a session, making it the correct trigger for learning + session summary save.
 
-### Compaction: dual hooks
+### Compaction
 
-The `session.compacted` event (fire-and-forget) runs `bridge pre-compact` (learning checkpoint before the window is rewritten) then `bridge post-compact` (post-compaction context + idempotent learning upsert). The `experimental.session.compacting` named hook (awaited) calls `bridge pre-compact` then `bridge post-compact` for the returned text and pushes it into `output.context`, injecting bridge state into the compaction summary so it survives across context windows.
+The named `experimental.session.compacting` hook calls `bridge pre-compact` before the window is rewritten, then `bridge post-compact` and pushes the returned text into `output.context` so bridge state survives across context windows.
 
 ### Observations
 
@@ -69,6 +68,6 @@ Every `$` shell call uses `.timeout(500)` — Bun's built-in timeout that kills 
 
 1. **`chat.message` hook**: This hook is the primary context-injection seam. It is not listed on the public OpenCode plugin docs page (https://opencode.ai/docs/plugins), but it is a real OpenCode plugin hook used by community plugins (e.g. `oh-my-openagent`, whose GitHub issue code-yeongyu/oh-my-openagent#885 "chat.message hook output not visible when plugin injects into output.parts" confirms plugins inject into `output.parts` via this hook). The adapter prepends injected context to `output.parts` before the model sees the message. If a future OpenCode version removes it, context injection degrades silently — `event`/`experimental.session.compacting` would still operate normally.
 
-2. **`tool.execute.after` event shape**: The event carries `{ type, tool, input, failed? }` (per the sst/opencode source). The plugin accesses `event.tool`, `event.input`, and `event.failed` via `as unknown as {...}` cast. If the actual shape differs (e.g. nested under `event.properties.tool`), observations will be recorded with an empty tool name and `{}` input — non-breaking but incomplete.
+2. **`tool.execute.after` event shape**: the named hook receives input with `sessionID` and `tool`; its output carries `output` and `metadata`. The plugin serializes both output and metadata to `bridge observe` stdin and marks the observation failed when metadata contains an error. If a future OpenCode version changes this shape, observations degrade to empty fields rather than blocking the turn.
 
 3. **`Bun.Shell.quiet()` availability**: The `.quiet()` method is documented in Bun's shell API. If unavailable in the OpenCode Bun runtime, the subprocess stderr will leak into stdout, potentially polluting the returned text — non-breaking but may produce unexpected injected context.

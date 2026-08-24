@@ -4,10 +4,10 @@
 
 - `legacy-memory-command-friction`
   - [rust/crates/keel/src/commands.rs](../../../rust/crates/keel/src/commands.rs)
-  - [rust/crates/keel/src/utility.rs](../../../rust/crates/keel/src/utility.rs)
+  - [rust/crates/keel/src/utility/memory](../../../rust/crates/keel/src/utility/memory)
 - `legacy-task-lifecycle-flag-friction`
   - [rust/crates/keel/src/commands.rs](../../../rust/crates/keel/src/commands.rs)
-  - [rust/crates/keel/src/utility.rs](../../../rust/crates/keel/src/utility.rs)
+  - [rust/crates/keel/src/utility/memory](../../../rust/crates/keel/src/utility/memory)
 
 ## Closed by Trust Artifact Publication
 
@@ -18,6 +18,5 @@
   - [regression-proof.md](./regression-proof.md)
   - [audit-manifest.json](./audit-manifest.json)
   - [README.md](../../../README.md)
-  - [todo.md](../../../todo.md)
   - [rust/crates/keel/src/commands.rs](../../../rust/crates/keel/src/commands.rs)
   - [Cargo.toml](../../../Cargo.toml)

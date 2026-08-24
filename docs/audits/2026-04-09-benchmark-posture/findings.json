@@ -4,13 +4,25 @@
     "title": "Benchmark posture did not yet have a published audit bundle artifact",
     "severity": "medium",
     "status": "closed",
-    "resolution": "Published the benchmark posture audit bundle and linked it from the benchmark trust surfaces."
+    "remediation_state": "closed",
+    "evidence_paths": [
+      "docs/audits/2026-04-09-benchmark-posture/audit-summary.md",
+      "docs/audits/2026-04-09-benchmark-posture/remediation-map.md",
+      "docs/audits/2026-04-09-benchmark-posture/regression-proof.md"
+    ],
+    "resolution": "Published the historical benchmark posture audit bundle and linked it from the benchmark trust surfaces."
   },
   {
     "id": "benchmark-posture-links-missing",
     "title": "Benchmark trust docs and contract tests did not point to one durable benchmark posture audit artifact",
     "severity": "medium",
     "status": "closed",
-    "resolution": "Aligned README, benchmark docs, todo, and contract tests to the published benchmark posture audit bundle."
+    "remediation_state": "closed",
+    "evidence_paths": [
+      "README.md",
+      "docs/benchmark-suite.md",
+      "docs/audits/2026-04-09-benchmark-posture/regression-proof.md"
+    ],
+    "resolution": "Aligned benchmark trust docs and contract tests to the historical benchmark posture audit bundle."
   }
 ]

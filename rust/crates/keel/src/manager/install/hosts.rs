@@ -2,6 +2,36 @@
 use super::*;
 use crate::runtime::{display_path, installed_executable_path, write_text};
 use std::path::{Path, PathBuf};
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ManagedCopyStatus {
+    Copied,
+    AlreadyCurrent,
+    PreservedCustom,
+}
+
+fn copy_managed_file(source: &Path, target: &Path) -> Result<ManagedCopyStatus, String> {
+    let source_bytes =
+        std::fs::read(source).map_err(|error| format!("read {}: {error}", display_path(source)))?;
+    if let Ok(metadata) = std::fs::symlink_metadata(target) {
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Ok(ManagedCopyStatus::PreservedCustom);
+        }
+        let target_bytes = std::fs::read(target)
+            .map_err(|error| format!("read {}: {error}", display_path(target)))?;
+        return Ok(if target_bytes == source_bytes {
+            ManagedCopyStatus::AlreadyCurrent
+        } else {
+            ManagedCopyStatus::PreservedCustom
+        });
+    }
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("create {}: {error}", display_path(parent)))?;
+    }
+    std::fs::write(target, source_bytes)
+        .map_err(|error| format!("write {}: {error}", display_path(target)))?;
+    Ok(ManagedCopyStatus::Copied)
+}
 pub(crate) fn maybe_register_mcp_server(claude_home: &Path) -> Option<String> {
     if !super::super::mcp_register::is_standard_claude_home(claude_home) {
         return None;
@@ -83,8 +113,14 @@ pub(crate) fn maybe_wire_opencode(
     let plugin_source = repository_root.join("opencode").join("keel.ts");
     let plugin_status = if plugin_source.is_file() {
         let plugin_target = plugin_dir.join("keel.ts");
-        match std::fs::copy(&plugin_source, &plugin_target) {
-            Ok(_) => format!("plugin -> {}", display_path(&plugin_target)),
+        match copy_managed_file(&plugin_source, &plugin_target) {
+            Ok(ManagedCopyStatus::Copied) => {
+                format!("plugin -> {}", display_path(&plugin_target))
+            }
+            Ok(ManagedCopyStatus::AlreadyCurrent) => "plugin already current".to_string(),
+            Ok(ManagedCopyStatus::PreservedCustom) => {
+                "plugin skipped (user-customized)".to_string()
+            }
             Err(error) => format!("plugin copy skipped ({error})"),
         }
     } else {
@@ -104,9 +140,6 @@ pub(crate) fn maybe_wire_opencode(
             format!("MCP registered in {}", display_path(&opencode_config_path))
         }
         Ok(JsonMcpMergeResult::AlreadyCurrent) => "MCP already current".to_string(),
-        Ok(JsonMcpMergeResult::Updated) => {
-            format!("MCP updated in {}", display_path(&opencode_config_path))
-        }
         Err(error) => format!("MCP skipped ({error})"),
     };
 
@@ -168,17 +201,31 @@ pub(crate) fn maybe_wire_cursor(
         let hooks_dir = home.join(".cursor").join("hooks");
         let _ = std::fs::create_dir_all(&hooks_dir);
         if hooks_json_source.is_file() {
-            let target = hooks_dir.join("hooks.json");
-            match std::fs::copy(&hooks_json_source, &target) {
-                Ok(_) => status_parts.push("hooks.json copied".to_string()),
-                Err(e) => status_parts.push(format!("hooks.json copy failed ({e})")),
+            let target = home.join(".cursor").join("hooks.json");
+            match copy_managed_file(&hooks_json_source, &target) {
+                Ok(ManagedCopyStatus::Copied) => status_parts.push("hooks.json copied".to_string()),
+                Ok(ManagedCopyStatus::AlreadyCurrent) => {
+                    status_parts.push("hooks.json already current".to_string())
+                }
+                Ok(ManagedCopyStatus::PreservedCustom) => {
+                    status_parts.push("hooks.json skipped (user-customized)".to_string())
+                }
+                Err(error) => status_parts.push(format!("hooks.json copy failed ({error})")),
             }
         }
         if rewrite_script_source.is_file() {
             let target = hooks_dir.join("keel-cursor.sh");
-            match std::fs::copy(&rewrite_script_source, &target) {
-                Ok(_) => status_parts.push("keel-cursor.sh copied".to_string()),
-                Err(e) => status_parts.push(format!("keel-cursor.sh copy failed ({e})")),
+            match copy_managed_file(&rewrite_script_source, &target) {
+                Ok(ManagedCopyStatus::Copied) => {
+                    status_parts.push("keel-cursor.sh copied".to_string())
+                }
+                Ok(ManagedCopyStatus::AlreadyCurrent) => {
+                    status_parts.push("keel-cursor.sh already current".to_string())
+                }
+                Ok(ManagedCopyStatus::PreservedCustom) => {
+                    status_parts.push("keel-cursor.sh skipped (user-customized)".to_string())
+                }
+                Err(error) => status_parts.push(format!("keel-cursor.sh copy failed ({error})")),
             }
         }
     }
@@ -205,6 +252,7 @@ pub(crate) fn maybe_wire_cursor(
         let binary = installed_executable_path(claude_home);
         let mut mcp_entry = if mcp_entry.is_null() {
             serde_json::json!({
+                "type": "stdio",
                 "command": display_path(&binary),
                 "args": ["mcp", "serve"],
             })
@@ -219,9 +267,6 @@ pub(crate) fn maybe_wire_cursor(
             }
             Ok(JsonMcpMergeResult::AlreadyCurrent) => {
                 status_parts.push("MCP already current".to_string())
-            }
-            Ok(JsonMcpMergeResult::Updated) => {
-                status_parts.push(format!("MCP updated in {}", display_path(&mcp_target)))
             }
             Err(error) => status_parts.push(format!("MCP skipped ({error})")),
         }
@@ -376,9 +421,6 @@ pub(crate) fn maybe_wire_pi(
             Ok(JsonMcpMergeResult::AlreadyCurrent) => {
                 status_parts.push("MCP already current".to_string())
             }
-            Ok(JsonMcpMergeResult::Updated) => {
-                status_parts.push(format!("MCP updated in {}", display_path(&mcp_target)))
-            }
             Err(error) => status_parts.push(format!("MCP skipped ({error})")),
         }
     }
@@ -389,9 +431,17 @@ pub(crate) fn maybe_wire_pi(
         let extensions_dir = home.join(".pi").join("agent").join("extensions");
         let _ = std::fs::create_dir_all(&extensions_dir);
         let target = extensions_dir.join("keel-pi.ts");
-        match std::fs::copy(&extension_source, &target) {
-            Ok(_) => status_parts.push(format!("keel-pi.ts -> {}", display_path(&target))),
-            Err(e) => status_parts.push(format!("keel-pi.ts copy failed ({e})")),
+        match copy_managed_file(&extension_source, &target) {
+            Ok(ManagedCopyStatus::Copied) => {
+                status_parts.push(format!("keel-pi.ts -> {}", display_path(&target)))
+            }
+            Ok(ManagedCopyStatus::AlreadyCurrent) => {
+                status_parts.push("keel-pi.ts already current".to_string())
+            }
+            Ok(ManagedCopyStatus::PreservedCustom) => {
+                status_parts.push("keel-pi.ts skipped (user-customized)".to_string())
+            }
+            Err(error) => status_parts.push(format!("keel-pi.ts copy failed ({error})")),
         }
     }
 
@@ -425,8 +475,16 @@ pub(crate) fn maybe_wire_commandcode(
             status_parts.push(format!("mods dir skipped ({error})"));
         } else {
             let target = mods_dir.join("keel-cmdc.ts");
-            match std::fs::copy(&mod_source, &target) {
-                Ok(_) => status_parts.push(format!("keel-cmdc.ts -> {}", display_path(&target))),
+            match copy_managed_file(&mod_source, &target) {
+                Ok(ManagedCopyStatus::Copied) => {
+                    status_parts.push(format!("keel-cmdc.ts -> {}", display_path(&target)))
+                }
+                Ok(ManagedCopyStatus::AlreadyCurrent) => {
+                    status_parts.push("keel-cmdc.ts already current".to_string())
+                }
+                Ok(ManagedCopyStatus::PreservedCustom) => {
+                    status_parts.push("keel-cmdc.ts skipped (user-customized)".to_string())
+                }
                 Err(error) => status_parts.push(format!("keel-cmdc.ts copy failed ({error})")),
             }
         }
@@ -472,9 +530,6 @@ pub(crate) fn maybe_wire_commandcode(
             Ok(JsonMcpMergeResult::AlreadyCurrent) => {
                 status_parts.push("MCP already current".to_string())
             }
-            Ok(JsonMcpMergeResult::Updated) => {
-                status_parts.push(format!("MCP updated in {}", display_path(&mcp_target)))
-            }
             Err(error) => status_parts.push(format!("MCP skipped ({error})")),
         }
     }
@@ -510,6 +565,8 @@ pub(crate) fn maybe_wire_codex(
         return Some(format!("plugin dir failed ({error})"));
     }
     let mut copied = 0;
+    let mut preserved = 0;
+    let mut mcp_copy_status = None;
     for entry in [
         "hooks/hooks.json",
         "keel-codex.ts",
@@ -518,39 +575,60 @@ pub(crate) fn maybe_wire_codex(
     ] {
         let source = codex_source_dir.join(entry);
         let target = plugin_target.join(entry);
-        if let Some(parent) = target.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if source.is_file() && std::fs::copy(&source, &target).is_ok() {
-            copied += 1;
-        }
-    }
-    // Codex resolves the MCP `command` via PATH only. The shipped .mcp.json
-    let mcp_target = plugin_target.join(".mcp.json");
-    let binary = installed_executable_path(claude_home);
-    let mcp_status = if mcp_target.is_file() {
-        match std::fs::read_to_string(&mcp_target)
-            .ok()
-            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-        {
-            Some(mut doc) => {
-                let absolute = display_path(&binary);
-                let mutated = rewrite_codex_mcp_command(&mut doc, &absolute);
-                if mutated {
-                    if let Ok(pretty) = serde_json::to_string_pretty(&doc) {
-                        let _ = write_text(&mcp_target, &pretty);
+        if source.is_file() {
+            match copy_managed_file(&source, &target) {
+                Ok(status @ ManagedCopyStatus::Copied)
+                | Ok(status @ ManagedCopyStatus::AlreadyCurrent) => {
+                    if status == ManagedCopyStatus::Copied {
+                        copied += 1;
+                    }
+                    if entry == ".mcp.json" {
+                        mcp_copy_status = Some(status);
                     }
                 }
-                if mutated {
-                    "MCP command -> absolute".to_string()
-                } else {
-                    "MCP command unchanged".to_string()
+                Ok(ManagedCopyStatus::PreservedCustom) => {
+                    preserved += 1;
+                    if entry == ".mcp.json" {
+                        mcp_copy_status = Some(ManagedCopyStatus::PreservedCustom);
+                    }
                 }
+                Err(_) => {}
             }
-            None => "MCP unparseable".to_string(),
         }
-    } else {
-        "MCP absent".to_string()
+    }
+    // Codex resolves the MCP `command` via PATH only. Rewrite the shipped
+    // entry after an owned copy; never mutate a conflicting user file.
+    let mcp_target = plugin_target.join(".mcp.json");
+    let binary = installed_executable_path(claude_home);
+    let mcp_status = match mcp_copy_status {
+        Some(ManagedCopyStatus::PreservedCustom) => "MCP preserved (user-customized)".to_string(),
+        Some(ManagedCopyStatus::Copied) | Some(ManagedCopyStatus::AlreadyCurrent) => {
+            if mcp_target.is_file() {
+                match std::fs::read_to_string(&mcp_target)
+                    .ok()
+                    .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+                {
+                    Some(mut doc) => {
+                        let absolute = display_path(&binary);
+                        let mutated = rewrite_codex_mcp_command(&mut doc, &absolute);
+                        if mutated {
+                            if let Ok(pretty) = serde_json::to_string_pretty(&doc) {
+                                let _ = write_text(&mcp_target, &pretty);
+                            }
+                        }
+                        if mutated {
+                            "MCP command -> absolute".to_string()
+                        } else {
+                            "MCP command unchanged".to_string()
+                        }
+                    }
+                    None => "MCP unparseable".to_string(),
+                }
+            } else {
+                "MCP absent".to_string()
+            }
+        }
+        None => "MCP absent".to_string(),
     };
     // Codex discovers plugins ONLY via a marketplace manifest and loads only
     // plugins enabled in config.toml; copying files alone never wires them.
@@ -619,7 +697,7 @@ pub(crate) fn maybe_wire_codex(
     }
 
     Some(format!(
-        "{copied} files -> {}; {mcp_status}; {}",
+        "{copied} files ({preserved} preserved) -> {}; {mcp_status}; {}",
         display_path(&plugin_target),
         wire_status.join("; ")
     ))
@@ -689,9 +767,6 @@ pub(crate) fn maybe_wire_cowork(
             display_path(&config_path)
         )),
         Ok(JsonMcpMergeResult::AlreadyCurrent) => Some("MCP already current".to_string()),
-        Ok(JsonMcpMergeResult::Updated) => {
-            Some(format!("MCP updated in {}", display_path(&config_path)))
-        }
         Err(error) => Some(format!("MCP skipped ({error})")),
     }
 }

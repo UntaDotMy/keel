@@ -3,8 +3,9 @@
 - Audit date: 2026-04-08
 - Repository: `UntaDotMy/keel`
 - Audited revision: `5e0bcb33f20ba626ca3e32657ae6f1c8350b9b2c`
+- Bundle status: historical; not current proof for later revisions.
 - Scope: governance posture, trust-artifact posture, native CLI compatibility, and static-safety evidence
-- Evidence sources: `todo.md`, `README.md`, `docs/security-audit-status.md`, `.claude-review.json`, `rust/crates/keel/src/commands.rs`, `rust/crates/keel/src/manager.rs`, `rust/crates/keel/src/utility.rs`, and `cargo test --workspace`
+- Evidence sources: this bundle's manifest, findings, remediation map, regression proof, and the referenced repository paths present at the audited revision.
 
 ## Conclusion
 
