@@ -2,7 +2,7 @@ use assert_cmd::Command;
 use std::time::Duration;
 
 fn keel_bin() -> Command {
-    let mut cmd = Command::cargo_bin("keel").expect("failed to locate keel binary");
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("keel"));
     cmd.timeout(Duration::from_secs(10));
     cmd
 }
@@ -24,7 +24,7 @@ fn bridge_pre_tool_use_does_not_block_on_stdin_for_edit_tools() {
     use std::process::{Command as StdCommand, Stdio};
     use std::time::Instant;
 
-    let binary = assert_cmd::cargo::cargo_bin("keel");
+    let binary = assert_cmd::cargo::cargo_bin!("keel");
     let mut child = StdCommand::new(binary)
         .args([
             "bridge",
