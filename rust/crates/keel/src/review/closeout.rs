@@ -153,22 +153,48 @@ pub fn review_baseline_path(
             repository_root.join(requested)
         }
     };
-    let root = fs::canonicalize(repository_root).unwrap_or_else(|_| repository_root.to_path_buf());
-    if candidate.is_absolute() && !candidate.starts_with(&root) {
+    if candidate
+        .components()
+        .any(|component| component == Component::ParentDir)
+    {
         return Err(format!(
             "review baseline path must stay inside the repository: {}",
             display_path(&candidate)
         ));
     }
-    let candidate_parent = candidate
-        .parent()
-        .and_then(|parent| fs::canonicalize(parent).ok())
-        .unwrap_or_else(|| root.clone());
-    if !candidate_parent.starts_with(&root) {
+    let root_display = display_path(repository_root);
+    let candidate_display = display_path(&candidate);
+    let root_prefix = format!(
+        "{}{}",
+        root_display.trim_end_matches(['\\', '/']),
+        std::path::MAIN_SEPARATOR
+    );
+    let candidate_lower = candidate_display.to_ascii_lowercase();
+    let root_lower = root_display.to_ascii_lowercase();
+    if candidate_lower != root_lower
+        && !candidate_lower.starts_with(&root_prefix.to_ascii_lowercase())
+    {
         return Err(format!(
             "review baseline path must stay inside the repository: {}",
-            display_path(&candidate)
+            candidate_display
         ));
+    }
+    if candidate.exists() {
+        let canonical_candidate = fs::canonicalize(&candidate).map_err(|error| {
+            format!(
+                "canonicalize review baseline {}: {error}",
+                candidate_display
+            )
+        })?;
+        let canonical_display = display_path(&canonical_candidate).to_ascii_lowercase();
+        if canonical_display != root_lower
+            && !canonical_display.starts_with(&root_prefix.to_ascii_lowercase())
+        {
+            return Err(format!(
+                "review baseline path must stay inside the repository: {}",
+                candidate_display
+            ));
+        }
     }
     Ok(candidate)
 }
