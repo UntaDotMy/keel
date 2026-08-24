@@ -268,6 +268,11 @@ jobs:
               cp -R "$adapter" "$target_dir/$adapter"
             fi
           done
+          # Stage opt-in statusline scripts so manual statusLine configuration
+          # works from the same release archive as the installed binary.
+          if [ -d statusline ]; then
+            cp -R statusline "$target_dir/statusline"
+          fi
           # Fail closed if staged layout cannot pass repository_layout_is_complete.
           missing=0
           for required in \

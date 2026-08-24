@@ -9,6 +9,7 @@ use crate::json::{write_indented, Value};
 use crate::runtime::run_command;
 
 mod ci;
+mod closeout;
 mod diff_gates;
 mod hosted;
 mod language_gates;
@@ -24,11 +25,11 @@ pub(super) use ci::{
 
 pub(super) use diff_gates::{
     artifact_targets_a_touched_file, brownfield_source_from_name_status,
-    changed_sources_including_added, comment_style_gate, completeness_check_gate,
-    completeness_source_from_name_status, completeness_touched_sources, flow_check_gate,
-    impact_gate, modified_existing_sources, newest_source_mtime_ms, preview_touched_paths,
-    prose_style_gate, run_review_surface_command, slop_gate, FLOW_EXEMPT_SEGMENTS,
-    FLOW_SOURCE_EXTENSIONS,
+    changed_sources_including_added, collect_review_gate_results, comment_style_gate,
+    completeness_check_gate, completeness_source_from_name_status, completeness_touched_sources,
+    flow_check_gate, impact_gate, modified_existing_sources, newest_source_mtime_ms,
+    preview_touched_paths, prose_style_gate, run_review_surface_command, slop_gate,
+    FLOW_EXEMPT_SEGMENTS, FLOW_SOURCE_EXTENSIONS,
 };
 
 pub(super) use hosted::{
@@ -80,6 +81,9 @@ pub fn run_review_command(
         return if arguments.is_empty() { 1 } else { 0 };
     }
     match arguments[0].as_str() {
+        "closeout" => {
+            closeout::run_review_closeout_command(&arguments[1..], standard_output, standard_error)
+        }
         "gates" => {
             let code = run_review_gates_command(&arguments[1..], standard_output, standard_error);
             if review_pass_clears_gate("gates", code) {
@@ -236,11 +240,10 @@ fn hosted_body() -> String {
     ]
     .join("\n")
 }
-
 fn render_review_help(standard_output: &mut dyn Write) {
     let _ = writeln!(
         standard_output,
-        "Usage: keel review [pre-commit|pre-pr|diff|gates|hosted|policy|comments] ..."
+        "Usage: keel review [closeout|pre-commit|pre-pr|diff|gates|hosted|policy|comments] ..."
     );
 }
 

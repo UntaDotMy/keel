@@ -317,13 +317,20 @@ fn tools_list_catalog() -> Value {
             },
             {
                 "name": "review",
-                "description": "MCP review exposes the fast `gates` check. Pass repo_test_policy=skip explicitly because full cargo tests belong to CLI `review pre-pr` and exceed the host tool deadline.",
+                "description": "MCP review dispatches the CLI review surfaces. `gates` remains the fast check and requires repo_test_policy=skip; `closeout` is long-running and requires wait:false, then command_output/command_kill.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "format": { "type": "string", "description": "Output format: json, markdown, or compact." },
+                        "action": { "type": "string", "enum": ["closeout", "gates", "pre-commit", "pre-pr", "diff", "init", "hosted", "policy", "comments"], "description": "Review operation. closeout is asynchronous; use wait:false and poll command_output." },
+                        "wait": { "type": "boolean", "default": false, "description": "For closeout, must be false because the review is long-running; poll the returned commandId with command_output." },
+                        "format": { "type": "string", "enum": ["json", "markdown", "compact"], "description": "Output format: json, markdown, or compact." },
                         "repo_test_policy": { "type": "string", "enum": ["run", "skip"], "description": "MCP gates must use skip to stay inside the host deadline; full tests belong to CLI pre-pr." },
-                        "repo_root": { "type": "string", "description": "Repository root path. Defaults to cwd." }
+                        "repo_root": { "type": "string", "description": "Repository root path. Defaults to cwd." },
+                        "base_ref": { "type": "string", "description": "Base Git ref for closeout scope and review surfaces. Defaults to origin/main for closeout." },
+                        "brief_id": { "type": "string", "description": "Working-brief id whose acceptance criteria closeout checks." },
+                        "proof": { "type": "string", "description": "Evidence text attached to closeout acceptance criteria." },
+                        "strict": { "type": "boolean", "description": "Require a brief and treat missing closeout evidence as a blocking finding." },
+                        "require_ci": { "type": "boolean", "description": "Require exact-head CI proof before closeout passes." }
                     },
                     "required": ["action"]
                 }
@@ -2415,7 +2422,10 @@ fn tool_review(arguments: &Value) -> Result<String, String> {
     let action = arguments
         .get("action")
         .and_then(Value::as_str)
-        .ok_or_else(|| "review: missing action (pre-commit|pre-pr|gates)".to_string())?;
+        .ok_or_else(|| {
+            "review: missing action (closeout|gates|pre-commit|pre-pr|diff|init|hosted|policy|comments)"
+                .to_string()
+        })?;
     if action == "gates" && optional_string_arg(arguments, "repo_test_policy") != Some("skip") {
         return Err(
             "review gates: set repo_test_policy=skip for the MCP fast gate; \
@@ -2423,6 +2433,22 @@ fn tool_review(arguments: &Value) -> Result<String, String> {
              not silently skipped."
                 .to_string(),
         );
+    }
+    if action == "closeout" {
+        if optional_bool_arg(arguments, "wait").unwrap_or(false) {
+            return Err(
+                "review closeout: pass wait:false; the closeout is long-running, so poll the returned commandId with command_output (or stop it with command_kill)"
+                    .to_string(),
+            );
+        }
+        let executable =
+            env::current_exe().map_err(|error| format!("review closeout: locate self: {error}"))?;
+        let argv = review_closeout_args(&executable, arguments);
+        return tool_run_command(&json!({
+            "argv": argv,
+            "wait": false,
+            "json": true,
+        }));
     }
     if let Some(message) = refuse_mcp_long_keel_job(&[String::from("review"), action.to_string()]) {
         return Err(message);
@@ -2454,6 +2480,33 @@ fn review_args(action: &str, arguments: &Value) -> Vec<String> {
         all_args.push(format!("--repo-root={root}"));
     }
     all_args
+}
+/// Build the direct-exec argv used by the asynchronous MCP closeout path.
+/// Values stay in individual argv entries; no shell command is assembled.
+fn review_closeout_args(executable: &Path, arguments: &Value) -> Vec<String> {
+    let mut args = vec![
+        executable.to_string_lossy().into_owned(),
+        "review".to_string(),
+        "closeout".to_string(),
+    ];
+    for (key, flag) in [
+        ("repo_root", "--repo-root"),
+        ("base_ref", "--base-ref"),
+        ("brief_id", "--brief-id"),
+        ("proof", "--proof"),
+        ("format", "--format"),
+    ] {
+        if let Some(value) = optional_string_arg(arguments, key) {
+            args.push(format!("{flag}={value}"));
+        }
+    }
+    if optional_bool_arg(arguments, "strict").unwrap_or(false) {
+        args.push("--strict".to_string());
+    }
+    if optional_bool_arg(arguments, "require_ci").unwrap_or(false) {
+        args.push("--require-ci".to_string());
+    }
+    args
 }
 
 fn tool_git_workflow(arguments: &Value) -> Result<String, String> {
@@ -3625,6 +3678,111 @@ mod tests {
         for action in ["pre-commit", "pre-pr"] {
             let args = review_args(action, &json!({ "base_ref": "origin/main" }));
             assert_eq!(args, vec![action, "--base-ref=origin/main"]);
+        }
+    }
+
+    #[test]
+    fn review_schema_advertises_closeout_contract() {
+        let listed = handle_tools_list();
+        let review = listed["tools"]
+            .as_array()
+            .expect("tools")
+            .iter()
+            .find(|tool| tool.get("name").and_then(Value::as_str) == Some("review"))
+            .expect("review tool");
+        let schema = &review["inputSchema"];
+        let actions = schema["properties"]["action"]["enum"]
+            .as_array()
+            .expect("action enum");
+        for action in ["gates", "closeout", "pre-commit", "pre-pr"] {
+            assert!(
+                actions.iter().any(|value| value.as_str() == Some(action)),
+                "missing action {action}: {actions:?}"
+            );
+        }
+        for option in [
+            "wait",
+            "repo_root",
+            "base_ref",
+            "brief_id",
+            "proof",
+            "strict",
+            "require_ci",
+            "format",
+        ] {
+            assert!(
+                schema["properties"].get(option).is_some(),
+                "missing closeout option {option}"
+            );
+        }
+    }
+
+    #[test]
+    fn review_closeout_args_map_options_without_shell_parsing() {
+        let args = review_closeout_args(
+            Path::new("/tmp/keel"),
+            &json!({
+                "repo_root": "/tmp/repo",
+                "base_ref": "origin/main",
+                "brief_id": "wb-123",
+                "proof": "$(echo pwned); & not-a-command",
+                "format": "compact",
+                "strict": true,
+                "require_ci": true,
+            }),
+        );
+        assert_eq!(
+            args,
+            vec![
+                "/tmp/keel",
+                "review",
+                "closeout",
+                "--repo-root=/tmp/repo",
+                "--base-ref=origin/main",
+                "--brief-id=wb-123",
+                "--proof=$(echo pwned); & not-a-command",
+                "--format=compact",
+                "--strict",
+                "--require-ci",
+            ]
+        );
+        assert_eq!(
+            args.iter()
+                .filter(|argument| argument.contains("pwned"))
+                .count(),
+            1,
+            "proof must remain one direct-exec argument: {args:?}"
+        );
+    }
+
+    #[test]
+    fn review_closeout_refuses_synchronous_wait() {
+        let error = tool_review(&json!({ "action": "closeout", "wait": true }))
+            .expect_err("closeout must refuse wait:true");
+        assert!(error.contains("pass wait:false"), "error: {error}");
+        assert!(error.contains("command_output"), "error: {error}");
+    }
+
+    #[test]
+    fn review_closeout_starts_async_command_or_reports_executable_error() {
+        let result = tool_review(&json!({
+            "action": "closeout",
+            "format": "compact",
+        }));
+        match result {
+            Ok(payload) => {
+                let value: Value = serde_json::from_str(&payload).expect("command payload");
+                let command_id = value["commandId"]
+                    .as_str()
+                    .expect("async closeout commandId");
+                let _ = tool_command_kill(&json!({ "command_id": command_id })); // best-effort cleanup
+                drop(tool_command_output(&json!({ "command_id": command_id })));
+                // release finished result
+            }
+            Err(error) => assert!(
+                error.contains("review closeout: locate self"),
+                "unexpected closeout error: {error}"
+            ),
         }
     }
 
