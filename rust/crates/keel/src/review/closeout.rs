@@ -162,18 +162,16 @@ pub fn review_baseline_path(
             display_path(&candidate)
         ));
     }
-    let root_display = display_path(repository_root);
+    let comparable_path = |path: &Path| {
+        let displayed = display_path(path);
+        let displayed = displayed.strip_prefix("\\\\?\\").unwrap_or(&displayed);
+        displayed.trim_end_matches(['\\', '/']).to_ascii_lowercase()
+    };
     let candidate_display = display_path(&candidate);
-    let root_prefix = format!(
-        "{}{}",
-        root_display.trim_end_matches(['\\', '/']),
-        std::path::MAIN_SEPARATOR
-    );
-    let candidate_lower = candidate_display.to_ascii_lowercase();
-    let root_lower = root_display.to_ascii_lowercase();
-    if candidate_lower != root_lower
-        && !candidate_lower.starts_with(&root_prefix.to_ascii_lowercase())
-    {
+    let root_lower = comparable_path(repository_root);
+    let candidate_lower = comparable_path(&candidate);
+    let root_prefix = format!("{}{}", root_lower, std::path::MAIN_SEPARATOR);
+    if candidate_lower != root_lower && !candidate_lower.starts_with(&root_prefix) {
         return Err(format!(
             "review baseline path must stay inside the repository: {}",
             candidate_display
@@ -186,10 +184,8 @@ pub fn review_baseline_path(
                 candidate_display
             )
         })?;
-        let canonical_display = display_path(&canonical_candidate).to_ascii_lowercase();
-        if canonical_display != root_lower
-            && !canonical_display.starts_with(&root_prefix.to_ascii_lowercase())
-        {
+        let canonical_lower = comparable_path(&canonical_candidate);
+        if canonical_lower != root_lower && !canonical_lower.starts_with(&root_prefix) {
             return Err(format!(
                 "review baseline path must stay inside the repository: {}",
                 candidate_display
