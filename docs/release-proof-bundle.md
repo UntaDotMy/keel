@@ -14,6 +14,13 @@ Every release-proof bundle should include these files:
 - `benchmark-status-snapshot.md`: the benchmark-suite snapshot that was current when the release was cut.
 - `release-proof-manifest.json`: machine-readable metadata for the release tag, build version, workflow run, and included proof files.
 
+## Validation precondition
+
+Release preflight requires a successful `Validate` workflow run for the exact
+release `GITHUB_SHA`. Main pushes trigger validation automatically. Tag and
+manual releases require a manual `Validate` dispatch against the same ref
+before release preflight can continue.
+
 ## Published asset shape
 
 The release workflow should upload one proof archive named `keel_release-proof_<build_version>.tar.gz`.

@@ -1,0 +1,22 @@
+# Purpose: Keep tracked Rust, OpenCode, and GitHub Actions dependencies current. Caller: GitHub Dependabot.
+# Dependencies: Cargo.lock, opencode/package.json, and workflow action references. Side Effects: Opens validated update pull requests.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 10
+  - package-ecosystem: npm
+    directory: /opencode
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 10

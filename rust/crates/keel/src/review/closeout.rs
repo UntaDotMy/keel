@@ -1,9 +1,10 @@
 use crate::runtime::{display_path, safe_path_segment, write_text};
 use crate::utility::hashing::fnv1a64_hex;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 pub const REVIEW_LEDGER_SCHEMA: u32 = 1;
 
@@ -70,6 +71,20 @@ pub struct ReviewLedger {
     pub gates: Vec<ReviewGateSnapshot>,
 }
 
+pub const REVIEW_BASELINE_SCHEMA: u32 = 1;
+pub const DEFAULT_REVIEW_BASELINE_FILE: &str = "review-closeout-baseline.json";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReviewBaseline {
+    pub schema_version: u32,
+    pub generated_from_head: String,
+    pub generated_at: String,
+    pub expires_at: String,
+    pub reviewed_by: String,
+    pub reason: String,
+    pub finding_ids: Vec<String>,
+}
+
 /// Return a deterministic, path-safe identifier for a review head.
 pub fn ledger_id(head_sha: &str) -> String {
     let short_sha: String = head_sha.trim().chars().take(12).collect();
@@ -122,6 +137,181 @@ pub fn save_ledger(claude_home: &Path, ledger: &ReviewLedger) -> Result<PathBuf,
         .map_err(|error| format!("serialize {}: {error}", display_path(&path)))?;
     write_text(&path, &format!("{rendered}\n"))?;
     Ok(path)
+}
+
+pub fn review_baseline_path(
+    repository_root: &Path,
+    requested_path: &str,
+) -> Result<PathBuf, String> {
+    let candidate = if requested_path.trim().is_empty() {
+        repository_root.join(DEFAULT_REVIEW_BASELINE_FILE)
+    } else {
+        let requested = PathBuf::from(requested_path.trim());
+        if requested.is_absolute() {
+            requested
+        } else {
+            repository_root.join(requested)
+        }
+    };
+    if candidate
+        .components()
+        .any(|component| component == Component::ParentDir)
+    {
+        return Err(format!(
+            "review baseline path must stay inside the repository: {}",
+            display_path(&candidate)
+        ));
+    }
+    let comparable_path = |path: &Path| {
+        let displayed = display_path(path);
+        let displayed = displayed.strip_prefix("\\\\?\\").unwrap_or(&displayed);
+        displayed.trim_end_matches(['\\', '/']).to_ascii_lowercase()
+    };
+    let candidate_display = display_path(&candidate);
+    let root_lower = comparable_path(repository_root);
+    let candidate_lower = comparable_path(&candidate);
+    let root_prefix = format!("{}{}", root_lower, std::path::MAIN_SEPARATOR);
+    if candidate_lower != root_lower && !candidate_lower.starts_with(&root_prefix) {
+        return Err(format!(
+            "review baseline path must stay inside the repository: {}",
+            candidate_display
+        ));
+    }
+    if candidate.exists() {
+        let canonical_candidate = fs::canonicalize(&candidate).map_err(|error| {
+            format!(
+                "canonicalize review baseline {}: {error}",
+                candidate_display
+            )
+        })?;
+        let canonical_lower = comparable_path(&canonical_candidate);
+        if canonical_lower != root_lower && !canonical_lower.starts_with(&root_prefix) {
+            return Err(format!(
+                "review baseline path must stay inside the repository: {}",
+                candidate_display
+            ));
+        }
+    }
+    Ok(candidate)
+}
+
+pub fn load_review_baseline(path: &Path, now: &str) -> Result<Option<ReviewBaseline>, String> {
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("read {}: {error}", display_path(path))),
+    };
+    let baseline: ReviewBaseline = serde_json::from_str(&text)
+        .map_err(|error| format!("parse {}: {error}", display_path(path)))?;
+    validate_review_baseline(&baseline, now)?;
+    Ok(Some(baseline))
+}
+
+pub fn save_review_baseline(path: &Path, baseline: &ReviewBaseline) -> Result<(), String> {
+    validate_review_baseline(baseline, &baseline.generated_at)?;
+    let rendered = serde_json::to_string_pretty(baseline)
+        .map_err(|error| format!("serialize {}: {error}", display_path(path)))?;
+    write_text(path, &format!("{rendered}\n"))
+}
+
+fn validate_review_baseline(baseline: &ReviewBaseline, now: &str) -> Result<(), String> {
+    if baseline.schema_version != REVIEW_BASELINE_SCHEMA {
+        return Err(format!(
+            "unsupported review baseline schema {} (expected {})",
+            baseline.schema_version, REVIEW_BASELINE_SCHEMA
+        ));
+    }
+    if baseline.generated_from_head.trim().is_empty()
+        || baseline.reviewed_by.trim().is_empty()
+        || baseline.reason.trim().is_empty()
+    {
+        return Err(
+            "review baseline requires generated_from_head, reviewed_by, and reason".to_string(),
+        );
+    }
+    let generated_at = DateTime::parse_from_rfc3339(&baseline.generated_at)
+        .map_err(|error| format!("review baseline generated_at is invalid: {error}"))?;
+    let expires_at = DateTime::parse_from_rfc3339(&baseline.expires_at)
+        .map_err(|error| format!("review baseline expires_at is invalid: {error}"))?;
+    let current_time = DateTime::parse_from_rfc3339(now)
+        .map_err(|error| format!("review baseline comparison time is invalid: {error}"))?;
+    if expires_at <= current_time {
+        return Err(format!(
+            "review baseline expired at {}",
+            baseline.expires_at
+        ));
+    }
+    if generated_at > expires_at {
+        return Err("review baseline generated_at is after expires_at".to_string());
+    }
+    let mut unique_ids = HashSet::new();
+    for finding_id in &baseline.finding_ids {
+        if finding_id.trim().is_empty() || !unique_ids.insert(finding_id) {
+            return Err("review baseline finding_ids must be non-empty and unique".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn baseline_eligible(finding: &ReviewFinding) -> bool {
+    finding.rule.starts_with("comment:")
+        || finding.rule.starts_with("prose:")
+        || finding.rule.starts_with("slop:")
+        || matches!(
+            finding.rule.as_str(),
+            "gate:comment_style" | "gate:prose_style"
+        )
+}
+
+fn build_review_baseline(
+    findings: &[ReviewFinding],
+    head: &str,
+    reviewed_by: &str,
+    reason: &str,
+    expires_at: &str,
+) -> Result<ReviewBaseline, String> {
+    let mut finding_ids: Vec<String> = findings
+        .iter()
+        .filter(|finding| baseline_eligible(finding))
+        .map(|finding| finding.id.clone())
+        .collect();
+    finding_ids.sort();
+    finding_ids.dedup();
+    let baseline = ReviewBaseline {
+        schema_version: REVIEW_BASELINE_SCHEMA,
+        generated_from_head: head.to_string(),
+        generated_at: Utc::now().to_rfc3339(),
+        expires_at: expires_at.to_string(),
+        reviewed_by: reviewed_by.to_string(),
+        reason: reason.to_string(),
+        finding_ids,
+    };
+    validate_review_baseline(&baseline, &baseline.generated_at)?;
+    Ok(baseline)
+}
+
+fn apply_review_baseline(
+    findings: Vec<ReviewFinding>,
+    baseline: Option<&ReviewBaseline>,
+    head: &str,
+) -> (Vec<ReviewFinding>, usize) {
+    let Some(baseline) = baseline else {
+        return (findings, 0);
+    };
+    let baseline_ids: HashSet<&str> = baseline.finding_ids.iter().map(String::as_str).collect();
+    let mut suppressed = 0usize;
+    let findings = findings
+        .into_iter()
+        .map(|mut finding| {
+            if baseline_ids.contains(finding.id.as_str()) {
+                finding.status = ReviewFindingStatus::Closed;
+                finding.closed_head = Some(head.to_string());
+                suppressed += 1;
+            }
+            finding
+        })
+        .collect();
+    (findings, suppressed)
 }
 
 /// Build an ID from semantic finding content. Include a location when available
@@ -907,7 +1097,7 @@ pub(crate) fn run_review_closeout_command(
     {
         let _ = writeln!(
             standard_output,
-            "Usage: keel review closeout [--repo-root <path>] [--base-ref <ref>] [--brief-id <id>] [--proof <text>] [--format json|markdown|compact] [--strict] [--require-ci]"
+            "Usage: keel review closeout [--repo-root <path>] [--base-ref <ref>] [--brief-id <id>] [--proof <text>] [--baseline <path>] [--baseline-reviewer <name>] [--baseline-reason <text>] [--baseline-expires <rfc3339>] [--write-baseline] [--format json|markdown|compact] [--strict] [--require-ci]"
         );
         return if arguments.is_empty() { 1 } else { 0 };
     }
@@ -921,6 +1111,11 @@ pub(crate) fn run_review_closeout_command(
     flags.string_flag("format", "json");
     flags.bool_flag("strict", false);
     flags.bool_flag("require-ci", false);
+    flags.string_flag("baseline", "");
+    flags.string_flag("baseline-reviewer", "");
+    flags.string_flag("baseline-reason", "");
+    flags.string_flag("baseline-expires", "");
+    flags.bool_flag("write-baseline", false);
     if let Err(error) = flags.parse(arguments) {
         let _ = writeln!(standard_error, "{}", error.message);
         return 1;
@@ -1164,14 +1359,124 @@ pub(crate) fn run_review_closeout_command(
             details: Some("CI evidence was not required".to_string()),
         });
     }
+    let baseline_argument = flags.string_value("baseline").trim();
+    let baseline_requested = !baseline_argument.is_empty();
+    let write_baseline = flags.bool_value("write-baseline");
+    if write_baseline && !dirty_status.trim().is_empty() {
+        let _ = writeln!(
+            standard_error,
+            "review closeout: --write-baseline requires a clean working tree"
+        );
+        return 1;
+    }
+    let baseline_path = match review_baseline_path(&repository_root, baseline_argument) {
+        Ok(path) => path,
+        Err(error) => {
+            let _ = writeln!(standard_error, "{error}");
+            return 1;
+        }
+    };
+    let mut baseline = None;
+    let mut baseline_error = None;
+    let mut baseline_status = "not_configured";
+    if !write_baseline {
+        match load_review_baseline(&baseline_path, &now_rfc3339()) {
+            Ok(Some(value)) => {
+                baseline = Some(value);
+                baseline_status = "pass";
+            }
+            Ok(None) if baseline_requested => {
+                let error = format!(
+                    "review baseline was not found at {}",
+                    display_path(&baseline_path)
+                );
+                baseline_error = Some(error.clone());
+                current_findings.push(finding(
+                    "baseline:missing",
+                    ReviewSeverity::Major,
+                    display_path(&baseline_path),
+                    None,
+                    "review baseline is missing",
+                    error,
+                    &head_sha,
+                ));
+                baseline_status = "blocked";
+            }
+            Ok(None) => {}
+            Err(error) => {
+                baseline_error = Some(error.clone());
+                current_findings.push(finding(
+                    "baseline:invalid",
+                    ReviewSeverity::Major,
+                    display_path(&baseline_path),
+                    None,
+                    "review baseline is invalid",
+                    error,
+                    &head_sha,
+                ));
+                baseline_status = "blocked";
+            }
+        }
+    } else {
+        let reviewed_by = flags.string_value("baseline-reviewer").trim();
+        let reason = flags.string_value("baseline-reason").trim();
+        let expires_at = flags.string_value("baseline-expires").trim();
+        if reviewed_by.is_empty() || reason.is_empty() || expires_at.is_empty() {
+            let _ = writeln!(
+                standard_error,
+                "review closeout: --write-baseline requires --baseline-reviewer, --baseline-reason, and --baseline-expires"
+            );
+            return 1;
+        }
+        let generated = match build_review_baseline(
+            &current_findings,
+            &head_sha,
+            reviewed_by,
+            reason,
+            expires_at,
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                let _ = writeln!(standard_error, "{error}");
+                return 1;
+            }
+        };
+        if let Err(error) = save_review_baseline(&baseline_path, &generated) {
+            let _ = writeln!(standard_error, "{error}");
+            return 1;
+        }
+        baseline = Some(generated);
+        baseline_status = "written";
+    }
 
     let proof = flags.string_value("proof").trim();
-    if !proof.is_empty() && current_findings.is_empty() {
+    let reconciled_findings = reconcile_findings(prior_findings, &current_findings, &head_sha);
+    let (reconciled_findings, baseline_suppressed) =
+        apply_review_baseline(reconciled_findings, baseline.as_ref(), &head_sha);
+    let baseline_details = baseline.as_ref().map(|value| {
+        format!(
+            "path={} reviewer={} expires_at={} suppressed_findings={}",
+            display_path(&baseline_path),
+            value.reviewed_by,
+            value.expires_at,
+            baseline_suppressed
+        )
+    });
+    snapshots.push(ReviewGateSnapshot {
+        name: "baseline".to_string(),
+        status: baseline_status.to_string(),
+        blocking: baseline_error.is_some(),
+        details: baseline_details.or_else(|| baseline_error.clone()),
+    });
+    if !proof.is_empty()
+        && reconciled_findings
+            .iter()
+            .all(|finding| finding.status == ReviewFindingStatus::Closed)
+    {
         for requirement in &mut current_requirements {
             requirement.status = ReviewFindingStatus::Closed;
         }
     }
-    let reconciled_findings = reconcile_findings(prior_findings, &current_findings, &head_sha);
     let reconciled_requirements = reconcile_requirements(prior_requirements, &current_requirements);
     let now = now_rfc3339();
     let ledger = ReviewLedger {
@@ -1400,5 +1705,118 @@ mod tests {
             .expect("ledger");
         assert_eq!(actual, expected);
         let _ = std::fs::remove_dir_all(home);
+    }
+    #[test]
+    fn baseline_path_rejects_escape() {
+        let root = test_home("baseline-path");
+        assert!(review_baseline_path(&root, "../outside.json").is_err());
+        assert!(review_baseline_path(&root, "review-closeout-baseline.json").is_ok());
+    }
+
+    #[test]
+    fn baseline_validation_requires_review_and_future_expiry() {
+        let valid = ReviewBaseline {
+            schema_version: REVIEW_BASELINE_SCHEMA,
+            generated_from_head: "head-a".to_string(),
+            generated_at: "2026-08-24T00:00:00Z".to_string(),
+            expires_at: "2027-08-24T00:00:00Z".to_string(),
+            reviewed_by: "reviewer".to_string(),
+            reason: "historical static findings".to_string(),
+            finding_ids: vec!["comment-1".to_string()],
+        };
+        assert!(validate_review_baseline(&valid, "2026-08-24T00:00:01Z").is_ok());
+
+        let mut expired = valid.clone();
+        expired.expires_at = "2026-08-24T00:00:00Z".to_string();
+        assert!(validate_review_baseline(&expired, "2026-08-24T00:00:01Z").is_err());
+
+        let mut unreviewed = valid;
+        unreviewed.reviewed_by.clear();
+        assert!(validate_review_baseline(&unreviewed, "2026-08-24T00:00:01Z").is_err());
+    }
+
+    #[test]
+    fn baseline_suppresses_only_exact_finding_ids() {
+        let mut historical = finding(
+            &stable_finding_id("comment:style", "docs/a.md", Some(4), "historical"),
+            ReviewFindingStatus::Open,
+        );
+        historical.rule = "comment:style".to_string();
+        historical.file = "docs/a.md".to_string();
+        historical.line = Some(4);
+        historical.message = "historical".to_string();
+        let mut new_finding = historical.clone();
+        new_finding.id = stable_finding_id("comment:style", "docs/a.md", Some(5), "new");
+        new_finding.line = Some(5);
+        new_finding.message = "new".to_string();
+        let baseline = ReviewBaseline {
+            schema_version: REVIEW_BASELINE_SCHEMA,
+            generated_from_head: "head-a".to_string(),
+            generated_at: "2026-08-24T00:00:00Z".to_string(),
+            expires_at: "2027-08-24T00:00:00Z".to_string(),
+            reviewed_by: "reviewer".to_string(),
+            reason: "historical static findings".to_string(),
+            finding_ids: vec![historical.id.clone()],
+        };
+        let (result, suppressed) =
+            apply_review_baseline(vec![historical, new_finding], Some(&baseline), "head-b");
+        assert_eq!(suppressed, 1);
+        assert_eq!(result[0].status, ReviewFindingStatus::Closed);
+        assert_eq!(result[0].closed_head.as_deref(), Some("head-b"));
+        assert_eq!(result[1].status, ReviewFindingStatus::Open);
+    }
+
+    #[test]
+    fn baseline_generation_excludes_dynamic_findings() {
+        let mut static_finding = finding(
+            &stable_finding_id("comment:style", "docs/a.md", Some(4), "historical"),
+            ReviewFindingStatus::Open,
+        );
+        static_finding.rule = "comment:style".to_string();
+        let dynamic_finding = finding(
+            &stable_finding_id("ci:exact-head", "review/ci", None, "ci"),
+            ReviewFindingStatus::Open,
+        );
+        let baseline = build_review_baseline(
+            &[static_finding, dynamic_finding],
+            "head-a",
+            "reviewer",
+            "historical static findings",
+            "2027-08-24T00:00:00Z",
+        )
+        .expect("baseline");
+        assert_eq!(baseline.finding_ids.len(), 1);
+        assert!(baseline.finding_ids[0].starts_with("comment-style-"));
+    }
+
+    #[test]
+    fn baseline_generation_includes_comment_and_prose_gate_summaries() {
+        let mut aggregate = finding(
+            &stable_finding_id("gate:comment_style", "review/comment_style", None, "gate"),
+            ReviewFindingStatus::Open,
+        );
+        aggregate.rule = "gate:comment_style".to_string();
+        let baseline = build_review_baseline(
+            &[aggregate],
+            "head-a",
+            "reviewer",
+            "historical static findings",
+            "2027-08-24T00:00:00Z",
+        )
+        .expect("baseline");
+        assert_eq!(baseline.finding_ids.len(), 1);
+        assert!(baseline.finding_ids[0].starts_with("gate-comment_style-"));
+    }
+
+    #[test]
+    fn closeout_help_advertises_baseline_controls() {
+        let mut output = Vec::new();
+        let mut error = Vec::new();
+        let code = run_review_closeout_command(&["--help".to_string()], &mut output, &mut error);
+        let text = String::from_utf8_lossy(&output);
+        assert_eq!(code, 0);
+        assert!(text.contains("--baseline"));
+        assert!(text.contains("--write-baseline"));
+        assert!(error.is_empty());
     }
 }

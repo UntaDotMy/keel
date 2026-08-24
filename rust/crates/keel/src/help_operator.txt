@@ -13,7 +13,7 @@
   uninstall [--repo-root <path>] [--claude-home <path>]
   menu
   review init|diff|pre-commit|pre-pr [--repo-root <path>] [--format json|markdown|compact]
-  review closeout [--repo-root <path>] [--base-ref <ref>] [--brief-id <id>] [--proof <text>] [--format json|markdown|compact] [--strict] [--require-ci]
+  review closeout [--repo-root <path>] [--base-ref <ref>] [--brief-id <id>] [--proof <text>] [--baseline <path>] [--baseline-reviewer <name>] [--baseline-reason <text>] [--baseline-expires <rfc3339>] [--write-baseline] [--format json|markdown|compact] [--strict] [--require-ci]
   review gates check [--repo-root <path>] [--surface <name>] [--repo-test-policy skip|run] [--format json|markdown|compact]
   review hosted check|comment [--repo-root <path>] [--provider <name>] [--write-payload-file <path>] [--write-body-file <path>] [--format json|markdown|compact]
   review policy show [--format json|markdown|compact]
