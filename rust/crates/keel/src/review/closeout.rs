@@ -641,6 +641,12 @@ fn refresh_evidence(
         "review.rs dispatcher".to_string(),
         "--source-of-truth".to_string(),
         "closeout ledger and review gate collector".to_string(),
+        "--storage-state-queue-owner".to_string(),
+        "review closeout ledger and command registry".to_string(),
+        "--side-effect-owner".to_string(),
+        "review scans, flow refresh, and ledger writes".to_string(),
+        "--cleanup-recovery-path".to_string(),
+        "ledger history and command termination".to_string(),
         "--consumers".to_string(),
         "review command and closeout ledger".to_string(),
         "--edit-boundary".to_string(),
@@ -894,6 +900,17 @@ pub(crate) fn run_review_closeout_command(
     standard_output: &mut dyn Write,
     standard_error: &mut dyn Write,
 ) -> u8 {
+    if arguments.is_empty()
+        || arguments
+            .iter()
+            .any(|argument| super::is_help_argument(argument))
+    {
+        let _ = writeln!(
+            standard_output,
+            "Usage: keel review closeout [--repo-root <path>] [--base-ref <ref>] [--brief-id <id>] [--proof <text>] [--format json|markdown|compact] [--strict] [--require-ci]"
+        );
+        return if arguments.is_empty() { 1 } else { 0 };
+    }
     let mut flags = FlagSet::new("review closeout");
     flags.string_flag("repo-root", "");
     flags.string_flag("base-ref", "origin/main");
@@ -1351,6 +1368,16 @@ mod tests {
         }];
         let result = reconcile_requirements(&[], &current);
         assert_eq!(result[0].status, ReviewFindingStatus::Open);
+    }
+
+    #[test]
+    fn closeout_help_is_actionable() {
+        let mut output = Vec::new();
+        let mut error = Vec::new();
+        let code = run_review_closeout_command(&["--help".to_string()], &mut output, &mut error);
+        assert_eq!(code, 0);
+        assert!(String::from_utf8_lossy(&output).contains("--brief-id"));
+        assert!(error.is_empty());
     }
 
     #[test]

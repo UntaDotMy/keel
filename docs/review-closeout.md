@@ -10,7 +10,10 @@ Start with the repository and brief that define the work:
 keel review closeout --repo-root <path> --base-ref origin/main --brief-id <id> --proof "targeted checks passed" --format markdown
 ```
 
-Use `--strict` when a working brief is required, and `--require-ci` when exact-head CI proof is required before a pass. The default base ref is `origin/main`; the default output format is `json`.
+Use `--strict` when a working brief is required, and `--require-ci` when exact-head
+CI proof is required before a pass. `--require-ci` also rejects a dirty worktree,
+because CI cannot prove uncommitted files. The default base ref is `origin/main`;
+the default output format is `json`.
 
 Each run writes a ledger under `<claude-home>/state/review-closeout/<review-id>.json`. Without an explicit review id, the id is derived from the current `HEAD` (for example, `review-<12-char-sha>`). The JSON result includes the ledger path, status, findings, requirements, and gate snapshots.
 
