@@ -281,9 +281,14 @@ function runBridgeWithStdin(subcommand, args, stdin) {
     return "";
   }
 }
+function resolveSessionContext(input) {
+  return {
+    sessionID: input.session_id ?? "unknown",
+    cwd: input.cwd ?? process.cwd()
+  };
+}
 function handleSessionStart(input) {
-  const sessionID = input.session_id ?? "unknown";
-  const cwd = input.cwd ?? process.cwd();
+  const { sessionID, cwd } = resolveSessionContext(input);
   if (hasStarted(sessionID))
     return "";
   const text = runBridge("session-start", [
@@ -296,8 +301,7 @@ function handleSessionStart(input) {
   return text;
 }
 function handleUserPromptSubmit(input) {
-  const sessionID = input.session_id ?? "unknown";
-  const cwd = input.cwd ?? process.cwd();
+  const { sessionID, cwd } = resolveSessionContext(input);
   const prompt = input.prompt ?? "";
   if (!prompt)
     return "";
@@ -319,8 +323,7 @@ function extractCommand(toolInput) {
 }
 function handlePreToolUse(input, isPre) {
   if (!isPre) {
-    const sessionID2 = input.session_id ?? "unknown";
-    const cwd2 = input.cwd ?? process.cwd();
+    const { sessionID: sessionID2, cwd: cwd2 } = resolveSessionContext(input);
     const currentToolName2 = toolName(input);
     const observation = input.tool_response ?? input.tool_input;
     const stdin2 = observation != null ? JSON.stringify(observation) : "{}";
@@ -339,8 +342,7 @@ function handlePreToolUse(input, isPre) {
     runBridgeWithStdin("observe", args, stdin2);
     return "";
   }
-  const sessionID = input.session_id ?? "unknown";
-  const cwd = input.cwd ?? process.cwd();
+  const { sessionID, cwd } = resolveSessionContext(input);
   const currentToolName = toolName(input);
   const stdin = input.tool_input != null ? JSON.stringify(input.tool_input) : "{}";
   const observeArgs = [
@@ -403,8 +405,7 @@ function handlePreToolUse(input, isPre) {
   return "";
 }
 function handlePreCompact(input) {
-  const sessionID = input.session_id ?? "unknown";
-  const cwd = input.cwd ?? process.cwd();
+  const { sessionID, cwd } = resolveSessionContext(input);
   runBridge("pre-compact", [
     "--session",
     sessionID,
@@ -414,8 +415,7 @@ function handlePreCompact(input) {
   return "";
 }
 function handlePostCompact(input) {
-  const sessionID = input.session_id ?? "unknown";
-  const cwd = input.cwd ?? process.cwd();
+  const { sessionID, cwd } = resolveSessionContext(input);
   return runBridge("post-compact", [
     "--session",
     sessionID,
@@ -427,8 +427,7 @@ function handleStop(_input) {
   return "";
 }
 function handleSessionEnd(input) {
-  const sessionID = input.session_id ?? "unknown";
-  const cwd = input.cwd ?? process.cwd();
+  const { sessionID, cwd } = resolveSessionContext(input);
   runBridge("session-end", [
     "--session",
     sessionID,

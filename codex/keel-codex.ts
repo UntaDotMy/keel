@@ -147,14 +147,22 @@ function runBridgeWithStdin(
     return "";
   }
 }
+function resolveSessionContext(input: CodexHookInput): {
+  sessionID: string;
+  cwd: string;
+} {
+  return {
+    sessionID: input.session_id ?? "unknown",
+    cwd: input.cwd ?? process.cwd(),
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Event handlers — map Codex events to bridge subcommands
 // ---------------------------------------------------------------------------
 
 function handleSessionStart(input: CodexHookInput): string {
-  const sessionID = input.session_id ?? "unknown";
-  const cwd = input.cwd ?? process.cwd();
+  const { sessionID, cwd } = resolveSessionContext(input);
 
   if (hasStarted(sessionID)) return "";
 
@@ -167,8 +175,7 @@ function handleSessionStart(input: CodexHookInput): string {
 }
 
 function handleUserPromptSubmit(input: CodexHookInput): string {
-  const sessionID = input.session_id ?? "unknown";
-  const cwd = input.cwd ?? process.cwd();
+  const { sessionID, cwd } = resolveSessionContext(input);
   const prompt = input.prompt ?? "";
 
   if (!prompt) return "";
@@ -192,8 +199,7 @@ function extractCommand(toolInput: unknown): string {
 function handlePreToolUse(input: CodexHookInput, isPre: boolean): string {
   // PostToolUse only records the official tool_response payload.
   if (!isPre) {
-    const sessionID = input.session_id ?? "unknown";
-    const cwd = input.cwd ?? process.cwd();
+    const { sessionID, cwd } = resolveSessionContext(input);
     const currentToolName = toolName(input);
     const observation = input.tool_response ?? input.tool_input;
     const stdin = observation != null ? JSON.stringify(observation) : "{}";
@@ -207,8 +213,7 @@ function handlePreToolUse(input: CodexHookInput, isPre: boolean): string {
   }
 
   // --- PreToolUse: Iron Law enforcement first, then observe + rewrite. ---
-  const sessionID = input.session_id ?? "unknown";
-  const cwd = input.cwd ?? process.cwd();
+  const { sessionID, cwd } = resolveSessionContext(input);
   const currentToolName = toolName(input);
 
 
@@ -288,8 +293,7 @@ function handlePreToolUse(input: CodexHookInput, isPre: boolean): string {
 }
 
 function handlePreCompact(input: CodexHookInput): string {
-  const sessionID = input.session_id ?? "unknown";
-  const cwd = input.cwd ?? process.cwd();
+  const { sessionID, cwd } = resolveSessionContext(input);
 
   // Pre-compact: persist what was learned before the window is rewritten.
   runBridge("pre-compact", [
@@ -301,8 +305,7 @@ function handlePreCompact(input: CodexHookInput): string {
 
 function handlePostCompact(input: CodexHookInput): string {
   // PostCompact: learning upsert (idempotent) + post-compaction context.
-  const sessionID = input.session_id ?? "unknown";
-  const cwd = input.cwd ?? process.cwd();
+  const { sessionID, cwd } = resolveSessionContext(input);
 
   return runBridge("post-compact", [
     "--session", sessionID,
@@ -323,8 +326,7 @@ function handleStop(_input: CodexHookInput): string {
 }
 
 function handleSessionEnd(input: CodexHookInput): string {
-  const sessionID = input.session_id ?? "unknown";
-  const cwd = input.cwd ?? process.cwd();
+  const { sessionID, cwd } = resolveSessionContext(input);
 
   runBridge("session-end", [
     "--session", sessionID,
