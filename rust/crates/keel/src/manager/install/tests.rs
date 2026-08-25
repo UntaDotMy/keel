@@ -2006,7 +2006,7 @@ fn ensure_codex_plugin_enabled_appends_section_when_absent() {
         "existing keys must survive the append"
     );
     // The result must still be valid TOML with the enabled flag set.
-    let doc: toml::Value = text.parse().unwrap();
+    let doc: toml::Value = toml::from_str(&text).unwrap();
     assert_eq!(
         doc["plugins"]["keel@personal-keel"]["enabled"].as_bool(),
         Some(true)
@@ -2021,7 +2021,7 @@ fn ensure_codex_plugin_enabled_creates_missing_file() {
     let result = ensure_codex_plugin_enabled(&path).unwrap();
     assert!(matches!(result, CodexEnableResult::Added));
     assert!(path.is_file());
-    let doc: toml::Value = fs::read_to_string(&path).unwrap().parse().unwrap();
+    let doc: toml::Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
     assert_eq!(
         doc["plugins"]["keel@personal-keel"]["enabled"].as_bool(),
         Some(true)
@@ -2074,7 +2074,7 @@ fn ensure_codex_plugin_enabled_inserts_under_existing_header() {
     .unwrap();
     let result = ensure_codex_plugin_enabled(&path).unwrap();
     assert!(matches!(result, CodexEnableResult::Added));
-    let doc: toml::Value = fs::read_to_string(&path).unwrap().parse().unwrap();
+    let doc: toml::Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
     let entry = &doc["plugins"]["keel@personal-keel"];
     assert_eq!(entry["enabled"].as_bool(), Some(true));
     assert_eq!(entry["other_key"].as_integer(), Some(1));
@@ -2141,7 +2141,7 @@ fn ensure_codex_native_mcp_appends_section_when_absent() {
     let binary = dir.join("keel.exe");
     let result = ensure_codex_native_mcp(&path, &binary).unwrap();
     assert!(matches!(result, CodexNativeMcpResult::Added));
-    let doc: toml::Value = fs::read_to_string(&path).unwrap().parse().unwrap();
+    let doc: toml::Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
     let entry = &doc["mcp_servers"]["keel"];
     assert_eq!(
         entry["command"].as_str().unwrap(),
@@ -2192,7 +2192,7 @@ fn ensure_codex_native_mcp_updates_stale_command_preserving_siblings() {
     let binary = dir.join("keel.exe");
     let result = ensure_codex_native_mcp(&path, &binary).unwrap();
     assert!(matches!(result, CodexNativeMcpResult::Updated));
-    let doc: toml::Value = fs::read_to_string(&path).unwrap().parse().unwrap();
+    let doc: toml::Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
     assert_eq!(
         doc["mcp_servers"]["keel"]["command"].as_str().unwrap(),
         display_path(&binary)
@@ -2213,7 +2213,7 @@ fn ensure_codex_native_mcp_escapes_windows_backslashes() {
     let result = ensure_codex_native_mcp(&path, &binary).unwrap();
     assert!(matches!(result, CodexNativeMcpResult::Added));
     // The written TOML must parse back to the exact path (escaping valid).
-    let doc: toml::Value = fs::read_to_string(&path).unwrap().parse().unwrap();
+    let doc: toml::Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
     assert_eq!(
         doc["mcp_servers"]["keel"]["command"].as_str().unwrap(),
         display_path(&binary)
@@ -2318,7 +2318,7 @@ fn remove_codex_plugin_section_removes_only_keel_section() {
     assert!(!text.contains("keel@personal-keel"));
     assert!(text.contains("[plugins.\"other@market\"]"));
     assert!(text.contains("# user comment"), "comments must survive");
-    let doc: toml::Value = text.parse().unwrap();
+    let doc: toml::Value = toml::from_str(&text).unwrap();
     assert_eq!(
         doc["plugins"]["other@market"]["enabled"].as_bool(),
         Some(false),

@@ -8,6 +8,23 @@ updates:
       interval: weekly
       day: monday
     open-pull-requests-limit: 10
+    # These releases resolve dependencies that require Rust 1.85; the workspace MSRV is 1.80.
+    ignore:
+      - dependency-name: serde_spanned
+        versions:
+          - ">= 1.1.0"
+      - dependency-name: toml_parser
+        versions:
+          - ">= 1.1.0"
+      - dependency-name: toml_writer
+        versions:
+          - ">= 1.1.0"
+      - dependency-name: rusqlite
+        versions:
+          - ">= 0.40.0"
+      - dependency-name: toml
+        versions:
+          - ">= 0.9.7"
   - package-ecosystem: npm
     directory: /opencode
     schedule:

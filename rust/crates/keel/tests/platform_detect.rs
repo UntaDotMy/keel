@@ -573,9 +573,8 @@ fn codex_install_registers_marketplace_and_enablement() {
         "install must ensure codex config.toml exists for enablement"
     );
     let config_text = fs::read_to_string(&config_toml).unwrap();
-    let parsed: toml::Value = config_text
-        .parse()
-        .expect("codex config.toml must remain valid TOML");
+    let parsed: toml::Value =
+        toml::from_str(&config_text).expect("codex config.toml must remain valid TOML");
     assert_eq!(
         parsed
             .get("plugins")
@@ -617,9 +616,7 @@ fn codex_enablement_preserves_user_config_and_disable_choice() {
     .unwrap();
     run_install(&repo, &claude_home, &[]);
 
-    let parsed: toml::Value = fs::read_to_string(&config_toml)
-        .unwrap()
-        .parse()
+    let parsed: toml::Value = toml::from_str(&fs::read_to_string(&config_toml).unwrap())
         .expect("config.toml must remain valid TOML");
     assert_eq!(
         parsed.get("model").and_then(|v| v.as_str()),
