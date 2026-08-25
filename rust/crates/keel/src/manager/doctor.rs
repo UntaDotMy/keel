@@ -797,7 +797,7 @@ pub(crate) fn report_bridge_host_wiring(
     .unwrap_or(false);
     let codex_config_text = fs::read_to_string(home.join(".codex").join("config.toml"))
         .ok()
-        .and_then(|text| text.parse::<toml::Value>().ok());
+        .and_then(|text| toml::from_str::<toml::Value>(&text).ok());
     let codex_enabled = codex_config_text
         .as_ref()
         .and_then(|doc| doc.get("plugins"))
@@ -1110,6 +1110,34 @@ mod tests {
         assert!(
             report.contains("[warn] keel MCP server registered"),
             "{report}"
+        );
+        let _ = fs::remove_dir_all(claude_home.parent().unwrap());
+    }
+    #[test]
+    fn codex_bridge_status_reads_full_config_document() {
+        let claude_home = unique_home("codex-config");
+        let home = claude_home.parent().unwrap();
+        let config_path = home.join(".codex").join("config.toml");
+        fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        fs::write(
+            &config_path,
+            "[plugins.\"keel@personal-keel\"]\nenabled = true\n\n[mcp_servers.keel]\ncommand = \"keel\"\n",
+        )
+        .unwrap();
+        let plugin_root = home.join(".codex").join("plugins").join("keel");
+        fs::create_dir_all(plugin_root.join(".codex-plugin")).unwrap();
+        fs::write(plugin_root.join(".codex-plugin").join("plugin.json"), "{}").unwrap();
+        fs::write(plugin_root.join(".mcp.json"), "{}").unwrap();
+
+        let mut output = Vec::new();
+        report_bridge_host_wiring(&mut output, &claude_home);
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("[ok] codex host: wired (rules + MCP)"));
+        assert!(output.contains(
+            "[ok] codex plugin enablement (config.toml [plugins.\"keel@personal-keel\"]): enabled"
+        ));
+        assert!(
+            output.contains("[ok] codex native MCP (config.toml [mcp_servers.keel]): registered")
         );
         let _ = fs::remove_dir_all(claude_home.parent().unwrap());
     }
