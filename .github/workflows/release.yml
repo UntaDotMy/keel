@@ -511,8 +511,7 @@ jobs:
             > "$validate_runs"
           validate_run_id="$(jq -r \
             --arg sha "$SOURCE_SHA" \
-            '[.[] | select(.headSha == $sha and .status == "completed" and .conclusion == "success")] \
-             | sort_by(.databaseId) | last | .databaseId // empty' \
+            '[.[] | select(.headSha == $sha and .status == "completed" and .conclusion == "success")] | sort_by(.databaseId) | last | .databaseId // empty' \
             "$validate_runs")"
           if [[ -z "$validate_run_id" ]]; then
             echo "No successful exact-head Validate run found for $SOURCE_SHA." >&2
