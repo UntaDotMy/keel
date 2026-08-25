@@ -810,8 +810,12 @@ fn release_bundle_stages_all_root_skills() {
         "release.yml must iterate over root skill directories"
     );
     assert!(
-        release_yml.contains("cp -R \"$skill_dir\" \"$target_dir/\""),
-        "release.yml must copy each root skill directory"
+        release_yml.contains("skill_name=\"${skill_dir%/}\""),
+        "release.yml must normalize the root skill directory name"
+    );
+    assert!(
+        release_yml.contains("cp -R \"$skill_dir\" \"$target_dir/$skill_name\""),
+        "release.yml must copy skills into named subdirectories"
     );
     assert!(
         release_yml.contains("skill_count=$((skill_count + 1))"),

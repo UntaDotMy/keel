@@ -276,7 +276,8 @@ jobs:
           skill_count=0
           for skill_dir in */; do
             if [ -f "${skill_dir}SKILL.md" ]; then
-              cp -R "$skill_dir" "$target_dir/"
+              skill_name="${skill_dir%/}"
+              cp -R "$skill_dir" "$target_dir/$skill_name"
               skill_count=$((skill_count + 1))
             fi
           done
