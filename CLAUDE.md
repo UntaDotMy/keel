@@ -241,15 +241,6 @@ literals in MCP env. Exits 2 on any high-severity finding. Add `--json` for
 machine output. Distinct from the `security-and-compliance-auditor` skill, which
 audits the user's application code.
 
-## Code Checkpoints
-
-`keel checkpoint create|list|show|restore` is a git-backed working-tree
-snapshot surface ,  the durable, cross-session analog to native `/rewind` for the
-*code* axis. `create` snapshots tracked changes via `git stash create` pinned
-under `refs/claude-checkpoints/<id>` (non-destructive); `restore --id <id>
---confirm` reapplies one, taking an automatic pre-restore safety snapshot first so
-the restore is itself reversible. It does not capture conversation state (only
-the harness's `/rewind` can), so the two are complementary.
 
 ## Code Graph
 

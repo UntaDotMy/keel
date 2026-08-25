@@ -269,9 +269,17 @@ jobs:
       - name: Stage release bundle
         shell: bash
         run: |
+          set -euo pipefail
           build_version="${{ needs.release-preflight.outputs.build_version }}"
           target_dir="dist/${{ matrix.os_name }}-${{ matrix.arch }}"
           mkdir -p "$target_dir"
+          skill_count=0
+          for skill_dir in */; do
+            if [ -f "${skill_dir}SKILL.md" ]; then
+              cp -R "$skill_dir" "$target_dir/"
+              skill_count=$((skill_count + 1))
+            fi
+          done
           cp "target/${{ matrix.target }}/release/${{ matrix.executable }}" "$target_dir/"
           cp *.md "$target_dir/" || true
           # Stage cross-skill resource directories that SKILL.md files
@@ -327,8 +335,8 @@ jobs:
             fi
           done
           staged_skills="$(find "$target_dir" -mindepth 2 -maxdepth 2 -type f -name SKILL.md | wc -l | tr -d ' ')"
-          if [ "$skill_count" -lt 1 ] || [ "$staged_skills" -lt 1 ]; then
-            echo "ERROR: staged release bundle has no skill directories (skill_count=$skill_count staged_skills=$staged_skills)" >&2
+          if [ "$skill_count" -lt 1 ] || [ "$staged_skills" -ne "$skill_count" ]; then
+            echo "ERROR: staged skill count mismatch (source=$skill_count staged=$staged_skills)" >&2
             missing=1
           fi
           if [ "$missing" -ne 0 ]; then

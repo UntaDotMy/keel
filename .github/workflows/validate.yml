@@ -232,6 +232,8 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: "1.4.0"
+      - name: Build native adapter runtime
+        run: cargo build --locked
       - name: Install OpenCode dependencies
         working-directory: opencode
         run: bun install --frozen-lockfile
@@ -244,6 +246,7 @@ jobs:
           bun --check pi/keel-pi.ts
           bun --check opencode/keel.ts
           bun --check codex/keel-codex.ts
+          bun --check codex/keel-codex.js
           bun --check commandcode/keel-cmdc.ts
       - name: Check Unix statusline syntax
         run: bash -n statusline/statusline-keel.sh

@@ -1,3 +1,5 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -33,6 +35,53 @@ test("Codex fixtures use the official hook payload and output fields", () => {
   expect(codex).toContain("permissionDecision");
   expect(codex).toContain('"--phase", "post"');
   expect(codex).toContain('"--phase", "pre"');
+});
+
+test("Codex hooks execute the bundled Node runtime without npx", () => {
+  const manifest = JSON.parse(source("codex/hooks/hooks.json")) as {
+    hooks: Record<string, Array<{ hooks?: Array<{ command?: string }> }>>;
+  };
+  const commands = Object.values(manifest.hooks).flatMap((entries) =>
+    entries.flatMap((entry) => (entry.hooks ?? []).map((hook) => hook.command ?? "")),
+  );
+  expect(commands.length).toBeGreaterThan(0);
+  expect(commands.every((command) => command === 'node "${PLUGIN_ROOT}/keel-codex.js"')).toBe(true);
+  expect(source("codex/keel-codex.js")).toContain("resolveBinary");
+});
+
+test("Codex bundled adapter handles PreToolUse end to end", async () => {
+  const tempHome = await mkdtemp(join(tmpdir(), "keel-codex-e2e-"));
+  const child = Bun.spawn(["node", "codex/keel-codex.js"], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      KEEL_HOME: join(repoRoot, "target", "debug"),
+      HOME: tempHome,
+      USERPROFILE: tempHome,
+      CLAUDE_TARGET_OVERRIDE: join(tempHome, ".claude"),
+    },
+    stdin: "pipe",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  try {
+    child.stdin.write(
+      `${JSON.stringify({
+        hook_event_name: "PreToolUse",
+        session_id: "codex-contract-e2e",
+        cwd: repoRoot,
+        tool_name: "Edit",
+        tool_input: { file_path: join(repoRoot, "README.md") },
+      })}\n`,
+    );
+    child.stdin.end();
+    const output = await new Response(child.stdout).text();
+    const exitCode = await child.exited;
+    expect(exitCode).toBe(0);
+    expect(output).toContain("permissionDecision");
+  } finally {
+    await rm(tempHome, { recursive: true, force: true });
+  }
 });
 
 test("Cursor fixtures match the shipped hooks JSON parser", () => {
