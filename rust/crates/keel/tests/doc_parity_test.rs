@@ -788,6 +788,59 @@ fn release_bundle_stages_adapter_source_dirs() {
         );
     }
 }
+/// The release bundle must copy every root directory containing SKILL.md and
+/// verify that the staged count matches the source count.
+#[test]
+fn release_bundle_stages_all_root_skills() {
+    let repo_root = repository_root();
+    let release_yml = fs::read_to_string(
+        repo_root
+            .join(".github")
+            .join("workflows")
+            .join("release.yml"),
+    )
+    .expect("read .github/workflows/release.yml");
+    let skill_count = first_party_skill_dirs(&repo_root).len();
+    assert!(
+        skill_count > 0,
+        "repository must contain first-party skills"
+    );
+    assert!(
+        release_yml.contains("for skill_dir in */"),
+        "release.yml must iterate over root skill directories"
+    );
+    assert!(
+        release_yml.contains("cp -R \"$skill_dir\" \"$target_dir/\""),
+        "release.yml must copy each root skill directory"
+    );
+    assert!(
+        release_yml.contains("skill_count=$((skill_count + 1))"),
+        "release.yml must count source skills"
+    );
+    assert!(
+        release_yml.contains("\"$staged_skills\" -ne \"$skill_count\""),
+        "release.yml must fail when source and staged skill counts differ"
+    );
+}
+#[test]
+fn docs_do_not_claim_removed_checkpoint_command() {
+    let repo_root = repository_root();
+    for relative_path in [
+        "CLAUDE.md",
+        "README.md",
+        "using-keel/references/mcp-and-memory.md",
+        "cowork/skills/using-keel/SKILL.md",
+        "docs/competitive-gap-closure.md",
+    ] {
+        let text = fs::read_to_string(repo_root.join(relative_path))
+            .unwrap_or_else(|error| panic!("read {relative_path}: {error}"));
+        assert!(
+            !text.contains("keel checkpoint")
+                && !text.contains("checkpoint create|list|show|restore"),
+            "{relative_path} still claims the removed checkpoint command"
+        );
+    }
+}
 
 /// H5/H6 guard: docs and host-bridge READMEs must not hardcode a literal
 /// specialist-skill count or MCP-tool count. The counts are asserted from disk

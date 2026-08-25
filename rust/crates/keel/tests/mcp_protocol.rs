@@ -16,10 +16,13 @@
 //!   index never collides with a real install or with sibling tests.
 
 use std::env;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{mpsc, Arc, Barrier};
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 
@@ -103,6 +106,69 @@ fn unique_temp_directory(label: &str) -> PathBuf {
     let candidate = env::temp_dir().join(format!("keel-mcp-{label}-{unique_suffix}"));
     std::fs::create_dir_all(&candidate).expect("create temp claude home");
     candidate
+}
+
+fn spawn_http_server(claude_home: &Path) -> (Child, SocketAddr) {
+    let probe = TcpListener::bind("127.0.0.1:0").expect("reserve HTTP port");
+    let address = probe.local_addr().expect("read HTTP port");
+    drop(probe);
+
+    let mut command = Command::new(keel_binary_path());
+    let bind = address.to_string();
+    command.args(["mcp", "serve-http", "--bind", &bind]);
+    command
+        .env("CLAUDE_TARGET_OVERRIDE", claude_home)
+        .env("HOME", claude_home)
+        .env("USERPROFILE", claude_home)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = command.spawn().expect("spawn keel HTTP MCP server");
+    let stdout = BufReader::new(child.stdout.take().expect("capture HTTP server stdout"));
+    let (ready_sender, ready_receiver) = mpsc::channel();
+    thread::spawn(move || {
+        for line in stdout.lines().map_while(Result::ok) {
+            if line.contains("listening on") {
+                let _ = ready_sender.send(());
+                break;
+            }
+        }
+    });
+    ready_receiver
+        .recv_timeout(Duration::from_secs(5))
+        .expect("HTTP MCP server readiness");
+    (child, address)
+}
+
+fn send_http_initialize(address: SocketAddr, request_id: usize) -> Result<(), String> {
+    let body = serde_json::to_string(&json!({
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "method": "initialize",
+        "params": {}
+    }))
+    .map_err(|error| format!("serialize request: {error}"))?;
+    let request = format!(
+        "POST /mcp HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\n\
+         Accept: application/json, text/event-stream\r\nMCP-Protocol-Version: 2025-03-26\r\n\
+         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(2))
+        .map_err(|error| format!("connect: {error}"))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .map_err(|error| format!("set read timeout: {error}"))?;
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|error| format!("write request: {error}"))?;
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .map_err(|error| format!("read response: {error}"))?;
+    if !response.starts_with("HTTP/1.1 200") || !response.contains("\"protocolVersion\"") {
+        return Err(format!("unexpected HTTP response: {response}"));
+    }
+    Ok(())
 }
 
 #[test]
@@ -361,5 +427,33 @@ fn mcp_serve_tools_call_with_omitted_params_returns_invalid_params() {
     );
 
     server.close();
+    let _ = std::fs::remove_dir_all(&claude_home);
+}
+
+#[test]
+fn mcp_http_initialize_handles_parallel_clients() {
+    const CLIENT_COUNT: usize = 32;
+    let claude_home = unique_temp_directory("http-parallel");
+    let (mut server, address) = spawn_http_server(&claude_home);
+    let barrier = Arc::new(Barrier::new(CLIENT_COUNT));
+    let handles: Vec<_> = (0..CLIENT_COUNT)
+        .map(|request_id| {
+            let barrier = Arc::clone(&barrier);
+            thread::spawn(move || {
+                barrier.wait();
+                send_http_initialize(address, request_id)
+            })
+        })
+        .collect();
+
+    for handle in handles {
+        handle
+            .join()
+            .expect("parallel HTTP client thread")
+            .expect("parallel HTTP initialize response");
+    }
+
+    let _ = server.kill();
+    let _ = server.wait();
     let _ = std::fs::remove_dir_all(&claude_home);
 }

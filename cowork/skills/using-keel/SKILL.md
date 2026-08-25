@@ -122,7 +122,6 @@ checking. The cost of skipping a skill that did apply is shipping a regression.
 - `keel code-search search` — Codebase search
 - `keel code-search siblings` — Completeness scan after a fix or implement
 - `keel code-graph build|impact` — Code dependency graph
-- `keel checkpoint create|list|show|restore` — Git-backed snapshots
 
 ## Memory Ownership Boundary
 

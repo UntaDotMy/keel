@@ -256,8 +256,10 @@ pub(crate) fn remove_wired_adapters(claude_home: &Path) -> usize {
 
     let codex_dir = home.join(".codex").join("plugins").join("keel");
     for (relative, marker) in [
+        ("hooks/hooks.json", "keel-codex.js"),
         ("hooks/hooks.json", "keel-codex.ts"),
         ("keel-codex.ts", "keel Codex CLI Plugin"),
+        ("keel-codex.js", "resolveBinary"),
         (
             ".codex-plugin/plugin.json",
             "\"mcpServers\": \"./.mcp.json\"",

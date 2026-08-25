@@ -570,6 +570,7 @@ pub(crate) fn maybe_wire_codex(
     for entry in [
         "hooks/hooks.json",
         "keel-codex.ts",
+        "keel-codex.js",
         ".codex-plugin/plugin.json",
         ".mcp.json",
     ] {

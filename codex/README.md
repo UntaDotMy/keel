@@ -6,7 +6,7 @@ Bridges Codex CLI lifecycle events to the `keel` Rust CLI for context injection,
 
 1. The `keel` binary must be installed at `~/.keel/keel` (unix) or `~/.keel/keel.exe` (win32), or on `PATH`. The plugin resolves the binary once at init in this order: `$KEEL_HOME`, `~/.keel/`, the legacy `~/.claude/` path, then PATH.
 2. Codex CLI must be installed and functional.
-3. `tsx` must be available (via `npx` or globally) for TypeScript execution. Alternatively, compile the adapter to JavaScript first.
+3. Node.js must be available on `PATH` to run the bundled JavaScript adapter. No package download is required at hook time.
 
 ## Install
 
@@ -97,7 +97,7 @@ matcher = ""
 
 [[hooks.SessionStart.hooks]]
 type = "command"
-command = "npx tsx ~/.codex/plugins/keel/hooks/keel-codex.ts"
+command = "node ~/.codex/plugins/keel/keel-codex.js"
 statusMessage = "Preparing keel session state"
 
 [[hooks.UserPromptSubmit]]
@@ -105,7 +105,7 @@ matcher = ""
 
 [[hooks.UserPromptSubmit.hooks]]
 type = "command"
-command = "npx tsx ~/.codex/plugins/keel/hooks/keel-codex.ts"
+command = "node ~/.codex/plugins/keel/keel-codex.js"
 statusMessage = "Injecting keel context"
 
 [[hooks.PreToolUse]]
@@ -113,7 +113,7 @@ matcher = "^Bash$"
 
 [[hooks.PreToolUse.hooks]]
 type = "command"
-command = "npx tsx ~/.codex/plugins/keel/hooks/keel-codex.ts"
+command = "node ~/.codex/plugins/keel/keel-codex.js"
 statusMessage = "Recording tool observation"
 
 [[hooks.Stop]]
@@ -121,7 +121,7 @@ matcher = ""
 
 [[hooks.Stop.hooks]]
 type = "command"
-command = "npx tsx ~/.codex/plugins/keel/hooks/keel-codex.ts"
+command = "node ~/.codex/plugins/keel/keel-codex.js"
 statusMessage = "Running keel turn-end checkpoint"
 ```
 
@@ -177,8 +177,9 @@ keel/
 ├── .codex-plugin/
 │   └── plugin.json          # Plugin manifest (name, version, hooks path, interface)
 ├── hooks/
-│   ├── hooks.json           # Lifecycle hook registrations (default-discovered by Codex)
-│   └── keel-codex.ts        # Adapter script (the bridge to `keel bridge`)
+│   └── hooks.json           # Lifecycle hook registrations (default-discovered by Codex)
+├── keel-codex.ts            # TypeScript source
+├── keel-codex.js            # Bundled Node.js runtime used by hooks
 └── README.md                # This file
 ```
 

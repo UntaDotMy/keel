@@ -653,12 +653,9 @@ tests:
 ## Native-parity note (`/rewind`)
 
 Native harness `/rewind` auto-captures the edit tool's changes and can restore
-code *and* conversation. `keel checkpoint` is the code half: a git-backed
-working-tree snapshot/restore that an external binary can actually own. It does
-not capture conversation state (only the harness itself can), so the two are
-complementary rather than identical ,  use `/rewind` for conversation+code inside a
-session, `checkpoint` for durable, named, git-pinned code snapshots that survive
-across sessions and tools.
+code and conversation. Keel does not ship a separate checkpoint command. Current
+recovery uses the Anvil bank, raw-output retention, working briefs, and review
+gates; `/rewind` remains the harness-owned code and conversation recovery path.
 
 ## Strategic open question
 

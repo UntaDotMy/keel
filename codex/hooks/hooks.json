@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "npx tsx \"${PLUGIN_ROOT}/keel-codex.ts\"",
+            "command": "node \"${PLUGIN_ROOT}/keel-codex.js\"",
             "statusMessage": "Preparing keel session state"
           }
         ]
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "npx tsx \"${PLUGIN_ROOT}/keel-codex.ts\"",
+            "command": "node \"${PLUGIN_ROOT}/keel-codex.js\"",
             "statusMessage": "Injecting keel context"
           }
         ]
@@ -28,7 +28,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "npx tsx \"${PLUGIN_ROOT}/keel-codex.ts\"",
+            "command": "node \"${PLUGIN_ROOT}/keel-codex.js\"",
             "statusMessage": "Recording tool observation"
           }
         ]
@@ -40,7 +40,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "npx tsx \"${PLUGIN_ROOT}/keel-codex.ts\"",
+            "command": "node \"${PLUGIN_ROOT}/keel-codex.js\"",
             "statusMessage": "Recording tool observation"
           }
         ]
@@ -51,7 +51,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "npx tsx \"${PLUGIN_ROOT}/keel-codex.ts\"",
+            "command": "node \"${PLUGIN_ROOT}/keel-codex.js\"",
             "statusMessage": "Running keel learning checkpoint"
           }
         ]
@@ -62,7 +62,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "npx tsx \"${PLUGIN_ROOT}/keel-codex.ts\"",
+            "command": "node \"${PLUGIN_ROOT}/keel-codex.js\"",
             "statusMessage": "Recording keel post-compact state"
           }
         ]
@@ -73,7 +73,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "npx tsx \"${PLUGIN_ROOT}/keel-codex.ts\"",
+            "command": "node \"${PLUGIN_ROOT}/keel-codex.js\"",
             "statusMessage": "Running keel turn-end checkpoint"
           }
         ]
@@ -84,7 +84,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "npx tsx \"${PLUGIN_ROOT}/keel-codex.ts\"",
+            "command": "node \"${PLUGIN_ROOT}/keel-codex.js\"",
             "statusMessage": "Running keel session-end learning"
           }
         ]
