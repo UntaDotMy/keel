@@ -283,6 +283,9 @@ jobs:
           done
           cp "target/${{ matrix.target }}/release/${{ matrix.executable }}" "$target_dir/"
           cp *.md "$target_dir/" || true
+          if [ -d docs ]; then
+            cp -R docs "$target_dir/docs"
+          fi
           # Stage cross-skill resource directories that SKILL.md files
           # reference via relative paths (for example _shared/common-discipline.md).
           # Mirrors SHARED_RESOURCE_DIRECTORIES in rust/.../runtime.rs — keep in

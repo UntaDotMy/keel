@@ -825,6 +825,10 @@ fn release_bundle_stages_all_root_skills() {
         release_yml.contains("\"$staged_skills\" -ne \"$skill_count\""),
         "release.yml must fail when source and staged skill counts differ"
     );
+    assert!(
+        release_yml.contains("cp -R docs \"$target_dir/docs\""),
+        "release.yml must stage the runtime guidance docs directory"
+    );
 }
 #[test]
 fn docs_do_not_claim_removed_checkpoint_command() {
