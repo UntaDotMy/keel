@@ -272,7 +272,7 @@ jobs:
           toolchain: stable
       - name: Install cargo-audit (cached tool binary)
         if: steps.filter.outputs.deps == 'true' || github.event_name != 'pull_request'
-        uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
+        uses: taiki-e/install-action@ba47c86ac325773530516bb756137ac718732518 # v2.86.5
         with:
           tool: cargo-audit
       - name: Run cargo audit
