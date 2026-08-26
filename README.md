@@ -233,7 +233,7 @@ discoverable `/`-menu wrapper over an **implemented** `keel` CLI surface
 
 | Command | Wraps | Use it for |
 | --- | --- | --- |
-| `/keel:anvil [compile\|cast\|sieve\|stamp\|loop\|run\|prefix-check] <args>` | `anvil` | Only delivery loop (frozen prefix, PPT+EV, bounded loop). |
+| `/keel:anvil [compile\|cast\|sieve\|stamp\|loop\|run\|prefix-check] <args>` | `anvil` | Only delivery loop (frozen prefix, evidence stamp, bounded loop). |
 | `/keel:review [pre-commit\|pre-pr\|gates] [base-ref]` | `review` gates | Deterministic local quality gate on the diff. |
 | `/keel:recall <terms>` | `memory recall` | FTS5 search over durable memory. |
 | `/keel:gain [since]` | `gain` | Report command-output compaction savings. |

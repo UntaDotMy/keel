@@ -154,7 +154,7 @@ The included `.mcp.json` (installed as `mcp.json`) registers keel's MCP server, 
 | `system_map_refresh` | Regenerate the cached workspace SYSTEM_MAP |
 | `context_brief` | Get the keel context brief (skills, memory, working brief) |
 | `cli` | Run any keel CLI subcommand |
-| `anvil` | Drive the Anvil delivery loop (compile/cast/sieve/stamp; loop and live run are CLI-only) |
+| `anvil` | Drive the Anvil delivery loop (compile/cast/sieve/stamp/run --dry-run in-process; loop and live run background via command_output) |
 
 The MCP config uses Pi's documented structure (`{"settings": {...}, "mcpServers": {...}}`), with `idleTimeout` under `settings` and per-server options `command`/`args`/`env`/`url`/`lifecycle` (`lazy`|`eager`|`keep-alive`)/`idleTimeout`/`directTools`/`debug`. `directTools: true` exposes each keel tool as a top-level tool instead of under an `mcp_` prefix. Adjust the `command` field to `keel.exe` on Windows if installing manually.
 

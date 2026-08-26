@@ -85,6 +85,16 @@ pub fn create_brief(
     }
 }
 
+pub fn linear_issue_payload(brief: &Brief) -> Value {
+    let description = brief.acceptance_criteria.join("\n");
+    Value::Object(vec![
+        ("title".into(), Value::String(brief.request.clone())),
+        ("description".into(), Value::String(description)),
+        ("keelBriefId".into(), Value::String(brief.id.clone())),
+        ("workspace".into(), Value::String(brief.workspace.clone())),
+    ])
+}
+
 pub fn brief_to_value(brief: &Brief) -> Value {
     Value::Object(vec![
         ("id".into(), Value::String(brief.id.clone())),
@@ -360,5 +370,30 @@ mod tests {
         assert!(round.acceptance_criteria.is_empty());
         assert!(round.assumptions.is_empty());
         let _ = fs::remove_dir_all(&claude_home);
+    }
+
+    #[test]
+    fn linear_issue_payload_uses_request_as_title() {
+        let brief = create_brief(
+            "wb-pm".into(),
+            "Ship the stamp loop".into(),
+            Vec::new(),
+            vec!["gates pass".into()],
+            Vec::new(),
+            "D:/proj".into(),
+            "2026-08-26T00:00:00Z".into(),
+        );
+        let payload = linear_issue_payload(&brief);
+        let Value::Object(fields) = payload else {
+            panic!("object");
+        };
+        let title = fields
+            .iter()
+            .find(|(key, _)| key == "title")
+            .map(|(_, value)| value);
+        match title {
+            Some(Value::String(text)) => assert_eq!(text, "Ship the stamp loop"),
+            other => panic!("title {other:?}"),
+        }
     }
 }

@@ -265,7 +265,7 @@ dispatch, workflow, orchestration, and team command surfaces.
 compile  goal + named bar -> anvil.lock.json + prefix.md + gates
 cast     N isolated workspaces from the frozen prefix
 sieve    0-LLM deterministic gates
-stamp    PPT + expected-value pick of the winner
+stamp    local PPT (Bradley-Terry ring on gate_ok + compactness)
 loop     bounded refine only if gates still fail
 run      compile -> cast -> sieve -> stamp -> loop
 ```

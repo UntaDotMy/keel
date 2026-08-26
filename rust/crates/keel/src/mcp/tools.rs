@@ -308,7 +308,7 @@ fn tools_list_catalog() -> Value {
             },
             {
                 "name": "anvil",
-                "description": "REQUIRED for any code change. compile/cast/sieve/stamp/run --dry-run/prefix-check only. Do not hand-edit first. loop and live run are CLI-only (they exceed the ~30s host MCP budget).",
+                "description": "Anvil delivery loop. compile/cast/sieve/stamp/run --dry-run/prefix-check run in-process. loop and live run start in the background: poll command_output, stop with command_kill.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -345,7 +345,7 @@ fn tools_list_catalog() -> Value {
             },
             {
                 "name": "git_workflow",
-                "description": "Git workflow operations. MCP-safe: preflight, configure, show, commit-message, pr-body, lint-message. await-ci is CLI-only (it polls past the host ~30s budget).",
+                "description": "Git workflow operations. Fast actions run in-process. await-ci starts in the background: poll command_output, stop with command_kill.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -1419,6 +1419,39 @@ fn spawn_background_command(mut child: Command, label: &str) -> Result<String, S
     Ok(command_id)
 }
 
+/// Start a long keel job without blocking the MCP worker. Returns a compact
+/// commandId payload so the host can poll `command_output`. Direct argv (no
+/// `keel run --` wrapper) so Anvil/review/await-ci do not re-enter compaction.
+fn spawn_background_keel_argv(argv: Vec<String>, label: &str) -> Result<String, String> {
+    let mut argv = argv;
+    if argv.is_empty() {
+        return Err(format!("{label}: empty argv"));
+    }
+    let program = argv.remove(0);
+    let mut child = Command::new(&program);
+    for argument in &argv {
+        child.arg(argument);
+    }
+    child.stdin(Stdio::null());
+    child.stdout(Stdio::piped());
+    child.stderr(Stdio::piped());
+    child.env("CLAUDE_SKILLS_HOOK", "mcp");
+    let command_id = spawn_background_command(child, label)?;
+    let payload = json!({
+        "commandId": command_id,
+        "running": true,
+        "label": label,
+        "hint": "poll with command_output, stop with command_kill",
+    });
+    mcp_json_compact(&payload).map_err(|error| format!("{label}: {error}"))
+}
+
+fn current_keel_executable() -> Result<String, String> {
+    env::current_exe()
+        .map(|path| path.to_string_lossy().into_owned())
+        .map_err(|error| format!("locate keel executable: {error}"))
+}
+
 /// Chunked reader: appends to the shared buffer as data arrives. Completion is
 /// signaled before the reaper publishes a terminal exit code.
 fn background_reader_thread(
@@ -2072,8 +2105,10 @@ fn tool_cli(arguments: &Value) -> Result<String, String> {
         ));
     }
 
-    if let Some(message) = refuse_mcp_long_keel_job(&args) {
-        return Err(message);
+    if refuse_mcp_long_keel_job(&args).is_some() {
+        let mut argv = vec![current_keel_executable()?];
+        argv.extend(args);
+        return spawn_background_keel_argv(argv, "keel cli long job");
     }
 
     // In-process: spawning current_exe() from `keel mcp serve` re-enters the
@@ -2092,8 +2127,7 @@ fn tool_anvil(arguments: &Value) -> Result<String, String> {
         .to_string();
     if action.is_empty() {
         return Err(
-            "anvil: missing action (compile|cast|sieve|stamp|run|prefix-check). loop is CLI-only."
-                .into(),
+            "anvil: missing action (compile|cast|sieve|stamp|loop|run|prefix-check)".into(),
         );
     }
     let mut owned = vec![action.clone()];
@@ -2106,8 +2140,10 @@ fn tool_anvil(arguments: &Value) -> Result<String, String> {
     }
     let mut tokens = vec!["anvil".to_string()];
     tokens.extend(owned.iter().cloned());
-    if let Some(message) = refuse_mcp_long_keel_job(&tokens) {
-        return Err(message);
+    if refuse_mcp_long_keel_job(&tokens).is_some() {
+        let mut argv = vec![current_keel_executable()?, "anvil".to_string()];
+        argv.extend(owned);
+        return spawn_background_keel_argv(argv, &format!("keel anvil {action}"));
     }
     run_inprocess_cli("keel anvil", |out, err| {
         crate::utility::run_anvil_command(&owned, out, err)
@@ -2688,8 +2724,10 @@ fn tool_review(arguments: &Value) -> Result<String, String> {
             "json": true,
         }));
     }
-    if let Some(message) = refuse_mcp_long_keel_job(&[String::from("review"), action.to_string()]) {
-        return Err(message);
+    if refuse_mcp_long_keel_job(&[String::from("review"), action.to_string()]).is_some() {
+        let mut argv = vec![current_keel_executable()?, "review".to_string()];
+        argv.extend(review_args(action, arguments));
+        return spawn_background_keel_argv(argv, &format!("keel review {action}"));
     }
     let all_args = review_args(action, arguments);
     run_keel_subcommand("review", &all_args)
@@ -2762,10 +2800,14 @@ fn tool_git_workflow(arguments: &Value) -> Result<String, String> {
             "git_workflow: missing action (preflight|configure|show|commit-message|pr-body|lint-message)"
                 .to_string()
         })?;
-    if let Some(message) =
-        refuse_mcp_long_keel_job(&[String::from("git-workflow"), action.to_string()])
-    {
-        return Err(message);
+    if refuse_mcp_long_keel_job(&[String::from("git-workflow"), action.to_string()]).is_some() {
+        let mut argv = vec![
+            current_keel_executable()?,
+            "git-workflow".to_string(),
+            action.to_string(),
+        ];
+        argv.extend(collect_extra_args(arguments));
+        return spawn_background_keel_argv(argv, &format!("keel git-workflow {action}"));
     }
     let extras = collect_extra_args(arguments);
     let mut all_args: Vec<&str> = vec![action];
@@ -3449,56 +3491,57 @@ mod tests {
         );
     }
 
+    fn assert_mcp_background_start(envelope: &Value) -> String {
+        assert_eq!(envelope["isError"], json!(false), "{envelope}");
+        let text = envelope["content"][0]["text"].as_str().unwrap_or("");
+        let value: Value = serde_json::from_str(text).expect("background payload");
+        let command_id = value["commandId"].as_str().expect("commandId").to_string();
+        assert_eq!(value["running"], json!(true), "{value}");
+        let _ = tool_command_kill(&json!({ "command_id": command_id }));
+        command_id
+    }
+
     #[test]
-    fn anvil_loop_and_live_run_are_mcp_errors() {
+    fn anvil_loop_and_live_run_start_background() {
         let loop_result = handle_tools_call(&json!({
             "name": "anvil",
             "arguments": { "action": "loop" }
         }))
         .expect("envelope");
-        assert_eq!(loop_result["isError"], json!(true));
-        let loop_text = loop_result["content"][0]["text"].as_str().unwrap_or("");
-        assert!(loop_text.contains("anvil loop"), "loop refuse: {loop_text}");
+        let loop_id = assert_mcp_background_start(&loop_result);
+        assert!(!loop_id.is_empty());
 
         let live = handle_tools_call(&json!({
             "name": "anvil",
             "arguments": { "action": "run" }
         }))
         .expect("envelope");
-        assert_eq!(live["isError"], json!(true));
-        let live_text = live["content"][0]["text"].as_str().unwrap_or("");
-        assert!(
-            live_text.contains("--dry-run"),
-            "live run refuse: {live_text}"
-        );
+        let live_id = assert_mcp_background_start(&live);
+        assert!(!live_id.is_empty());
     }
 
     #[test]
-    fn review_pre_pr_is_mcp_error() {
+    fn review_pre_pr_starts_background() {
         let result = handle_tools_call(&json!({
             "name": "review",
             "arguments": { "action": "pre-pr" }
         }))
         .expect("envelope");
-        assert_eq!(result["isError"], json!(true));
-        let text = result["content"][0]["text"].as_str().unwrap_or("");
-        assert!(text.contains("pre-pr"), "review pre-pr refuse: {text}");
+        let _ = assert_mcp_background_start(&result);
     }
 
     #[test]
-    fn git_workflow_await_ci_is_mcp_error() {
+    fn git_workflow_await_ci_starts_background() {
         let result = handle_tools_call(&json!({
             "name": "git_workflow",
             "arguments": { "action": "await-ci" }
         }))
         .expect("envelope");
-        assert_eq!(result["isError"], json!(true));
-        let text = result["content"][0]["text"].as_str().unwrap_or("");
-        assert!(text.contains("await-ci"), "await-ci refuse: {text}");
+        let _ = assert_mcp_background_start(&result);
     }
 
     #[test]
-    fn cli_passthrough_refuses_the_same_long_jobs() {
+    fn cli_passthrough_starts_the_same_long_jobs_in_background() {
         for args in [
             json!(["anvil", "loop"]),
             json!(["anvil", "run"]),
@@ -3511,11 +3554,7 @@ mod tests {
                 "arguments": { "args": args }
             }))
             .expect("envelope");
-            assert_eq!(
-                result["isError"],
-                json!(true),
-                "cli {args} should refuse: {result}"
-            );
+            let _ = assert_mcp_background_start(&result);
         }
     }
 

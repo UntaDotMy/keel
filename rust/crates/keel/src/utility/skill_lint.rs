@@ -545,29 +545,135 @@ pub(crate) fn split_frontmatter(text: &str) -> Option<(String, String)> {
     Some((frontmatter, body))
 }
 
-/// Parse `key: value` frontmatter lines into pairs. Simple line scanner matching
-/// how the rest of the codebase reads its flat config — values keep their inline
-/// text; nested YAML is not needed by the fields we validate.
+/// Parse `key: value` frontmatter lines into pairs. Top-level keys only.
+/// YAML 1.2 literal (`|`) and folded (`>`) block scalars are expanded so
+/// `when_to_use: |` is the body text, not the `|` indicator.
+/// Nested mappings / block lists keep an empty value on the key line.
 fn parse_frontmatter(frontmatter: &str) -> Vec<(String, String)> {
+    let lines: Vec<&str> = frontmatter.lines().collect();
     let mut fields = Vec::new();
-    for line in frontmatter.lines() {
+    let mut index = 0usize;
+    while index < lines.len() {
+        let line = lines[index];
+        index += 1;
         if line.trim().is_empty() || line.trim_start().starts_with('#') {
             continue;
         }
-        // Only treat top-level (non-indented) `key:` lines as fields so a nested
-        // mapping value does not get misread as a new key.
         if line.starts_with(char::is_whitespace) {
             continue;
         }
-        if let Some(colon) = line.find(':') {
-            let key = line[..colon].trim().to_string();
-            let value = line[colon + 1..].trim().to_string();
-            if !key.is_empty() {
-                fields.push((key, value));
-            }
+        let Some(colon) = line.find(':') else {
+            continue;
+        };
+        let key = line[..colon].trim().to_string();
+        if key.is_empty() {
+            continue;
+        }
+        let rest = line[colon + 1..].trim();
+        if let Some((value, consumed)) = parse_block_scalar(rest, &lines[index..]) {
+            fields.push((key, value));
+            index += consumed;
+        } else {
+            fields.push((key, rest.to_string()));
         }
     }
     fields
+}
+
+/// YAML 1.2 block scalar: `|` literal / `>` folded, optional indent 1-9 and
+/// chomp `-` (strip) / `+` (keep) / default clip.
+/// Spec: https://yaml.org/spec/1.2.2/#block-scalar-styles
+fn parse_block_scalar(header: &str, following: &[&str]) -> Option<(String, usize)> {
+    let header = header.split('#').next().unwrap_or(header).trim();
+    if header.is_empty() {
+        return None;
+    }
+    let style = *header.as_bytes().first()?;
+    if style != b'|' && style != b'>' {
+        return None;
+    }
+    let mut indent: Option<usize> = None;
+    let mut chomp = 'c';
+    for item in header[1..].chars() {
+        if item.is_whitespace() {
+            continue;
+        }
+        if item.is_ascii_digit() && item != '0' && indent.is_none() {
+            indent = Some((item as u8 - b'0') as usize);
+            continue;
+        }
+        if (item == '-' || item == '+') && chomp == 'c' {
+            chomp = item;
+            continue;
+        }
+        return None;
+    }
+    let mut consumed = 0usize;
+    let mut raw = Vec::new();
+    for line in following {
+        if line.starts_with(char::is_whitespace) || line.trim().is_empty() {
+            raw.push(*line);
+            consumed += 1;
+        } else {
+            break;
+        }
+    }
+    let indent = indent.unwrap_or_else(|| {
+        raw.iter()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| line.chars().take_while(|item| *item == ' ').count())
+            .min()
+            .unwrap_or(0)
+    });
+    let mut content: Vec<String> = raw
+        .iter()
+        .map(|line| {
+            if line.trim().is_empty() {
+                String::new()
+            } else {
+                let skip = indent.min(line.chars().take_while(|item| *item == ' ').count());
+                line.chars().skip(skip).collect()
+            }
+        })
+        .collect();
+    if chomp != '+' {
+        while content.last().is_some_and(|line| line.is_empty()) {
+            content.pop();
+        }
+    }
+    let mut value = if style == b'>' {
+        fold_block_lines(&content)
+    } else {
+        content.join("\n")
+    };
+    if chomp != '-' && !value.is_empty() {
+        value.push('\n');
+    }
+    Some((value, consumed))
+}
+
+fn fold_block_lines(lines: &[String]) -> String {
+    let mut out = String::new();
+    let mut pending_space = false;
+    for line in lines {
+        if line.is_empty() {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            pending_space = false;
+        } else {
+            if pending_space {
+                out.push(' ');
+            }
+            out.push_str(line);
+            pending_space = true;
+        }
+    }
+    out
+}
+
+pub(crate) fn frontmatter_field(frontmatter: &str, key: &str) -> Option<String> {
+    field(&parse_frontmatter(frontmatter), key)
 }
 
 fn field(fields: &[(String, String)], key: &str) -> Option<String> {
@@ -941,6 +1047,29 @@ mod tests {
         assert_eq!(field(&fields, "name").as_deref(), Some("x"));
         assert_eq!(field(&fields, "description").as_deref(), Some("hi"));
         assert!(field(&fields, "nested").is_none());
+    }
+
+    #[test]
+    fn parse_frontmatter_reads_literal_block_scalar() {
+        let fm = "name: memory-consolidation\nwhen_to_use: |\n  Use when consolidating recent work:\n  - At session end\n\n  Do NOT use for briefs\n";
+        let value = field(&parse_frontmatter(fm), "when_to_use").expect("when_to_use");
+        assert_ne!(value.trim(), "|");
+        assert!(
+            value.contains("Use when consolidating recent work"),
+            "{value:?}"
+        );
+        assert!(value.contains("At session end"), "{value:?}");
+        assert!(value.contains("Do NOT use for briefs"), "{value:?}");
+    }
+
+    #[test]
+    fn parse_frontmatter_folds_block_scalar() {
+        let fm = "when_to_use: >\n  Use when consolidating\n  recent work into memory\n";
+        let value = field(&parse_frontmatter(fm), "when_to_use").expect("when_to_use");
+        assert!(
+            value.contains("Use when consolidating recent work into memory"),
+            "{value:?}"
+        );
     }
 
     #[test]

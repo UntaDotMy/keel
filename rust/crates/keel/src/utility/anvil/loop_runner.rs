@@ -94,32 +94,49 @@ pub fn run_loop(
         }
     };
     let piece = flags.string_value("piece").to_string();
+    let guard_signature = format!(
+        "anvil-loop:{}",
+        if piece.is_empty() {
+            "all"
+        } else {
+            piece.as_str()
+        }
+    );
+    if crate::utility::memory_families::loop_guard_exhausted(&paths.home, &guard_signature, 2) {
+        let _ = writeln!(
+            standard_error,
+            "anvil loop: loop-guard exhausted for {guard_signature}"
+        );
+        return 1;
+    }
     let final_pass;
+    let mut last_score = 0.0;
     let (iters, delta) = if dry_run {
         let piece_ref = piece.clone();
         let mut pass_state = false;
         let result = run_bounded_loop(&cfg, || match sieve::sieve_lock(&paths, &piece_ref, &[]) {
             Ok(outcome) => {
                 pass_state = outcome.ok;
-                (outcome.ok, if outcome.ok { 1.0 } else { 0.0 })
+                last_score = outcome.pass_rate;
+                (outcome.ok, outcome.pass_rate)
             }
             Err(_) => {
                 pass_state = false;
+                last_score = 0.0;
                 (false, 0.0)
             }
         });
         final_pass = pass_state;
         result
     } else if paths.lock_path().is_file() {
-        let workspace = paths.out_dir().join("workspace");
-        if !workspace.is_dir() {
-            let _ = writeln!(
-                standard_error,
-                "anvil loop: no promoted winner workspace at {}",
-                workspace.display()
-            );
-            return 1;
-        }
+        let workspace = match crate::utility::anvil::stamp::ensure_winner_workspace(&paths, strict)
+        {
+            Ok(path) => path,
+            Err(error) => {
+                let _ = writeln!(standard_error, "{error}");
+                return 1;
+            }
+        };
         let gates = match refinement_gates(&paths, &piece) {
             Ok(gates) => gates,
             Err(error) => {
@@ -137,9 +154,10 @@ pub fn run_loop(
         let result = run_bounded_loop(&cfg, || {
             match cast::run_builder(&workspace, &builder_piece, &gates) {
                 Ok(_) => {
-                    let (pass, _) = sieve::run_gates_in_directory(&gates, Some(&workspace));
-                    pass_state = pass;
-                    (pass, if pass { 1.0 } else { 0.0 })
+                    let scored = sieve::run_gates_scored(&gates, Some(&workspace));
+                    pass_state = scored.ok;
+                    last_score = scored.rate();
+                    (scored.ok, scored.rate())
                 }
                 Err(error) => {
                     builder_error = Some(error);
@@ -164,7 +182,19 @@ pub fn run_loop(
     let mut built = report::empty_report();
     built.loop_iterations = iters as u64;
     built.improvement_delta = delta;
-    built.gate_pass_rate = if final_pass { 1.0 } else { 0.0 };
+    built.gate_pass_rate = if final_pass { 1.0 } else { last_score };
+    if !final_pass {
+        if let Ok((_, exhausted)) =
+            crate::utility::memory_families::bump_loop_guard(&paths.home, &guard_signature, 2)
+        {
+            if exhausted {
+                let _ = writeln!(
+                    standard_error,
+                    "anvil loop: loop-guard exhausted for {guard_signature}"
+                );
+            }
+        }
+    }
     if let Err(error) = report::write_report(&paths, &built) {
         let _ = writeln!(standard_error, "{error}");
         return 1;
@@ -226,5 +256,26 @@ mod tests {
         };
         let (iters, _) = run_bounded_loop(&cfg, || (false, 0.1));
         assert!(iters <= 5);
+    }
+
+    #[test]
+    fn loop_continues_while_gate_score_improves() {
+        let cfg = LoopConfig {
+            max_iterations: 10,
+            min_improvement: 0.05,
+            wall_timeout: Duration::from_secs(10),
+        };
+        let scores = [0.0, 0.25, 0.5, 0.8, 1.0];
+        let index = std::cell::Cell::new(0);
+        let (iters, _) = run_bounded_loop(&cfg, || {
+            let i = index.get();
+            let score = scores[i.min(scores.len() - 1)];
+            index.set(i + 1);
+            (score >= 1.0, score)
+        });
+        assert!(
+            iters >= 4,
+            "fractional improvement must keep iterating, iters={iters}"
+        );
     }
 }

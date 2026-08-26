@@ -49,6 +49,13 @@ pub(crate) fn run_builder(
         .iter()
         .map(|value| expand_builder_arg(value, workspace, piece, gates))
         .collect();
+    let command_line = std::iter::once(program.as_str())
+        .chain(arguments.iter().map(String::as_str))
+        .collect::<Vec<_>>()
+        .join(" ");
+    if supervisor::is_denied_command(&command_line) {
+        return Err(format!("anvil builder: denied command: {command_line}"));
+    }
     let result = crate::runtime::run_command_with_timeout(
         program,
         &arguments,

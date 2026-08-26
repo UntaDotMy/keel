@@ -82,6 +82,44 @@ fn family_store(claude_home: &Path, command_group: &str, family: &str) -> Record
     RecordStore::new(claude_home, &format!("{command_group}/{family}"))
 }
 
+/// Increment a loop-guard signature and return `(count, exhausted)` for `budget`.
+pub fn bump_loop_guard(
+    claude_home: &Path,
+    signature: &str,
+    budget: u32,
+) -> Result<(u32, bool), String> {
+    let store = family_store(claude_home, "memory", "loop-guard");
+    let id = sanitize_id(signature);
+    let mut record = store.read_record(&id).ok().flatten().unwrap_or_else(|| {
+        vec![
+            ("id".into(), id.clone()),
+            ("signature".into(), signature.trim().to_string()),
+            ("count".into(), "0".into()),
+        ]
+    });
+    let mut count: u32 = field(&record, "count")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    count = count.saturating_add(1);
+    set_field(&mut record, "count", count.to_string());
+    store
+        .write_record(&id, &record)
+        .map_err(|error| error.to_string())?;
+    Ok((count, count >= budget))
+}
+
+pub fn loop_guard_exhausted(claude_home: &Path, signature: &str, budget: u32) -> bool {
+    let store = family_store(claude_home, "memory", "loop-guard");
+    let id = sanitize_id(signature);
+    let count: u32 = store
+        .read_record(&id)
+        .ok()
+        .flatten()
+        .and_then(|record| field(&record, "count")?.parse().ok())
+        .unwrap_or(0);
+    count >= budget
+}
+
 fn now_id(prefix: &str) -> (String, String) {
     unique_timestamped_id(prefix)
 }
@@ -1999,6 +2037,19 @@ mod tests {
         );
         assert_eq!(code, 2, "exhausted check must exit 2; stdout: {out}");
         assert!(out.contains("exhausted=true"), "stdout: {out}");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn bump_loop_guard_exhausts_at_budget() {
+        let home = temp_home("lg-bump");
+        let (count, exhausted) = bump_loop_guard(&home, "anvil-loop:all", 2).expect("bump 1");
+        assert_eq!(count, 1);
+        assert!(!exhausted);
+        let (count, exhausted) = bump_loop_guard(&home, "anvil-loop:all", 2).expect("bump 2");
+        assert_eq!(count, 2);
+        assert!(exhausted);
+        assert!(loop_guard_exhausted(&home, "anvil-loop:all", 2));
         let _ = std::fs::remove_dir_all(&home);
     }
 

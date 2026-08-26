@@ -16,30 +16,29 @@ pub fn publish_native_executable(
     claude_home: &Path,
 ) -> Result<bool, String> {
     let target = detect_current_target().map_err(|error| format!("detect target: {error}"))?;
-    // Three source layouts must be supported, probed in this priority order:
-    let cargo_targeted = repository_root
-        .join("target")
-        .join(target.directory_name())
-        .join("release")
-        .join(executable_file_name());
-    let cargo_host_default = repository_root
-        .join("target")
-        .join("release")
-        .join(executable_file_name());
-    let bundle_root = repository_root.join(executable_file_name());
-    let source_path = if cargo_targeted.is_file() {
-        cargo_targeted
-    } else if cargo_host_default.is_file() {
-        cargo_host_default
-    } else if bundle_root.is_file() {
-        bundle_root
-    } else {
+    // Probe order matches restore: release first, then bundle root, debug last
+    // so a developer workspace with only `cargo build` still refreshes PATH/MCP.
+    let target_dir = repository_root.join("target");
+    let probes = [
+        target_dir
+            .join(target.directory_name())
+            .join("release")
+            .join(executable_file_name()),
+        target_dir.join("release").join(executable_file_name()),
+        repository_root.join(executable_file_name()),
+        target_dir
+            .join(target.directory_name())
+            .join("debug")
+            .join(executable_file_name()),
+        target_dir.join("debug").join(executable_file_name()),
+    ];
+    let target_path = installed_executable_path(claude_home);
+    let Some(source_path) = probes
+        .into_iter()
+        .find(|probe| probe.is_file() && !executables_are_identical(probe, &target_path))
+    else {
         return Ok(false);
     };
-    let target_path = installed_executable_path(claude_home);
-    if executables_are_identical(&source_path, &target_path) {
-        return Ok(false);
-    }
     atomic_copy_executable(&source_path, &target_path)?;
     Ok(true)
 }

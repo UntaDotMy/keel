@@ -53,3 +53,81 @@ pub fn write_report(paths: &job::JobPaths, report: &Report) -> Result<(), String
     write_text(&paths.report_path(), &report.to_json().to_string())
         .map_err(|error| format!("anvil.report.json: {error}"))
 }
+
+pub fn read_report(paths: &job::JobPaths) -> Result<Report, String> {
+    let text = std::fs::read_to_string(paths.report_path())
+        .map_err(|error| format!("anvil.report.json: {error}"))?;
+    let value: Value =
+        serde_json::from_str(&text).map_err(|error| format!("anvil.report.json: {error}"))?;
+    Ok(Report {
+        cache_hit_ratio: value
+            .get("cache_hit_ratio")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0),
+        tokens_uncached: value
+            .get("tokens_uncached")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        tokens_cached: value
+            .get("tokens_cached")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        critic_calls: value
+            .get("critic_calls")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        gate_pass_rate: value
+            .get("gate_pass_rate")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0),
+        stamp_used: value
+            .get("stamp_used")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        winner_id: value
+            .get("winner_id")
+            .and_then(Value::as_str)
+            .unwrap_or("none")
+            .to_string(),
+        loop_iterations: value
+            .get("loop_iterations")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        improvement_delta: value
+            .get("improvement_delta")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_report_round_trips_loop_metrics() {
+        let dir = std::env::temp_dir().join(format!(
+            "anvil-report-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let paths = job::JobPaths::from_resolved(dir.clone(), dir.clone());
+        let mut built = empty_report();
+        built.loop_iterations = 4;
+        built.improvement_delta = 0.2;
+        built.gate_pass_rate = 0.75;
+        built.winner_id = "cast_2".into();
+        write_report(&paths, &built).expect("write");
+        let loaded = read_report(&paths).expect("read");
+        assert_eq!(loaded.loop_iterations, 4);
+        assert!((loaded.improvement_delta - 0.2).abs() < 1e-9);
+        assert!((loaded.gate_pass_rate - 0.75).abs() < 1e-9);
+        assert_eq!(loaded.winner_id, "cast_2");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

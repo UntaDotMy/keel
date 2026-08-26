@@ -281,10 +281,16 @@ events exist for today, it displays "(no compaction events today)".
 calculation, from real events), 2 cockpit tests in `workflow.rs` (section
 presence, no-color no-ANSI). All 5 pass.
 
-### G4, G5: planned
+### G4: shipped — working-brief Linear/Jira export
 
-- **G4: PM tool integration** ,  sync working briefs to Linear/Jira so the
-  workflow ledger stays in sync with external PM tools.
+**What:** `keel memory working-brief export --id <brief> --format linear-issue|jira-issue`
+writes a title/description JSON payload from the stored brief (`title` = request,
+`description` = acceptance criteria, `keelBriefId`, `workspace`). Live API push
+still needs a tracker token in the host; the export is the keel-owned contract
+so the ledger can sync without inventing a second brief store.
+
+**Where:** `utility/working_brief.rs` `linear_issue_payload`, CLI
+`memory working-brief export`.
 
 ### G5: shipped ,  TOML filter DSL
 

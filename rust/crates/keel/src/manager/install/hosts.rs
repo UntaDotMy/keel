@@ -310,6 +310,9 @@ pub(crate) fn maybe_wire_grok(claude_home: &Path) -> Option<String> {
             "PreToolUse": [{ "hooks": [{ "type": "command", "command": format!("{command} pre-tool-use"), "timeout": 10 }] }],
             "PostToolUse": [{ "hooks": [{ "type": "command", "command": format!("{command} post-tool-use"), "timeout": 10 }] }],
             "PostToolUseFailure": [{ "hooks": [{ "type": "command", "command": format!("{command} post-tool-use-failure"), "timeout": 10 }] }],
+            "PreCompact": [{ "hooks": [{ "type": "command", "command": format!("{command} pre-compact"), "timeout": 10 }] }],
+            "PostCompact": [{ "hooks": [{ "type": "command", "command": format!("{command} post-compact"), "timeout": 10 }] }],
+            "SessionEnd": [{ "hooks": [{ "type": "command", "command": format!("{command} session-end"), "timeout": 10 }] }],
             "Stop": [{ "hooks": [{ "type": "command", "command": format!("{command} stop"), "timeout": 10 }] }]
         }
     });

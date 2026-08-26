@@ -1,4 +1,3 @@
-#[allow(dead_code)]
 pub fn is_denied_command(cmd: &str) -> bool {
     let low = cmd.to_ascii_lowercase();
     low.contains("git commit")

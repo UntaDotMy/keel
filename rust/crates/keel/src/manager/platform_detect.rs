@@ -5,8 +5,8 @@
 //! 1. Config-directory presence (e.g. `~/.config/opencode/`, `~/.codex/`)
 //! 2. Binary-on-PATH via the `which` crate
 //!
-//! Cursor is never auto-detected — there is no reliable cross-platform
-//! signal for Cursor IDE installation. Use `--with cursor` to force it.
+//! Cursor auto-detects `~/.cursor/`. Use `--with cursor` to force wiring when
+//! that directory is absent. Do not create Cursor files unless detected or forced.
 
 use std::path::{Path, PathBuf};
 
@@ -36,7 +36,7 @@ impl PlatformDetector {
             opencode: self.has_config_dir(".config/opencode") || self.has_binary("opencode"),
             codex: self.has_config_dir(".codex") || self.has_binary("codex"),
             pi: self.has_config_dir(".pi/agent") || self.has_binary("pi"),
-            cursor: false,
+            cursor: self.has_config_dir(".cursor"),
             // Cowork (Claude Desktop) detection:
             // Claude Desktop Cowork uses the same ~/.claude directory as Claude Code,
             // but stores a specific app identifier file to distinguish itself.
@@ -98,5 +98,42 @@ impl PlatformDetector {
 
     fn has_binary(&self, name: &str) -> bool {
         which::which(name).is_ok()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cursor_detects_existing_cursor_dir() {
+        let root = std::env::temp_dir().join(format!(
+            "keel-cursor-detect-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(root.join(".cursor")).unwrap();
+        let detected = PlatformDetector::new(&root).detect();
+        assert!(detected.cursor);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn cursor_stays_off_without_cursor_dir() {
+        let root = std::env::temp_dir().join(format!(
+            "keel-cursor-absent-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let detected = PlatformDetector::new(&root).detect();
+        assert!(!detected.cursor);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

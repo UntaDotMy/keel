@@ -38,7 +38,7 @@ keel anvil compile
 keel anvil run
 ```
 
-Anvil is the only core delivery-loop surface: frozen prompt prefix, PPT+EV tracking, bounded loop. `keel anvil cast`, `anvil sieve`, `anvil stamp`, and `anvil prefix-check` cover the supporting steps.
+Anvil is the only core delivery-loop surface: frozen prompt prefix, evidence-ranked stamp, bounded loop. `keel anvil cast`, `anvil sieve`, `anvil stamp`, and `anvil prefix-check` cover the supporting steps.
 
 ### 4. Turn local work into proof before you call it done
 
