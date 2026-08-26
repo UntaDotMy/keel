@@ -58,7 +58,7 @@ The keel MCP server provides these tools. Use them via the `mcp` proxy tool or d
 | `system_map_refresh` | Regenerate the cached workspace SYSTEM_MAP.md |
 | `context_brief` | Get the keel context brief: iron law, skill catalog, memory health, newest brief |
 | `cli` | Run any keel CLI subcommand (review, git-workflow, anvil, memory, etc.) |
-| `anvil` | Drive the Anvil delivery loop (compile, cast, sieve, stamp; loop/live run are CLI-only) |
+| `anvil` | Drive the Anvil delivery loop (compile/cast/sieve/stamp/run --dry-run in-process; loop/live run background via command_output) |
 
 ## Skill Catalog
 

@@ -1068,20 +1068,11 @@ pub(crate) fn split_frontmatter(text: &str) -> Option<String> {
     crate::utility::skill_lint::split_frontmatter(text).map(|(frontmatter, _)| frontmatter)
 }
 
-/// Read a top-level `key: value` frontmatter field. Ignores indented lines so a
-/// nested mapping value (e.g. the `paths:` list) is not misread as a field.
+/// Read a top-level frontmatter field. Delegates to `skill_lint` so YAML 1.2
+/// `|` / `>` block scalars match the lint parser (a `when_to_use: |` value is
+/// the body, not the `|` indicator).
 fn frontmatter_field(frontmatter: &str, key: &str) -> Option<String> {
-    for line in frontmatter.lines() {
-        if line.starts_with(char::is_whitespace) {
-            continue;
-        }
-        if let Some(colon) = line.find(':') {
-            if line[..colon].trim() == key {
-                return Some(line[colon + 1..].trim().to_string());
-            }
-        }
-    }
-    None
+    crate::utility::skill_lint::frontmatter_field(frontmatter, key)
 }
 
 /// Parse a `related_skills` frontmatter value into a list of skill names.
@@ -1178,6 +1169,17 @@ mod tests {
     fn related_skills_empty_when_absent() {
         let fm = "name: x\ndescription: d.\n";
         assert!(related_skills_list(fm).is_empty());
+    }
+
+    #[test]
+    fn frontmatter_field_reads_literal_block_when_to_use() {
+        let fm = "name: memory-consolidation\nwhen_to_use: |\n  Use when consolidating recent work into durable memory:\n  - At session end or compaction\n";
+        let value = frontmatter_field(fm, "when_to_use").expect("when_to_use");
+        assert_ne!(value.trim(), "|");
+        assert!(
+            value.contains("Use when consolidating recent work"),
+            "{value:?}"
+        );
     }
 
     #[test]

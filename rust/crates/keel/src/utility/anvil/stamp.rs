@@ -41,7 +41,7 @@ pub fn run_stamp(
     if dry_run {
         let _ = writeln!(
             standard_output,
-            "anvil stamp: dry-run casts={} strict={} mode=evidence",
+            "anvil stamp: dry-run casts={} strict={} mode=ppt-evidence",
             casts.len(),
             strict
         );
@@ -58,7 +58,7 @@ pub fn run_stamp(
             return 1;
         }
     };
-    let winner = match pick_evidence_winner(&evidence) {
+    let winner = match pick_evidence_winner(&evidence, strict) {
         Ok(value) => value,
         Err(error) => {
             let _ = writeln!(standard_error, "{error}");
@@ -67,12 +67,12 @@ pub fn run_stamp(
     };
     let winner_evidence = &evidence[winner];
     let value = paths.as_ref().expect("paths for non-dry run");
-    if let Err(error) = promote_winner(value, winner) {
+    if let Err(error) = promote_winner(value, winner_evidence) {
         let _ = writeln!(standard_error, "{error}");
         return 1;
     }
     let line = format!(
-        "anvil stamp: winner={} gate_ok={} clipped_len={} strict={} mode=evidence",
+        "anvil stamp: winner={} gate_ok={} clipped_len={} strict={} mode=ppt-evidence",
         winner_evidence.id, winner_evidence.gate_ok, winner_evidence.clipped_len, strict
     );
     let _ = writeln!(standard_output, "{line}");
@@ -142,27 +142,91 @@ fn load_cast_evidence(paths: &job::JobPaths) -> Result<Vec<CastEvidence>, String
         })
         .collect()
 }
-fn pick_evidence_winner(evidence: &[CastEvidence]) -> Result<usize, String> {
-    let mut winner: Option<usize> = None;
-    for (index, candidate) in evidence.iter().enumerate() {
-        let better = winner.map_or(true, |current| {
-            let incumbent = &evidence[current];
-            (candidate.gate_ok && !incumbent.gate_ok)
-                || (candidate.gate_ok == incumbent.gate_ok
-                    && (candidate.clipped_len < incumbent.clipped_len
-                        || (candidate.clipped_len == incumbent.clipped_len
-                            && candidate.id < incumbent.id)))
-        });
-        if better {
-            winner = Some(index);
-        }
-    }
-    winner.ok_or_else(|| "anvil stamp: no cast evidence to rank".to_string())
+fn evidence_strength(evidence: &CastEvidence) -> f64 {
+    let gate = if evidence.gate_ok { 1.0 } else { 0.0 };
+    gate + 1.0 / (1.0 + evidence.clipped_len as f64)
 }
 
-fn promote_winner(paths: &job::JobPaths, winner: usize) -> Result<(), String> {
+fn bradley_terry_pref(left: f64, right: f64) -> f64 {
+    1.0 / (1.0 + (-(left - right)).exp())
+}
+
+fn evidence_rank_better(candidate: &CastEvidence, incumbent: &CastEvidence) -> bool {
+    (candidate.gate_ok && !incumbent.gate_ok)
+        || (candidate.gate_ok == incumbent.gate_ok
+            && (candidate.clipped_len < incumbent.clipped_len
+                || (candidate.clipped_len == incumbent.clipped_len && candidate.id < incumbent.id)))
+}
+
+fn pick_evidence_winner(evidence: &[CastEvidence], strict: bool) -> Result<usize, String> {
+    if evidence.is_empty() {
+        return Err("anvil stamp: no cast evidence to rank".to_string());
+    }
+    let n = evidence.len();
+    let mut winner = 0usize;
+    if n >= 2 {
+        let strengths: Vec<f64> = evidence.iter().map(evidence_strength).collect();
+        let mut wins = vec![0.0; n];
+        let mut counts = vec![0.0; n];
+        for i in 0..n {
+            let j = (i + 1) % n;
+            let pref = bradley_terry_pref(strengths[i], strengths[j]);
+            wins[i] += pref;
+            wins[j] += 1.0 - pref;
+            counts[i] += 1.0;
+            counts[j] += 1.0;
+        }
+        let mut best_mean = f64::NEG_INFINITY;
+        for i in 0..n {
+            let mean = wins[i] / counts[i];
+            let better = mean > best_mean + 1e-12
+                || ((mean - best_mean).abs() <= 1e-12
+                    && evidence_rank_better(&evidence[i], &evidence[winner]));
+            if better {
+                best_mean = mean;
+                winner = i;
+            }
+        }
+    }
+    if strict && !evidence[winner].gate_ok {
+        return Err("anvil stamp: --strict requires a passing survivor".to_string());
+    }
+    Ok(winner)
+}
+
+pub(crate) fn ensure_winner_workspace(
+    paths: &job::JobPaths,
+    strict: bool,
+) -> Result<std::path::PathBuf, String> {
+    let workspace = paths.out_dir().join("workspace");
+    if workspace.is_dir() {
+        return Ok(workspace);
+    }
+    let evidence = load_cast_evidence(paths).map_err(|error| {
+        format!(
+            "anvil loop: no promoted winner workspace at {}: {error}",
+            workspace.display()
+        )
+    })?;
+    let winner = pick_evidence_winner(&evidence, strict).map_err(|error| {
+        format!(
+            "anvil loop: no promoted winner workspace at {}: {error}",
+            workspace.display()
+        )
+    })?;
+    promote_winner(paths, &evidence[winner])?;
+    if !workspace.is_dir() {
+        return Err(format!(
+            "anvil loop: no promoted winner workspace at {}",
+            workspace.display()
+        ));
+    }
+    Ok(workspace)
+}
+
+fn promote_winner(paths: &job::JobPaths, winner: &CastEvidence) -> Result<(), String> {
     let out = paths.out_dir();
-    let result = paths.dir.join(format!("cast_{winner}")).join("result.json");
+    let result = paths.dir.join(&winner.id).join("result.json");
     if !result.is_file() {
         return Err(format!(
             "anvil stamp: missing cast evidence {}",
@@ -190,7 +254,7 @@ fn promote_winner(paths: &job::JobPaths, winner: usize) -> Result<(), String> {
                 &staging.join("workspace"),
             )
         })
-        .and_then(|_| write_text(&staging.join("winner.txt"), &format!("cast_{winner}\n")))
+        .and_then(|_| write_text(&staging.join("winner.txt"), &format!("{}\n", winner.id)))
     {
         let _ = std::fs::remove_dir_all(&staging);
         return Err(error);
@@ -228,6 +292,37 @@ mod tests {
                 clipped_len: 20,
             },
         ];
-        assert_eq!(pick_evidence_winner(&evidence).expect("winner"), 2);
+        assert_eq!(pick_evidence_winner(&evidence, false).expect("winner"), 2);
+        assert_eq!(pick_evidence_winner(&evidence, true).expect("winner"), 2);
+    }
+
+    #[test]
+    fn bradley_terry_pref_is_half_on_equal_strength() {
+        assert!((bradley_terry_pref(1.0, 1.0) - 0.5).abs() < 1e-9);
+        assert!(bradley_terry_pref(2.0, 0.0) > 0.5);
+    }
+
+    #[test]
+    fn strict_rejects_when_no_passing_survivor() {
+        let evidence = vec![CastEvidence {
+            id: "cast_0".into(),
+            gate_ok: false,
+            clipped_len: 10,
+        }];
+        let error = pick_evidence_winner(&evidence, true).expect_err("strict");
+        assert!(
+            error.contains("--strict requires a passing survivor"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn non_strict_ranks_failing_only_survivor() {
+        let evidence = vec![CastEvidence {
+            id: "cast_0".into(),
+            gate_ok: false,
+            clipped_len: 10,
+        }];
+        assert_eq!(pick_evidence_winner(&evidence, false).expect("winner"), 0);
     }
 }

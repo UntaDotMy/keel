@@ -1,6 +1,6 @@
 ---
 name: running-anvil
-description: Use when delivering any non-trivial build, fix, or multi-piece change with a named bar, isolated casts, deterministic gates, and bounded refinement. Run the Anvil single-root delivery loop — compile a named bar into lock+prefix+gates with one frontier call, cast N isolated workspaces from a frozen prefix, sieve with deterministic 0-LLM gates, stamp with PPT logprob verifier (EV over A–T), and bounded-loop refine only if gates still fail. The only keel delivery loop — replaces sprint/gauntlet/work fully.
+description: Use when delivering any non-trivial build, fix, or multi-piece change with a named bar, isolated casts, deterministic gates, and bounded refinement. Run the Anvil single-root delivery loop — compile a named bar into lock+prefix+gates from --goal/--bar/--files, cast N isolated workspaces from a frozen prefix via the host CLI, sieve with deterministic 0-LLM gates, stamp by evidence rank (passing gate, then smaller clipped output), and bounded-loop refine only if gates still fail. The only keel delivery loop — replaces sprint/gauntlet/work fully.
 when_to_use: Any non-trivial build, fix, or multi-piece delivery — ambitious artifacts, feature drops, bug fixes, hardening passes where selection under a named bar + bounded iteration matters. All new work must use Anvil; sprint/gauntlet/work are deleted legacy surfaces.
 allowed-tools: Read, Grep, Glob, Bash(keel anvil:*), Bash(keel code-search siblings:*), Bash(keel memory:*), Bash(keel review:*)
 effort: medium
@@ -10,7 +10,7 @@ effort: medium
 
 ## Purpose
 
-`keel anvil` is the **only** delivery loop. One compile, N parallel casts against a frozen byte-identical prefix, a zero-LLM sieve of deterministic gates, a probabilistic stamp that picks the winner, and a bounded, token-efficient loop that refines only if gates still fail.
+`keel anvil` is the **only** delivery loop. One compile, N isolated casts against a frozen byte-identical prefix, a zero-LLM sieve of deterministic gates, an evidence-ranked stamp that picks the winner, and a bounded loop that re-runs the host builder only if gates still fail. No external model client.
 
 No auto-git. Isolated workspaces. No web cockpit.
 
@@ -31,7 +31,7 @@ Anvil's `sieve` validates gates deterministically; `stamp` selects probabilistic
 
 keel is host-neutral (`~/.keel`). SessionStart/PostCompact/user-prompt inject `COMPACT_BOOTSTRAP + memory_scope_summary + workspace_digest + instincts`. The job bank is **not** `{cwd}/anvil/`. It lives under `<keel-home>/memories/workspaces/<slug>/anvil/` (same per-workspace memory lane as SYSTEM_MAP). `recall` indexes `memories/` so lock+prefix+gates+report are visible from any CLI (claude/codex/pi/opencode/cursor/cmdc) that shares that home. Isolated casts use temp dirs and are deleted after the result is copied into the bank. Do not re-`ls` what recall/map already names.
 
-### 1. Compile — goal + bar → lock + prefix + gates (1 call)
+### 1. Compile — goal + bar → lock + prefix + gates
 
 ```bash
 keel anvil compile --goal "CLI that pretty-prints JSON logs" --bar "jq 1.7" --files src/parse.py,src/cli.py
@@ -69,17 +69,16 @@ keel anvil sieve --gates "pytest -q" # ad-hoc gates
 - Runs each gate with timeout, `compress_output` (dedupe, clip pass wall to count, `ANVIL_CLIPPED n→m` prefix).
 - Per piece: 0 greens + `critic:none` → FAIL; ≥1 green + `critic:none` → DONE (lowest-token green); `blind_ab` + ≥2 artifacts → stamp (greens first), otherwise skip stamp.
 
-### 4. Stamp — PPT logprob verifier (batched, cached)
+### 4. Stamp — local PPT over evidence (0 LLM)
 
 ```bash
-keel anvil stamp           # default K=1, k=1, G=20, C=3
-keel anvil stamp --strict  # K=2, k=2
+keel anvil stamp           # Bradley-Terry ring on evidence strengths
+keel anvil stamp --strict  # fail closed if no passing survivor
 ```
 
-- Payload: diffs vs start + last 80 gate lines + help/screenshot hashes — never whole repo.
-- Local PPT/EV over survivors (A–T, φ(A)=1…T=20, Bradley–Terry). No external logprob API. Skip stamp when `critic:none` and ≥1 green, or when survivors < 2. Winner copied to the global bank `anvil_out/`.
-- PPT: ring → rank `w_i/c_i` → top-k pivots → extra `N+k(N−k)+C(k,2)` with `N=3,k=1` ring-reuse via `(min,max)` pair cache; env router `ANVIL_COMPILE/CAST/STAMP/LOOP_MODEL`.
-- Winner copied to `anvil_out/`.
+- Strength = `gate_ok` + `1/(1+clipped_len)`. Ring-pass P(i≻j)=1/(1+exp(-(Ri-Rj))) ([Bradley-Terry](https://en.wikipedia.org/wiki/Bradley-Terry_model)). No logprob API.
+- Skip stamp when `critic:none` and ≥1 green, or when survivors < 2. Winner copied to the global bank `anvil_out/` by cast id.
+- `--strict` refuses to promote when every survivor failed its gate.
 
 ### 5. Loop — bounded refinement *only if gates still fail*
 
@@ -87,16 +86,14 @@ keel anvil stamp --strict  # K=2, k=2
 keel anvil loop            # max_iterations:20 ∈[5,50], min_improvement:0.05, wall 300s
 ```
 
-- Structured state (objective/constraints/decisions/unresolved/next-action) as key-value/diff, not transcript replay.
-- Context shrinks: progressive retrieval (200-line window), top-3-4 evidence ranking, working-memory hygiene.
-- Surgical line-range edits, never whole-file rewrites.
-- Termination: all gates pass → DONE; `improvement < threshold` → STOP; `iterations ≥ max` → STOP; `wall ≥300s` → STOP; repeated identical tool calls / new errors without progress → STOP.
-- Logs `loop_iterations + improvement_delta + final_gate_status` into `anvil.report.json`.
+- Live loop promotes a winner workspace from stamp, or from cast evidence when `anvil_out/workspace` is missing (dry-run stamp does not copy). Re-runs the host builder (`KEEL_ANVIL_BUILDER_ARGV`) then the lock gates. Score is the gate pass fraction (passed/total), not a binary 0/1.
+- Termination: all gates pass → DONE; `improvement < threshold` → STOP; `iterations ≥ max` → STOP; `wall ≥300s` → STOP.
+- Logs `loop_iterations + improvement_delta + gate_pass_rate` into `anvil.report.json`. `anvil run` copies those fields instead of hardcoding them.
 
 ### 6. Run — thin orchestrator
 
 ```bash
-keel anvil run --dry-run              # offline: lock + prefix + sieve + local PPT
+keel anvil run --dry-run              # offline: lock + prefix + sieve + evidence stamp
 keel anvil run                        # compile→cast→sieve→stamp/loop as needed; host CLI is the LLM
 ```
 

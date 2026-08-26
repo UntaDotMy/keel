@@ -6,6 +6,12 @@ This file is the honest security-status artifact for the current governance pass
 
 The tracked bundle format now lives in [docs/audit-bundle-format.md](./audit-bundle-format.md). That format is the release gate for future numeric scores or named findings lists.
 
+## Verified On 2026-08-26
+
+`keel config-audit --repo-root .` this revision: 0 high, 0 medium, 0 low.
+`keel skill-lint --repo-root .`: 51 skills, 0 failed.
+Numeric public pentest score: still not claimed (no scanner bundle for this revision).
+
 ## Verified On 2026-03-15
 
 The current workspace evidence for this repo includes:

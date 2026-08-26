@@ -11,7 +11,8 @@ use crate::json::Value;
 use crate::runtime::{display_path, resolve_claude_home};
 use crate::utility::record_store::unique_timestamped_id;
 use crate::utility::working_brief::{
-    brief_directory, brief_to_value, create_brief, list_briefs, read_brief, write_brief, Brief,
+    brief_directory, brief_to_value, create_brief, linear_issue_payload, list_briefs, read_brief,
+    write_brief, Brief,
 };
 
 use super::shared::{is_help_argument, render_workflow_json};
@@ -25,7 +26,7 @@ pub(super) fn run_working_brief_command(
     if arguments.is_empty() || is_help_argument(&arguments[0]) {
         let _ = writeln!(
             standard_output,
-            "Usage: keel {command_group} working-brief [write|show|list|record-summary] ..."
+            "Usage: keel {command_group} working-brief [write|show|list|record-summary|export] ..."
         );
         return if arguments.is_empty() { 1 } else { 0 };
     }
@@ -54,10 +55,16 @@ pub(super) fn run_working_brief_command(
             standard_output,
             standard_error,
         ),
+        "export" => run_working_brief_export(
+            command_group,
+            &arguments[1..],
+            standard_output,
+            standard_error,
+        ),
         other => {
             let _ = writeln!(
                 standard_error,
-                "Unknown {command_group} working-brief action: {other} (expected write|show|list|record-summary)"
+                "Unknown {command_group} working-brief action: {other} (expected write|show|list|record-summary|export)"
             );
             1
         }
@@ -389,6 +396,83 @@ fn run_working_brief_record_summary(
             );
             let _ = writeln!(standard_output, "  summary: {summary}");
             let _ = writeln!(standard_output, "  path: {}", display_path(&path));
+            0
+        }
+        Err(error) => {
+            let _ = writeln!(standard_error, "{label}: {error}");
+            1
+        }
+    }
+}
+
+fn run_working_brief_export(
+    command_group: &str,
+    arguments: &[String],
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let label = format!("{command_group} working-brief export");
+    let mut flag_set = FlagSet::new(label.clone());
+    flag_set.string_flag("id", "");
+    flag_set.string_flag("format", "linear-issue");
+    flag_set.string_flag("out", "");
+    flag_set.string_flag("claude-home", "");
+    if let Err(parse_error) = flag_set.parse(arguments) {
+        let _ = writeln!(standard_error, "{}", parse_error.message);
+        return 1;
+    }
+    let entry_id = flag_set.string_value("id").trim().to_string();
+    if entry_id.is_empty() {
+        let _ = writeln!(standard_error, "{label}: --id is required");
+        return 1;
+    }
+    let format = flag_set.string_value("format").trim().to_string();
+    if format != "linear-issue" && format != "jira-issue" {
+        let _ = writeln!(
+            standard_error,
+            "{label}: unknown --format {format} (expected linear-issue|jira-issue)"
+        );
+        return 1;
+    }
+    let claude_home = match resolve_claude_home(flag_set.string_value("claude-home")) {
+        Ok(path) => path,
+        Err(error) => {
+            let _ = writeln!(standard_error, "{label}: {error}");
+            return 1;
+        }
+    };
+    let brief = match read_brief(&claude_home, &entry_id) {
+        Ok(Some(brief)) => brief,
+        Ok(None) => {
+            let _ = writeln!(standard_error, "{label}: no brief with id {entry_id}");
+            return 1;
+        }
+        Err(error) => {
+            let _ = writeln!(standard_error, "{label}: {error}");
+            return 1;
+        }
+    };
+    let payload = linear_issue_payload(&brief);
+    let mut serialized = Vec::<u8>::new();
+    if let Err(error) = crate::json::write_indented(&mut serialized, &payload) {
+        let _ = writeln!(standard_error, "{label}: {error}");
+        return 1;
+    }
+    let text = match String::from_utf8(serialized) {
+        Ok(text) => text,
+        Err(error) => {
+            let _ = writeln!(standard_error, "{label}: {error}");
+            return 1;
+        }
+    };
+    let out = flag_set.string_value("out").trim().to_string();
+    if out.is_empty() {
+        let _ = write!(standard_output, "{text}");
+        return 0;
+    }
+    match crate::runtime::write_text(std::path::Path::new(&out), &text) {
+        Ok(()) => {
+            let _ = writeln!(standard_output, "{label}: wrote {out} format={format}");
             0
         }
         Err(error) => {

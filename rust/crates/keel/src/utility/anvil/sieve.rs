@@ -7,9 +7,32 @@ use crate::utility::anvil::job;
 pub struct SieveOutcome {
     pub ok: bool,
     pub greens: u64,
+    pub pass_rate: f64,
     pub logs: String,
     pub skip_stamp: bool,
     pub critic: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct GateScore {
+    pub ok: bool,
+    pub passed: u64,
+    pub total: u64,
+    pub logs: String,
+}
+
+impl GateScore {
+    pub fn rate(&self) -> f64 {
+        gate_pass_rate(self.passed, self.total)
+    }
+}
+
+pub fn gate_pass_rate(passed: u64, total: u64) -> f64 {
+    if total == 0 {
+        0.0
+    } else {
+        passed as f64 / total as f64
+    }
 }
 
 pub fn run_gates(gates: &[String]) -> (bool, String) {
@@ -20,24 +43,37 @@ pub fn run_gates_in_directory(
     gates: &[String],
     working_directory: Option<&std::path::Path>,
 ) -> (bool, String) {
+    let scored = run_gates_scored(gates, working_directory);
+    (scored.ok, scored.logs)
+}
+
+pub fn run_gates_scored(
+    gates: &[String],
+    working_directory: Option<&std::path::Path>,
+) -> GateScore {
     let mut all_ok = true;
+    let mut passed = 0u64;
+    let mut total = 0u64;
     let mut logs = String::new();
     for gate in gates {
         let trimmed = gate.trim();
         if trimmed.is_empty() {
             continue;
         }
+        total += 1;
         let (program, arguments) = crate::runtime::platform_shell_command_parts(trimmed);
         match crate::runtime::run_command(&program, &arguments, working_directory) {
             Ok(result) => {
-                let passed = result.code == 0;
-                if !passed {
+                let gate_passed = result.code == 0;
+                if gate_passed {
+                    passed += 1;
+                } else {
                     all_ok = false;
                 }
                 logs.push_str(&format!(
                     "gate={trimmed} exit_code={} status={}\n",
                     result.code,
-                    if passed { "pass" } else { "fail" }
+                    if gate_passed { "pass" } else { "fail" }
                 ));
                 logs.push_str(&String::from_utf8_lossy(&result.stdout));
                 logs.push_str(&String::from_utf8_lossy(&result.stderr));
@@ -48,7 +84,12 @@ pub fn run_gates_in_directory(
             }
         }
     }
-    (all_ok, compress_output(&logs))
+    GateScore {
+        ok: all_ok,
+        passed,
+        total,
+        logs: compress_output(&logs),
+    }
 }
 
 pub fn sieve_lock(
@@ -59,10 +100,12 @@ pub fn sieve_lock(
     let lock = job::load_lock(paths)?;
     let pieces = job::pieces_from_lock(&lock, piece)?;
     let mut greens = 0u64;
+    let mut pieces_total = 0u64;
     let mut ok = true;
     let mut logs = String::new();
     let mut has_blind = false;
     for spec in pieces {
+        pieces_total += 1;
         if spec.critic == "blind_ab" {
             has_blind = true;
         }
@@ -92,6 +135,7 @@ pub fn sieve_lock(
     Ok(SieveOutcome {
         ok,
         greens,
+        pass_rate: gate_pass_rate(greens, pieces_total),
         logs,
         skip_stamp,
         critic: if has_blind {
@@ -176,6 +220,30 @@ mod tests {
         let (ok, _) = run_gates(&[]);
         assert!(ok);
     }
+
+    #[test]
+    fn gate_pass_rate_is_fractional() {
+        assert!((gate_pass_rate(1, 4) - 0.25).abs() < 1e-9);
+        assert_eq!(gate_pass_rate(0, 2), 0.0);
+        assert_eq!(gate_pass_rate(2, 2), 1.0);
+        assert_eq!(gate_pass_rate(0, 0), 0.0);
+    }
+
+    #[test]
+    fn scored_gates_count_partial_passes() {
+        let pass = "echo ok".to_string();
+        let fail = if cfg!(windows) {
+            "cmd /C exit 7".to_string()
+        } else {
+            "sh -c 'exit 7'".to_string()
+        };
+        let scored = run_gates_scored(&[pass, fail], None);
+        assert!(!scored.ok);
+        assert_eq!(scored.passed, 1);
+        assert_eq!(scored.total, 2);
+        assert!((scored.rate() - 0.5).abs() < 1e-9);
+    }
+
     #[test]
     fn failed_gate_reports_command_and_exit_code() {
         let gate = if cfg!(windows) {

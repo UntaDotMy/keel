@@ -15,7 +15,7 @@ Use the installed binary path (bare `keel` is not guaranteed on PATH):
 - `compile --goal "..." --bar "..."` — write lock + prefix + gates to the global bank
 - `cast --dry-run` — isolated temp workspaces; results land in the bank, temps are deleted
 - `sieve` — run lock gates
-- `stamp --dry-run` — PPT pick
+- `stamp --dry-run` — evidence rank (passing gate, then smaller clipped output)
 - `loop --dry-run` — bounded refine
 - `run --dry-run` — full offline pipeline
 - `run` — live pipeline; the current host CLI does the LLM work (no external model client)

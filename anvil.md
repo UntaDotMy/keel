@@ -1,5 +1,7 @@
 # BUILD ANVIL (RUST TOKEN-EFFICIENT LOOP EDITION)
 
+**Implementation note:** the keel CLI ships a host-CLI Anvil: compile writes lock/prefix/gates from flags, stamp ranks `gate_ok` then `clipped_len` (`--strict` fail-closed), and loop re-runs the configured builder against a gate pass fraction. This file is the original design spec (PPT/logprob, tokio casts, provider clients). Do not treat unimplemented PPT sections as current `keel anvil` behavior.
+
 You are implementing **Anvil** in pure **Rust** (no Python, no heavy framework crates). This document is the complete specification. Build exactly this. Do not invent a raw Gauntlet clone, multi-round critic chat, HTML workbench, or auto-git agent.
 
 Anvil casts $N$ candidate artifacts in parallel using async tasks (`tokio`), filters losers via deterministic gates (Sieve), selects a winner using expectation-based logprob pairwise verifiers (Stamp via PPT), and conditionally runs a bounded refinement loop if gates fail.
@@ -219,7 +221,7 @@ Winner is $\text{argmax}(w_i / c_i)$.
 * Non-dry casts require `KEEL_ANVIL_BUILDER_ARGV`, a JSON argv array for the host builder command. Arguments may use `{workspace}`, `{piece}`, and `{gates}` placeholders.
 * The configured builder runs with the isolated workspace as its current directory and a 300-second bounded process timeout. Missing configuration fails before a cast result is written.
 * `--dry-run` is the offline path; it creates the workspace scaffold without invoking a builder.
-* Builder output is clipped before deterministic gates run. Git commit, push, rebase, and branch operations remain the builder's responsibility to avoid.
+* Builder output is clipped before deterministic gates run. `is_denied_command` refuses builder argv that contains `git commit`, `git push`, `git rebase`, or `git branch`.
 ### 4.3 Sieve (`anvil sieve`)
 
 * Runs gate commands deterministically via `tokio::process::Command` with timeouts.
@@ -232,9 +234,9 @@ Winner is $\text{argmax}(w_i / c_i)$.
 * Runs PPT using expected score verifier on candidate pairs.
 * Promotes winner files to output path (`anvil_out/`).
 
-### 4.5 Bounded Refinement Loop (`anvil loop` / `refine_loop` module)
+### 4.5 Bounded Refinement Loop (`anvil loop` / `loop_runner` module)
 
-Invoked only if the Stamp winner fails deterministic gates. Note: The module is named `refine_loop` or `loop_engine` internally to avoid collision with Rust's reserved `loop` keyword.
+Invoked only if sieve gates fail. Live loop promotes `anvil_out/workspace` from stamp, or from cast evidence when stamp was dry-run and did not copy. The module is `loop_runner.rs` (`loop` is a Rust keyword). Host builder is `KEEL_ANVIL_BUILDER_ARGV`; there is no external reasoning-model client.
 
 ```
                     ┌─────────────────────────┐
@@ -249,12 +251,8 @@ Invoked only if the Stamp winner fails deterministic gates. Note: The module is 
                                  │
                                  ▼
                      ┌───────────────────────┐
-                     │ Invoke Reasoning Model│
-                     └───────────┬───────────┘
-                                 │
-                                 ▼
-                     ┌───────────────────────┐
-                     │ Execute Surgical Edits│
+                     │ Host builder argv     │
+                     │ KEEL_ANVIL_BUILDER_ARGV│
                      └───────────┬───────────┘
                                  │
                                  ▼
@@ -302,8 +300,8 @@ anvil/
 │   ├── compile.rs         # Compile stage handler
 │   ├── cast.rs            # Async parallel builder stage (tokio)
 │   ├── sieve.rs           # Zero-LLM gate verification stage
-│   ├── stamp.rs           # Pairwise verifier & PPT tournament engine
-│   ├── refine_loop.rs     # Bounded refinement loop (loop_engine)
+│   ├── stamp.rs           # Evidence rank (Bradley-Terry on gate_ok + clipped_len)
+│   ├── loop_runner.rs     # Bounded refinement loop
 │   ├── supervisor.rs      # LLM-free enforcement rules
 │   ├── filter.rs          # Tool output compression logic
 │   ├── cache.rs           # Provider header building & cache prewarming

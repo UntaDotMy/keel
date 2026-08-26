@@ -900,6 +900,20 @@ pub(crate) fn report_bridge_host_wiring(
         cursor_rules.is_file() && cursor_hooks.is_file() && cursor_script.is_file(),
         cursor_mcp,
     );
+
+    // Grok: ~/.grok/hooks/keel.json. Auto-detected by install; no --with grok flag.
+    // MCP is the shared keel server, not a Grok-specific mcp.json.
+    let grok_dir = home.join(".grok");
+    if grok_dir.is_dir() {
+        let grok_hooks = grok_dir.join("hooks").join("keel.json");
+        let grok_wired = grok_hooks.is_file();
+        let state = if grok_wired {
+            "wired (hooks)"
+        } else {
+            "not wired (run `keel install` to write ~/.grok/hooks/keel.json)"
+        };
+        write_doctor_check(standard_output, grok_wired, &format!("grok host: {state}"));
+    }
 }
 
 /// One summary line per bridge host: name + wired state + MCP state.
@@ -1141,6 +1155,47 @@ mod tests {
         );
         let _ = fs::remove_dir_all(claude_home.parent().unwrap());
     }
+    #[test]
+    fn grok_host_reports_wired_when_hooks_file_exists() {
+        let claude_home = unique_home("grok-wired");
+        let home = claude_home.parent().unwrap();
+        let grok_hooks = home.join(".grok").join("hooks");
+        fs::create_dir_all(&grok_hooks).unwrap();
+        fs::write(grok_hooks.join("keel.json"), "{\"hooks\":{}}").unwrap();
+        let mut output = Vec::new();
+        report_bridge_host_wiring(&mut output, &claude_home);
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("[ok] grok host: wired (hooks)"), "{output}");
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn grok_host_warns_when_detected_but_unwired() {
+        let claude_home = unique_home("grok-unwired");
+        let home = claude_home.parent().unwrap();
+        fs::create_dir_all(home.join(".grok")).unwrap();
+        let mut output = Vec::new();
+        report_bridge_host_wiring(&mut output, &claude_home);
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("[warn] grok host: not wired"), "{output}");
+        assert!(output.contains("keel install"), "{output}");
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn grok_host_omitted_when_not_detected() {
+        let claude_home = unique_home("grok-absent");
+        let home = claude_home.parent().unwrap();
+        let mut output = Vec::new();
+        report_bridge_host_wiring(&mut output, &claude_home);
+        let output = String::from_utf8(output).unwrap();
+        assert!(
+            !output.contains("grok host:"),
+            "undetected Grok must not appear, {output}"
+        );
+        let _ = fs::remove_dir_all(home);
+    }
+
     #[test]
     fn claude_home_flag_reaches_doctor_checks_not_just_status_summary() {
         // Doctor checks must use the custom home, not the default home.

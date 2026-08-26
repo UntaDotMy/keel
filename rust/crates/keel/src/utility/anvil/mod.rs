@@ -27,10 +27,10 @@ pub fn run_anvil_command(
             standard_output,
             "Usage: keel anvil <compile|cast|sieve|stamp|loop|run|prefix-check> [flags]\n\
              \n\
-             compile      goal -> lock + prefix + gates (1 frontier call)\n\
-             cast         run N builders in isolated workspaces\n\
+             compile      goal -> lock + prefix + gates from --goal/--bar/--files\n\
+             cast         run N builders in isolated workspaces (host CLI argv)\n\
              sieve        run gates only (0 LLM)\n\
-             stamp        PPT over survivors (logprob EV)\n\
+             stamp        PPT over evidence strengths (Bradley-Terry ring; --strict fail-closed)\n\
              loop         bounded refinement if gates fail (max_iterations, delta)\n\
              run          compile->cast->sieve->stamp->loop orchestrator\n\
              prefix-check verify prefix SHA256 stability\n\
@@ -184,22 +184,24 @@ fn run_orchestrator(
         }
         stamp_used = true;
     }
-    let mut loop_iterations = 0;
+    let mut loop_failed = false;
+    let mut loop_report = None;
     if !sieve_ok {
-        if loop_runner::run_loop(&shared, standard_output, standard_error) != 0 {
-            return 1;
-        }
-        loop_iterations = 1;
+        loop_failed = loop_runner::run_loop(&shared, standard_output, standard_error) != 0;
+        loop_report = report::read_report(&paths).ok();
     }
-    let mut built = report::empty_report();
-    built.stamp_used = stamp_used;
-    built.winner_id = if stamp_used {
-        "cast_0".into()
+    let stamp_winner = if stamp_used {
+        read_stamp_winner(&paths)
     } else {
-        "sieve".into()
+        None
     };
-    built.gate_pass_rate = if sieve_ok { 1.0 } else { 0.0 };
-    built.loop_iterations = loop_iterations;
+    let built = merge_pipeline_metrics(
+        sieve_ok,
+        sieve_outcome.pass_rate,
+        stamp_used,
+        stamp_winner,
+        loop_report.as_ref(),
+    );
     if let Err(error) = report::write_report(&paths, &built) {
         let _ = writeln!(standard_error, "{error}");
         return 1;
@@ -210,7 +212,43 @@ fn run_orchestrator(
         built.metrics_line(),
         built.to_json()
     );
-    0
+    if loop_failed {
+        1
+    } else {
+        0
+    }
+}
+
+fn read_stamp_winner(paths: &job::JobPaths) -> Option<String> {
+    let text = std::fs::read_to_string(paths.out_dir().join("winner.txt")).ok()?;
+    let id = text.trim();
+    if id.is_empty() {
+        None
+    } else {
+        Some(id.to_string())
+    }
+}
+
+fn merge_pipeline_metrics(
+    sieve_ok: bool,
+    sieve_pass_rate: f64,
+    stamp_used: bool,
+    stamp_winner: Option<String>,
+    loop_report: Option<&report::Report>,
+) -> report::Report {
+    let mut built = report::empty_report();
+    built.stamp_used = stamp_used;
+    built.winner_id = stamp_winner.unwrap_or_else(|| "sieve".into());
+    built.gate_pass_rate = if sieve_ok { 1.0 } else { sieve_pass_rate };
+    if let Some(loop_report) = loop_report {
+        built.loop_iterations = loop_report.loop_iterations;
+        built.improvement_delta = loop_report.improvement_delta;
+        built.gate_pass_rate = loop_report.gate_pass_rate;
+        if built.winner_id == "sieve" && loop_report.winner_id != "none" {
+            built.winner_id = loop_report.winner_id.clone();
+        }
+    }
+    built
 }
 
 #[cfg(test)]
@@ -276,17 +314,12 @@ mod tests {
     }
     static BUILDER_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    fn with_builder<F: FnOnce() -> R, R>(run: F) -> R {
+    fn with_builder_argv<F: FnOnce() -> R, R>(builder: &str, run: F) -> R {
         let _guard = match BUILDER_ENV_LOCK.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
         let previous = std::env::var("KEEL_ANVIL_BUILDER_ARGV").ok();
-        let builder = if cfg!(windows) {
-            r#"["cmd.exe","/C","echo built>built.txt"]"#
-        } else {
-            r#"["sh","-c","printf built > built.txt"]"#
-        };
         std::env::set_var("KEEL_ANVIL_BUILDER_ARGV", builder);
         let result = run();
         match previous {
@@ -296,11 +329,61 @@ mod tests {
         result
     }
 
+    fn with_builder<F: FnOnce() -> R, R>(run: F) -> R {
+        let builder = if cfg!(windows) {
+            r#"["cmd.exe","/C","echo built>built.txt"]"#
+        } else {
+            r#"["sh","-c","printf built > built.txt"]"#
+        };
+        with_builder_argv(builder, run)
+    }
+
+    fn looping_builder_argv() -> &'static str {
+        if cfg!(windows) {
+            r#"["cmd.exe","/C","if exist once.txt (echo built>built.txt) else (echo x>once.txt)"]"#
+        } else {
+            r#"["sh","-c","if [ -f once.txt ]; then printf built > built.txt; else printf x > once.txt; fi"]"#
+        }
+    }
+
+    fn file_exists_bar() -> &'static str {
+        if cfg!(windows) {
+            "if (Test-Path -Path built.txt) { exit 0 } else { exit 1 }"
+        } else {
+            "test -f built.txt"
+        }
+    }
+
     #[test]
     fn empty_action_prints_usage_and_fails() {
         let (code, stdout, _) = run_cmd(&[]);
         assert_eq!(code, 1);
         assert!(stdout.contains("Usage: keel anvil"));
+        assert!(
+            stdout.contains("Bradley-Terry"),
+            "help must describe local PPT, stdout={stdout}"
+        );
+        assert!(
+            !stdout.contains("logprob"),
+            "help must not claim a logprob API, stdout={stdout}"
+        );
+    }
+
+    #[test]
+    fn pipeline_report_uses_loop_and_stamp_outcome() {
+        let mut loop_report = report::empty_report();
+        loop_report.loop_iterations = 4;
+        loop_report.improvement_delta = 0.2;
+        loop_report.gate_pass_rate = 1.0;
+        let built =
+            merge_pipeline_metrics(false, 0.0, true, Some("cast_2".into()), Some(&loop_report));
+        assert_eq!(built.winner_id, "cast_2");
+        assert_eq!(built.loop_iterations, 4);
+        assert!(built.stamp_used);
+        assert!((built.gate_pass_rate - 1.0).abs() < 1e-9);
+        assert!((built.improvement_delta - 0.2).abs() < 1e-9);
+        assert_ne!(built.winner_id, "cast_0");
+        assert_ne!(built.loop_iterations, 1);
     }
 
     #[test]
@@ -379,6 +462,103 @@ mod tests {
         assert!(loop_stdout.is_empty());
         assert!(loop_stderr.contains("no promoted winner workspace"));
         assert!(!job.paths.report_path().is_file());
+    }
+
+    #[test]
+    fn dry_run_loop_iterates_when_gates_fail() {
+        let job = temp_job("dry-loop");
+        let (compile_code, _, compile_stderr) = run_cmd(&with_job(
+            &job,
+            vec![
+                "compile".into(),
+                "--goal".into(),
+                "failing quality bar".into(),
+                "--bar".into(),
+                "exit 7".into(),
+            ],
+        ));
+        assert_eq!(compile_code, 0, "compile stderr={compile_stderr}");
+        let (code, stdout, stderr) =
+            run_cmd(&with_job(&job, vec!["loop".into(), "--dry-run".into()]));
+        assert_eq!(code, 1, "stdout={stdout} stderr={stderr}");
+        assert!(
+            stdout.contains("iters=2") || stdout.contains("iters=3"),
+            "dry-run loop must iterate while gates fail, stdout={stdout}"
+        );
+        assert!(stdout.contains("pass=false"), "stdout={stdout}");
+        assert!(job.paths.report_path().is_file());
+        let built = report::read_report(&job.paths).expect("report");
+        assert!(
+            built.loop_iterations >= 2,
+            "loop_iterations={}",
+            built.loop_iterations
+        );
+    }
+
+    #[test]
+    fn live_loop_promotes_cast_and_iterates_until_gates_pass() {
+        let job = temp_job("live-loop");
+        let (compile_code, _, compile_stderr) = run_cmd(&with_job(
+            &job,
+            vec![
+                "compile".into(),
+                "--goal".into(),
+                "file gate".into(),
+                "--bar".into(),
+                file_exists_bar().into(),
+            ],
+        ));
+        assert_eq!(compile_code, 0, "compile stderr={compile_stderr}");
+        let (cast_code, _, cast_stderr) =
+            run_cmd(&with_job(&job, vec!["cast".into(), "--dry-run".into()]));
+        assert_eq!(cast_code, 0, "cast stderr={cast_stderr}");
+        assert!(!job.paths.out_dir().join("workspace").is_dir());
+
+        let (code, stdout, stderr) = with_builder_argv(looping_builder_argv(), || {
+            run_cmd(&with_job(&job, vec!["loop".into()]))
+        });
+        assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+        assert!(stdout.contains("pass=true"), "stdout={stdout}");
+        assert!(
+            stdout.contains("iters=2") || stdout.contains("iters=3"),
+            "live loop must iterate then pass, stdout={stdout}"
+        );
+        assert!(job
+            .paths
+            .out_dir()
+            .join("workspace")
+            .join("built.txt")
+            .is_file());
+        let built = report::read_report(&job.paths).expect("report");
+        assert!(
+            built.loop_iterations >= 2,
+            "loop_iterations={}",
+            built.loop_iterations
+        );
+        assert!((built.gate_pass_rate - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn live_cast_denies_git_commit_builder() {
+        let job = temp_job("cast-deny");
+        let _ = run_cmd(&with_job(
+            &job,
+            vec![
+                "compile".into(),
+                "--goal".into(),
+                "g".into(),
+                "--bar".into(),
+                "echo ok".into(),
+            ],
+        ));
+        let (code, _, stderr) = with_builder_argv(r#"["git","commit","-am","x"]"#, || {
+            run_cmd(&with_job(&job, vec!["cast".into()]))
+        });
+        assert_eq!(code, 1, "stderr={stderr}");
+        assert!(
+            stderr.contains("denied command"),
+            "builder denylist must fire, stderr={stderr}"
+        );
     }
 
     #[test]
@@ -520,7 +700,7 @@ mod tests {
         let _ = run_cmd(&with_job(&job, vec!["cast".into(), "--dry-run".into()]));
         let (code, stdout, stderr) = run_cmd(&with_job(&job, vec!["stamp".into()]));
         assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
-        assert!(stdout.contains("mode=evidence"));
+        assert!(stdout.contains("mode=ppt-evidence"));
         assert!(job.paths.out_dir().join("winner.txt").is_file());
         assert!(!job.workspace.join("anvil").exists());
     }
@@ -529,7 +709,7 @@ mod tests {
     fn dry_run_stamp_uses_evidence() {
         let (code, stdout, _) = run_cmd(&["stamp".into(), "--dry-run".into()]);
         assert_eq!(code, 0);
-        assert!(stdout.contains("mode=evidence"));
+        assert!(stdout.contains("mode=ppt-evidence"));
         assert!(!stdout.contains("stub"));
         assert!(stdout.contains("strict=false"));
     }
@@ -538,7 +718,7 @@ mod tests {
     fn dry_run_stamp_strict_reports_strict_mode() {
         let (code, stdout, _) = run_cmd(&["stamp".into(), "--dry-run".into(), "--strict".into()]);
         assert_eq!(code, 0);
-        assert!(stdout.contains("mode=evidence"));
+        assert!(stdout.contains("mode=ppt-evidence"));
         assert!(stdout.contains("strict=true"));
     }
 

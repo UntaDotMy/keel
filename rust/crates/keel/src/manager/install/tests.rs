@@ -327,6 +327,69 @@ fn repo_version_recovers_bootstrap_commit_from_installed_metadata() {
 }
 
 #[test]
+fn publish_native_executable_skips_stale_identical_release_and_uses_debug() {
+    let (repo, claude_home) = unique_paths("publish-skip-stale-release");
+    fs::create_dir_all(&claude_home).unwrap();
+    let release_dir = repo.join("target").join("release");
+    let debug_dir = repo.join("target").join("debug");
+    fs::create_dir_all(&release_dir).unwrap();
+    fs::create_dir_all(&debug_dir).unwrap();
+    fs::write(
+        release_dir.join(executable_file_name()),
+        b"old-binary-contents",
+    )
+    .unwrap();
+    fs::write(debug_dir.join(executable_file_name()), b"fresh-debug").unwrap();
+    let installed = installed_executable_path(&claude_home);
+    fs::write(&installed, b"old-binary-contents").unwrap();
+    let published = publish_native_executable(&repo, &claude_home).unwrap();
+    assert!(
+        published,
+        "stale identical release must be skipped so debug can refresh PATH/MCP"
+    );
+    assert_eq!(fs::read(&installed).unwrap(), b"fresh-debug");
+    let _ = fs::remove_dir_all(&repo);
+    let _ = fs::remove_dir_all(&claude_home);
+}
+
+#[test]
+fn publish_native_executable_falls_back_to_debug_when_no_release() {
+    let (repo, claude_home) = unique_paths("publish-debug-fallback");
+    fs::create_dir_all(&claude_home).unwrap();
+    let debug_dir = repo.join("target").join("debug");
+    fs::create_dir_all(&debug_dir).unwrap();
+    fs::write(debug_dir.join(executable_file_name()), b"debug-build").unwrap();
+    let installed = installed_executable_path(&claude_home);
+    fs::write(&installed, b"old-binary-contents").unwrap();
+    let published = publish_native_executable(&repo, &claude_home).unwrap();
+    assert!(
+        published,
+        "debug artifact must publish when release is absent"
+    );
+    assert_eq!(fs::read(&installed).unwrap(), b"debug-build");
+    let _ = fs::remove_dir_all(&repo);
+    let _ = fs::remove_dir_all(&claude_home);
+}
+
+#[test]
+fn publish_native_executable_prefers_release_over_debug() {
+    let (repo, claude_home) = unique_paths("publish-release-wins");
+    fs::create_dir_all(&claude_home).unwrap();
+    let release_dir = repo.join("target").join("release");
+    let debug_dir = repo.join("target").join("debug");
+    fs::create_dir_all(&release_dir).unwrap();
+    fs::create_dir_all(&debug_dir).unwrap();
+    fs::write(release_dir.join(executable_file_name()), b"release-build").unwrap();
+    fs::write(debug_dir.join(executable_file_name()), b"debug-build").unwrap();
+    let installed = installed_executable_path(&claude_home);
+    let published = publish_native_executable(&repo, &claude_home).unwrap();
+    assert!(published);
+    assert_eq!(fs::read(&installed).unwrap(), b"release-build");
+    let _ = fs::remove_dir_all(&repo);
+    let _ = fs::remove_dir_all(&claude_home);
+}
+
+#[test]
 fn publish_native_executable_falls_back_to_bundle_root_binary() {
     // Release archives stage the binary at `<bundle>/keel.exe`; the fallback
     // handles that layout when no Cargo target artifact exists.
@@ -2352,8 +2415,20 @@ fn grok_stop_hook_is_silent_not_post_tool_batch() {
         "Grok Stop must call silent hook stop: {text}"
     );
     assert!(
+        text.contains("hook session-end"),
+        "Grok SessionEnd must drive the learning cycle: {text}"
+    );
+    assert!(
+        text.contains("hook pre-compact"),
+        "Grok PreCompact must checkpoint before compaction: {text}"
+    );
+    assert!(
+        text.contains("hook post-compact"),
+        "Grok PostCompact must re-push context: {text}"
+    );
+    assert!(
         !text.contains("post-tool-batch"),
-        "Grok Stop must not inject post-tool-batch closeout: {text}"
+        "Grok has no PostToolBatch event; Stop must not inject post-tool-batch closeout: {text}"
     );
     let _ = fs::remove_dir_all(&root);
 }
