@@ -1341,6 +1341,42 @@ fn iron_law_gate_denies_without_evidence_and_does_not_ack_on_deny() {
 }
 
 #[test]
+fn grok_camel_case_session_does_not_inherit_satisfied_default_gate() {
+    let _guard = crate::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let claude_home = temp_brief_gate_home("grok-session-id-gate");
+    let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
+    let previous_mode = std::env::var(IRON_LAW_GATE_ENV_VAR).ok();
+    std::env::set_var("CLAUDE_TARGET_OVERRIDE", &claude_home);
+    std::env::set_var(IRON_LAW_GATE_ENV_VAR, "strict");
+
+    mark_iron_law_satisfied("default");
+    let input = serde_json::json!({
+        "sessionId": "grok-unsatisfied-session",
+        "toolName": "search_replace"
+    });
+    assert!(iron_law_gate_decision(hook_session_id(&input)).is_some());
+
+    let mut output = Vec::new();
+    let mut error = Vec::new();
+    assert_eq!(run_iron_law_gate(&input, &mut output, &mut error), 0);
+    let payload: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(payload["decision"], "deny");
+    assert!(error.is_empty());
+
+    match previous_home {
+        Some(value) => std::env::set_var("CLAUDE_TARGET_OVERRIDE", value),
+        None => std::env::remove_var("CLAUDE_TARGET_OVERRIDE"),
+    }
+    match previous_mode {
+        Some(value) => std::env::set_var(IRON_LAW_GATE_ENV_VAR, value),
+        None => std::env::remove_var(IRON_LAW_GATE_ENV_VAR),
+    }
+    let _ = std::fs::remove_dir_all(&claude_home);
+}
+
+#[test]
 fn iron_law_gate_mode_defaults_to_strict() {
     let _guard = crate::test_support::ENV_LOCK
         .lock()

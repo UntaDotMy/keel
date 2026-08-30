@@ -454,10 +454,7 @@ pub(super) fn run_iron_law_gate(
     standard_output: &mut dyn Write,
     standard_error: &mut dyn Write,
 ) -> u8 {
-    let session_id = input
-        .get("session_id")
-        .and_then(JsonDocument::as_str)
-        .unwrap_or("default");
+    let session_id = hook_session_id(input);
 
     let Some(reason) = iron_law_gate_decision(session_id) else {
         return 0;
