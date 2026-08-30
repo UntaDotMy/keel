@@ -65,7 +65,7 @@ pub(super) const JSON_RPC_PARSE_ERROR: i64 = -32700;
 pub(super) const JSON_RPC_INVALID_REQUEST: i64 = -32600;
 const JSON_RPC_METHOD_NOT_FOUND: i64 = -32601;
 pub(super) const JSON_RPC_INVALID_PARAMS: i64 = -32602;
-const JSON_RPC_INTERNAL_ERROR: i64 = -32603;
+pub(super) const JSON_RPC_INTERNAL_ERROR: i64 = -32603;
 
 /// Resource URIs this server publishes. Keep these as constants so the list
 /// surface and the read surface stay in lockstep.

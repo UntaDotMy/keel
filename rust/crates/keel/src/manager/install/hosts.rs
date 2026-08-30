@@ -302,20 +302,7 @@ pub(crate) fn maybe_wire_grok(claude_home: &Path, detected: bool) -> Option<Stri
     }
     let target = hooks_dir.join("keel.json");
     let binary = installed_executable_path(claude_home);
-    let command = format!("{} hook", shell_command_path(&binary));
-    let payload = serde_json::json!({
-        "hooks": {
-            "SessionStart": [{ "hooks": [{ "type": "command", "command": format!("{command} session-start"), "timeout": 10 }] }],
-            "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": format!("{command} user-prompt-submit"), "timeout": 10 }] }],
-            "PreToolUse": [{ "hooks": [{ "type": "command", "command": format!("{command} pre-tool-use"), "timeout": 10 }] }],
-            "PostToolUse": [{ "hooks": [{ "type": "command", "command": format!("{command} post-tool-use"), "timeout": 10 }] }],
-            "PostToolUseFailure": [{ "hooks": [{ "type": "command", "command": format!("{command} post-tool-use-failure"), "timeout": 10 }] }],
-            "PreCompact": [{ "hooks": [{ "type": "command", "command": format!("{command} pre-compact"), "timeout": 10 }] }],
-            "PostCompact": [{ "hooks": [{ "type": "command", "command": format!("{command} post-compact"), "timeout": 10 }] }],
-            "SessionEnd": [{ "hooks": [{ "type": "command", "command": format!("{command} session-end"), "timeout": 10 }] }],
-            "Stop": [{ "hooks": [{ "type": "command", "command": format!("{command} stop"), "timeout": 10 }] }]
-        }
-    });
+    let payload = grok_hooks_payload(&binary);
     let rendered = match serde_json::to_string_pretty(&payload) {
         Ok(text) => text,
         Err(error) => return Some(format!("serialize skipped ({error})")),
@@ -332,6 +319,30 @@ pub(crate) fn maybe_wire_grok(claude_home: &Path, detected: bool) -> Option<Stri
         Err(error) => format!("native MCP skipped ({error})"),
     };
     Some(format!("{hook_status}; {mcp_status}"))
+}
+
+pub(crate) fn grok_hooks_payload(binary: &Path) -> serde_json::Value {
+    let command = format!("{} hook", shell_command_path(binary));
+    serde_json::json!({
+        "hooks": {
+            "SessionStart": [{ "hooks": [{ "type": "command", "command": format!("{command} session-start"), "timeout": 10 }] }],
+            "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": format!("{command} user-prompt-submit"), "timeout": 10 }] }],
+            "PreToolUse": [{ "hooks": [{ "type": "command", "command": format!("{command} pre-tool-use"), "timeout": 10 }] }],
+            "PostToolUse": [{ "hooks": [{ "type": "command", "command": format!("{command} post-tool-use"), "timeout": 10 }] }],
+            "PostToolUseFailure": [{ "hooks": [{ "type": "command", "command": format!("{command} post-tool-use-failure"), "timeout": 10 }] }],
+            "PreCompact": [{ "hooks": [{ "type": "command", "command": format!("{command} pre-compact"), "timeout": 10 }] }],
+            "PostCompact": [{ "hooks": [{ "type": "command", "command": format!("{command} post-compact"), "timeout": 10 }] }],
+            "SessionEnd": [{ "hooks": [{ "type": "command", "command": format!("{command} session-end"), "timeout": 10 }] }],
+            "Stop": [{ "hooks": [{ "type": "command", "command": format!("{command} stop"), "timeout": 10 }] }]
+        }
+    })
+}
+
+pub(crate) fn grok_hooks_are_current(hook_path: &Path, binary: &Path) -> bool {
+    std::fs::read_to_string(hook_path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .is_some_and(|value| value == grok_hooks_payload(binary))
 }
 
 pub(crate) fn grok_config_home(user_home: &Path) -> PathBuf {

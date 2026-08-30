@@ -80,6 +80,8 @@ pub struct ProcessResult {
 /// 64 MiB leaves room for full test logs (the legitimate large-output case)
 /// while bounding the worst case. Mirrors the `MAX_EVENT_LOG_BYTES` precedent.
 pub const MAX_CAPTURED_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
+const CAPTURE_TRUNCATION_MARKER: &[u8] =
+    b"\n[keel] captured output capped at MAX_CAPTURED_OUTPUT_BYTES; see raw output locally for the full stream\n";
 /// Default wall-clock budget for internal command probes and `keel run`.
 /// Override with `KEEL_COMMAND_TIMEOUT_SECS`; values are clamped to 5 minutes
 /// through 1 hour so a malformed value cannot create an unbounded wait.
@@ -88,13 +90,14 @@ const DEFAULT_COMMAND_TIMEOUT_SECS: u64 = 300;
 /// Truncate a captured stream to the cap, returning (bytes, original_len). When
 /// truncation occurs, a trailing marker is appended so the model can see the
 /// output was cut.
+#[cfg(test)]
 pub fn cap_captured_stream(bytes: Vec<u8>) -> (Vec<u8>, usize) {
     let original_len = bytes.len();
     if original_len <= MAX_CAPTURED_OUTPUT_BYTES {
         return (bytes, original_len);
     }
     let mut truncated = bytes[..MAX_CAPTURED_OUTPUT_BYTES].to_vec();
-    let marker = b"\n[keel] captured output capped at MAX_CAPTURED_OUTPUT_BYTES; see raw output locally for the full stream\n";
+    let marker = CAPTURE_TRUNCATION_MARKER;
     // Make room for the marker so the total stays at/under the cap.
     let needed = marker.len();
     if truncated.len() > needed {
@@ -710,29 +713,40 @@ pub fn run_command_with_timeout(
     if let Some(directory) = working_directory {
         command.current_dir(directory);
     }
+    run_prepared_command_with_timeout(command, program, timeout)
+}
+
+/// Execute a caller-configured command with the shared capture, timeout, and
+/// process-tree ownership contract. Callers may set environment variables and
+/// arguments, while stdio and lifecycle ownership remain centrally enforced.
+pub fn run_prepared_command_with_timeout(
+    mut command: Command,
+    label: &str,
+    timeout: std::time::Duration,
+) -> Result<ProcessResult, String> {
     command.stdin(Stdio::null());
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
     configure_process_group(&mut command);
     let mut child = command
         .spawn()
-        .map_err(|error| format!("execute {program}: {error}"))?;
+        .map_err(|error| format!("execute {label}: {error}"))?;
     let mut process_guard = match own_process_tree(&mut child) {
         Ok(guard) => guard,
         Err(error) => {
             let _ = child.kill();
             let _ = child.wait();
-            return Err(format!("execute {program}: process ownership: {error}"));
+            return Err(format!("execute {label}: process ownership: {error}"));
         }
     };
     let stdout = child
         .stdout
         .take()
-        .ok_or_else(|| format!("execute {program}: stdout pipe unavailable"))?;
+        .ok_or_else(|| format!("execute {label}: stdout pipe unavailable"))?;
     let stderr = child
         .stderr
         .take()
-        .ok_or_else(|| format!("execute {program}: stderr pipe unavailable"))?;
+        .ok_or_else(|| format!("execute {label}: stderr pipe unavailable"))?;
     let stdout_thread = std::thread::spawn(|| capture_stream(stdout));
     let stderr_thread = std::thread::spawn(|| capture_stream(stderr));
     let deadline = std::time::Instant::now() + timeout;
@@ -751,7 +765,7 @@ pub fn run_command_with_timeout(
                     .map(|error| format!("; process-tree cleanup failed: {error}"))
                     .unwrap_or_default();
                 return Err(format!(
-                    "execute {program}: timed out after {}s{suffix}; retry with a smaller command or increase KEEL_COMMAND_TIMEOUT_SECS",
+                    "execute {label}: timed out after {}s{suffix}; retry with a smaller command or increase KEEL_COMMAND_TIMEOUT_SECS",
                     timeout.as_secs()
                 ));
             }
@@ -760,16 +774,20 @@ pub fn run_command_with_timeout(
                 let _ = child.wait(); // intentional cleanup after tree termination
                 let _ = stdout_thread.join(); // intentional drain-thread cleanup
                 let _ = stderr_thread.join(); // intentional drain-thread cleanup
-                return Err(format!("execute {program}: wait failed: {error}"));
+                return Err(format!("execute {label}: wait failed: {error}"));
             }
         }
     };
+    // The direct child may exit while a descendant still owns an inherited
+    // stdout/stderr handle. Close the owned job/process group before joining
+    // readers so such descendants cannot hold this synchronous call open.
+    let _ = terminate_owned_process_tree(&mut child, &mut process_guard);
     let (stdout, original_stdout_bytes) = stdout_thread
         .join()
-        .map_err(|_| format!("execute {program}: stdout reader panicked"))?;
+        .map_err(|_| format!("execute {label}: stdout reader panicked"))?;
     let (stderr, original_stderr_bytes) = stderr_thread
         .join()
-        .map_err(|_| format!("execute {program}: stderr reader panicked"))?;
+        .map_err(|_| format!("execute {label}: stderr reader panicked"))?;
     Ok(ProcessResult {
         code: exit_status_code(&status),
         stdout,
@@ -841,7 +859,7 @@ fn command_timeout() -> std::time::Duration {
     std::time::Duration::from_secs(seconds)
 }
 
-fn capture_stream<R: Read>(mut reader: R) -> (Vec<u8>, usize) {
+pub(crate) fn capture_stream<R: Read>(mut reader: R) -> (Vec<u8>, usize) {
     let mut kept = Vec::new();
     let mut buffer = [0u8; 8192];
     let mut original = 0usize;
@@ -857,11 +875,14 @@ fn capture_stream<R: Read>(mut reader: R) -> (Vec<u8>, usize) {
             }
         }
     }
-    let (kept, _) = cap_captured_stream(kept);
+    if original > MAX_CAPTURED_OUTPUT_BYTES {
+        kept.truncate(MAX_CAPTURED_OUTPUT_BYTES - CAPTURE_TRUNCATION_MARKER.len());
+        kept.extend_from_slice(CAPTURE_TRUNCATION_MARKER);
+    }
     (kept, original)
 }
 
-fn configure_process_group(command: &mut Command) {
+pub(crate) fn configure_process_group(command: &mut Command) {
     #[cfg(not(unix))]
     let _ = command; // process groups are configured only on Unix
     #[cfg(unix)]
@@ -881,6 +902,8 @@ fn configure_process_group(command: &mut Command) {
 pub struct ChildProcessGuard {
     #[cfg(windows)]
     job_handle: isize,
+    #[cfg(unix)]
+    process_group_id: i32,
 }
 
 impl Drop for ChildProcessGuard {
@@ -888,6 +911,11 @@ impl Drop for ChildProcessGuard {
         #[cfg(windows)]
         {
             let _ = windows_process::close_handle(&mut self.job_handle);
+        }
+        #[cfg(unix)]
+        if self.process_group_id > 0 {
+            let _ = libc_kill_process_group(self.process_group_id);
+            self.process_group_id = 0;
         }
     }
 }
@@ -907,8 +935,9 @@ pub fn terminate_owned_process_tree(
     }
     #[cfg(unix)]
     {
-        let _ = process_guard;
-        terminate_process_tree(child)
+        let result = terminate_process_tree(child);
+        process_guard.process_group_id = 0;
+        result
     }
 }
 
@@ -918,7 +947,13 @@ pub fn own_process_tree(child: &mut Child) -> Result<ChildProcessGuard, String> 
         let job_handle = windows_process::create_kill_on_close_job(child.id())?;
         Ok(ChildProcessGuard { job_handle })
     }
-    #[cfg(not(windows))]
+    #[cfg(unix)]
+    {
+        Ok(ChildProcessGuard {
+            process_group_id: child.id() as i32,
+        })
+    }
+    #[cfg(not(any(windows, unix)))]
     {
         let _ = child;
         Ok(ChildProcessGuard {})
@@ -1769,6 +1804,40 @@ mod process_lifecycle_tests {
                 .expect("short command");
         assert_eq!(result.code, 0);
         assert!(String::from_utf8_lossy(&result.stdout).contains("ok"));
+    }
+
+    #[test]
+    fn leader_exit_cannot_leave_inherited_pipe_open_in_descendant() {
+        let (program, arguments) = if cfg!(windows) {
+            (
+                "powershell",
+                vec![
+                    "-NoProfile".to_string(),
+                    "-Command".to_string(),
+                    "$p=Start-Process powershell -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds 30' -NoNewWindow -PassThru; Write-Output $p.Id"
+                        .to_string(),
+                ],
+            )
+        } else {
+            (
+                "sh",
+                vec!["-c".to_string(), "sleep 30 & echo $!".to_string()],
+            )
+        };
+        let started = std::time::Instant::now();
+        let result =
+            run_command_with_timeout(program, &arguments, None, std::time::Duration::from_secs(3))
+                .expect("leader exit must close descendant-held pipes");
+        assert!(started.elapsed() < std::time::Duration::from_secs(3));
+        let descendant = String::from_utf8_lossy(&result.stdout)
+            .lines()
+            .find_map(|line| line.trim().parse::<u32>().ok())
+            .expect("descendant pid");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while process_is_alive(descendant) == Some(true) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_ne!(process_is_alive(descendant), Some(true));
     }
 }
 #[cfg(test)]

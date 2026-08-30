@@ -154,7 +154,7 @@ impl RawStore {
         fs::create_dir_all(&day_dir)?;
         restrict_directory(&self.root)?;
         restrict_directory(&day_dir)?;
-        cleanup_stale_raw_staging(&day_dir);
+        cleanup_stale_raw_staging(&self.root);
         let staging_dir = day_dir.join(format!(
             ".tmp-{}-{}-{:08x}",
             meta.raw_id,
@@ -381,29 +381,41 @@ impl RawStore {
     }
 }
 
-fn cleanup_stale_raw_staging(day_directory: &std::path::Path) {
-    let Ok(entries) = fs::read_dir(day_directory) else {
+fn cleanup_stale_raw_staging(root: &std::path::Path) {
+    let Ok(day_directories) = fs::read_dir(root) else {
         return;
     };
-    for entry in entries.flatten() {
-        let file_name = entry.file_name();
-        let Some(file_name) = file_name.to_str() else {
-            continue;
-        };
-        if !file_name.starts_with(".tmp-") {
-            continue;
-        }
-        let mut suffix_parts = file_name.rsplitn(3, '-');
-        let nonce = suffix_parts.next().unwrap_or("");
-        let process_id = suffix_parts.next().unwrap_or("");
-        if nonce.is_empty() {
+    for day_directory in day_directories.flatten() {
+        if !day_directory
+            .file_type()
+            .map(|kind| kind.is_dir())
+            .unwrap_or(false)
+        {
             continue;
         }
-        let Ok(process_id) = process_id.parse::<u32>() else {
+        let Ok(entries) = fs::read_dir(day_directory.path()) else {
             continue;
         };
-        if crate::runtime::process_is_alive(process_id) == Some(false) {
-            let _ = fs::remove_dir_all(entry.path());
+        for entry in entries.flatten() {
+            let file_name = entry.file_name();
+            let Some(file_name) = file_name.to_str() else {
+                continue;
+            };
+            if !file_name.starts_with(".tmp-") {
+                continue;
+            }
+            let mut suffix_parts = file_name.rsplitn(3, '-');
+            let nonce = suffix_parts.next().unwrap_or("");
+            let process_id = suffix_parts.next().unwrap_or("");
+            if nonce.is_empty() {
+                continue;
+            }
+            let Ok(process_id) = process_id.parse::<u32>() else {
+                continue;
+            };
+            if crate::runtime::process_is_alive(process_id) == Some(false) {
+                let _ = fs::remove_dir_all(entry.path());
+            }
         }
     }
 }
@@ -547,10 +559,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         let day = chrono::Local::now().format("%Y-%m-%d").to_string();
         let stale = root.join(&day).join(".tmp-old-999999-a1");
+        let prior_stale = root.join("2001-02-03").join(".tmp-old-999999-c3");
         let live = root
             .join(&day)
             .join(format!(".tmp-live-{}-b2", std::process::id()));
         std::fs::create_dir_all(&stale).expect("stale staging");
+        std::fs::create_dir_all(&prior_stale).expect("prior-day stale staging");
         std::fs::create_dir_all(&live).expect("live staging");
         let store = RawStore::with_root(root.clone());
         let mut meta = sample_meta("staging-cleanup");
@@ -563,6 +577,10 @@ mod tests {
         store.save(&mut meta, &run).expect("save");
 
         assert!(!stale.exists());
+        assert!(
+            !prior_stale.exists(),
+            "interrupted staging from an earlier day must be reclaimed"
+        );
         assert!(live.exists(), "active process staging must be preserved");
         assert!(
             store

@@ -17,13 +17,16 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-use super::{DispatchBodyResult, JSON_RPC_INVALID_REQUEST, JSON_RPC_PARSE_ERROR};
+use super::{
+    DispatchBodyResult, JSON_RPC_INTERNAL_ERROR, JSON_RPC_INVALID_REQUEST, JSON_RPC_PARSE_ERROR,
+};
 
 const DEFAULT_BIND: &str = "127.0.0.1:3920";
 const MAX_HTTP_BODY: usize = 8 * 1024 * 1024;
 const MAX_HTTP_HEADER: usize = 16 * 1024;
 const MAX_HTTP_BATCH_ITEMS: usize = 64;
 const HTTP_INFLIGHT_WAIT: Duration = Duration::from_secs(2);
+const HTTP_BATCH_WALL_BUDGET: Duration = Duration::from_secs(30);
 
 /// `keel mcp serve-http [--bind HOST:PORT]`
 pub(super) fn serve_http(
@@ -694,11 +697,11 @@ fn handle_post(
     let is_initialize = value.get("method").and_then(Value::as_str) == Some("initialize");
     apply_http_cancellations(&value, state, headers.session_id.as_deref());
 
-    // Batch members use bounded concurrent dispatch; individual requests use
-    // the shared cancellable dispatch path.
+    // Batch members stay in this connection worker. Connections are already
+    // concurrent and globally bounded; per-item threads would multiply the
+    // connection limit by the batch-size limit.
     let outcome = if value.is_array() {
-        // Prefer concurrent batch elements when a client sends a JSON-RPC batch.
-        dispatch_body_concurrent(&value, state, headers.session_id.as_deref())
+        dispatch_body_bounded(&value, state, headers.session_id.as_deref())
     } else {
         dispatch_http_value(&value, state, headers.session_id.as_deref())
     };
@@ -770,6 +773,15 @@ fn dispatch_http_value(
     session_id: Option<&str>,
 ) -> DispatchBodyResult {
     let cancellation = Arc::new(AtomicBool::new(false));
+    dispatch_http_value_with_cancellation(value, state, session_id, cancellation)
+}
+
+fn dispatch_http_value_with_cancellation(
+    value: &Value,
+    state: &HttpState,
+    session_id: Option<&str>,
+    cancellation: Arc<AtomicBool>,
+) -> DispatchBodyResult {
     let key = value
         .get("id")
         .and_then(|request_id| http_cancellation_key(session_id, request_id));
@@ -804,11 +816,20 @@ fn dispatch_http_value(
     }
 }
 
-/// Run batch elements on worker threads (bounded) then assemble the array.
-fn dispatch_body_concurrent(
+/// Dispatch a bounded batch in its already-bounded connection worker.
+fn dispatch_body_bounded(
     body: &Value,
     state: &Arc<HttpState>,
     session_id: Option<&str>,
+) -> DispatchBodyResult {
+    dispatch_body_with_budget(body, state, session_id, HTTP_BATCH_WALL_BUDGET)
+}
+
+fn dispatch_body_with_budget(
+    body: &Value,
+    state: &Arc<HttpState>,
+    session_id: Option<&str>,
+    wall_budget: Duration,
 ) -> DispatchBodyResult {
     let items = match body.as_array() {
         Some(items) if items.is_empty() => {
@@ -829,37 +850,123 @@ fn dispatch_body_concurrent(
         None => return dispatch_http_value(body, state, session_id),
     };
 
-    let (tx, rx) = std::sync::mpsc::channel();
-    let mut expected = 0usize;
-    for (index, item) in items.iter().cloned().enumerate() {
-        expected += 1;
-        let tx = tx.clone();
-        let state = Arc::clone(state);
-        let session_id = session_id.map(str::to_string);
-        let _ = thread::Builder::new()
-            .name("keel-mcp-http-batch".into())
-            .spawn(move || {
-                let response = match dispatch_http_value(&item, &state, session_id.as_deref()) {
-                    DispatchBodyResult::Json(response) => Some(response),
-                    DispatchBodyResult::Accepted => None,
-                };
-                let _ = tx.send((index, response));
-            });
-    }
-    drop(tx);
+    let current_cancellation = Arc::new(Mutex::new(None::<Arc<AtomicBool>>));
+    let deadline_expired = Arc::new(AtomicBool::new(false));
+    let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+    let timer_current = Arc::clone(&current_cancellation);
+    let timer_expired = Arc::clone(&deadline_expired);
+    let timer = match thread::Builder::new()
+        .name("keel-mcp-http-batch-deadline".into())
+        .spawn(move || {
+            if finished_rx.recv_timeout(wall_budget).is_err() {
+                timer_expired.store(true, Ordering::Release);
+                if let Some(cancellation) = timer_current
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .as_ref()
+                {
+                    cancellation.store(true, Ordering::Release);
+                }
+            }
+        }) {
+        Ok(timer) => timer,
+        Err(error) => {
+            return DispatchBodyResult::Json(super::error_response(
+                Value::Null,
+                JSON_RPC_INTERNAL_ERROR,
+                &format!("batch deadline worker unavailable: {error}"),
+            ));
+        }
+    };
 
-    let mut slots: Vec<Option<Option<Value>>> = vec![None; items.len()];
-    for _ in 0..expected {
-        if let Ok((index, response)) = rx.recv() {
-            if index < slots.len() {
-                slots[index] = Some(response);
+    let batch_cancellations: Vec<Arc<AtomicBool>> = items
+        .iter()
+        .map(|_| Arc::new(AtomicBool::new(false)))
+        .collect();
+    {
+        let mut registrations = state
+            .cancellations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for (item, cancellation) in items.iter().zip(&batch_cancellations) {
+            if let Some(key) = item
+                .get("id")
+                .and_then(|request_id| http_cancellation_key(session_id, request_id))
+            {
+                registrations.insert(key, Arc::clone(cancellation));
             }
         }
     }
-    let responses: Vec<Value> = slots
-        .into_iter()
-        .filter_map(|slot| slot.and_then(|inner| inner))
-        .collect();
+    // The caller scans cancellations before batch registration. Scan once more
+    // so a cancellation notification in the same batch reaches a later item.
+    apply_http_cancellations(body, state, session_id);
+
+    let mut responses = Vec::with_capacity(items.len());
+    for (item, cancellation) in items.iter().zip(&batch_cancellations) {
+        if deadline_expired.load(Ordering::Acquire) {
+            if let Some(id) = item.get("id") {
+                responses.push(super::error_response(
+                    id.clone(),
+                    JSON_RPC_INTERNAL_ERROR,
+                    "batch wall-clock budget exceeded",
+                ));
+            }
+            continue;
+        }
+        *current_cancellation
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::clone(cancellation));
+        let outcome = dispatch_http_value_with_cancellation(
+            item,
+            state,
+            session_id,
+            Arc::clone(cancellation),
+        );
+        let mut current = current_cancellation
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if current
+            .as_ref()
+            .is_some_and(|registered| Arc::ptr_eq(registered, cancellation))
+        {
+            *current = None;
+        }
+        drop(current);
+        match outcome {
+            DispatchBodyResult::Json(response) => responses.push(response),
+            DispatchBodyResult::Accepted
+                if deadline_expired.load(Ordering::Acquire) && item.get("id").is_some() =>
+            {
+                responses.push(super::error_response(
+                    item.get("id").cloned().unwrap_or(Value::Null),
+                    JSON_RPC_INTERNAL_ERROR,
+                    "batch wall-clock budget exceeded",
+                ));
+            }
+            DispatchBodyResult::Accepted => {}
+        }
+    }
+    let _ = finished_tx.send(());
+    let _ = timer.join();
+    {
+        let mut registrations = state
+            .cancellations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for (item, cancellation) in items.iter().zip(&batch_cancellations) {
+            if let Some(key) = item
+                .get("id")
+                .and_then(|request_id| http_cancellation_key(session_id, request_id))
+            {
+                if registrations
+                    .get(&key)
+                    .is_some_and(|registered| Arc::ptr_eq(registered, cancellation))
+                {
+                    registrations.remove(&key);
+                }
+            }
+        }
+    }
     if responses.is_empty() {
         DispatchBodyResult::Accepted
     } else {
@@ -1205,11 +1312,95 @@ mod tests {
                 .collect(),
         );
         let DispatchBodyResult::Json(response) =
-            dispatch_body_concurrent(&body, &Arc::new(HttpState::default()), None)
+            dispatch_body_bounded(&body, &Arc::new(HttpState::default()), None)
         else {
             panic!("oversized batch must return an error response");
         };
         assert_eq!(response["error"]["code"], json!(JSON_RPC_INVALID_REQUEST));
+    }
+
+    #[test]
+    fn maximum_batch_returns_every_response_in_request_order() {
+        let body = Value::Array(
+            (0..MAX_HTTP_BATCH_ITEMS)
+                .map(|id| json!({"jsonrpc":"2.0","id":id,"method":"ping"}))
+                .collect(),
+        );
+        let DispatchBodyResult::Json(Value::Array(responses)) =
+            dispatch_body_bounded(&body, &Arc::new(HttpState::default()), None)
+        else {
+            panic!("maximum batch must return an array");
+        };
+        assert_eq!(responses.len(), MAX_HTTP_BATCH_ITEMS);
+        for (id, response) in responses.iter().enumerate() {
+            assert_eq!(response["id"], json!(id));
+        }
+    }
+
+    #[test]
+    fn batch_deadline_cancels_current_member_and_errors_remaining_requests() {
+        let body = json!([
+            {"jsonrpc":"2.0","id":"slow","method":"keel/test_delay_ms","params":{"ms":500}},
+            {"jsonrpc":"2.0","id":"later","method":"ping"}
+        ]);
+        let started = Instant::now();
+        let DispatchBodyResult::Json(Value::Array(responses)) = dispatch_body_with_budget(
+            &body,
+            &Arc::new(HttpState::default()),
+            Some("deadline-session"),
+            Duration::from_millis(50),
+        ) else {
+            panic!("deadline batch must return errors");
+        };
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert_eq!(responses.len(), 2);
+        assert!(responses
+            .iter()
+            .all(|response| response["error"]["code"] == json!(JSON_RPC_INTERNAL_ERROR)));
+    }
+
+    #[test]
+    fn cancellation_of_preregistered_later_batch_member_prevents_execution() {
+        let state = Arc::new(HttpState::default());
+        let worker_state = Arc::clone(&state);
+        let worker = thread::spawn(move || {
+            dispatch_body_with_budget(
+                &json!([
+                    {"jsonrpc":"2.0","id":"first","method":"keel/test_delay_ms","params":{"ms":200}},
+                    {"jsonrpc":"2.0","id":"later","method":"keel/test_delay_ms","params":{"ms":500}}
+                ]),
+                &worker_state,
+                Some("batch-session"),
+                Duration::from_secs(2),
+            )
+        });
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !state
+            .cancellations
+            .lock()
+            .unwrap()
+            .contains_key("batch-session\0\"later\"")
+        {
+            assert!(
+                Instant::now() < deadline,
+                "later member was not preregistered"
+            );
+            thread::yield_now();
+        }
+        apply_http_cancellations(
+            &json!({
+                "jsonrpc":"2.0",
+                "method":"notifications/cancelled",
+                "params":{"requestId":"later"}
+            }),
+            &state,
+            Some("batch-session"),
+        );
+        let DispatchBodyResult::Json(Value::Array(responses)) = worker.join().unwrap() else {
+            panic!("first batch member must respond");
+        };
+        assert_eq!(responses.len(), 1);
+        assert_eq!(responses[0]["id"], json!("first"));
     }
 
     #[test]

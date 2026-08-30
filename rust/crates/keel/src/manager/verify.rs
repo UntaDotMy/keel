@@ -143,8 +143,63 @@ fn verify_install(
             display_path(&installed_executable_path(&claude_home))
         ));
     }
+    if verify_grok_wiring(&claude_home)? {
+        let _ = writeln!(standard_output, "Grok hooks and MCP registration verified");
+    }
     let _ = writeln!(standard_output, "All Rust verification checks passed");
     Ok(())
+}
+
+fn verify_grok_wiring(keel_home: &Path) -> Result<bool, String> {
+    if !crate::manager::install::is_standard_home(keel_home) {
+        return Ok(false);
+    }
+    let Some(user_home) = crate::manager::install::host_user_home(keel_home) else {
+        return Ok(false);
+    };
+    let grok_home = crate::manager::install::grok_config_home(&user_home);
+    verify_grok_wiring_at(keel_home, &grok_home)
+}
+
+fn verify_grok_wiring_at(keel_home: &Path, grok_home: &Path) -> Result<bool, String> {
+    let hook_path = grok_home.join("hooks").join("keel.json");
+    let config_path = grok_home.join("config.toml");
+    let config_text = read_text_if_exists(&config_path)?;
+    let document = if config_text.trim().is_empty() {
+        None
+    } else {
+        Some(
+            toml::from_str::<toml::Value>(&config_text).map_err(|error| {
+                format!("parse Grok config {}: {error}", display_path(&config_path))
+            })?,
+        )
+    };
+    let has_mcp_entry = document.as_ref().is_some_and(|value| {
+        value
+            .get("mcp_servers")
+            .and_then(|servers| servers.get("keel"))
+            .is_some()
+    });
+    if !hook_path.exists() && !has_mcp_entry {
+        return Ok(false);
+    }
+    let executable = installed_executable_path(keel_home);
+    if !document
+        .as_ref()
+        .is_some_and(|value| crate::manager::doctor::native_mcp_is_current(value, &executable))
+    {
+        return Err(format!(
+            "Grok MCP registration is missing or stale in {}",
+            display_path(&config_path)
+        ));
+    }
+    if !crate::manager::install::grok_hooks_are_current(&hook_path, &executable) {
+        return Err(format!(
+            "Grok hooks are missing or stale in {}",
+            display_path(&hook_path)
+        ));
+    }
+    Ok(true)
 }
 
 fn compare_skill(skill: &SkillDefinition, claude_home: &Path) -> Result<(), String> {
@@ -602,5 +657,51 @@ mod tests {
 
         let _ = fs::remove_dir_all(&root);
         let _ = PathBuf::from("."); // silence unused if any
+    }
+
+    #[test]
+    fn grok_verification_rejects_stale_mcp_and_hook_contracts() {
+        let root = crate::test_support::unique_temp_dir("keel-verify-grok");
+        let keel_home = root.join(".keel");
+        let grok_home = root.join(".grok");
+        let executable = installed_executable_path(&keel_home);
+        fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        fs::write(&executable, "binary").unwrap();
+        fs::create_dir_all(grok_home.join("hooks")).unwrap();
+        crate::manager::install::ensure_codex_native_mcp(
+            &grok_home.join("config.toml"),
+            &executable,
+        )
+        .unwrap();
+        fs::write(
+            grok_home.join("hooks/keel.json"),
+            serde_json::to_string_pretty(&crate::manager::install::grok_hooks_payload(&executable))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(verify_grok_wiring_at(&keel_home, &grok_home), Ok(true));
+
+        let config_path = grok_home.join("config.toml");
+        let mut stale = fs::read_to_string(&config_path)
+            .unwrap()
+            .parse::<toml::Table>()
+            .unwrap();
+        stale["mcp_servers"]["keel"]["command"] = toml::Value::String("C:/stale/keel.exe".into());
+        fs::write(&config_path, toml::to_string_pretty(&stale).unwrap()).unwrap();
+        assert!(verify_grok_wiring_at(&keel_home, &grok_home)
+            .unwrap_err()
+            .contains("MCP registration"));
+
+        crate::manager::install::ensure_codex_native_mcp(&config_path, &executable).unwrap();
+        fs::write(grok_home.join("hooks/keel.json"), "{\"hooks\":{}}").unwrap();
+        assert!(verify_grok_wiring_at(&keel_home, &grok_home)
+            .unwrap_err()
+            .contains("hooks are missing or stale"));
+    }
+
+    #[test]
+    fn grok_verification_skips_nonstandard_explicit_home() {
+        let home = crate::test_support::unique_temp_dir("keel-verify-hermetic-home");
+        assert_eq!(verify_grok_wiring(&home), Ok(false));
     }
 }

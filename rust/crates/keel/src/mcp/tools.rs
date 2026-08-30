@@ -1391,6 +1391,10 @@ struct BackgroundCommand {
     process_guard: Mutex<Option<crate::runtime::ChildProcessGuard>>,
     exit: Arc<Mutex<Option<i32>>>,
     readers_done: ReaderState,
+    // On Unix the supervisor watches this pipe. Abrupt MCP server exit closes
+    // the writer in the kernel, causing the supervisor to kill its process
+    // group even though Rust destructors cannot run after a hard crash.
+    _lifetime_pipe: Mutex<Option<std::process::ChildStdin>>,
 }
 
 fn background_registry() -> &'static Mutex<std::collections::HashMap<String, Arc<BackgroundCommand>>>
@@ -1415,6 +1419,7 @@ fn next_background_id() -> String {
 fn spawn_background_command(mut child: Command, label: &str) -> Result<String, String> {
     #[cfg(unix)]
     {
+        child = unix_background_supervisor(&child);
         use std::os::unix::process::CommandExt;
         // setsid detaches the child into a new session + process group, making
         // its pid == pgid. Safe here: we never send SIGINT-style job-control
@@ -1442,6 +1447,7 @@ fn spawn_background_command(mut child: Command, label: &str) -> Result<String, S
         }
     };
     let pid = spawned.id();
+    let lifetime_pipe = spawned.stdin.take();
     let stdout_pipe = spawned
         .stdout
         .take()
@@ -1461,6 +1467,7 @@ fn spawn_background_command(mut child: Command, label: &str) -> Result<String, S
         process_guard: Mutex::new(Some(process_guard)),
         exit: Arc::new(Mutex::new(None)),
         readers_done: Arc::new((Mutex::new(2), Condvar::new())),
+        _lifetime_pipe: Mutex::new(lifetime_pipe),
     });
     let command_id = next_background_id();
 
@@ -1526,6 +1533,39 @@ fn spawn_background_command(mut child: Command, label: &str) -> Result<String, S
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     registry.insert(command_id.clone(), entry);
     Ok(command_id)
+}
+
+#[cfg(unix)]
+fn unix_background_supervisor(command: &Command) -> Command {
+    let program = command.get_program().to_os_string();
+    let arguments: Vec<std::ffi::OsString> =
+        command.get_args().map(|arg| arg.to_os_string()).collect();
+    let mut supervised = Command::new("sh");
+    supervised
+        .arg("-c")
+        .arg(
+            "parent_watch() { while IFS= read -r _; do :; done; kill -KILL -$$ 2>/dev/null || true; }; parent_watch & watcher=$!; \"$@\" </dev/null & command_pid=$!; wait \"$command_pid\"; status=$?; kill \"$watcher\" 2>/dev/null || true; wait \"$watcher\" 2>/dev/null || true; exit \"$status\"",
+        )
+        .arg("keel-background-supervisor")
+        .arg(program)
+        .args(arguments)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(directory) = command.get_current_dir() {
+        supervised.current_dir(directory);
+    }
+    for (key, value) in command.get_envs() {
+        match value {
+            Some(value) => {
+                supervised.env(key, value);
+            }
+            None => {
+                supervised.env_remove(key);
+            }
+        }
+    }
+    supervised
 }
 
 /// Start a long keel job without blocking the MCP worker. Returns a compact
@@ -2416,6 +2456,7 @@ fn run_command_with_timeout_stdin(
     timeout: Duration,
     label: &str,
 ) -> Result<(i32, String, String), String> {
+    crate::runtime::configure_process_group(&mut command);
     let mut child = command
         .spawn()
         .map_err(|error| format!("{label}: spawn: {error}"))?;
@@ -2447,16 +2488,12 @@ fn run_command_with_timeout_stdin(
         .ok_or_else(|| format!("{label}: missing stderr pipe"))?;
 
     let stdout_handle = std::thread::spawn(move || {
-        let mut buf = String::new();
-        let mut reader = stdout_pipe;
-        let _ = reader.read_to_string(&mut buf);
-        buf
+        let (bytes, _) = crate::runtime::capture_stream(stdout_pipe);
+        String::from_utf8_lossy(&bytes).into_owned()
     });
     let stderr_handle = std::thread::spawn(move || {
-        let mut buf = String::new();
-        let mut reader = stderr_pipe;
-        let _ = reader.read_to_string(&mut buf);
-        buf
+        let (bytes, _) = crate::runtime::capture_stream(stderr_pipe);
+        String::from_utf8_lossy(&bytes).into_owned()
     });
 
     let deadline = Instant::now() + timeout;
@@ -2512,6 +2549,9 @@ fn run_command_with_timeout_stdin(
         }
     };
 
+    // A descendant can outlive the leader while retaining the captured pipe.
+    // End the owned tree before joining readers so completion stays bounded.
+    let _ = crate::runtime::terminate_owned_process_tree(&mut child, &mut process_guard);
     let stdout_text = stdout_handle
         .join()
         .unwrap_or_else(|_| String::from("(stdout reader panicked)"));
@@ -2657,6 +2697,42 @@ mod mcp_timeout_tests {
             err.contains("timed out"),
             "expected timeout error, got: {err}"
         );
+    }
+
+    #[test]
+    fn mcp_runner_closes_descendant_held_pipes_after_leader_exit() {
+        let mut command = if cfg!(windows) {
+            let mut command = Command::new("powershell");
+            command.args([
+                "-NoProfile",
+                "-Command",
+                "$p=Start-Process powershell -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds 30' -NoNewWindow -PassThru; Write-Output $p.Id",
+            ]);
+            command
+        } else {
+            let mut command = Command::new("sh");
+            command.args(["-c", "sleep 30 & echo $!"]);
+            command
+        };
+        command.stdin(Stdio::null());
+        command.stdout(Stdio::piped());
+        command.stderr(Stdio::piped());
+        let started = Instant::now();
+        let (_, stdout, _) =
+            run_command_with_timeout(command, Duration::from_secs(3), "descendant-pipe-test")
+                .expect("leader exit must close inherited pipes");
+        assert!(started.elapsed() < Duration::from_secs(3));
+        let descendant = stdout
+            .lines()
+            .find_map(|line| line.trim().parse::<u32>().ok())
+            .expect("descendant pid");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while crate::runtime::process_is_alive(descendant) == Some(true)
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_ne!(crate::runtime::process_is_alive(descendant), Some(true));
     }
 
     #[test]
@@ -4619,5 +4695,39 @@ mod tests {
         assert!(error.contains("unknown command_id"), "got: {error}");
         let error = tool_command_output(&json!({ "command_id": "nope" })).expect_err("unknown");
         assert!(error.contains("unknown command_id"), "got: {error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn closing_server_lifetime_pipe_reaps_background_process_group() {
+        let mut child = Command::new("sh");
+        child.args(["-c", "sleep 60"]);
+        child.stdin(Stdio::null());
+        child.stdout(Stdio::piped());
+        child.stderr(Stdio::piped());
+        let id = spawn_background_command(child, "server-death-watchdog").expect("spawn");
+        let entry = background_registry()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&id)
+            .cloned()
+            .expect("registry entry");
+        let pid = entry.pid.expect("supervisor pid");
+
+        entry
+            ._lifetime_pipe
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while crate::runtime::process_is_alive(pid) == Some(true) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_ne!(crate::runtime::process_is_alive(pid), Some(true));
+        background_registry()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&id);
     }
 }

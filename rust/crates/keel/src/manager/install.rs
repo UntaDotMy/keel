@@ -26,9 +26,11 @@ pub use executable::{
 };
 pub use flags::InstallOverrides;
 pub(crate) use flags::PlatformName;
+#[cfg(test)]
+pub(crate) use hosts::grok_hooks_payload;
 pub(crate) use hosts::{
-    grok_config_home, maybe_wire_codex, maybe_wire_commandcode, maybe_wire_cowork,
-    maybe_wire_cursor, maybe_wire_grok, maybe_wire_opencode, maybe_wire_pi,
+    grok_config_home, grok_hooks_are_current, maybe_wire_codex, maybe_wire_commandcode,
+    maybe_wire_cowork, maybe_wire_cursor, maybe_wire_grok, maybe_wire_opencode, maybe_wire_pi,
 };
 pub use path::ensure_keel_home_on_path;
 

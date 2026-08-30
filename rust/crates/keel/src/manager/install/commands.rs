@@ -522,48 +522,42 @@ fn run_packaged_release_update(
         return 1;
     }
     let _ = writeln!(standard_output, "Updating from the latest packaged release");
-    let result = if cfg!(windows) {
-        Command::new("powershell")
-            .args([
+    let mut command = if cfg!(windows) {
+        let mut command = Command::new("powershell");
+        command.args([
                 "-NoProfile",
                 "-ExecutionPolicy",
                 "Bypass",
                 "-Command",
-                r#"$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; $d=Join-Path ([IO.Path]::GetTempPath()) ('keel-update-'+[Guid]::NewGuid().ToString('N')); try { New-Item -ItemType Directory -Path $d | Out-Null; $s=Join-Path $d 'install.ps1'; $c=Join-Path $d 'install.ps1.sha256'; Invoke-WebRequest -Uri ($args[0]+'/install.ps1') -OutFile $s; Invoke-WebRequest -Uri ($args[0]+'/install.ps1.sha256') -OutFile $c; $expected=((Get-Content -Raw $c).Trim() -split '\s+')[0].ToUpperInvariant(); if($expected -notmatch '^[0-9A-F]{64}$'){throw 'Invalid installer checksum'}; $actual=(Get-FileHash -Algorithm SHA256 $s).Hash.ToUpperInvariant(); if($actual -ne $expected){throw 'Installer checksum mismatch'}; & $s; exit $LASTEXITCODE } finally { if(Test-Path -LiteralPath $d){Remove-Item -LiteralPath $d -Recurse -Force} }"#,
+                r#"$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; $d=Join-Path ([IO.Path]::GetTempPath()) ('keel-update-'+[Guid]::NewGuid().ToString('N')); try { New-Item -ItemType Directory -Path $d | Out-Null; $s=Join-Path $d 'install.ps1'; $c=Join-Path $d 'install.ps1.sha256'; Invoke-WebRequest -TimeoutSec 60 -Uri ($args[0]+'/install.ps1') -OutFile $s; Invoke-WebRequest -TimeoutSec 60 -Uri ($args[0]+'/install.ps1.sha256') -OutFile $c; $expected=((Get-Content -Raw $c).Trim() -split '\s+')[0].ToUpperInvariant(); if($expected -notmatch '^[0-9A-F]{64}$'){throw 'Invalid installer checksum'}; $actual=(Get-FileHash -Algorithm SHA256 $s).Hash.ToUpperInvariant(); if($actual -ne $expected){throw 'Installer checksum mismatch'}; & $s; exit $LASTEXITCODE } finally { if(Test-Path -LiteralPath $d){Remove-Item -LiteralPath $d -Recurse -Force} }"#,
                 &format!(
                     "https://github.com/{repository}/releases/latest/download"
                 ),
-            ])
-            .env("KEEL_HOME", keel_home)
-            .env("CLAUDE_SKILLS_REPOSITORY", repository)
-            .env("CLAUDE_SKILLS_VERSION", "latest")
-            .output()
+            ]);
+        command
     } else {
-        Command::new("bash")
-            .args([
+        let mut command = Command::new("bash");
+        command.args([
                 "-c",
                 "set -euo pipefail; d=$(mktemp -d \"${TMPDIR:-/tmp}/keel-update.XXXXXX\"); trap 'rm -rf \"$d\"' EXIT; curl -fsSL --connect-timeout 15 --max-time 60 -o \"$d/install.sh\" \"$1/install.sh\"; curl -fsSL --connect-timeout 15 --max-time 60 -o \"$d/install.sh.sha256\" \"$1/install.sh.sha256\"; expected=$(awk 'NF {print tolower($1); exit}' \"$d/install.sh.sha256\"); case \"$expected\" in (*[!0-9a-f]*|'') echo 'Invalid installer checksum' >&2; exit 1;; esac; if [ ${#expected} -ne 64 ]; then echo 'Invalid installer checksum' >&2; exit 1; fi; if command -v sha256sum >/dev/null 2>&1; then actual=$(sha256sum \"$d/install.sh\" | awk '{print tolower($1)}'); else actual=$(shasum -a 256 \"$d/install.sh\" | awk '{print tolower($1)}'); fi; [ \"$actual\" = \"$expected\" ] || { echo 'Installer checksum mismatch' >&2; exit 1; }; bash \"$d/install.sh\"",
                 "keel-update",
                 &format!(
                     "https://github.com/{repository}/releases/latest/download"
                 ),
-            ])
-            .env("KEEL_HOME", keel_home)
-            .env("CLAUDE_SKILLS_REPOSITORY", repository)
-            .env("CLAUDE_SKILLS_VERSION", "latest")
-            .output()
+            ]);
+        command
     };
+    command
+        .env("KEEL_HOME", keel_home)
+        .env("CLAUDE_SKILLS_REPOSITORY", repository)
+        .env("CLAUDE_SKILLS_VERSION", "latest");
+    let result = crate::runtime::run_prepared_command_with_timeout(
+        command,
+        "packaged release update",
+        std::time::Duration::from_secs(300),
+    );
     match result {
-        Ok(output) => {
-            let original_stdout_bytes = output.stdout.len();
-            let original_stderr_bytes = output.stderr.len();
-            let process_result = crate::runtime::ProcessResult {
-                code: output.status.code().unwrap_or(1),
-                stdout: output.stdout,
-                stderr: output.stderr,
-                original_stdout_bytes,
-                original_stderr_bytes,
-            };
+        Ok(process_result) => {
             crate::runtime::forward_process_result(
                 &process_result,
                 standard_output,
