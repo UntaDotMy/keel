@@ -6,6 +6,74 @@ use crate::runtime::resolve_claude_home;
 use crate::utility::anvil::lock::validate_lock;
 use crate::utility::system_map::sanitize_key;
 
+pub struct JobLease {
+    path: PathBuf,
+    owner: String,
+}
+
+impl JobLease {
+    pub fn acquire(paths: &JobPaths) -> Result<Self, String> {
+        let parent = paths
+            .dir
+            .parent()
+            .ok_or_else(|| "anvil: job directory has no parent".to_string())?;
+        std::fs::create_dir_all(parent).map_err(|error| format!("anvil lock: {error}"))?;
+        let path = parent.join("anvil.operation.lock");
+        let owner = format!(
+            "pid={} nonce={}\n",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0)
+        );
+        for attempt in 0..2 {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(mut file) => {
+                    use std::io::Write as _;
+                    if let Err(error) = file
+                        .write_all(owner.as_bytes())
+                        .and_then(|_| file.sync_all())
+                    {
+                        drop(file);
+                        let _ = std::fs::remove_file(&path); // intentional partial-lease cleanup
+                        return Err(format!("anvil lock: {error}"));
+                    }
+                    return Ok(Self { path, owner });
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && attempt == 0 => {
+                    let stale = std::fs::metadata(&path)
+                        .and_then(|metadata| metadata.modified())
+                        .ok()
+                        .and_then(|modified| modified.elapsed().ok())
+                        .is_some_and(|age| age > std::time::Duration::from_secs(7_200));
+                    if stale {
+                        std::fs::remove_file(&path).map_err(|remove| {
+                            format!("anvil lock: remove stale lease: {remove}")
+                        })?;
+                        continue;
+                    }
+                    return Err(format!("anvil: another operation owns {}", path.display()));
+                }
+                Err(error) => return Err(format!("anvil lock: {error}")),
+            }
+        }
+        Err("anvil: could not acquire operation lease".to_string())
+    }
+}
+
+impl Drop for JobLease {
+    fn drop(&mut self) {
+        if std::fs::read_to_string(&self.path).ok().as_deref() == Some(self.owner.as_str()) {
+            let _ = std::fs::remove_file(&self.path); // intentional best-effort Drop cleanup
+        }
+    }
+}
+
 /// Host-neutral Anvil bank for one workspace.
 ///
 /// Lock, prefix, gates, cast results, and the report live under
@@ -72,11 +140,8 @@ impl JobPaths {
 }
 
 pub fn resolve_workspace_root(flag: &str) -> Result<PathBuf, String> {
-    let path = if flag.trim().is_empty() {
-        std::env::current_dir().map_err(|error| format!("workspace-root: {error}"))?
-    } else {
-        PathBuf::from(flag)
-    };
+    let path = crate::runtime::resolve_repository_root(flag)
+        .map_err(|error| format!("workspace-root: {error}"))?;
     if !path.is_dir() {
         return Err(format!(
             "workspace-root not a directory: {}",
@@ -212,6 +277,52 @@ pub fn n_casts(lock: &JsonValue) -> u64 {
         .clamp(1, 8)
 }
 
+pub fn generation(lock: &JsonValue) -> Result<&str, String> {
+    lock.get("generation")
+        .and_then(JsonValue::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "anvil: lock generation missing".to_string())
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct JobBudget {
+    pub builder_retries: u64,
+    pub max_tokens_cast: u64,
+    pub max_tokens_loop: u64,
+    pub max_tool_chars: usize,
+    pub max_iterations: usize,
+    pub min_improvement: f64,
+    pub wall_timeout: std::time::Duration,
+    pub gate_timeout: std::time::Duration,
+}
+
+pub fn budget_from_lock(lock: &JsonValue) -> Result<JobBudget, String> {
+    let budget = lock
+        .get("budget")
+        .and_then(JsonValue::as_object)
+        .ok_or_else(|| "anvil: lock budget missing".to_string())?;
+    let required = |key: &str| {
+        budget
+            .get(key)
+            .and_then(JsonValue::as_u64)
+            .ok_or_else(|| format!("anvil: lock budget.{key} missing"))
+    };
+    Ok(JobBudget {
+        builder_retries: required("builder_retries")?,
+        max_tokens_cast: required("max_tokens_cast")?,
+        max_tokens_loop: required("max_tokens_loop")?,
+        max_tool_chars: required("max_tool_chars")? as usize,
+        max_iterations: required("max_iterations")? as usize,
+        min_improvement: budget
+            .get("min_improvement_threshold")
+            .and_then(JsonValue::as_f64)
+            .ok_or_else(|| "anvil: lock budget.min_improvement_threshold missing".to_string())?,
+        wall_timeout: std::time::Duration::from_secs(required("wall_timeout_secs")?),
+        gate_timeout: std::time::Duration::from_secs(required("gate_timeout_secs")?),
+    })
+}
+
 fn string_list(value: Option<&JsonValue>) -> Vec<String> {
     value
         .and_then(JsonValue::as_array)
@@ -229,6 +340,37 @@ fn string_list(value: Option<&JsonValue>) -> Vec<String> {
 mod tests {
     use super::*;
 
+    struct TempTestDir(std::path::PathBuf);
+
+    impl TempTestDir {
+        fn new(label: &str) -> Self {
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let path =
+                std::env::temp_dir().join(format!("anvil-{label}-{}-{stamp}", std::process::id()));
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempTestDir {
+        fn drop(&mut self) {
+            for _ in 0..5 {
+                match std::fs::remove_dir_all(&self.0) {
+                    Ok(()) => return,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+                    Err(_) => std::thread::sleep(std::time::Duration::from_millis(10)),
+                }
+            }
+        }
+    }
+
     #[test]
     fn resolve_workspace_root_rejects_file_and_missing() {
         let missing = resolve_workspace_root("D:/anvil-missing-workspace-root");
@@ -236,61 +378,59 @@ mod tests {
     }
 
     #[test]
+    fn relative_workspace_root_resolves_to_the_same_nonempty_lane_as_absolute() {
+        let current = std::env::current_dir().unwrap();
+        let relative = JobPaths::from_resolved(
+            resolve_workspace_root(".").expect("relative root"),
+            std::env::temp_dir().join("anvil-relative-home"),
+        );
+        let absolute = JobPaths::from_resolved(
+            resolve_workspace_root(&current.display().to_string()).expect("absolute root"),
+            std::env::temp_dir().join("anvil-relative-home"),
+        );
+        assert_eq!(relative.dir, absolute.dir);
+        assert_ne!(
+            relative.dir.parent().and_then(|path| path.file_name()),
+            Some(std::ffi::OsStr::new("workspaces"))
+        );
+    }
+
+    #[test]
     fn bank_is_under_memory_lane_not_workspace() {
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let workspace = std::env::temp_dir().join(format!("anvil-job-ws-{stamp}"));
-        let home = std::env::temp_dir().join(format!("anvil-job-home-{stamp}"));
-        std::fs::create_dir_all(&workspace).unwrap();
-        std::fs::create_dir_all(&home).unwrap();
-        let paths = JobPaths::from_resolved(workspace.clone(), home.clone());
-        assert!(paths.dir.starts_with(&home));
+        let workspace = TempTestDir::new("job-ws");
+        let home = TempTestDir::new("job-home");
+        let paths = JobPaths::from_resolved(workspace.path().into(), home.path().into());
+        assert!(paths.dir.starts_with(home.path()));
         assert!(paths.dir.ends_with("anvil"));
         assert!(paths.dir.to_string_lossy().contains("memories"));
         assert!(paths.dir.to_string_lossy().contains("workspaces"));
-        assert!(!paths.dir.starts_with(&workspace));
-        let _ = std::fs::remove_dir_all(&workspace);
-        let _ = std::fs::remove_dir_all(&home);
+        assert!(!paths.dir.starts_with(workspace.path()));
     }
 
     #[test]
     fn active_jobs_summary_reports_lock_and_report_state() {
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let workspace = std::env::temp_dir().join(format!("anvil-sum-ws-{stamp}"));
-        let home = std::env::temp_dir().join(format!("anvil-sum-home-{stamp}"));
-        std::fs::create_dir_all(&workspace).unwrap();
-        std::fs::create_dir_all(&home).unwrap();
-        let paths = JobPaths::from_resolved(workspace.clone(), home.clone());
+        let workspace = TempTestDir::new("sum-ws");
+        let home = TempTestDir::new("sum-home");
+        let paths = JobPaths::from_resolved(workspace.path().into(), home.path().into());
 
         // No lock yet: the axis must be empty, never fabricated.
-        assert!(active_jobs_summary(&home, Some(&workspace)).is_empty());
+        assert!(active_jobs_summary(home.path(), Some(workspace.path())).is_empty());
 
         paths.ensure_dir().unwrap();
         std::fs::write(paths.lock_path(), "{}").unwrap();
-        let summary = active_jobs_summary(&home, Some(&workspace));
-        let lane_id = sanitize_key(&workspace.to_string_lossy());
+        let summary = active_jobs_summary(home.path(), Some(workspace.path()));
+        let lane_id = sanitize_key(&workspace.path().to_string_lossy());
         assert_eq!(summary, vec![(lane_id.clone(), "active".to_string())]);
 
         std::fs::write(paths.report_path(), "{}").unwrap();
-        let summary = active_jobs_summary(&home, Some(&workspace));
+        let summary = active_jobs_summary(home.path(), Some(workspace.path()));
         assert_eq!(summary, vec![(lane_id, "complete".to_string())]);
-        let _ = std::fs::remove_dir_all(&workspace);
-        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
     fn active_jobs_summary_scans_all_lanes_when_unscoped() {
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let home = std::env::temp_dir().join(format!("anvil-sum-scan-{stamp}"));
-        let workspaces = home.join("memories").join("workspaces");
+        let home = TempTestDir::new("sum-scan");
+        let workspaces = home.path().join("memories").join("workspaces");
         for slug in ["b-slug", "a-slug"] {
             let lane = workspaces.join(slug).join("anvil");
             std::fs::create_dir_all(&lane).unwrap();
@@ -299,7 +439,7 @@ mod tests {
         // A lane without a lock is not a job.
         std::fs::create_dir_all(workspaces.join("empty-slug").join("anvil")).unwrap();
 
-        let summary = active_jobs_summary(&home, None);
+        let summary = active_jobs_summary(home.path(), None);
         assert_eq!(
             summary,
             vec![
@@ -307,27 +447,18 @@ mod tests {
                 ("b-slug".to_string(), "active".to_string()),
             ]
         );
-        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
     fn same_workspace_and_home_share_bank() {
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let workspace = std::env::temp_dir().join(format!("anvil-job-share-{stamp}"));
-        let home = std::env::temp_dir().join(format!("anvil-job-share-home-{stamp}"));
-        std::fs::create_dir_all(&workspace).unwrap();
-        let first = JobPaths::from_resolved(workspace.clone(), home.clone());
-        let second = JobPaths::from_resolved(workspace.clone(), home.clone());
+        let workspace = TempTestDir::new("job-share");
+        let home = TempTestDir::new("job-share-home");
+        let other_home = TempTestDir::new("job-other-home");
+        let first = JobPaths::from_resolved(workspace.path().into(), home.path().into());
+        let second = JobPaths::from_resolved(workspace.path().into(), home.path().into());
         assert_eq!(first.dir, second.dir);
-        let other = JobPaths::from_resolved(
-            workspace.clone(),
-            std::env::temp_dir().join(format!("anvil-job-other-home-{stamp}")),
-        );
+        let other = JobPaths::from_resolved(workspace.path().into(), other_home.path().into());
         assert_ne!(first.dir, other.dir);
-        let _ = std::fs::remove_dir_all(&workspace);
     }
 
     #[test]
@@ -355,5 +486,16 @@ mod tests {
         assert_eq!(n_casts(&lock), 1);
         let lock = serde_json::json!({});
         assert_eq!(n_casts(&lock), 3);
+    }
+
+    #[test]
+    fn operation_lease_is_exclusive_and_released_by_drop() {
+        let workspace = TempTestDir::new("lease-ws");
+        let home = TempTestDir::new("lease-home");
+        let paths = JobPaths::from_resolved(workspace.path().into(), home.path().into());
+        let first = JobLease::acquire(&paths).expect("first lease");
+        assert!(JobLease::acquire(&paths).is_err());
+        drop(first);
+        assert!(JobLease::acquire(&paths).is_ok());
     }
 }

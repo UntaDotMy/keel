@@ -32,6 +32,14 @@ fn validate_value(v: &JsonValue) -> Result<(), String> {
     if version != 1 {
         return Err("lock: version must be 1".into());
     }
+    let generation = obj
+        .get("generation")
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .trim();
+    if generation.is_empty() {
+        return Err("lock: generation required".into());
+    }
     let goal = obj
         .get("goal")
         .and_then(|x| x.as_str())
@@ -95,6 +103,38 @@ fn validate_value(v: &JsonValue) -> Result<(), String> {
             return Err("lock: budget.min_improvement_threshold must be 0..1".into());
         }
     }
+    for key in [
+        "builder_retries",
+        "max_tokens_cast",
+        "max_tokens_stamp",
+        "max_tokens_loop",
+        "max_tool_chars",
+    ] {
+        let value = budget
+            .get(key)
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0);
+        if value == 0 {
+            return Err(format!("lock: budget.{key} must be positive"));
+        }
+        let maximum = match key {
+            "builder_retries" => 10,
+            "max_tool_chars" => 1_000_000,
+            _ => 10_000_000,
+        };
+        if value > maximum {
+            return Err(format!("lock: budget.{key} must not exceed {maximum}"));
+        }
+    }
+    for (key, maximum) in [("wall_timeout_secs", 3600), ("gate_timeout_secs", 1800)] {
+        let value = budget
+            .get(key)
+            .and_then(|item| item.as_u64())
+            .ok_or_else(|| format!("lock: budget.{key} required"))?;
+        if value == 0 || value > maximum {
+            return Err(format!("lock: budget.{key} must be 1..{maximum}"));
+        }
+    }
     let models = obj
         .get("models")
         .and_then(|x| x.as_object())
@@ -137,6 +177,7 @@ fn validate_value(v: &JsonValue) -> Result<(), String> {
         return Err("lock: pieces must be non-empty".into());
     }
     let mut ids = HashSet::new();
+    let mut owned_files = HashSet::new();
     let has_blind = pieces
         .iter()
         .any(|p| p.get("critic").and_then(|x| x.as_str()) == Some("blind_ab"));
@@ -151,6 +192,25 @@ fn validate_value(v: &JsonValue) -> Result<(), String> {
         }
         if !ids.insert(id.to_string()) {
             return Err(format!("lock: duplicate piece id {id:?}"));
+        }
+        let files = o
+            .get("files")
+            .and_then(|value| value.as_array())
+            .ok_or_else(|| format!("lock: piece {id} files required"))?;
+        if files.is_empty() {
+            return Err(format!("lock: piece {id} files must be non-empty"));
+        }
+        for file in files {
+            let file = file
+                .as_str()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| format!("lock: piece {id} files must be strings"))?;
+            if !owned_files.insert(file.to_string()) {
+                return Err(format!(
+                    "lock: file {file:?} is owned by more than one piece"
+                ));
+            }
         }
         let critic = o.get("critic").and_then(|x| x.as_str()).unwrap_or("");
         if !matches!(critic, "none" | "blind_ab") {
@@ -177,9 +237,10 @@ mod tests {
     fn minimal_lock(allow: bool, n_casts: u64) -> String {
         serde_json::json!({
             "version": 1,
+            "generation": "test-generation",
             "goal": "CLI that pretty-prints JSON logs",
             "bar": {"name": "jq 1.7", "fetch": "cmd:jq --version", "compare": "stdout+exit"},
-            "budget": {"n_casts": n_casts, "k_pivots": 1, "critic_k": 1, "granularity": 20, "builder_retries": 2, "max_tokens_cast": 80000, "max_tokens_stamp": 40000, "max_tokens_loop": 100000, "max_tool_chars": 4000, "max_iterations": 20, "min_improvement_threshold": 0.05},
+            "budget": {"n_casts": n_casts, "k_pivots": 1, "critic_k": 1, "granularity": 20, "builder_retries": 2, "max_tokens_cast": 80000, "max_tokens_stamp": 40000, "max_tokens_loop": 100000, "max_tool_chars": 4000, "max_iterations": 20, "min_improvement_threshold": 0.05, "wall_timeout_secs": 300, "gate_timeout_secs": 120},
             "models": {"compile": "frontier", "cast": "cheap", "stamp": "mid", "loop": "cheap", "allow_training_data": allow},
             "criteria": ["specification","output","errors"],
             "pieces": [{"id":"parse","files":["src/parse.py"],"gates":["pytest -q tests/test_parse.py"],"critic":"none"}]
@@ -211,6 +272,13 @@ mod tests {
     fn rejects_max_iterations_bounds() {
         let mut v: JsonValue = serde_json::from_str(&minimal_lock(true, 3)).unwrap();
         v["budget"]["max_iterations"] = JsonValue::Number(serde_json::Number::from(100));
+        assert!(validate_value(&v).is_err());
+    }
+
+    #[test]
+    fn rejects_unbounded_builder_retries() {
+        let mut v: JsonValue = serde_json::from_str(&minimal_lock(true, 3)).unwrap();
+        v["budget"]["builder_retries"] = JsonValue::Number(serde_json::Number::from(11));
         assert!(validate_value(&v).is_err());
     }
 }
