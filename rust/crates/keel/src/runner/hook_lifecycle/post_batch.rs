@@ -1,66 +1,6 @@
 //! Hook lifecycle post_batch responsibility split.
 
-#![allow(unused_imports)]
-
-use super::{
-    display_path, event_by_name, event_by_slug, fs, installed_executable_path, learning,
-    observation, resolve_claude_home, resolve_repository_root, rewrite_command_text_for_shell,
-    rewrite_shell_for_tool, tool_timings, utility, write_indented, write_text, BTreeMap, FlagSet,
-    HookEvent, JsonDocument, JsonMap, Path, PathBuf, RawStore, Read, Value, Write, HOOK_EVENTS,
-};
-
-use super::{
-    anvil_gate_enabled, anvil_satisfied_path, anvil_satisfied_this_session,
-    anvil_workspace_marker_ms, append_compression_hint_when_forced, append_managed_hooks,
-    base64_decode, brief_is_fresh, build_hooks_payload, build_session_summary,
-    claude_hook_event_names, collect_hook_diagnostics, command_path_is_managed_executable,
-    compression_hint_text, count_session_tool_timing_rows, cue_used_as_verb,
-    decode_powershell_encoded_command, emit_pretool_deny, ensure_hooks_object,
-    ensure_skill_listing_budget_fraction, hook_session_id, hook_str, hook_tool_name,
-    increment_counter_file, iron_law_gate_decision, iron_law_gate_mode, iron_law_legacy_path,
-    iron_law_marker_present, iron_law_satisfied_path, is_edit_class_tool, is_help_argument,
-    is_host_research_tool_name, is_host_shell_tool_name, is_keel_research_command,
-    is_keel_research_tool_name, is_managed_args_form, is_managed_hook_command,
-    is_managed_hook_command_with_depth, is_managed_hook_entry, is_secret_key, is_shell_tool_name,
-    is_web_research_tool_name, lifecycle_additional_context, managed_hook_command,
-    managed_hook_entry, mark_anvil_satisfied, mark_iron_law_satisfied, mask_secret_value,
-    maybe_capture_session_summary, maybe_capture_session_summary_with_id, maybe_compression_hint,
-    maybe_mark_iron_law_from_parts, maybe_mark_iron_law_from_tool_event,
-    maybe_self_heal_mcp_registration, mcp_tool_pointer_for_prompt, memory_scope_summary,
-    memory_system_map_path_for_workspace, post_compact_context, post_tool_batch_context,
-    pre_compact_context, prune_dir_files_older_than, prune_observations_store,
-    prune_raw_output_store, prune_state_marker_stores, prune_tool_timings_store,
-    read_hooks_document, read_json_stdin_fail_open, read_stdin_text, record_anvil_gate_clear,
-    redact_secrets_in_settings, redact_secrets_in_value,
-    refresh_memory_scope_for_current_directory, remove_managed_hook_payload,
-    remove_managed_hook_payload_for_home, remove_managed_hooks, render_hook_help,
-    render_lifecycle_payload, reset_counter_file, resolve_current_executable,
-    run_bridge_session_end, run_hook_command, run_hook_cwd_changed, run_hook_diagnose,
-    run_hook_git_hooks, run_hook_install, run_hook_instructions, run_hook_lifecycle, run_hook_list,
-    run_hook_notification, run_hook_permission_denied, run_hook_permission_request,
-    run_hook_post_tool_use, run_hook_post_tool_use_failure, run_hook_pre_tool_use,
-    run_hook_session_end, run_hook_subagent_start, run_hook_uninstall, run_hook_user_prompt_submit,
-    run_iron_law_gate, run_post_tool_comment_lint, run_post_tool_graph_context,
-    run_session_end_learning, sanitize_memory_key, session_has_iron_law_evidence,
-    session_start_context, set_core_hooks_path, settings_points_at_installed_executable,
-    should_refresh_system_map, skill_pointer_fallback, skill_pointer_text, sort_hook_events,
-    subagent_start_context, system_map_edit_counter_path, system_map_refresh_threshold,
-    today_date_string, tool_input_command, tool_is_anvil_surface, tool_is_iron_law_gated,
-    tool_satisfies_iron_law, truncate_on_line_boundary, user_config_or_env_u64,
-    user_config_review_strictness, user_prompt_submit_context, user_prompt_submit_core,
-    work_intent_pointer_for_prompt, workspace_memory_digest, HookDiagnostics, IronLawGateMode,
-    ManagedHookEntry, SessionSummary, ANVIL_GATE_DENIAL, ANVIL_SATISFIED_DIR, COMPACT_BOOTSTRAP,
-    COMPRESSION_HINT_DEFAULT_THRESHOLD, DIGEST_BRIEF_MAX_BYTES, DIGEST_MAP_HEAD_MAX_BYTES,
-    DIGEST_MEMORY_MAX_BYTES, INSTINCT_DIGEST_MAX_BYTES, IRON_LAW_GATE_DENIAL_BALANCED,
-    IRON_LAW_GATE_DENIAL_STRICT, IRON_LAW_GATE_DENIAL_VERIFIED, IRON_LAW_GATE_ENV_VAR,
-    IRON_LAW_LEGACY_GATE_DIR, IRON_LAW_SATISFIED_DIR, MANAGED_PRE_TOOL_USE_EVENT,
-    MCP_SELF_HEAL_ENV_VAR, NOTIFICATION_BELL_OUTPUT, OBSERVATION_DEFAULT_RETENTION_DAYS,
-    PLUGIN_MEMORY_RETENTION_DAYS, PLUGIN_REVIEW_STRICTNESS, PLUGIN_SYSTEM_MAP_REFRESH_INTERVAL,
-    RAW_OUTPUT_DEFAULT_RETENTION_DAYS, REVIEW_GATE_ENV_VAR, REVIEW_GATE_MAX_BLOCKS_ENV_VAR,
-    SESSION_CAPTURE_ENV_VAR, SYNTHESIS_NUDGE_MAX_BYTES, SYSTEM_MAP_REFRESH_DEFAULT_THRESHOLD,
-    TIMINGS_DEFAULT_RETENTION_DAYS, USER_PROMPT_DIGEST_MAX_BYTES, USER_PROMPT_ENFORCEMENT_STRIP,
-    WORKSPACE_DIGEST_MAX_BYTES, WORK_INTENT_REMINDER,
-};
+use super::*;
 
 pub(super) const GATE_DEFAULT_MAX_BLOCKS: u64 = 1;
 
@@ -582,14 +522,14 @@ pub(super) fn file_mtime_ms(path: &Path) -> Option<u64> {
 /// `<claude_home>/working-briefs/*.json` — the same directory the
 /// `keel memory working-brief write` surface writes to.
 ///
-/// A brief applies when its stored `workspace` matches `workspace_cwd` (compared
-/// through [`sanitize_memory_key`] so path-separator and case differences
-/// normalize out) OR its workspace is empty. Empty means a legacy brief written
-/// before the field existed, or a write where the cwd could not be resolved —
-/// either way it is treated as "applies anywhere" so the workspace scoping never
-/// makes an older brief suddenly stop counting. Fail-open: a missing or
-/// unreadable directory, or a brief that fails to parse, yields no match for
-/// that entry rather than an error.
+/// A brief applies when it has at least one non-empty acceptance criterion and
+/// its stored `workspace` matches `workspace_cwd` (compared through
+/// [`sanitize_memory_key`] so path-separator and case differences normalize
+/// out) OR its workspace is empty. Empty workspace means a legacy brief written
+/// before the field existed and remains a compatibility match; empty acceptance
+/// criteria do not satisfy closeout because they provide no definition of done.
+/// A missing or unreadable directory, or a brief that fails to parse, yields no
+/// match for that entry rather than an error.
 pub(super) fn newest_brief_mtime_ms(claude_home: &Path, workspace_cwd: &str) -> Option<u64> {
     let directory = crate::utility::working_brief::brief_directory(claude_home);
     let entries = fs::read_dir(&directory).ok()?;
@@ -606,6 +546,13 @@ pub(super) fn newest_brief_mtime_ms(claude_home: &Path, workspace_cwd: &str) -> 
         let Ok(brief) = crate::utility::working_brief::parse_brief_text(&text) else {
             continue;
         };
+        if !brief
+            .acceptance_criteria
+            .iter()
+            .any(|criterion| !criterion.trim().is_empty())
+        {
+            continue;
+        }
         let applies = brief.workspace.trim().is_empty()
             || sanitize_memory_key(&brief.workspace) == current_key;
         if !applies {
@@ -1209,6 +1156,79 @@ pub(super) fn run_hook_post_tool_batch(
 
     // No gate fired to advisory reminder.
     emit_post_tool_batch_advisory(standard_output, standard_error)
+}
+
+fn stop_gate_is_enforcing(mode: GateMode, max_blocks: u64) -> bool {
+    max_blocks > 0 && matches!(mode, GateMode::Block | GateMode::Escalate)
+}
+
+pub(super) fn run_hook_stop(
+    standard_input: &mut dyn Read,
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let Some(input) = read_json_stdin_fail_open(standard_input) else {
+        return 0;
+    };
+    let session_id = hook_session_id(&input);
+    let Ok(claude_home) = resolve_claude_home("") else {
+        return 0;
+    };
+    let stats = session_edit_stats(&claude_home, session_id);
+    if stats.count == 0 {
+        return 0;
+    }
+
+    let session_start = session_start_ms(&claude_home, session_id);
+    let mut blockers: Vec<&str> = Vec::new();
+    if stop_gate_is_enforcing(brief_gate_mode(), brief_gate_max_blocks())
+        && !brief_written_this_session(&claude_home, &stats.last_cwd, session_start)
+    {
+        blockers.push("write a current working brief with acceptance criteria");
+    }
+    if stop_gate_is_enforcing(completeness_gate_mode(), completeness_gate_max_blocks())
+        && !completeness_marker_ms(&claude_home, &stats.last_cwd)
+            .map(|marker_ms| marker_ms >= stats.last_edit_ms)
+            .unwrap_or(false)
+    {
+        blockers.push("run the sibling scan after the latest edit");
+    }
+    if stop_gate_is_enforcing(review_gate_mode(), review_gate_max_blocks())
+        && !review_marker_ms(&claude_home, &stats.last_cwd)
+            .map(|marker_ms| marker_ms >= stats.last_edit_ms)
+            .unwrap_or(false)
+    {
+        blockers.push("run a reviewer pass after the latest edit");
+    }
+    if stop_gate_is_enforcing(memory_gate_mode(), memory_gate_max_blocks())
+        && !memory_written_this_session(&claude_home, session_start)
+    {
+        blockers.push("save the non-trivial result to memory");
+    }
+    if stop_gate_is_enforcing(research_gate_mode(), research_gate_max_blocks())
+        && !session_has_research_tool(&claude_home, session_id)
+    {
+        blockers.push("record research evidence for the implementation");
+    }
+    if blockers.is_empty() {
+        return 0;
+    }
+
+    let reason = format!(
+        "Keel closeout is incomplete: {}. Complete every item, then stop again.",
+        blockers.join("; ")
+    );
+    let payload = serde_json::json!({"decision": "block", "reason": reason});
+    match serde_json::to_string_pretty(&payload) {
+        Ok(rendered) => {
+            let _ = writeln!(standard_output, "{rendered}");
+            0
+        }
+        Err(error) => {
+            let _ = writeln!(standard_error, "Unable to render Stop gate output: {error}");
+            1
+        }
+    }
 }
 
 /// Decide whether the learned-skill reminder fires this turn, returning the

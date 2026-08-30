@@ -22,7 +22,12 @@
 
 #![cfg(test)]
 
+use std::ops::Deref;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Process-wide guard around test-time mutation of environment
 /// variables. Take this lock at the top of any test that calls
@@ -36,3 +41,46 @@ use std::sync::Mutex;
 /// benign here — the next acquirer immediately overwrites the env var
 /// with its own fresh value.
 pub(crate) static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+pub(crate) struct TestTempDir {
+    path: PathBuf,
+}
+
+impl Deref for TestTempDir {
+    type Target = Path;
+
+    fn deref(&self) -> &Self::Target {
+        &self.path
+    }
+}
+
+impl AsRef<Path> for TestTempDir {
+    fn as_ref(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TestTempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+/// Create a process-unique test directory and remove it when its owner drops.
+/// The numeric suffix prevents parallel test processes from deleting each
+/// other's state, while RAII cleanup also runs during unwinding.
+pub(crate) fn unique_temp_dir(label: &str) -> TestTempDir {
+    let sequence = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("{label}-{}-{sequence}", std::process::id()));
+    std::fs::create_dir_all(&path).expect("create unique test directory");
+    TestTempDir { path }
+}
+
+#[test]
+fn unique_temp_directory_is_removed_on_drop() {
+    let directory = unique_temp_dir("keel-raii-temp-test");
+    let path = directory.path.clone();
+    assert!(path.is_dir());
+    drop(directory);
+    assert!(!path.exists());
+}

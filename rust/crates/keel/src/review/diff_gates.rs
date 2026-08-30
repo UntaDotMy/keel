@@ -267,39 +267,76 @@ pub(crate) fn flow_check_gate(
 
     let artifact =
         keel_flow::resolve_artifact_path(repository_root, keel_flow::DEFAULT_ARTIFACT_PATH);
-    let (errors, target_file) =
+    let (errors, check) =
         match keel_flow::load_check(repository_root, keel_flow::DEFAULT_ARTIFACT_PATH) {
-            Ok(check) => {
-                let target = check.target_file.clone();
-                (keel_flow::validate_check(check), target)
-            }
-            Err(load_error) => (vec![load_error.to_string()], String::new()),
+            Ok(check) => (
+                keel_flow::validate_finished_check(check.clone()),
+                Some(check),
+            ),
+            Err(load_error) => (vec![load_error.to_string()], None),
         };
 
     if errors.is_empty() {
-        // the artifact is workspace-global, so without this a single filled
-        // artifact would satisfy the gate forever regardless of what changed next.
-        if !artifact_targets_a_touched_file(&target_file, &touched) {
+        let check = check.expect("validated flow check must be present");
+        if check.docs_only || check.formatting_only || check.generated_only || check.greenfield {
             return GateResult {
                 name: "flow_check".to_string(),
                 status: GateStatus::Fail,
                 blocking: true,
                 details: Some(format!(
-                    "the flow-check artifact at {} traces {target_file:?}, which is not among the \
-                     {} modified source file(s) ({}). The artifact is stale for this change. \
-                     Re-run `keel flow start --target-file <path>` for what you are editing.",
+                    "the flow-check artifact at {} claims an exemption, but the reviewed diff \
+                     contains {} established source file(s) ({}); exemption claims cannot bypass \
+                     existing-source ownership evidence",
                     artifact.display(),
                     touched.len(),
                     preview_touched_paths(&touched)
                 )),
             };
         }
+        if !artifact_targets_all_touched_files(&check.target_files, &touched) {
+            return GateResult {
+                name: "flow_check".to_string(),
+                status: GateStatus::Fail,
+                blocking: true,
+                details: Some(format!(
+                    "the flow-check artifact at {} does not trace every modified source file \
+                     ({}). Re-run `keel flow start --target-file <path> --target-files <csv>` \
+                     with the complete owner set, then `keel flow finish`.",
+                    artifact.display(),
+                    preview_touched_paths(&touched)
+                )),
+            };
+        }
+        match keel_flow::repository_state(repository_root) {
+            Ok((head, fingerprint))
+                if head == check.repository_head && fingerprint == check.diff_fingerprint => {}
+            Ok(_) => {
+                return GateResult {
+                    name: "flow_check".to_string(),
+                    status: GateStatus::Fail,
+                    blocking: true,
+                    details: Some(format!(
+                        "the finalized flow-check artifact at {} is stale for the current HEAD/diff; \
+                         re-run `keel flow finish` after the latest edit",
+                        artifact.display()
+                    )),
+                };
+            }
+            Err(error) => {
+                return GateResult {
+                    name: "flow_check".to_string(),
+                    status: GateStatus::Fail,
+                    blocking: true,
+                    details: Some(format!("could not verify finalized flow evidence: {error}")),
+                };
+            }
+        }
         return GateResult {
             name: "flow_check".to_string(),
             status: GateStatus::Pass,
             blocking: true,
             details: Some(format!(
-                "{} existing source file(s) modified; flow-check artifact traces {target_file:?}",
+                "{} existing source file(s) modified; finalized flow-check covers every file and matches the current diff",
                 touched.len()
             )),
         };
@@ -311,7 +348,7 @@ pub(crate) fn flow_check_gate(
         blocking: true,
         details: Some(format!(
             "{} existing source file(s) modified ({}) but the flow-check artifact at {} is missing or incomplete: {}. \
-             Run `keel flow start --target-file <path>`, fill the owner path, then `keel flow check`.",
+             Run `keel flow start --target-file <path>`, fill the owner path, then `keel flow finish`.",
             touched.len(),
             preview_touched_paths(&touched),
             artifact.display(),
@@ -563,6 +600,18 @@ pub(crate) fn artifact_targets_a_touched_file(target_file: &str, touched: &[Stri
             || candidate.ends_with(&format!("/{target}"))
             || target.ends_with(&format!("/{candidate}"))
     })
+}
+
+pub(crate) fn artifact_targets_all_touched_files(
+    target_files: &[String],
+    touched: &[String],
+) -> bool {
+    !touched.is_empty()
+        && touched.iter().all(|touched_file| {
+            target_files.iter().any(|target_file| {
+                artifact_targets_a_touched_file(target_file, std::slice::from_ref(touched_file))
+            })
+        })
 }
 
 /// Build the prose-style gate result for a review surface. Lints added lines in

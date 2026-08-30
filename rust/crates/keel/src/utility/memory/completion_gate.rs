@@ -4,10 +4,10 @@
 //! Main Functions: run_completion_gate_command
 //! Side Effects: `--proof` persists the proof text onto the brief record itself.
 //!
-//! The gate is purely brief-based: there is no workflow ledger anymore (it was
-//! removed before release), so a fresh install passes the gate exactly when the
-//! named working brief exists. A supplied `--proof` is written into the brief's
-//! `proof` field via the working_brief storage APIs.
+//! The gate requires a named brief, at least one acceptance criterion, and
+//! non-empty completion proof. A supplied `--proof` is written into the brief's
+//! `proof` field via the working_brief storage APIs; later checks may reuse that
+//! persisted proof.
 
 use std::io::Write;
 
@@ -111,26 +111,54 @@ fn run_completion_gate_check(
         Err(error) => error.clone(),
     };
 
-    // Proof probe: optional. Whitespace-only input is rejected; real text is
-    // recorded onto the brief record itself.
+    let acceptance_probe: Result<String, String> = match &brief_probe {
+        Ok(brief)
+            if brief
+                .acceptance_criteria
+                .iter()
+                .any(|criterion| !criterion.trim().is_empty()) =>
+        {
+            Ok(format!(
+                "{} acceptance criterion/criteria recorded",
+                brief
+                    .acceptance_criteria
+                    .iter()
+                    .filter(|criterion| !criterion.trim().is_empty())
+                    .count()
+            ))
+        }
+        Ok(_) => Err("working brief has no acceptance criteria".to_string()),
+        Err(_) => Err("acceptance criteria cannot be checked without a brief".to_string()),
+    };
+    let acceptance_status = acceptance_probe
+        .as_ref()
+        .map_or_else(Clone::clone, Clone::clone);
+
+    // Proof is mandatory. A new value replaces the persisted proof; otherwise
+    // the existing proof is reused so verification can be repeated safely.
     let raw_proof = flag_set.string_value("proof");
     let proof_input = raw_proof.trim().to_string();
-    let proof_probe: Option<Result<String, String>> = if raw_proof.is_empty() {
-        None
+    let proof_probe: Result<String, String> = if raw_proof.is_empty() {
+        brief_probe
+            .as_ref()
+            .ok()
+            .map(|brief| brief.proof.trim().to_string())
+            .filter(|proof| !proof.is_empty())
+            .ok_or_else(|| {
+                "completion proof is required; pass --proof or record proof on the brief"
+                    .to_string()
+            })
     } else if proof_input.is_empty() {
-        Some(Err("proof argument is whitespace only".to_string()))
+        Err("proof argument is whitespace only".to_string())
     } else {
-        Some(Ok(proof_input.clone()))
+        Ok(proof_input.clone())
     };
-    let proof_status = proof_probe.as_ref().map(|probe| match probe {
-        Ok(detail) => detail.clone(),
-        Err(error) => error.clone(),
-    });
+    let proof_status = proof_probe.as_ref().map_or_else(Clone::clone, Clone::clone);
 
     // Persist the proof on the brief; failure fails the check.
     // A claimed proof must never be silently dropped.
     let persisted_probe: Option<Result<String, String>> = match (&brief_probe, &proof_probe) {
-        (Ok(brief), Some(Ok(proof))) => {
+        (Ok(brief), Ok(proof)) if !raw_proof.is_empty() => {
             let mut updated = brief.clone();
             updated.proof = proof.clone();
             Some(match write_brief(&claude_home, &updated) {
@@ -146,7 +174,8 @@ fn run_completion_gate_check(
     });
 
     let all_ok = brief_probe.is_ok()
-        && proof_probe.as_ref().map(Result::is_ok).unwrap_or(true)
+        && acceptance_probe.is_ok()
+        && proof_probe.is_ok()
         && persisted_probe.as_ref().map(Result::is_ok).unwrap_or(true);
 
     if flag_set.bool_value("json") {
@@ -156,10 +185,13 @@ fn run_completion_gate_check(
                 "workingBrief".into(),
                 probe_value(&brief_probe, &brief_status),
             ),
+            (
+                "acceptanceCriteria".into(),
+                probe_value(&acceptance_probe, &acceptance_status),
+            ),
+            ("proof".into(), probe_value(&proof_probe, &proof_status)),
+            ("closureReady".into(), Value::Bool(all_ok)),
         ];
-        if let (Some(probe), Some(status)) = (&proof_probe, &proof_status) {
-            fields.push(("proof".into(), probe_value(probe, status)));
-        }
         if let (Some(probe), Some(status)) = (&persisted_probe, &persisted_status) {
             fields.push(("proofPersisted".into(), probe_value(probe, status)));
         }
@@ -177,13 +209,16 @@ fn run_completion_gate_check(
         "  working-brief: {} -> {brief_status}",
         probe_marker(&brief_probe)
     );
-    if let (Some(probe), Some(status)) = (&proof_probe, &proof_status) {
-        let _ = writeln!(
-            standard_output,
-            "  proof: {} -> {status}",
-            probe_marker(probe)
-        );
-    }
+    let _ = writeln!(
+        standard_output,
+        "  acceptance-criteria: {} -> {acceptance_status}",
+        probe_marker(&acceptance_probe)
+    );
+    let _ = writeln!(
+        standard_output,
+        "  proof: {} -> {proof_status}",
+        probe_marker(&proof_probe)
+    );
     if let (Some(probe), Some(status)) = (&persisted_probe, &persisted_status) {
         let _ = writeln!(
             standard_output,

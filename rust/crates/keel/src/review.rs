@@ -1,4 +1,3 @@
-#![allow(unused_imports)]
 //! Rust-native review and git-workflow command facade.
 
 use std::io::Write;
@@ -16,20 +15,11 @@ mod language_gates;
 mod messages;
 mod workflow;
 
-pub(super) use ci::{
-    ci_run_matches_head, classify_check_state, cleaned_header, cli_available, detect_ci_provider,
-    evaluate_checks, parse_gh_checks, parse_glab_status, query_checks_gh, query_checks_glab,
-    query_provider_checks, render_await_ci_result, resolve_provider, run_git_workflow_await_ci,
-    AwaitCiOutcome, CheckState, CiCheck, CiProvider, CiQuery, CiVerdict, ProviderResolution,
-};
+pub(super) use ci::{resolve_provider, run_git_workflow_await_ci, CiProvider, ProviderResolution};
 
 pub(super) use diff_gates::{
-    artifact_targets_a_touched_file, brownfield_source_from_name_status,
-    changed_sources_including_added, collect_review_gate_results, comment_style_gate,
-    completeness_check_gate, completeness_source_from_name_status, completeness_touched_sources,
-    flow_check_gate, impact_gate, modified_existing_sources, newest_source_mtime_ms,
-    preview_touched_paths, prose_style_gate, run_review_surface_command, slop_gate,
-    FLOW_EXEMPT_SEGMENTS, FLOW_SOURCE_EXTENSIONS,
+    collect_review_gate_results, completeness_check_gate, flow_check_gate,
+    run_review_surface_command, FLOW_SOURCE_EXTENSIONS,
 };
 
 pub(super) use hosted::{
@@ -37,29 +27,15 @@ pub(super) use hosted::{
 };
 
 pub(super) use language_gates::{
-    check_black, check_circular_imports, check_clang_format, check_e2e_config, check_eslint,
-    check_for_extensions, check_go_test, check_go_vet, check_gofmt, check_import_safety,
-    check_mypy, check_npm_test, check_prettier, check_python_tests, check_ruff, check_tsc,
-    classify_python_test_exit, collect_cpp_source_files, has_cpp_project, has_go_project,
-    has_js_files, has_js_project, has_python_files, has_python_project, render_gate_results,
-    run_cpp_surface_gates, run_go_surface_gates, run_js_surface_gates, run_python_surface_gates,
-    run_review_gates_command, run_rust_surface_gates, tally_gate_results, GateResult, GateStatus,
-    E2E_CONFIG_FILENAMES,
+    check_e2e_config, render_gate_results, run_cpp_surface_gates, run_go_surface_gates,
+    run_js_surface_gates, run_python_surface_gates, run_review_gates_command,
+    run_rust_surface_gates, tally_gate_results, GateResult, GateStatus,
 };
 
-pub(super) use messages::{
-    changed_files_against_base, commit_body_from_staged, derive_scope, detect_category,
-    generate_commit_subject, git_diff_stat, git_diff_stat_against_base, is_ci_path, is_config_path,
-    is_docs_path, is_source_path, is_test_path, lint_message, normalize_commit_category,
-    pr_summary_bullets, preview_paths, render_generated_message, staged_files, subject_summary,
-    validate_commit_subject, COMMIT_CATEGORIES,
-};
+pub(super) use messages::{lint_message, render_generated_message, validate_commit_subject};
 
 pub(super) use workflow::{
-    commit_subject_has_sanctioned_prefix, render_preflight_result, run_git_workflow_configure,
-    run_git_workflow_preflight, run_git_workflow_show, truncate_subject, workflow_pref_store,
-    workflow_slug, DEFAULT_BRANCH_TIERS, LEGACY_BRANCH_PREFIXES, PREFERRED_BRANCH_PREFIXES,
-    SANCTIONED_BRANCH_PREFIXES, SANCTIONED_COMMIT_PREFIXES, WORKFLOW_PREF_RECORD_ID,
+    run_git_workflow_configure, run_git_workflow_preflight, run_git_workflow_show,
 };
 /// PostToolBatch review gate.
 ///

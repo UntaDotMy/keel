@@ -9,8 +9,8 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use keel_flow::{
-    load_check, new_template_check, resolve_artifact_path, validate_check, write_check,
-    DEFAULT_ARTIFACT_PATH, SCHEMA_VERSION,
+    finalize_check, load_check, new_template_check, resolve_artifact_path, validate_check,
+    validate_finished_check, write_check, DEFAULT_ARTIFACT_PATH, SCHEMA_VERSION,
 };
 use keel_platform::{detect_current_target, Target};
 use keel_releaseassets::{
@@ -557,11 +557,13 @@ impl Application {
                 subcommand_arguments,
                 standard_output,
                 standard_error,
+                false,
             ),
             "finish" => self.run_flow_validate_command(
                 subcommand_arguments,
                 standard_output,
                 standard_error,
+                true,
             ),
             "help" | "--help" | "-h" => {
                 render_flow_help(standard_output);
@@ -585,6 +587,7 @@ impl Application {
         flag_set.string_flag("repo-root", ".");
         flag_set.string_flag("output", DEFAULT_ARTIFACT_PATH);
         flag_set.string_flag("target-file", "");
+        flag_set.string_flag("target-files", "");
         flag_set.string_flag("target-function", "");
         flag_set.string_flag("task", "");
         flag_set.string_flag("current-behavior", "");
@@ -642,6 +645,9 @@ impl Application {
         check.consumers = parse_list(flag_set.string_value("consumers"));
         check.validation_needed = parse_list(flag_set.string_value("validation-needed"));
         check.validation_evidence = parse_list(flag_set.string_value("validation-evidence"));
+        check
+            .target_files
+            .extend(parse_list(flag_set.string_value("target-files")));
         let artifact_path =
             match write_check(&repository_root, flag_set.string_value("output"), check) {
                 Ok(path) => path,
@@ -691,6 +697,7 @@ impl Application {
         arguments: &[String],
         standard_output: &mut dyn Write,
         standard_error: &mut dyn Write,
+        finish: bool,
     ) -> u8 {
         let mut flag_set = FlagSet::new("flow check");
         flag_set.string_flag("repo-root", ".");
@@ -703,7 +710,7 @@ impl Application {
         let repository_root = resolve_flow_repository_root(flag_set.string_value("repo-root"));
         let artifact_path =
             resolve_artifact_path(&repository_root, flag_set.string_value("artifact"));
-        let check = match load_check(&repository_root, flag_set.string_value("artifact")) {
+        let mut check = match load_check(&repository_root, flag_set.string_value("artifact")) {
             Ok(check) => check,
             Err(load_error) => {
                 if flag_set.bool_value("json") {
@@ -728,7 +735,7 @@ impl Application {
             }
         };
 
-        let validation_errors = validate_check(check);
+        let validation_errors = validate_check(check.clone());
         if !validation_errors.is_empty() {
             if flag_set.bool_value("json") {
                 let payload = Value::Object(vec![
@@ -755,6 +762,34 @@ impl Application {
             return 1;
         }
 
+        if finish {
+            check = match finalize_check(&repository_root, check) {
+                Ok(check) => check,
+                Err(error) => {
+                    let _ = writeln!(standard_error, "Unable to finalize flow evidence: {error}");
+                    return 1;
+                }
+            };
+            let final_errors = validate_finished_check(check.clone());
+            if !final_errors.is_empty() {
+                let _ = writeln!(
+                    standard_error,
+                    "Flow check artifact could not be finalized: {}",
+                    final_errors.join("; ")
+                );
+                return 1;
+            }
+            if let Err(error) =
+                write_check(&repository_root, flag_set.string_value("artifact"), check)
+            {
+                let _ = writeln!(
+                    standard_error,
+                    "Unable to persist finalized flow evidence: {error}"
+                );
+                return 1;
+            }
+        }
+
         if flag_set.bool_value("json") {
             let payload = Value::Object(vec![
                 (
@@ -763,6 +798,7 @@ impl Application {
                 ),
                 ("schema".into(), Value::Number(SCHEMA_VERSION.to_string())),
                 ("valid".into(), Value::Bool(true)),
+                ("finalized".into(), Value::Bool(finish)),
             ]);
             return render_json(standard_output, standard_error, &payload);
         }
@@ -810,11 +846,11 @@ fn render_flow_help(standard_output: &mut dyn Write) {
     );
     let _ = writeln!(
         standard_output,
-        "  flow start --target-file <path> [--target-function <name>] [--current-behavior <text>] [--entry-point <text>] [--producer <text>] [--source-of-truth <text>] [--storage-state-queue-owner <text>] [--side-effect-owner <text>] [--consumers <csv>] [--cleanup-recovery-path <text>] [--edit-boundary <text>] [--validation-needed <csv>] [--validation-evidence <csv>] [--repo-root <path>] [--output <path>] [--json]"
+        "  flow start --target-file <path> [--target-files <csv>] [--target-function <name>] [--current-behavior <text>] [--entry-point <text>] [--producer <text>] [--source-of-truth <text>] [--storage-state-queue-owner <text>] [--side-effect-owner <text>] [--consumers <csv>] [--cleanup-recovery-path <text>] [--edit-boundary <text>] [--validation-needed <csv>] [--validation-evidence <csv>] [--repo-root <path>] [--output <path>] [--json]"
     );
     let _ = writeln!(
         standard_output,
-        "  Default artifact: ~/.claude/memories/workspaces/<workspace-slug>/flow/flow-check.json"
+        "  Default artifact: <keel-home>/memories/workspaces/<workspace-slug>/flow/flow-check.json"
     );
     let _ = writeln!(
         standard_output,
@@ -899,6 +935,7 @@ mod tests {
     #[test]
     fn flow_command_runs_start_check_finish_lifecycle() {
         let repository_root = tempdir_under("keel-flow-command-lifecycle");
+        initialize_test_repository(&repository_root);
         let artifact_path = repository_root.join("flow-check.json");
         let artifact = artifact_path.to_string_lossy().to_string();
         let application = Application::new("test-version");
@@ -1148,6 +1185,25 @@ mod tests {
         };
         write_check(repository_root, artifact_path, complete_check)
             .expect("write complete flow check");
+    }
+
+    fn initialize_test_repository(repository_root: &Path) {
+        let run_git = |arguments: &[&str]| {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(repository_root)
+                .args(arguments)
+                .status()
+                .expect("run git for flow test");
+            assert!(status.success(), "git command failed: {arguments:?}");
+        };
+        run_git(&["init"]);
+        run_git(&["config", "user.name", "Keel Test"]);
+        run_git(&["config", "user.email", "keel-test@example.invalid"]);
+        std::fs::write(repository_root.join("README.md"), "# flow test\n")
+            .expect("write flow test seed");
+        run_git(&["add", "README.md"]);
+        run_git(&["commit", "-m", "Add : TEST : initialize flow fixture"]);
     }
 
     fn tempdir_under(label: &str) -> PathBuf {

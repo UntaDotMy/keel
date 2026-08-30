@@ -484,9 +484,8 @@ fn readable_rule_prefix(rule: &str) -> String {
 }
 
 use super::{
-    collect_review_gate_results, evaluate_checks, git_lines, git_text, query_provider_checks,
-    resolve_provider, CiProvider, CiQuery, CiVerdict, GateResult, GateStatus, ProviderResolution,
-    FLOW_SOURCE_EXTENSIONS,
+    collect_review_gate_results, git_lines, git_text, resolve_provider, CiProvider, GateResult,
+    GateStatus, ProviderResolution, FLOW_SOURCE_EXTENSIONS,
 };
 use crate::args::FlagSet;
 use crate::runtime::{resolve_claude_home, resolve_repository_root, run_command};

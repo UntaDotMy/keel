@@ -1,13 +1,14 @@
 //! Purpose: Preserve-existing-flow evidence schema (the `Check` struct, validation, and JSON I/O).
-//! Caller: Future Rust ports of `review` and `app`; today no CLI command consumes it directly.
+//! Caller: `keel flow` lifecycle commands and review's brownfield ownership gate.
 //! Dependencies: std::env, std::fs, std::io, std::path; serde and serde_json (workspace deps).
-//! Main Functions: new_template_check, validate_check, write_check, load_check, resolve_artifact_path; LoadError carries the failure cases.
+//! Main Functions: new_template_check, validate_check, finalize_check, write_check, load_check, resolve_artifact_path; LoadError carries the failure cases.
 //! Side Effects: write/load read and write JSON files on disk; pure helpers do no I/O. Rust-native flow artifact validation.
 
 use std::env;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 
@@ -22,6 +23,12 @@ pub struct Check {
     pub task: String,
     #[serde(default, rename = "target_file")]
     pub target_file: String,
+    #[serde(
+        default,
+        rename = "target_files",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub target_files: Vec<String>,
     #[serde(
         default,
         rename = "target_function",
@@ -70,6 +77,24 @@ pub struct Check {
     pub generated_only: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub greenfield: bool,
+    #[serde(
+        default,
+        rename = "repository_head",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub repository_head: String,
+    #[serde(
+        default,
+        rename = "diff_fingerprint",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub diff_fingerprint: String,
+    #[serde(
+        default,
+        rename = "finalized_at",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub finalized_at: String,
 }
 
 fn is_false(boolean_value: &bool) -> bool {
@@ -88,6 +113,7 @@ pub fn new_template_check(target_file: &str, target_function: &str) -> Check {
     Check {
         version: SCHEMA_VERSION,
         target_file: path_to_forward_slashes(target_file).trim().to_string(),
+        target_files: vec![path_to_forward_slashes(target_file).trim().to_string()],
         target_function: target_function.trim().to_string(),
         consumers: Vec::new(),
         validation_needed: Vec::new(),
@@ -186,12 +212,27 @@ pub fn resolve_artifact_path(repository_root: &Path, artifact_path: &str) -> Pat
 }
 
 pub fn default_workspace_artifact_path(repository_root: &Path) -> PathBuf {
-    claude_home_directory()
+    let home = claude_home_directory();
+    let key = workspace_key(repository_root);
+    let preferred = home
         .join("memories")
         .join("workspaces")
-        .join(workspace_key(repository_root))
+        .join(&key)
         .join("flow")
-        .join("flow-check.json")
+        .join("flow-check.json");
+    let legacy_key = legacy_workspace_key(repository_root);
+    if legacy_key != key {
+        let legacy = home
+            .join("memories")
+            .join("workspaces")
+            .join(legacy_key)
+            .join("flow")
+            .join("flow-check.json");
+        if legacy.is_file() {
+            return legacy;
+        }
+    }
+    preferred
 }
 
 fn claude_home_directory() -> PathBuf {
@@ -223,6 +264,16 @@ fn claude_home_directory() -> PathBuf {
 }
 
 fn workspace_key(repository_root: &Path) -> String {
+    let raw_key = legacy_workspace_key(repository_root);
+    if raw_key.chars().count() <= 64 {
+        return raw_key;
+    }
+    let raw_path = clean_path(repository_root).to_string_lossy().to_string();
+    let prefix: String = raw_key.chars().take(47).collect();
+    format!("{prefix}-{}", stable_fingerprint_bytes(raw_path.as_bytes()))
+}
+
+fn legacy_workspace_key(repository_root: &Path) -> String {
     let cleaned_root = clean_path(repository_root);
     let raw_key = path_to_forward_slashes(&cleaned_root.to_string_lossy())
         .chars()
@@ -311,6 +362,76 @@ pub fn validate_check(check: Check) -> Vec<String> {
     validation_errors
 }
 
+pub fn validate_finished_check(check: Check) -> Vec<String> {
+    let normalized = normalize_check(check);
+    let mut validation_errors = validate_check(normalized.clone());
+    for (field_name, field_value) in [
+        ("repository_head", normalized.repository_head.as_str()),
+        ("diff_fingerprint", normalized.diff_fingerprint.as_str()),
+        ("finalized_at", normalized.finalized_at.as_str()),
+    ] {
+        if field_value.is_empty() {
+            validation_errors.push(format!("{field_name} is required after flow finish"));
+        }
+    }
+    validation_errors
+}
+
+pub fn finalize_check(repository_root: &Path, mut check: Check) -> Result<Check, String> {
+    let (repository_head, diff_fingerprint) = repository_state(repository_root)?;
+    check.repository_head = repository_head;
+    check.diff_fingerprint = diff_fingerprint;
+    check.finalized_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| format!("read system clock: {error}"))?
+        .as_millis()
+        .to_string();
+    Ok(normalize_check(check))
+}
+
+pub fn repository_state(repository_root: &Path) -> Result<(String, String), String> {
+    let head_output = Command::new("git")
+        .arg("-C")
+        .arg(repository_root)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .map_err(|error| format!("run git rev-parse: {error}"))?;
+    if !head_output.status.success() {
+        return Err(format!(
+            "git rev-parse HEAD failed: {}",
+            String::from_utf8_lossy(&head_output.stderr).trim()
+        ));
+    }
+    let diff_output = Command::new("git")
+        .arg("-C")
+        .arg(repository_root)
+        .args(["diff", "--binary", "HEAD", "--", "."])
+        .output()
+        .map_err(|error| format!("run git diff: {error}"))?;
+    if !diff_output.status.success() {
+        return Err(format!(
+            "git diff HEAD failed: {}",
+            String::from_utf8_lossy(&diff_output.stderr).trim()
+        ));
+    }
+    let repository_head = String::from_utf8_lossy(&head_output.stdout)
+        .trim()
+        .to_string();
+    Ok((
+        repository_head,
+        stable_fingerprint_bytes(&diff_output.stdout),
+    ))
+}
+
+fn stable_fingerprint_bytes(content: &[u8]) -> String {
+    let mut hash: u64 = 14695981039346656037;
+    for byte in content {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(1099511628211);
+    }
+    format!("{hash:016x}")
+}
+
 fn normalize_check(mut check: Check) -> Check {
     if check.version == 0 {
         check.version = SCHEMA_VERSION;
@@ -318,6 +439,18 @@ fn normalize_check(mut check: Check) -> Check {
     check.target_file = path_to_forward_slashes(&check.target_file)
         .trim()
         .to_string();
+    check.target_files = non_empty_strings(
+        &check
+            .target_files
+            .iter()
+            .map(|path| path_to_forward_slashes(path))
+            .collect::<Vec<_>>(),
+    );
+    if check.target_files.is_empty() && !check.target_file.is_empty() {
+        check.target_files.push(check.target_file.clone());
+    }
+    check.target_files.sort();
+    check.target_files.dedup();
     check.target_function = check.target_function.trim().to_string();
     check.task = check.task.trim().to_string();
     check.current_behavior = check.current_behavior.trim().to_string();
@@ -331,6 +464,9 @@ fn normalize_check(mut check: Check) -> Check {
     check.consumers = non_empty_strings(&check.consumers);
     check.validation_needed = non_empty_strings(&check.validation_needed);
     check.validation_evidence = non_empty_strings(&check.validation_evidence);
+    check.repository_head = check.repository_head.trim().to_string();
+    check.diff_fingerprint = check.diff_fingerprint.trim().to_string();
+    check.finalized_at = check.finalized_at.trim().to_string();
     check
 }
 
@@ -527,6 +663,21 @@ mod tests {
     }
 
     #[test]
+    fn validate_finished_check_requires_diff_bound_metadata() {
+        let check = valid_flow_check_for_tests();
+        let errors = validate_finished_check(check.clone()).join("\n");
+        assert!(errors.contains("repository_head"), "errors: {errors}");
+        assert!(errors.contains("diff_fingerprint"), "errors: {errors}");
+        assert!(errors.contains("finalized_at"), "errors: {errors}");
+
+        let mut finished = check;
+        finished.repository_head = "abc123".to_string();
+        finished.diff_fingerprint = "def456".to_string();
+        finished.finalized_at = "2026-08-31T00:00:00Z".to_string();
+        assert!(validate_finished_check(finished).is_empty());
+    }
+
+    #[test]
     fn load_check_reports_missing_and_invalid_artifacts() {
         let temporary_directory = tempdir_under("keel-flow-invalid");
         match load_check(&temporary_directory, "flow-check.json") {
@@ -607,6 +758,16 @@ mod tests {
             std::env::remove_var("CLAUDE_TARGET_OVERRIDE");
         }
         let _ = std::fs::remove_dir_all(&temporary_directory);
+    }
+
+    #[test]
+    fn workspace_key_bounds_long_paths_without_collisions() {
+        let shared = "C:/work/a-very-long-parent-segment-that-would-consume-the-entire-old-directory-key-before-the-project-name/";
+        let first = workspace_key(Path::new(&format!("{shared}alpha")));
+        let second = workspace_key(Path::new(&format!("{shared}beta")));
+        assert_ne!(first, second);
+        assert!(first.len() <= 64, "key={first}");
+        assert!(second.len() <= 64, "key={second}");
     }
 
     fn tempdir_under(label: &str) -> PathBuf {
