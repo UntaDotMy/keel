@@ -291,11 +291,28 @@ pub const KEEL_HOME_DIRECTORY_NAME: &str = ".keel";
 /// agents, commands, settings.json, user CLAUDE.md, the plugin): the harness
 /// only reads them from `~/.claude`, so they can never move to `~/.keel`.
 ///
-/// Split rule: when `keel_home` is a standard `.keel` directory, the
-/// engagement home is its sibling `~/.claude`. For any other root name
-/// (test temp dirs, legacy `--claude-home` overrides), the root doubles as
-/// the engagement home, preserving the pre-split single-root behavior.
+/// Split rule: a standard `.keel` uses its sibling `.claude`; a custom root
+/// selected through `KEEL_HOME` uses the user's `.claude`. Explicit legacy
+/// `--claude-home` and test roots still use the single-root behavior.
 pub fn claude_engagement_home(keel_home: &Path) -> PathBuf {
+    let configured_keel_home = env::var("KEEL_HOME")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    let user_home = resolve_user_home().ok();
+    claude_engagement_home_for(
+        keel_home,
+        user_home.as_deref(),
+        configured_keel_home.as_deref(),
+    )
+}
+
+fn claude_engagement_home_for(
+    keel_home: &Path,
+    user_home: Option<&Path>,
+    configured_keel_home: Option<&Path>,
+) -> PathBuf {
     let is_standard_keel_home = keel_home
         .file_name()
         .and_then(|name| name.to_str())
@@ -304,6 +321,14 @@ pub fn claude_engagement_home(keel_home: &Path) -> PathBuf {
     if is_standard_keel_home {
         if let Some(parent) = keel_home.parent() {
             return parent.join(".claude");
+        }
+    }
+    if configured_keel_home
+        .map(|configured| clean_path(configured) == clean_path(keel_home))
+        .unwrap_or(false)
+    {
+        if let Some(user_home) = user_home {
+            return user_home.join(".claude");
         }
     }
     keel_home.to_path_buf()
@@ -534,6 +559,7 @@ pub fn read_text_if_exists(path: &Path) -> Result<String, String> {
 /// a non-atomic success still beats a hard failure.
 pub fn write_text(path: &Path, text: &str) -> Result<(), String> {
     ensure_parent_directory(path)?;
+    cleanup_stale_atomic_temps(path);
 
     let temp_path = atomic_temp_path(path);
     // Best-effort cleanup of any leftover temp from a previous interrupted write.
@@ -573,6 +599,40 @@ pub fn write_text(path: &Path, text: &str) -> Result<(), String> {
                     display_path(path)
                 )
             })
+        }
+    }
+}
+
+fn cleanup_stale_atomic_temps(target: &Path) {
+    let Some(parent) = target.parent() else {
+        return;
+    };
+    let Some(target_name) = target.file_name().and_then(|name| name.to_str()) else {
+        return;
+    };
+    let prefix = format!("{target_name}.tmp-");
+    let Ok(entries) = fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let Some(file_name) = file_name.to_str() else {
+            continue;
+        };
+        let Some(suffix) = file_name.strip_prefix(&prefix) else {
+            continue;
+        };
+        let Some((process_id, nonce)) = suffix.split_once('-') else {
+            continue;
+        };
+        if nonce.is_empty() {
+            continue;
+        }
+        let Ok(process_id) = process_id.parse::<u32>() else {
+            continue;
+        };
+        if process_is_alive(process_id) == Some(false) {
+            let _ = fs::remove_file(entry.path());
         }
     }
 }
@@ -657,6 +717,14 @@ pub fn run_command_with_timeout(
     let mut child = command
         .spawn()
         .map_err(|error| format!("execute {program}: {error}"))?;
+    let mut process_guard = match own_process_tree(&mut child) {
+        Ok(guard) => guard,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("execute {program}: process ownership: {error}"));
+        }
+    };
     let stdout = child
         .stdout
         .take()
@@ -675,7 +743,7 @@ pub fn run_command_with_timeout(
                 std::thread::sleep(std::time::Duration::from_millis(25));
             }
             Ok(None) => {
-                let kill_error = terminate_process_tree(&mut child).err();
+                let kill_error = terminate_owned_process_tree(&mut child, &mut process_guard).err();
                 let _ = child.wait(); // intentional cleanup after tree termination
                 let _ = stdout_thread.join(); // intentional drain-thread cleanup
                 let _ = stderr_thread.join(); // intentional drain-thread cleanup
@@ -688,7 +756,7 @@ pub fn run_command_with_timeout(
                 ));
             }
             Err(error) => {
-                let _ = terminate_process_tree(&mut child); // intentional cleanup after wait failure
+                let _ = terminate_owned_process_tree(&mut child, &mut process_guard);
                 let _ = child.wait(); // intentional cleanup after tree termination
                 let _ = stdout_thread.join(); // intentional drain-thread cleanup
                 let _ = stderr_thread.join(); // intentional drain-thread cleanup
@@ -729,6 +797,14 @@ pub fn run_command_inherit(
     let mut child = command
         .spawn()
         .map_err(|error| format!("execute {program}: {error}"))?;
+    let mut process_guard = match own_process_tree(&mut child) {
+        Ok(guard) => guard,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("execute {program}: process ownership: {error}"));
+        }
+    };
     let deadline = std::time::Instant::now() + command_timeout();
     loop {
         match child.try_wait() {
@@ -737,7 +813,7 @@ pub fn run_command_inherit(
                 std::thread::sleep(std::time::Duration::from_millis(25));
             }
             Ok(None) => {
-                let kill_error = terminate_process_tree(&mut child).err();
+                let kill_error = terminate_owned_process_tree(&mut child, &mut process_guard).err();
                 let _ = child.wait(); // intentional cleanup after inherited-stream timeout
                 let suffix = kill_error
                     .map(|error| format!("; process-tree cleanup failed: {error}"))
@@ -748,7 +824,7 @@ pub fn run_command_inherit(
                 ));
             }
             Err(error) => {
-                let _ = terminate_process_tree(&mut child); // intentional cleanup after wait failure
+                let _ = terminate_owned_process_tree(&mut child, &mut process_guard);
                 let _ = child.wait(); // intentional cleanup after tree termination
                 return Err(format!("execute {program}: wait failed: {error}"));
             }
@@ -799,6 +875,286 @@ fn configure_process_group(command: &mut Command) {
                 Ok(())
             });
         }
+    }
+}
+
+pub struct ChildProcessGuard {
+    #[cfg(windows)]
+    job_handle: isize,
+}
+
+impl Drop for ChildProcessGuard {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        {
+            let _ = windows_process::close_handle(&mut self.job_handle);
+        }
+    }
+}
+
+pub fn terminate_owned_process_tree(
+    child: &mut Child,
+    process_guard: &mut ChildProcessGuard,
+) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        match windows_process::close_handle(&mut process_guard.job_handle) {
+            Ok(()) => Ok(()),
+            Err(job_error) => terminate_process_tree(child).map_err(|fallback_error| {
+                format!("{job_error}; fallback process-tree cleanup failed: {fallback_error}")
+            }),
+        }
+    }
+    #[cfg(unix)]
+    {
+        let _ = process_guard;
+        terminate_process_tree(child)
+    }
+}
+
+pub fn own_process_tree(child: &mut Child) -> Result<ChildProcessGuard, String> {
+    #[cfg(windows)]
+    {
+        let job_handle = windows_process::create_kill_on_close_job(child.id())?;
+        Ok(ChildProcessGuard { job_handle })
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = child;
+        Ok(ChildProcessGuard {})
+    }
+}
+
+pub fn process_is_alive(process_id: u32) -> Option<bool> {
+    #[cfg(windows)]
+    {
+        windows_process::process_is_alive(process_id)
+    }
+    #[cfg(unix)]
+    {
+        extern "C" {
+            fn kill(process_id: i32, signal: i32) -> i32;
+        }
+        if process_id == 0 || process_id > i32::MAX as u32 {
+            return Some(false);
+        }
+        Some(unsafe { kill(process_id as i32, 0) == 0 })
+    }
+}
+
+#[cfg(windows)]
+pub fn parent_process_id(process_id: u32) -> Option<u32> {
+    windows_process::parent_process_id(process_id)
+}
+
+#[cfg(windows)]
+mod windows_process {
+    use std::ffi::c_void;
+    use std::mem::size_of;
+    use std::ptr;
+
+    type Handle = *mut c_void;
+    const TH32CS_SNAPPROCESS: u32 = 0x0000_0002;
+    const PROCESS_TERMINATE: u32 = 0x0001;
+    const PROCESS_SET_QUOTA: u32 = 0x0100;
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: u32 = 0x0000_2000;
+    const JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS: i32 = 9;
+    const STILL_ACTIVE: u32 = 259;
+    const ERROR_ACCESS_DENIED: u32 = 5;
+
+    #[repr(C)]
+    struct ProcessEntry32W {
+        size: u32,
+        usage_count: u32,
+        process_id: u32,
+        default_heap_id: usize,
+        module_id: u32,
+        thread_count: u32,
+        parent_process_id: u32,
+        base_priority: i32,
+        flags: u32,
+        executable_file: [u16; 260],
+    }
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct JobObjectBasicLimitInformation {
+        per_process_user_time_limit: i64,
+        per_job_user_time_limit: i64,
+        limit_flags: u32,
+        minimum_working_set_size: usize,
+        maximum_working_set_size: usize,
+        active_process_limit: u32,
+        affinity: usize,
+        priority_class: u32,
+        scheduling_class: u32,
+    }
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct IoCounters {
+        read_operation_count: u64,
+        write_operation_count: u64,
+        other_operation_count: u64,
+        read_transfer_count: u64,
+        write_transfer_count: u64,
+        other_transfer_count: u64,
+    }
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct JobObjectExtendedLimitInformation {
+        basic_limit_information: JobObjectBasicLimitInformation,
+        io_info: IoCounters,
+        process_memory_limit: usize,
+        job_memory_limit: usize,
+        peak_process_memory_used: usize,
+        peak_job_memory_used: usize,
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreateToolhelp32Snapshot(flags: u32, process_id: u32) -> Handle;
+        fn Process32FirstW(snapshot: Handle, entry: *mut ProcessEntry32W) -> i32;
+        fn Process32NextW(snapshot: Handle, entry: *mut ProcessEntry32W) -> i32;
+        fn CreateJobObjectW(attributes: *mut c_void, name: *const u16) -> Handle;
+        fn SetInformationJobObject(
+            job: Handle,
+            information_class: i32,
+            information: *const c_void,
+            information_length: u32,
+        ) -> i32;
+        fn OpenProcess(access: u32, inherit_handle: i32, process_id: u32) -> Handle;
+        fn AssignProcessToJobObject(job: Handle, process: Handle) -> i32;
+        fn GetExitCodeProcess(process: Handle, exit_code: *mut u32) -> i32;
+        fn GetLastError() -> u32;
+        fn CloseHandle(handle: Handle) -> i32;
+    }
+
+    fn valid_handle(handle: Handle) -> bool {
+        !handle.is_null() && handle as isize != -1
+    }
+
+    pub(super) fn close_handle(handle: &mut isize) -> Result<(), String> {
+        if *handle == 0 || *handle == -1 {
+            return Ok(());
+        }
+        let closing = *handle;
+        *handle = 0;
+        // SAFETY: `closing` is an owned Job Object handle and is invalidated
+        // before this single close so Drop cannot close it twice.
+        if unsafe { CloseHandle(closing as Handle) } != 0 {
+            Ok(())
+        } else {
+            Err(format!(
+                "close Windows Job Object: {}",
+                std::io::Error::last_os_error()
+            ))
+        }
+    }
+
+    pub(super) fn parent_process_id(process_id: u32) -> Option<u32> {
+        // SAFETY: the snapshot handle is validated before use and closed below.
+        let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+        if !valid_handle(snapshot) {
+            return None;
+        }
+        // SAFETY: this repr(C) record is initialized to the Win32-required zero
+        // state before its size field is populated.
+        let mut entry: ProcessEntry32W = unsafe { std::mem::zeroed() };
+        entry.size = size_of::<ProcessEntry32W>() as u32;
+        let mut found = None;
+        // SAFETY: `entry` points to writable storage with the required size.
+        let mut has_entry = unsafe { Process32FirstW(snapshot, &mut entry) } != 0;
+        while has_entry {
+            if entry.process_id == process_id {
+                found = Some(entry.parent_process_id);
+                break;
+            }
+            // SAFETY: the validated snapshot and initialized record stay live.
+            has_entry = unsafe { Process32NextW(snapshot, &mut entry) } != 0;
+        }
+        // SAFETY: `snapshot` is an owned valid handle and is closed once.
+        unsafe {
+            CloseHandle(snapshot);
+        }
+        found
+    }
+
+    pub(super) fn process_is_alive(process_id: u32) -> Option<bool> {
+        if process_id == 0 {
+            return Some(false);
+        }
+        // SAFETY: OpenProcess receives a concrete PID and no borrowed pointers.
+        let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, process_id) };
+        if !valid_handle(process) {
+            // SAFETY: GetLastError has no preconditions and reads thread state.
+            return (unsafe { GetLastError() } != ERROR_ACCESS_DENIED).then_some(false);
+        }
+        let mut exit_code = 0u32;
+        // SAFETY: `process` is valid and `exit_code` is writable for the call.
+        let queried = unsafe { GetExitCodeProcess(process, &mut exit_code) } != 0;
+        // SAFETY: `process` is an owned valid handle and is closed once.
+        unsafe {
+            CloseHandle(process);
+        }
+        queried.then_some(exit_code == STILL_ACTIVE)
+    }
+
+    pub(super) fn create_kill_on_close_job(process_id: u32) -> Result<isize, String> {
+        // SAFETY: null security attributes/name request an unnamed default job.
+        let job = unsafe { CreateJobObjectW(ptr::null_mut(), ptr::null()) };
+        if !valid_handle(job) {
+            return Err(format!(
+                "create Windows Job Object: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        let mut limits = JobObjectExtendedLimitInformation::default();
+        limits.basic_limit_information.limit_flags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        // SAFETY: `limits` has the documented repr(C) layout and byte length.
+        let configured = unsafe {
+            SetInformationJobObject(
+                job,
+                JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS,
+                &limits as *const _ as *const c_void,
+                size_of::<JobObjectExtendedLimitInformation>() as u32,
+            )
+        } != 0;
+        if !configured {
+            let error = std::io::Error::last_os_error();
+            // SAFETY: `job` is an owned valid handle and is closed on failure.
+            unsafe {
+                CloseHandle(job);
+            }
+            return Err(format!("configure Windows Job Object: {error}"));
+        }
+        // SAFETY: OpenProcess receives a concrete child PID and no pointers.
+        let process = unsafe { OpenProcess(PROCESS_TERMINATE | PROCESS_SET_QUOTA, 0, process_id) };
+        if !valid_handle(process) {
+            let error = std::io::Error::last_os_error();
+            // SAFETY: `job` is an owned valid handle and is closed on failure.
+            unsafe {
+                CloseHandle(job);
+            }
+            return Err(format!("open child process {process_id}: {error}"));
+        }
+        // SAFETY: both handles are valid and remain live through assignment.
+        let assigned = unsafe { AssignProcessToJobObject(job, process) } != 0;
+        // SAFETY: `process` is an owned valid handle and is closed once.
+        unsafe {
+            CloseHandle(process);
+        }
+        if !assigned {
+            let error = std::io::Error::last_os_error();
+            // SAFETY: `job` is an owned valid handle and is closed on failure.
+            unsafe {
+                CloseHandle(job);
+            }
+            return Err(format!("assign child {process_id} to Job Object: {error}"));
+        }
+        Ok(job as isize)
     }
 }
 
@@ -1134,6 +1490,34 @@ mod write_text_tests {
         assert!(temp_siblings(&dir, "CLAUDE.md").is_empty());
         let _ = fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn write_text_removes_only_stale_temps_for_its_target() {
+        let root = std::env::temp_dir().join(format!(
+            "keel-write-stale-temp-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&root).expect("root");
+        let target = root.join("settings.json");
+        let stale = root.join("settings.json.tmp-999999-1");
+        let unrelated = root.join("other.json.tmp-999999-1");
+        std::fs::write(&stale, "stale").expect("stale");
+        std::fs::write(&unrelated, "keep").expect("unrelated");
+
+        write_text(&target, "current").expect("write target");
+
+        assert!(!stale.exists(), "stale sibling temp must be recovered");
+        assert!(
+            unrelated.exists(),
+            "another target's temp must be preserved"
+        );
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "current");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
 
 #[cfg(test)]
@@ -1198,6 +1582,25 @@ mod keel_home_split_tests {
         assert_eq!(claude_engagement_home(&custom), custom);
         let legacy = PathBuf::from("/home/user/.claude");
         assert_eq!(claude_engagement_home(&legacy), legacy);
+    }
+
+    #[test]
+    fn configured_custom_keel_home_keeps_claude_engagement_under_user_home() {
+        let user_home = PathBuf::from("/home/user");
+        let custom_keel_home = PathBuf::from("/mnt/keel-data");
+        assert_eq!(
+            claude_engagement_home_for(
+                &custom_keel_home,
+                Some(&user_home),
+                Some(&custom_keel_home),
+            ),
+            user_home.join(".claude")
+        );
+        assert_eq!(
+            claude_engagement_home_for(&custom_keel_home, Some(&user_home), None),
+            custom_keel_home,
+            "an explicit legacy override remains a hermetic single root"
+        );
     }
 
     #[test]
@@ -1308,6 +1711,41 @@ mod process_lifecycle_tests {
         )
         .expect_err("hanging process must be terminated");
         assert!(error.contains("timed out"), "unexpected error: {error}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn closing_owned_job_terminates_child_without_taskkill() {
+        let mut child = Command::new("cmd")
+            .args(["/C", "ping -n 30 127.0.0.1 >nul"])
+            .spawn()
+            .expect("spawn child");
+        let mut process_guard = own_process_tree(&mut child).expect("own child tree");
+
+        terminate_owned_process_tree(&mut child, &mut process_guard).expect("close job");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            match child.try_wait().expect("poll child") {
+                Some(_) => break,
+                None if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                None => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("closing the Job Object did not terminate its child");
+                }
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_process_probes_find_the_current_process_and_parent() {
+        assert_eq!(process_is_alive(std::process::id()), Some(true));
+        let parent = parent_process_id(std::process::id()).expect("parent process");
+        assert_ne!(parent, 0);
     }
 
     #[test]

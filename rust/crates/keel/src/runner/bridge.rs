@@ -45,7 +45,7 @@ pub fn run_bridge_command(
                 arguments[0]
             );
             render_bridge_help(standard_output);
-            0
+            1
         }
     }
 }
@@ -129,6 +129,7 @@ fn run_bridge_session_start(
     let mut flags = bridge_flag_set("bridge session-start");
     if let Err(parse_error) = flags.parse(arguments) {
         let _ = writeln!(standard_error, "{}", parse_error.message);
+        return 2;
     }
     let context = with_workspace_cwd(
         flags.string_value("cwd"),
@@ -147,6 +148,7 @@ fn run_bridge_user_prompt(
     flags.string_flag("prompt", "");
     if let Err(parse_error) = flags.parse(arguments) {
         let _ = writeln!(standard_error, "{}", parse_error.message);
+        return 2;
     }
     let prompt = flags.string_value("prompt");
     let context = with_workspace_cwd(flags.string_value("cwd"), || {
@@ -167,6 +169,7 @@ fn run_bridge_observe(
     flags.string_flag("phase", "post");
     if let Err(parse_error) = flags.parse(arguments) {
         let _ = writeln!(standard_error, "{}", parse_error.message);
+        return 2;
     }
     let (session, cwd) = resolve_bridge_args(&flags, standard_error);
 
@@ -185,7 +188,7 @@ fn run_bridge_observe(
                 standard_error,
                 "bridge observe: resolve_claude_home failed: {error}"
             );
-            return 0;
+            return 1;
         }
     };
 
@@ -214,7 +217,7 @@ fn run_bridge_observe(
                 standard_error,
                 "bridge observe: observation record failed: {error}"
             );
-            0
+            1
         }
     }
 }
@@ -251,6 +254,7 @@ fn run_bridge_session_end(
     let mut flags = bridge_flag_set("bridge session-end");
     if let Err(parse_error) = flags.parse(arguments) {
         let _ = writeln!(standard_error, "{}", parse_error.message);
+        return 2;
     }
     let (session, _cwd) = resolve_bridge_args(&flags, standard_error);
 
@@ -261,7 +265,7 @@ fn run_bridge_session_end(
                 standard_error,
                 "bridge session-end: resolve_claude_home failed: {error}"
             );
-            return 0;
+            return 1;
         }
     };
 
@@ -277,6 +281,7 @@ fn run_bridge_pre_compact(
     let mut flags = bridge_flag_set("bridge pre-compact");
     if let Err(parse_error) = flags.parse(arguments) {
         let _ = writeln!(standard_error, "{}", parse_error.message);
+        return 2;
     }
     // Honor --cwd so the workspace learning checkpoint runs against the host's
     // workspace, not the bridge process cwd (same contract as post-compact).
@@ -298,6 +303,7 @@ fn run_bridge_post_compact(
     let mut flags = bridge_flag_set("bridge post-compact");
     if let Err(parse_error) = flags.parse(arguments) {
         let _ = writeln!(standard_error, "{}", parse_error.message);
+        return 2;
     }
     let context = with_workspace_cwd(
         flags.string_value("cwd"),
@@ -316,6 +322,7 @@ fn run_bridge_gate_status(
     let mut flags = bridge_flag_set("bridge gate-status");
     if let Err(parse_error) = flags.parse(arguments) {
         let _ = writeln!(standard_error, "{}", parse_error.message);
+        return 2;
     }
     let (session, _cwd) = resolve_bridge_args(&flags, standard_error);
     let claude_home = match resolve_claude_home("") {
@@ -325,7 +332,7 @@ fn run_bridge_gate_status(
                 standard_error,
                 "bridge gate-status: resolve_claude_home failed: {error}"
             );
-            return 0;
+            return 1;
         }
     };
 
@@ -370,6 +377,7 @@ fn run_bridge_pre_tool_use(
     flags.string_flag("command", "");
     if let Err(parse_error) = flags.parse(arguments) {
         let _ = writeln!(standard_error, "{}", parse_error.message);
+        return 2;
     }
     let (session, _cwd) = resolve_bridge_args(&flags, standard_error);
     let tool_name = flags.string_value("tool");
@@ -418,6 +426,7 @@ fn run_bridge_rewrite(
     flags.string_flag("tool", "");
     if let Err(parse_error) = flags.parse(arguments) {
         let _ = writeln!(standard_error, "{}", parse_error.message);
+        return 2;
     }
     let tool_name = flags.string_value("tool");
     let lower = tool_name.to_ascii_lowercase();
@@ -625,5 +634,26 @@ mod tests {
             None => std::env::remove_var("CLAUDE_TARGET_OVERRIDE"),
         }
         let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn malformed_bridge_commands_fail_nonzero_without_running_handlers() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let unknown = run_bridge_command(&["not-a-command".to_string()], &mut stdout, &mut stderr);
+        assert_ne!(unknown, 0, "unknown bridge commands must fail closed");
+
+        stdout.clear();
+        stderr.clear();
+        let malformed = run_bridge_command(
+            &[
+                "session-end".to_string(),
+                "--not-a-flag".to_string(),
+                "value".to_string(),
+            ],
+            &mut stdout,
+            &mut stderr,
+        );
+        assert_ne!(malformed, 0, "parse errors must not run lifecycle effects");
     }
 }

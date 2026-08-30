@@ -131,7 +131,7 @@ function runBridge(
   subcommand: string,
   args: string[],
   stdinInput?: string,
-  timeoutMs = 500,
+  timeoutMs = 5000,
 ): string {
   try {
     const result = execFileSync(BRIDGE_BIN, ["bridge", subcommand, ...args], {
@@ -342,7 +342,7 @@ function handleToolExecutionEnd(
     "post",
   ];
   if (event?.error) args.push("--failed");
-  runBridge("observe", args, "{}", 500);
+  runBridge("observe", args, "{}", 2000);
 }
 
 function handlePostCompact(event: PiSessionLikeEvent, ctx?: PiExtensionContext): void {

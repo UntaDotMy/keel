@@ -30,6 +30,7 @@ use std::env;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Condvar, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
@@ -308,12 +309,12 @@ fn tools_list_catalog() -> Value {
             },
             {
                 "name": "anvil",
-                "description": "Anvil delivery loop. compile/cast/sieve/stamp/run --dry-run/prefix-check run in-process. loop and live run start in the background: poll command_output, stop with command_kill.",
+                "description": "Anvil delivery loop. compile requires --goal, --bar, and --files. Short actions run in-process; loop and live run return a background commandId.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "action": { "type": "string", "enum": ["compile", "cast", "sieve", "stamp", "loop", "run", "prefix-check"], "description": "Anvil operation to perform." },
-                        "args": { "type": "array", "items": { "type": "string" }, "description": "Additional CLI flags after the action." }
+                        "args": { "type": "array", "items": { "type": "string" }, "description": "CLI flags after the action. Compile example: [\"--goal\",\"fix lifecycle\",\"--bar\",\"cargo test -p keel\",\"--files\",\"src/a.rs,src/b.rs\"]." }
                     },
                     "required": ["action"]
                 }
@@ -625,7 +626,15 @@ fn mcp_json_compact(payload: &Value) -> Result<String, String> {
     serde_json::to_string(payload).map_err(|error| format!("serialize: {error}"))
 }
 
+#[cfg(test)]
 pub(super) fn handle_tools_call(params: &Value) -> Result<Value, MethodError> {
+    handle_tools_call_cancellable(params, None)
+}
+
+pub(super) fn handle_tools_call_cancellable(
+    params: &Value,
+    cancellation: Option<Arc<AtomicBool>>,
+) -> Result<Value, MethodError> {
     let object = params.as_object().ok_or_else(|| MethodError {
         code: JSON_RPC_INVALID_PARAMS,
         message: "tools/call params must be an object".to_string(),
@@ -652,9 +661,13 @@ pub(super) fn handle_tools_call(params: &Value) -> Result<Value, MethodError> {
     // Child-spawning tools also apply an inner kill timeout (same budget).
     let name = tool_name.to_string();
     let name_for_worker = name.clone();
-    let outcome = run_tool_with_deadline(mcp_child_timeout(), &name, move || {
-        dispatch_mcp_tool(&name_for_worker, &arguments)
-    });
+    let outcome = run_tool_with_executor_cancellation(
+        &TOOL_EXECUTOR,
+        mcp_child_timeout(),
+        &name,
+        cancellation,
+        move || dispatch_mcp_tool(&name_for_worker, &arguments),
+    );
 
     match outcome {
         Ok(text) => Ok(json!({
@@ -773,32 +786,136 @@ fn dispatch_mcp_tool(tool_name: &str, arguments: &Value) -> Result<String, Strin
     }
 }
 
-type ToolJob = Box<dyn FnOnce() + Send + 'static>;
+struct ToolJob {
+    deadline: Instant,
+    cancellation: Arc<AtomicBool>,
+    work: Box<dyn FnOnce() + Send + 'static>,
+}
 
 struct ToolExecutor {
     sender: mpsc::SyncSender<ToolJob>,
 }
 
-static TOOL_EXECUTOR: LazyLock<ToolExecutor> = LazyLock::new(|| {
-    let (sender, receiver) = mpsc::sync_channel::<ToolJob>(MCP_TOOL_QUEUE_CAPACITY);
-    let receiver = Arc::new(Mutex::new(receiver));
-    for index in 0..MCP_TOOL_WORKER_COUNT {
-        let receiver = Arc::clone(&receiver);
-        let _ = std::thread::Builder::new()
-            .name(format!("keel-mcp-tool-{index}"))
-            .spawn(move || loop {
-                let job = receiver
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .recv();
-                match job {
-                    Ok(job) => job(),
-                    Err(_) => break,
-                }
-            });
+impl ToolExecutor {
+    fn new(worker_count: usize, queue_capacity: usize) -> Self {
+        let (sender, receiver) = mpsc::sync_channel::<ToolJob>(queue_capacity.max(1));
+        let receiver = Arc::new(Mutex::new(receiver));
+        for index in 0..worker_count.max(1) {
+            let receiver = Arc::clone(&receiver);
+            let _ = std::thread::Builder::new()
+                .name(format!("keel-mcp-tool-{index}"))
+                .spawn(move || loop {
+                    let job = receiver
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .recv();
+                    match job {
+                        Ok(job)
+                            if !job.cancellation.load(Ordering::Acquire)
+                                && Instant::now() < job.deadline =>
+                        {
+                            ACTIVE_TOOL_CANCELLATION.with(|active| {
+                                *active.borrow_mut() = Some(Arc::clone(&job.cancellation));
+                            });
+                            (job.work)();
+                            ACTIVE_TOOL_CANCELLATION.with(|active| {
+                                *active.borrow_mut() = None;
+                            });
+                        }
+                        Ok(_) => {}
+                        Err(_) => break,
+                    }
+                });
+        }
+        Self { sender }
     }
-    ToolExecutor { sender }
-});
+}
+
+thread_local! {
+    static ACTIVE_TOOL_CANCELLATION: std::cell::RefCell<Option<Arc<AtomicBool>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn current_tool_is_cancelled() -> bool {
+    ACTIVE_TOOL_CANCELLATION.with(|active| {
+        active
+            .borrow()
+            .as_ref()
+            .map(|token| token.load(Ordering::Acquire))
+            .unwrap_or(false)
+    })
+}
+
+static TOOL_EXECUTOR: LazyLock<ToolExecutor> =
+    LazyLock::new(|| ToolExecutor::new(MCP_TOOL_WORKER_COUNT, MCP_TOOL_QUEUE_CAPACITY));
+
+fn run_tool_with_executor<F>(
+    executor: &ToolExecutor,
+    timeout: Duration,
+    label: &str,
+    work: F,
+) -> Result<String, String>
+where
+    F: FnOnce() -> Result<String, String> + Send + 'static,
+{
+    run_tool_with_executor_cancellation(executor, timeout, label, None, work)
+}
+
+fn run_tool_with_executor_cancellation<F>(
+    executor: &ToolExecutor,
+    timeout: Duration,
+    label: &str,
+    cancellation: Option<Arc<AtomicBool>>,
+    work: F,
+) -> Result<String, String>
+where
+    F: FnOnce() -> Result<String, String> + Send + 'static,
+{
+    let cancellation = cancellation.unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+    let deadline = Instant::now() + timeout;
+    let (tx, rx) = mpsc::channel();
+    let job = ToolJob {
+        deadline,
+        cancellation: Arc::clone(&cancellation),
+        work: Box::new(move || {
+            let _ = tx.send(work());
+        }),
+    };
+    executor.sender.try_send(job).map_err(|error| match error {
+        mpsc::TrySendError::Full(_) => {
+            format!("{label}: tool executor queue is full; retry later")
+        }
+        mpsc::TrySendError::Disconnected(_) => {
+            format!("{label}: tool executor is unavailable")
+        }
+    })?;
+
+    loop {
+        if cancellation.load(Ordering::Acquire) {
+            return Err(format!("{label}: request cancelled"));
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            cancellation.store(true, Ordering::Release);
+            return Err(format!(
+                "{label}: timed out after {}s; cancellation was requested",
+                timeout.as_secs()
+            ));
+        }
+        let wait = deadline
+            .saturating_duration_since(now)
+            .min(Duration::from_millis(25));
+        match rx.recv_timeout(wait) {
+            Ok(result) => return result,
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(format!(
+                    "{label}: tool worker disconnected without a result"
+                ));
+            }
+        }
+    }
+}
 
 /// Run an in-process tool body on a bounded worker pool and return by `timeout`.
 /// A timed-out body may finish in its pool worker, but cannot create an
@@ -811,32 +928,7 @@ pub(crate) fn run_tool_with_deadline<F>(
 where
     F: FnOnce() -> Result<String, String> + Send + 'static,
 {
-    let (tx, rx) = mpsc::channel();
-    let job: ToolJob = Box::new(move || {
-        let _ = tx.send(work());
-    });
-    TOOL_EXECUTOR
-        .sender
-        .try_send(job)
-        .map_err(|error| match error {
-            mpsc::TrySendError::Full(_) => {
-                format!("{label}: tool executor queue is full; retry later")
-            }
-            mpsc::TrySendError::Disconnected(_) => {
-                format!("{label}: tool executor is unavailable")
-            }
-        })?;
-
-    match rx.recv_timeout(timeout) {
-        Ok(result) => result,
-        Err(mpsc::RecvTimeoutError::Timeout) => Err(format!(
-            "{label}: timed out after {}s; the bounded tool worker continues safely",
-            timeout.as_secs()
-        )),
-        Err(mpsc::RecvTimeoutError::Disconnected) => Err(format!(
-            "{label}: tool worker disconnected without a result"
-        )),
-    }
+    run_tool_with_executor(&TOOL_EXECUTOR, timeout, label, work)
 }
 
 fn tool_recall(arguments: &Value) -> Result<String, String> {
@@ -1296,6 +1388,7 @@ struct BackgroundCommand {
     /// `Some(child)` while running; the reaper or command_kill takes it out
     /// when the process ends and records the exit code in `exit`.
     child: Arc<Mutex<Option<std::process::Child>>>,
+    process_guard: Mutex<Option<crate::runtime::ChildProcessGuard>>,
     exit: Arc<Mutex<Option<i32>>>,
     readers_done: ReaderState,
 }
@@ -1318,7 +1411,7 @@ fn next_background_id() -> String {
 /// Spawn `child` in the background and register it under a fresh command id.
 /// On Unix the child becomes its own process-group leader (setsid) so
 /// `kill_process_tree` can reach every descendant via `kill(-pid, SIGKILL)`.
-/// On Windows `taskkill /T` walks the tree instead, so no setup is needed.
+/// On Windows a kill-on-close Job Object owns descendants for crash cleanup.
 fn spawn_background_command(mut child: Command, label: &str) -> Result<String, String> {
     #[cfg(unix)]
     {
@@ -1338,6 +1431,16 @@ fn spawn_background_command(mut child: Command, label: &str) -> Result<String, S
     let mut spawned = child
         .spawn()
         .map_err(|error| format!("run_command: background spawn: {error}"))?;
+    let process_guard = match crate::runtime::own_process_tree(&mut spawned) {
+        Ok(guard) => guard,
+        Err(error) => {
+            let _ = spawned.kill();
+            let _ = spawned.wait();
+            return Err(format!(
+                "run_command: background process ownership: {error}"
+            ));
+        }
+    };
     let pid = spawned.id();
     let stdout_pipe = spawned
         .stdout
@@ -1355,6 +1458,7 @@ fn spawn_background_command(mut child: Command, label: &str) -> Result<String, S
         stdout: Arc::new(Mutex::new(String::new())),
         stderr: Arc::new(Mutex::new(String::new())),
         child: Arc::new(Mutex::new(Some(spawned))),
+        process_guard: Mutex::new(Some(process_guard)),
         exit: Arc::new(Mutex::new(None)),
         readers_done: Arc::new((Mutex::new(2), Condvar::new())),
     });
@@ -1401,6 +1505,11 @@ fn spawn_background_command(mut child: Command, label: &str) -> Result<String, S
                 }
             };
             if let Some(code) = outcome {
+                reaper_entry
+                    .process_guard
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .take();
                 wait_for_background_readers(&reaper_entry.readers_done);
                 let mut exit_guard = reaper_entry
                     .exit
@@ -1618,13 +1727,28 @@ fn tool_command_kill(arguments: &Value) -> Result<String, String> {
             // killing only it would orphan the real work it spawned. The
             // wrapper was started in a kill-on-close Job Object (Windows) or
             // its own process group (Unix), so the tree is reachable.
-            if let Err(error) = crate::runtime::terminate_process_tree(&mut child) {
+            let mut process_guard = entry
+                .process_guard
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take()
+                .ok_or_else(|| "command_kill: process ownership is unavailable".to_string())?;
+            if let Err(error) =
+                crate::runtime::terminate_owned_process_tree(&mut child, &mut process_guard)
+            {
                 let mut child_guard = entry
                     .child
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 if child_guard.is_none() {
                     *child_guard = Some(child);
+                }
+                let mut ownership_guard = entry
+                    .process_guard
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if ownership_guard.is_none() {
+                    *ownership_guard = Some(process_guard);
                 }
                 return Err(format!("command_kill: {error}"));
             }
@@ -1958,7 +2082,7 @@ fn tool_brief_create(arguments: &Value) -> Result<String, String> {
     });
     if brief.acceptance_criteria.len() >= 2 {
         payload["next_step"] = Value::String(format!(
-            "{} acceptance criteria -> run `keel anvil compile --goal ... --bar ...` then `keel anvil run`",
+            "{} acceptance criteria -> run `keel anvil compile --goal ... --bar ... --files path/to/owner.rs` then `keel anvil run --dry-run`",
             brief.acceptance_criteria.len()
         ));
     }
@@ -2138,6 +2262,12 @@ fn tool_anvil(arguments: &Value) -> Result<String, String> {
             }
         }
     }
+    if action == "compile" && !argv_flag_has_value(&owned[1..], "--files") {
+        return Err(
+            "anvil compile: missing --files; pass the comma-separated owning files for the isolated delivery boundary"
+                .into(),
+        );
+    }
     let mut tokens = vec!["anvil".to_string()];
     tokens.extend(owned.iter().cloned());
     if refuse_mcp_long_keel_job(&tokens).is_some() {
@@ -2147,6 +2277,20 @@ fn tool_anvil(arguments: &Value) -> Result<String, String> {
     }
     run_inprocess_cli("keel anvil", |out, err| {
         crate::utility::run_anvil_command(&owned, out, err)
+    })
+}
+
+fn argv_flag_has_value(arguments: &[String], flag: &str) -> bool {
+    arguments.iter().enumerate().any(|(index, argument)| {
+        argument
+            .strip_prefix(&format!("{flag}="))
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
+            || (argument == flag
+                && arguments
+                    .get(index + 1)
+                    .map(|value| !value.trim().is_empty() && !value.starts_with("--"))
+                    .unwrap_or(false))
     })
 }
 
@@ -2275,6 +2419,14 @@ fn run_command_with_timeout_stdin(
     let mut child = command
         .spawn()
         .map_err(|error| format!("{label}: spawn: {error}"))?;
+    let mut process_guard = match crate::runtime::own_process_tree(&mut child) {
+        Ok(guard) => guard,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("{label}: process ownership: {error}"));
+        }
+    };
 
     if let Some(bytes) = stdin_bytes {
         if let Some(mut stdin_pipe) = child.stdin.take() {
@@ -2312,8 +2464,28 @@ fn run_command_with_timeout_stdin(
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) => {
+                if current_tool_is_cancelled() {
+                    let kill_error = crate::runtime::terminate_owned_process_tree(
+                        &mut child,
+                        &mut process_guard,
+                    )
+                    .err();
+                    let _ = child.wait();
+                    let _ = stdout_handle.join();
+                    let _ = stderr_handle.join();
+                    let suffix = kill_error
+                        .map(|error| format!("; process-tree cleanup failed: {error}"))
+                        .unwrap_or_default();
+                    return Err(format!(
+                        "{label}: request cancelled{suffix}; process tree was terminated"
+                    ));
+                }
                 if Instant::now() >= deadline {
-                    let kill_error = crate::runtime::terminate_process_tree(&mut child).err();
+                    let kill_error = crate::runtime::terminate_owned_process_tree(
+                        &mut child,
+                        &mut process_guard,
+                    )
+                    .err();
                     let _ = child.wait();
                     let _ = stdout_handle.join();
                     let _ = stderr_handle.join();
@@ -2333,7 +2505,8 @@ fn run_command_with_timeout_stdin(
                 std::thread::sleep(Duration::from_millis(25));
             }
             Err(error) => {
-                let _ = crate::runtime::terminate_process_tree(&mut child); // intentional tree cleanup after wait failure
+                let _ =
+                    crate::runtime::terminate_owned_process_tree(&mut child, &mut process_guard);
                 return Err(format!("{label}: wait: {error}"));
             }
         }
@@ -2661,6 +2834,56 @@ mod mcp_timeout_tests {
         assert_eq!(
             slim["tools"][0]["inputSchema"]["properties"]["q"]["type"],
             "string"
+        );
+    }
+
+    #[test]
+    fn expired_queued_work_never_starts_and_executor_recovers() {
+        let executor = Arc::new(ToolExecutor::new(2, 4));
+        let started = Arc::new(std::sync::Barrier::new(3));
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let mut blockers = Vec::new();
+        for _ in 0..2 {
+            let executor = Arc::clone(&executor);
+            let started = Arc::clone(&started);
+            let release = Arc::clone(&release);
+            blockers.push(std::thread::spawn(move || {
+                run_tool_with_executor(&executor, Duration::from_secs(2), "blocker", move || {
+                    started.wait();
+                    let (lock, notify) = &*release;
+                    let mut open = lock.lock().unwrap();
+                    while !*open {
+                        open = notify.wait(open).unwrap();
+                    }
+                    Ok("released".into())
+                })
+            }));
+        }
+        started.wait();
+
+        let executions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let executions_for_job = Arc::clone(&executions);
+        let result =
+            run_tool_with_executor(&executor, Duration::from_millis(40), "expired", move || {
+                executions_for_job.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok("late".into())
+            });
+        assert!(result.unwrap_err().contains("timed out"));
+
+        let (lock, notify) = &*release;
+        *lock.lock().unwrap() = true;
+        notify.notify_all();
+        for blocker in blockers {
+            assert_eq!(blocker.join().unwrap().unwrap(), "released");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(executions.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(
+            run_tool_with_executor(&executor, Duration::from_secs(1), "recovered", || {
+                Ok("ok".into())
+            })
+            .unwrap(),
+            "ok"
         );
     }
 }
@@ -3518,6 +3741,20 @@ mod tests {
         .expect("envelope");
         let live_id = assert_mcp_background_start(&live);
         assert!(!live_id.is_empty());
+    }
+
+    #[test]
+    fn anvil_compile_requires_an_explicit_file_boundary() {
+        let error = tool_anvil(&json!({
+            "action": "compile",
+            "args": ["--goal", "fix", "--bar", "cargo check"]
+        }))
+        .expect_err("compile without files must fail before dispatch");
+        assert!(error.contains("--files"), "{error}");
+        assert!(argv_flag_has_value(
+            &["--files=src/lib.rs".to_string()],
+            "--files"
+        ));
     }
 
     #[test]

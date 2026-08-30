@@ -12,7 +12,9 @@ use std::collections::{HashMap, VecDeque};
 use std::env;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+use std::sync::Arc;
 use std::thread;
 
 use serde_json::{json, Value};
@@ -175,9 +177,15 @@ enum ServeEvent {
     Response {
         value: Value,
         batch: Option<BatchMember>,
+        cancellation_key: Option<String>,
+        cancellation: Arc<AtomicBool>,
     },
     /// A worker finished a notification (no response). Frees an in-flight slot.
-    WorkerDone { batch: Option<BatchMember> },
+    WorkerDone {
+        batch: Option<BatchMember>,
+        cancellation_key: Option<String>,
+        cancellation: Arc<AtomicBool>,
+    },
 }
 
 /// Identity of one element inside an open JSON-RPC batch.
@@ -205,6 +213,8 @@ enum BatchSlot {
 struct PendingJob {
     request: Value,
     batch: Option<BatchMember>,
+    cancellation_key: Option<String>,
+    cancellation: Arc<AtomicBool>,
 }
 
 /// Read newline-delimited JSON-RPC messages from `input` and write framed
@@ -348,26 +358,7 @@ struct ParentWatch {
 impl ParentWatch {
     #[cfg(windows)]
     fn capture() -> Option<Self> {
-        let own = std::process::id();
-        let executable = crate::runtime::powershell_executable()?;
-        let output = std::process::Command::new(executable)
-            .args([
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                &format!(
-                    "(Get-CimInstance Win32_Process -Filter \"ProcessId={own}\").ParentProcessId"
-                ),
-            ])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .output()
-            .ok()?;
-        if !output.status.success() {
-            return None;
-        }
-        let text = String::from_utf8_lossy(&output.stdout);
-        text.trim().parse::<u32>().ok().map(|ppid| Self { ppid })
+        crate::runtime::parent_process_id(std::process::id()).map(|ppid| Self { ppid })
     }
 
     #[cfg(unix)]
@@ -384,27 +375,7 @@ impl ParentWatch {
 
     #[cfg(windows)]
     fn alive(&self) -> bool {
-        let ppid = self.ppid;
-        let Some(executable) = crate::runtime::powershell_executable() else {
-            return true;
-        };
-        let output = std::process::Command::new(executable)
-            .args([
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                &format!("if (Get-Process -Id {ppid} -ErrorAction SilentlyContinue) {{ 1 }} else {{ 0 }}"),
-            ])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .output();
-        match output {
-            Ok(output) if output.status.success() => {
-                String::from_utf8_lossy(&output.stdout).trim() == "1"
-            }
-            // Probe failure is conservative: assume alive, keep serving.
-            _ => true,
-        }
+        crate::runtime::process_is_alive(self.ppid).unwrap_or(true)
     }
 
     #[cfg(unix)]
@@ -474,6 +445,73 @@ fn read_frames_into(input: &mut dyn Read, event_tx: mpsc::Sender<ServeEvent>) {
     }
 }
 
+pub(super) fn cancellation_key(request_id: &Value) -> Option<String> {
+    match request_id {
+        Value::Null | Value::String(_) | Value::Number(_) => serde_json::to_string(request_id).ok(),
+        _ => None,
+    }
+}
+
+fn new_pending_job(
+    request: Value,
+    batch: Option<BatchMember>,
+    cancellations: &mut HashMap<String, Arc<AtomicBool>>,
+) -> PendingJob {
+    let key = request.get("id").and_then(cancellation_key);
+    let cancellation = Arc::new(AtomicBool::new(false));
+    if let Some(key) = key.as_ref() {
+        cancellations.insert(key.clone(), Arc::clone(&cancellation));
+    }
+    PendingJob {
+        request,
+        batch,
+        cancellation_key: key,
+        cancellation,
+    }
+}
+
+fn apply_cancellation_notifications(frame: &str, cancellations: &HashMap<String, Arc<AtomicBool>>) {
+    let Ok(value) = serde_json::from_str::<Value>(frame) else {
+        return;
+    };
+    let messages: Vec<&Value> = match &value {
+        Value::Array(items) => items.iter().collect(),
+        other => vec![other],
+    };
+    for message in messages {
+        if message.get("method").and_then(Value::as_str) != Some("notifications/cancelled") {
+            continue;
+        }
+        let Some(key) = message
+            .get("params")
+            .and_then(|params| params.get("requestId"))
+            .and_then(cancellation_key)
+        else {
+            continue;
+        };
+        if let Some(cancellation) = cancellations.get(&key) {
+            cancellation.store(true, Ordering::Release);
+        }
+    }
+}
+
+fn remove_cancellation_registration(
+    cancellations: &mut HashMap<String, Arc<AtomicBool>>,
+    key: Option<&str>,
+    cancellation: &Arc<AtomicBool>,
+) {
+    let Some(key) = key else {
+        return;
+    };
+    if cancellations
+        .get(key)
+        .map(|registered| Arc::ptr_eq(registered, cancellation))
+        .unwrap_or(false)
+    {
+        cancellations.remove(key);
+    }
+}
+
 fn run_serve_event_loop(
     event_tx: mpsc::Sender<ServeEvent>,
     event_rx: mpsc::Receiver<ServeEvent>,
@@ -484,6 +522,7 @@ fn run_serve_event_loop(
     let mut in_flight: usize = 0;
     let mut pending: VecDeque<PendingJob> = VecDeque::new();
     let mut batches: HashMap<u64, BatchCollector> = HashMap::new();
+    let mut cancellations: HashMap<String, Arc<AtomicBool>> = HashMap::new();
     let mut next_batch_id: u64 = 1;
     let mut reader_done = false;
     let mut exit_code: u8 = 0;
@@ -533,12 +572,10 @@ fn run_serve_event_loop(
         match event {
             ServeEvent::Frame(frame) => {
                 last_frame_at = std::time::Instant::now();
+                apply_cancellation_notifications(&frame, &cancellations);
                 match parse_frame(&frame) {
                     FrameParse::Single(request) => {
-                        pending.push_back(PendingJob {
-                            request,
-                            batch: None,
-                        });
+                        pending.push_back(new_pending_job(request, None, &mut cancellations));
                     }
                     FrameParse::Batch(items) => {
                         let batch_id = next_batch_id;
@@ -552,10 +589,11 @@ fn run_serve_event_loop(
                             },
                         );
                         for (index, request) in items.into_iter().enumerate() {
-                            pending.push_back(PendingJob {
+                            pending.push_back(new_pending_job(
                                 request,
-                                batch: Some(BatchMember { batch_id, index }),
-                            });
+                                Some(BatchMember { batch_id, index }),
+                                &mut cancellations,
+                            ));
                         }
                     }
                     FrameParse::Immediate(response) => {
@@ -591,9 +629,28 @@ fn run_serve_event_loop(
                 reader_done = true;
                 pending.clear();
             }
-            ServeEvent::Response { value, batch } => {
+            ServeEvent::Response {
+                value,
+                batch,
+                cancellation_key,
+                cancellation,
+            } => {
                 in_flight = in_flight.saturating_sub(1);
-                if let Some(member) = batch {
+                remove_cancellation_registration(
+                    &mut cancellations,
+                    cancellation_key.as_deref(),
+                    &cancellation,
+                );
+                if cancellation.load(Ordering::Acquire) {
+                    if let Some(member) = batch {
+                        if let Some(finished) =
+                            complete_batch_slot(&mut batches, member, BatchSlot::Notification)
+                        {
+                            let _ =
+                                write_framed_response(standard_output, standard_error, &finished);
+                        }
+                    }
+                } else if let Some(member) = batch {
                     if let Some(finished) =
                         complete_batch_slot(&mut batches, member, BatchSlot::Response(value))
                     {
@@ -616,8 +673,17 @@ fn run_serve_event_loop(
                     pending.clear();
                 }
             }
-            ServeEvent::WorkerDone { batch } => {
+            ServeEvent::WorkerDone {
+                batch,
+                cancellation_key,
+                cancellation,
+            } => {
                 in_flight = in_flight.saturating_sub(1);
+                remove_cancellation_registration(
+                    &mut cancellations,
+                    cancellation_key.as_deref(),
+                    &cancellation,
+                );
                 if let Some(member) = batch {
                     if let Some(finished) =
                         complete_batch_slot(&mut batches, member, BatchSlot::Notification)
@@ -644,23 +710,40 @@ fn run_serve_event_loop(
             let worker_tx = event_tx.clone();
             let request_id = job.request.get("id").cloned().unwrap_or(Value::Null);
             let batch = job.batch;
+            let cancellation_key = job.cancellation_key;
+            let cancellation = job.cancellation;
+            let worker_cancellation_key = cancellation_key.clone();
+            let worker_cancellation = Arc::clone(&cancellation);
             let request = job.request;
             let spawn_result =
                 thread::Builder::new()
                     .name("keel-mcp-req".into())
-                    .spawn(move || match dispatch(&request) {
-                        Some(response) => {
-                            let _ = worker_tx.send(ServeEvent::Response {
-                                value: response,
-                                batch,
-                            });
-                        }
-                        None => {
-                            let _ = worker_tx.send(ServeEvent::WorkerDone { batch });
-                        }
-                    });
+                    .spawn(
+                        move || match dispatch_cancellable(&request, &worker_cancellation) {
+                            Some(response) => {
+                                let _ = worker_tx.send(ServeEvent::Response {
+                                    value: response,
+                                    batch,
+                                    cancellation_key: worker_cancellation_key,
+                                    cancellation: worker_cancellation,
+                                });
+                            }
+                            None => {
+                                let _ = worker_tx.send(ServeEvent::WorkerDone {
+                                    batch,
+                                    cancellation_key: worker_cancellation_key,
+                                    cancellation: worker_cancellation,
+                                });
+                            }
+                        },
+                    );
             if let Err(error) = spawn_result {
                 in_flight = in_flight.saturating_sub(1);
+                remove_cancellation_registration(
+                    &mut cancellations,
+                    cancellation_key.as_deref(),
+                    &cancellation,
+                );
                 let _ = writeln!(standard_error, "[keel mcp] spawn request worker: {error}");
                 let response = error_response(
                     request_id,
@@ -770,6 +853,7 @@ fn parse_frame(frame: &str) -> FrameParse {
 
 /// Dispatch a JSON-RPC body (object or batch array) for HTTP / tests.
 /// Returns framed outcomes without I/O.
+#[cfg(test)]
 pub(crate) fn dispatch_body(body: &Value) -> DispatchBodyResult {
     match body {
         Value::Array(items) if items.is_empty() => DispatchBodyResult::Json(error_response(
@@ -902,7 +986,18 @@ fn write_framed_response(
 /// requests (objects with an `id`) and `None` for notifications. Tests drive
 /// this function directly to avoid spawning the binary; the stdio loop also
 /// uses it after framing.
+#[cfg(test)]
 pub fn dispatch(request: &Value) -> Option<Value> {
+    dispatch_cancellable(request, &Arc::new(AtomicBool::new(false)))
+}
+
+pub(super) fn dispatch_cancellable(
+    request: &Value,
+    cancellation: &Arc<AtomicBool>,
+) -> Option<Value> {
+    if cancellation.load(Ordering::Acquire) {
+        return None;
+    }
     let object = match request.as_object() {
         Some(object) => object,
         None => {
@@ -946,27 +1041,35 @@ pub fn dispatch(request: &Value) -> Option<Value> {
         // Currently the only meaningful incoming notification is
         // `notifications/initialized`. Other notifications are ignored
         // silently per the spec — they must never produce a response.
-        let _ = handle_method(&method, &params);
+        let _ = handle_method_cancellable(&method, &params, cancellation);
         return None;
     }
 
     let request_id = id.unwrap_or(Value::Null);
-    Some(match handle_method(&method, &params) {
-        Ok(result) => success_response(request_id, result),
-        Err(MethodError { code, message }) => error_response(request_id, code, &message),
-    })
+    Some(
+        match handle_method_cancellable(&method, &params, cancellation) {
+            Ok(result) => success_response(request_id, result),
+            Err(MethodError { code, message }) => error_response(request_id, code, &message),
+        },
+    )
 }
 
 /// Dispatcher for a single MCP method. Kept method-keyed (rather than
 /// argument-keyed) so the protocol surface is greppable and each handler
 /// stays small.
-fn handle_method(method: &str, params: &Value) -> Result<Value, MethodError> {
+fn handle_method_cancellable(
+    method: &str,
+    params: &Value,
+    cancellation: &Arc<AtomicBool>,
+) -> Result<Value, MethodError> {
     match method {
         "initialize" => Ok(handle_initialize(params)),
         "notifications/initialized" => Ok(Value::Null),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(tools::handle_tools_list()),
-        "tools/call" => tools::handle_tools_call(params),
+        "tools/call" => {
+            tools::handle_tools_call_cancellable(params, Some(Arc::clone(cancellation)))
+        }
         "resources/list" => Ok(handle_resources_list()),
         "resources/read" => handle_resources_read(params),
         // Test-only in-process delay — never ships in non-test binaries.
@@ -978,7 +1081,13 @@ fn handle_method(method: &str, params: &Value) -> Result<Value, MethodError> {
                 .and_then(Value::as_u64)
                 .unwrap_or(50)
                 .min(500);
-            thread::sleep(std::time::Duration::from_millis(ms));
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(ms);
+            while std::time::Instant::now() < deadline {
+                if cancellation.load(Ordering::Acquire) {
+                    return Ok(Value::Null);
+                }
+                thread::sleep(std::time::Duration::from_millis(5));
+            }
             Ok(json!({ "slept_ms": ms }))
         }
         other => Err(MethodError {
@@ -1546,6 +1655,37 @@ mod tests {
             "fast jobs must overtake the slow one (ping, then 80ms, then 300ms); \
              serial FIFO would render d1 first: {rendered}"
         );
+    }
+
+    #[test]
+    fn cancellation_notification_suppresses_and_stops_inflight_request() {
+        let mut input_bytes = Vec::new();
+        for value in [
+            json!({
+                "jsonrpc": "2.0",
+                "id": "slow-request",
+                "method": "keel/test_delay_ms",
+                "params": { "ms": 500 }
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/cancelled",
+                "params": { "requestId": "slow-request", "reason": "test" }
+            }),
+            json!({"jsonrpc": "2.0", "id": "still-live", "method": "ping"}),
+        ] {
+            input_bytes.extend(serde_json::to_vec(&value).expect("serialize"));
+            input_bytes.push(b'\n');
+        }
+        let mut input: &[u8] = &input_bytes;
+        let mut output = Vec::new();
+        let mut error_output = Vec::new();
+
+        assert_eq!(serve_stdio(&mut input, &mut output, &mut error_output), 0);
+
+        let rendered = String::from_utf8_lossy(&output);
+        assert!(!rendered.contains("slow-request"), "{rendered}");
+        assert!(rendered.contains("still-live"), "{rendered}");
     }
 
     #[test]

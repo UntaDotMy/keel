@@ -6,8 +6,8 @@
 // This script is invoked by Codex hook commands. It reads event JSON from
 // stdin, maps Codex lifecycle events to keel bridge subcommands, and writes
 // context text to stdout. Follows the same design principles as the OpenCode
-// adapter: resolve binary once, 500ms hard timeout, fire-and-forget for
-// observations, degrade gracefully on any error.
+// adapter: resolve the binary once, use bounded per-operation timeouts, and
+// degrade gracefully on advisory lifecycle errors.
 //
 // Codex plugin structure:
 //   .codex-plugin/plugin.json    — manifest pointing at hooks/hooks.json
@@ -104,10 +104,10 @@ function denyOutput(reason: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Bridge runner — never throws, 500ms hard timeout via execFileSync
+// Bridge runner. Lifecycle reads receive a bounded budget for index and disk I/O.
 // ---------------------------------------------------------------------------
 
-function runBridge(subcommand: string, args: string[], timeoutMs = 500): string {
+function runBridge(subcommand: string, args: string[], timeoutMs = 5000): string {
   try {
     const result = execFileSync(
       BRIDGE_BIN,
@@ -135,7 +135,7 @@ function runBridgeWithStdin(
       BRIDGE_BIN,
       ["bridge", subcommand, ...args],
       {
-        timeout: 500,
+        timeout: 2000,
         input: stdin,
         stdio: ["pipe", "pipe", "pipe"],
         encoding: "utf-8",

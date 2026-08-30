@@ -62,12 +62,12 @@ const KeelPlugin: Plugin = async ({ client, directory, $ }) => {
 
   const cwd = directory;
 
-  // ---- bridge runner (closes over $), never throws, 500ms hard timeout ----
+  // ---- bridge runner (closes over $), never throws, bounded lifecycle timeout ----
 
   async function runBridge(
     subcommand: string,
     args: string[],
-    timeoutMs = 500,
+    timeoutMs = 5000,
   ): Promise<string> {
     try {
       // Bun's $ escapes each interpolation as a single argument; a string array
@@ -94,7 +94,7 @@ const KeelPlugin: Plugin = async ({ client, directory, $ }) => {
       // `echo | cmd`, which mangles JSON across shells.
       const input = Buffer.from(stdin, "utf-8");
       const result = await $`${BRIDGE_BIN} bridge ${subcommand} ${args} < ${input}`
-        .timeout(500)
+        .timeout(2000)
         .quiet()
         .text();
       return result ?? "";

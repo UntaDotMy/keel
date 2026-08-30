@@ -3,23 +3,27 @@
 //! Caller: `run_mcp_command` `serve-http` arm.
 //! Dependencies: std::net only (no async runtime); reuses `super::dispatch` /
 //!   `dispatch_body` for JSON-RPC semantics.
-//! Side Effects: Binds a TCP listener (default 127.0.0.1:3920), accepts many
-//!   clients, writes HTTP responses; tracks optional MCP-Session-Id set.
+//! Side Effects: Binds a TCP listener (default 127.0.0.1:3920), accepts bounded
+//!   concurrent clients, writes responses, and tracks sessions/cancellation.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-use super::{dispatch_body, DispatchBodyResult, JSON_RPC_INVALID_REQUEST, JSON_RPC_PARSE_ERROR};
+use super::{DispatchBodyResult, JSON_RPC_INVALID_REQUEST, JSON_RPC_PARSE_ERROR};
 
 const DEFAULT_BIND: &str = "127.0.0.1:3920";
 const MAX_HTTP_BODY: usize = 8 * 1024 * 1024;
+const MAX_HTTP_HEADER: usize = 16 * 1024;
+const MAX_HTTP_BATCH_ITEMS: usize = 64;
+const HTTP_INFLIGHT_WAIT: Duration = Duration::from_secs(2);
 
 /// `keel mcp serve-http [--bind HOST:PORT]`
 pub(super) fn serve_http(
@@ -63,22 +67,35 @@ pub(super) fn serve_http(
     );
     let _ = standard_output.flush();
 
-    let sessions: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+    let state = Arc::new(HttpState::default());
     // Mirror the stdio loop's KEEL_MCP_MAX_INFLIGHT contract (mod.rs):
     // bound concurrent in-flight request handling on HTTP too.
-    let inflight = Arc::new(InflightGuard::new(super::max_inflight()));
+    let max_inflight = super::max_inflight();
+    let inflight = Arc::new(InflightGuard::new(max_inflight));
+    let connections = Arc::new(InflightGuard::new(max_inflight.saturating_add(8)));
 
     for connection in listener.incoming() {
         match connection {
-            Ok(stream) => {
-                let sessions = Arc::clone(&sessions);
+            Ok(mut stream) => {
+                let Some(connection_permit) = connections.try_acquire() else {
+                    let _ = write_http(
+                        &mut stream,
+                        503,
+                        "text/plain; charset=utf-8",
+                        None,
+                        b"server busy",
+                    );
+                    continue;
+                };
+                let state = Arc::clone(&state);
                 let inflight = Arc::clone(&inflight);
                 let _ = stream.set_read_timeout(Some(Duration::from_secs(60)));
                 let _ = stream.set_write_timeout(Some(Duration::from_secs(60)));
                 let spawn = thread::Builder::new()
                     .name("keel-mcp-http".into())
                     .spawn(move || {
-                        if let Err(error) = handle_connection(stream, sessions, inflight) {
+                        let _connection_permit = connection_permit;
+                        if let Err(error) = handle_connection(stream, state, inflight) {
                             // Connection-level errors stay local; no shared stderr.
                             let _ = error;
                         }
@@ -148,9 +165,15 @@ fn remote_http_authorized(header: Option<&str>) -> bool {
         .unwrap_or(false)
 }
 
+#[derive(Default)]
+struct HttpState {
+    sessions: Mutex<HashSet<String>>,
+    cancellations: Mutex<HashMap<String, Arc<AtomicBool>>>,
+}
+
 fn handle_connection(
     mut stream: TcpStream,
-    sessions: Arc<Mutex<HashSet<String>>>,
+    state: Arc<HttpState>,
     inflight: Arc<InflightGuard>,
 ) -> std::io::Result<()> {
     let mut buffer = Vec::new();
@@ -161,20 +184,50 @@ fn handle_connection(
             break;
         }
         buffer.extend_from_slice(&chunk[..n]);
-        if buffer.len() > MAX_HTTP_BODY + 16_384 {
+        if find_header_end(&buffer).is_none() && buffer.len() > MAX_HTTP_HEADER {
             write_http(
                 &mut stream,
-                413,
+                431,
                 "text/plain; charset=utf-8",
                 None,
-                b"payload too large",
+                b"request headers too large",
             )?;
             return Ok(());
         }
         if let Some(header_end) = find_header_end(&buffer) {
+            if header_end > MAX_HTTP_HEADER {
+                write_http(
+                    &mut stream,
+                    431,
+                    "text/plain; charset=utf-8",
+                    None,
+                    b"request headers too large",
+                )?;
+                return Ok(());
+            }
             let header_text = String::from_utf8_lossy(&buffer[..header_end]);
             let headers = parse_headers(&header_text);
-            let content_length = headers.content_length.unwrap_or(0).min(MAX_HTTP_BODY);
+            if !headers.content_length_valid {
+                write_http(
+                    &mut stream,
+                    400,
+                    "text/plain; charset=utf-8",
+                    None,
+                    b"invalid Content-Length",
+                )?;
+                return Ok(());
+            }
+            let content_length = headers.content_length.unwrap_or(0);
+            if content_length > MAX_HTTP_BODY {
+                write_http(
+                    &mut stream,
+                    413,
+                    "text/plain; charset=utf-8",
+                    None,
+                    b"payload too large",
+                )?;
+                return Ok(());
+            }
             let total_needed = header_end + content_length;
             while buffer.len() < total_needed {
                 let n = stream.read(&mut chunk)?;
@@ -182,9 +235,19 @@ fn handle_connection(
                     break;
                 }
                 buffer.extend_from_slice(&chunk[..n]);
-                if buffer.len() > MAX_HTTP_BODY + 16_384 {
+                if buffer.len() > total_needed {
                     break;
                 }
+            }
+            if buffer.len() < total_needed {
+                write_http(
+                    &mut stream,
+                    400,
+                    "text/plain; charset=utf-8",
+                    None,
+                    b"incomplete request body",
+                )?;
+                return Ok(());
             }
             let body = if content_length == 0 {
                 Vec::new()
@@ -196,8 +259,21 @@ fn handle_connection(
             };
             // Bound in-flight request handling; the permit releases on drop
             // when this connection's handler returns.
-            let _permit = inflight.acquire();
-            respond(&mut stream, &headers, &body, &sessions)?;
+            if body_contains_only_cancellation_notifications(&body) {
+                respond(&mut stream, &headers, &body, &state)?;
+                return Ok(());
+            }
+            let Some(_permit) = inflight.acquire_timeout(HTTP_INFLIGHT_WAIT) else {
+                write_http(
+                    &mut stream,
+                    503,
+                    "text/plain; charset=utf-8",
+                    None,
+                    b"server busy",
+                )?;
+                return Ok(());
+            };
+            respond(&mut stream, &headers, &body, &state)?;
             return Ok(());
         }
     }
@@ -225,6 +301,7 @@ impl InflightGuard {
 
     /// Block until an in-flight slot is free, then take it. The returned
     /// permit releases the slot on drop and wakes one waiter.
+    #[cfg(test)]
     fn acquire(self: &Arc<Self>) -> InflightPermit {
         let mut current = self.lock();
         while *current >= self.capacity {
@@ -237,6 +314,40 @@ impl InflightGuard {
         InflightPermit {
             guard: Arc::clone(self),
         }
+    }
+
+    fn acquire_timeout(self: &Arc<Self>, timeout: Duration) -> Option<InflightPermit> {
+        let deadline = Instant::now() + timeout;
+        let mut current = self.lock();
+        while *current >= self.capacity {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return None;
+            }
+            let waited = self
+                .slot_freed
+                .wait_timeout(current, remaining)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            current = waited.0;
+            if waited.1.timed_out() && *current >= self.capacity {
+                return None;
+            }
+        }
+        *current += 1;
+        Some(InflightPermit {
+            guard: Arc::clone(self),
+        })
+    }
+
+    fn try_acquire(self: &Arc<Self>) -> Option<InflightPermit> {
+        let mut current = self.lock();
+        if *current >= self.capacity {
+            return None;
+        }
+        *current += 1;
+        Some(InflightPermit {
+            guard: Arc::clone(self),
+        })
     }
 
     /// Test observation only; production paths rely on acquire/permit drop.
@@ -269,6 +380,7 @@ struct HttpHeaders {
     path: String,
     origin: Option<String>,
     content_length: Option<usize>,
+    content_length_valid: bool,
     accept: String,
     authorization: Option<String>,
     protocol_version: Option<String>,
@@ -290,6 +402,7 @@ fn parse_headers(text: &str) -> HttpHeaders {
     let path = parts.next().unwrap_or("/").to_string();
     let mut origin = None;
     let mut content_length = None;
+    let mut content_length_valid = true;
     let mut accept = String::new();
     let mut authorization = None;
     let mut protocol_version = None;
@@ -300,7 +413,16 @@ fn parse_headers(text: &str) -> HttpHeaders {
             let value = value.trim();
             match name.as_str() {
                 "origin" => origin = Some(value.to_string()),
-                "content-length" => content_length = value.parse().ok(),
+                "content-length" => {
+                    if content_length.is_some() {
+                        content_length_valid = false;
+                    } else {
+                        match value.parse() {
+                            Ok(parsed) => content_length = Some(parsed),
+                            Err(_) => content_length_valid = false,
+                        }
+                    }
+                }
                 "accept" => accept = value.to_string(),
                 "authorization" => authorization = Some(value.to_string()),
                 "mcp-protocol-version" => protocol_version = Some(value.to_string()),
@@ -314,6 +436,7 @@ fn parse_headers(text: &str) -> HttpHeaders {
         path,
         origin,
         content_length,
+        content_length_valid,
         accept,
         authorization,
         protocol_version,
@@ -409,11 +532,26 @@ fn origin_allowed(origin: Option<&str>) -> bool {
     }
 }
 
+fn body_contains_only_cancellation_notifications(body: &[u8]) -> bool {
+    let Ok(value) = serde_json::from_slice::<Value>(body) else {
+        return false;
+    };
+    let messages: Vec<&Value> = match &value {
+        Value::Array(items) if !items.is_empty() => items.iter().collect(),
+        Value::Array(_) => return false,
+        other => vec![other],
+    };
+    messages.iter().all(|message| {
+        message.get("method").and_then(Value::as_str) == Some("notifications/cancelled")
+            && message.get("id").is_none()
+    })
+}
+
 fn respond(
     stream: &mut TcpStream,
     headers: &HttpHeaders,
     body: &[u8],
-    sessions: &Arc<Mutex<HashSet<String>>>,
+    state: &Arc<HttpState>,
 ) -> std::io::Result<()> {
     if allow_remote_bind() && !remote_http_authorized(headers.authorization.as_deref()) {
         return write_http(
@@ -462,13 +600,13 @@ fn respond(
         }
         "DELETE" => {
             if let Some(id) = headers.session_id.as_ref() {
-                if let Ok(mut guard) = sessions.lock() {
+                if let Ok(mut guard) = state.sessions.lock() {
                     guard.remove(id);
                 }
             }
             write_http(stream, 200, "text/plain; charset=utf-8", None, b"")
         }
-        "POST" => handle_post(stream, headers, body, sessions),
+        "POST" => handle_post(stream, headers, body, state),
         _ => write_http(
             stream,
             405,
@@ -483,7 +621,7 @@ fn handle_post(
     stream: &mut TcpStream,
     headers: &HttpHeaders,
     body: &[u8],
-    sessions: &Arc<Mutex<HashSet<String>>>,
+    state: &Arc<HttpState>,
 ) -> std::io::Result<()> {
     if !accepts_streamable_http(&headers.accept) {
         return write_http(
@@ -506,7 +644,11 @@ fn handle_post(
         }
     }
     if let Some(id) = headers.session_id.as_ref() {
-        let known = sessions.lock().map(|g| g.contains(id)).unwrap_or(false);
+        let known = state
+            .sessions
+            .lock()
+            .map(|guard| guard.contains(id))
+            .unwrap_or(false);
         if !known {
             return write_http(
                 stream,
@@ -550,21 +692,21 @@ fn handle_post(
     }
 
     let is_initialize = value.get("method").and_then(Value::as_str) == Some("initialize");
+    apply_http_cancellations(&value, state, headers.session_id.as_deref());
 
-    // Concurrent dispatch for batch arrays is sequential here for HTTP body
-    // simplicity; multi-client concurrency is via parallel TCP connections.
-    // For single-object requests we still use the shared dispatch path.
+    // Batch members use bounded concurrent dispatch; individual requests use
+    // the shared cancellable dispatch path.
     let outcome = if value.is_array() {
         // Prefer concurrent batch elements when a client sends a JSON-RPC batch.
-        dispatch_body_concurrent(&value)
+        dispatch_body_concurrent(&value, state, headers.session_id.as_deref())
     } else {
-        dispatch_body(&value)
+        dispatch_http_value(&value, state, headers.session_id.as_deref())
     };
 
     let mut new_session: Option<String> = None;
     if is_initialize {
         let session = format!("keel-{}", generate_session_token());
-        if let Ok(mut guard) = sessions.lock() {
+        if let Ok(mut guard) = state.sessions.lock() {
             guard.insert(session.clone());
         }
         new_session = Some(session);
@@ -591,8 +733,83 @@ fn handle_post(
     }
 }
 
+fn http_cancellation_key(session_id: Option<&str>, request_id: &Value) -> Option<String> {
+    super::cancellation_key(request_id)
+        .map(|request_key| format!("{}\0{request_key}", session_id.unwrap_or("")))
+}
+
+fn apply_http_cancellations(value: &Value, state: &HttpState, session_id: Option<&str>) {
+    let messages: Vec<&Value> = match value {
+        Value::Array(items) => items.iter().collect(),
+        other => vec![other],
+    };
+    let cancellations = state
+        .cancellations
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    for message in messages {
+        if message.get("method").and_then(Value::as_str) != Some("notifications/cancelled") {
+            continue;
+        }
+        let Some(key) = message
+            .get("params")
+            .and_then(|params| params.get("requestId"))
+            .and_then(|request_id| http_cancellation_key(session_id, request_id))
+        else {
+            continue;
+        };
+        if let Some(cancellation) = cancellations.get(&key) {
+            cancellation.store(true, Ordering::Release);
+        }
+    }
+}
+
+fn dispatch_http_value(
+    value: &Value,
+    state: &HttpState,
+    session_id: Option<&str>,
+) -> DispatchBodyResult {
+    let cancellation = Arc::new(AtomicBool::new(false));
+    let key = value
+        .get("id")
+        .and_then(|request_id| http_cancellation_key(session_id, request_id));
+    if let Some(key) = key.as_ref() {
+        state
+            .cancellations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(key.clone(), Arc::clone(&cancellation));
+    }
+    let response = super::dispatch_cancellable(value, &cancellation);
+    if let Some(key) = key.as_ref() {
+        let mut registrations = state
+            .cancellations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if registrations
+            .get(key)
+            .map(|registered| Arc::ptr_eq(registered, &cancellation))
+            .unwrap_or(false)
+        {
+            registrations.remove(key);
+        }
+    }
+    if cancellation.load(Ordering::Acquire) {
+        DispatchBodyResult::Accepted
+    } else {
+        match response {
+            Some(response) => DispatchBodyResult::Json(response),
+            None => DispatchBodyResult::Accepted,
+        }
+    }
+}
+
 /// Run batch elements on worker threads (bounded) then assemble the array.
-fn dispatch_body_concurrent(body: &Value) -> DispatchBodyResult {
+fn dispatch_body_concurrent(
+    body: &Value,
+    state: &Arc<HttpState>,
+    session_id: Option<&str>,
+) -> DispatchBodyResult {
     let items = match body.as_array() {
         Some(items) if items.is_empty() => {
             return DispatchBodyResult::Json(super::error_response(
@@ -601,8 +818,15 @@ fn dispatch_body_concurrent(body: &Value) -> DispatchBodyResult {
                 "Invalid Request: empty batch",
             ));
         }
+        Some(items) if items.len() > MAX_HTTP_BATCH_ITEMS => {
+            return DispatchBodyResult::Json(super::error_response(
+                Value::Null,
+                JSON_RPC_INVALID_REQUEST,
+                "Invalid Request: batch exceeds maximum item count",
+            ));
+        }
         Some(items) => items,
-        None => return dispatch_body(body),
+        None => return dispatch_http_value(body, state, session_id),
     };
 
     let (tx, rx) = std::sync::mpsc::channel();
@@ -610,10 +834,15 @@ fn dispatch_body_concurrent(body: &Value) -> DispatchBodyResult {
     for (index, item) in items.iter().cloned().enumerate() {
         expected += 1;
         let tx = tx.clone();
+        let state = Arc::clone(state);
+        let session_id = session_id.map(str::to_string);
         let _ = thread::Builder::new()
             .name("keel-mcp-http-batch".into())
             .spawn(move || {
-                let response = super::dispatch(&item);
+                let response = match dispatch_http_value(&item, &state, session_id.as_deref()) {
+                    DispatchBodyResult::Json(response) => Some(response),
+                    DispatchBodyResult::Accepted => None,
+                };
                 let _ = tx.send((index, response));
             });
     }
@@ -664,6 +893,8 @@ fn write_http(
         405 => "Method Not Allowed",
         406 => "Not Acceptable",
         413 => "Payload Too Large",
+        431 => "Request Header Fields Too Large",
+        503 => "Service Unavailable",
         _ => "Error",
     };
     let mut header = format!(
@@ -767,11 +998,11 @@ mod tests {
     fn http_post_ping_roundtrip() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("addr");
-        let sessions: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
-        let sessions_accept = Arc::clone(&sessions);
+        let state = Arc::new(HttpState::default());
+        let state_accept = Arc::clone(&state);
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().expect("accept");
-            handle_connection(stream, sessions_accept, Arc::new(InflightGuard::new(8)))
+            handle_connection(stream, state_accept, Arc::new(InflightGuard::new(8)))
                 .expect("handle");
         });
 
@@ -798,11 +1029,11 @@ mod tests {
     fn foreign_origin_is_forbidden() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("addr");
-        let sessions: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
-        let sessions_accept = Arc::clone(&sessions);
+        let state = Arc::new(HttpState::default());
+        let state_accept = Arc::clone(&state);
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().expect("accept");
-            handle_connection(stream, sessions_accept, Arc::new(InflightGuard::new(8)))
+            handle_connection(stream, state_accept, Arc::new(InflightGuard::new(8)))
                 .expect("handle");
         });
         thread::sleep(Duration::from_millis(20));
@@ -870,5 +1101,175 @@ mod tests {
         drop(held);
         let (_, observed) = waiter.join().expect("waiter");
         assert_eq!(observed, 1, "waiter woke and took exactly one slot");
+    }
+
+    #[test]
+    fn inflight_guard_times_out_without_exceeding_capacity() {
+        let guard = Arc::new(InflightGuard::new(1));
+        let _held = guard.acquire();
+        let started = Instant::now();
+        let permit = guard.acquire_timeout(Duration::from_millis(40));
+        assert!(permit.is_none(), "over-cap waiter must time out");
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert_eq!(guard.in_flight(), 1);
+    }
+
+    #[test]
+    fn inflight_guard_refuses_excess_connection_without_waiting() {
+        let guard = Arc::new(InflightGuard::new(1));
+        let _held = guard.try_acquire().expect("first permit");
+        assert!(guard.try_acquire().is_none());
+        assert_eq!(guard.in_flight(), 1);
+    }
+
+    #[test]
+    fn oversized_declared_body_is_rejected_before_body_read() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            handle_connection(
+                stream,
+                Arc::new(HttpState::default()),
+                Arc::new(InflightGuard::new(1)),
+            )
+            .expect("handle");
+        });
+        let mut client = TcpStream::connect(addr).expect("connect");
+        let request = format!(
+            "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {}\r\n\r\n",
+            MAX_HTTP_BODY + 1
+        );
+        client.write_all(request.as_bytes()).expect("write headers");
+        client.flush().expect("flush");
+        let text = read_http_response(&mut client);
+        assert!(text.contains("413"), "response={text}");
+        server.join().expect("server");
+    }
+
+    #[test]
+    fn oversized_headers_are_rejected_before_unbounded_buffering() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            handle_connection(
+                stream,
+                Arc::new(HttpState::default()),
+                Arc::new(InflightGuard::new(1)),
+            )
+            .expect("handle");
+        });
+        let mut client = TcpStream::connect(addr).expect("connect");
+        let request = format!(
+            "GET /mcp HTTP/1.1\r\nX-Fill: {}",
+            "x".repeat(MAX_HTTP_HEADER)
+        );
+        client.write_all(request.as_bytes()).expect("write headers");
+        client.flush().expect("flush");
+        let text = read_http_response(&mut client);
+        assert!(text.contains("431"), "response={text}");
+        server.join().expect("server");
+    }
+
+    #[test]
+    fn duplicate_content_length_is_rejected_to_prevent_request_smuggling() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            handle_connection(
+                stream,
+                Arc::new(HttpState::default()),
+                Arc::new(InflightGuard::new(1)),
+            )
+            .expect("handle");
+        });
+        let mut client = TcpStream::connect(addr).expect("connect");
+        client
+            .write_all(
+                b"POST /mcp HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nContent-Length: 1\r\n\r\n",
+            )
+            .expect("write headers");
+        client.flush().expect("flush");
+        let text = read_http_response(&mut client);
+        assert!(text.contains("400"), "response={text}");
+        server.join().expect("server");
+    }
+
+    #[test]
+    fn oversized_json_rpc_batch_is_rejected_without_thread_fanout() {
+        let body = Value::Array(
+            (0..=MAX_HTTP_BATCH_ITEMS)
+                .map(|id| json!({"jsonrpc":"2.0","id":id,"method":"ping"}))
+                .collect(),
+        );
+        let DispatchBodyResult::Json(response) =
+            dispatch_body_concurrent(&body, &Arc::new(HttpState::default()), None)
+        else {
+            panic!("oversized batch must return an error response");
+        };
+        assert_eq!(response["error"]["code"], json!(JSON_RPC_INVALID_REQUEST));
+    }
+
+    #[test]
+    fn http_cancellation_reaches_request_running_on_another_connection() {
+        let state = Arc::new(HttpState::default());
+        let worker_state = Arc::clone(&state);
+        let worker = thread::spawn(move || {
+            dispatch_http_value(
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": "http-slow",
+                    "method": "keel/test_delay_ms",
+                    "params": { "ms": 500 }
+                }),
+                &worker_state,
+                Some("session-a"),
+            )
+        });
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !state
+            .cancellations
+            .lock()
+            .unwrap()
+            .contains_key("session-a\0\"http-slow\"")
+        {
+            assert!(Instant::now() < deadline, "request registration timed out");
+            thread::yield_now();
+        }
+
+        apply_http_cancellations(
+            &json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/cancelled",
+                "params": { "requestId": "http-slow" }
+            }),
+            &state,
+            Some("session-b"),
+        );
+        assert!(!state
+            .cancellations
+            .lock()
+            .unwrap()
+            .get("session-a\0\"http-slow\"")
+            .unwrap()
+            .load(Ordering::Acquire));
+
+        apply_http_cancellations(
+            &json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/cancelled",
+                "params": { "requestId": "http-slow" }
+            }),
+            &state,
+            Some("session-a"),
+        );
+
+        assert!(matches!(
+            worker.join().unwrap(),
+            DispatchBodyResult::Accepted
+        ));
+        assert!(state.cancellations.lock().unwrap().is_empty());
     }
 }

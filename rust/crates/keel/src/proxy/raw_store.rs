@@ -151,10 +151,18 @@ impl RawStore {
         let date = chrono::Local::now().format("%Y-%m-%d").to_string();
         let day_dir = self.root.join(date);
         let dir = day_dir.join(&meta.raw_id);
-        fs::create_dir_all(&dir)?;
+        fs::create_dir_all(&day_dir)?;
         restrict_directory(&self.root)?;
         restrict_directory(&day_dir)?;
-        restrict_directory(&dir)?;
+        cleanup_stale_raw_staging(&day_dir);
+        let staging_dir = day_dir.join(format!(
+            ".tmp-{}-{}-{:08x}",
+            meta.raw_id,
+            std::process::id(),
+            rand::random::<u32>()
+        ));
+        fs::create_dir(&staging_dir)?;
+        restrict_directory(&staging_dir)?;
 
         // Defense-in-depth: never write an unbounded stream to disk. The capture
         // chokepoint already caps, but a direct RawRun caller could bypass it.
@@ -168,14 +176,21 @@ impl RawStore {
         } else {
             &run.stderr[..]
         };
-        write_private(&dir.join("stdout.log"), stdout_bytes)?;
-        write_private(&dir.join("stderr.log"), stderr_bytes)?;
-        write_private(&dir.join("command.txt"), meta.command.as_bytes())?;
-
-        let meta_json = serde_json::to_string_pretty(meta)?;
-        write_private(&dir.join("meta.json"), meta_json.as_bytes())?;
-
-        meta.raw_path = dir;
+        let previous_raw_path = meta.raw_path.clone();
+        meta.raw_path = dir.clone();
+        let staged = (|| -> std::io::Result<()> {
+            write_private(&staging_dir.join("stdout.log"), stdout_bytes)?;
+            write_private(&staging_dir.join("stderr.log"), stderr_bytes)?;
+            write_private(&staging_dir.join("command.txt"), meta.command.as_bytes())?;
+            let meta_json = serde_json::to_string_pretty(meta)?;
+            write_private(&staging_dir.join("meta.json"), meta_json.as_bytes())?;
+            fs::rename(&staging_dir, &dir)
+        })();
+        if let Err(error) = staged {
+            meta.raw_path = previous_raw_path;
+            let _ = fs::remove_dir_all(&staging_dir);
+            return Err(error);
+        }
         Ok(())
     }
 
@@ -255,6 +270,9 @@ impl RawStore {
                     continue;
                 }
                 let raw_id = raw.file_name().to_string_lossy().to_string();
+                if raw_id.starts_with(".tmp-") {
+                    continue;
+                }
                 let meta = fs::read_to_string(raw.path().join("meta.json"))
                     .ok()
                     .and_then(|text| serde_json::from_str::<RunMeta>(&text).ok());
@@ -277,12 +295,19 @@ impl RawStore {
             .checked_sub(Duration::from_secs(days.saturating_mul(86_400)))
             .unwrap_or(UNIX_EPOCH);
         let mut removed = 0usize;
+        let mut first_error = None;
         for entry in self.list()? {
             // why: date folders age by logical day even if mtime was touched.
             let age_signal = entry_age_signal(&entry.path).unwrap_or_else(|_| SystemTime::now());
             if age_signal < cutoff {
-                fs::remove_dir_all(&entry.path)?;
-                removed += 1;
+                match fs::remove_dir_all(&entry.path) {
+                    Ok(()) => removed += 1,
+                    Err(error) => {
+                        if first_error.is_none() {
+                            first_error = Some(error);
+                        }
+                    }
+                }
             }
         }
         // why: remove empty YYYY-MM-DD shells left after entry prunes.
@@ -299,7 +324,10 @@ impl RawStore {
                 }
             }
         }
-        Ok(removed)
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(removed),
+        }
     }
 
     /// Age-based prune for the capture hot path. Throttled to at most one sweep
@@ -316,8 +344,9 @@ impl RawStore {
         if !self.prune_stamp_due() {
             return;
         }
-        let _ = self.prune_older_than(retention_days);
-        self.write_prune_stamp();
+        if self.prune_older_than(retention_days).is_ok() {
+            self.write_prune_stamp();
+        }
     }
 
     /// True when no fresh stamp exists, meaning a sweep is due. A missing or
@@ -349,6 +378,33 @@ impl RawStore {
             &self.root.join(".last-auto-prune"),
             now.to_string().as_bytes(),
         );
+    }
+}
+
+fn cleanup_stale_raw_staging(day_directory: &std::path::Path) {
+    let Ok(entries) = fs::read_dir(day_directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let Some(file_name) = file_name.to_str() else {
+            continue;
+        };
+        if !file_name.starts_with(".tmp-") {
+            continue;
+        }
+        let mut suffix_parts = file_name.rsplitn(3, '-');
+        let nonce = suffix_parts.next().unwrap_or("");
+        let process_id = suffix_parts.next().unwrap_or("");
+        if nonce.is_empty() {
+            continue;
+        }
+        let Ok(process_id) = process_id.parse::<u32>() else {
+            continue;
+        };
+        if crate::runtime::process_is_alive(process_id) == Some(false) {
+            let _ = fs::remove_dir_all(entry.path());
+        }
     }
 }
 
@@ -407,6 +463,33 @@ mod tests {
     use super::{parse_yyyy_mm_dd_midnight_utc, RawRun, RawStore, RunMeta};
     use std::path::PathBuf;
 
+    fn sample_meta(raw_id: &str) -> RunMeta {
+        RunMeta {
+            raw_id: raw_id.to_string(),
+            command: "test".to_string(),
+            program: "test".to_string(),
+            args: Vec::new(),
+            cwd: PathBuf::from("."),
+            started_at: 1,
+            duration_ms: 2,
+            exit_code: 0,
+            adapter_name: "tests".to_string(),
+            raw_path: PathBuf::new(),
+            compact_path: PathBuf::new(),
+            agent: "test".to_string(),
+            workspace: PathBuf::from("."),
+            stdout_bytes: 0,
+            stderr_bytes: 0,
+            compact_stdout_bytes: 0,
+            compact_stderr_bytes: 0,
+            estimated_tokens_before: 0,
+            estimated_tokens_after: 0,
+            estimated_tokens_saved: 0,
+            savings_pct: 0.0,
+            compacted: false,
+        }
+    }
+
     #[test]
     fn raw_store_saves_and_loads_metadata_and_streams() {
         let root = std::env::temp_dir().join(format!("keel-raw-store-test-{}", std::process::id()));
@@ -442,6 +525,8 @@ mod tests {
             exit_code: 1,
         };
         store.save(&mut meta, &run).expect("save");
+        let initially_loaded = store.load_meta(&meta.raw_id).expect("load initial meta");
+        assert_eq!(initially_loaded.raw_path, meta.raw_path);
         meta.compact_path = meta.raw_path.join("compact.txt");
         store.save_compact(&meta, "FAIL pytest").expect("compact");
 
@@ -452,6 +537,41 @@ mod tests {
             b"stdout"
         );
         assert!(store.find_dir(&meta.raw_id).expect("dir").is_dir());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn raw_store_save_removes_only_dead_process_staging_directories() {
+        let root =
+            std::env::temp_dir().join(format!("keel-raw-staging-cleanup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let day = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let stale = root.join(&day).join(".tmp-old-999999-a1");
+        let live = root
+            .join(&day)
+            .join(format!(".tmp-live-{}-b2", std::process::id()));
+        std::fs::create_dir_all(&stale).expect("stale staging");
+        std::fs::create_dir_all(&live).expect("live staging");
+        let store = RawStore::with_root(root.clone());
+        let mut meta = sample_meta("staging-cleanup");
+        let run = RawRun {
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            exit_code: 0,
+        };
+
+        store.save(&mut meta, &run).expect("save");
+
+        assert!(!stale.exists());
+        assert!(live.exists(), "active process staging must be preserved");
+        assert!(
+            store
+                .list()
+                .expect("list")
+                .iter()
+                .all(|entry| !entry.raw_id.starts_with(".tmp-")),
+            "in-progress staging directories must not be exposed as raw runs"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
     #[cfg(unix)]
@@ -744,6 +864,48 @@ mod tests {
             let root = auto_prune_root("missing").join("does-not-exist");
             let store = RawStore::with_root(root.clone());
             store.auto_prune();
+            let _ = std::fs::remove_dir_all(&root);
+        });
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn prune_continues_after_locked_entry_and_auto_prune_retries() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let _guard = AUTO_PRUNE_ENV_LOCK.lock().unwrap();
+        with_retention_env(Some("14"), || {
+            let root = auto_prune_root("locked-entry");
+            let store = RawStore::with_root(root.clone());
+            let blocked = write_dated_entry(&root, "2001-02-03", "zzz-blocked");
+            let removable = write_dated_entry(&root, "2001-02-03", "aaa-removable");
+            let lock = std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .open(blocked.join("stdout.log"))
+                .expect("exclusive lock");
+
+            store.auto_prune();
+            assert!(
+                blocked.exists(),
+                "locked entry must survive the failed removal"
+            );
+            assert!(
+                !removable.exists(),
+                "a locked sibling must not abort the rest of the prune sweep"
+            );
+            assert!(
+                !root.join(".last-auto-prune").exists(),
+                "a partial sweep must not be stamped successful"
+            );
+
+            drop(lock);
+            store.auto_prune();
+            assert!(
+                !blocked.exists(),
+                "without a success stamp, the next call must retry the locked entry"
+            );
+            assert!(root.join(".last-auto-prune").exists());
             let _ = std::fs::remove_dir_all(&root);
         });
     }
