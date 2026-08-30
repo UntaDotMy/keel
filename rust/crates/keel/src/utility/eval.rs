@@ -40,11 +40,9 @@ struct EvalFixture {
     raw_stdout: &'static str,
     raw_stderr: &'static str,
     exit_code: i32,
-    /// The adapter we expect the classifier to route this command to. Asserted
-    /// in tests so a classification regression (e.g. a build command silently
-    /// falling through to `generic`) is caught. Only read under `#[cfg(test)]`,
-    /// so it is dead in the release build by design.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// The adapter this fixture is intended to exercise. The eval validates
+    /// this before measuring so a classifier regression cannot silently turn
+    /// an adapter benchmark into a generic-adapter benchmark.
     expected_adapter: &'static str,
 }
 
@@ -93,6 +91,14 @@ pub fn run_compaction_eval() -> EvalReport {
         let adapter = registry
             .best_match(&ast)
             .expect("generic adapter always matches");
+        assert_eq!(
+            adapter.name(),
+            fixture.expected_adapter,
+            "eval fixture {} routed to {} instead of {}",
+            fixture.name,
+            adapter.name(),
+            fixture.expected_adapter
+        );
 
         let stdout = fixture.raw_stdout.as_bytes();
         let stderr = fixture.raw_stderr.as_bytes();

@@ -23,16 +23,11 @@ use crate::runner::tool_timings::iter_day_files;
 
 /// One parsed JSONL row. Only the fields the aggregator needs are kept; the
 /// rest of the row is discarded so a future schema addition does not break
-/// the reader. `session_id` is preserved for the optional `--session` filter
-/// and for tests that assert per-session aggregation.
+/// the reader. Session filtering happens while parsing, before a row is kept.
 #[derive(Debug, Clone)]
 pub struct TimingRow {
     pub tool_name: String,
     pub duration_ms: u64,
-    /// Kept on the row for `--session` filtering callers and tests; the
-    /// summary aggregator keys by tool_name only.
-    #[allow(dead_code)]
-    pub session_id: String,
 }
 
 /// One row in the aggregated summary table — keyed by tool_name with
@@ -198,7 +193,6 @@ pub fn read_rows<'a>(
             out.push(TimingRow {
                 tool_name,
                 duration_ms,
-                session_id,
             });
         }
     }
@@ -392,11 +386,10 @@ mod tests {
         fs::write(path, body).expect("write jsonl fixture");
     }
 
-    fn row(tool: &str, duration: u64, session: &str) -> TimingRow {
+    fn row(tool: &str, duration: u64) -> TimingRow {
         TimingRow {
             tool_name: tool.to_string(),
             duration_ms: duration,
-            session_id: session.to_string(),
         }
     }
 
@@ -411,12 +404,12 @@ mod tests {
         // Bash dominates by total time; Edit has higher count but smaller
         // sum. Confirms the ordering criterion is sum_ms, not count.
         let rows = vec![
-            row("Bash", 1000, "s1"),
-            row("Bash", 2000, "s1"),
-            row("Edit", 50, "s1"),
-            row("Edit", 50, "s1"),
-            row("Edit", 50, "s1"),
-            row("Read", 100, "s1"),
+            row("Bash", 1000),
+            row("Bash", 2000),
+            row("Edit", 50),
+            row("Edit", 50),
+            row("Edit", 50),
+            row("Read", 100),
         ];
         let summaries = aggregate_rows(rows, 10);
         assert_eq!(summaries.len(), 3);
@@ -440,11 +433,11 @@ mod tests {
     #[test]
     fn aggregate_rows_truncates_to_top_n() {
         let rows = vec![
-            row("A", 500, "s"),
-            row("B", 400, "s"),
-            row("C", 300, "s"),
-            row("D", 200, "s"),
-            row("E", 100, "s"),
+            row("A", 500),
+            row("B", 400),
+            row("C", 300),
+            row("D", 200),
+            row("E", 100),
         ];
         let summaries = aggregate_rows(rows, 2);
         assert_eq!(summaries.len(), 2);
@@ -456,7 +449,7 @@ mod tests {
     fn aggregate_rows_top_zero_keeps_everything() {
         // top == 0 is the documented "no truncation" knob. Verify it
         // does not silently collapse the list to empty.
-        let rows = vec![row("A", 1, "s"), row("B", 1, "s"), row("C", 1, "s")];
+        let rows = vec![row("A", 1), row("B", 1), row("C", 1)];
         let summaries = aggregate_rows(rows, 0);
         assert_eq!(summaries.len(), 3);
     }
@@ -466,7 +459,7 @@ mod tests {
         // Pins the "top > len" guard. A `>=` typo would still pass the
         // tie-break + truncate tests above but would slice at len-1
         // here. This locks the inequality.
-        let rows = vec![row("A", 3, "s"), row("B", 2, "s"), row("C", 1, "s")];
+        let rows = vec![row("A", 3), row("B", 2), row("C", 1)];
         let summaries = aggregate_rows(rows, 99);
         assert_eq!(summaries.len(), 3);
         assert_eq!(summaries[0].tool_name, "A");
@@ -480,7 +473,7 @@ mod tests {
         // is fail-open: we don't drop them, we just label them honestly
         // so a caller can spot the gap. Two empty-name rows must merge
         // into a single bucket with their durations summed.
-        let rows = vec![row("", 40, "s"), row("Bash", 100, "s"), row("", 60, "s")];
+        let rows = vec![row("", 40), row("Bash", 100), row("", 60)];
         let summaries = aggregate_rows(rows, 10);
         assert_eq!(summaries.len(), 2);
         // Bash sum 100 < empty bucket sum 100? Bash 100, empty 100 — tie
@@ -496,7 +489,7 @@ mod tests {
     fn aggregate_rows_breaks_sum_tie_by_name_ascending() {
         // Two tools with identical sum_ms must produce a deterministic
         // ordering. Lexicographic on tool_name is the doc'd tie-break.
-        let rows = vec![row("Zeta", 100, "s"), row("Alpha", 100, "s")];
+        let rows = vec![row("Zeta", 100), row("Alpha", 100)];
         let summaries = aggregate_rows(rows, 10);
         assert_eq!(summaries[0].tool_name, "Alpha");
         assert_eq!(summaries[1].tool_name, "Zeta");
@@ -547,9 +540,8 @@ mod tests {
 
             let rows = read_rows([path.as_path()], Some("alpha"));
             assert_eq!(rows.len(), 2);
-            for row in &rows {
-                assert_eq!(row.session_id, "alpha");
-            }
+            assert_eq!(rows[0].tool_name, "Bash");
+            assert_eq!(rows[1].tool_name, "Edit");
         });
     }
 

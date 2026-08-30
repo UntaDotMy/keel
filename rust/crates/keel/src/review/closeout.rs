@@ -501,7 +501,6 @@ fn gate_status(status: GateStatus) -> &'static str {
         GateStatus::Pass => "pass",
         GateStatus::Fail => "fail",
         GateStatus::Warn => "warn",
-        GateStatus::Skipped => "skipped",
         GateStatus::Blocked => "blocked",
     }
 }
