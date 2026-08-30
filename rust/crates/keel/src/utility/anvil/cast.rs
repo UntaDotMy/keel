@@ -264,6 +264,14 @@ pub fn run_cast(
         .unwrap_or_else(|_| prefix::build_static_prefix("anvil", "host-cli"));
     let headers = cache::cache_headers_for("openai");
     let mut written = 0u64;
+    let mut occupied_candidate_ids =
+        match candidate_indices(&dir, !flags.string_value("piece").is_empty()) {
+            Ok(indices) => indices,
+            Err(error) => {
+                let _ = writeln!(standard_error, "anvil cast: inspect candidate ids: {error}");
+                return 1;
+            }
+        };
     let deadline = std::time::Instant::now() + budget.wall_timeout;
     let mut pending = match PendingResultBatch::new(&dir) {
         Ok(batch) => batch,
@@ -357,7 +365,14 @@ pub fn run_cast(
                 let _ = writeln!(standard_error, "anvil cast: remove builder brief: {error}");
                 return 1;
             }
-            let result_id = format!("cast_{written}");
+            let result_index = match reserve_candidate_index(&mut occupied_candidate_ids) {
+                Ok(index) => index,
+                Err(error) => {
+                    let _ = writeln!(standard_error, "anvil cast: {error}");
+                    return 1;
+                }
+            };
+            let result_id = format!("cast_{result_index}");
             let result_dir = dir.join(&result_id);
             let staging = pending.stage(&result_id, result_dir.clone());
             if let Err(error) = std::fs::create_dir_all(&staging) {
@@ -419,6 +434,36 @@ pub fn run_cast(
         headers.len()
     );
     0
+}
+
+fn candidate_indices(
+    dir: &Path,
+    preserve_existing: bool,
+) -> Result<std::collections::HashSet<u64>, String> {
+    if !preserve_existing {
+        return Ok(std::collections::HashSet::new());
+    }
+    let mut occupied = std::collections::HashSet::new();
+    for entry in std::fs::read_dir(dir).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        if let Some(index) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.strip_prefix("cast_"))
+            .and_then(|suffix| suffix.parse::<u64>().ok())
+        {
+            occupied.insert(index);
+        }
+    }
+    Ok(occupied)
+}
+
+fn reserve_candidate_index(occupied: &mut std::collections::HashSet<u64>) -> Result<u64, String> {
+    let index = (0..=u64::MAX)
+        .find(|index| !occupied.contains(index))
+        .ok_or_else(|| "candidate id space exhausted".to_string())?;
+    occupied.insert(index);
+    Ok(index)
 }
 
 fn replaced_result_paths(

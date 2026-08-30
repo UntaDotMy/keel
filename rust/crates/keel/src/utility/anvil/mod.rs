@@ -1010,6 +1010,66 @@ mod tests {
     }
 
     #[test]
+    fn selective_recast_does_not_collide_with_preserved_candidate_ids() {
+        let job = temp_job("selective-recast");
+        std::fs::write(job.workspace.join("second.txt"), "second\n").unwrap();
+        let args = with_job(
+            &job,
+            vec![
+                "compile".into(),
+                "--goal".into(),
+                "two pieces".into(),
+                "--bar".into(),
+                "echo ok".into(),
+            ],
+        );
+        assert_eq!(run_cmd(&args).0, 0);
+        let mut lock = job::load_lock(&job.paths).expect("lock");
+        lock["pieces"] = serde_json::json!([
+            {"id":"first","files":["input.txt"],"gates":["echo ok"],"critic":"none"},
+            {"id":"second","files":["second.txt"],"gates":["echo ok"],"critic":"none"}
+        ]);
+        std::fs::write(
+            job.paths.lock_path(),
+            serde_json::to_string_pretty(&lock).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            with_builder(|| run_cmd(&with_job(&job, vec!["cast".into()]))).0,
+            0
+        );
+
+        let (code, _, stderr) = with_builder(|| {
+            run_cmd(&with_job(
+                &job,
+                vec!["cast".into(), "--piece".into(), "second".into()],
+            ))
+        });
+        assert_eq!(code, 0, "selective recast stderr={stderr}");
+        let candidates: Vec<serde_json::Value> = std::fs::read_dir(&job.paths.dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter_map(|entry| std::fs::read_to_string(entry.path().join("result.json")).ok())
+            .filter_map(|text| serde_json::from_str(&text).ok())
+            .collect();
+        assert_eq!(candidates.len(), 6);
+        assert_eq!(
+            candidates
+                .iter()
+                .filter(|value| value["piece"] == "first")
+                .count(),
+            3
+        );
+        assert_eq!(
+            candidates
+                .iter()
+                .filter(|value| value["piece"] == "second")
+                .count(),
+            3
+        );
+    }
+
+    #[test]
     fn run_without_lock_or_goal_fails() {
         let job = temp_job("run-nogoal");
         let (code, _, stderr) = run_cmd(&with_job(&job, vec!["run".into()]));
