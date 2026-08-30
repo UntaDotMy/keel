@@ -774,11 +774,8 @@ mod tests {
         result
     }
 
-    fn auto_prune_root(tag: &str) -> PathBuf {
-        let root =
-            std::env::temp_dir().join(format!("keel-raw-auto-prune-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        root
+    fn auto_prune_root(tag: &str) -> crate::test_support::TestTempDir {
+        crate::test_support::unique_temp_dir(&format!("keel-raw-auto-prune-{tag}"))
     }
 
     /// Write one raw entry under a synthetic logical day so the prune ages it by
@@ -795,7 +792,7 @@ mod tests {
         let _guard = AUTO_PRUNE_ENV_LOCK.lock().unwrap();
         with_retention_env(Some("14"), || {
             let root = auto_prune_root("stale");
-            let store = RawStore::with_root(root.clone());
+            let store = RawStore::with_root(root.to_path_buf());
             let stale = write_dated_entry(&root, "2001-02-03", "stale-id");
             let fresh = write_dated_entry(&root, "2099-01-01", "fresh-id");
             store.auto_prune();
@@ -810,7 +807,7 @@ mod tests {
         let _guard = AUTO_PRUNE_ENV_LOCK.lock().unwrap();
         with_retention_env(Some("0"), || {
             let root = auto_prune_root("disabled");
-            let store = RawStore::with_root(root.clone());
+            let store = RawStore::with_root(root.to_path_buf());
             let ancient = write_dated_entry(&root, "2001-02-03", "ancient-id");
             store.auto_prune();
             assert!(
@@ -826,7 +823,7 @@ mod tests {
         let _guard = AUTO_PRUNE_ENV_LOCK.lock().unwrap();
         with_retention_env(Some("14"), || {
             let root = auto_prune_root("throttle");
-            let store = RawStore::with_root(root.clone());
+            let store = RawStore::with_root(root.to_path_buf());
             let stamp = root.join(".last-auto-prune");
             std::fs::create_dir_all(&root).expect("root");
             // A fresh stamp (now) means a sweep is not due, so even a stale
@@ -859,12 +856,15 @@ mod tests {
     fn auto_prune_fails_open_when_store_is_unwritable() {
         let _guard = AUTO_PRUNE_ENV_LOCK.lock().unwrap();
         with_retention_env(Some("14"), || {
-            // A store root that cannot be created or listed must not panic or
-            // return an error to the caller: auto_prune returns ().
-            let root = auto_prune_root("missing").join("does-not-exist");
-            let store = RawStore::with_root(root.clone());
+            // A regular file in the would-be directory path makes both listing
+            // and stamp creation fail without relying on platform permissions.
+            let root = auto_prune_root("unwritable");
+            let blocker = root.join("not-a-directory");
+            std::fs::write(&blocker, "block").expect("create path blocker");
+            let store_root = blocker.join("raw");
+            let store = RawStore::with_root(store_root.clone());
             store.auto_prune();
-            let _ = std::fs::remove_dir_all(&root);
+            assert!(!store_root.exists());
         });
     }
 
@@ -876,7 +876,7 @@ mod tests {
         let _guard = AUTO_PRUNE_ENV_LOCK.lock().unwrap();
         with_retention_env(Some("14"), || {
             let root = auto_prune_root("locked-entry");
-            let store = RawStore::with_root(root.clone());
+            let store = RawStore::with_root(root.to_path_buf());
             let blocked = write_dated_entry(&root, "2001-02-03", "zzz-blocked");
             let removable = write_dated_entry(&root, "2001-02-03", "aaa-removable");
             let lock = std::fs::OpenOptions::new()

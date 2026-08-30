@@ -938,7 +938,16 @@ pub fn process_is_alive(process_id: u32) -> Option<bool> {
         if process_id == 0 || process_id > i32::MAX as u32 {
             return Some(false);
         }
-        Some(unsafe { kill(process_id as i32, 0) == 0 })
+        if unsafe { kill(process_id as i32, 0) } == 0 {
+            return Some(true);
+        }
+        match std::io::Error::last_os_error().kind() {
+            // Permission denial proves the process exists even though it cannot
+            // be signalled by this user.
+            std::io::ErrorKind::PermissionDenied => Some(true),
+            std::io::ErrorKind::NotFound => Some(false),
+            _ => None,
+        }
     }
 }
 
