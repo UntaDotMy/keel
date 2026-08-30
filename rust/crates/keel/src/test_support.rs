@@ -22,6 +22,7 @@
 
 #![cfg(test)]
 
+use std::ffi::OsStr;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -29,17 +30,8 @@ use std::sync::Mutex;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// Process-wide guard around test-time mutation of environment
-/// variables. Take this lock at the top of any test that calls
-/// `std::env::set_var` or `std::env::remove_var`. Hold it for the
-/// entire test body, including the read-back assertions that depend on
-/// the env value still pointing at the test's private state.
-///
-/// Use `lock().unwrap_or_else(|poisoned| poisoned.into_inner())` so a
-/// poisoned mutex from a panicking peer test does not cascade into a
-/// second failure that masks the original. The poisoned-mutex case is
-/// benign here — the next acquirer immediately overwrites the env var
-/// with its own fresh value.
+/// Process-wide guard around test-time mutation of environment variables.
+/// Writers hold this for their full test body and restore the prior values.
 pub(crate) static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 pub(crate) struct TestTempDir {
@@ -60,9 +52,24 @@ impl AsRef<Path> for TestTempDir {
     }
 }
 
+impl AsRef<OsStr> for TestTempDir {
+    fn as_ref(&self) -> &OsStr {
+        self.path.as_os_str()
+    }
+}
+
 impl Drop for TestTempDir {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.path);
+        for attempt in 0..5 {
+            match std::fs::remove_dir_all(&self.path) {
+                Ok(()) => return,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+                Err(_) if attempt < 4 => {
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+                Err(_) => return,
+            }
+        }
     }
 }
 

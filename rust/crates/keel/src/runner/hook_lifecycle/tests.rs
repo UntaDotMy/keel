@@ -1871,17 +1871,59 @@ impl Drop for NewGatesSilenced {
     }
 }
 
-fn temp_brief_gate_home(label: &str) -> std::path::PathBuf {
-    let unique: u128 = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default();
-    let directory = std::env::temp_dir().join(format!(
-        "keel-brief-gate-{label}-{}-{unique}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&directory).expect("create tempdir");
-    directory
+struct BriefGateTempDir {
+    inner: crate::test_support::TestTempDir,
+}
+
+impl std::ops::Deref for BriefGateTempDir {
+    type Target = std::path::Path;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl AsRef<std::path::Path> for BriefGateTempDir {
+    fn as_ref(&self) -> &std::path::Path {
+        &self.inner
+    }
+}
+
+impl AsRef<std::ffi::OsStr> for BriefGateTempDir {
+    fn as_ref(&self) -> &std::ffi::OsStr {
+        self.inner.as_ref()
+    }
+}
+
+impl Drop for BriefGateTempDir {
+    fn drop(&mut self) {
+        let path = self.inner.to_path_buf();
+        let _ = std::thread::Builder::new()
+            .name("keel-test-temp-janitor".to_string())
+            .spawn(move || {
+                // Another parallel test can read the process-global home while
+                // this fixture owns it and finish a late index write after the
+                // owner drops. Let that bounded work finish, then reclaim only
+                // this process-unique directory with retries for Windows locks.
+                std::thread::sleep(std::time::Duration::from_secs(3));
+                for attempt in 0..20 {
+                    match std::fs::remove_dir_all(&path) {
+                        Ok(()) => return,
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+                        Err(_) if attempt < 19 => {
+                            std::thread::sleep(std::time::Duration::from_millis(250));
+                        }
+                        Err(_) => return,
+                    }
+                }
+            });
+    }
+}
+
+fn temp_brief_gate_home(label: &str) -> BriefGateTempDir {
+    BriefGateTempDir {
+        inner: crate::test_support::unique_temp_dir(&format!("keel-brief-gate-{label}")),
+    }
 }
 
 #[test]
