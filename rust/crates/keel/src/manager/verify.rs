@@ -54,8 +54,9 @@ fn verify_install(
     requested_skill_name: Option<&str>,
     standard_output: &mut dyn Write,
 ) -> Result<(), String> {
-    let repository_root = resolve_repository_root(flag_set.string_value("repo-root"))?;
     let claude_home = resolve_claude_home(flag_set.string_value("claude-home"))?;
+    let repository_root =
+        resolve_manager_repository_root(flag_set.string_value("repo-root"), &claude_home)?;
     // Root guidance files install into the engagement home even when the keel
     // root is `~/.keel`, so verification compares them there.
     let engagement_home = crate::runtime::claude_engagement_home(&claude_home);
@@ -324,6 +325,28 @@ pub fn install_metadata_path(claude_home: &Path) -> PathBuf {
     state_directory(claude_home).join("install-metadata.txt")
 }
 
+pub(crate) fn resolve_manager_repository_root(
+    requested_repository_root: &str,
+    keel_home: &Path,
+) -> Result<PathBuf, String> {
+    if !requested_repository_root.trim().is_empty() {
+        return resolve_repository_root(requested_repository_root);
+    }
+    let metadata = read_text_if_exists(&install_metadata_path(keel_home)).unwrap_or_default();
+    if let Some(source_root) = metadata_value(&metadata, "source_root") {
+        let candidate = PathBuf::from(source_root);
+        if crate::runtime::repository_layout_is_complete(&candidate) {
+            return Ok(candidate);
+        }
+    }
+    if let Ok(current) = std::env::current_dir() {
+        if crate::runtime::repository_layout_is_complete(&current) {
+            return Ok(current);
+        }
+    }
+    Err("Repository root not found in the current directory or install metadata. Re-run `keel install` from a release bundle/source checkout, or pass --repo-root.".to_string())
+}
+
 pub fn read_inventory_lines(path: &Path) -> Vec<String> {
     read_text_if_exists(path)
         .unwrap_or_default()
@@ -496,6 +519,37 @@ mod tests {
     use super::*;
     use crate::runtime::RepositoryLayout;
     use std::path::PathBuf;
+
+    #[test]
+    fn manager_repository_root_falls_back_to_install_metadata() {
+        let root = std::env::temp_dir().join(format!(
+            "keel-installed-source-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|value| value.as_nanos())
+                .unwrap_or_default()
+        ));
+        let source = root.join("source");
+        let home = root.join("home");
+        fs::create_dir_all(source.join("reviewer")).unwrap();
+        for relative in [
+            "AGENTS.md",
+            "README.md",
+            "00-skill-routing-and-escalation.md",
+            "reviewer/SKILL.md",
+        ] {
+            fs::write(source.join(relative), "").unwrap();
+        }
+        fs::create_dir_all(state_directory(&home)).unwrap();
+        fs::write(
+            install_metadata_path(&home),
+            format!("source_root={}\n", display_path(&source)),
+        )
+        .unwrap();
+        assert_eq!(resolve_manager_repository_root("", &home).unwrap(), source);
+        let _ = fs::remove_dir_all(root);
+    }
 
     #[test]
     fn stale_managed_skill_names_detects_content_drift() {

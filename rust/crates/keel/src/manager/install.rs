@@ -25,9 +25,10 @@ pub use executable::{
     repo_version_from_metadata_or_build, restore_missing_executable,
 };
 pub use flags::InstallOverrides;
+pub(crate) use flags::PlatformName;
 pub(crate) use hosts::{
-    maybe_wire_codex, maybe_wire_commandcode, maybe_wire_cowork, maybe_wire_cursor,
-    maybe_wire_grok, maybe_wire_opencode, maybe_wire_pi,
+    grok_config_home, maybe_wire_codex, maybe_wire_commandcode, maybe_wire_cowork,
+    maybe_wire_cursor, maybe_wire_grok, maybe_wire_opencode, maybe_wire_pi,
 };
 pub use path::ensure_keel_home_on_path;
 
@@ -48,7 +49,7 @@ pub(crate) use executable::{
 };
 #[cfg(test)]
 pub(crate) use executable::{replace_executable_in_place, sibling_temp_path};
-pub(crate) use flags::{apply_overrides, is_standard_home, parse_overrides};
+pub(crate) use flags::{apply_overrides, host_user_home, is_standard_home, parse_overrides};
 pub(crate) use hosts::{
     claude_desktop_config_path, maybe_install_hooks, maybe_register_mcp_server,
 };
@@ -334,7 +335,7 @@ pub fn install_from_paths(
     let cowork_wiring = maybe_wire_cowork(repository_root, claude_home, detected.cowork);
     let commandcode_wiring =
         maybe_wire_commandcode(repository_root, claude_home, detected.commandcode);
-    let grok_wiring = maybe_wire_grok(claude_home);
+    let grok_wiring = maybe_wire_grok(claude_home, detected.grok);
     let removed_legacy_duplicates = cleanup_identical_legacy_data(claude_home, &engagement_home);
     if removed_legacy_duplicates > 0 {
         let report = migration_report.get_or_insert_with(String::new);

@@ -29,7 +29,7 @@ The branch mattered as a regression-hardening shape because the user-visible def
 ~~~bash
 cargo test --workspace
 cargo test --workspace
-cargo run --bin keel -- anvil compile --goal "first-run default" --workspace-root .
+cargo run --bin keel -- anvil compile --goal "first-run default" --bar "cargo test --workspace --locked" --files "docs/demo-regression-hardening-flow.md" --workspace-root .
 cargo run --bin keel -- git-workflow preflight --repo-root . --base-ref origin/main
 ~~~
 

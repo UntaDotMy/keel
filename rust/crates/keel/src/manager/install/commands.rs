@@ -2,9 +2,8 @@
 use super::*;
 use crate::runtime::{
     agent_profiles_directory, agents_directory, config_path, display_path,
-    installed_executable_path, read_text_if_exists, repository_layout_is_complete,
-    resolve_claude_home, resolve_repository_root, run_command, skills_directory, state_directory,
-    write_text,
+    installed_executable_path, read_text_if_exists, resolve_claude_home, run_command,
+    skills_directory, state_directory, update_cache_directory, write_text,
 };
 use std::fs;
 use std::io::Write;
@@ -221,6 +220,9 @@ pub(crate) fn uninstall_managed_files(claude_home: &Path) -> Result<usize, Strin
     ] {
         let _ = remove_path_if_exists_counted(&inventory)?;
     }
+    // Packaged installs need this owned cache after OS temp cleanup.
+    // Uninstall removes the durable copy at the lifecycle boundary.
+    removed_count += remove_path_if_exists_counted(&update_cache_directory(claude_home))?;
     Ok(removed_count)
 }
 
@@ -239,8 +241,8 @@ pub(crate) fn remove_deprecated_config_keys(claude_home: &Path) -> Result<(), St
 
 pub(crate) fn remove_wired_adapters(claude_home: &Path) -> usize {
     let mut removed = 0;
-    let home = match claude_home.parent() {
-        Some(path) => path.to_path_buf(),
+    let home = match host_user_home(claude_home) {
+        Some(path) => path,
         None => return 0,
     };
 
@@ -345,6 +347,13 @@ pub(crate) fn remove_wired_adapters(claude_home: &Path) -> usize {
     let cmdc_mcp = home.join(".commandcode").join("mcp.json");
     removed += remove_json_mcp_entry(&cmdc_mcp, "mcpServers");
 
+    let grok_home = grok_config_home(&home);
+    removed += remove_owned_file_if_marked(
+        &grok_home.join("hooks").join("keel.json"),
+        "hook session-start",
+    );
+    removed += remove_codex_native_mcp_section(&grok_home.join("config.toml"));
+
     removed
 }
 
@@ -361,13 +370,6 @@ pub fn run_update_command(
         let _ = writeln!(standard_error, "{}", parse_error.message);
         return 1;
     }
-    let repository_root = match resolve_update_repository_root(flag_set.string_value("repo-root")) {
-        Ok(path) => path,
-        Err(error) => {
-            let _ = writeln!(standard_error, "{error}");
-            return 1;
-        }
-    };
     let claude_home = match resolve_claude_home(flag_set.string_value("claude-home")) {
         Ok(path) => path,
         Err(error) => {
@@ -375,6 +377,17 @@ pub fn run_update_command(
             return 1;
         }
     };
+    let repository_root =
+        match resolve_update_repository_root(flag_set.string_value("repo-root"), &claude_home) {
+            Ok(path) => path,
+            Err(error) => {
+                let _ = writeln!(standard_error, "{error}");
+                return 1;
+            }
+        };
+    if !repository_root.join(".git").is_dir() {
+        return run_packaged_release_update(&claude_home, standard_output, standard_error);
+    }
     let current_branch =
         current_git_branch(&repository_root).unwrap_or_else(|_| "main".to_string());
     let _ = writeln!(
@@ -385,6 +398,7 @@ pub fn run_update_command(
         "git",
         &[
             "pull".to_string(),
+            "--ff-only".to_string(),
             "origin".to_string(),
             current_branch.clone(),
         ],
@@ -483,14 +497,96 @@ pub(crate) fn external_failure_detail(result: &crate::runtime::ProcessResult) ->
     source.trim().to_string()
 }
 
-pub(crate) fn resolve_update_repository_root(flag_value: &str) -> Result<PathBuf, String> {
-    if !flag_value.trim().is_empty() {
-        return resolve_repository_root(flag_value);
+pub(crate) fn resolve_update_repository_root(
+    flag_value: &str,
+    keel_home: &Path,
+) -> Result<PathBuf, String> {
+    super::super::verify::resolve_manager_repository_root(flag_value, keel_home)
+}
+
+fn run_packaged_release_update(
+    keel_home: &Path,
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let metadata = read_text_if_exists(&super::super::verify::install_metadata_path(keel_home))
+        .unwrap_or_default();
+    let repository = super::super::verify::metadata_value(&metadata, "repository_slug")
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("UntaDotMy/keel");
+    if !valid_repository_slug(repository) {
+        let _ = writeln!(
+            standard_error,
+            "invalid repository slug in install metadata"
+        );
+        return 1;
     }
-    match std::env::current_dir() {
-        Ok(path) if repository_layout_is_complete(&path) => Ok(path),
-        _ => Err("Repository root not found. Use --repo-root to specify the path.".to_string()),
+    let _ = writeln!(standard_output, "Updating from the latest packaged release");
+    let result = if cfg!(windows) {
+        Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                r#"$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; $d=Join-Path ([IO.Path]::GetTempPath()) ('keel-update-'+[Guid]::NewGuid().ToString('N')); try { New-Item -ItemType Directory -Path $d | Out-Null; $s=Join-Path $d 'install.ps1'; $c=Join-Path $d 'install.ps1.sha256'; Invoke-WebRequest -Uri ($args[0]+'/install.ps1') -OutFile $s; Invoke-WebRequest -Uri ($args[0]+'/install.ps1.sha256') -OutFile $c; $expected=((Get-Content -Raw $c).Trim() -split '\s+')[0].ToUpperInvariant(); if($expected -notmatch '^[0-9A-F]{64}$'){throw 'Invalid installer checksum'}; $actual=(Get-FileHash -Algorithm SHA256 $s).Hash.ToUpperInvariant(); if($actual -ne $expected){throw 'Installer checksum mismatch'}; & $s; exit $LASTEXITCODE } finally { if(Test-Path -LiteralPath $d){Remove-Item -LiteralPath $d -Recurse -Force} }"#,
+                &format!(
+                    "https://github.com/{repository}/releases/latest/download"
+                ),
+            ])
+            .env("KEEL_HOME", keel_home)
+            .env("CLAUDE_SKILLS_REPOSITORY", repository)
+            .env("CLAUDE_SKILLS_VERSION", "latest")
+            .output()
+    } else {
+        Command::new("bash")
+            .args([
+                "-c",
+                "set -euo pipefail; d=$(mktemp -d \"${TMPDIR:-/tmp}/keel-update.XXXXXX\"); trap 'rm -rf \"$d\"' EXIT; curl -fsSL --connect-timeout 15 --max-time 60 -o \"$d/install.sh\" \"$1/install.sh\"; curl -fsSL --connect-timeout 15 --max-time 60 -o \"$d/install.sh.sha256\" \"$1/install.sh.sha256\"; expected=$(awk 'NF {print tolower($1); exit}' \"$d/install.sh.sha256\"); case \"$expected\" in (*[!0-9a-f]*|'') echo 'Invalid installer checksum' >&2; exit 1;; esac; if [ ${#expected} -ne 64 ]; then echo 'Invalid installer checksum' >&2; exit 1; fi; if command -v sha256sum >/dev/null 2>&1; then actual=$(sha256sum \"$d/install.sh\" | awk '{print tolower($1)}'); else actual=$(shasum -a 256 \"$d/install.sh\" | awk '{print tolower($1)}'); fi; [ \"$actual\" = \"$expected\" ] || { echo 'Installer checksum mismatch' >&2; exit 1; }; bash \"$d/install.sh\"",
+                "keel-update",
+                &format!(
+                    "https://github.com/{repository}/releases/latest/download"
+                ),
+            ])
+            .env("KEEL_HOME", keel_home)
+            .env("CLAUDE_SKILLS_REPOSITORY", repository)
+            .env("CLAUDE_SKILLS_VERSION", "latest")
+            .output()
+    };
+    match result {
+        Ok(output) => {
+            let original_stdout_bytes = output.stdout.len();
+            let original_stderr_bytes = output.stderr.len();
+            let process_result = crate::runtime::ProcessResult {
+                code: output.status.code().unwrap_or(1),
+                stdout: output.stdout,
+                stderr: output.stderr,
+                original_stdout_bytes,
+                original_stderr_bytes,
+            };
+            crate::runtime::forward_process_result(
+                &process_result,
+                standard_output,
+                standard_error,
+            );
+            process_result.code.clamp(0, 255) as u8
+        }
+        Err(error) => {
+            let _ = writeln!(standard_error, "release update failed: {error}");
+            1
+        }
     }
+}
+
+fn valid_repository_slug(repository: &str) -> bool {
+    repository.split_once('/').is_some_and(|(owner, name)| {
+        !owner.is_empty()
+            && !name.is_empty()
+            && owner
+                .bytes()
+                .chain(name.bytes())
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    })
 }
 
 pub(crate) fn current_git_branch(repository_root: &Path) -> Result<String, String> {
@@ -642,4 +738,17 @@ pub fn run_self_replace_command(arguments: &[String], standard_error: &mut dyn W
         display_path(&target)
     );
     1
+}
+
+#[cfg(test)]
+mod update_tests {
+    use super::*;
+
+    #[test]
+    fn release_repository_slug_rejects_shell_metacharacters() {
+        assert!(valid_repository_slug("UntaDotMy/keel"));
+        assert!(!valid_repository_slug("UntaDotMy/keel;whoami"));
+        assert!(!valid_repository_slug("UntaDotMy"));
+        assert!(!valid_repository_slug("/keel"));
+    }
 }

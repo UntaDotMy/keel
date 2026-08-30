@@ -34,7 +34,7 @@ Hold onto the brief id; the completion gate at closeout checks against it.
 ### 3. Carry the change through the Anvil delivery loop
 
 ```bash
-keel anvil compile
+keel anvil compile --goal "deliver the scoped change" --bar "cargo test --workspace --locked" --files "<owned files csv>"
 keel anvil run
 ```
 

@@ -99,8 +99,8 @@ pub(crate) fn maybe_wire_opencode(
     }
 
     // Derive the owning home from `claude_home.parent()`, not process globals.
-    let home: PathBuf = match claude_home.parent() {
-        Some(path) => path.to_path_buf(),
+    let home: PathBuf = match host_user_home(claude_home) {
+        Some(path) => path,
         None => return Some("skipped (no home directory)".to_string()),
     };
 
@@ -157,8 +157,8 @@ pub(crate) fn maybe_wire_cursor(
     if !detected {
         return Some("skipped (not detected)".to_string());
     }
-    let home = match claude_home.parent() {
-        Some(path) => path.to_path_buf(),
+    let home = match host_user_home(claude_home) {
+        Some(path) => path,
         None => return Some("no home directory".to_string()),
     };
     let mut status_parts: Vec<String> = Vec::new();
@@ -284,25 +284,25 @@ pub(crate) fn maybe_wire_cursor(
 /// native Grok hook file so PreToolUse deny (Iron Law + Anvil) always fires.
 /// Stop must call `keel hook stop` (silent). Grok treats Stop additionalContext
 /// as "keep going"; wiring Stop to post-tool-batch loops until the host cap.
-pub(crate) fn maybe_wire_grok(claude_home: &Path) -> Option<String> {
+pub(crate) fn maybe_wire_grok(claude_home: &Path, detected: bool) -> Option<String> {
     if !is_standard_home(claude_home) {
         return None;
     }
-    let home = match claude_home.parent() {
-        Some(path) => path.to_path_buf(),
+    let home = match host_user_home(claude_home) {
+        Some(path) => path,
         None => return Some("skipped (no home directory)".to_string()),
     };
-    let grok_dir = home.join(".grok");
-    if !grok_dir.is_dir() {
+    if !detected {
         return Some("skipped (not detected)".to_string());
     }
+    let grok_dir = grok_config_home(&home);
     let hooks_dir = grok_dir.join("hooks");
     if let Err(error) = std::fs::create_dir_all(&hooks_dir) {
         return Some(format!("hooks dir skipped ({error})"));
     }
     let target = hooks_dir.join("keel.json");
     let binary = installed_executable_path(claude_home);
-    let command = format!("{} hook", display_path(&binary));
+    let command = format!("{} hook", shell_command_path(&binary));
     let payload = serde_json::json!({
         "hooks": {
             "SessionStart": [{ "hooks": [{ "type": "command", "command": format!("{command} session-start"), "timeout": 10 }] }],
@@ -320,9 +320,33 @@ pub(crate) fn maybe_wire_grok(claude_home: &Path) -> Option<String> {
         Ok(text) => text,
         Err(error) => return Some(format!("serialize skipped ({error})")),
     };
-    match std::fs::write(&target, rendered) {
-        Ok(()) => Some(format!("hooks -> {}", display_path(&target))),
-        Err(error) => Some(format!("hooks write skipped ({error})")),
+    let hook_status = match std::fs::write(&target, rendered) {
+        Ok(()) => format!("hooks -> {}", display_path(&target)),
+        Err(error) => return Some(format!("hooks write skipped ({error})")),
+    };
+    let config_path = grok_dir.join("config.toml");
+    let mcp_status = match ensure_codex_native_mcp(&config_path, &binary) {
+        Ok(CodexNativeMcpResult::Added) => "native MCP registered".to_string(),
+        Ok(CodexNativeMcpResult::Updated) => "native MCP command updated".to_string(),
+        Ok(CodexNativeMcpResult::AlreadyCurrent) => "native MCP already current".to_string(),
+        Err(error) => format!("native MCP skipped ({error})"),
+    };
+    Some(format!("{hook_status}; {mcp_status}"))
+}
+
+pub(crate) fn grok_config_home(user_home: &Path) -> PathBuf {
+    std::env::var_os("GROK_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| user_home.join(".grok"))
+}
+
+fn shell_command_path(path: &Path) -> String {
+    let rendered = display_path(path);
+    if cfg!(windows) {
+        format!("\"{}\"", rendered.replace('"', "\\\""))
+    } else {
+        format!("'{}'", rendered.replace('\'', "'\"'\"'"))
     }
 }
 
@@ -342,8 +366,8 @@ pub(crate) fn maybe_wire_pi(
     if !agents_source.is_file() && !mcp_source.is_file() {
         return Some("source absent".to_string());
     }
-    let home = match claude_home.parent() {
-        Some(path) => path.to_path_buf(),
+    let home = match host_user_home(claude_home) {
+        Some(path) => path,
         None => return Some("no home directory".to_string()),
     };
     let mut status_parts: Vec<String> = Vec::new();
@@ -464,8 +488,8 @@ pub(crate) fn maybe_wire_commandcode(
     if !detected {
         return Some("skipped (not detected)".to_string());
     }
-    let home: PathBuf = match claude_home.parent() {
-        Some(path) => path.to_path_buf(),
+    let home: PathBuf = match host_user_home(claude_home) {
+        Some(path) => path,
         None => return Some("no home directory".to_string()),
     };
     let mut status_parts: Vec<String> = Vec::new();
@@ -559,8 +583,8 @@ pub(crate) fn maybe_wire_codex(
     if !codex_source_dir.is_dir() {
         return Some("source absent".to_string());
     }
-    let home: PathBuf = match claude_home.parent() {
-        Some(path) => path.to_path_buf(),
+    let home: PathBuf = match host_user_home(claude_home) {
+        Some(path) => path,
         None => return Some("no home directory".to_string()),
     };
     let plugin_target = home.join(".codex").join("plugins").join("keel");
@@ -745,8 +769,8 @@ pub(crate) fn maybe_wire_cowork(
         return Some("skipped (not detected)".to_string());
     }
 
-    let home = match claude_home.parent() {
-        Some(path) => path.to_path_buf(),
+    let home = match host_user_home(claude_home) {
+        Some(path) => path,
         None => return Some("skipped (no home directory)".to_string()),
     };
 

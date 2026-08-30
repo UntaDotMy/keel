@@ -334,11 +334,119 @@ pub(crate) fn write_install_metadata(
             format!("{build_version}-{short_head}")
         }
     };
-    let metadata = format!("repo_version={repo_version}\nmanager_version={manager_version}\n");
+    let (source_kind, source_root, repository_slug) =
+        if let Some(repository_slug) = packaged_release_repository(repository_root)? {
+            (
+                "release",
+                cache_packaged_release_source(repository_root, claude_home)?,
+                repository_slug,
+            )
+        } else {
+            ("checkout", repository_root.to_path_buf(), String::new())
+        };
+    let source_root = display_path(&source_root);
+    if source_root.contains(['\r', '\n']) {
+        return Err("repository source path contains a newline".to_string());
+    }
+    let metadata = format!(
+        "repo_version={repo_version}\nmanager_version={manager_version}\nsource_kind={source_kind}\nsource_root={source_root}\nrepository_slug={repository_slug}\n"
+    );
     write_text(
         &super::super::verify::install_metadata_path(claude_home),
         &metadata,
     )?;
+    Ok(())
+}
+
+fn packaged_release_repository(repository_root: &Path) -> Result<Option<String>, String> {
+    let manifest_path = repository_root.join("keel-release-manifest.json");
+    if !manifest_path.is_file() {
+        return Ok(None);
+    }
+    let text = fs::read_to_string(&manifest_path)
+        .map_err(|error| format!("read {}: {error}", display_path(&manifest_path)))?;
+    let document: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|error| format!("parse {}: {error}", display_path(&manifest_path)))?;
+    let repository = document
+        .get("repository_slug")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("UntaDotMy/keel")
+        .trim();
+    let valid = repository.split_once('/').is_some_and(|(owner, name)| {
+        !owner.is_empty()
+            && !name.is_empty()
+            && owner
+                .bytes()
+                .chain(name.bytes())
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    });
+    if !valid {
+        return Err(format!("invalid release repository slug: {repository}"));
+    }
+    Ok(Some(repository.to_string()))
+}
+
+fn cache_packaged_release_source(
+    repository_root: &Path,
+    keel_home: &Path,
+) -> Result<PathBuf, String> {
+    let cache_parent = keel_home.join("cache");
+    let target = cache_parent.join("installed-source");
+    if repository_root.starts_with(keel_home) {
+        return Ok(repository_root.to_path_buf());
+    }
+    fs::create_dir_all(&cache_parent)
+        .map_err(|error| format!("create {}: {error}", display_path(&cache_parent)))?;
+    let stage = cache_parent.join(format!("installed-source.new-{}", std::process::id()));
+    if stage.exists() {
+        fs::remove_dir_all(&stage)
+            .map_err(|error| format!("remove stale {}: {error}", display_path(&stage)))?;
+    }
+    copy_release_tree(repository_root, &stage)?;
+    if target.exists() {
+        fs::remove_dir_all(&target)
+            .map_err(|error| format!("replace {}: {error}", display_path(&target)))?;
+    }
+    fs::rename(&stage, &target).map_err(|error| {
+        format!(
+            "publish cached release {} -> {}: {error}",
+            display_path(&stage),
+            display_path(&target)
+        )
+    })?;
+    Ok(target)
+}
+
+fn copy_release_tree(source: &Path, target: &Path) -> Result<(), String> {
+    fs::create_dir_all(target)
+        .map_err(|error| format!("create {}: {error}", display_path(target)))?;
+    let entries =
+        fs::read_dir(source).map_err(|error| format!("read {}: {error}", display_path(source)))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("read release entry: {error}"))?;
+        let source_path = entry.path();
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("inspect {}: {error}", display_path(&source_path)))?;
+        if file_type.is_symlink() {
+            return Err(format!(
+                "release bundle contains unsupported symlink: {}",
+                display_path(&source_path)
+            ));
+        }
+        let target_path = target.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_release_tree(&source_path, &target_path)?;
+        } else if file_type.is_file() {
+            fs::copy(&source_path, &target_path).map_err(|error| {
+                format!(
+                    "copy {} -> {}: {error}",
+                    display_path(&source_path),
+                    display_path(&target_path)
+                )
+            })?;
+        }
+    }
     Ok(())
 }
 

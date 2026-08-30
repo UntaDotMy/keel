@@ -235,6 +235,19 @@ fn remove_wired_adapters_preserves_custom_files_and_hooks() {
     let _ = fs::create_dir_all(cmdc_mod.parent().unwrap());
     fs::write(&cmdc_mod, "// keel Command Code (cmdc) Mod\n").unwrap();
 
+    let grok_home = base.join(".grok");
+    fs::create_dir_all(grok_home.join("hooks")).unwrap();
+    fs::write(
+        grok_home.join("hooks").join("keel.json"),
+        r#"{"command":"keel hook session-start"}"#,
+    )
+    .unwrap();
+    fs::write(
+        grok_home.join("config.toml"),
+        "theme = \"dark\"\n\n[mcp_servers.keel]\ncommand = \"keel\"\nargs = [\"mcp\", \"serve\"]\n\n[mcp_servers.user]\ncommand = \"custom\"\n",
+    )
+    .unwrap();
+
     let removed = remove_wired_adapters(&claude_home);
     assert!(removed >= 2);
     assert_eq!(
@@ -247,6 +260,11 @@ fn remove_wired_adapters_preserves_custom_files_and_hooks() {
     assert!(cursor_dir.join("hooks").join("keel-cursor.sh").is_file());
     assert!(!pi_extension.exists());
     assert!(!cmdc_mod.exists());
+    assert!(!grok_home.join("hooks").join("keel.json").exists());
+    let grok_config = fs::read_to_string(grok_home.join("config.toml")).unwrap();
+    assert!(!grok_config.contains("mcp_servers.keel"));
+    assert!(grok_config.contains("mcp_servers.user"));
+    assert!(grok_config.contains("theme = \"dark\""));
 
     let _ = fs::remove_dir_all(&base);
 }
@@ -324,6 +342,59 @@ fn repo_version_recovers_bootstrap_commit_from_installed_metadata() {
         repo_version_from_metadata_or_build(metadata, "dev").as_deref(),
         Some("8c0eb1c")
     );
+}
+
+#[test]
+fn install_metadata_records_a_durable_checkout_source() {
+    let (repo, keel_home) = unique_paths("metadata-checkout-source");
+    stage_minimal_layout(&repo);
+    fs::create_dir_all(&keel_home).unwrap();
+    write_install_metadata("dev", &repo, &keel_home).unwrap();
+    let metadata =
+        fs::read_to_string(super::super::verify::install_metadata_path(&keel_home)).unwrap();
+    assert_eq!(
+        super::super::verify::metadata_value(&metadata, "source_kind"),
+        Some("checkout")
+    );
+    assert_eq!(
+        super::super::verify::metadata_value(&metadata, "source_root"),
+        Some(display_path(&repo).as_str())
+    );
+    let _ = fs::remove_dir_all(repo);
+    let _ = fs::remove_dir_all(keel_home);
+}
+
+#[test]
+fn release_install_metadata_caches_source_before_the_extract_tree_is_deleted() {
+    let (repo, keel_home) = unique_paths("metadata-release-source");
+    stage_minimal_layout(&repo);
+    fs::create_dir_all(&keel_home).unwrap();
+    fs::write(
+        repo.join("keel-release-manifest.json"),
+        r#"{"repository_slug":"UntaDotMy/keel","release_tag":"v1","build_version":"1"}"#,
+    )
+    .unwrap();
+    write_install_metadata("1", &repo, &keel_home).unwrap();
+    let metadata =
+        fs::read_to_string(super::super::verify::install_metadata_path(&keel_home)).unwrap();
+    assert_eq!(
+        super::super::verify::metadata_value(&metadata, "source_kind"),
+        Some("release")
+    );
+    assert_eq!(
+        super::super::verify::metadata_value(&metadata, "repository_slug"),
+        Some("UntaDotMy/keel")
+    );
+    let cached =
+        PathBuf::from(super::super::verify::metadata_value(&metadata, "source_root").unwrap());
+    assert!(cached.join("AGENTS.md").is_file());
+    assert!(cached.join("reviewer/SKILL.md").is_file());
+    fs::remove_dir_all(&repo).unwrap();
+    assert_eq!(
+        super::super::verify::resolve_manager_repository_root("", &keel_home).unwrap(),
+        cached
+    );
+    let _ = fs::remove_dir_all(keel_home);
 }
 
 #[test]
@@ -571,6 +642,14 @@ fn create_minimal_layout(name: &str) -> PathBuf {
     fs::write(root.join("00-skill-routing-and-escalation.md"), "").unwrap();
     fs::write(root.join("reviewer").join("SKILL.md"), "").unwrap();
     root
+}
+
+fn stage_minimal_layout(root: &Path) {
+    fs::create_dir_all(root.join("reviewer")).unwrap();
+    fs::write(root.join("AGENTS.md"), "").unwrap();
+    fs::write(root.join("README.md"), "").unwrap();
+    fs::write(root.join("00-skill-routing-and-escalation.md"), "").unwrap();
+    fs::write(root.join("reviewer").join("SKILL.md"), "").unwrap();
 }
 
 fn unique_paths(name: &str) -> (PathBuf, PathBuf) {
@@ -1819,6 +1898,12 @@ fn update_temp_trees_are_deleted_but_legacy_state_stays() {
     let engagement = dir.join(".claude");
     fs::create_dir_all(keel_home.join("cache/update/v1")).unwrap();
     fs::write(keel_home.join("cache/update/v1/bin"), "tmp").unwrap();
+    fs::create_dir_all(keel_home.join("cache/installed-source")).unwrap();
+    fs::write(
+        keel_home.join("cache/installed-source/keel-release-manifest.json"),
+        "{}",
+    )
+    .unwrap();
     fs::create_dir_all(state_directory(&keel_home)).unwrap();
     fs::write(state_directory(&keel_home).join("managed-files.txt"), "x").unwrap();
     fs::create_dir_all(legacy_state_directory(&engagement).join("bin")).unwrap();
@@ -1833,7 +1918,10 @@ fn update_temp_trees_are_deleted_but_legacy_state_stays() {
     )
     .unwrap();
     remove_update_temp_trees(&keel_home, &engagement);
-    assert!(!update_cache_directory(&keel_home).exists());
+    assert!(!update_cache_directory(&keel_home).join("update").exists());
+    assert!(update_cache_directory(&keel_home)
+        .join("installed-source/keel-release-manifest.json")
+        .is_file());
     assert!(state_directory(&keel_home)
         .join("managed-files.txt")
         .is_file());
@@ -1846,6 +1934,23 @@ fn update_temp_trees_are_deleted_but_legacy_state_stays() {
     assert_eq!(
         fs::read_to_string(legacy_state_directory(&engagement).join("user-data.json")).unwrap(),
         "keep"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn uninstall_removes_the_owned_installed_source_cache() {
+    let dir = unique_codex_test_dir("uninstall-installed-source");
+    let keel_home = dir.join(".keel");
+    let cached_source = keel_home.join("cache/installed-source");
+    fs::create_dir_all(&cached_source).unwrap();
+    fs::write(cached_source.join("keel-release-manifest.json"), "{}").unwrap();
+
+    super::commands::uninstall_managed_files(&keel_home).unwrap();
+
+    assert!(
+        !keel_home.join("cache").exists(),
+        "uninstall must not retain the packaged release source cache"
     );
     let _ = fs::remove_dir_all(&dir);
 }
@@ -2404,12 +2509,20 @@ fn grok_stop_hook_is_silent_not_post_tool_batch() {
     let grok_dir = root.join(".grok");
     fs::create_dir_all(&keel_home).unwrap();
     fs::create_dir_all(&grok_dir).unwrap();
-    let status = maybe_wire_grok(&keel_home).expect("wire when .grok exists");
+    let status = maybe_wire_grok(&keel_home, true).expect("wire when .grok exists");
     assert!(
         !status.contains("skipped"),
         "standard .keel + detected .grok must write hooks: {status}"
     );
     let text = fs::read_to_string(grok_dir.join("hooks").join("keel.json")).unwrap();
+    let hook_document: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let session_command = hook_document["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
+    assert!(
+        session_command.starts_with(if cfg!(windows) { '"' } else { '\'' }),
+        "Grok hook executable must be quoted: {session_command}"
+    );
     assert!(
         text.contains("hook stop"),
         "Grok Stop must call silent hook stop: {text}"
@@ -2430,5 +2543,40 @@ fn grok_stop_hook_is_silent_not_post_tool_batch() {
         !text.contains("post-tool-batch"),
         "Grok has no PostToolBatch event; Stop must not inject post-tool-batch closeout: {text}"
     );
+    let config = fs::read_to_string(grok_dir.join("config.toml")).unwrap();
+    let document: toml::Value = toml::from_str(&config).unwrap();
+    assert_eq!(
+        document["mcp_servers"]["keel"]["command"].as_str(),
+        Some(display_path(&installed_executable_path(&keel_home)).as_str())
+    );
+    assert_eq!(
+        document["mcp_servers"]["keel"]["args"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(toml::Value::as_str)
+            .collect::<Vec<_>>(),
+        ["mcp", "serve"]
+    );
     let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn grok_platform_override_can_force_and_skip_detection() {
+    let forced = parse_overrides("grok", "");
+    let detected = apply_overrides(
+        crate::manager::platform_detect::DetectedPlatforms::default(),
+        &forced,
+    );
+    assert!(detected.grok);
+
+    let skipped = parse_overrides("", "grok");
+    let detected = apply_overrides(
+        crate::manager::platform_detect::DetectedPlatforms {
+            grok: true,
+            ..Default::default()
+        },
+        &skipped,
+    );
+    assert!(!detected.grok);
 }

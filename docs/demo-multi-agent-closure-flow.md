@@ -26,7 +26,7 @@ The repair loop did all of the following:
 ~~~bash
 cargo test --workspace
 cargo run --bin keel -- memory working-brief write --request "repair closure proof"
-cargo run --bin keel -- anvil compile --goal "repair closure proof" --workspace-root .
+cargo run --bin keel -- anvil compile --goal "repair closure proof" --bar "cargo test --workspace --locked" --files "docs/demo-multi-agent-closure-flow.md" --workspace-root .
 cargo run --bin keel -- review pre-pr --repo-root . --base-ref origin/main --format markdown
 cargo run --bin keel -- git-workflow preflight --repo-root . --base-ref origin/main
 cargo run --bin keel -- memory completion-gate check --brief-id <id> --proof "review proof recorded"

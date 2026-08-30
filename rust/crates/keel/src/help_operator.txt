@@ -3,11 +3,11 @@
   platform [--json]
   bootstrap-info [--json] [--claude-home <path>] [--repository-slug <owner/repo>] [--repo-root <path>] [--version <build-version>]
   all [--repo-root <path>] [--claude-home <path>] [--profile full|smoke]
-  install [--repo-root <path>] [--claude-home <path>] [--interactive]
+  install [--repo-root <path>] [--claude-home <path>] [--with <hosts>] [--without <hosts>] [--interactive] [--purge-stale|--no-purge]
   update [--repo-root <path>] [--claude-home <path>]
   status [--repo-root <path>] [--claude-home <path>]
   doctor [--repo-root <path>] [--claude-home <path>]
-  repair [--claude-home <path>]
+  repair [--repo-root <path>] [--claude-home <path>]
   validate [--repo-root <path>] [--profile full|smoke]
   verify [--repo-root <path>] [--claude-home <path>] [<skill-name>]
   uninstall [--repo-root <path>] [--claude-home <path>]
@@ -34,7 +34,7 @@
   hook install|uninstall|list|show|instructions|diagnose|git-hooks
   bridge <session-start|user-prompt|observe|session-end|post-compact|gate-status|pre-tool-use|rewrite> [flags]
   learn [status|dry-run|run] [--window <days>] [--json]
-  code-search search --workspace-root <path> --query <text> [--format json|compact]
+  code-search search --query <text> [--workspace-root <path>] [--claude-home <path>] [--path <filter>] [--limit <n>] [--json]
   code-search siblings [--query <text>] [--workspace-root <path>] [--json]
   code-index refresh|status|map [--workspace-root <path>] [--claude-home <path>] [--force] [--json]
   code-graph build|impact [--workspace-root <path>] [--output <path>] [--changed <a,b,c>] [--json]
@@ -59,4 +59,4 @@
   flow start --target-file <path> [--target-function <name>] [--repo-root <path>] [--output <path>] [--json]
   flow check [--repo-root <path>] [--artifact <path>] [--json]
   flow finish [--repo-root <path>] [--artifact <path>] [--json]
-  mcp serve
+  mcp serve|serve-http

@@ -703,18 +703,17 @@ fn report_mcp_registration(standard_output: &mut dyn Write, claude_home: &std::p
     }
 }
 
-/// Report the wiring health of the four bridge hosts (OpenCode, Pi, Codex,
-/// Cursor). Unlike the native host probes above, these are file-presence checks
+/// Report bridge-host wiring health. Unlike the native host probes above,
+/// these are file-presence checks
 /// — doctor reads the installed artifacts and reports which are present/absent
 /// so an operator can see, at a glance, which bridge hosts are wired. Read-only.
-/// `claude_home` is the standard `~/.claude`; each host's files live under
-/// `claude_home.parent()` (the user home), mirroring the installer's paths.
+/// `keel_home` is the host-neutral root; host files live under the user home.
 pub(crate) fn report_bridge_host_wiring(
     standard_output: &mut dyn Write,
-    claude_home: &std::path::Path,
+    keel_home: &std::path::Path,
 ) {
     let _ = writeln!(standard_output, "Bridge hosts:");
-    let home = match claude_home.parent() {
+    let home = match crate::manager::install::host_user_home(keel_home) {
         Some(path) => path,
         None => return,
     };
@@ -807,12 +806,9 @@ pub(crate) fn report_bridge_host_wiring(
         .unwrap_or(false);
     // Native MCP registration: this config.toml entry is what actually makes
     // the tools reachable on Windows, where plugin-bundled MCP never loads.
-    let codex_native_mcp = codex_config_text
-        .as_ref()
-        .and_then(|doc| doc.get("mcp_servers"))
-        .and_then(|m| m.get("keel"))
-        .and_then(|entry| entry.get("command"))
-        .is_some();
+    let codex_native_mcp = codex_config_text.as_ref().is_some_and(|document| {
+        native_mcp_is_current(document, &installed_executable_path(keel_home))
+    });
     let codex_agents_md = fs::read_to_string(home.join(".codex").join("AGENTS.md"))
         .map(|text| text.contains("keel:begin"))
         .unwrap_or(false);
@@ -901,19 +897,42 @@ pub(crate) fn report_bridge_host_wiring(
         cursor_mcp,
     );
 
-    // Grok: ~/.grok/hooks/keel.json. Auto-detected by install; no --with grok flag.
-    // MCP is the shared keel server, not a Grok-specific mcp.json.
-    let grok_dir = home.join(".grok");
+    let grok_dir = crate::manager::install::grok_config_home(&home);
     if grok_dir.is_dir() {
         let grok_hooks = grok_dir.join("hooks").join("keel.json");
-        let grok_wired = grok_hooks.is_file();
+        let grok_mcp = fs::read_to_string(grok_dir.join("config.toml"))
+            .ok()
+            .and_then(|text| toml::from_str::<toml::Value>(&text).ok())
+            .is_some_and(|document| {
+                native_mcp_is_current(&document, &installed_executable_path(keel_home))
+            });
+        let grok_wired = grok_hooks.is_file() && grok_mcp;
         let state = if grok_wired {
-            "wired (hooks)"
+            "wired (hooks + MCP)"
         } else {
-            "not wired (run `keel install` to write ~/.grok/hooks/keel.json)"
+            "not wired (run `keel install --with grok` to repair hooks + MCP)"
         };
         write_doctor_check(standard_output, grok_wired, &format!("grok host: {state}"));
     }
+}
+
+fn native_mcp_is_current(document: &toml::Value, executable: &std::path::Path) -> bool {
+    let Some(entry) = document
+        .get("mcp_servers")
+        .and_then(|servers| servers.get("keel"))
+    else {
+        return false;
+    };
+    let command_matches = entry.get("command").and_then(toml::Value::as_str)
+        == Some(display_path(executable).as_str());
+    let args: Vec<&str> = entry
+        .get("args")
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(toml::Value::as_str)
+        .collect();
+    command_matches && args == ["mcp", "serve"]
 }
 
 /// One summary line per bridge host: name + wired state + MCP state.
@@ -1135,7 +1154,10 @@ mod tests {
         fs::create_dir_all(config_path.parent().unwrap()).unwrap();
         fs::write(
             &config_path,
-            "[plugins.\"keel@personal-keel\"]\nenabled = true\n\n[mcp_servers.keel]\ncommand = \"keel\"\n",
+            format!(
+                "[plugins.\"keel@personal-keel\"]\nenabled = true\n\n[mcp_servers.keel]\ncommand = {:?}\nargs = [\"mcp\", \"serve\"]\n",
+                display_path(&installed_executable_path(&claude_home))
+            ),
         )
         .unwrap();
         let plugin_root = home.join(".codex").join("plugins").join("keel");
@@ -1162,10 +1184,21 @@ mod tests {
         let grok_hooks = home.join(".grok").join("hooks");
         fs::create_dir_all(&grok_hooks).unwrap();
         fs::write(grok_hooks.join("keel.json"), "{\"hooks\":{}}").unwrap();
+        fs::write(
+            home.join(".grok").join("config.toml"),
+            format!(
+                "[mcp_servers.keel]\ncommand = {:?}\nargs = [\"mcp\", \"serve\"]\n",
+                display_path(&installed_executable_path(&claude_home))
+            ),
+        )
+        .unwrap();
         let mut output = Vec::new();
         report_bridge_host_wiring(&mut output, &claude_home);
         let output = String::from_utf8(output).unwrap();
-        assert!(output.contains("[ok] grok host: wired (hooks)"), "{output}");
+        assert!(
+            output.contains("[ok] grok host: wired (hooks + MCP)"),
+            "{output}"
+        );
         let _ = fs::remove_dir_all(home);
     }
 

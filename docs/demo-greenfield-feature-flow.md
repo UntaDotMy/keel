@@ -30,7 +30,7 @@ The work stayed narrow:
 cargo test --workspace
 cargo test --workspace
 cargo test --workspace
-cargo run --bin keel -- anvil compile --goal "improve first-run delivery guidance" --workspace-root .
+cargo run --bin keel -- anvil compile --goal "improve first-run delivery guidance" --bar "cargo test --workspace --locked" --files "README.md,docs/demo-greenfield-feature-flow.md" --workspace-root .
 cargo run --bin keel -- review pre-pr --base-ref origin/main --repo-root .
 cargo run --bin keel -- git-workflow preflight --repo-root . --base-ref origin/main
 ~~~
