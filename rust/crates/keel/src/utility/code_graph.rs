@@ -952,16 +952,9 @@ fn should_skip_entry(name: &str, path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
-    fn tempdir(label: &str) -> PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or_default();
-        let dir = std::env::temp_dir().join(format!("code-graph-{label}-{nanos}"));
-        fs::create_dir_all(&dir).expect("create tempdir");
-        dir
+    fn tempdir(label: &str) -> crate::test_support::TestTempDir {
+        crate::test_support::unique_temp_dir(&format!("code-graph-{label}"))
     }
 
     fn write(root: &Path, rel: &str, content: &str) {
@@ -1015,7 +1008,8 @@ mod tests {
     fn absolute_output_is_used_as_is() {
         let root = tempdir("abs-root");
         let home = tempdir("abs-home");
-        let absolute = tempdir("abs-out").join("graph.json");
+        let absolute_root = tempdir("abs-out");
+        let absolute = absolute_root.join("graph.json");
         let resolved =
             resolve_artifact_path(&root, &absolute.to_string_lossy(), &home.to_string_lossy())
                 .expect("resolve absolute");

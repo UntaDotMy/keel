@@ -1408,10 +1408,8 @@ fn verified_mode_requires_web_research_not_internal_state() {
         None
     ));
     // The denial message names VERIFIED.
-    std::env::set_var(
-        "CLAUDE_TARGET_OVERRIDE",
-        temp_brief_gate_home("iron-law-verified"),
-    );
+    let verified_home = temp_brief_gate_home("iron-law-verified");
+    std::env::set_var("CLAUDE_TARGET_OVERRIDE", &verified_home);
     let decision = iron_law_gate_decision("sess-verified-fresh");
     assert!(
         decision.map(|d| d.contains("VERIFIED")).unwrap_or(false),
@@ -1419,6 +1417,7 @@ fn verified_mode_requires_web_research_not_internal_state() {
     );
     std::env::remove_var(IRON_LAW_GATE_ENV_VAR);
     std::env::remove_var("CLAUDE_TARGET_OVERRIDE");
+    let _ = std::fs::remove_dir_all(verified_home);
 }
 
 #[test]
