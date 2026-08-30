@@ -168,12 +168,12 @@ fn run_code_search_search(
         }
     };
     let path_filter = normalize_path_filter(flags.string_value("path"));
-    let search_limit = if path_filter.is_empty() { limit } else { 50 };
-    let hits = match workspace_index::search(
+    let hits = match workspace_index::search_filtered(
         &root,
         flags.string_value("claude-home"),
         query,
-        search_limit,
+        limit,
+        (!path_filter.is_empty()).then_some(path_filter.as_str()),
     ) {
         Ok(hits) => hits,
         Err(error) => {
@@ -181,13 +181,7 @@ fn run_code_search_search(
             return 1;
         }
     };
-    let hits: Vec<SearchHit> = hits
-        .into_iter()
-        .filter(|hit| {
-            path_filter.is_empty() || hit.path.to_ascii_lowercase().contains(&path_filter)
-        })
-        .take(limit)
-        .collect();
+    let hits: Vec<SearchHit> = hits.into_iter().collect();
     if flags.bool_value("json") {
         let _ = writeln!(
             standard_output,
