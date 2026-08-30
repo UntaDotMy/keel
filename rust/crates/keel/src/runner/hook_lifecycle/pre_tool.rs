@@ -733,6 +733,6 @@ pub(super) fn anvil_gate_enabled() -> bool {
 
 pub(super) const ANVIL_GATE_DENIAL: &str = "\
 Anvil gate: call `anvil` (compile, then run --dry-run) before editing. \
-This is the only keel delivery loop. MCP: keel__anvil action=compile then action=run args=[--dry-run]. \
-CLI: keel anvil compile --goal \"...\" --bar \"echo ok\" then keel anvil run --dry-run. \
+This is the only keel delivery loop. MCP: keel__anvil action=compile args=[--goal,...,--bar,...,--files,...] then action=run args=[--dry-run]. \
+CLI: keel anvil compile --goal \"...\" --bar \"echo ok\" --files \"src/file.rs\" then keel anvil run --dry-run. \
 Set KEEL_ANVIL_GATE=off to disable.";

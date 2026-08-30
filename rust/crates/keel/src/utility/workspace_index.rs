@@ -15,7 +15,6 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 
 use crate::runtime::{display_path, resolve_claude_home};
-use crate::utility::system_map::sanitize_key;
 
 const SCHEMA_VERSION: &str = "1";
 const MAX_FILES: usize = 20_000;
@@ -93,7 +92,8 @@ struct Candidate {
 
 pub fn database_path(workspace_root: &Path, claude_home_flag: &str) -> Result<PathBuf, String> {
     let home = resolve_claude_home(claude_home_flag)?;
-    let slug = sanitize_key(&display_path(workspace_root));
+    let raw_workspace = display_path(workspace_root);
+    let slug = crate::utility::system_map::bounded_slug(&raw_workspace, 64);
     Ok(home
         .join("memories")
         .join("workspaces")
@@ -109,9 +109,8 @@ pub fn refresh(
 ) -> Result<RefreshReport, String> {
     let root = canonical_workspace_root(workspace_root)?;
     let path = database_path(&root, claude_home_flag)?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| format!("create index directory: {error}"))?;
-    }
+    crate::utility::sqlite::create_parent_directory(&path)
+        .map_err(|error| format!("create index directory: {error}"))?;
     let mut connection = open_connection(&path)?;
     ensure_schema(&connection)?;
     let sources = collect_sources(&root)?;
@@ -616,8 +615,8 @@ fn ensure_schema(connection: &Connection) -> Result<(), String> {
 }
 
 fn open_connection(path: &Path) -> Result<Connection, String> {
-    let connection =
-        Connection::open(path).map_err(|error| format!("open {}: {error}", display_path(path)))?;
+    let connection = crate::utility::sqlite::open_connection(path)
+        .map_err(|error| format!("open {}: {error}", display_path(path)))?;
     connection
         .busy_timeout(std::time::Duration::from_secs(5))
         .map_err(|error| format!("set workspace index busy timeout: {error}"))?;

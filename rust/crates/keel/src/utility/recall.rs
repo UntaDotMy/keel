@@ -795,13 +795,16 @@ fn default_search_roots(claude_home: &Path) -> Vec<PathBuf> {
 }
 
 fn open_recall_connection(database_path: &Path) -> Result<Connection, String> {
-    if let Some(parent_directory) = database_path.parent() {
-        fs::create_dir_all(parent_directory)
-            .map_err(|io_error| format!("create {}: {io_error}", display_path(parent_directory)))?;
-    }
-    let connection = Connection::open(database_path).map_err(|database_error| {
-        recall_open_error_hint(database_path, &format!("open sqlite: {database_error}"))
+    crate::utility::sqlite::create_parent_directory(database_path).map_err(|io_error| {
+        format!(
+            "create {}: {io_error}",
+            display_path(database_path.parent().unwrap_or(database_path))
+        )
     })?;
+    let connection =
+        crate::utility::sqlite::open_connection(database_path).map_err(|database_error| {
+            recall_open_error_hint(database_path, &format!("open sqlite: {database_error}"))
+        })?;
     connection
         .pragma_update(None, "journal_mode", "WAL")
         .map_err(|database_error| {

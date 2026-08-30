@@ -1202,7 +1202,7 @@ fn iron_law_research_command_rejects_bypass_and_non_research_surfaces() {
     // Genuine standalone research still clears it.
     assert!(is_keel_research_command("keel recall borrow checker"));
     assert!(!is_keel_research_command(
-        "keel anvil compile --goal x --bar echo"
+        "keel anvil compile --goal x --bar echo --files src/lib.rs"
     ));
     assert!(is_keel_research_command("keel anvil prefix-check"));
     assert!(is_keel_research_command("keel anvil sieve"));
@@ -4796,7 +4796,7 @@ fn observing_an_anvil_command_does_not_clear_the_edit_gate() {
         let event: JsonDocument = serde_json::json!({
             "session_id": "observe-only",
             "tool_name": "Bash",
-            "tool_input": {"command": "keel anvil compile --goal audit --bar true"}
+            "tool_input": {"command": "keel anvil compile --goal audit --bar true --files src/lib.rs"}
         });
 
         maybe_mark_iron_law_from_tool_event(&event);
