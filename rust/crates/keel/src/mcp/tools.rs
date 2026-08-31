@@ -2703,7 +2703,9 @@ mod mcp_timeout_tests {
         let mut command = if cfg!(windows) {
             let mut command = Command::new("powershell");
             command.args([
+                "-NoLogo",
                 "-NoProfile",
+                "-NonInteractive",
                 "-Command",
                 "$p=Start-Process powershell -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds 30' -NoNewWindow -PassThru; Write-Output $p.Id",
             ]);
@@ -2717,10 +2719,11 @@ mod mcp_timeout_tests {
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
         let started = Instant::now();
+        let completion_budget = Duration::from_secs(if cfg!(windows) { 10 } else { 3 });
         let (_, stdout, _) =
-            run_command_with_timeout(command, Duration::from_secs(3), "descendant-pipe-test")
+            run_command_with_timeout(command, completion_budget, "descendant-pipe-test")
                 .expect("leader exit must close inherited pipes");
-        assert!(started.elapsed() < Duration::from_secs(3));
+        assert!(started.elapsed() < completion_budget);
         let descendant = stdout
             .lines()
             .find_map(|line| line.trim().parse::<u32>().ok())

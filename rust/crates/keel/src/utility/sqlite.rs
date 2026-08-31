@@ -4,9 +4,13 @@
 //! Main Functions: open_connection.
 //! Side Effects: Opens or creates the requested SQLite database.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(windows)]
+use std::path::PathBuf;
 
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::Connection;
+#[cfg(windows)]
+use rusqlite::OpenFlags;
 
 pub(crate) fn open_connection(path: &Path) -> rusqlite::Result<Connection> {
     #[cfg(windows)]

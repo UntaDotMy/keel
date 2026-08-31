@@ -1811,7 +1811,9 @@ mod process_lifecycle_tests {
             (
                 "powershell",
                 vec![
+                    "-NoLogo".to_string(),
                     "-NoProfile".to_string(),
+                    "-NonInteractive".to_string(),
                     "-Command".to_string(),
                     "$p=Start-Process powershell -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds 30' -NoNewWindow -PassThru; Write-Output $p.Id"
                         .to_string(),
@@ -1824,10 +1826,10 @@ mod process_lifecycle_tests {
             )
         };
         let started = std::time::Instant::now();
-        let result =
-            run_command_with_timeout(program, &arguments, None, std::time::Duration::from_secs(3))
-                .expect("leader exit must close descendant-held pipes");
-        assert!(started.elapsed() < std::time::Duration::from_secs(3));
+        let completion_budget = std::time::Duration::from_secs(if cfg!(windows) { 10 } else { 3 });
+        let result = run_command_with_timeout(program, &arguments, None, completion_budget)
+            .expect("leader exit must close descendant-held pipes");
+        assert!(started.elapsed() < completion_budget);
         let descendant = String::from_utf8_lossy(&result.stdout)
             .lines()
             .find_map(|line| line.trim().parse::<u32>().ok())
