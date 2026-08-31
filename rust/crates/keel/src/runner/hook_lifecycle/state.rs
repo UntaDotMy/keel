@@ -57,9 +57,35 @@ pub(super) fn read_stdin_text(stdin: &mut dyn Read) -> Result<String, String> {
 pub(super) fn read_json_stdin_fail_open(stdin: &mut dyn Read) -> Option<JsonDocument> {
     let mut text = String::new();
     match stdin.read_to_string(&mut text) {
-        Ok(_) if !text.trim().is_empty() => serde_json::from_str(&text).ok(),
+        Ok(_) if !text.trim().is_empty() => {
+            serde_json::from_str(&text).ok().map(normalize_hook_input)
+        }
         _ => None,
     }
+}
+
+/// Add Claude-compatible aliases for the Grok fields consumed by lifecycle state.
+/// Existing snake_case values win. Deliberately avoid copying `toolResult` and
+/// other potentially large fields that no current consumer reads.
+pub(super) fn normalize_hook_input(mut input: JsonDocument) -> JsonDocument {
+    let Some(object) = input.as_object_mut() else {
+        return input;
+    };
+
+    for (snake_case, camel_case) in [
+        ("session_id", "sessionId"),
+        ("tool_name", "toolName"),
+        ("tool_input", "toolInput"),
+        ("duration_ms", "durationMs"),
+    ] {
+        if !object.contains_key(snake_case) {
+            if let Some(value) = object.get(camel_case).cloned() {
+                object.insert(snake_case.to_string(), value);
+            }
+        }
+    }
+
+    input
 }
 
 pub(crate) fn is_edit_class_tool(tool_name: &str) -> bool {

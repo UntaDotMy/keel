@@ -240,6 +240,9 @@ pub(crate) fn remove_deprecated_config_keys(claude_home: &Path) -> Result<(), St
 }
 
 pub(crate) fn remove_wired_adapters(claude_home: &Path) -> usize {
+    if !is_standard_home(claude_home) {
+        return 0;
+    }
     let mut removed = 0;
     let home = match host_user_home(claude_home) {
         Some(path) => path,

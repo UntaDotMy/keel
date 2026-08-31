@@ -322,7 +322,8 @@ pub(crate) fn maybe_wire_grok(claude_home: &Path, detected: bool) -> Option<Stri
 }
 
 pub(crate) fn grok_hooks_payload(binary: &Path) -> serde_json::Value {
-    let command = format!("{} hook", shell_command_path(binary));
+    let command =
+        crate::runner::shell_rewrite::platform_default_command_for_executable_args(binary, "hook");
     serde_json::json!({
         "hooks": {
             "SessionStart": [{ "hooks": [{ "type": "command", "command": format!("{command} session-start"), "timeout": 10 }] }],
@@ -350,15 +351,6 @@ pub(crate) fn grok_config_home(user_home: &Path) -> PathBuf {
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| user_home.join(".grok"))
-}
-
-fn shell_command_path(path: &Path) -> String {
-    let rendered = display_path(path);
-    if cfg!(windows) {
-        format!("\"{}\"", rendered.replace('"', "\\\""))
-    } else {
-        format!("'{}'", rendered.replace('\'', "'\"'\"'"))
-    }
 }
 
 pub(crate) fn maybe_wire_pi(

@@ -18,7 +18,7 @@ pub(super) fn run_hook_post_tool_use(standard_error: &mut dyn Write) -> u8 {
     };
 
     let input: JsonDocument = match serde_json::from_str(&input_text) {
-        Ok(value) => value,
+        Ok(value) => super::state::normalize_hook_input(value),
 
         Err(error) => {
             let _ = writeln!(
@@ -279,7 +279,7 @@ pub(super) fn run_hook_post_tool_use_failure(standard_error: &mut dyn Write) -> 
     };
 
     let input: JsonDocument = match serde_json::from_str(&input_text) {
-        Ok(value) => value,
+        Ok(value) => super::state::normalize_hook_input(value),
         Err(error) => {
             let _ = writeln!(
                 standard_error,

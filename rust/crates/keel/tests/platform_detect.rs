@@ -8,6 +8,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+struct TestDirectory(PathBuf);
+
+impl Drop for TestDirectory {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
 fn repository_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
@@ -328,6 +336,58 @@ fn uninstall_removes_only_keel_owned_grok_config() {
     assert!(!after.contains("[mcp_servers.keel]"));
     assert!(!hooks.exists(), "keel-owned Grok hook must be removed");
     let _ = fs::remove_dir_all(&home);
+}
+
+#[test]
+fn uninstall_custom_home_does_not_remove_user_host_adapters() {
+    let repo = repository_root();
+    let user_home = unique_temp_dir("keel-uninstall-custom-user-home");
+    let custom_home = unique_temp_dir("keel-uninstall-custom-root");
+    let _ = fs::remove_dir_all(&user_home);
+    let _ = fs::remove_dir_all(&custom_home);
+    let _user_cleanup = TestDirectory(user_home.clone());
+    let _custom_cleanup = TestDirectory(custom_home.clone());
+    fs::create_dir_all(&custom_home).unwrap();
+
+    let grok_home = user_home.join(".grok");
+    let hook_path = grok_home.join("hooks").join("keel.json");
+    fs::create_dir_all(hook_path.parent().unwrap()).unwrap();
+    fs::write(&hook_path, r#"{"command":"keel hook session-start"}"#).unwrap();
+    let config_path = grok_home.join("config.toml");
+    fs::write(
+        &config_path,
+        "[mcp_servers.keel]\ncommand = \"keel\"\nargs = [\"mcp\", \"serve\"]\n",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_keel"))
+        .arg("uninstall")
+        .arg("--repo-root")
+        .arg(&repo)
+        .arg("--claude-home")
+        .arg(&custom_home)
+        .env("HOME", &user_home)
+        .env("USERPROFILE", &user_home)
+        .env_remove("KEEL_HOME")
+        .env_remove("CLAUDE_TARGET_OVERRIDE")
+        .output()
+        .expect("run keel uninstall with a custom home");
+    assert!(
+        output.status.success(),
+        "uninstall failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        hook_path.is_file(),
+        "a custom install root must not remove user-level Grok hooks"
+    );
+    assert!(
+        fs::read_to_string(&config_path)
+            .unwrap()
+            .contains("mcp_servers.keel"),
+        "a custom install root must not remove user-level Grok MCP config"
+    );
 }
 
 #[test]
