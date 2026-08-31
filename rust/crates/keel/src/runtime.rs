@@ -975,7 +975,12 @@ pub fn process_is_alive(process_id: u32) -> Option<bool> {
         if unsafe { kill(process_id as i32, 0) } == 0 {
             return Some(true);
         }
-        match std::io::Error::last_os_error().kind() {
+        let error = std::io::Error::last_os_error();
+        const ESRCH: i32 = 3;
+        if error.raw_os_error() == Some(ESRCH) {
+            return Some(false);
+        }
+        match error.kind() {
             // Permission denial proves the process exists even though it cannot
             // be signalled by this user.
             std::io::ErrorKind::PermissionDenied => Some(true),
@@ -1546,8 +1551,9 @@ mod write_text_tests {
         ));
         std::fs::create_dir_all(&root).expect("root");
         let target = root.join("settings.json");
-        let stale = root.join("settings.json.tmp-999999-1");
-        let unrelated = root.join("other.json.tmp-999999-1");
+        let missing_pid = i32::MAX as u32;
+        let stale = root.join(format!("settings.json.tmp-{missing_pid}-1"));
+        let unrelated = root.join(format!("other.json.tmp-{missing_pid}-1"));
         std::fs::write(&stale, "stale").expect("stale");
         std::fs::write(&unrelated, "keep").expect("unrelated");
 
@@ -1789,6 +1795,12 @@ mod process_lifecycle_tests {
         assert_eq!(process_is_alive(std::process::id()), Some(true));
         let parent = parent_process_id(std::process::id()).expect("parent process");
         assert_ne!(parent, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_unix_process_is_not_alive() {
+        assert_eq!(process_is_alive(i32::MAX as u32), Some(false));
     }
 
     #[test]

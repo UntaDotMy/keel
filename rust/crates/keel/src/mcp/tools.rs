@@ -1543,7 +1543,7 @@ fn unix_background_supervisor(command: &Command) -> Command {
     supervised
         .arg("-c")
         .arg(
-            "parent_watch() { while IFS= read -r _; do :; done; kill -KILL -$$ 2>/dev/null || true; }; parent_watch & watcher=$!; \"$@\" </dev/null & command_pid=$!; wait \"$command_pid\"; status=$?; kill \"$watcher\" 2>/dev/null || true; wait \"$watcher\" 2>/dev/null || true; exit \"$status\"",
+            "parent_watch() { trap 'exit 0' TERM; while IFS= read -r _; do :; done; kill -KILL -$$ 2>/dev/null || true; }; parent_watch & watcher=$!; \"$@\" </dev/null & command_pid=$!; wait \"$command_pid\"; status=$?; kill \"$watcher\" 2>/dev/null || true; wait \"$watcher\" 2>/dev/null || true; exit \"$status\"",
         )
         .arg("keel-background-supervisor")
         .arg(program)

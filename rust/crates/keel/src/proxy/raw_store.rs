@@ -558,8 +558,11 @@ mod tests {
             std::env::temp_dir().join(format!("keel-raw-staging-cleanup-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let day = chrono::Local::now().format("%Y-%m-%d").to_string();
-        let stale = root.join(&day).join(".tmp-old-999999-a1");
-        let prior_stale = root.join("2001-02-03").join(".tmp-old-999999-c3");
+        let missing_pid = i32::MAX as u32;
+        let stale = root.join(&day).join(format!(".tmp-old-{missing_pid}-a1"));
+        let prior_stale = root
+            .join("2001-02-03")
+            .join(format!(".tmp-old-{missing_pid}-c3"));
         let live = root
             .join(&day)
             .join(format!(".tmp-live-{}-b2", std::process::id()));
