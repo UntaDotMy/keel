@@ -1377,6 +1377,52 @@ fn grok_camel_case_session_does_not_inherit_satisfied_default_gate() {
 }
 
 #[test]
+fn grok_camel_case_hook_input_is_normalized_for_lifecycle_consumers() {
+    let mut input = std::io::Cursor::new(
+        br#"{
+            "hookEventName": "post_tool_use",
+            "sessionId": "grok-session",
+            "workspaceRoot": "C:/workspace",
+            "permissionMode": "default",
+            "promptId": "prompt-1",
+            "toolName": "search_replace",
+            "toolInput": { "file_path": "src/lib.rs" },
+            "toolUseId": "tool-1",
+            "toolInputTruncated": false,
+            "toolResult": { "ok": true },
+            "durationMs": 42,
+            "stopHookActive": true
+        }"#,
+    );
+
+    let normalized = read_json_stdin_fail_open(&mut input).expect("parse Grok hook input");
+
+    assert_eq!(normalized["session_id"], "grok-session");
+    assert_eq!(normalized["tool_name"], "search_replace");
+    assert_eq!(normalized["tool_input"]["file_path"], "src/lib.rs");
+    assert_eq!(normalized["duration_ms"], 42);
+    assert_eq!(normalized["toolResult"]["ok"], true);
+    assert!(normalized.get("tool_response").is_none());
+}
+
+#[test]
+fn hook_input_normalization_preserves_existing_claude_fields() {
+    let mut input = std::io::Cursor::new(
+        br#"{
+            "session_id": "claude-session",
+            "sessionId": "grok-session",
+            "tool_name": "Edit",
+            "toolName": "search_replace"
+        }"#,
+    );
+
+    let normalized = read_json_stdin_fail_open(&mut input).expect("parse mixed hook input");
+
+    assert_eq!(normalized["session_id"], "claude-session");
+    assert_eq!(normalized["tool_name"], "Edit");
+}
+
+#[test]
 fn iron_law_gate_mode_defaults_to_strict() {
     let _guard = crate::test_support::ENV_LOCK
         .lock()

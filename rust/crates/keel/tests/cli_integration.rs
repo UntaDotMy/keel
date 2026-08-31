@@ -1,5 +1,14 @@
 use assert_cmd::Command;
+use std::path::PathBuf;
 use std::time::Duration;
+
+struct TestDirectory(PathBuf);
+
+impl Drop for TestDirectory {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
 
 fn keel_bin() -> Command {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("keel"));
@@ -103,4 +112,81 @@ fn keel_skill_lint_runs_without_panic() {
         output.status.code().is_some(),
         "skill-lint must exit with a code, not hang or panic"
     );
+}
+
+#[test]
+fn grok_camel_case_post_tool_use_updates_lifecycle_state() {
+    let unique = format!(
+        "keel-grok-camel-hook-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    );
+    let root = std::env::temp_dir().join(unique);
+    let _cleanup = TestDirectory(root.clone());
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).expect("create isolated hook workspace");
+
+    let payload = r#"{
+        "hookEventName": "post_tool_use",
+        "sessionId": "grok-session",
+        "cwd": "C:/workspace",
+        "workspaceRoot": "C:/workspace",
+        "permissionMode": "default",
+        "toolName": "search_replace",
+        "toolInput": { "file_path": "src/lib.rs" },
+        "toolUseId": "tool-1",
+        "toolInputTruncated": false,
+        "toolResult": { "ok": true },
+        "durationMs": 42
+    }"#;
+
+    keel_bin()
+        .args(["hook", "post-tool-use"])
+        .current_dir(&workspace)
+        .env("KEEL_HOME", &root)
+        .env("CLAUDE_TARGET_OVERRIDE", &root)
+        .env("CLAUDE_SKILLS_SYSTEM_MAP_REFRESH_INTERVAL", "100")
+        .env("CLAUDE_SKILLS_COMMENT_LINT_GATE", "off")
+        .env("CLAUDE_SKILLS_GRAPH_CONTEXT_GATE", "off")
+        .write_stdin(payload)
+        .assert()
+        .success();
+
+    let timings_dir = root.join("state").join("tool-timings");
+    let timing_path = std::fs::read_dir(&timings_dir)
+        .expect("Grok PostToolUse must create tool timings")
+        .next()
+        .expect("timing row file")
+        .expect("timing directory entry")
+        .path();
+    let timing = std::fs::read_to_string(timing_path).expect("read timing row");
+    assert!(timing.contains(r#""tool_name":"search_replace""#));
+    assert!(timing.contains(r#""session_id":"grok-session""#));
+    assert!(timing.contains(r#""duration_ms":42"#));
+
+    let counter_dir = root.join("state").join("system-map-edit-counter");
+    let counter_path = std::fs::read_dir(&counter_dir)
+        .expect("Grok edit must update the SYSTEM_MAP counter")
+        .next()
+        .expect("counter file")
+        .expect("counter directory entry")
+        .path();
+    assert_eq!(
+        std::fs::read_to_string(counter_path).expect("read edit counter"),
+        "1"
+    );
+
+    let observations_dir = root.join("state").join("observations");
+    let observation_path = std::fs::read_dir(&observations_dir)
+        .expect("Grok edit must create an observation")
+        .next()
+        .expect("observation row file")
+        .expect("observation directory entry")
+        .path();
+    let observation = std::fs::read_to_string(observation_path).expect("read observation row");
+    assert!(observation.contains(r#""tool_name":"search_replace""#));
+    assert!(observation.contains(r#""signature":"edit:rs""#));
 }

@@ -2495,6 +2495,76 @@ fn remove_codex_plugin_section_removes_only_keel_section() {
     let _ = fs::remove_dir_all(dir);
 }
 
+#[cfg(windows)]
+#[test]
+fn grok_hook_command_executes_spaced_path_and_forwards_stdin_in_powershell() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let root = crate::test_support::unique_temp_dir("keel grok hook command");
+    let hook_probe = root.join("hook stdin probe.cmd");
+    fs::write(
+        &hook_probe,
+        "@echo off\r\nset /p hook_input=\r\necho %hook_input%\r\n",
+    )
+    .unwrap();
+
+    let hook_document = grok_hooks_payload(&hook_probe);
+    let command = hook_document["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        .as_str()
+        .expect("PreToolUse command");
+    let (powershell, arguments) = crate::runtime::named_shell_command_parts("powershell", command)
+        .expect("resolve PowerShell");
+    let mut child = Command::new(powershell)
+        .args(arguments)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start PowerShell");
+    let mut standard_input = child.stdin.take().expect("PowerShell stdin");
+    standard_input
+        .write_all(b"grok-hook-input\r\n")
+        .expect("write hook input");
+    drop(standard_input);
+    let output = child.wait_with_output().expect("wait for PowerShell");
+
+    assert!(
+        output.status.success(),
+        "generated Grok hook command must execute in PowerShell: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("grok-hook-input"),
+        "hook process must receive Grok stdin: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn grok_hooks_are_current_rejects_legacy_windows_command() {
+    let root = crate::test_support::unique_temp_dir("keel-grok-legacy-hook");
+    let hook_path = root.join("keel.json");
+    let binary = root.join("Keel Install").join("keel.exe");
+    let mut legacy_document = grok_hooks_payload(&binary);
+    legacy_document["hooks"]["PreToolUse"][0]["hooks"][0]["command"] =
+        serde_json::Value::String(format!(
+            "\"{}\" hook pre-tool-use",
+            display_path(&binary).replace('"', "\\\"")
+        ));
+    fs::write(
+        &hook_path,
+        serde_json::to_string_pretty(&legacy_document).unwrap(),
+    )
+    .unwrap();
+
+    assert!(
+        !grok_hooks_are_current(&hook_path, &binary),
+        "the PowerShell-incompatible quoted command must require repair"
+    );
+}
+
 #[test]
 fn grok_stop_hook_is_silent_not_post_tool_batch() {
     let root = std::env::temp_dir().join(format!(
@@ -2520,7 +2590,7 @@ fn grok_stop_hook_is_silent_not_post_tool_batch() {
         .as_str()
         .unwrap();
     assert!(
-        session_command.starts_with(if cfg!(windows) { '"' } else { '\'' }),
+        session_command.starts_with(if cfg!(windows) { "& '" } else { "'" }),
         "Grok hook executable must be quoted: {session_command}"
     );
     assert!(

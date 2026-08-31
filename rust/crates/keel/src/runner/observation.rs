@@ -187,7 +187,7 @@ fn derive_signature(tool_name: &str, input: &JsonDocument) -> Option<(String, St
     let tool_input = input.get("tool_input");
     let tool_name_lower = tool_name.to_ascii_lowercase();
     match tool_name_lower.as_str() {
-        "bash" => {
+        "bash" | "run_terminal_command" => {
             let command = tool_input
                 .and_then(|value| value.get("command"))
                 .and_then(JsonDocument::as_str)
@@ -196,7 +196,7 @@ fn derive_signature(tool_name: &str, input: &JsonDocument) -> Option<(String, St
             let signature = command_signature(&scrubbed)?;
             Some((signature, truncate_detail(&scrubbed)))
         }
-        "edit" | "write" | "multiedit" | "notebookedit" => {
+        "edit" | "write" | "multiedit" | "notebookedit" | "search_replace" => {
             let path = tool_input
                 .and_then(|value| value.get("file_path"))
                 .and_then(JsonDocument::as_str)
@@ -775,6 +775,36 @@ mod tests {
             assert!(record_observation(&input).expect("record"));
             let rows = iter_recent_rows(1).expect("iter");
             assert_eq!(rows[0].signature, "edit:rs");
+        });
+    }
+
+    #[test]
+    fn record_observation_maps_grok_terminal_tool_to_shell_signal() {
+        with_isolated_claude_home("grok-terminal", |_root| {
+            let input = json!({
+                "tool_name": "run_terminal_command",
+                "session_id": "grok-session",
+                "tool_input": { "command": "cargo test --workspace" },
+            });
+            assert!(record_observation(&input).expect("record"));
+            let rows = iter_recent_rows(1).expect("iter");
+            assert_eq!(rows[0].signature, "cargo test");
+            assert_eq!(rows[0].tool_name, "run_terminal_command");
+        });
+    }
+
+    #[test]
+    fn record_observation_maps_grok_edit_tool_to_edit_signal() {
+        with_isolated_claude_home("grok-edit", |_root| {
+            let input = json!({
+                "tool_name": "search_replace",
+                "session_id": "grok-session",
+                "tool_input": { "file_path": "/repo/src/lib.rs" },
+            });
+            assert!(record_observation(&input).expect("record"));
+            let rows = iter_recent_rows(1).expect("iter");
+            assert_eq!(rows[0].signature, "edit:rs");
+            assert_eq!(rows[0].tool_name, "search_replace");
         });
     }
 
