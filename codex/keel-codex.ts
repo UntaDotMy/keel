@@ -104,7 +104,7 @@ function denyOutput(reason: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Bridge runner. Lifecycle reads receive a bounded budget for index and disk I/O.
+// Bridge runner. Lifecycle reads receive a bounded index and disk budget.
 // ---------------------------------------------------------------------------
 
 function runBridge(subcommand: string, args: string[], timeoutMs = 5000): string {

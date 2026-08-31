@@ -697,9 +697,8 @@ fn handle_post(
     let is_initialize = value.get("method").and_then(Value::as_str) == Some("initialize");
     apply_http_cancellations(&value, state, headers.session_id.as_deref());
 
-    // Batch members stay in this connection worker. Connections are already
-    // concurrent and globally bounded; per-item threads would multiply the
-    // connection limit by the batch-size limit.
+    // Batch members stay in the bounded connection worker; per-item threads
+    // would multiply the connection limit by the batch-size limit.
     let outcome = if value.is_array() {
         dispatch_body_bounded(&value, state, headers.session_id.as_deref())
     } else {

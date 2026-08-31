@@ -1391,9 +1391,8 @@ struct BackgroundCommand {
     process_guard: Mutex<Option<crate::runtime::ChildProcessGuard>>,
     exit: Arc<Mutex<Option<i32>>>,
     readers_done: ReaderState,
-    // On Unix the supervisor watches this pipe. Abrupt MCP server exit closes
-    // the writer in the kernel, causing the supervisor to kill its process
-    // group even though Rust destructors cannot run after a hard crash.
+    // The Unix supervisor kills its process group when an abrupt server exit
+    // closes this pipe without running Rust destructors.
     _lifetime_pipe: Mutex<Option<std::process::ChildStdin>>,
 }
 

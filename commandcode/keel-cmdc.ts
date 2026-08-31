@@ -21,7 +21,7 @@ const SESSION_STARTED_TYPE = "keel-cmdc/session-started";
 
 const BRIDGE_BIN: string = resolveBinary();
 
-// Bridge runner. Never throws; lifecycle reads have bounded index and disk I/O.
+// Bridge runner. Never throws; lifecycle reads have a bounded index and disk budget.
 function runBridge(
   subcommand: string,
   args: string[],

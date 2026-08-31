@@ -1901,10 +1901,8 @@ impl Drop for BriefGateTempDir {
         let _ = std::thread::Builder::new()
             .name("keel-test-temp-janitor".to_string())
             .spawn(move || {
-                // Another parallel test can read the process-global home while
-                // this fixture owns it and finish a late index write after the
-                // owner drops. Let that bounded work finish, then reclaim only
-                // this process-unique directory with retries for Windows locks.
+                // A parallel test can finish a late global-home write after drop.
+                // Reclaim only this unique directory after a bounded delay.
                 std::thread::sleep(std::time::Duration::from_secs(3));
                 for attempt in 0..20 {
                     match std::fs::remove_dir_all(&path) {
