@@ -1542,8 +1542,10 @@ fn unix_background_supervisor(command: &Command) -> Command {
     let mut supervised = Command::new("sh");
     supervised
         .arg("-c")
+        // POSIX gives asynchronous lists /dev/null as stdin. Save the lifetime
+        // pipe first, then redirect the watcher from that descriptor.
         .arg(
-            "parent_watch() { trap 'exit 0' TERM; while IFS= read -r _; do :; done; kill -KILL -$$ 2>/dev/null || true; }; parent_watch & watcher=$!; \"$@\" </dev/null & command_pid=$!; wait \"$command_pid\"; status=$?; kill \"$watcher\" 2>/dev/null || true; wait \"$watcher\" 2>/dev/null || true; exit \"$status\"",
+            "parent_watch() { trap 'exit 0' TERM; while IFS= read -r _; do :; done; kill -KILL -$$ 2>/dev/null || true; }; exec 3<&0; parent_watch <&3 & watcher=$!; \"$@\" </dev/null 3<&- & command_pid=$!; wait \"$command_pid\"; status=$?; kill \"$watcher\" 2>/dev/null || true; wait \"$watcher\" 2>/dev/null || true; exit \"$status\"",
         )
         .arg("keel-background-supervisor")
         .arg(program)
@@ -4715,6 +4717,13 @@ mod tests {
             .cloned()
             .expect("registry entry");
         let pid = entry.pid.expect("supervisor pid");
+
+        std::thread::sleep(Duration::from_millis(250));
+        assert_eq!(
+            crate::runtime::process_is_alive(pid),
+            Some(true),
+            "the held lifetime pipe must keep the supervisor alive"
+        );
 
         entry
             ._lifetime_pipe
