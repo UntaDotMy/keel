@@ -3693,9 +3693,8 @@ fn diagnose_text_output_lists_failures() {
 
 #[test]
 fn stop_hooks_fail_open_on_missing_payload_without_looping() {
-    // A malformed or missing host payload cannot be tied to a session, so the
-    // closeout gate fails open. It must not emit additionalContext, which host
-    // runtimes interpret as another turn and can therefore loop forever.
+    // Missing session identity fails open without additionalContext.
+    // Host runtimes can interpret that field as another turn and loop.
     for subcommand in ["stop", "subagent-stop"] {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();

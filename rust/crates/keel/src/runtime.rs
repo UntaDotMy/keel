@@ -778,9 +778,8 @@ pub fn run_prepared_command_with_timeout(
             }
         }
     };
-    // The direct child may exit while a descendant still owns an inherited
-    // stdout/stderr handle. Close the owned job/process group before joining
-    // readers so such descendants cannot hold this synchronous call open.
+    // Close the owned tree before joining readers because descendants can keep
+    // inherited output handles open after the direct child exits.
     let _ = terminate_owned_process_tree(&mut child, &mut process_guard);
     let (stdout, original_stdout_bytes) = stdout_thread
         .join()
