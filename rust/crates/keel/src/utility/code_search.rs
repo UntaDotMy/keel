@@ -167,21 +167,21 @@ fn run_code_search_search(
             return 1;
         }
     };
-    let hits = match workspace_index::search(&root, flags.string_value("claude-home"), query, limit)
-    {
+    let path_filter = normalize_path_filter(flags.string_value("path"));
+    let hits = match workspace_index::search_filtered(
+        &root,
+        flags.string_value("claude-home"),
+        query,
+        limit,
+        (!path_filter.is_empty()).then_some(path_filter.as_str()),
+    ) {
         Ok(hits) => hits,
         Err(error) => {
             let _ = writeln!(standard_error, "code-search search: {error}");
             return 1;
         }
     };
-    let path_filter = normalize_path_filter(flags.string_value("path"));
-    let hits: Vec<SearchHit> = hits
-        .into_iter()
-        .filter(|hit| {
-            path_filter.is_empty() || hit.path.to_ascii_lowercase().contains(&path_filter)
-        })
-        .collect();
+    let hits: Vec<SearchHit> = hits.into_iter().collect();
     if flags.bool_value("json") {
         let _ = writeln!(
             standard_output,
@@ -318,16 +318,12 @@ fn resolve_root(
     label: &str,
     standard_error: &mut dyn Write,
 ) -> Option<std::path::PathBuf> {
-    let root = if raw.trim().is_empty() {
-        match resolve_repository_root("") {
-            Ok(root) => root,
-            Err(_) => {
-                let _ = writeln!(standard_error, "{label}: no repository root found");
-                return None;
-            }
+    let root = match resolve_repository_root(raw) {
+        Ok(root) => root,
+        Err(_) => {
+            let _ = writeln!(standard_error, "{label}: no repository root found");
+            return None;
         }
-    } else {
-        std::path::PathBuf::from(raw)
     };
     if !root.is_dir() {
         let _ = writeln!(
@@ -414,6 +410,25 @@ fn git_added_text(root: &Path) -> String {
             text.push_str(&String::from_utf8_lossy(&output.stdout));
         }
     }
+    for relative in untracked_paths_from_git(root) {
+        if text.len() >= 1_048_576 {
+            break;
+        }
+        let path = root.join(&relative);
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        if bytes.len() > 262_144 || bytes.contains(&0) {
+            continue;
+        }
+        if let Ok(contents) = String::from_utf8(bytes) {
+            for line in contents.lines() {
+                text.push_str("+ ");
+                text.push_str(line);
+                text.push('\n');
+            }
+        }
+    }
     text
 }
 
@@ -426,12 +441,38 @@ fn changed_paths_from_git(root: &Path) -> Vec<String> {
     let Ok(output) = output else {
         return Vec::new();
     };
+    let tracked = String::from_utf8_lossy(&output.stdout);
+    merge_changed_paths(&tracked, &untracked_paths_from_git(root).join("\n"))
+}
+
+fn untracked_paths_from_git(root: &Path) -> Vec<String> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["ls-files", "--others", "--exclude-standard"])
+        .output();
+    let Ok(output) = output else {
+        return Vec::new();
+    };
     String::from_utf8_lossy(&output.stdout)
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .map(|line| line.replace('\\', "/"))
         .collect()
+}
+
+fn merge_changed_paths(tracked: &str, untracked: &str) -> Vec<String> {
+    let mut paths: Vec<String> = tracked
+        .lines()
+        .chain(untracked.lines())
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| line.replace('\\', "/"))
+        .collect();
+    paths.sort();
+    paths.dedup();
+    paths
 }
 
 fn distinctive_tokens(diff: &str) -> Vec<String> {
@@ -506,5 +547,13 @@ mod tests {
     fn parse_limit_is_bounded() {
         assert_eq!(parse_limit("100").expect("limit"), 50);
         assert!(parse_limit("0").is_err());
+    }
+
+    #[test]
+    fn changed_paths_include_untracked_files_without_duplicates() {
+        assert_eq!(
+            merge_changed_paths("src/lib.rs\nsrc/main.rs\n", "src/main.rs\nnew/file.rs\n"),
+            ["new/file.rs", "src/lib.rs", "src/main.rs"]
+        );
     }
 }

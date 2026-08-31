@@ -27,8 +27,9 @@ use crate::runtime::{
     skills_directory,
 };
 use install::{
-    install_from_flags, repo_version_for_source, repo_version_from_metadata_or_build,
-    write_install_summary,
+    install_from_flags, install_from_paths, install_purge_stale_enabled, parse_overrides,
+    repo_version_for_source, repo_version_from_metadata_or_build, resolve_install_repository_root,
+    write_install_summary, InstallOverrides, PlatformName,
 };
 
 use verify::{
@@ -71,8 +72,8 @@ pub fn run_install_command(
     }
 }
 
-/// Guided interactive install flow. Prompts the user through harness type
-/// detection, feature selection, and verification — no external TUI crate needed.
+/// Guided interactive install flow. Prompts for an explicit host adapter and
+/// verifies the same repository/home that was installed.
 fn run_interactive_install(
     build_version: &str,
     flag_set: &FlagSet,
@@ -86,12 +87,9 @@ fn run_interactive_install(
     let detected_harness = detect_harness_type();
     let _ = writeln!(standard_output, "1. Detected harness: {detected_harness}");
     let _ = writeln!(standard_output);
-    let _ = writeln!(
-        standard_output,
-        "   (set CLAUDE_TARGET_OVERRIDE to override, or press Enter to accept)"
+    let harness_choice = read_line_from_stdin(
+        "   Harness [claude/opencode/codex/pi/cursor/cowork/commandcode/grok] (Enter to accept): ",
     );
-    let harness_choice =
-        read_line_from_stdin("   Harness type [claude/opencode/codex] (Enter to accept): ");
     let harness = if harness_choice.trim().is_empty() {
         detected_harness
     } else {
@@ -100,57 +98,19 @@ fn run_interactive_install(
     let _ = writeln!(standard_output, "   -> Using: {harness}");
     let _ = writeln!(standard_output);
 
-    let _ = writeln!(standard_output, "2. Features to enable:");
-    let _ = writeln!(standard_output);
+    let overrides = match interactive_overrides(flag_set, &harness) {
+        Ok(overrides) => overrides,
+        Err(error) => {
+            let _ = writeln!(standard_error, "{error}");
+            return 1;
+        }
+    };
 
-    let features = [
-        ("Iron law hooks", true),
-        ("Command compaction", true),
-        ("Memory system", true),
-        (
-            "Cross-harness adapters (Codex/Cursor/OpenCode/Command Code)",
-            false,
-        ),
-    ];
-
-    let mut selected: Vec<bool> = Vec::new();
-    for (name, default) in features.iter() {
-        let marker = if *default { "x" } else { " " };
-        let _ = write!(standard_output, "   [{marker}] {name}");
-        let response = read_line_from_stdin("   Toggle (Enter keeps default): ");
-        let keep = response.trim().is_empty();
-        let new_value = if keep {
-            *default
-        } else {
-            matches!(response.trim(), "y" | "Y" | "1" | "true" | "on")
-        };
-        selected.push(new_value);
-        let final_marker = if new_value { "x" } else { " " };
-        let _ = writeln!(standard_output, "   [{final_marker}] {name} (selected)");
-    }
-    let _ = writeln!(standard_output);
-
-    let _ = writeln!(standard_output, "3. Configuration summary:");
+    let _ = writeln!(standard_output, "2. Configuration summary:");
     let _ = writeln!(standard_output, "   Harness: {harness}");
     let _ = writeln!(
         standard_output,
-        "   Iron law hooks: {}",
-        if selected[0] { "enabled" } else { "disabled" }
-    );
-    let _ = writeln!(
-        standard_output,
-        "   Command compaction: {}",
-        if selected[1] { "enabled" } else { "disabled" }
-    );
-    let _ = writeln!(
-        standard_output,
-        "   Memory system: {}",
-        if selected[2] { "enabled" } else { "disabled" }
-    );
-    let _ = writeln!(
-        standard_output,
-        "   Cross-harness adapters: {}",
-        if selected[3] { "enabled" } else { "disabled" }
+        "   Feature set: standard (hooks, compaction, memory, selected host adapter)"
     );
     let _ = writeln!(standard_output);
 
@@ -161,10 +121,35 @@ fn run_interactive_install(
     }
     let _ = writeln!(standard_output);
 
-    let _ = writeln!(standard_output, "4. Running install...");
+    let _ = writeln!(standard_output, "3. Running install...");
     let _ = writeln!(standard_output);
 
-    match install_from_flags(build_version, flag_set) {
+    let repository_root = match resolve_install_repository_root(flag_set.string_value("repo-root"))
+    {
+        Ok(path) => path,
+        Err(error) => {
+            let _ = writeln!(standard_error, "Native Rust install failed: {error}");
+            return 1;
+        }
+    };
+    let claude_home = match resolve_claude_home(flag_set.string_value("claude-home")) {
+        Ok(path) => path,
+        Err(error) => {
+            let _ = writeln!(standard_error, "Native Rust install failed: {error}");
+            return 1;
+        }
+    };
+    let purge_stale = install_purge_stale_enabled(
+        flag_set.bool_value("no-purge"),
+        flag_set.bool_value("purge-stale"),
+    );
+    match install_from_paths(
+        build_version,
+        &repository_root,
+        &claude_home,
+        &overrides,
+        purge_stale,
+    ) {
         Ok(summary) => {
             write_install_summary(&summary, standard_output);
         }
@@ -174,21 +159,41 @@ fn run_interactive_install(
         }
     }
 
-    let _ = writeln!(standard_output, "5. Verification: running keel status...");
+    let _ = writeln!(standard_output, "4. Verification: running keel status...");
     let _ = writeln!(standard_output);
 
     let status_args = vec![
-        "status".to_string(),
         "--repo-root".to_string(),
-        flag_set.string_value("repo-root").trim().to_string(),
+        repository_root.to_string_lossy().to_string(),
         "--claude-home".to_string(),
-        flag_set.string_value("claude-home").trim().to_string(),
+        claude_home.to_string_lossy().to_string(),
     ];
-    let _ = run_status_command(build_version, &status_args, standard_output, standard_error);
+    let status = run_status_command(build_version, &status_args, standard_output, standard_error);
+    if status != 0 {
+        return status;
+    }
 
     let _ = writeln!(standard_output);
     let _ = writeln!(standard_output, "Interactive setup complete.");
     0
+}
+
+fn interactive_overrides(flag_set: &FlagSet, harness: &str) -> Result<InstallOverrides, String> {
+    let mut overrides = parse_overrides(
+        flag_set.string_value("with"),
+        flag_set.string_value("without"),
+    );
+    if harness.eq_ignore_ascii_case("claude") {
+        return Ok(overrides);
+    }
+    let platform = PlatformName::parse(harness).ok_or_else(|| {
+        format!(
+            "Unsupported harness {harness:?}. Choose claude, opencode, codex, pi, cursor, cowork, commandcode, or grok."
+        )
+    })?;
+    overrides.skip.remove(&platform);
+    overrides.force.insert(platform);
+    Ok(overrides)
 }
 
 fn detect_harness_type() -> String {
@@ -341,4 +346,32 @@ pub fn run_status_command(
     let _ = writeln!(standard_output);
     doctor::report_bridge_host_wiring(standard_output, &claude_home);
     0
+}
+
+#[cfg(test)]
+mod interactive_tests {
+    use super::*;
+
+    fn install_flags(with: &str, without: &str) -> FlagSet {
+        let mut flags = FlagSet::new("install");
+        flags.string_flag("with", with);
+        flags.string_flag("without", without);
+        flags
+    }
+
+    #[test]
+    fn interactive_host_selection_forces_the_selected_adapter() {
+        let flags = install_flags("cursor", "grok");
+        let overrides = interactive_overrides(&flags, "grok").unwrap();
+        assert!(overrides.force.contains(&PlatformName::Cursor));
+        assert!(overrides.force.contains(&PlatformName::Grok));
+        assert!(!overrides.skip.contains(&PlatformName::Grok));
+    }
+
+    #[test]
+    fn interactive_host_selection_rejects_unknown_names() {
+        let flags = install_flags("", "");
+        let error = interactive_overrides(&flags, "imaginary-host").unwrap_err();
+        assert!(error.contains("Unsupported harness"));
+    }
 }

@@ -25,7 +25,8 @@ The goal is to keep the supported entry points explicit for both human operators
 | Surface | In repo root | Outside repo root with `--repo-root` | Installed global CLI | Hosted automation | Notes |
 | --- | --- | --- | --- | --- | --- |
 | `help`, `help advanced`, `version`, `platform` | Supported | Supported | Supported | Supported | Safe discovery surfaces for both operators and agents. |
-| `install`, `update`, `status`, `doctor`, `verify`, `uninstall` | Supported | Supported | Supported | Supported | Managed-pack lifecycle works from the native CLI. |
+| `install`, `update`, `status`, `doctor`, `repair`, `verify`, `uninstall` | Supported | Supported | Supported | Supported | Checkout and packaged-release installs retain their owning source so lifecycle commands work outside the original extraction directory. |
+| Host adapter wiring | Supported | Supported | Supported | Supported | Claude, OpenCode, Codex, Cursor, Pi, Cowork, Command Code, and Grok are detected or selected with `--with`; Grok uses `$GROK_HOME` native hooks and MCP config. |
 | `review pre-commit`, `review pre-pr`, `review gates check` | Supported | Supported | Supported | Supported | Native review surfaces are the default deterministic proof path. |
 | `git-workflow preflight` | Supported | Supported | Supported | Supported | Main branch and PR hygiene gate before publish or merge. |
 | `memory scope`, `memory system-map`, `memory working-brief`, `memory completion-gate`, `memory recall` | Supported | Supported | Supported | Supported | Core surfaces of the **unified** `keel memory` group. |

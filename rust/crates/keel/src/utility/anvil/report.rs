@@ -104,19 +104,39 @@ pub fn read_report(paths: &job::JobPaths) -> Result<Report, String> {
 mod tests {
     use super::*;
 
+    struct TempReportDir(std::path::PathBuf);
+
+    impl TempReportDir {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "anvil-report-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0)
+            ));
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TempReportDir {
+        fn drop(&mut self) {
+            for _ in 0..5 {
+                match std::fs::remove_dir_all(&self.0) {
+                    Ok(()) => return,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+                    Err(_) => std::thread::sleep(std::time::Duration::from_millis(10)),
+                }
+            }
+        }
+    }
+
     #[test]
     fn read_report_round_trips_loop_metrics() {
-        let dir = std::env::temp_dir().join(format!(
-            "anvil-report-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let paths = job::JobPaths::from_resolved(dir.clone(), dir.clone());
+        let dir = TempReportDir::new();
+        let paths = job::JobPaths::from_resolved(dir.0.clone(), dir.0.clone());
         let mut built = empty_report();
         built.loop_iterations = 4;
         built.improvement_delta = 0.2;
@@ -128,6 +148,5 @@ mod tests {
         assert!((loaded.improvement_delta - 0.2).abs() < 1e-9);
         assert!((loaded.gate_pass_rate - 0.75).abs() < 1e-9);
         assert_eq!(loaded.winner_id, "cast_2");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

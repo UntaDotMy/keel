@@ -52,16 +52,8 @@ pub fn skill_use_count(claude_home: &Path, skill_name: &str) -> u64 {
 mod tests {
     use super::*;
 
-    fn temp_home(label: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "keel-skill-usage-{label}-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        fs::create_dir_all(&dir).expect("create temp home");
-        dir
+    fn temp_home(label: &str) -> crate::test_support::TestTempDir {
+        crate::test_support::unique_temp_dir(&format!("keel-skill-usage-{label}"))
     }
 
     #[test]

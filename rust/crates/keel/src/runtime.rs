@@ -80,6 +80,8 @@ pub struct ProcessResult {
 /// 64 MiB leaves room for full test logs (the legitimate large-output case)
 /// while bounding the worst case. Mirrors the `MAX_EVENT_LOG_BYTES` precedent.
 pub const MAX_CAPTURED_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
+const CAPTURE_TRUNCATION_MARKER: &[u8] =
+    b"\n[keel] captured output capped at MAX_CAPTURED_OUTPUT_BYTES; see raw output locally for the full stream\n";
 /// Default wall-clock budget for internal command probes and `keel run`.
 /// Override with `KEEL_COMMAND_TIMEOUT_SECS`; values are clamped to 5 minutes
 /// through 1 hour so a malformed value cannot create an unbounded wait.
@@ -88,13 +90,14 @@ const DEFAULT_COMMAND_TIMEOUT_SECS: u64 = 300;
 /// Truncate a captured stream to the cap, returning (bytes, original_len). When
 /// truncation occurs, a trailing marker is appended so the model can see the
 /// output was cut.
+#[cfg(test)]
 pub fn cap_captured_stream(bytes: Vec<u8>) -> (Vec<u8>, usize) {
     let original_len = bytes.len();
     if original_len <= MAX_CAPTURED_OUTPUT_BYTES {
         return (bytes, original_len);
     }
     let mut truncated = bytes[..MAX_CAPTURED_OUTPUT_BYTES].to_vec();
-    let marker = b"\n[keel] captured output capped at MAX_CAPTURED_OUTPUT_BYTES; see raw output locally for the full stream\n";
+    let marker = CAPTURE_TRUNCATION_MARKER;
     // Make room for the marker so the total stays at/under the cap.
     let needed = marker.len();
     if truncated.len() > needed {
@@ -291,11 +294,28 @@ pub const KEEL_HOME_DIRECTORY_NAME: &str = ".keel";
 /// agents, commands, settings.json, user CLAUDE.md, the plugin): the harness
 /// only reads them from `~/.claude`, so they can never move to `~/.keel`.
 ///
-/// Split rule: when `keel_home` is a standard `.keel` directory, the
-/// engagement home is its sibling `~/.claude`. For any other root name
-/// (test temp dirs, legacy `--claude-home` overrides), the root doubles as
-/// the engagement home, preserving the pre-split single-root behavior.
+/// Split rule: a standard `.keel` uses its sibling `.claude`; a custom root
+/// selected through `KEEL_HOME` uses the user's `.claude`. Explicit legacy
+/// `--claude-home` and test roots still use the single-root behavior.
 pub fn claude_engagement_home(keel_home: &Path) -> PathBuf {
+    let configured_keel_home = env::var("KEEL_HOME")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    let user_home = resolve_user_home().ok();
+    claude_engagement_home_for(
+        keel_home,
+        user_home.as_deref(),
+        configured_keel_home.as_deref(),
+    )
+}
+
+fn claude_engagement_home_for(
+    keel_home: &Path,
+    user_home: Option<&Path>,
+    configured_keel_home: Option<&Path>,
+) -> PathBuf {
     let is_standard_keel_home = keel_home
         .file_name()
         .and_then(|name| name.to_str())
@@ -304,6 +324,14 @@ pub fn claude_engagement_home(keel_home: &Path) -> PathBuf {
     if is_standard_keel_home {
         if let Some(parent) = keel_home.parent() {
             return parent.join(".claude");
+        }
+    }
+    if configured_keel_home
+        .map(|configured| clean_path(configured) == clean_path(keel_home))
+        .unwrap_or(false)
+    {
+        if let Some(user_home) = user_home {
+            return user_home.join(".claude");
         }
     }
     keel_home.to_path_buf()
@@ -534,6 +562,7 @@ pub fn read_text_if_exists(path: &Path) -> Result<String, String> {
 /// a non-atomic success still beats a hard failure.
 pub fn write_text(path: &Path, text: &str) -> Result<(), String> {
     ensure_parent_directory(path)?;
+    cleanup_stale_atomic_temps(path);
 
     let temp_path = atomic_temp_path(path);
     // Best-effort cleanup of any leftover temp from a previous interrupted write.
@@ -573,6 +602,40 @@ pub fn write_text(path: &Path, text: &str) -> Result<(), String> {
                     display_path(path)
                 )
             })
+        }
+    }
+}
+
+fn cleanup_stale_atomic_temps(target: &Path) {
+    let Some(parent) = target.parent() else {
+        return;
+    };
+    let Some(target_name) = target.file_name().and_then(|name| name.to_str()) else {
+        return;
+    };
+    let prefix = format!("{target_name}.tmp-");
+    let Ok(entries) = fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let Some(file_name) = file_name.to_str() else {
+            continue;
+        };
+        let Some(suffix) = file_name.strip_prefix(&prefix) else {
+            continue;
+        };
+        let Some((process_id, nonce)) = suffix.split_once('-') else {
+            continue;
+        };
+        if nonce.is_empty() {
+            continue;
+        }
+        let Ok(process_id) = process_id.parse::<u32>() else {
+            continue;
+        };
+        if process_is_alive(process_id) == Some(false) {
+            let _ = fs::remove_file(entry.path());
         }
     }
 }
@@ -650,21 +713,40 @@ pub fn run_command_with_timeout(
     if let Some(directory) = working_directory {
         command.current_dir(directory);
     }
+    run_prepared_command_with_timeout(command, program, timeout)
+}
+
+/// Execute a caller-configured command with the shared capture, timeout, and
+/// process-tree ownership contract. Callers may set environment variables and
+/// arguments, while stdio and lifecycle ownership remain centrally enforced.
+pub fn run_prepared_command_with_timeout(
+    mut command: Command,
+    label: &str,
+    timeout: std::time::Duration,
+) -> Result<ProcessResult, String> {
     command.stdin(Stdio::null());
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
     configure_process_group(&mut command);
     let mut child = command
         .spawn()
-        .map_err(|error| format!("execute {program}: {error}"))?;
+        .map_err(|error| format!("execute {label}: {error}"))?;
+    let mut process_guard = match own_process_tree(&mut child) {
+        Ok(guard) => guard,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("execute {label}: process ownership: {error}"));
+        }
+    };
     let stdout = child
         .stdout
         .take()
-        .ok_or_else(|| format!("execute {program}: stdout pipe unavailable"))?;
+        .ok_or_else(|| format!("execute {label}: stdout pipe unavailable"))?;
     let stderr = child
         .stderr
         .take()
-        .ok_or_else(|| format!("execute {program}: stderr pipe unavailable"))?;
+        .ok_or_else(|| format!("execute {label}: stderr pipe unavailable"))?;
     let stdout_thread = std::thread::spawn(|| capture_stream(stdout));
     let stderr_thread = std::thread::spawn(|| capture_stream(stderr));
     let deadline = std::time::Instant::now() + timeout;
@@ -675,7 +757,7 @@ pub fn run_command_with_timeout(
                 std::thread::sleep(std::time::Duration::from_millis(25));
             }
             Ok(None) => {
-                let kill_error = terminate_process_tree(&mut child).err();
+                let kill_error = terminate_owned_process_tree(&mut child, &mut process_guard).err();
                 let _ = child.wait(); // intentional cleanup after tree termination
                 let _ = stdout_thread.join(); // intentional drain-thread cleanup
                 let _ = stderr_thread.join(); // intentional drain-thread cleanup
@@ -683,25 +765,28 @@ pub fn run_command_with_timeout(
                     .map(|error| format!("; process-tree cleanup failed: {error}"))
                     .unwrap_or_default();
                 return Err(format!(
-                    "execute {program}: timed out after {}s{suffix}; retry with a smaller command or increase KEEL_COMMAND_TIMEOUT_SECS",
+                    "execute {label}: timed out after {}s{suffix}; retry with a smaller command or increase KEEL_COMMAND_TIMEOUT_SECS",
                     timeout.as_secs()
                 ));
             }
             Err(error) => {
-                let _ = terminate_process_tree(&mut child); // intentional cleanup after wait failure
+                let _ = terminate_owned_process_tree(&mut child, &mut process_guard);
                 let _ = child.wait(); // intentional cleanup after tree termination
                 let _ = stdout_thread.join(); // intentional drain-thread cleanup
                 let _ = stderr_thread.join(); // intentional drain-thread cleanup
-                return Err(format!("execute {program}: wait failed: {error}"));
+                return Err(format!("execute {label}: wait failed: {error}"));
             }
         }
     };
+    // Close the owned tree before joining readers because descendants can keep
+    // inherited output handles open after the direct child exits.
+    let _ = terminate_owned_process_tree(&mut child, &mut process_guard);
     let (stdout, original_stdout_bytes) = stdout_thread
         .join()
-        .map_err(|_| format!("execute {program}: stdout reader panicked"))?;
+        .map_err(|_| format!("execute {label}: stdout reader panicked"))?;
     let (stderr, original_stderr_bytes) = stderr_thread
         .join()
-        .map_err(|_| format!("execute {program}: stderr reader panicked"))?;
+        .map_err(|_| format!("execute {label}: stderr reader panicked"))?;
     Ok(ProcessResult {
         code: exit_status_code(&status),
         stdout,
@@ -729,6 +814,14 @@ pub fn run_command_inherit(
     let mut child = command
         .spawn()
         .map_err(|error| format!("execute {program}: {error}"))?;
+    let mut process_guard = match own_process_tree(&mut child) {
+        Ok(guard) => guard,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("execute {program}: process ownership: {error}"));
+        }
+    };
     let deadline = std::time::Instant::now() + command_timeout();
     loop {
         match child.try_wait() {
@@ -737,7 +830,7 @@ pub fn run_command_inherit(
                 std::thread::sleep(std::time::Duration::from_millis(25));
             }
             Ok(None) => {
-                let kill_error = terminate_process_tree(&mut child).err();
+                let kill_error = terminate_owned_process_tree(&mut child, &mut process_guard).err();
                 let _ = child.wait(); // intentional cleanup after inherited-stream timeout
                 let suffix = kill_error
                     .map(|error| format!("; process-tree cleanup failed: {error}"))
@@ -748,7 +841,7 @@ pub fn run_command_inherit(
                 ));
             }
             Err(error) => {
-                let _ = terminate_process_tree(&mut child); // intentional cleanup after wait failure
+                let _ = terminate_owned_process_tree(&mut child, &mut process_guard);
                 let _ = child.wait(); // intentional cleanup after tree termination
                 return Err(format!("execute {program}: wait failed: {error}"));
             }
@@ -765,7 +858,7 @@ fn command_timeout() -> std::time::Duration {
     std::time::Duration::from_secs(seconds)
 }
 
-fn capture_stream<R: Read>(mut reader: R) -> (Vec<u8>, usize) {
+pub(crate) fn capture_stream<R: Read>(mut reader: R) -> (Vec<u8>, usize) {
     let mut kept = Vec::new();
     let mut buffer = [0u8; 8192];
     let mut original = 0usize;
@@ -781,11 +874,14 @@ fn capture_stream<R: Read>(mut reader: R) -> (Vec<u8>, usize) {
             }
         }
     }
-    let (kept, _) = cap_captured_stream(kept);
+    if original > MAX_CAPTURED_OUTPUT_BYTES {
+        kept.truncate(MAX_CAPTURED_OUTPUT_BYTES - CAPTURE_TRUNCATION_MARKER.len());
+        kept.extend_from_slice(CAPTURE_TRUNCATION_MARKER);
+    }
     (kept, original)
 }
 
-fn configure_process_group(command: &mut Command) {
+pub(crate) fn configure_process_group(command: &mut Command) {
     #[cfg(not(unix))]
     let _ = command; // process groups are configured only on Unix
     #[cfg(unix)]
@@ -799,6 +895,314 @@ fn configure_process_group(command: &mut Command) {
                 Ok(())
             });
         }
+    }
+}
+
+pub struct ChildProcessGuard {
+    #[cfg(windows)]
+    job_handle: isize,
+    #[cfg(unix)]
+    process_group_id: i32,
+}
+
+impl Drop for ChildProcessGuard {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        {
+            let _ = windows_process::close_handle(&mut self.job_handle);
+        }
+        #[cfg(unix)]
+        if self.process_group_id > 0 {
+            let _ = libc_kill_process_group(self.process_group_id);
+            self.process_group_id = 0;
+        }
+    }
+}
+
+pub fn terminate_owned_process_tree(
+    child: &mut Child,
+    process_guard: &mut ChildProcessGuard,
+) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        match windows_process::close_handle(&mut process_guard.job_handle) {
+            Ok(()) => Ok(()),
+            Err(job_error) => terminate_process_tree(child).map_err(|fallback_error| {
+                format!("{job_error}; fallback process-tree cleanup failed: {fallback_error}")
+            }),
+        }
+    }
+    #[cfg(unix)]
+    {
+        let result = terminate_process_tree(child);
+        process_guard.process_group_id = 0;
+        result
+    }
+}
+
+pub fn own_process_tree(child: &mut Child) -> Result<ChildProcessGuard, String> {
+    #[cfg(windows)]
+    {
+        let job_handle = windows_process::create_kill_on_close_job(child.id())?;
+        Ok(ChildProcessGuard { job_handle })
+    }
+    #[cfg(unix)]
+    {
+        Ok(ChildProcessGuard {
+            process_group_id: child.id() as i32,
+        })
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        let _ = child;
+        Ok(ChildProcessGuard {})
+    }
+}
+
+pub fn process_is_alive(process_id: u32) -> Option<bool> {
+    #[cfg(windows)]
+    {
+        windows_process::process_is_alive(process_id)
+    }
+    #[cfg(unix)]
+    {
+        extern "C" {
+            fn kill(process_id: i32, signal: i32) -> i32;
+        }
+        if process_id == 0 || process_id > i32::MAX as u32 {
+            return Some(false);
+        }
+        if unsafe { kill(process_id as i32, 0) } == 0 {
+            return Some(true);
+        }
+        let error = std::io::Error::last_os_error();
+        const ESRCH: i32 = 3;
+        if error.raw_os_error() == Some(ESRCH) {
+            return Some(false);
+        }
+        match error.kind() {
+            // Permission denial proves the process exists even though it cannot
+            // be signalled by this user.
+            std::io::ErrorKind::PermissionDenied => Some(true),
+            std::io::ErrorKind::NotFound => Some(false),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(windows)]
+pub fn parent_process_id(process_id: u32) -> Option<u32> {
+    windows_process::parent_process_id(process_id)
+}
+
+#[cfg(windows)]
+mod windows_process {
+    use std::ffi::c_void;
+    use std::mem::size_of;
+    use std::ptr;
+
+    type Handle = *mut c_void;
+    const TH32CS_SNAPPROCESS: u32 = 0x0000_0002;
+    const PROCESS_TERMINATE: u32 = 0x0001;
+    const PROCESS_SET_QUOTA: u32 = 0x0100;
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: u32 = 0x0000_2000;
+    const JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS: i32 = 9;
+    const STILL_ACTIVE: u32 = 259;
+    const ERROR_ACCESS_DENIED: u32 = 5;
+
+    #[repr(C)]
+    struct ProcessEntry32W {
+        size: u32,
+        usage_count: u32,
+        process_id: u32,
+        default_heap_id: usize,
+        module_id: u32,
+        thread_count: u32,
+        parent_process_id: u32,
+        base_priority: i32,
+        flags: u32,
+        executable_file: [u16; 260],
+    }
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct JobObjectBasicLimitInformation {
+        per_process_user_time_limit: i64,
+        per_job_user_time_limit: i64,
+        limit_flags: u32,
+        minimum_working_set_size: usize,
+        maximum_working_set_size: usize,
+        active_process_limit: u32,
+        affinity: usize,
+        priority_class: u32,
+        scheduling_class: u32,
+    }
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct IoCounters {
+        read_operation_count: u64,
+        write_operation_count: u64,
+        other_operation_count: u64,
+        read_transfer_count: u64,
+        write_transfer_count: u64,
+        other_transfer_count: u64,
+    }
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct JobObjectExtendedLimitInformation {
+        basic_limit_information: JobObjectBasicLimitInformation,
+        io_info: IoCounters,
+        process_memory_limit: usize,
+        job_memory_limit: usize,
+        peak_process_memory_used: usize,
+        peak_job_memory_used: usize,
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreateToolhelp32Snapshot(flags: u32, process_id: u32) -> Handle;
+        fn Process32FirstW(snapshot: Handle, entry: *mut ProcessEntry32W) -> i32;
+        fn Process32NextW(snapshot: Handle, entry: *mut ProcessEntry32W) -> i32;
+        fn CreateJobObjectW(attributes: *mut c_void, name: *const u16) -> Handle;
+        fn SetInformationJobObject(
+            job: Handle,
+            information_class: i32,
+            information: *const c_void,
+            information_length: u32,
+        ) -> i32;
+        fn OpenProcess(access: u32, inherit_handle: i32, process_id: u32) -> Handle;
+        fn AssignProcessToJobObject(job: Handle, process: Handle) -> i32;
+        fn GetExitCodeProcess(process: Handle, exit_code: *mut u32) -> i32;
+        fn GetLastError() -> u32;
+        fn CloseHandle(handle: Handle) -> i32;
+    }
+
+    fn valid_handle(handle: Handle) -> bool {
+        !handle.is_null() && handle as isize != -1
+    }
+
+    pub(super) fn close_handle(handle: &mut isize) -> Result<(), String> {
+        if *handle == 0 || *handle == -1 {
+            return Ok(());
+        }
+        let closing = *handle;
+        *handle = 0;
+        // SAFETY: `closing` is an owned Job Object handle and is invalidated
+        // before this single close so Drop cannot close it twice.
+        if unsafe { CloseHandle(closing as Handle) } != 0 {
+            Ok(())
+        } else {
+            Err(format!(
+                "close Windows Job Object: {}",
+                std::io::Error::last_os_error()
+            ))
+        }
+    }
+
+    pub(super) fn parent_process_id(process_id: u32) -> Option<u32> {
+        // SAFETY: the snapshot handle is validated before use and closed below.
+        let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+        if !valid_handle(snapshot) {
+            return None;
+        }
+        // SAFETY: this repr(C) record is initialized to the Win32-required zero
+        // state before its size field is populated.
+        let mut entry: ProcessEntry32W = unsafe { std::mem::zeroed() };
+        entry.size = size_of::<ProcessEntry32W>() as u32;
+        let mut found = None;
+        // SAFETY: `entry` points to writable storage with the required size.
+        let mut has_entry = unsafe { Process32FirstW(snapshot, &mut entry) } != 0;
+        while has_entry {
+            if entry.process_id == process_id {
+                found = Some(entry.parent_process_id);
+                break;
+            }
+            // SAFETY: the validated snapshot and initialized record stay live.
+            has_entry = unsafe { Process32NextW(snapshot, &mut entry) } != 0;
+        }
+        // SAFETY: `snapshot` is an owned valid handle and is closed once.
+        unsafe {
+            CloseHandle(snapshot);
+        }
+        found
+    }
+
+    pub(super) fn process_is_alive(process_id: u32) -> Option<bool> {
+        if process_id == 0 {
+            return Some(false);
+        }
+        // SAFETY: OpenProcess receives a concrete PID and no borrowed pointers.
+        let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, process_id) };
+        if !valid_handle(process) {
+            // SAFETY: GetLastError has no preconditions and reads thread state.
+            return (unsafe { GetLastError() } != ERROR_ACCESS_DENIED).then_some(false);
+        }
+        let mut exit_code = 0u32;
+        // SAFETY: `process` is valid and `exit_code` is writable for the call.
+        let queried = unsafe { GetExitCodeProcess(process, &mut exit_code) } != 0;
+        // SAFETY: `process` is an owned valid handle and is closed once.
+        unsafe {
+            CloseHandle(process);
+        }
+        queried.then_some(exit_code == STILL_ACTIVE)
+    }
+
+    pub(super) fn create_kill_on_close_job(process_id: u32) -> Result<isize, String> {
+        // SAFETY: null security attributes/name request an unnamed default job.
+        let job = unsafe { CreateJobObjectW(ptr::null_mut(), ptr::null()) };
+        if !valid_handle(job) {
+            return Err(format!(
+                "create Windows Job Object: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        let mut limits = JobObjectExtendedLimitInformation::default();
+        limits.basic_limit_information.limit_flags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        // SAFETY: `limits` has the documented repr(C) layout and byte length.
+        let configured = unsafe {
+            SetInformationJobObject(
+                job,
+                JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS,
+                &limits as *const _ as *const c_void,
+                size_of::<JobObjectExtendedLimitInformation>() as u32,
+            )
+        } != 0;
+        if !configured {
+            let error = std::io::Error::last_os_error();
+            // SAFETY: `job` is an owned valid handle and is closed on failure.
+            unsafe {
+                CloseHandle(job);
+            }
+            return Err(format!("configure Windows Job Object: {error}"));
+        }
+        // SAFETY: OpenProcess receives a concrete child PID and no pointers.
+        let process = unsafe { OpenProcess(PROCESS_TERMINATE | PROCESS_SET_QUOTA, 0, process_id) };
+        if !valid_handle(process) {
+            let error = std::io::Error::last_os_error();
+            // SAFETY: `job` is an owned valid handle and is closed on failure.
+            unsafe {
+                CloseHandle(job);
+            }
+            return Err(format!("open child process {process_id}: {error}"));
+        }
+        // SAFETY: both handles are valid and remain live through assignment.
+        let assigned = unsafe { AssignProcessToJobObject(job, process) } != 0;
+        // SAFETY: `process` is an owned valid handle and is closed once.
+        unsafe {
+            CloseHandle(process);
+        }
+        if !assigned {
+            let error = std::io::Error::last_os_error();
+            // SAFETY: `job` is an owned valid handle and is closed on failure.
+            unsafe {
+                CloseHandle(job);
+            }
+            return Err(format!("assign child {process_id} to Job Object: {error}"));
+        }
+        Ok(job as isize)
     }
 }
 
@@ -1134,6 +1538,35 @@ mod write_text_tests {
         assert!(temp_siblings(&dir, "CLAUDE.md").is_empty());
         let _ = fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn write_text_removes_only_stale_temps_for_its_target() {
+        let root = std::env::temp_dir().join(format!(
+            "keel-write-stale-temp-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&root).expect("root");
+        let target = root.join("settings.json");
+        let missing_pid = i32::MAX as u32;
+        let stale = root.join(format!("settings.json.tmp-{missing_pid}-1"));
+        let unrelated = root.join(format!("other.json.tmp-{missing_pid}-1"));
+        std::fs::write(&stale, "stale").expect("stale");
+        std::fs::write(&unrelated, "keep").expect("unrelated");
+
+        write_text(&target, "current").expect("write target");
+
+        assert!(!stale.exists(), "stale sibling temp must be recovered");
+        assert!(
+            unrelated.exists(),
+            "another target's temp must be preserved"
+        );
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "current");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
 
 #[cfg(test)]
@@ -1198,6 +1631,25 @@ mod keel_home_split_tests {
         assert_eq!(claude_engagement_home(&custom), custom);
         let legacy = PathBuf::from("/home/user/.claude");
         assert_eq!(claude_engagement_home(&legacy), legacy);
+    }
+
+    #[test]
+    fn configured_custom_keel_home_keeps_claude_engagement_under_user_home() {
+        let user_home = PathBuf::from("/home/user");
+        let custom_keel_home = PathBuf::from("/mnt/keel-data");
+        assert_eq!(
+            claude_engagement_home_for(
+                &custom_keel_home,
+                Some(&user_home),
+                Some(&custom_keel_home),
+            ),
+            user_home.join(".claude")
+        );
+        assert_eq!(
+            claude_engagement_home_for(&custom_keel_home, Some(&user_home), None),
+            custom_keel_home,
+            "an explicit legacy override remains a hermetic single root"
+        );
     }
 
     #[test]
@@ -1310,6 +1762,47 @@ mod process_lifecycle_tests {
         assert!(error.contains("timed out"), "unexpected error: {error}");
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn closing_owned_job_terminates_child_without_taskkill() {
+        let mut child = Command::new("cmd")
+            .args(["/C", "ping -n 30 127.0.0.1 >nul"])
+            .spawn()
+            .expect("spawn child");
+        let mut process_guard = own_process_tree(&mut child).expect("own child tree");
+
+        terminate_owned_process_tree(&mut child, &mut process_guard).expect("close job");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            match child.try_wait().expect("poll child") {
+                Some(_) => break,
+                None if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                None => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("closing the Job Object did not terminate its child");
+                }
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_process_probes_find_the_current_process_and_parent() {
+        assert_eq!(process_is_alive(std::process::id()), Some(true));
+        let parent = parent_process_id(std::process::id()).expect("parent process");
+        assert_ne!(parent, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_unix_process_is_not_alive() {
+        assert_eq!(process_is_alive(i32::MAX as u32), Some(false));
+    }
+
     #[test]
     fn short_command_returns_output_and_status() {
         let (program, arguments) = if cfg!(windows) {
@@ -1322,6 +1815,42 @@ mod process_lifecycle_tests {
                 .expect("short command");
         assert_eq!(result.code, 0);
         assert!(String::from_utf8_lossy(&result.stdout).contains("ok"));
+    }
+
+    #[test]
+    fn leader_exit_cannot_leave_inherited_pipe_open_in_descendant() {
+        let (program, arguments) = if cfg!(windows) {
+            (
+                "powershell",
+                vec![
+                    "-NoLogo".to_string(),
+                    "-NoProfile".to_string(),
+                    "-NonInteractive".to_string(),
+                    "-Command".to_string(),
+                    "$p=Start-Process powershell -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds 30' -NoNewWindow -PassThru; Write-Output $p.Id"
+                        .to_string(),
+                ],
+            )
+        } else {
+            (
+                "sh",
+                vec!["-c".to_string(), "sleep 30 & echo $!".to_string()],
+            )
+        };
+        let started = std::time::Instant::now();
+        let completion_budget = std::time::Duration::from_secs(if cfg!(windows) { 10 } else { 3 });
+        let result = run_command_with_timeout(program, &arguments, None, completion_budget)
+            .expect("leader exit must close descendant-held pipes");
+        assert!(started.elapsed() < completion_budget);
+        let descendant = String::from_utf8_lossy(&result.stdout)
+            .lines()
+            .find_map(|line| line.trim().parse::<u32>().ok())
+            .expect("descendant pid");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while process_is_alive(descendant) == Some(true) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_ne!(process_is_alive(descendant), Some(true));
     }
 }
 #[cfg(test)]

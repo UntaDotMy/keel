@@ -1,4 +1,5 @@
 use super::*;
+use super::{ci::*, diff_gates::*, language_gates::*, messages::*, workflow::*};
 
 // ---- await-ci fail-closed (offline; no provider CLI invoked) ----
 
@@ -248,6 +249,99 @@ fn artifact_relevance_matches_touched_paths_tolerantly() {
     ));
 }
 
+#[test]
+fn artifact_relevance_requires_every_touched_path() {
+    let touched = vec![
+        "rust/crates/keel/src/review.rs".to_string(),
+        "rust/crates/keel/src/commands.rs".to_string(),
+    ];
+    assert!(!artifact_targets_all_touched_files(
+        &["rust/crates/keel/src/review.rs".to_string()],
+        &touched
+    ));
+    assert!(artifact_targets_all_touched_files(
+        &[
+            "rust/crates/keel/src/commands.rs".to_string(),
+            ".\\rust\\crates\\keel\\src\\review.rs".to_string(),
+        ],
+        &touched
+    ));
+}
+
+#[test]
+fn flow_gate_rejects_stale_or_false_exemption_evidence() {
+    let _guard = crate::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let repository = crate::test_support::unique_temp_dir("keel-flow-gate-repo");
+    let keel_home = crate::test_support::unique_temp_dir("keel-flow-gate-home");
+    let previous_home = std::env::var("KEEL_HOME").ok();
+    std::env::set_var("KEEL_HOME", keel_home.as_os_str());
+    let source = repository.join("src").join("main.rs");
+    std::fs::create_dir_all(source.parent().expect("source parent")).expect("source directory");
+    std::fs::write(&source, "fn main() {}\n").expect("initial source");
+    for arguments in [
+        vec!["init"],
+        vec!["config", "user.email", "keel-tests@example.invalid"],
+        vec!["config", "user.name", "Keel Tests"],
+        vec!["add", "."],
+        vec!["commit", "-m", "Add : TEST : seed repository"],
+    ] {
+        let status = std::process::Command::new("git")
+            .args(arguments)
+            .current_dir(&repository)
+            .status()
+            .expect("git command");
+        assert!(status.success());
+    }
+    std::fs::write(&source, "fn main() { println!(\"one\"); }\n").expect("first edit");
+
+    let mut check = keel_flow::new_template_check("src/main.rs", "main");
+    check.current_behavior = "program entry point".into();
+    check.entry_point = "main".into();
+    check.producer = "main".into();
+    check.source_of_truth = "src/main.rs".into();
+    check.storage_state_queue_owner = "Not found".into();
+    check.side_effect_owner = "main".into();
+    check.consumers = vec!["process".into()];
+    check.cleanup_recovery_path = "process exit".into();
+    check.edit_boundary = "src/main.rs".into();
+    check.validation_needed = vec!["flow gate".into()];
+    check.validation_evidence = vec!["test fixture".into()];
+    let finalized = keel_flow::finalize_check(&repository, check).expect("finalize check");
+    keel_flow::write_check(
+        &repository,
+        keel_flow::DEFAULT_ARTIFACT_PATH,
+        finalized.clone(),
+    )
+    .expect("write check");
+    assert_eq!(
+        flow_check_gate(&repository, "", "pre-commit").status,
+        GateStatus::Pass
+    );
+
+    std::fs::write(&source, "fn main() { println!(\"two\"); }\n").expect("later edit");
+    let stale = flow_check_gate(&repository, "", "pre-commit");
+    assert_eq!(stale.status, GateStatus::Fail);
+    assert!(stale.details.unwrap_or_default().contains("stale"));
+
+    let mut exempt = keel_flow::finalize_check(&repository, finalized).expect("refinalize check");
+    exempt.docs_only = true;
+    keel_flow::write_check(&repository, keel_flow::DEFAULT_ARTIFACT_PATH, exempt)
+        .expect("write exemption");
+    let false_exemption = flow_check_gate(&repository, "", "pre-commit");
+    assert_eq!(false_exemption.status, GateStatus::Fail);
+    assert!(false_exemption
+        .details
+        .unwrap_or_default()
+        .contains("claims an exemption"));
+
+    match previous_home {
+        Some(value) => std::env::set_var("KEEL_HOME", value),
+        None => std::env::remove_var("KEEL_HOME"),
+    }
+}
+
 /// Case-insensitive filesystems allow `Foo.RS`; a case-sensitive extension
 /// check would let that edit bypass the gate entirely.
 #[test]
@@ -392,6 +486,43 @@ fn workflow_slug_is_safe_and_lowercase() {
 }
 
 #[test]
+fn workflow_slug_keeps_distinct_long_paths_distinct() {
+    let shared = "C:/work/this-is-a-very-long-workspace-prefix-that-used-to-be-truncated-before-the-distinguishing-segment/";
+    let first = workflow_slug(&format!("{shared}alpha"));
+    let second = workflow_slug(&format!("{shared}beta"));
+
+    assert_ne!(
+        first, second,
+        "long workspace paths must not share one record store"
+    );
+    assert!(first.len() <= 64);
+    assert!(second.len() <= 64);
+}
+
+#[test]
+fn git_workflow_configure_rejects_an_unsupported_model() {
+    let repository = crate::test_support::unique_temp_dir("keel-workflow-model");
+    let keel_home = crate::test_support::unique_temp_dir("keel-workflow-model-home");
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let code = run_git_workflow_configure(
+        &[
+            "--repo-root".into(),
+            repository.to_string_lossy().into_owned(),
+            "--claude-home".into(),
+            keel_home.to_string_lossy().into_owned(),
+            "--model".into(),
+            "invented-model".into(),
+        ],
+        &mut stdout,
+        &mut stderr,
+    );
+
+    assert_eq!(code, 1);
+    assert!(String::from_utf8_lossy(&stderr).contains("supported model is four-tier"));
+}
+
+#[test]
 fn review_policy_show_succeeds_with_no_extra_args() {
     // The handler accepts the documented one-argument `review policy show` form.
     let mut stdout: Vec<u8> = Vec::new();
@@ -522,7 +653,7 @@ fn gate_result_status_mapping() {
 
 #[test]
 fn has_python_files_detection() {
-    let temp = std::env::temp_dir().join("keel-review-test");
+    let temp = crate::test_support::unique_temp_dir("keel-review-test");
     std::fs::create_dir_all(&temp).unwrap();
 
     // Create a Python file
@@ -537,7 +668,7 @@ fn has_python_files_detection() {
 
 #[test]
 fn has_js_files_detection() {
-    let temp = std::env::temp_dir().join("keel-review-js-test");
+    let temp = crate::test_support::unique_temp_dir("keel-review-js-test");
     std::fs::create_dir_all(&temp).unwrap();
 
     // Create a JS file
@@ -806,7 +937,7 @@ fn pr_summary_bullets_empty_returns_no_changes_message() {
 
 #[test]
 fn rust_surface_gates_skip_when_no_cargo_toml() {
-    let temp = std::env::temp_dir().join("keel-no-cargo-test");
+    let temp = crate::test_support::unique_temp_dir("keel-no-cargo-test");
     std::fs::create_dir_all(&temp).unwrap();
     let gates = run_rust_surface_gates(&temp, true);
     assert!(

@@ -41,7 +41,7 @@ curl -fsSL https://raw.githubusercontent.com/UntaDotMy/keel/main/install.cmd -o 
 
 The installer detects your OS and architecture, pulls the matching prebuilt binary from [GitHub Releases](https://github.com/UntaDotMy/keel/releases/latest), runs `keel install`, verifies `status`, and cleans up temp downloads only. No Rust toolchain required. Pin a version with `CLAUDE_SKILLS_VERSION=vX.Y.Z`.
 
-**Install layout:** keel uses a host-neutral home so every host (claude, codex, opencode, cursor, pi, cowork) shares one install. The binary, data, and state live in `%USERPROFILE%\.keel` / `~/.keel` (override with `KEEL_HOME`); the Claude-harness engagement files (skills, agents, commands, `settings.json`, user `CLAUDE.md`) stay in `%USERPROFILE%\.claude` / `~/.claude` because the harness only reads them there. Upgrading from an older install copies keel-owned data from `~/.claude` into `~/.keel`, removes only verified identical legacy duplicates after success, and retains mismatches for recovery. The legacy binary is removed only after the replacement is published. Managed files replaced by an install are snapshotted under `<keel-home>/backups/`. User projects, memories, histories, legacy state, and host caches are not deleted by install or update. Install also adds the keel home to your PATH so `keel` works from any shell. It does **not** touch `~/.grok` sessions…
+**Install layout:** keel uses a host-neutral home so every host (claude, codex, opencode, cursor, pi, cowork, commandcode, grok) shares one install. The binary, data, and state live in `%USERPROFILE%\.keel` / `~/.keel` (override with `KEEL_HOME`); the Claude-harness engagement files (skills, agents, commands, `settings.json`, user `CLAUDE.md`) stay in `%USERPROFILE%\.claude` / `~/.claude` because the harness only reads them there. Upgrading from an older install copies keel-owned data from `~/.claude` into `~/.keel`, removes only verified identical legacy duplicates after success, and retains mismatches for recovery. The legacy binary is removed only after the replacement is published. Managed files replaced by an install are snapshotted under `<keel-home>/backups/`. User projects, memories, histories, legacy state, and host caches are not deleted by install or update. Install also adds the keel home to your PATH so `keel` works from any shell. It does **not** touch Grok session data.
 
 **Deterministic indexed retrieval.** The standard binary uses a persistent local
 workspace index for files, symbols, source chunks, paths, and verified import
@@ -136,7 +136,7 @@ Example: a raw `cargo test --workspace` may produce `Rerun that as: keel run -- 
 | --- | --- | --- |
 | First install, no Rust required | Download a release, extract it, run `./keel install` or `.\keel.exe install` | Installs the native binary and managed skills into the harness home. |
 | Check the install | `keel status` (on PATH after install) or `~/.keel/keel status` / `%USERPROFILE%\.keel\keel.exe status` | Confirms the managed harness-home surface. |
-| Start normal work | `keel anvil compile --goal "..." --bar "<named command>"` |
+| Start normal work | `keel anvil compile --goal "..." --bar "<named command>" --files "<owned files csv>"` |
 | Run the delivery loop | `keel anvil run` |
 | Inspect live gates | `keel anvil sieve`, `keel anvil loop` |
 | Review and close | `keel review pre-pr`, `keel memory completion-gate check` |
@@ -190,7 +190,7 @@ Use `--repo-root <path>` only when you intentionally run `keel install` from out
 & "$env:USERPROFILE\.keel\keel.exe" status
 ```
 
-The Rust manager remembers the source checkout in install metadata, fast-forwards that checkout on `update`, rebuilds the native CLI when needed, delta-syncs changed files, removes stale managed files, and preserves unrelated harness-home files. Shell and PowerShell wrapper launchers are no longer shipped.
+The Rust manager records a durable source in install metadata. Source installs fast-forward the recorded checkout with `--ff-only`, rebuild, and delta-sync. Packaged installs cache their verification source and `update` reruns the release installer, which verifies the downloaded archive checksum before installation. Both paths preserve unrelated harness-home files.
 
 On Windows, install replaces the running `keel.exe` synchronously via `MoveFileEx(MOVEFILE_REPLACE_EXISTING)` (the same trick rustup uses) instead of a detached `cmd /C copy`. Failures now surface as install errors instead of leaving a stale binary on disk. When the source and the deployed binary are byte-identical, the swap is skipped entirely so a no-op `update` does not touch the executable.
 
@@ -201,7 +201,7 @@ Run these once after a fresh install or update:
 ```bash
 ~/.keel/keel verify     # confirms inventory + binary match the source
 ~/.keel/keel doctor     # probes hooks end-to-end, reports any drift
-~/.keel/keel status     # version, repo SHA, install timestamp
+~/.keel/keel status     # installed/source version and sync state
 ```
 
 Hooks are wired automatically by `install`. If you want to refresh `~/.claude/settings.json` without a full reinstall:
@@ -299,8 +299,9 @@ Empty stdout means the hook is intentionally silent for that event.
 
 | Job | Commands |
 | --- | --- |
-| Compile a delivery job | `keel anvil compile --goal "<goal>" --bar "<quality command>"` |
-| Run the delivery loop | `keel anvil run --dry-run` or `keel anvil run` |
+| Compile a delivery job | `keel anvil compile --goal "<goal>" --bar "<quality command>" --files "<owned files csv>"` |
+| Validate/plan the delivery loop | `keel anvil run --dry-run` (`writes=0 executes=0`) |
+| Run the delivery loop and create evidence | `keel anvil run` |
 | Inspect deterministic gates | `keel anvil sieve` |
 | Re-run bounded refinement | `keel anvil loop` |
 | Review locally | `keel review pre-commit`, `keel review pre-pr`, `keel review gates check` |
@@ -326,7 +327,7 @@ the process tree instead of leaving a hung cast behind.
 
 ```bash
 keel memory working-brief write --request "..." --acceptance-criteria "..."
-keel anvil compile --goal "..." --bar "cargo test --workspace --locked"
+keel anvil compile --goal "..." --bar "cargo test --workspace --locked" --files "rust/crates/keel/src/target.rs"
 keel anvil run
 keel code-search siblings
 keel review pre-pr
@@ -337,7 +338,7 @@ keel review pre-pr
 ```bash
 keel flow start --target-file rust/crates/keel/src/target.rs --target-function target
 keel flow check
-keel anvil compile --goal "reproduce and fix the regression" --bar "cargo test --workspace --locked"
+keel anvil compile --goal "reproduce and fix the regression" --bar "cargo test --workspace --locked" --files "rust/crates/keel/src/target.rs"
 keel anvil run
 keel review pre-pr
 ```
@@ -346,7 +347,7 @@ keel review pre-pr
 
 ```bash
 keel memory working-brief write --request "..." --acceptance-criteria "failing test; fixed behavior; regression proof"
-keel anvil compile --goal "red-green-refactor delivery" --bar "cargo test --workspace --locked"
+keel anvil compile --goal "red-green-refactor delivery" --bar "cargo test --workspace --locked" --files "rust/crates/keel/src/target.rs"
 keel anvil run
 keel review pre-pr
 ```
@@ -360,7 +361,7 @@ mechanical proof surfaces:
 ```bash
 keel memory working-brief write --request "..." --acceptance-criteria "..."
 keel flow start --target-file <path> --target-function <name>
-keel anvil compile --goal "..." --bar "<named command>"
+keel anvil compile --goal "..." --bar "<named command>" --files "<owned files csv>"
 keel anvil run
 keel memory completion-gate check
 keel review pre-pr
@@ -421,13 +422,13 @@ cargo fmt --all --check
 Hosted PR discipline:
 
 1. Run local proof.
-2. Push one cohesive `task/<task>` work branch (branched off `feat`; subtasks nest as `task/<task>/<subtask>`). Never delete the branch after push or merge.
+2. Push one cohesive `task/<task>` work branch branched off `feat`. Parallel subtask branches use flat siblings such as `task/<task>-<subtask>`. Never delete the branch after push or merge.
 3. Open the PR against `feat`.
 4. Wait at least 20 seconds for hosted checks to appear. In checklists this is written as: wait at least 20 seconds.
 5. Watch `gh pr checks --watch`.
 6. If a hosted lane fails, inspect the failing logs, fix the root cause on the same PR, push again, and rerun `gh pr checks --watch`.
 
-Branch model: `main` ← `dev` ← `feat` ← `task/<task>` [← `task/<task>/<subtask>`]. Never use `feat/<task>` while bare `feat` exists (Git ref collision). Fixes stay on the same work branch. Commit subjects: `Add : FEATURE : short information` (capitalized category, uppercase FEATURE, spaces around colons).
+Branch model: `main` ← `dev` ← `feat` ← `task/<task>` [← `task/<task>-<subtask>`]. Nested refs are not used because Git cannot store a parent ref and a child path together. Never use `feat/<task>` while bare `feat` exists. Fixes stay on the same work branch. Commit subjects: `Add : FEATURE : short information` (capitalized category, uppercase FEATURE, spaces around colons).
 
 Run `keel git-workflow preflight --repo-root . --base-ref origin/feat` before push or merge-request creation (`origin/dev` when promoting `feat` to `dev`; `origin/main` only when promoting `dev` to `main`).
 
@@ -615,10 +616,11 @@ keel works with multiple AI coding agents through dedicated adapters. Each adapt
 | **Cursor IDE** | Rules + hooks + MCP | `cursor/.cursorrules` + `cursor/hooks/` + `cursor/mcp.json`: iron law, lifecycle bridge (`keel bridge`), MCP tools. Install with `keel install --with cursor` (Cursor is not always auto-detected) | `cursor/` |
 | **Pi Agent** | Rules + hooks + MCP | `pi/AGENTS.md` + `pi/hooks.json` + `pi/keel-pi.ts` + `pi/.mcp.json`: iron law, lifecycle bridge, MCP tools | `pi/` |
 | **Command Code** (cmdc) | Mod (TypeScript) + MCP | `commandcode/keel-cmdc.ts` ,  lifecycle bridge (`keel bridge`) via ModApi hooks + `compaction_start`/`compaction_done` events, MCP tools via `commandcode/mcp.json` | `commandcode/` |
+| **Grok CLI** | Native hooks + MCP | `$GROK_HOME/hooks/keel.json` + `[mcp_servers.keel]` in `$GROK_HOME/config.toml` (default `~/.grok`) | `$GROK_HOME/` |
 
-Claude Code is the primary target (native hooks, full lifecycle). OpenCode, Codex, Cowork, Cursor, Pi, and Command Code ship runtime bridges that map host events to `keel bridge` (edit gate, rewrite, observe, session-end learn, pre/post-compact continuity). Cursor often needs `--with cursor` because desktop IDEs are not always detected.
+Claude Code is the primary target (native hooks, full lifecycle). OpenCode, Codex, Cursor, Pi, and Command Code ship runtime bridges that map host events to `keel bridge`; Grok uses native hooks plus MCP. Cowork is MCP-only because Claude Desktop exposes no hook API. Cursor often needs `--with cursor` because desktop IDEs are not always detected.
 
-`keel install` auto-detects which AI CLIs are installed (via config dirs, env vars, and binary-on-PATH) and wires only the matching adapters. Use `--with <name>` to force an adapter even when not detected (e.g. `--with cursor`), and `--without <name>` to skip a detected adapter (e.g. `--without opencode`). Names: `opencode`, `codex`, `pi`, `cursor`, `cowork`, `commandcode`. Manual file copying is no longer required.
+`keel install` auto-detects which AI CLIs are installed (via config dirs, env vars, and binary-on-PATH) and wires only the matching adapters. Use `--with <name>` to force an adapter even when not detected (e.g. `--with grok,cursor`), and `--without <name>` to skip a detected adapter (e.g. `--without opencode`). Names: `opencode`, `codex`, `pi`, `cursor`, `cowork`, `commandcode`, `grok`. Grok receives native hooks plus `[mcp_servers.keel]` in `$GROK_HOME/config.toml` (default `~/.grok/config.toml`). Manual file copying is no longer required.
 
 ## Managed Agent Profiles
 
@@ -672,7 +674,7 @@ The benchmark docs track real scenario evidence across 8 flows, including greenf
 keel/
 |- rust/crates/keel          Native install, update, hook, review, flow, and compaction surfaces
 |- rust/crates/keel-*        Rust support crates for flow, platform, release assets, and text linting
-|- cowork/                    Claude Desktop (Cowork) adapter (TypeScript plugin with lifecycle bridge)
+|- cowork/                    Claude Desktop (Cowork) reference surface; native install wires MCP only
 |- opencode/                 OpenCode adapter (TypeScript plugin with lifecycle bridge)
 |- codex/                    Codex CLI adapter (plugin + hooks + TypeScript bridge)
 |- cursor/                   Cursor IDE adapter (rules + hooks + MCP)

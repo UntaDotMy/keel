@@ -65,7 +65,7 @@ fn run_uninstall(repo_root: &Path, claude_home: &Path) {
 }
 
 // ---------------------------------------------------------------------------
-// Detection tests (10)
+// Detection and explicit host-wiring tests
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -254,8 +254,38 @@ fn with_cursor_forces_cursor_wiring() {
     let _ = fs::remove_dir_all(&home);
 }
 
+#[test]
+fn with_grok_writes_native_mcp_config_and_hooks() {
+    let repo = repository_root();
+    let (home, claude_home) = fake_home_with_claude("keel-with-grok");
+    run_install(&repo, &claude_home, &["--with", "grok"]);
+
+    let config = home.join(".grok").join("config.toml");
+    let config_text = fs::read_to_string(&config).expect("read Grok config.toml");
+    assert!(
+        config_text.contains("[mcp_servers.keel]"),
+        "Grok config must contain the native keel MCP server"
+    );
+    assert!(
+        config_text.contains("args = [\"mcp\", \"serve\"]"),
+        "Grok MCP server must launch keel's stdio transport"
+    );
+    let expected_binary = claude_home.join(if cfg!(windows) { "keel.exe" } else { "keel" });
+    let config_doc: toml::Value = toml::from_str(&config_text).expect("valid Grok TOML");
+    assert_eq!(
+        config_doc["mcp_servers"]["keel"]["command"].as_str(),
+        Some(expected_binary.to_string_lossy().as_ref()),
+        "Grok MCP command must use the installed binary: {}",
+        expected_binary.display()
+    );
+
+    let hooks = home.join(".grok").join("hooks").join("keel.json");
+    assert!(hooks.is_file(), "Grok native hook config must be installed");
+    let _ = fs::remove_dir_all(&home);
+}
+
 // ---------------------------------------------------------------------------
-// Uninstall cleanup tests (6)
+// Uninstall cleanup tests
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -275,6 +305,28 @@ fn uninstall_removes_opencode_plugin() {
         !plugin.exists(),
         "opencode plugin should be removed after uninstall"
     );
+    let _ = fs::remove_dir_all(&home);
+}
+
+#[test]
+fn uninstall_removes_only_keel_owned_grok_config() {
+    let repo = repository_root();
+    let (home, claude_home) = fake_home_with_claude("keel-uninstall-grok");
+    let grok_home = home.join(".grok");
+    fs::create_dir_all(&grok_home).unwrap();
+    let config = grok_home.join("config.toml");
+    fs::write(&config, "[display]\ntheme = \"dark\"\n").unwrap();
+
+    run_install(&repo, &claude_home, &["--with", "grok"]);
+    let hooks = grok_home.join("hooks").join("keel.json");
+    assert!(hooks.is_file(), "Grok hook must exist after install");
+    run_uninstall(&repo, &claude_home);
+
+    let after = fs::read_to_string(&config).expect("user Grok config must remain");
+    assert!(after.contains("[display]"));
+    assert!(after.contains("theme = \"dark\""));
+    assert!(!after.contains("[mcp_servers.keel]"));
+    assert!(!hooks.exists(), "keel-owned Grok hook must be removed");
     let _ = fs::remove_dir_all(&home);
 }
 

@@ -22,17 +22,72 @@
 
 #![cfg(test)]
 
+use std::ffi::OsStr;
+use std::ops::Deref;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
-/// Process-wide guard around test-time mutation of environment
-/// variables. Take this lock at the top of any test that calls
-/// `std::env::set_var` or `std::env::remove_var`. Hold it for the
-/// entire test body, including the read-back assertions that depend on
-/// the env value still pointing at the test's private state.
-///
-/// Use `lock().unwrap_or_else(|poisoned| poisoned.into_inner())` so a
-/// poisoned mutex from a panicking peer test does not cascade into a
-/// second failure that masks the original. The poisoned-mutex case is
-/// benign here — the next acquirer immediately overwrites the env var
-/// with its own fresh value.
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Process-wide guard around test-time mutation of environment variables.
+/// Writers hold this for their full test body and restore the prior values.
 pub(crate) static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+pub(crate) struct TestTempDir {
+    path: PathBuf,
+}
+
+impl Deref for TestTempDir {
+    type Target = Path;
+
+    fn deref(&self) -> &Self::Target {
+        &self.path
+    }
+}
+
+impl AsRef<Path> for TestTempDir {
+    fn as_ref(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl AsRef<OsStr> for TestTempDir {
+    fn as_ref(&self) -> &OsStr {
+        self.path.as_os_str()
+    }
+}
+
+impl Drop for TestTempDir {
+    fn drop(&mut self) {
+        for attempt in 0..5 {
+            match std::fs::remove_dir_all(&self.path) {
+                Ok(()) => return,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+                Err(_) if attempt < 4 => {
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+                Err(_) => return,
+            }
+        }
+    }
+}
+
+/// Create a process-unique test directory and remove it when its owner drops.
+/// The numeric suffix prevents parallel test processes from deleting each
+/// other's state, while RAII cleanup also runs during unwinding.
+pub(crate) fn unique_temp_dir(label: &str) -> TestTempDir {
+    let sequence = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("{label}-{}-{sequence}", std::process::id()));
+    std::fs::create_dir_all(&path).expect("create unique test directory");
+    TestTempDir { path }
+}
+
+#[test]
+fn unique_temp_directory_is_removed_on_drop() {
+    let directory = unique_temp_dir("keel-raii-temp-test");
+    let path = directory.path.clone();
+    assert!(path.is_dir());
+    drop(directory);
+    assert!(!path.exists());
+}

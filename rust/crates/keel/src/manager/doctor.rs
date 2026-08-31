@@ -263,37 +263,44 @@ fn find_orphan_mcp_serve_pids() -> Vec<u32> {
 /// alive by [`parent_is_alive`]).
 #[cfg(windows)]
 fn running_mcp_serve_pids_with_ppid() -> Vec<(u32, u32)> {
-    let output = Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            "Get-CimInstance Win32_Process -Filter \"Name='keel.exe'\" | Where-Object { $_.CommandLine -match 'mcp serve' } | ForEach-Object { \"$($_.ProcessId) $($_.ParentProcessId)\" }",
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output();
+    let arguments = [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "Get-CimInstance Win32_Process -Filter \"Name='keel.exe'\" | Where-Object { $_.CommandLine -match 'mcp serve' } | ForEach-Object { \"$($_.ProcessId) $($_.ParentProcessId)\" }",
+    ]
+    .map(str::to_string);
+    let output = crate::runtime::run_command_with_timeout(
+        "powershell",
+        &arguments,
+        None,
+        std::time::Duration::from_secs(10),
+    );
     parse_pid_ppid_listing(
         output
             .ok()
-            .map(|o| String::from_utf8_lossy(&o.stdout).to_string()),
+            .filter(|result| result.code == 0)
+            .map(|result| String::from_utf8_lossy(&result.stdout).to_string()),
     )
 }
 
 #[cfg(not(windows))]
 fn running_mcp_serve_pids_with_ppid() -> Vec<(u32, u32)> {
-    let output = Command::new("sh")
-        .args([
-            "-c",
-            "ps -eo pid=,ppid=,args | grep '[k]eel mcp serve' | awk '{print $1\" \"$2}'",
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output();
+    let arguments = [
+        "-c".to_string(),
+        "ps -eo pid=,ppid=,args | grep '[k]eel mcp serve' | awk '{print $1\" \"$2}'".to_string(),
+    ];
+    let output = crate::runtime::run_command_with_timeout(
+        "sh",
+        &arguments,
+        None,
+        std::time::Duration::from_secs(10),
+    );
     parse_pid_ppid_listing(
         output
             .ok()
-            .map(|o| String::from_utf8_lossy(&o.stdout).to_string()),
+            .filter(|result| result.code == 0)
+            .map(|result| String::from_utf8_lossy(&result.stdout).to_string()),
     )
 }
 
@@ -321,19 +328,7 @@ fn parent_is_alive(ppid: u32) -> bool {
     if ppid == 0 {
         return true; // Unknown parent: assume alive, never kill on doubt.
     }
-    Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            &format!("if (Get-Process -Id {ppid} -ErrorAction SilentlyContinue) {{ 'alive' }}"),
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).contains("alive"))
-        // Probe failure: assume alive rather than kill on doubt.
-        .unwrap_or(true)
+    crate::runtime::process_is_alive(ppid).unwrap_or(true)
 }
 
 #[cfg(not(windows))]
@@ -344,15 +339,7 @@ fn parent_is_alive(ppid: u32) -> bool {
     if ppid == 1 {
         return false; // Reparented to init/launchd: the harness parent is gone.
     }
-    // kill -0 probes existence without signalling; failure (no such process)
-    // means the parent is gone. A probe error (None) is treated as alive.
-    Command::new("kill")
-        .args(["-0", &ppid.to_string()])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(true)
+    crate::runtime::process_is_alive(ppid).unwrap_or(true)
 }
 
 /// Terminate the given PIDs, returning how many were actually reaped. Used only
@@ -364,24 +351,27 @@ fn reap_processes(pids: &[u32]) -> usize {
 
 #[cfg(windows)]
 fn terminate_pid(pid: u32) -> bool {
-    Command::new("taskkill")
-        .args(["/PID", &pid.to_string(), "/F", "/T"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
+    let arguments = ["/PID", &pid.to_string(), "/F", "/T"].map(str::to_string);
+    crate::runtime::run_command_with_timeout(
+        "taskkill",
+        &arguments,
+        None,
+        std::time::Duration::from_secs(10),
+    )
+    .map(|result| result.code == 0)
+    .unwrap_or(false)
 }
 
 #[cfg(not(windows))]
 fn terminate_pid(pid: u32) -> bool {
-    Command::new("kill")
-        .arg(pid.to_string())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
+    crate::runtime::run_command_with_timeout(
+        "kill",
+        &[pid.to_string()],
+        None,
+        std::time::Duration::from_secs(10),
+    )
+    .map(|result| result.code == 0)
+    .unwrap_or(false)
 }
 
 /// Probe the PreToolUse hook with a noisy command and confirm it produces a
@@ -577,20 +567,36 @@ fn probe_mcp_launch(standard_output: &mut dyn Write, claude_home: &std::path::Pa
 /// hang `doctor`. A reader thread captures stdout while the main thread waits on
 /// a channel with a deadline; on timeout the child is killed and reaped.
 fn probe_mcp_initialize(command: &str, args: &[String]) -> bool {
+    probe_mcp_initialize_with_timeout(command, args, std::time::Duration::from_secs(5))
+}
+
+fn probe_mcp_initialize_with_timeout(
+    command: &str,
+    args: &[String],
+    timeout: std::time::Duration,
+) -> bool {
     use std::sync::mpsc;
-    use std::time::Duration;
 
     const MAX_PROBE_OUTPUT_BYTES: usize = 256 * 1024;
-    let mut child = match Command::new(command)
+    let mut probe = Command::new(command);
+    probe
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-    {
+        .stderr(Stdio::null());
+    crate::runtime::configure_process_group(&mut probe);
+    let mut child = match probe.spawn() {
         Ok(child) => child,
         // Command not found / not executable — the failure this probe exists for.
         Err(_) => return false,
+    };
+    let mut process_guard = match crate::runtime::own_process_tree(&mut child) {
+        Ok(guard) => guard,
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return false;
+        }
     };
     let request = serde_json::json!({
         "jsonrpc": "2.0",
@@ -628,7 +634,7 @@ fn probe_mcp_initialize(command: &str, args: &[String]) -> bool {
         })
     });
 
-    let responded = match receiver.recv_timeout(Duration::from_secs(5)) {
+    let responded = match receiver.recv_timeout(timeout) {
         Ok(response) => response.contains("protocolVersion") && response.contains("\"result\""),
         // Timed out (or the reader thread vanished) — treat as no response.
         Err(_) => false,
@@ -636,7 +642,7 @@ fn probe_mcp_initialize(command: &str, args: &[String]) -> bool {
 
     // why: teardown errors are intentionally ignored after the probe result;
     // cleanup must not replace the health signal or strand a child process.
-    let _ = crate::runtime::terminate_process_tree(&mut child);
+    let _ = crate::runtime::terminate_owned_process_tree(&mut child, &mut process_guard);
     let _ = child.wait();
     if let Some(reader) = reader {
         // why: the bounded reader has no useful result after the probe; join it
@@ -703,18 +709,17 @@ fn report_mcp_registration(standard_output: &mut dyn Write, claude_home: &std::p
     }
 }
 
-/// Report the wiring health of the four bridge hosts (OpenCode, Pi, Codex,
-/// Cursor). Unlike the native host probes above, these are file-presence checks
+/// Report bridge-host wiring health. Unlike the native host probes above,
+/// these are file-presence checks
 /// — doctor reads the installed artifacts and reports which are present/absent
 /// so an operator can see, at a glance, which bridge hosts are wired. Read-only.
-/// `claude_home` is the standard `~/.claude`; each host's files live under
-/// `claude_home.parent()` (the user home), mirroring the installer's paths.
+/// `keel_home` is the host-neutral root; host files live under the user home.
 pub(crate) fn report_bridge_host_wiring(
     standard_output: &mut dyn Write,
-    claude_home: &std::path::Path,
+    keel_home: &std::path::Path,
 ) {
     let _ = writeln!(standard_output, "Bridge hosts:");
-    let home = match claude_home.parent() {
+    let home = match crate::manager::install::host_user_home(keel_home) {
         Some(path) => path,
         None => return,
     };
@@ -807,12 +812,9 @@ pub(crate) fn report_bridge_host_wiring(
         .unwrap_or(false);
     // Native MCP registration: this config.toml entry is what actually makes
     // the tools reachable on Windows, where plugin-bundled MCP never loads.
-    let codex_native_mcp = codex_config_text
-        .as_ref()
-        .and_then(|doc| doc.get("mcp_servers"))
-        .and_then(|m| m.get("keel"))
-        .and_then(|entry| entry.get("command"))
-        .is_some();
+    let codex_native_mcp = codex_config_text.as_ref().is_some_and(|document| {
+        native_mcp_is_current(document, &installed_executable_path(keel_home))
+    });
     let codex_agents_md = fs::read_to_string(home.join(".codex").join("AGENTS.md"))
         .map(|text| text.contains("keel:begin"))
         .unwrap_or(false);
@@ -901,19 +903,43 @@ pub(crate) fn report_bridge_host_wiring(
         cursor_mcp,
     );
 
-    // Grok: ~/.grok/hooks/keel.json. Auto-detected by install; no --with grok flag.
-    // MCP is the shared keel server, not a Grok-specific mcp.json.
-    let grok_dir = home.join(".grok");
+    let grok_dir = crate::manager::install::grok_config_home(&home);
     if grok_dir.is_dir() {
         let grok_hooks = grok_dir.join("hooks").join("keel.json");
-        let grok_wired = grok_hooks.is_file();
+        let expected_executable = installed_executable_path(keel_home);
+        let grok_mcp = fs::read_to_string(grok_dir.join("config.toml"))
+            .ok()
+            .and_then(|text| toml::from_str::<toml::Value>(&text).ok())
+            .is_some_and(|document| native_mcp_is_current(&document, &expected_executable));
+        let grok_wired =
+            crate::manager::install::grok_hooks_are_current(&grok_hooks, &expected_executable)
+                && grok_mcp;
         let state = if grok_wired {
-            "wired (hooks)"
+            "wired (hooks + MCP)"
         } else {
-            "not wired (run `keel install` to write ~/.grok/hooks/keel.json)"
+            "not wired (run `keel install --with grok` to repair hooks + MCP)"
         };
         write_doctor_check(standard_output, grok_wired, &format!("grok host: {state}"));
     }
+}
+
+pub(crate) fn native_mcp_is_current(document: &toml::Value, executable: &std::path::Path) -> bool {
+    let Some(entry) = document
+        .get("mcp_servers")
+        .and_then(|servers| servers.get("keel"))
+    else {
+        return false;
+    };
+    let command_matches = entry.get("command").and_then(toml::Value::as_str)
+        == Some(display_path(executable).as_str());
+    let args: Vec<&str> = entry
+        .get("args")
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(toml::Value::as_str)
+        .collect();
+    command_matches && args == ["mcp", "serve"]
 }
 
 /// One summary line per bridge host: name + wired state + MCP state.
@@ -1055,6 +1081,33 @@ mod tests {
     }
 
     #[test]
+    fn mcp_probe_timeout_reaps_descendant_held_pipes() {
+        let (program, arguments) = if cfg!(windows) {
+            (
+                "powershell",
+                vec![
+                    "-NoProfile".to_string(),
+                    "-Command".to_string(),
+                    "$p=Start-Process powershell -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds 30' -NoNewWindow -PassThru; exit 0"
+                        .to_string(),
+                ],
+            )
+        } else {
+            (
+                "sh",
+                vec!["-c".to_string(), "sleep 30 & exit 0".to_string()],
+            )
+        };
+        let started = std::time::Instant::now();
+        assert!(!probe_mcp_initialize_with_timeout(
+            program,
+            &arguments,
+            std::time::Duration::from_millis(100),
+        ));
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    }
+
+    #[test]
     fn reports_ok_when_entry_has_always_load() {
         let claude_home = unique_home("ok");
         let config = super::super::mcp_register::mcp_config_path(&claude_home);
@@ -1135,7 +1188,10 @@ mod tests {
         fs::create_dir_all(config_path.parent().unwrap()).unwrap();
         fs::write(
             &config_path,
-            "[plugins.\"keel@personal-keel\"]\nenabled = true\n\n[mcp_servers.keel]\ncommand = \"keel\"\n",
+            format!(
+                "[plugins.\"keel@personal-keel\"]\nenabled = true\n\n[mcp_servers.keel]\ncommand = {:?}\nargs = [\"mcp\", \"serve\"]\n",
+                display_path(&installed_executable_path(&claude_home))
+            ),
         )
         .unwrap();
         let plugin_root = home.join(".codex").join("plugins").join("keel");
@@ -1156,16 +1212,56 @@ mod tests {
         let _ = fs::remove_dir_all(claude_home.parent().unwrap());
     }
     #[test]
-    fn grok_host_reports_wired_when_hooks_file_exists() {
+    fn grok_host_reports_wired_when_hooks_and_mcp_are_current() {
         let claude_home = unique_home("grok-wired");
         let home = claude_home.parent().unwrap();
         let grok_hooks = home.join(".grok").join("hooks");
         fs::create_dir_all(&grok_hooks).unwrap();
-        fs::write(grok_hooks.join("keel.json"), "{\"hooks\":{}}").unwrap();
+        fs::write(
+            grok_hooks.join("keel.json"),
+            serde_json::to_string_pretty(&crate::manager::install::grok_hooks_payload(
+                &installed_executable_path(&claude_home),
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            home.join(".grok").join("config.toml"),
+            format!(
+                "[mcp_servers.keel]\ncommand = {:?}\nargs = [\"mcp\", \"serve\"]\n",
+                display_path(&installed_executable_path(&claude_home))
+            ),
+        )
+        .unwrap();
         let mut output = Vec::new();
         report_bridge_host_wiring(&mut output, &claude_home);
         let output = String::from_utf8(output).unwrap();
-        assert!(output.contains("[ok] grok host: wired (hooks)"), "{output}");
+        assert!(
+            output.contains("[ok] grok host: wired (hooks + MCP)"),
+            "{output}"
+        );
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn grok_host_warns_when_hook_contract_is_stale() {
+        let claude_home = unique_home("grok-stale-hook");
+        let home = claude_home.parent().unwrap();
+        let grok_hooks = home.join(".grok").join("hooks");
+        fs::create_dir_all(&grok_hooks).unwrap();
+        fs::write(grok_hooks.join("keel.json"), "{\"hooks\":{}}").unwrap();
+        fs::write(
+            home.join(".grok").join("config.toml"),
+            format!(
+                "[mcp_servers.keel]\ncommand = {:?}\nargs = [\"mcp\", \"serve\"]\n",
+                display_path(&installed_executable_path(&claude_home))
+            ),
+        )
+        .unwrap();
+        let mut output = Vec::new();
+        report_bridge_host_wiring(&mut output, &claude_home);
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("[warn] grok host: not wired"), "{output}");
         let _ = fs::remove_dir_all(home);
     }
 

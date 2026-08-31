@@ -21,11 +21,11 @@ const SESSION_STARTED_TYPE = "keel-cmdc/session-started";
 
 const BRIDGE_BIN: string = resolveBinary();
 
-// Bridge runner. Never throws; 500ms hard timeout via execFileSync
+// Bridge runner. Never throws; lifecycle reads have a bounded index and disk budget.
 function runBridge(
   subcommand: string,
   args: string[],
-  timeoutMs = 500,
+  timeoutMs = 5000,
   stdin?: string,
 ): string {
   try {
@@ -119,7 +119,7 @@ export default function keelCmdcMod(cmd: ModApi): void {
       const contract = runBridge(
         "session-start",
         ["--session", sessionIdFor(cmd.cwd), "--cwd", cmd.cwd],
-        2000,
+        5000,
       );
       if (contract) {
         sessionStartContract = contract;
@@ -231,7 +231,7 @@ export default function keelCmdcMod(cmd: ModApi): void {
         "--phase", "post",
       ];
       if (isError) args.push("--failed");
-      runBridge("observe", args, 500, payload);
+      runBridge("observe", args, 2000, payload);
     },
 
     // Session end: learning + marker cleanup

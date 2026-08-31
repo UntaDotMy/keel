@@ -11,7 +11,7 @@ Comparisons reference native harness primitives, a runtime-shell comparator, and
 ## When to Choose keel
 
 Choose keel when you need:
-- A specific structured path: open a working brief with `keel memory working-brief write`, carry it through the Anvil loop (`keel anvil compile`, `keel anvil run`), prove it with `keel review pre-pr`, and close it with `keel memory completion-gate check`
+- A specific structured path: open a working brief with `keel memory working-brief write`, compile an explicit candidate set with `keel anvil compile --files <csv>`, carry it through `keel anvil run`, prove it with `keel review pre-pr`, and close it with `keel memory completion-gate check`
 - Deterministic local review gates before treating a PR as real
 - Explicit hosted-check discipline after the PR opens
 - Durable artifacts for briefs, requirements, lanes, and closure

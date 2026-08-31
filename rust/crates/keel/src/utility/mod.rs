@@ -21,6 +21,7 @@ pub mod skill_eval;
 pub mod skill_lint;
 pub mod skill_match;
 pub mod skill_usage;
+pub(crate) mod sqlite;
 pub mod stats;
 pub mod system_map;
 pub mod working_brief;

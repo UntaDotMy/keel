@@ -18,6 +18,7 @@ pub struct DetectedPlatforms {
     pub cursor: bool,
     pub cowork: bool,
     pub commandcode: bool,
+    pub grok: bool,
 }
 
 pub struct PlatformDetector {
@@ -37,59 +38,20 @@ impl PlatformDetector {
             codex: self.has_config_dir(".codex") || self.has_binary("codex"),
             pi: self.has_config_dir(".pi/agent") || self.has_binary("pi"),
             cursor: self.has_config_dir(".cursor"),
-            // Cowork (Claude Desktop) detection:
-            // Claude Desktop Cowork uses the same ~/.claude directory as Claude Code,
-            // but stores a specific app identifier file to distinguish itself.
-            // Detection strategy:
-            // 1. Check for .claude directory with Cowork-specific config
-            // 2. Check for CLAUDE_DESKTOP_HOME env var
-            // 3. Check for Claude Desktop binary on PATH
-            cowork: self.has_config_dir(".claude-desktop")
-                || self.has_binary("claude-desktop")
-                || std::env::var("CLAUDE_DESKTOP_HOME").is_ok()
-                || self.detect_cowork_via_claude_dir(),
+            cowork: {
+                let config = super::install::claude_desktop_config_path(&self.home);
+                config.is_file()
+                    || config.parent().is_some_and(Path::is_dir)
+                    || self.has_binary("claude-desktop")
+            },
             // Command Code: config dir ~/.commandcode or the cmdc binary on PATH.
             commandcode: self.has_config_dir(".commandcode") || self.has_binary("cmdc"),
+            grok: self.grok_home().is_dir() || self.has_binary("grok"),
         }
     }
 
-    /// Detect Cowork by checking for Claude Desktop-specific markers in ~/.claude
-    fn detect_cowork_via_claude_dir(&self) -> bool {
-        let claude_dir = self.home.join(".claude");
-        if !claude_dir.is_dir() {
-            return false;
-        }
-
-        // Check for Cowork-specific files that distinguish it from Claude Code CLI
-        // These files are created by the Cowork app and not by the CLI
-        let cowork_markers = [
-            "cowork.session",    // Cowork session marker
-            "cowork.lock",       // Cowork lock file
-            ".cowork.installed", // Cowork install marker
-        ];
-
-        for marker in &cowork_markers {
-            if claude_dir.join(marker).exists() {
-                return true;
-            }
-        }
-
-        // Also check if there's a plugins directory with Cowork-specific plugins
-        let plugins_dir = claude_dir.join("plugins");
-        if plugins_dir.is_dir() {
-            if let Ok(entries) = std::fs::read_dir(&plugins_dir) {
-                for entry in entries.flatten() {
-                    let name = entry.file_name();
-                    let name_str = name.to_string_lossy();
-                    // Look for Cowork-specific plugins
-                    if name_str.contains("cowork") || name_str.contains("claude-desktop") {
-                        return true;
-                    }
-                }
-            }
-        }
-
-        false
+    fn grok_home(&self) -> PathBuf {
+        super::install::grok_config_home(&self.home)
     }
 
     fn has_config_dir(&self, relative: &str) -> bool {
@@ -134,6 +96,40 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let detected = PlatformDetector::new(&root).detect();
         assert!(!detected.cursor);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn cowork_detects_the_native_desktop_config() {
+        let root = std::env::temp_dir().join(format!(
+            "keel-cowork-detect-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let config = super::super::install::claude_desktop_config_path(&root);
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::write(&config, "{}").unwrap();
+        assert!(PlatformDetector::new(&root).detect().cowork);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn cowork_does_not_trust_invented_claude_cli_markers() {
+        let root = std::env::temp_dir().join(format!(
+            "keel-cowork-fake-marker-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let claude = root.join(".claude");
+        std::fs::create_dir_all(&claude).unwrap();
+        std::fs::write(claude.join("cowork.session"), "").unwrap();
+        assert!(!PlatformDetector::new(&root).detect().cowork);
         let _ = std::fs::remove_dir_all(&root);
     }
 }

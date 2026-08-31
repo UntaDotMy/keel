@@ -93,18 +93,20 @@ pub fn run_repair_command(
 
     // 3. Resolve the repository root; it anchors both the executable restore
     //    below and the bridge-host wiring after it.
-    let repo_root =
-        match crate::runtime::resolve_repository_root(flag_set.string_value("repo-root")) {
-            Ok(path) => path,
-            Err(error) => {
-                had_error = true;
-                let _ = writeln!(
+    let repo_root = match crate::manager::verify::resolve_manager_repository_root(
+        flag_set.string_value("repo-root"),
+        &claude_home,
+    ) {
+        Ok(path) => path,
+        Err(error) => {
+            had_error = true;
+            let _ = writeln!(
                 standard_error,
                 "[fail] resolve repo root: {error} (executable restore and bridge wiring skipped)"
             );
-                return if had_error { 1 } else { 0 };
-            }
-        };
+            return if had_error { 1 } else { 0 };
+        }
+    };
 
     // 4. Restore a deleted executable into the requested home. install/update
     //    publish it; repair must bring it back so hooks and MCP keep working.
@@ -137,27 +139,47 @@ pub fn run_repair_command(
         }
     }
 
-    // 5. Re-wire the four bridge hosts (OpenCode, Pi, Codex, Cursor). Like the
-    //    native MCP step, repair is an explicit operator action, so we force
-    //    detected=true for each host the operator has installed — re-running its
-    //    wiring idempotently. Cursor is never auto-detected, so we always force
-    //    it (the maybe_wire call is a no-op if the source files are absent).
+    // 5. Re-wire every detected host without creating configuration for hosts
+    //    that are not installed on this machine.
+    let detected = crate::manager::install::host_user_home(&claude_home)
+        .map(|home| crate::manager::platform_detect::PlatformDetector::new(&home).detect())
+        .unwrap_or_default();
     for (name, status) in [
         (
             "opencode",
-            crate::manager::install::maybe_wire_opencode(&repo_root, &claude_home, true),
+            crate::manager::install::maybe_wire_opencode(
+                &repo_root,
+                &claude_home,
+                detected.opencode,
+            ),
         ),
         (
             "pi",
-            crate::manager::install::maybe_wire_pi(&repo_root, &claude_home, true),
+            crate::manager::install::maybe_wire_pi(&repo_root, &claude_home, detected.pi),
         ),
         (
             "codex",
-            crate::manager::install::maybe_wire_codex(&repo_root, &claude_home, true),
+            crate::manager::install::maybe_wire_codex(&repo_root, &claude_home, detected.codex),
         ),
         (
             "cursor",
-            crate::manager::install::maybe_wire_cursor(&repo_root, &claude_home, true),
+            crate::manager::install::maybe_wire_cursor(&repo_root, &claude_home, detected.cursor),
+        ),
+        (
+            "commandcode",
+            crate::manager::install::maybe_wire_commandcode(
+                &repo_root,
+                &claude_home,
+                detected.commandcode,
+            ),
+        ),
+        (
+            "cowork",
+            crate::manager::install::maybe_wire_cowork(&repo_root, &claude_home, detected.cowork),
+        ),
+        (
+            "grok",
+            crate::manager::install::maybe_wire_grok(&claude_home, detected.grok),
         ),
     ] {
         match status {

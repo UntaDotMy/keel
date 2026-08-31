@@ -254,7 +254,7 @@ function denyOutput(reason) {
     }
   });
 }
-function runBridge(subcommand, args, timeoutMs = 500) {
+function runBridge(subcommand, args, timeoutMs = 5e3) {
   try {
     const result = execFileSync(BRIDGE_BIN, ["bridge", subcommand, ...args], {
       timeout: timeoutMs,
@@ -270,7 +270,7 @@ function runBridge(subcommand, args, timeoutMs = 500) {
 function runBridgeWithStdin(subcommand, args, stdin) {
   try {
     const result = execFileSync(BRIDGE_BIN, ["bridge", subcommand, ...args], {
-      timeout: 500,
+      timeout: 2e3,
       input: stdin,
       stdio: ["pipe", "pipe", "pipe"],
       encoding: "utf-8",

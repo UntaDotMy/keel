@@ -15,7 +15,6 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 
 use crate::runtime::{display_path, resolve_claude_home};
-use crate::utility::system_map::sanitize_key;
 
 const SCHEMA_VERSION: &str = "1";
 const MAX_FILES: usize = 20_000;
@@ -93,7 +92,8 @@ struct Candidate {
 
 pub fn database_path(workspace_root: &Path, claude_home_flag: &str) -> Result<PathBuf, String> {
     let home = resolve_claude_home(claude_home_flag)?;
-    let slug = sanitize_key(&display_path(workspace_root));
+    let raw_workspace = display_path(workspace_root);
+    let slug = crate::utility::system_map::bounded_slug(&raw_workspace, 64);
     Ok(home
         .join("memories")
         .join("workspaces")
@@ -109,9 +109,8 @@ pub fn refresh(
 ) -> Result<RefreshReport, String> {
     let root = canonical_workspace_root(workspace_root)?;
     let path = database_path(&root, claude_home_flag)?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| format!("create index directory: {error}"))?;
-    }
+    crate::utility::sqlite::create_parent_directory(&path)
+        .map_err(|error| format!("create index directory: {error}"))?;
     let mut connection = open_connection(&path)?;
     ensure_schema(&connection)?;
     let sources = collect_sources(&root)?;
@@ -388,6 +387,16 @@ pub fn search(
     query: &str,
     limit: usize,
 ) -> Result<Vec<SearchHit>, String> {
+    search_filtered(workspace_root, claude_home_flag, query, limit, None)
+}
+
+pub fn search_filtered(
+    workspace_root: &Path,
+    claude_home_flag: &str,
+    query: &str,
+    limit: usize,
+    path_filter: Option<&str>,
+) -> Result<Vec<SearchHit>, String> {
     if query.trim().is_empty() {
         return Ok(Vec::new());
     }
@@ -399,13 +408,40 @@ pub fn search(
     if terms.is_empty() {
         return Ok(Vec::new());
     }
-    let exact = exact_candidates(&connection, &terms)?;
-    let channels = vec![
-        exact.clone(),
-        fts_candidates(&connection, &terms, limit.max(10))?,
-        path_candidates(&connection, &terms, limit.max(10))?,
-        graph_candidates(&connection, &exact, limit.max(10))?,
-    ];
+    let normalized_filter = path_filter
+        .map(|value| value.replace('\\', "/").to_ascii_lowercase())
+        .filter(|value| !value.is_empty());
+    let candidate_limit = if normalized_filter.is_some() {
+        MAX_FILES
+    } else {
+        limit.max(10)
+    };
+    let mut exact = exact_candidates(&connection, &terms)?;
+    let mut fts = fts_candidates(&connection, &terms, candidate_limit)?;
+    let mut paths = path_candidates(&connection, &terms, candidate_limit)?;
+    if let Some(path_filter) = normalized_filter.as_deref() {
+        let matches = |candidate: &Candidate| {
+            candidate
+                .hit
+                .path
+                .to_ascii_lowercase()
+                .contains(path_filter)
+        };
+        exact.retain(&matches);
+        fts.retain(&matches);
+        paths.retain(&matches);
+    }
+    let mut graph = graph_candidates(&connection, &exact, candidate_limit)?;
+    if let Some(path_filter) = normalized_filter.as_deref() {
+        graph.retain(|candidate| {
+            candidate
+                .hit
+                .path
+                .to_ascii_lowercase()
+                .contains(path_filter)
+        });
+    }
+    let channels = vec![exact, fts, paths, graph];
     Ok(fuse_candidates(channels, limit))
 }
 
@@ -616,8 +652,8 @@ fn ensure_schema(connection: &Connection) -> Result<(), String> {
 }
 
 fn open_connection(path: &Path) -> Result<Connection, String> {
-    let connection =
-        Connection::open(path).map_err(|error| format!("open {}: {error}", display_path(path)))?;
+    let connection = crate::utility::sqlite::open_connection(path)
+        .map_err(|error| format!("open {}: {error}", display_path(path)))?;
     connection
         .busy_timeout(std::time::Duration::from_secs(5))
         .map_err(|error| format!("set workspace index busy timeout: {error}"))?;
@@ -760,20 +796,17 @@ fn fts_candidates(
         .prepare("SELECT path, symbol, kind, start_line, end_line, entity_key, snippet(code_entries, 5, '[', ']', '…', 20) FROM code_entries WHERE code_entries MATCH ?1 ORDER BY bm25(code_entries) LIMIT ?2")
         .map_err(|error| format!("prepare indexed code search: {error}"))?;
     let rows = statement
-        .query_map(
-            params![query, limit.min(MAX_SEARCH_RESULTS) as i64],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, i64>(4)?,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, String>(6)?,
-                ))
-            },
-        )
+        .query_map(params![query, limit.min(MAX_FILES) as i64], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+            ))
+        })
         .map_err(|error| format!("read indexed code search: {error}"))?;
     let mut candidates = Vec::new();
     for row in rows {
@@ -810,10 +843,9 @@ fn path_candidates(
             )
             .map_err(|error| format!("prepare indexed path search: {error}"))?;
         let rows = statement
-            .query_map(
-                params![pattern, limit.min(MAX_SEARCH_RESULTS) as i64],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-            )
+            .query_map(params![pattern, limit.min(MAX_FILES) as i64], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
             .map_err(|error| format!("read indexed path search: {error}"))?;
         for row in rows {
             let (path, language) =
@@ -1401,8 +1433,8 @@ fn now_millis() -> u128 {
 mod tests {
     use super::*;
 
-    fn temp_workspace(label: &str) -> (PathBuf, PathBuf) {
-        let root = std::env::temp_dir().join(format!("keel-index-{label}-{}", now_millis()));
+    fn temp_workspace(label: &str) -> (crate::test_support::TestTempDir, PathBuf) {
+        let root = crate::test_support::unique_temp_dir(&format!("keel-index-{label}"));
         let home = root.join("home");
         fs::create_dir_all(root.join("src")).expect("workspace");
         fs::create_dir_all(&home).expect("home");
@@ -1439,6 +1471,44 @@ mod tests {
         assert_eq!(hits[0].path, "src/main.rs");
         assert_eq!(hits[0].symbol, "dispatch_request");
         assert!(hits[0].reason.contains("exact-symbol"));
+    }
+
+    #[test]
+    fn filtered_search_finds_match_below_unfiltered_result_cap() {
+        let (root, home) = temp_workspace("filtered-search");
+        for index in 0..60 {
+            fs::write(
+                root.join("src").join(format!("rank-{index:02}.rs")),
+                "// deep_filter_token\n",
+            )
+            .expect("ranked source");
+        }
+        fs::create_dir_all(root.join("zzz")).expect("filtered directory");
+        fs::write(root.join("zzz/target.rs"), "// deep_filter_token\n").expect("filtered source");
+
+        let unfiltered = search(
+            &root,
+            &home.to_string_lossy(),
+            "deep_filter_token",
+            MAX_SEARCH_RESULTS,
+        )
+        .expect("unfiltered search");
+        assert!(
+            unfiltered.iter().all(|hit| hit.path != "zzz/target.rs"),
+            "fixture must place the target below the unfiltered cap"
+        );
+
+        let hits = search_filtered(
+            &root,
+            &home.to_string_lossy(),
+            "deep_filter_token",
+            10,
+            Some("zzz/"),
+        )
+        .expect("filtered search");
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, "zzz/target.rs");
     }
 
     #[test]

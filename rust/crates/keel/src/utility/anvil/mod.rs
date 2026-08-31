@@ -40,27 +40,53 @@ pub fn run_anvil_command(
         );
         return if action.is_empty() { 1 } else { 0 };
     }
+    let dry_run = arguments[1..]
+        .iter()
+        .any(|argument| argument == "--dry-run");
+    let compile_has_bar = arguments[1..]
+        .windows(2)
+        .find(|pair| pair[0] == "--bar")
+        .is_some_and(|pair| !pair[1].trim().is_empty());
+    let writes_state = ((action == "compile" && compile_has_bar)
+        || matches!(action, "cast" | "stamp" | "loop" | "run"))
+        && !(dry_run && action != "compile");
+    let _lease = if writes_state {
+        let value_after = |flag: &str| {
+            arguments[1..]
+                .windows(2)
+                .find(|pair| pair[0] == flag)
+                .map(|pair| pair[1].as_str())
+                .unwrap_or("")
+        };
+        let paths = match job::JobPaths::resolve(
+            value_after("--workspace-root"),
+            value_after("--claude-home"),
+        ) {
+            Ok(paths) => paths,
+            Err(error) => {
+                let _ = writeln!(standard_error, "{error}");
+                return 1;
+            }
+        };
+        match job::JobLease::acquire(&paths) {
+            Ok(lease) => Some(lease),
+            Err(error) => {
+                let _ = writeln!(standard_error, "{error}");
+                return 1;
+            }
+        }
+    } else {
+        None
+    };
     match action {
-        "compile" => {
-            let code = compile::run_compile(&arguments[1..], standard_output, standard_error);
-            if code == 0 {
-                crate::runner::hook_lifecycle::record_anvil_gate_clear();
-            }
-            code
-        }
-        "cast" => {
-            let code = cast::run_cast(&arguments[1..], standard_output, standard_error);
-            if code == 0 {
-                crate::runner::hook_lifecycle::record_anvil_gate_clear();
-            }
-            code
-        }
+        "compile" => compile::run_compile(&arguments[1..], standard_output, standard_error),
+        "cast" => cast::run_cast(&arguments[1..], standard_output, standard_error),
         "sieve" => sieve::run_sieve(&arguments[1..], standard_output, standard_error),
         "stamp" => stamp::run_stamp(&arguments[1..], standard_output, standard_error),
         "loop" => loop_runner::run_loop(&arguments[1..], standard_output, standard_error),
         "run" => {
             let code = run_orchestrator(&arguments[1..], standard_output, standard_error);
-            if code == 0 {
+            if should_clear_edit_gate("run", &arguments[1..], code) {
                 crate::runner::hook_lifecycle::record_anvil_gate_clear();
             }
             code
@@ -73,6 +99,15 @@ pub fn run_anvil_command(
             1
         }
     }
+}
+
+fn should_clear_edit_gate(action: &str, arguments: &[String], code: u8) -> bool {
+    code == 0 && action == "run" && arguments.iter().any(|argument| argument == "--dry-run")
+}
+
+fn fail_dry_run(standard_error: &mut dyn Write, error: &str) -> u8 {
+    let _ = writeln!(standard_error, "anvil run: dry-run: {error}");
+    1
 }
 
 fn run_orchestrator(
@@ -105,13 +140,70 @@ fn run_orchestrator(
             return 1;
         }
     };
-    let mut goal = flags.string_value("goal").trim().to_string();
-    let mut bar = flags.string_value("bar").trim().to_string();
-    if dry_run && goal.is_empty() {
-        goal = "offline anvil demo".into();
-    }
-    if dry_run && bar.is_empty() {
-        bar = "echo ok".into();
+    let goal = flags.string_value("goal").trim().to_string();
+    let bar = flags.string_value("bar").trim().to_string();
+    let files: Vec<String> = flags
+        .string_value("files")
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(str::to_string)
+        .collect();
+    if dry_run {
+        let lock = if paths.lock_path().is_file()
+            && goal.is_empty()
+            && bar.is_empty()
+            && files.is_empty()
+        {
+            match job::load_lock(&paths) {
+                Ok(lock) => lock,
+                Err(error) => {
+                    return fail_dry_run(standard_error, &error);
+                }
+            }
+        } else {
+            if goal.is_empty() || bar.is_empty() || files.is_empty() {
+                let _ = writeln!(
+                    standard_error,
+                    "anvil run: dry-run requires --goal, --bar, and --files when no current lock is selected"
+                );
+                return 1;
+            }
+            let lock = compile::build_lock_value(&goal, &bar, &files, "dry-run");
+            let serialized = match serde_json::to_string(&lock) {
+                Ok(value) => value,
+                Err(error) => {
+                    let _ = writeln!(standard_error, "anvil run: dry-run lock: {error}");
+                    return 1;
+                }
+            };
+            if let Err(error) = lock::validate_lock(&serialized) {
+                let _ = writeln!(standard_error, "anvil run: dry-run lock: {error}");
+                return 1;
+            }
+            lock
+        };
+        let pieces = match job::pieces_from_lock(&lock, "") {
+            Ok(pieces) => pieces,
+            Err(error) => {
+                return fail_dry_run(standard_error, &error);
+            }
+        };
+        for piece in &pieces {
+            if let Err(error) = workspace::validate_workspace_files(&paths.workspace, &piece.files)
+            {
+                return fail_dry_run(standard_error, &error);
+            }
+        }
+        let casts = job::n_casts(&lock);
+        let _ = writeln!(
+            standard_output,
+            "anvil run: dry-run plan pieces={} casts={} gates={} writes=0 executes=0",
+            pieces.len(),
+            casts,
+            pieces.iter().map(|piece| piece.gates.len()).sum::<usize>()
+        );
+        return 0;
     }
     if !paths.lock_path().is_file() {
         if goal.is_empty() {
@@ -128,22 +220,12 @@ fn run_orchestrator(
             );
             return 1;
         }
-        let files: Vec<String> = flags
-            .string_value("files")
-            .split(',')
-            .map(str::trim)
-            .filter(|item| !item.is_empty())
-            .map(str::to_string)
-            .collect();
         if let Err(error) = compile::write_lock(&paths, &goal, &bar, &files, "") {
             let _ = writeln!(standard_error, "anvil run: compile: {error}");
             return 1;
         }
     }
     let mut shared = Vec::new();
-    if dry_run {
-        shared.push("--dry-run".into());
-    }
     if strict {
         shared.push("--strict".into());
     }
@@ -155,7 +237,15 @@ fn run_orchestrator(
     if cast::run_cast(&shared, standard_output, standard_error) != 0 {
         return 1;
     }
-    let sieve_outcome = match sieve::sieve_lock(&paths, "", &[]) {
+    let candidate_workspace = match stamp::ensure_winner_workspace(&paths, strict) {
+        Ok(workspace) => workspace,
+        Err(error) => {
+            let _ = writeln!(standard_error, "{error}");
+            return 1;
+        }
+    };
+    let sieve_outcome = match sieve::sieve_lock_in_directory(&paths, "", &[], &candidate_workspace)
+    {
         Ok(outcome) => outcome,
         Err(error) => {
             let _ = writeln!(standard_error, "{error}");
@@ -266,8 +356,15 @@ mod tests {
 
     impl Drop for TempJob {
         fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.workspace);
-            let _ = std::fs::remove_dir_all(&self.home);
+            for path in [&self.workspace, &self.home] {
+                for _ in 0..5 {
+                    match std::fs::remove_dir_all(path) {
+                        Ok(()) => break,
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+                        Err(_) => std::thread::sleep(std::time::Duration::from_millis(10)),
+                    }
+                }
+            }
         }
     }
 
@@ -286,6 +383,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(&workspace).unwrap();
         std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(workspace.join("input.txt"), "input\n").unwrap();
         let paths = job::JobPaths::from_resolved(workspace.clone(), home.clone());
         TempJob {
             workspace,
@@ -295,6 +393,12 @@ mod tests {
     }
 
     fn with_job(job: &TempJob, mut args: Vec<String>) -> Vec<String> {
+        if args.first().map(String::as_str) == Some("compile")
+            && !args.iter().any(|value| value == "--files")
+        {
+            args.push("--files".into());
+            args.push("input.txt".into());
+        }
         args.push("--workspace-root".into());
         args.push(job.workspace.display().to_string());
         args.push("--claude-home".into());
@@ -433,6 +537,90 @@ mod tests {
     }
 
     #[test]
+    fn compile_requires_at_least_one_owned_file() {
+        let job = temp_job("compile-files");
+        let (code, _, stderr) = run_cmd(&[
+            "compile".into(),
+            "--goal".into(),
+            "pretty json".into(),
+            "--bar".into(),
+            "echo ok".into(),
+            "--workspace-root".into(),
+            job.workspace.display().to_string(),
+            "--claude-home".into(),
+            job.home.display().to_string(),
+        ]);
+        assert_eq!(code, 1);
+        assert!(stderr.contains("--files is required"), "stderr={stderr}");
+    }
+
+    #[test]
+    fn compile_starts_a_new_generation_and_removes_stale_outputs() {
+        let job = temp_job("compile-generation");
+        let args = with_job(
+            &job,
+            vec![
+                "compile".into(),
+                "--goal".into(),
+                "first".into(),
+                "--bar".into(),
+                "echo ok".into(),
+            ],
+        );
+        assert_eq!(run_cmd(&args).0, 0);
+        let first = job::load_lock(&job.paths).expect("first lock")["generation"]
+            .as_str()
+            .expect("generation")
+            .to_string();
+        std::fs::create_dir_all(job.paths.dir.join("cast_stale")).unwrap();
+        std::fs::create_dir_all(job.paths.out_dir()).unwrap();
+        std::fs::write(job.paths.report_path(), "{}").unwrap();
+        assert_eq!(run_cmd(&args).0, 0);
+        let second = job::load_lock(&job.paths).expect("second lock")["generation"]
+            .as_str()
+            .expect("generation")
+            .to_string();
+        assert_ne!(first, second);
+        assert!(!job.paths.dir.join("cast_stale").exists());
+        assert!(!job.paths.out_dir().exists());
+        assert!(!job.paths.report_path().exists());
+    }
+
+    #[test]
+    fn failed_compile_preserves_the_current_generation() {
+        let job = temp_job("compile-rollback");
+        let args = with_job(
+            &job,
+            vec![
+                "compile".into(),
+                "--goal".into(),
+                "first".into(),
+                "--bar".into(),
+                "echo ok".into(),
+            ],
+        );
+        assert_eq!(run_cmd(&args).0, 0);
+        let before = std::fs::read_to_string(job.paths.lock_path()).unwrap();
+        std::fs::write(job.paths.report_path(), "preserve").unwrap();
+        let result = compile::write_lock(
+            &job.paths,
+            "bad replacement",
+            "echo ok",
+            &["missing.txt".into()],
+            "",
+        );
+        assert!(result.is_err());
+        assert_eq!(
+            std::fs::read_to_string(job.paths.lock_path()).unwrap(),
+            before
+        );
+        assert_eq!(
+            std::fs::read_to_string(job.paths.report_path()).unwrap(),
+            "preserve"
+        );
+    }
+
+    #[test]
     fn compile_bar_drives_failing_sieve_and_loop() {
         let job = temp_job("failing-bar");
         let (compile_code, _, compile_stderr) = run_cmd(&with_job(
@@ -465,7 +653,7 @@ mod tests {
     }
 
     #[test]
-    fn dry_run_loop_iterates_when_gates_fail() {
+    fn dry_run_loop_is_a_read_only_plan() {
         let job = temp_job("dry-loop");
         let (compile_code, _, compile_stderr) = run_cmd(&with_job(
             &job,
@@ -480,19 +668,9 @@ mod tests {
         assert_eq!(compile_code, 0, "compile stderr={compile_stderr}");
         let (code, stdout, stderr) =
             run_cmd(&with_job(&job, vec!["loop".into(), "--dry-run".into()]));
-        assert_eq!(code, 1, "stdout={stdout} stderr={stderr}");
-        assert!(
-            stdout.contains("iters=2") || stdout.contains("iters=3"),
-            "dry-run loop must iterate while gates fail, stdout={stdout}"
-        );
-        assert!(stdout.contains("pass=false"), "stdout={stdout}");
-        assert!(job.paths.report_path().is_file());
-        let built = report::read_report(&job.paths).expect("report");
-        assert!(
-            built.loop_iterations >= 2,
-            "loop_iterations={}",
-            built.loop_iterations
-        );
+        assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+        assert!(stdout.contains("dry-run plan"), "stdout={stdout}");
+        assert!(!job.paths.report_path().is_file());
     }
 
     #[test]
@@ -509,8 +687,9 @@ mod tests {
             ],
         ));
         assert_eq!(compile_code, 0, "compile stderr={compile_stderr}");
-        let (cast_code, _, cast_stderr) =
-            run_cmd(&with_job(&job, vec!["cast".into(), "--dry-run".into()]));
+        let (cast_code, _, cast_stderr) = with_builder_argv(looping_builder_argv(), || {
+            run_cmd(&with_job(&job, vec!["cast".into()]))
+        });
         assert_eq!(cast_code, 0, "cast stderr={cast_stderr}");
         assert!(!job.paths.out_dir().join("workspace").is_dir());
 
@@ -520,7 +699,7 @@ mod tests {
         assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
         assert!(stdout.contains("pass=true"), "stdout={stdout}");
         assert!(
-            stdout.contains("iters=2") || stdout.contains("iters=3"),
+            stdout.contains("iters=1") || stdout.contains("iters=2"),
             "live loop must iterate then pass, stdout={stdout}"
         );
         assert!(job
@@ -531,7 +710,7 @@ mod tests {
             .is_file());
         let built = report::read_report(&job.paths).expect("report");
         assert!(
-            built.loop_iterations >= 2,
+            built.loop_iterations >= 1,
             "loop_iterations={}",
             built.loop_iterations
         );
@@ -558,6 +737,38 @@ mod tests {
         assert!(
             stderr.contains("denied command"),
             "builder denylist must fire, stderr={stderr}"
+        );
+    }
+
+    #[test]
+    fn failed_recast_preserves_previous_candidates() {
+        let job = temp_job("cast-rollback");
+        let _ = run_cmd(&with_job(
+            &job,
+            vec![
+                "compile".into(),
+                "--goal".into(),
+                "g".into(),
+                "--bar".into(),
+                "echo ok".into(),
+            ],
+        ));
+        assert_eq!(
+            with_builder(|| run_cmd(&with_job(&job, vec!["cast".into()]))).0,
+            0
+        );
+        let prior = std::fs::read_to_string(job.paths.dir.join("cast_0/result.json")).unwrap();
+        let failing = if cfg!(windows) {
+            r#"["cmd.exe","/C","exit 7"]"#
+        } else {
+            r#"["sh","-c","exit 7"]"#
+        };
+        let (code, _, _) =
+            with_builder_argv(failing, || run_cmd(&with_job(&job, vec!["cast".into()])));
+        assert_eq!(code, 1);
+        assert_eq!(
+            std::fs::read_to_string(job.paths.dir.join("cast_0/result.json")).unwrap(),
+            prior
         );
     }
 
@@ -612,7 +823,7 @@ mod tests {
     }
 
     #[test]
-    fn dry_run_cast_writes_result_json() {
+    fn dry_run_cast_writes_no_result_json() {
         let job = temp_job("cast");
         let _ = run_cmd(&with_job(
             &job,
@@ -627,7 +838,8 @@ mod tests {
         let (code, stdout, stderr) =
             run_cmd(&with_job(&job, vec!["cast".into(), "--dry-run".into()]));
         assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
-        assert!(job.paths.dir.join("cast_0").join("result.json").is_file());
+        assert!(!job.paths.dir.join("cast_0").join("result.json").is_file());
+        assert!(stdout.contains("writes=0"), "stdout={stdout}");
         assert!(!job.workspace.join("anvil").exists());
     }
 
@@ -697,7 +909,9 @@ mod tests {
                 "echo ok".into(),
             ],
         ));
-        let _ = run_cmd(&with_job(&job, vec!["cast".into(), "--dry-run".into()]));
+        let (cast_code, _, cast_stderr) =
+            with_builder(|| run_cmd(&with_job(&job, vec!["cast".into()])));
+        assert_eq!(cast_code, 0, "stderr={cast_stderr}");
         let (code, stdout, stderr) = run_cmd(&with_job(&job, vec!["stamp".into()]));
         assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
         assert!(stdout.contains("mode=ppt-evidence"));
@@ -734,12 +948,125 @@ mod tests {
                     "offline anvil demo".into(),
                     "--bar".into(),
                     "echo ok".into(),
+                    "--files".into(),
+                    "input.txt".into(),
                 ],
             ))
         });
         assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
         assert!(job.paths.report_path().is_file());
+        assert!(job
+            .paths
+            .out_dir()
+            .join("workspace")
+            .join("built.txt")
+            .is_file());
+        assert!(!job.workspace.join("built.txt").exists());
         assert!(!job.workspace.join("anvil").exists());
+    }
+
+    #[test]
+    fn multi_piece_casts_are_unique_and_stamp_merges_winners() {
+        let job = temp_job("multi-piece");
+        std::fs::write(job.workspace.join("second.txt"), "second\n").unwrap();
+        let args = with_job(
+            &job,
+            vec![
+                "compile".into(),
+                "--goal".into(),
+                "two pieces".into(),
+                "--bar".into(),
+                "echo ok".into(),
+            ],
+        );
+        assert_eq!(run_cmd(&args).0, 0);
+        let mut lock = job::load_lock(&job.paths).expect("lock");
+        lock["pieces"] = serde_json::json!([
+            {"id":"first","files":["input.txt"],"gates":["echo ok"],"critic":"none"},
+            {"id":"second","files":["second.txt"],"gates":["echo ok"],"critic":"none"}
+        ]);
+        std::fs::write(
+            job.paths.lock_path(),
+            serde_json::to_string_pretty(&lock).unwrap(),
+        )
+        .unwrap();
+        let (cast_code, _, cast_stderr) =
+            with_builder(|| run_cmd(&with_job(&job, vec!["cast".into()])));
+        assert_eq!(cast_code, 0, "stderr={cast_stderr}");
+        let result_count = std::fs::read_dir(&job.paths.dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry.file_name().to_string_lossy().starts_with("cast_")
+                    && entry.path().join("result.json").is_file()
+            })
+            .count();
+        assert_eq!(result_count, 6);
+        let (stamp_code, _, stamp_stderr) = run_cmd(&with_job(&job, vec!["stamp".into()]));
+        assert_eq!(stamp_code, 0, "stderr={stamp_stderr}");
+        let promoted = job.paths.out_dir().join("workspace");
+        assert!(promoted.join("input.txt").is_file());
+        assert!(promoted.join("second.txt").is_file());
+    }
+
+    #[test]
+    fn selective_recast_does_not_collide_with_preserved_candidate_ids() {
+        let job = temp_job("selective-recast");
+        std::fs::write(job.workspace.join("second.txt"), "second\n").unwrap();
+        let args = with_job(
+            &job,
+            vec![
+                "compile".into(),
+                "--goal".into(),
+                "two pieces".into(),
+                "--bar".into(),
+                "echo ok".into(),
+            ],
+        );
+        assert_eq!(run_cmd(&args).0, 0);
+        let mut lock = job::load_lock(&job.paths).expect("lock");
+        lock["pieces"] = serde_json::json!([
+            {"id":"first","files":["input.txt"],"gates":["echo ok"],"critic":"none"},
+            {"id":"second","files":["second.txt"],"gates":["echo ok"],"critic":"none"}
+        ]);
+        std::fs::write(
+            job.paths.lock_path(),
+            serde_json::to_string_pretty(&lock).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            with_builder(|| run_cmd(&with_job(&job, vec!["cast".into()]))).0,
+            0
+        );
+
+        let (code, _, stderr) = with_builder(|| {
+            run_cmd(&with_job(
+                &job,
+                vec!["cast".into(), "--piece".into(), "second".into()],
+            ))
+        });
+        assert_eq!(code, 0, "selective recast stderr={stderr}");
+        let candidates: Vec<serde_json::Value> = std::fs::read_dir(&job.paths.dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter_map(|entry| std::fs::read_to_string(entry.path().join("result.json")).ok())
+            .filter_map(|text| serde_json::from_str(&text).ok())
+            .collect();
+        assert_eq!(candidates.len(), 6);
+        assert_eq!(
+            candidates
+                .iter()
+                .filter(|value| value["piece"] == "first")
+                .count(),
+            3
+        );
+        assert_eq!(
+            candidates
+                .iter()
+                .filter(|value| value["piece"] == "second")
+                .count(),
+            3
+        );
     }
 
     #[test]
@@ -780,13 +1107,38 @@ mod tests {
     #[test]
     fn dry_run_pipeline_writes_lock_and_report() {
         let job = temp_job("run");
-        let (code, stdout, stderr) =
-            run_cmd(&with_job(&job, vec!["run".into(), "--dry-run".into()]));
+        let sentinel = job.workspace.join("dry-run-sentinel.txt");
+        let (code, stdout, stderr) = run_cmd(&with_job(
+            &job,
+            vec![
+                "run".into(),
+                "--dry-run".into(),
+                "--goal".into(),
+                "dry run".into(),
+                "--bar".into(),
+                "echo touched > dry-run-sentinel.txt".into(),
+                "--files".into(),
+                "input.txt".into(),
+            ],
+        ));
         assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
         assert!(!stdout.contains("stub"), "stdout={stdout}");
-        assert!(job.paths.lock_path().is_file());
-        assert!(job.paths.report_path().is_file());
+        assert!(stdout.contains("plan"), "stdout={stdout}");
+        assert!(!sentinel.exists(), "dry-run executed a gate command");
+        assert!(
+            !job.paths.dir.exists(),
+            "dry-run wrote persistent job state"
+        );
         assert!(!job.workspace.join("anvil").exists());
+    }
+
+    #[test]
+    fn edit_gate_clear_requires_successful_run_dry_run() {
+        assert!(!should_clear_edit_gate("compile", &[], 0));
+        assert!(!should_clear_edit_gate("cast", &["--dry-run".into()], 0));
+        assert!(!should_clear_edit_gate("run", &[], 0));
+        assert!(!should_clear_edit_gate("run", &["--dry-run".into()], 1));
+        assert!(should_clear_edit_gate("run", &["--dry-run".into()], 0));
     }
 
     #[test]
@@ -803,7 +1155,7 @@ mod tests {
             ],
         ));
         assert_eq!(code, 0, "stderr={stderr}");
-        let (code, _, stderr) = run_cmd(&with_job(&job, vec!["cast".into(), "--dry-run".into()]));
+        let (code, _, stderr) = with_builder(|| run_cmd(&with_job(&job, vec!["cast".into()])));
         assert_eq!(code, 0, "stderr={stderr}");
         let lock = job::load_lock(&job.paths).expect("lock survives");
         assert_eq!(lock["goal"], "resume goal");

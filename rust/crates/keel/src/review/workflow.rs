@@ -1,9 +1,10 @@
 use super::*;
 use crate::runtime::{resolve_claude_home, resolve_repository_root};
+use crate::utility::hashing::fnv1a64_hex;
 use crate::utility::record_store::RecordStore;
 
-/// Preferred work-branch prefix going forward (`task/<task>` and
-/// `task/<task>/<subtask>`). Integration stays `feat` (a bare branch name);
+/// Preferred work-branch prefix going forward (`task/<task>`). Integration
+/// stays `feat` (a bare branch name);
 /// work must NOT use `feat/` because Git cannot store both `refs/heads/feat`
 /// and `refs/heads/feat/...` at once.
 pub(crate) const PREFERRED_BRANCH_PREFIXES: &[&str] = &["task/"];
@@ -33,8 +34,7 @@ pub(crate) const SANCTIONED_BRANCH_PREFIXES: &[&str] = &[
 ];
 
 /// Default hierarchy text for configure/show.
-pub(crate) const DEFAULT_BRANCH_TIERS: &str =
-    "main <- dev <- feat <- task/<task> [<- task/<task>/<subtask>]";
+pub(crate) const DEFAULT_BRANCH_TIERS: &str = "main <- dev <- feat <- task/<task>";
 
 /// Conventional commit-subject prefixes the preflight expects; a subject that
 /// matches none of these (and fails the keel colon form) earns a non-blocking
@@ -113,13 +113,14 @@ pub(crate) fn run_git_workflow_preflight(
         .iter()
         .any(|prefix| branch.starts_with(prefix))
     {
-        // Preferred: task/<task> or task/<task>/<subtask>.
+        // Preferred: task/<task>. Use separate flat task names for parallel work;
+        // Git cannot create task/x/y while the task/x branch ref exists.
     } else if LEGACY_BRANCH_PREFIXES
         .iter()
         .any(|prefix| branch.starts_with(prefix))
     {
         warnings.push(format!(
-            "branch '{branch}' uses a legacy work-branch prefix — keep working; new branches should use task/<task> (or task/<task>/<subtask>)"
+            "branch '{branch}' uses a legacy work-branch prefix — keep working; new branches should use task/<task>"
         ));
     } else if !SANCTIONED_BRANCH_PREFIXES
         .iter()
@@ -245,11 +246,14 @@ pub(crate) fn workflow_slug(raw: &str) -> String {
             last_dash = true;
         }
     }
-    let bounded: String = slug.trim_matches('-').chars().take(64).collect();
-    if bounded.is_empty() {
+    let normalized = slug.trim_matches('-');
+    if normalized.is_empty() {
         "workspace".to_string()
+    } else if normalized.chars().count() <= 64 {
+        normalized.to_string()
     } else {
-        bounded
+        let prefix: String = normalized.chars().take(47).collect();
+        format!("{prefix}-{}", fnv1a64_hex(raw))
     }
 }
 
@@ -283,10 +287,11 @@ pub(crate) fn run_git_workflow_configure(
         }
     };
     let model = flag_set.string_value("model").trim().to_string();
-    if model.is_empty() {
+    if model != "four-tier" {
         let _ = writeln!(
             standard_error,
-            "git-workflow configure: --model must not be empty"
+            "git-workflow configure: supported model is four-tier; received '{}'",
+            if model.is_empty() { "<empty>" } else { &model }
         );
         return 1;
     }

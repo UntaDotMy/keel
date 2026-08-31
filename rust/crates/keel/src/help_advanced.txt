@@ -6,7 +6,7 @@
   memory working-brief list [--claude-home <path>] [--json]
   memory completion-gate check [--brief-id <id>] [--proof <text>] [--claude-home <path>] [--json]
   memory recall <query> [--limit <count>] [--json] [--claude-home <path>]
-  anvil compile --goal <text> [--bar <text>] [--files <csv>] [--out <path>]
+  anvil compile --goal <text> --bar <text> --files <csv> [--out <path>]
   anvil cast --dry-run
   anvil sieve [--gates <cmd>]
   anvil stamp [--strict]

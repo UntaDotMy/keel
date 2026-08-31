@@ -3,13 +3,5 @@
 # This file pins which advisories are ignored and why, so ignores are explicit
 # and auditable rather than silent.
 
-[[advisories]]
-# paste is unmaintained (last release 2022). It is a build-time helper pulled
-# transitively by `num-*`, `onig`, and `macro_rules_attribute` — there is no
-# fixed version and removing it would require replacing multiple major
-# dependencies. Unmaintained advisories are informational, not soundness bugs;
-# paste's generated code is stable and the crate sees no further changes to
-# regress. Revisit when a transitive consumer drops it.
-id = "RUSTSEC-2024-0436"
-reason = "paste is an unmaintained transitive build-helper (num-*/onig/macro_rules_attribute); no fixed version exists, removal needs major dep changes. Informational, not a soundness defect."
-ignored = true
+# No advisory is currently ignored. Add a time-bounded exception only when the
+# locked dependency graph actually contains the affected crate.

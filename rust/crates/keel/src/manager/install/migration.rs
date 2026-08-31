@@ -285,7 +285,9 @@ pub(crate) fn migrate_legacy_state_directory(home: &Path) {
 
 /// Delete transient update extract trees while retaining legacy state files.
 pub(crate) fn remove_update_temp_trees(keel_home: &Path, engagement_home: &Path) {
-    let _ = remove_path_if_exists(&update_cache_directory(keel_home));
+    // Preserve the durable installed source needed by verify/repair/update.
+    // Only the legacy transient extraction subtree is disposable here.
+    let _ = remove_path_if_exists(&update_cache_directory(keel_home).join("update"));
     let _ = remove_path_if_exists(&legacy_state_directory(keel_home).join("bin"));
     if engagement_home != keel_home {
         // The neutral home owns update cache; retain generic engagement cache.

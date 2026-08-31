@@ -7,7 +7,9 @@
 use crate::proxy::adapter::CompactResult;
 use crate::proxy::injection_guard::InjectionFinding;
 use crate::proxy::raw_store::RunMeta;
-use crate::runtime::{display_path, resolve_claude_home, COMMAND_COMPACTION_EVENTS_FILE_NAME};
+use crate::runtime::{
+    display_path, resolve_claude_home, write_text, COMMAND_COMPACTION_EVENTS_FILE_NAME,
+};
 use std::fs;
 use std::io::Write;
 
@@ -28,11 +30,20 @@ const EVENT_LOG_KEEP_LINES: usize = 10_000;
 /// opening the old inode during the rename window at worst appends to a stale
 /// file that the next rotation reclaims — no corruption, at most a lost line.
 fn rotate_event_log_if_needed(event_path: &std::path::Path) {
+    rotate_event_log(event_path, MAX_EVENT_LOG_BYTES, EVENT_LOG_KEEP_LINES);
+}
+
+fn rotate_event_log(event_path: &std::path::Path, max_bytes: u64, keep_lines: usize) {
+    // Versions before the unique atomic writer used this fixed sibling name.
+    // It is Keel-owned and safe to reclaim after an interrupted rotation.
+    let legacy_temp = event_path.with_extension("log.rotate-tmp");
+    let _ = fs::remove_file(legacy_temp);
+
     let size = match fs::metadata(event_path) {
         Ok(metadata) => metadata.len(),
         Err(_) => return,
     };
-    if size <= MAX_EVENT_LOG_BYTES {
+    if size <= max_bytes {
         return;
     }
     let content = match fs::read_to_string(event_path) {
@@ -42,22 +53,15 @@ fn rotate_event_log_if_needed(event_path: &std::path::Path) {
     let kept_lines: Vec<&str> = content
         .lines()
         .rev()
-        .take(EVENT_LOG_KEEP_LINES)
+        .take(keep_lines)
         .collect::<Vec<_>>()
         .into_iter()
         .rev()
         .collect();
     let trimmed = kept_lines.join("\n") + "\n";
-    // Atomic rotate: write a sibling temp file, then rename over the log so a
-    // concurrent reader/appender never sees a truncated or half-written file.
-    let temp_path = event_path.with_extension("log.rotate-tmp");
-    if fs::write(&temp_path, &trimmed).is_err() {
-        let _ = fs::remove_file(&temp_path);
-        return;
-    }
-    if fs::rename(&temp_path, event_path).is_err() {
-        let _ = fs::remove_file(&temp_path);
-    }
+    // The shared writer uses collision-free sibling temps, reclaims temps
+    // whose owner died, and handles replace semantics on Windows.
+    let _ = write_text(event_path, &trimmed);
 }
 
 pub fn record_compaction_event(
@@ -124,5 +128,35 @@ pub fn record_compaction_event(
         .open(event_path)
     {
         let _ = writeln!(file, "{rendered}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rotation_replaces_existing_log_and_keeps_newest_lines() {
+        let root = crate::test_support::unique_temp_dir("keel-event-log-rotate");
+        let event_path = root.join("events.jsonl");
+        fs::write(&event_path, "one\ntwo\nthree\n").unwrap();
+
+        rotate_event_log(&event_path, 8, 2);
+
+        assert_eq!(fs::read_to_string(event_path).unwrap(), "two\nthree\n");
+    }
+
+    #[test]
+    fn rotation_reclaims_legacy_temp_even_when_log_is_small() {
+        let root = crate::test_support::unique_temp_dir("keel-event-log-stale");
+        let event_path = root.join("events.jsonl");
+        let legacy_temp = event_path.with_extension("log.rotate-tmp");
+        fs::write(&event_path, "one\n").unwrap();
+        fs::write(&legacy_temp, "stale").unwrap();
+
+        rotate_event_log(&event_path, 1024, 2);
+
+        assert!(!legacy_temp.exists());
+        assert_eq!(fs::read_to_string(event_path).unwrap(), "one\n");
     }
 }

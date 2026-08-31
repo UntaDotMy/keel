@@ -54,8 +54,9 @@ fn verify_install(
     requested_skill_name: Option<&str>,
     standard_output: &mut dyn Write,
 ) -> Result<(), String> {
-    let repository_root = resolve_repository_root(flag_set.string_value("repo-root"))?;
     let claude_home = resolve_claude_home(flag_set.string_value("claude-home"))?;
+    let repository_root =
+        resolve_manager_repository_root(flag_set.string_value("repo-root"), &claude_home)?;
     // Root guidance files install into the engagement home even when the keel
     // root is `~/.keel`, so verification compares them there.
     let engagement_home = crate::runtime::claude_engagement_home(&claude_home);
@@ -142,8 +143,63 @@ fn verify_install(
             display_path(&installed_executable_path(&claude_home))
         ));
     }
+    if verify_grok_wiring(&claude_home)? {
+        let _ = writeln!(standard_output, "Grok hooks and MCP registration verified");
+    }
     let _ = writeln!(standard_output, "All Rust verification checks passed");
     Ok(())
+}
+
+fn verify_grok_wiring(keel_home: &Path) -> Result<bool, String> {
+    if !crate::manager::install::is_standard_home(keel_home) {
+        return Ok(false);
+    }
+    let Some(user_home) = crate::manager::install::host_user_home(keel_home) else {
+        return Ok(false);
+    };
+    let grok_home = crate::manager::install::grok_config_home(&user_home);
+    verify_grok_wiring_at(keel_home, &grok_home)
+}
+
+fn verify_grok_wiring_at(keel_home: &Path, grok_home: &Path) -> Result<bool, String> {
+    let hook_path = grok_home.join("hooks").join("keel.json");
+    let config_path = grok_home.join("config.toml");
+    let config_text = read_text_if_exists(&config_path)?;
+    let document = if config_text.trim().is_empty() {
+        None
+    } else {
+        Some(
+            toml::from_str::<toml::Value>(&config_text).map_err(|error| {
+                format!("parse Grok config {}: {error}", display_path(&config_path))
+            })?,
+        )
+    };
+    let has_mcp_entry = document.as_ref().is_some_and(|value| {
+        value
+            .get("mcp_servers")
+            .and_then(|servers| servers.get("keel"))
+            .is_some()
+    });
+    if !hook_path.exists() && !has_mcp_entry {
+        return Ok(false);
+    }
+    let executable = installed_executable_path(keel_home);
+    if !document
+        .as_ref()
+        .is_some_and(|value| crate::manager::doctor::native_mcp_is_current(value, &executable))
+    {
+        return Err(format!(
+            "Grok MCP registration is missing or stale in {}",
+            display_path(&config_path)
+        ));
+    }
+    if !crate::manager::install::grok_hooks_are_current(&hook_path, &executable) {
+        return Err(format!(
+            "Grok hooks are missing or stale in {}",
+            display_path(&hook_path)
+        ));
+    }
+    Ok(true)
 }
 
 fn compare_skill(skill: &SkillDefinition, claude_home: &Path) -> Result<(), String> {
@@ -324,6 +380,28 @@ pub fn install_metadata_path(claude_home: &Path) -> PathBuf {
     state_directory(claude_home).join("install-metadata.txt")
 }
 
+pub(crate) fn resolve_manager_repository_root(
+    requested_repository_root: &str,
+    keel_home: &Path,
+) -> Result<PathBuf, String> {
+    if !requested_repository_root.trim().is_empty() {
+        return resolve_repository_root(requested_repository_root);
+    }
+    let metadata = read_text_if_exists(&install_metadata_path(keel_home)).unwrap_or_default();
+    if let Some(source_root) = metadata_value(&metadata, "source_root") {
+        let candidate = PathBuf::from(source_root);
+        if crate::runtime::repository_layout_is_complete(&candidate) {
+            return Ok(candidate);
+        }
+    }
+    if let Ok(current) = std::env::current_dir() {
+        if crate::runtime::repository_layout_is_complete(&current) {
+            return Ok(current);
+        }
+    }
+    Err("Repository root not found in the current directory or install metadata. Re-run `keel install` from a release bundle/source checkout, or pass --repo-root.".to_string())
+}
+
 pub fn read_inventory_lines(path: &Path) -> Vec<String> {
     read_text_if_exists(path)
         .unwrap_or_default()
@@ -498,6 +576,37 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
+    fn manager_repository_root_falls_back_to_install_metadata() {
+        let root = std::env::temp_dir().join(format!(
+            "keel-installed-source-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|value| value.as_nanos())
+                .unwrap_or_default()
+        ));
+        let source = root.join("source");
+        let home = root.join("home");
+        fs::create_dir_all(source.join("reviewer")).unwrap();
+        for relative in [
+            "AGENTS.md",
+            "README.md",
+            "00-skill-routing-and-escalation.md",
+            "reviewer/SKILL.md",
+        ] {
+            fs::write(source.join(relative), "").unwrap();
+        }
+        fs::create_dir_all(state_directory(&home)).unwrap();
+        fs::write(
+            install_metadata_path(&home),
+            format!("source_root={}\n", display_path(&source)),
+        )
+        .unwrap();
+        assert_eq!(resolve_manager_repository_root("", &home).unwrap(), source);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn stale_managed_skill_names_detects_content_drift() {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -548,5 +657,51 @@ mod tests {
 
         let _ = fs::remove_dir_all(&root);
         let _ = PathBuf::from("."); // silence unused if any
+    }
+
+    #[test]
+    fn grok_verification_rejects_stale_mcp_and_hook_contracts() {
+        let root = crate::test_support::unique_temp_dir("keel-verify-grok");
+        let keel_home = root.join(".keel");
+        let grok_home = root.join(".grok");
+        let executable = installed_executable_path(&keel_home);
+        fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        fs::write(&executable, "binary").unwrap();
+        fs::create_dir_all(grok_home.join("hooks")).unwrap();
+        crate::manager::install::ensure_codex_native_mcp(
+            &grok_home.join("config.toml"),
+            &executable,
+        )
+        .unwrap();
+        fs::write(
+            grok_home.join("hooks/keel.json"),
+            serde_json::to_string_pretty(&crate::manager::install::grok_hooks_payload(&executable))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(verify_grok_wiring_at(&keel_home, &grok_home), Ok(true));
+
+        let config_path = grok_home.join("config.toml");
+        let mut stale = fs::read_to_string(&config_path)
+            .unwrap()
+            .parse::<toml::Table>()
+            .unwrap();
+        stale["mcp_servers"]["keel"]["command"] = toml::Value::String("C:/stale/keel.exe".into());
+        fs::write(&config_path, toml::to_string_pretty(&stale).unwrap()).unwrap();
+        assert!(verify_grok_wiring_at(&keel_home, &grok_home)
+            .unwrap_err()
+            .contains("MCP registration"));
+
+        crate::manager::install::ensure_codex_native_mcp(&config_path, &executable).unwrap();
+        fs::write(grok_home.join("hooks/keel.json"), "{\"hooks\":{}}").unwrap();
+        assert!(verify_grok_wiring_at(&keel_home, &grok_home)
+            .unwrap_err()
+            .contains("hooks are missing or stale"));
+    }
+
+    #[test]
+    fn grok_verification_skips_nonstandard_explicit_home() {
+        let home = crate::test_support::unique_temp_dir("keel-verify-hermetic-home");
+        assert_eq!(verify_grok_wiring(&home), Ok(false));
     }
 }

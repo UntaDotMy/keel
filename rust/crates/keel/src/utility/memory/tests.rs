@@ -25,13 +25,66 @@ fn seed_brief(claude_home: &std::path::Path, id: &str, request: &str) {
             id.to_string(),
             request.to_string(),
             Vec::new(),
-            Vec::new(),
+            vec!["requested behavior is verified".to_string()],
             Vec::new(),
             String::new(),
             "1970-01-01T00:00:00Z".to_string(),
         ),
     )
     .expect("seed brief");
+}
+
+#[test]
+fn completion_gate_requires_acceptance_criteria_and_proof() {
+    let temporary_directory = tempdir_under("keel-cg-required-evidence");
+    let claude_home = temporary_directory.join("claude-home");
+    fs::create_dir_all(&claude_home).expect("create claude home");
+    write_brief(
+        &claude_home,
+        &create_brief(
+            "wb-incomplete".to_string(),
+            "ship feature".to_string(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            String::new(),
+            "1970-01-01T00:00:00Z".to_string(),
+        ),
+    )
+    .expect("seed incomplete brief");
+
+    let mut stdout: Vec<u8> = Vec::new();
+    let mut stderr: Vec<u8> = Vec::new();
+    let exit_code = run_memory_command(
+        "memory",
+        &[
+            "completion-gate".to_string(),
+            "check".to_string(),
+            "--brief-id".to_string(),
+            "wb-incomplete".to_string(),
+            "--claude-home".to_string(),
+            claude_home.to_string_lossy().to_string(),
+            "--json".to_string(),
+        ],
+        &mut stdout,
+        &mut stderr,
+    );
+
+    assert_eq!(exit_code, 1);
+    let rendered = String::from_utf8_lossy(&stdout);
+    assert!(
+        rendered.contains("working brief has no acceptance criteria"),
+        "json: {rendered}"
+    );
+    assert!(
+        rendered.contains("completion proof is required"),
+        "json: {rendered}"
+    );
+    assert!(
+        rendered.contains("\"closureReady\": false"),
+        "json: {rendered}"
+    );
+    let _ = fs::remove_dir_all(&temporary_directory);
 }
 
 #[test]
@@ -1101,7 +1154,7 @@ fn working_brief_help_lists_record_summary() {
 }
 
 #[test]
-fn completion_gate_help_lists_brief_id_and_drops_record_requirement() {
+fn completion_gate_help_lists_brief_id_and_proof() {
     let mut stdout: Vec<u8> = Vec::new();
     let mut stderr: Vec<u8> = Vec::new();
     let exit_code = run_memory_command(
@@ -1117,8 +1170,8 @@ fn completion_gate_help_lists_brief_id_and_drops_record_requirement() {
         "help should list --brief-id: {output}"
     );
     assert!(
-        !output.contains("record-requirement"),
-        "record-requirement was removed and must not appear in help: {output}"
+        output.contains("--proof"),
+        "help should list --proof: {output}"
     );
 }
 

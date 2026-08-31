@@ -26,9 +26,11 @@ Hierarchy, promoted one direction only. Integration tiers are permanent; task br
 - **`dev`** — staging integration. Receives merges from `feat`; features are verified here before promotion to `main`. Never commit directly.
 - **`feat`** — feature integration. Receives merges from `task/<task>` once verified. Never commit directly. Bare `feat` only — not `feat/<task>` (Git ref collision).
 - **`task/<task>`** — one complete task; branches off `feat` (or a parent task when stacked).
-- **`task/<task>/<subtask>`** — one subtask; branches off `task/<task>`.
+- **`task/<task>-<subtask>`**: optional flat sibling branch for one parallel subtask; branches off `task/<task>`.
 
-Promotion flow: `task/<task>/<subtask>` → `task/<task>` → `feat` → `dev` → `main`.
+Promotion flow: `task/<task>-<subtask>` → `task/<task>` → `feat` → `dev` → `main`.
+
+Git cannot store both `refs/heads/task/<task>` and `refs/heads/task/<task>/<subtask>`, so nested task refs are prohibited while the parent exists.
 
 - One task = one `task/<task>` branch (optionally with subtask branches) = merge request into `feat` (or into the parent task for a subtask).
 - **Fixes for in-flight work stay on the same work branch** — never open a new branch for review or test fixes.

@@ -1,4 +1,8 @@
 use super::*;
+use super::{
+    post_batch::*, post_tool::*, pre_tool::*, prompt_submit::*, session_end::*, session_start::*,
+    settings::*,
+};
 use std::path::PathBuf;
 
 #[test]
@@ -1198,7 +1202,7 @@ fn iron_law_research_command_rejects_bypass_and_non_research_surfaces() {
     // Genuine standalone research still clears it.
     assert!(is_keel_research_command("keel recall borrow checker"));
     assert!(!is_keel_research_command(
-        "keel anvil compile --goal x --bar echo"
+        "keel anvil compile --goal x --bar echo --files src/lib.rs"
     ));
     assert!(is_keel_research_command("keel anvil prefix-check"));
     assert!(is_keel_research_command("keel anvil sieve"));
@@ -1337,6 +1341,42 @@ fn iron_law_gate_denies_without_evidence_and_does_not_ack_on_deny() {
 }
 
 #[test]
+fn grok_camel_case_session_does_not_inherit_satisfied_default_gate() {
+    let _guard = crate::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let claude_home = temp_brief_gate_home("grok-session-id-gate");
+    let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
+    let previous_mode = std::env::var(IRON_LAW_GATE_ENV_VAR).ok();
+    std::env::set_var("CLAUDE_TARGET_OVERRIDE", &claude_home);
+    std::env::set_var(IRON_LAW_GATE_ENV_VAR, "strict");
+
+    mark_iron_law_satisfied("default");
+    let input = serde_json::json!({
+        "sessionId": "grok-unsatisfied-session",
+        "toolName": "search_replace"
+    });
+    assert!(iron_law_gate_decision(hook_session_id(&input)).is_some());
+
+    let mut output = Vec::new();
+    let mut error = Vec::new();
+    assert_eq!(run_iron_law_gate(&input, &mut output, &mut error), 0);
+    let payload: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(payload["decision"], "deny");
+    assert!(error.is_empty());
+
+    match previous_home {
+        Some(value) => std::env::set_var("CLAUDE_TARGET_OVERRIDE", value),
+        None => std::env::remove_var("CLAUDE_TARGET_OVERRIDE"),
+    }
+    match previous_mode {
+        Some(value) => std::env::set_var(IRON_LAW_GATE_ENV_VAR, value),
+        None => std::env::remove_var(IRON_LAW_GATE_ENV_VAR),
+    }
+    let _ = std::fs::remove_dir_all(&claude_home);
+}
+
+#[test]
 fn iron_law_gate_mode_defaults_to_strict() {
     let _guard = crate::test_support::ENV_LOCK
         .lock()
@@ -1404,10 +1444,8 @@ fn verified_mode_requires_web_research_not_internal_state() {
         None
     ));
     // The denial message names VERIFIED.
-    std::env::set_var(
-        "CLAUDE_TARGET_OVERRIDE",
-        temp_brief_gate_home("iron-law-verified"),
-    );
+    let verified_home = temp_brief_gate_home("iron-law-verified");
+    std::env::set_var("CLAUDE_TARGET_OVERRIDE", &verified_home);
     let decision = iron_law_gate_decision("sess-verified-fresh");
     assert!(
         decision.map(|d| d.contains("VERIFIED")).unwrap_or(false),
@@ -1415,6 +1453,7 @@ fn verified_mode_requires_web_research_not_internal_state() {
     );
     std::env::remove_var(IRON_LAW_GATE_ENV_VAR);
     std::env::remove_var("CLAUDE_TARGET_OVERRIDE");
+    let _ = std::fs::remove_dir_all(verified_home);
 }
 
 #[test]
@@ -1715,12 +1754,28 @@ fn brief_written_this_session_logic() {
         "known start with no brief must be unsatisfied"
     );
 
+    let incomplete = crate::utility::working_brief::create_brief(
+        "wb-gate-incomplete".into(),
+        "missing acceptance criteria".into(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        WS_A.into(),
+        "2026-06-06T00:00:00Z".into(),
+    );
+    crate::utility::working_brief::write_brief(&claude_home, &incomplete)
+        .expect("write incomplete brief");
+    assert!(
+        !brief_written_this_session(&claude_home, WS_A, Some(now_ms())),
+        "a brief without acceptance criteria must not clear the closeout gate"
+    );
+
     // A brief written ~now for WS_A covers a WS_A session starting ~now.
     let brief_a = crate::utility::working_brief::create_brief(
         "wb-gate-a".into(),
         "cover this session".into(),
         Vec::new(),
-        Vec::new(),
+        vec!["requested behavior is verified".into()],
         Vec::new(),
         WS_A.into(),
         "2026-06-06T00:00:00Z".into(),
@@ -1745,7 +1800,7 @@ fn brief_written_this_session_logic() {
         "wb-gate-legacy".into(),
         "legacy brief".into(),
         Vec::new(),
-        Vec::new(),
+        vec!["legacy behavior remains verified".into()],
         Vec::new(),
         String::new(),
         "2026-06-06T00:00:00Z".into(),
@@ -1765,7 +1820,7 @@ fn brief_written_this_session_logic() {
         "wb-gate-stale".into(),
         "old".into(),
         Vec::new(),
-        Vec::new(),
+        vec!["old behavior was verified".into()],
         Vec::new(),
         WS_A.into(),
         "2026-06-06T00:00:00Z".into(),
@@ -1816,17 +1871,57 @@ impl Drop for NewGatesSilenced {
     }
 }
 
-fn temp_brief_gate_home(label: &str) -> std::path::PathBuf {
-    let unique: u128 = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default();
-    let directory = std::env::temp_dir().join(format!(
-        "keel-brief-gate-{label}-{}-{unique}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&directory).expect("create tempdir");
-    directory
+struct BriefGateTempDir {
+    inner: crate::test_support::TestTempDir,
+}
+
+impl std::ops::Deref for BriefGateTempDir {
+    type Target = std::path::Path;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl AsRef<std::path::Path> for BriefGateTempDir {
+    fn as_ref(&self) -> &std::path::Path {
+        &self.inner
+    }
+}
+
+impl AsRef<std::ffi::OsStr> for BriefGateTempDir {
+    fn as_ref(&self) -> &std::ffi::OsStr {
+        self.inner.as_ref()
+    }
+}
+
+impl Drop for BriefGateTempDir {
+    fn drop(&mut self) {
+        let path = self.inner.to_path_buf();
+        let _ = std::thread::Builder::new()
+            .name("keel-test-temp-janitor".to_string())
+            .spawn(move || {
+                // A parallel test can finish a late global-home write after drop.
+                // Reclaim only this unique directory after a bounded delay.
+                std::thread::sleep(std::time::Duration::from_secs(3));
+                for attempt in 0..20 {
+                    match std::fs::remove_dir_all(&path) {
+                        Ok(()) => return,
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+                        Err(_) if attempt < 19 => {
+                            std::thread::sleep(std::time::Duration::from_millis(250));
+                        }
+                        Err(_) => return,
+                    }
+                }
+            });
+    }
+}
+
+fn temp_brief_gate_home(label: &str) -> BriefGateTempDir {
+    BriefGateTempDir {
+        inner: crate::test_support::unique_temp_dir(&format!("keel-brief-gate-{label}")),
+    }
 }
 
 #[test]
@@ -2263,6 +2358,85 @@ fn seed_edit_row(claude_home: &std::path::Path, session_id: &str, cwd: &str) {
         format!("{row}\n"),
     )
     .expect("write timings row");
+}
+
+#[test]
+fn stop_hook_blocks_until_required_review_is_current() {
+    let _guard = crate::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let claude_home = temp_brief_gate_home("stop-review-gate");
+    let _silenced = NewGatesSilenced::new();
+    let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
+    let previous_review = std::env::var(REVIEW_GATE_ENV_VAR).ok();
+    let previous_brief = std::env::var(BRIEF_GATE_ENV_VAR).ok();
+    let previous_research = std::env::var(RESEARCH_GATE_ENV_VAR).ok();
+    std::env::set_var("CLAUDE_TARGET_OVERRIDE", &claude_home);
+    std::env::set_var(REVIEW_GATE_ENV_VAR, "block");
+    std::env::set_var(BRIEF_GATE_ENV_VAR, "off");
+    std::env::set_var(RESEARCH_GATE_ENV_VAR, "off");
+
+    let session_id = "stop-review-session";
+    let cwd = "D:/workspace/stop-review";
+    seed_edit_row(&claude_home, session_id, cwd);
+    let input = format!("{{\"sessionId\":\"{session_id}\",\"stopHookActive\":false}}");
+    let mut blocked_output = Vec::new();
+    let mut blocked_error = Vec::new();
+    assert_eq!(
+        run_hook_stop(
+            &mut input.as_bytes(),
+            &mut blocked_output,
+            &mut blocked_error
+        ),
+        0
+    );
+    let blocked_text = String::from_utf8_lossy(&blocked_output);
+    assert!(
+        blocked_text.contains("\"decision\": \"block\""),
+        "{blocked_text}"
+    );
+    assert!(blocked_text.contains("reviewer pass"), "{blocked_text}");
+
+    let review_directory = claude_home.join("state").join("review-gate");
+    std::fs::create_dir_all(&review_directory).expect("create review marker directory");
+    std::fs::write(
+        review_directory.join(format!("{}.reviewed", sanitize_memory_key(cwd))),
+        now_ms().saturating_add(1).to_string(),
+    )
+    .expect("write review marker");
+    let mut allowed_output = Vec::new();
+    let mut allowed_error = Vec::new();
+    assert_eq!(
+        run_hook_stop(
+            &mut input.as_bytes(),
+            &mut allowed_output,
+            &mut allowed_error
+        ),
+        0
+    );
+    assert!(
+        allowed_output.is_empty(),
+        "{:?}",
+        String::from_utf8_lossy(&allowed_output)
+    );
+
+    match previous_home {
+        Some(value) => std::env::set_var("CLAUDE_TARGET_OVERRIDE", value),
+        None => std::env::remove_var("CLAUDE_TARGET_OVERRIDE"),
+    }
+    match previous_review {
+        Some(value) => std::env::set_var(REVIEW_GATE_ENV_VAR, value),
+        None => std::env::remove_var(REVIEW_GATE_ENV_VAR),
+    }
+    match previous_brief {
+        Some(value) => std::env::set_var(BRIEF_GATE_ENV_VAR, value),
+        None => std::env::remove_var(BRIEF_GATE_ENV_VAR),
+    }
+    match previous_research {
+        Some(value) => std::env::set_var(RESEARCH_GATE_ENV_VAR, value),
+        None => std::env::remove_var(RESEARCH_GATE_ENV_VAR),
+    }
+    let _ = std::fs::remove_dir_all(&claude_home);
 }
 
 /// Seed a research-cache record file with a fresh mtime so the memory gate
@@ -3518,14 +3692,9 @@ fn diagnose_text_output_lists_failures() {
 }
 
 #[test]
-fn stop_and_subagent_stop_short_circuit_at_dispatch() {
-    // Stop and SubagentStop must always exit 0 AND emit no stdout. Two
-    // distinct hazards this guards against:
-    //   1. A non-zero exit makes the harness re-run the turn (stop cascade).
-    //   2. Any stdout carrying hookSpecificOutput.additionalContext on a Stop
-    //      hook means "keep going" — so emitting it makes the agent loop
-    //      forever. This was the PR #121 regression; the dispatch arm now
-    //      short-circuits both events to exit 0 with no output.
+fn stop_hooks_fail_open_on_missing_payload_without_looping() {
+    // Missing session identity fails open without additionalContext.
+    // Host runtimes can interpret that field as another turn and loop.
     for subcommand in ["stop", "subagent-stop"] {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
@@ -4207,7 +4376,7 @@ fn research_gate_nudges_when_no_research_before_edit() {
     std::env::set_var(BRIEF_GATE_ENV_VAR, "off");
     std::env::set_var(REVIEW_GATE_ENV_VAR, "off");
 
-    let temp = std::env::temp_dir().join("keel-research-gate-test");
+    let temp = crate::test_support::unique_temp_dir("keel-research-gate-test");
     let claude_home = temp.join("claude-home");
     let _ = std::fs::create_dir_all(claude_home.join("state").join("tool-timings"));
     let _ = std::fs::create_dir_all(claude_home.join("state").join("research-gate-blocks"));
@@ -4691,4 +4860,28 @@ fn user_config_numeric_knob_ignores_garbage_and_falls_back() {
             assert_eq!(system_map_refresh_threshold(), 33);
         },
     );
+}
+
+#[test]
+fn observing_an_anvil_command_does_not_clear_the_edit_gate() {
+    let keel_home = crate::test_support::unique_temp_dir("keel-anvil-observe-gate");
+    let home_text = keel_home.to_string_lossy().into_owned();
+    with_env_vars(&[("KEEL_HOME", Some(home_text.as_str()))], || {
+        let event: JsonDocument = serde_json::json!({
+            "session_id": "observe-only",
+            "tool_name": "Bash",
+            "tool_input": {"command": "keel anvil compile --goal audit --bar true --files src/lib.rs"}
+        });
+
+        maybe_mark_iron_law_from_tool_event(&event);
+
+        assert!(
+            !anvil_satisfied_path(&keel_home, "observe-only").exists(),
+            "observing a command cannot prove that Anvil completed successfully"
+        );
+        assert!(
+            !keel_home.join("state").join("anvil-gate").exists(),
+            "only the successful Anvil implementation may write the workspace marker"
+        );
+    });
 }

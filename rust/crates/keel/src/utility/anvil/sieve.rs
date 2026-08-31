@@ -51,6 +51,20 @@ pub fn run_gates_scored(
     gates: &[String],
     working_directory: Option<&std::path::Path>,
 ) -> GateScore {
+    run_gates_scored_bounded(
+        gates,
+        working_directory,
+        std::time::Duration::from_secs(300),
+        None,
+    )
+}
+
+pub fn run_gates_scored_bounded(
+    gates: &[String],
+    working_directory: Option<&std::path::Path>,
+    gate_timeout: std::time::Duration,
+    deadline: Option<std::time::Instant>,
+) -> GateScore {
     let mut all_ok = true;
     let mut passed = 0u64;
     let mut total = 0u64;
@@ -61,8 +75,24 @@ pub fn run_gates_scored(
             continue;
         }
         total += 1;
+        let timeout = deadline
+            .map(|value| value.saturating_duration_since(std::time::Instant::now()))
+            .map(|remaining| remaining.min(gate_timeout))
+            .unwrap_or(gate_timeout);
+        if timeout.is_zero() {
+            all_ok = false;
+            logs.push_str(&format!(
+                "gate={trimmed} status=error error=wall-clock budget exhausted\n"
+            ));
+            continue;
+        }
         let (program, arguments) = crate::runtime::platform_shell_command_parts(trimmed);
-        match crate::runtime::run_command(&program, &arguments, working_directory) {
+        match crate::runtime::run_command_with_timeout(
+            &program,
+            &arguments,
+            working_directory,
+            timeout,
+        ) {
             Ok(result) => {
                 let gate_passed = result.code == 0;
                 if gate_passed {
@@ -97,13 +127,24 @@ pub fn sieve_lock(
     piece: &str,
     override_gates: &[String],
 ) -> Result<SieveOutcome, String> {
+    sieve_lock_in_directory(paths, piece, override_gates, &paths.workspace)
+}
+
+pub fn sieve_lock_in_directory(
+    paths: &job::JobPaths,
+    piece: &str,
+    override_gates: &[String],
+    working_directory: &std::path::Path,
+) -> Result<SieveOutcome, String> {
     let lock = job::load_lock(paths)?;
+    let budget = job::budget_from_lock(&lock)?;
     let pieces = job::pieces_from_lock(&lock, piece)?;
     let mut greens = 0u64;
     let mut pieces_total = 0u64;
     let mut ok = true;
     let mut logs = String::new();
     let mut has_blind = false;
+    let deadline = std::time::Instant::now() + budget.wall_timeout;
     for spec in pieces {
         pieces_total += 1;
         if spec.critic == "blind_ab" {
@@ -120,7 +161,14 @@ pub fn sieve_lock(
                 spec.id
             ));
         }
-        let (pass, piece_logs) = run_gates_in_directory(&gates, Some(&paths.workspace));
+        let scored = run_gates_scored_bounded(
+            &gates,
+            Some(working_directory),
+            budget.gate_timeout,
+            Some(deadline),
+        );
+        let pass = scored.ok;
+        let piece_logs = scored.logs;
         logs.push_str(&piece_logs);
         if pass && !gates.is_empty() {
             greens += 1;
@@ -258,5 +306,28 @@ mod tests {
             logs.contains("exit_code=1") || logs.contains("exit_code=7"),
             "logs: {logs}"
         );
+    }
+
+    #[test]
+    fn bounded_gate_times_out_instead_of_sticking() {
+        let gate = if cfg!(windows) {
+            "Start-Sleep -Seconds 5"
+        } else {
+            "sleep 5"
+        };
+        let started = std::time::Instant::now();
+        let scored = run_gates_scored_bounded(
+            &[gate.to_string()],
+            None,
+            std::time::Duration::from_millis(100),
+            None,
+        );
+        assert!(!scored.ok);
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_millis(4_500),
+            "bounded gate took {elapsed:?}"
+        );
+        assert!(scored.logs.contains("timed out"), "logs={}", scored.logs);
     }
 }

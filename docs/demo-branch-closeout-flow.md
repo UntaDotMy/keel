@@ -41,8 +41,8 @@ Current Anvil-first equivalent:
 
 ~~~bash
 keel memory working-brief write --request "comparison and release docs"
-keel anvil compile --goal "comparison and release docs" --workspace-root .
-keel anvil run --dry-run --workspace-root .
+keel anvil compile --goal "comparison and release docs" --bar "cargo test --workspace --locked" --files "README.md,docs/demo-branch-closeout-flow.md" --workspace-root .
+keel anvil run --workspace-root .
 keel review pre-pr --repo-root . --base-ref origin/main --format markdown
 keel memory completion-gate check --brief-id <id> --proof "review and hosted checks passed"
 ~~~

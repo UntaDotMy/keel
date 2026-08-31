@@ -165,9 +165,6 @@ pub(crate) enum GateStatus {
     Pass,
     Fail,
     Warn,
-    /// Reserved for gates that intentionally no-op; matched in status renderers.
-    #[allow(dead_code)]
-    Skipped,
     Blocked,
 }
 
@@ -176,20 +173,6 @@ pub(crate) struct GateResult {
     pub(crate) status: GateStatus,
     pub(crate) blocking: bool,
     pub(crate) details: Option<String>,
-}
-
-#[allow(dead_code)]
-#[derive(Clone, Copy)]
-enum MissingToolBehavior {
-    Blocked(&'static str),
-    Failed(&'static str),
-}
-
-#[allow(dead_code)]
-#[derive(Clone, Copy)]
-enum ToolTestPolicy {
-    Run,
-    Skip(&'static str),
 }
 
 #[derive(Clone, Copy)]
@@ -207,8 +190,7 @@ enum ToolEvaluation {
 #[derive(Clone, Copy)]
 struct ToolGateOptions {
     blocking: bool,
-    missing: MissingToolBehavior,
-    test_policy: ToolTestPolicy,
+    missing_details: &'static str,
     evaluation: ToolEvaluation,
 }
 
@@ -219,37 +201,15 @@ fn run_tool_gate(
     repository_root: &Path,
     options: ToolGateOptions,
 ) -> GateResult {
-    if let ToolTestPolicy::Skip(details) = options.test_policy {
-        return GateResult {
-            name: name.to_string(),
-            status: GateStatus::Skipped,
-            blocking: false,
-            details: Some(details.to_string()),
-        };
-    }
-    let missing = |details: &'static str| match options.missing {
-        MissingToolBehavior::Blocked(_) => GateResult {
-            name: name.to_string(),
-            status: GateStatus::Blocked,
-            blocking: false,
-            details: Some(details.to_string()),
-        },
-        MissingToolBehavior::Failed(_) => GateResult {
-            name: name.to_string(),
-            status: GateStatus::Fail,
-            blocking: options.blocking,
-            details: Some(details.to_string()),
-        },
+    let missing = || GateResult {
+        name: name.to_string(),
+        status: GateStatus::Blocked,
+        blocking: false,
+        details: Some(options.missing_details.to_string()),
     };
     let result = match run_command(executable, args, Some(repository_root)) {
         Ok(result) => result,
-        Err(_) => {
-            return match options.missing {
-                MissingToolBehavior::Blocked(details) | MissingToolBehavior::Failed(details) => {
-                    missing(details)
-                }
-            }
-        }
+        Err(_) => return missing(),
     };
     let (status, details) = match options.evaluation {
         ToolEvaluation::ExitCode { passed, failed } => {
@@ -378,8 +338,7 @@ pub(crate) fn check_black(repository_root: &Path) -> GateResult {
         repository_root,
         ToolGateOptions {
             blocking: true,
-            missing: MissingToolBehavior::Blocked("black not found or not applicable"),
-            test_policy: ToolTestPolicy::Run,
+            missing_details: "black not found or not applicable",
             evaluation: ToolEvaluation::ExitCode {
                 passed: "black --check passed",
                 failed: "black --check found formatting issues",
@@ -396,8 +355,7 @@ pub(crate) fn check_ruff(repository_root: &Path) -> GateResult {
         repository_root,
         ToolGateOptions {
             blocking: true,
-            missing: MissingToolBehavior::Blocked("ruff not found or not applicable"),
-            test_policy: ToolTestPolicy::Run,
+            missing_details: "ruff not found or not applicable",
             evaluation: ToolEvaluation::ExitCode {
                 passed: "ruff check passed",
                 failed: "ruff check found issues",
@@ -414,8 +372,7 @@ pub(crate) fn check_mypy(repository_root: &Path) -> GateResult {
         repository_root,
         ToolGateOptions {
             blocking: true,
-            missing: MissingToolBehavior::Blocked("mypy not found or not applicable"),
-            test_policy: ToolTestPolicy::Run,
+            missing_details: "mypy not found or not applicable",
             evaluation: ToolEvaluation::ExitCode {
                 passed: "mypy passed",
                 failed: "mypy found type errors",
@@ -674,8 +631,7 @@ pub(crate) fn check_prettier(repository_root: &Path) -> GateResult {
         repository_root,
         ToolGateOptions {
             blocking: true,
-            missing: MissingToolBehavior::Blocked("prettier not found or not applicable"),
-            test_policy: ToolTestPolicy::Run,
+            missing_details: "prettier not found or not applicable",
             evaluation: ToolEvaluation::ExitCode {
                 passed: "prettier --check passed",
                 failed: "prettier --check found formatting issues",
@@ -693,8 +649,7 @@ pub(crate) fn check_prettier(repository_root: &Path) -> GateResult {
         repository_root,
         ToolGateOptions {
             blocking: true,
-            missing: MissingToolBehavior::Blocked("prettier not found or not applicable"),
-            test_policy: ToolTestPolicy::Run,
+            missing_details: "prettier not found or not applicable",
             evaluation: ToolEvaluation::ExitCode {
                 passed: "prettier --check passed",
                 failed: "prettier --check found formatting issues",
@@ -744,7 +699,6 @@ pub(crate) fn render_gate_results(
                                                 GateStatus::Pass => "pass",
                                                 GateStatus::Fail => "fail",
                                                 GateStatus::Warn => "warn",
-                                                GateStatus::Skipped => "skipped",
                                                 GateStatus::Blocked => "blocked",
                                             }
                                             .into(),
@@ -785,7 +739,6 @@ pub(crate) fn render_gate_results(
                     GateStatus::Pass => "[PASS]",
                     GateStatus::Fail => "[FAIL]",
                     GateStatus::Warn => "[WARN]",
-                    GateStatus::Skipped => "[SKIP]",
                     GateStatus::Blocked => "[BLK]",
                 };
                 let _ = writeln!(
@@ -808,7 +761,6 @@ pub(crate) fn render_gate_results(
                     GateStatus::Pass => "pass",
                     GateStatus::Fail => "fail",
                     GateStatus::Warn => "warn",
-                    GateStatus::Skipped => "skipped",
                     GateStatus::Blocked => "blocked",
                 };
                 let _ = writeln!(
@@ -1036,8 +988,7 @@ pub(crate) fn check_clang_format(repository_root: &Path) -> GateResult {
         repository_root,
         ToolGateOptions {
             blocking: true,
-            missing: MissingToolBehavior::Blocked("clang-format not found or not applicable"),
-            test_policy: ToolTestPolicy::Run,
+            missing_details: "clang-format not found or not applicable",
             evaluation: ToolEvaluation::ExitCode {
                 passed: "clang-format available",
                 failed: "clang-format unavailable",
@@ -1063,8 +1014,7 @@ pub(crate) fn check_clang_format(repository_root: &Path) -> GateResult {
             repository_root,
             ToolGateOptions {
                 blocking: true,
-                missing: MissingToolBehavior::Blocked("clang-format not found or not applicable"),
-                test_policy: ToolTestPolicy::Run,
+                missing_details: "clang-format not found or not applicable",
                 evaluation: ToolEvaluation::ExitCode {
                     passed: "clang-format clean",
                     failed: "clang-format found unformatted files",
@@ -1101,8 +1051,7 @@ pub(crate) fn check_gofmt(repository_root: &Path) -> GateResult {
         repository_root,
         ToolGateOptions {
             blocking: true,
-            missing: MissingToolBehavior::Blocked("gofmt not found or not applicable"),
-            test_policy: ToolTestPolicy::Run,
+            missing_details: "gofmt not found or not applicable",
             evaluation: ToolEvaluation::StdoutLines {
                 clean: "gofmt -l . clean",
                 failed_prefix: "gofmt found unformatted files",
@@ -1119,8 +1068,7 @@ pub(crate) fn check_go_vet(repository_root: &Path) -> GateResult {
         repository_root,
         ToolGateOptions {
             blocking: true,
-            missing: MissingToolBehavior::Blocked("go not found or not applicable"),
-            test_policy: ToolTestPolicy::Run,
+            missing_details: "go not found or not applicable",
             evaluation: ToolEvaluation::ExitCode {
                 passed: "go vet ./... passed",
                 failed: "go vet ./... found issues",
@@ -1137,8 +1085,7 @@ pub(crate) fn check_go_test(repository_root: &Path) -> GateResult {
         repository_root,
         ToolGateOptions {
             blocking: true,
-            missing: MissingToolBehavior::Blocked("go not found or not applicable"),
-            test_policy: ToolTestPolicy::Run,
+            missing_details: "go not found or not applicable",
             evaluation: ToolEvaluation::ExitCode {
                 passed: "go test ./... passed",
                 failed: "go test ./... failed",
@@ -1186,8 +1133,7 @@ pub(crate) fn check_eslint(repository_root: &Path) -> GateResult {
         repository_root,
         ToolGateOptions {
             blocking: true,
-            missing: MissingToolBehavior::Blocked("eslint not found or not applicable"),
-            test_policy: ToolTestPolicy::Run,
+            missing_details: "eslint not found or not applicable",
             evaluation: ToolEvaluation::ExitCode {
                 passed: "eslint passed",
                 failed: "eslint found issues",
@@ -1208,8 +1154,7 @@ pub(crate) fn check_tsc(repository_root: &Path) -> GateResult {
         repository_root,
         ToolGateOptions {
             blocking: true,
-            missing: MissingToolBehavior::Blocked("tsc not found or not applicable"),
-            test_policy: ToolTestPolicy::Run,
+            missing_details: "tsc not found or not applicable",
             evaluation: ToolEvaluation::ExitCode {
                 passed: "tsc --noEmit passed",
                 failed: "tsc --noEmit found type errors",
@@ -1226,8 +1171,7 @@ pub(crate) fn check_tsc(repository_root: &Path) -> GateResult {
         repository_root,
         ToolGateOptions {
             blocking: true,
-            missing: MissingToolBehavior::Blocked("tsc not found or not applicable"),
-            test_policy: ToolTestPolicy::Run,
+            missing_details: "tsc not found or not applicable",
             evaluation: ToolEvaluation::ExitCode {
                 passed: "tsc --noEmit passed",
                 failed: "tsc --noEmit found type errors",

@@ -27,8 +27,17 @@ pub fn bounded_slug(value: &str, max_len: usize) -> String {
     let slug = sanitize_key(value);
     if slug.chars().count() <= max_len {
         slug
+    } else if max_len == 0 {
+        String::new()
     } else {
-        slug.chars().take(max_len).collect()
+        let hash = crate::utility::hashing::fnv1a64_hex(value);
+        if max_len <= hash.len() {
+            hash.chars().take(max_len).collect()
+        } else {
+            let prefix_len = max_len - hash.len() - 1;
+            let prefix: String = slug.chars().take(prefix_len).collect();
+            format!("{prefix}-{hash}")
+        }
     }
 }
 
@@ -60,5 +69,15 @@ mod tests {
             "d-nasri-project-keel"
         );
         assert_eq!(sanitize_key("workspace///name"), "workspace-name");
+    }
+
+    #[test]
+    fn bounded_slugs_keep_distinct_long_paths_distinct() {
+        let shared = "C:/work/a-very-long-parent-segment-that-would-consume-the-entire-old-directory-key-before-the-project-name/";
+        let first = bounded_slug(&format!("{shared}alpha"), 64);
+        let second = bounded_slug(&format!("{shared}beta"), 64);
+        assert_ne!(first, second);
+        assert!(first.len() <= 64);
+        assert!(second.len() <= 64);
     }
 }

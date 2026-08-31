@@ -559,9 +559,7 @@ pub(crate) struct GainSummary {
     pub tokens_after: u64,
     pub tokens_saved: u64,
     pub top_commands: Vec<GainCommandSummary>,
-    #[allow(dead_code)]
     top_reducers: Vec<GainDimensionSummary>,
-    #[allow(dead_code)]
     top_families: Vec<GainDimensionSummary>,
 }
 
@@ -579,7 +577,6 @@ impl GainSummary {
 pub(crate) struct GainCommandSummary {
     pub command: String,
     pub tokens_saved: u64,
-    #[allow(dead_code)]
     count: u64,
 }
 

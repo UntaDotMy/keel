@@ -2,6 +2,14 @@
 
 **Implementation note:** the keel CLI ships a host-CLI Anvil: compile writes lock/prefix/gates from flags, stamp ranks `gate_ok` then `clipped_len` (`--strict` fail-closed), and loop re-runs the configured builder against a gate pass fraction. This file is the original design spec (PPT/logprob, tokio casts, provider clients). Do not treat unimplemented PPT sections as current `keel anvil` behavior.
 
+**Current dry-run contract:** every `--dry-run` stage validates and plans only
+(`writes=0 executes=0`). Dry-run does not create workspaces, invoke builders or
+gates, or write cast/winner/report evidence. Only live `cast` and live `run`
+create evidence. Relative `--workspace-root .` is resolved to the absolute
+current scoped lane before choosing
+`<keel-home>/memories/workspaces/<slug>/anvil/`; it never selects a global
+`workspaces/anvil` directory.
+
 You are implementing **Anvil** in pure **Rust** (no Python, no heavy framework crates). This document is the complete specification. Build exactly this. Do not invent a raw Gauntlet clone, multi-round critic chat, HTML workbench, or auto-git agent.
 
 Anvil casts $N$ candidate artifacts in parallel using async tasks (`tokio`), filters losers via deterministic gates (Sieve), selects a winner using expectation-based logprob pairwise verifiers (Stamp via PPT), and conditionally runs a bounded refinement loop if gates fail.
@@ -220,7 +228,7 @@ Winner is $\text{argmax}(w_i / c_i)$.
 * Creates $N$ isolated directories and copies only lock-listed source files.
 * Non-dry casts require `KEEL_ANVIL_BUILDER_ARGV`, a JSON argv array for the host builder command. Arguments may use `{workspace}`, `{piece}`, and `{gates}` placeholders.
 * The configured builder runs with the isolated workspace as its current directory and a 300-second bounded process timeout. Missing configuration fails before a cast result is written.
-* `--dry-run` is the offline path; it creates the workspace scaffold without invoking a builder.
+* `--dry-run` validates and plans only (`writes=0 executes=0`); it creates no workspace or evidence and invokes no builder or gate.
 * Builder output is clipped before deterministic gates run. `is_denied_command` refuses builder argv that contains `git commit`, `git push`, `git rebase`, or `git branch`.
 ### 4.3 Sieve (`anvil sieve`)
 

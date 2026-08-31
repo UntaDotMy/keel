@@ -7,6 +7,11 @@ use crate::utility::anvil::job;
 use crate::utility::anvil::report;
 use crate::utility::anvil::sieve;
 
+fn fail_with_error(standard_error: &mut dyn Write, error: &str) -> u8 {
+    let _ = writeln!(standard_error, "anvil loop: {error}");
+    1
+}
+
 pub struct LoopConfig {
     pub max_iterations: usize,
     pub min_improvement: f64,
@@ -42,7 +47,7 @@ where
             break;
         }
         improvement = score - prev.unwrap_or(score);
-        if prev.is_some() && improvement.abs() < config.min_improvement {
+        if prev.is_some() && improvement < config.min_improvement {
             iterations += 1;
             break;
         }
@@ -79,10 +84,6 @@ pub fn run_loop(
     let strict = flags.bool_value("strict");
     let dry_run = flags.bool_value("dry-run");
     let mut cfg = LoopConfig::default();
-    if strict {
-        cfg.min_improvement = 0.02;
-        cfg.max_iterations = 30;
-    }
     let paths = match job::JobPaths::resolve(
         flags.string_value("workspace-root"),
         flags.string_value("claude-home"),
@@ -94,8 +95,46 @@ pub fn run_loop(
         }
     };
     let piece = flags.string_value("piece").to_string();
+    let lock = match job::load_lock(&paths) {
+        Ok(lock) => lock,
+        Err(error) => {
+            return fail_with_error(standard_error, &error);
+        }
+    };
+    let generation = match job::generation(&lock) {
+        Ok(value) => value.to_string(),
+        Err(error) => {
+            return fail_with_error(standard_error, &error);
+        }
+    };
+    let budget = match job::budget_from_lock(&lock) {
+        Ok(value) => value,
+        Err(error) => {
+            return fail_with_error(standard_error, &error);
+        }
+    };
+    cfg.max_iterations = budget.max_iterations;
+    cfg.min_improvement = budget.min_improvement;
+    cfg.wall_timeout = budget.wall_timeout;
+    if dry_run {
+        let pieces = match job::pieces_from_lock(&lock, &piece) {
+            Ok(pieces) => pieces,
+            Err(error) => {
+                let _ = writeln!(standard_error, "anvil loop: dry-run: {error}");
+                return 1;
+            }
+        };
+        let _ = writeln!(
+            standard_output,
+            "anvil loop: dry-run plan pieces={} max_iterations={} wall_secs={} writes=0 executes=0",
+            pieces.len(),
+            cfg.max_iterations,
+            cfg.wall_timeout.as_secs()
+        );
+        return 0;
+    }
     let guard_signature = format!(
-        "anvil-loop:{}",
+        "anvil-loop:{generation}:{}",
         if piece.is_empty() {
             "all"
         } else {
@@ -111,24 +150,7 @@ pub fn run_loop(
     }
     let final_pass;
     let mut last_score = 0.0;
-    let (iters, delta) = if dry_run {
-        let piece_ref = piece.clone();
-        let mut pass_state = false;
-        let result = run_bounded_loop(&cfg, || match sieve::sieve_lock(&paths, &piece_ref, &[]) {
-            Ok(outcome) => {
-                pass_state = outcome.ok;
-                last_score = outcome.pass_rate;
-                (outcome.ok, outcome.pass_rate)
-            }
-            Err(_) => {
-                pass_state = false;
-                last_score = 0.0;
-                (false, 0.0)
-            }
-        });
-        final_pass = pass_state;
-        result
-    } else if paths.lock_path().is_file() {
+    let (iters, delta) = if paths.lock_path().is_file() {
         let workspace = match crate::utility::anvil::stamp::ensure_winner_workspace(&paths, strict)
         {
             Ok(path) => path,
@@ -151,10 +173,29 @@ pub fn run_loop(
         };
         let mut pass_state = false;
         let mut builder_error = None;
+        let deadline = Instant::now() + cfg.wall_timeout;
         let result = run_bounded_loop(&cfg, || {
-            match cast::run_builder(&workspace, &builder_piece, &gates) {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                builder_error = Some("anvil loop: wall-clock budget exhausted".to_string());
+                return (false, last_score);
+            }
+            match cast::run_builder_with_budget(
+                &workspace,
+                &builder_piece,
+                &gates,
+                remaining,
+                budget.max_tool_chars,
+                budget.max_tokens_loop,
+            ) {
                 Ok(_) => {
-                    let scored = sieve::run_gates_scored(&gates, Some(&workspace));
+                    builder_error = None;
+                    let scored = sieve::run_gates_scored_bounded(
+                        &gates,
+                        Some(&workspace),
+                        budget.gate_timeout,
+                        Some(deadline),
+                    );
                     pass_state = scored.ok;
                     last_score = scored.rate();
                     (scored.ok, scored.rate())
@@ -277,5 +318,23 @@ mod tests {
             iters >= 4,
             "fractional improvement must keep iterating, iters={iters}"
         );
+    }
+
+    #[test]
+    fn loop_stops_when_score_regresses() {
+        let cfg = LoopConfig {
+            max_iterations: 10,
+            min_improvement: 0.05,
+            wall_timeout: Duration::from_secs(10),
+        };
+        let scores = [0.8, 0.2, 0.9];
+        let index = std::cell::Cell::new(0);
+        let (iters, delta) = run_bounded_loop(&cfg, || {
+            let i = index.get();
+            index.set(i + 1);
+            (false, scores[i.min(scores.len() - 1)])
+        });
+        assert_eq!(iters, 2);
+        assert!(delta < 0.0);
     }
 }

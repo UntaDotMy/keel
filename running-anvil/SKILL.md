@@ -45,13 +45,15 @@ keel anvil compile --goal "CLI that pretty-prints JSON logs" --bar "jq 1.7" --fi
 - If `--bar` missing, compile proposes ≤3 named fetchable bars and stops — do not invent one silently.
 - PrefixGuard renders twice; refusing if hash drifts.
 
-Offline demo is seeded with a checked-in lock so `anvil run --dry-run` works with no keys.
+`--dry-run` always means validate/plan only (`writes=0 executes=0`); only live
+`cast` and `run` create evidence. Relative `--workspace-root .` resolves to the
+absolute scoped lane, never a global `workspaces/anvil` lane.
 
 ### 2. Cast — N isolated builders (cheap model, parallel)
 
 ```bash
 keel anvil cast --piece parse              # one piece
-keel anvil cast --dry-run                  # offline: workspace + paginated-read stub
+keel anvil cast --dry-run                  # validate/plan only; writes=0 executes=0
 ```
 
 - Creates `tempfile.mkdtemp` per cast (copies only listed `files+gates`), prewarms one 1-token completion on the prefix (`cache_write_tokens`), frozen tool set entire job (mutating tools breaks cache), dynamic only after breakpoint.
@@ -93,7 +95,7 @@ keel anvil loop            # max_iterations:20 ∈[5,50], min_improvement:0.05, 
 ### 6. Run — thin orchestrator
 
 ```bash
-keel anvil run --dry-run              # offline: lock + prefix + sieve + evidence stamp
+keel anvil run --dry-run              # validate/plan only; writes=0 executes=0
 keel anvil run                        # compile→cast→sieve→stamp/loop as needed; host CLI is the LLM
 ```
 

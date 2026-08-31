@@ -27,22 +27,22 @@ The managed `PreToolUse` hook may return a harness denial whose reason begins wi
 | `main` | Final stable, verified. Only after `dev` passes staging. | Receives merges only — never direct commits. |
 | `dev` | Staging layer. Feature sets are tested here before promotion to `main`. | Verified features merged from `feat`. |
 | `feat` | Integration base. All task branches and their subtasks merge here eventually. | Merges from `task/<task>` branches. |
-| `task/<task>` | One complete task. Parent branch. Sub-branches stack off here. | Merges from `task/<task>/<subtask>` sub-branches. |
-| `task/<task>/<subtask>` | One subtask or concern within a task. Short-lived. One MR each. | The actual work commits. |
+| `task/<task>` | One complete task. Parent branch. | Merges from optional flat `task/<task>-<subtask>` branches. |
+| `task/<task>-<subtask>` | One parallel subtask or concern. Short-lived. One MR each. | The actual work commits. |
 
-▎ **Namespace note (Git hard rule):** The integration branch is bare `feat` (`refs/heads/feat`). Work branches **must not** use `feat/<task>` — Git cannot store both `refs/heads/feat` and `refs/heads/feat/...` at the same time (ref lock collision). That is why work lives under `task/<task>` and `task/<task>/<subtask>`.
+▎ **Namespace note (Git hard rule):** Git cannot store both a ref and children below that ref. Therefore work branches must not use `feat/<task>` while bare `feat` exists, and must not use `task/<task>/<subtask>` while `task/<task>` exists. Parallel subtasks use flat `task/<task>-<subtask>` names.
 
-**Flow direction:** `task/<task>/<subtask>` → `task/<task>` → `feat` → `dev` → `main`. Work moves only upward, via merge. Never commit directly to `main`, `dev`, or `feat`.
+**Flow direction:** `task/<task>-<subtask>` → `task/<task>` → `feat` → `dev` → `main`. Work moves only upward, via merge. Never commit directly to `main`, `dev`, or `feat`.
 
 **Verification gates:**
-- A subtask done → `task/<task>/<subtask>` merges into `task/<task>`.
+- A subtask done → `task/<task>-<subtask>` merges into `task/<task>`.
 - All subtasks for a task done → `task/<task>` merges into `feat`.
 - A feature set ready for staging → `feat` merges into `dev`.
 - Staging passes → `dev` merges into `main`.
 
 **Hard rule:** Never delete any branch — local or remote. Merged branches stay as permanent references.
 
-**Legacy branches:** In-flight work on older prefixes (`add/`, `fix/`, `feature/`, etc.) may continue until merge. Preflight warns but does not block. **New** branches use `task/<task>` (or `task/<task>/<subtask>`).
+**Legacy branches:** In-flight work on older prefixes (`add/`, `fix/`, `feature/`, etc.) may continue until merge. Preflight warns but does not block. **New** branches use `task/<task>` (or flat `task/<task>-<subtask>` siblings).
 
 ### CI / Action workflow gate
 
@@ -88,7 +88,7 @@ When running many tasks simultaneously, each task lives in its own worktree: **o
 git worktree add ../project-<task> task/<task>
 
 # Subtask branch
-git worktree add ../project-<task>-<subtask> task/<task>/<subtask>
+git worktree add ../project-<task>-<subtask> task/<task>-<subtask>
 ```
 
 Before any work, confirm identity:
@@ -130,8 +130,8 @@ A subtask always branches off its parent task:
 
 ```bash
 git checkout task/<task>
-git checkout -b task/<task>/<subtask>
-# optional: git worktree add ../project-<task>-<subtask> task/<task>/<subtask>
+git checkout -b task/<task>-<subtask>
+# optional: git worktree add ../project-<task>-<subtask> task/<task>-<subtask>
 ```
 
 Never branch a subtask off `feat` directly.
@@ -153,8 +153,8 @@ Verify locally first. Fix on the same branch. Only push and open an MR when expl
 Only on explicit user request, after local verification:
 
 ```bash
-# Subtask MR: task/<task>/<subtask> → task/<task>
-git push -u origin task/<task>/<subtask>
+# Subtask MR: task/<task>-<subtask> → task/<task>
+git push -u origin task/<task>-<subtask>
 
 # Task MR: task/<task> → feat
 git push -u origin task/<task>
@@ -167,7 +167,7 @@ Then follow the CI gate. Wait for green before merging (if requested).
 **Parent gets fixes (still unmerged):**
 
 ```bash
-git checkout task/<task>/<subtask>
+git checkout task/<task>-<subtask>
 git fetch origin
 git rebase task/<task>
 git push --force-with-lease
@@ -176,7 +176,7 @@ git push --force-with-lease
 **Parent merges into its integration branch:**
 
 ```bash
-git checkout task/<task>/<subtask>
+git checkout task/<task>-<subtask>
 git fetch origin
 git rebase origin/task/<task>   # or origin/feat if the task merged into feat
 git push --force-with-lease
@@ -247,7 +247,7 @@ Leave the branch. Never delete. Rebase stacked children if any.
 2. Determine dependency:
    - Independent → `git checkout feat && git pull && git checkout -b task/<task>`.
    - Dependent (stable parent) → `git checkout task/<parent> && git checkout -b task/<task>`.
-   - Subtask → `git checkout task/<task> && git checkout -b task/<task>/<subtask>`.
+   - Subtask → `git checkout task/<task> && git checkout -b task/<task>-<subtask>`.
    - Dependent but parent unstable → wait.
 3. Optional worktree: `git worktree add ../<name> <branch>`.
 
@@ -308,7 +308,7 @@ Automation cannot prove semantic singlefeature scope perfectly. Human review and
 - If the audit still shows an open task, active plan item, unresolved requirement, non-terminal required lane, or missing proof, the work is not finished.
 - Do not trust the first green rerun after a fix as closure by itself; rerun the narrow proving checks and re-audit the broader impacted system before handoff.
 - Open a tracked working brief before stateful work begins: \`keel memory working-brief write --request "..." --constraints "..." --acceptance-criteria "..."\` (\`keel memory working-brief list\` to review open briefs). The brief keeps scope and acceptance evidence explicit.
-- Carry the delivery loop through Anvil: \`keel anvil compile\` and \`keel anvil run\`; use \`keel anvil sieve\` / \`keel anvil stamp\` when the delivery ran through Anvil.
+- Carry the delivery loop through Anvil: \`keel anvil compile --goal "..." --bar "..." --files "<owned files csv>"\` and \`keel anvil run\`; compile fails closed without an explicit candidate-file set. Use \`keel anvil sieve\` / \`keel anvil stamp\` when the delivery ran through Anvil.
 - Close out with proof: gate the branch with \`keel review pre-pr\`, then clear the honest-closeout gate with \`keel memory completion-gate check --brief-id <brief-id> --proof "..."\`.
 
 ## Spawned Agent Discipline
