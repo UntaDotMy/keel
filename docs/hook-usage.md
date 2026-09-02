@@ -24,6 +24,7 @@ The goal is to prevent noisy raw command output from entering the harness contex
 
 ## What the hook does not do
 
+- Composite rewrite uses **Bash on Unix** and **PowerShell on Windows**. fish and zsh are not the rewrite runtime. Putting `keel` on PATH for those shells does not mean hook rewrite runs in those shells. That hole is separate from PATH honesty and is not this cycle.
 - Existing-source ownership still requires Preserve Existing Flow and review gates (`keel review pre-pr`, `keel review gates check`). The Iron Law edit gate only proves research happened before the first edit class tool.
 - It cannot force the harness to *think* well; it can deny edit-class tools until evidence exists, inject `additionalContext`, and feed-forward closeout requirements.
 - Closeout gates (working-brief, review, and others) ride `PostToolBatch`. **Harder defaults:** `CLAUDE_SKILLS_BRIEF_GATE` and `CLAUDE_SKILLS_REVIEW_GATE` default to **`block`** mode (imperative feed-forward via `additionalContext` when code changed without a brief / reviewer marker; Block cap defaults to 3 fires per session, then advisory). Opt-down with `=nudge`, `=escalate`, or `=off`. They do not run the heavy gate commands themselves.

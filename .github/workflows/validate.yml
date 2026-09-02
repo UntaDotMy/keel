@@ -150,6 +150,9 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Run tests
         run: cargo test --locked
+      - name: Cheap-parse install.sh
+        # Syntax only. Not hosted fish/zsh/CMD install proof.
+        run: bash -n install.sh
 
   validate-msrv:
     name: validate-msrv
@@ -201,6 +204,28 @@ jobs:
             $errors | ForEach-Object { Write-Error $_.Message }
             exit 1
           }
+      - name: Cheap-parse install.ps1 and install.cmd
+        # Syntax only. Does not execute the installers against a live home.
+        # Cheap-parse is not hosted PowerShell/CMD install proof.
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Join-Path $PWD "install.ps1"),
+            [ref]$tokens,
+            [ref]$errors
+          ) | Out-Null
+          if ($errors.Count -gt 0) {
+            $errors | ForEach-Object { Write-Error $_.Message }
+            exit 1
+          }
+          cmd /d /q /c "type install.cmd >nul"
+          if ($LASTEXITCODE -ne 0) { throw "install.cmd is not readable by cmd" }
+          $bytes = [System.IO.File]::ReadAllBytes((Join-Path $PWD "install.cmd"))
+          if ($bytes -contains 0) { throw "install.cmd contains NUL" }
+          $cmdText = [System.IO.File]::ReadAllText((Join-Path $PWD "install.cmd"))
+          if ($cmdText -notmatch '(?i)@echo off') { throw "install.cmd missing @echo off" }
 
   validate-macos:
     needs: changes

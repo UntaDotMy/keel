@@ -22,12 +22,8 @@ if ([string]::IsNullOrWhiteSpace($Version)) {
 
 function Normalize-ReleaseTag {
     param([string]$RawVersion)
-    if ($RawVersion -match "^(v|bootstrap-)") {
-        return $RawVersion
-    }
-    if ($RawVersion -match "^[0-9]") {
-        return "v$RawVersion"
-    }
+    # Do not coerce numeric pins to v*. Published tags are `latest` or
+    # `bootstrap-<sha>`. A missing tag is a missing-release error.
     return $RawVersion
 }
 
@@ -154,6 +150,7 @@ try {
     # or `keel repair` to re-register if anything looks off.
 
     Write-Host "keel installed successfully at $InstalledBinary"
+    Write-Host "PATH is configured by keel install. Open a new window if keel is not found."
 } finally {
     if (Test-Path $TemporaryDirectory) {
         Remove-Item -Path $TemporaryDirectory -Recurse -Force

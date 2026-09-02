@@ -18,6 +18,8 @@ keel status
 keel doctor
 ```
 
+If this session cannot resolve `keel`, open a new window or use `~/.keel/keel` / `%USERPROFILE%\.keel\keel.exe`. PATH details live in the README and the compatibility matrix.
+
 What to look for:
 - managed install and binary health (`keel status`)
 - doctor follow-up guidance if the environment is not ready yet

@@ -154,8 +154,8 @@ pub struct InstallSummary {
     /// `~/.claude` install into the host-neutral root, or `None` when there
     /// was nothing to migrate. Data-preserving by construction.
     pub migration_report: Option<String>,
-    /// Human-readable outcome of putting the keel home on the user PATH so
-    /// every shell and host can invoke `keel` without a full path.
+    /// Human-readable outcome of putting the keel home on PATH for bash, zsh,
+    /// sh/dash, fish, and Windows User PATH. None when skipped (non-default home).
     pub path_wiring: Option<String>,
 }
 

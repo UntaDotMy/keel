@@ -31,29 +31,31 @@ This repository is a managed harness skill pack, not a loose prompt collection. 
 
 ## Required Validation
 
-Run this default native loop from the repository root against a temporary harness home target:
+Run this default native loop from the repository root against a temporary keel home:
 
 ```bash
-temporary_claude_home="$(mktemp -d)"
-CLAUDE_TARGET_OVERRIDE="$temporary_claude_home" cargo run --bin keel -- validate --profile smoke
-CLAUDE_TARGET_OVERRIDE="$temporary_claude_home" cargo run --bin keel -- install --repo-root "$PWD"
-"$temporary_claude_home/keel" verify --repo-root "$PWD"
-"$temporary_claude_home/keel" status --repo-root "$PWD"
+temporary_keel_home="$(mktemp -d)/.keel"
+KEEL_HOME="$temporary_keel_home" cargo run --bin keel -- validate --profile smoke
+KEEL_HOME="$temporary_keel_home" cargo run --bin keel -- install --repo-root "$PWD"
+"$temporary_keel_home/keel" verify --repo-root "$PWD"
+"$temporary_keel_home/keel" status --repo-root "$PWD"
 ```
 
 Windows contributors should run the same Rust CLI shape from PowerShell:
 
 ```powershell
-$temporaryClaudeHome = Join-Path $env:TEMP "keel-test-home"
-New-Item -ItemType Directory -Force -Path $temporaryClaudeHome | Out-Null
-$env:CLAUDE_TARGET_OVERRIDE = $temporaryClaudeHome
+$temporaryKeelHome = Join-Path $env:TEMP "keel-test-home\.keel"
+New-Item -ItemType Directory -Force -Path $temporaryKeelHome | Out-Null
+$env:KEEL_HOME = $temporaryKeelHome
 cargo run --bin keel -- validate --profile smoke
 cargo run --bin keel -- install --repo-root .
-& (Join-Path $temporaryClaudeHome "keel.exe") verify --repo-root .
-& (Join-Path $temporaryClaudeHome "keel.exe") status --repo-root .
+& (Join-Path $temporaryKeelHome "keel.exe") verify --repo-root .
+& (Join-Path $temporaryKeelHome "keel.exe") status --repo-root .
 ```
 
-Use the live `~/.claude` target only as an intentional final check when the change specifically needs that real-home proof.
+Use the live `~/.keel` target only as an intentional final check when the change specifically needs that real-home proof. `~/.claude` is the harness engagement home (skills, agents, hooks), not the keel binary home.
+
+PATH wiring is owned by native `keel install`. See the README and [docs/compatibility-matrix.md](docs/compatibility-matrix.md) for the one PATH story; do not re-teach it here.
 
 Full validate now proves the Rust-native CLI foundation. Install the stable Rust toolchain before running the complete repository loop locally; CI enforces the same Rust workspace proof.
 

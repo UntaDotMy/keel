@@ -18,11 +18,9 @@ need_command() {
 }
 
 normalize_tag() {
-  case "$1" in
-    v*|bootstrap-*) printf '%s\n' "$1" ;;
-    [0-9]*) printf 'v%s\n' "$1" ;;
-    *) printf '%s\n' "$1" ;;
-  esac
+  # Do not coerce numeric pins to v*. Published tags are latest or bootstrap-<sha>.
+  # A missing tag is a missing-release error, not a silent v* rewrite.
+  printf '%s\n' "$1"
 }
 
 asset_version_from_tag() {
@@ -169,3 +167,4 @@ fi
 # `keel repair` to re-register if anything looks off.
 
 printf 'keel installed successfully at %s\n' "$installed_binary"
+printf 'PATH is configured by keel install. Open a new window if keel is not found.\n'
