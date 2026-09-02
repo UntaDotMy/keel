@@ -28,7 +28,7 @@ The managed `PreToolUse` hook may return a harness denial whose reason begins wi
 | `dev` | Staging layer. Feature sets are tested here before promotion to `main`. | Verified features merged from `feat`. |
 | `feat` | Integration base. All task branches and their subtasks merge here eventually. | Merges from `task/<task>` branches. |
 | `task/<task>` | One complete task. Parent branch. | Merges from optional flat `task/<task>-<subtask>` branches. |
-| `task/<task>-<subtask>` | One parallel subtask or concern. Short-lived. One MR each. | The actual work commits. |
+| `task/<task>-<subtask>` | One parallel subtask or concern. Short-lived. One PR each. | The actual work commits. |
 
 ▎ **Namespace note (Git hard rule):** Git cannot store both a ref and children below that ref. Therefore work branches must not use `feat/<task>` while bare `feat` exists, and must not use `task/<task>/<subtask>` while `task/<task>` exists. Parallel subtasks use flat `task/<task>-<subtask>` names.
 
@@ -48,7 +48,7 @@ The managed `PreToolUse` hook may return a harness denial whose reason begins wi
 
 This gate applies only when explicitly requested to push or merge. It never triggers automatically.
 
-**Before opening an MR or merging**
+**Before opening a PR or merging**
 1. Check if the repo has Action workflows: `ls .github/workflows/` (or GitHub UI → Actions).
 2. If workflows exist — read each file. Understand triggers, checks, and what must pass.
 3. Before committing, ensure the work satisfies every check the workflow will run.
@@ -146,17 +146,17 @@ git add <files>
 git commit -m "Add : PROTOCOL : rgb sync ask and ack parse"
 ```
 
-Verify locally first. Fix on the same branch. Only push and open an MR when explicitly requested.
+Verify locally first. Fix on the same branch. Only push and open a PR when explicitly requested.
 
-### Pushing and opening an MR
+### Pushing and opening a PR
 
 Only on explicit user request, after local verification:
 
 ```bash
-# Subtask MR: task/<task>-<subtask> → task/<task>
+# Subtask PR: task/<task>-<subtask> → task/<task>
 git push -u origin task/<task>-<subtask>
 
-# Task MR: task/<task> → feat
+# Task PR: task/<task> → feat
 git push -u origin task/<task>
 ```
 
@@ -186,10 +186,10 @@ Deep stacks: rebase bottom-up. Never rebase the top before the middle.
 
 ### Review process
 
-- One MR per branch. Subtask MR targets parent task; task MR targets `feat`.
-- Keep MRs small. One layer or concern per commit.
-- MR description: what the branch does, parent target, stack context, expected CI checks.
-- Do not open a draft/WIP MR unless asked. Open when verified and ready.
+- One PR per branch. Subtask PR targets parent task; task PR targets `feat`.
+- Keep PRs small. One layer or concern per commit.
+- PR description: what the branch does, parent target, stack context, expected CI checks.
+- Do not open a draft/WIP PR unless asked. Open when verified and ready.
 - CI green before review is requested (if workflows exist).
 - Resolve comments on the same branch — never a new branch for review fixes.
 
@@ -215,7 +215,7 @@ Leave the branch. Never delete. Rebase stacked children if any.
 5. Rebase bottom-up in deep stacks.
 6. Tag known-good points before rebases.
 7. Never delete branches.
-8. One MR per branch.
+8. One PR per branch.
 9. Confirm branch and worktree identity before every operation.
 10. If workflows exist, read them before pushing; wait for green before merging.
 11. Never use `feat/<task>` as a work branch while bare `feat` is the integration tier (Git ref collision).
@@ -234,7 +234,7 @@ Leave the branch. Never delete. Rebase stacked children if any.
 - Committing directly to `main`, `dev`, or `feat`.
 - Pushing before committing locally.
 - Merging while CI is red or still running.
-- Pushing or opening an MR before the work is verified, or without an explicit user request.
+- Pushing or opening a PR before the work is verified, or without an explicit user request.
 
 ### Workflow preference memory
 
@@ -257,7 +257,7 @@ Leave the branch. Never delete. Rebase stacked children if any.
 
 **Before pushing (only on explicit request)**
 - Check workflows; satisfy them; then `git push -u origin <branch>`.
-- Open MR targeting the correct parent. Include purpose, target, stack context, expected CI.
+- Open PR targeting the correct parent. Include purpose, target, stack context, expected CI.
 
 **After pushing**
 - Wait for green if workflows exist. Fix on same branch if red. Merge only if requested and green.

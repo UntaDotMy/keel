@@ -23,7 +23,7 @@ on:
 
 permissions:
   actions: read
-  contents: write
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
@@ -478,6 +478,8 @@ jobs:
       - release-smoke
     if: needs.changes.outputs.release == 'true'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     env:
       GH_REPO: ${{ github.repository }}
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

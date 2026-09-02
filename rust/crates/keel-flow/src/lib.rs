@@ -270,7 +270,7 @@ fn workspace_key(repository_root: &Path) -> String {
     }
     let raw_path = clean_path(repository_root).to_string_lossy().to_string();
     let prefix: String = raw_key.chars().take(47).collect();
-    format!("{prefix}-{}", stable_fingerprint_bytes(raw_path.as_bytes()))
+    format!("{prefix}-{}", fnv1a_64_hash(raw_path.as_bytes()))
 }
 
 fn legacy_workspace_key(repository_root: &Path) -> String {
@@ -417,13 +417,12 @@ pub fn repository_state(repository_root: &Path) -> Result<(String, String), Stri
     let repository_head = String::from_utf8_lossy(&head_output.stdout)
         .trim()
         .to_string();
-    Ok((
-        repository_head,
-        stable_fingerprint_bytes(&diff_output.stdout),
-    ))
+    Ok((repository_head, fnv1a_64_hash(&diff_output.stdout)))
 }
 
-fn stable_fingerprint_bytes(content: &[u8]) -> String {
+/// FNV-1a 64-bit hash for fast, non-cryptographic content fingerprinting.
+/// Suitable for per-session diff fingerprinting; not collision-resistant.
+fn fnv1a_64_hash(content: &[u8]) -> String {
     let mut hash: u64 = 14695981039346656037;
     for byte in content {
         hash ^= *byte as u64;

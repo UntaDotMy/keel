@@ -38,6 +38,7 @@ import {
   clearSessionStarted,
   hasSessionStarted,
   ironLawSatisfied,
+  isAlreadyCompacted,
   isEditClassTool,
   isKeelReadingCommand,
   isShellTool,
@@ -164,8 +165,11 @@ function resolveSessionId(event: PiSessionLikeEvent, ctx?: PiExtensionContext): 
   const raw =
     event?.sessionId ||
     ctx?.sessionId ||
-    (typeof process !== "undefined" ? String((process as any).pid ?? "") : "") ||
-    "default";
+    // PID-based fallback causes session collisions when multiple Pi sessions
+    // run on the same machine. Use a unique identifier instead.
+    (typeof crypto !== "undefined" && crypto.randomUUID
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(36).slice(2)}`);
   return String(raw);
 }
 
@@ -297,7 +301,7 @@ function handleToolCall(
       };
     }
 
-    if (shellTool && command && !command.startsWith("keel run --")) {
+    if (shellTool && command && !isAlreadyCompacted(command)) {
       const rewritten = parseRewriteResponse(runBridge("rewrite", [
         "--tool",
         toolName,
@@ -371,8 +375,8 @@ function setup(pi: PiExtensionAPI): void {
   pi.on("session_start", (event: PiSessionLikeEvent, ctx?: PiExtensionContext) => {
     try {
       handleSessionStart(event, ctx);
-    } catch {
-      /* degrade */
+    } catch (err) {
+      console.error("[keel-pi] session_start handler error:", err);
     }
   });
 

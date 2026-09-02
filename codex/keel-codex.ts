@@ -21,6 +21,7 @@ import {
   clearIronLawMarker,
   clearSessionStarted,
   hasSessionStarted,
+  isAlreadyCompacted,
   isEditClassTool,
   isKeelReadingCommand,
   isShellTool,
@@ -273,7 +274,7 @@ function handlePreToolUse(input: CodexHookInput, isPre: boolean): string {
         "keel Iron Law shell gate could not be evaluated. Retry after running `keel doctor`.",
       );
     }
-    if (command) {
+    if (command && !isAlreadyCompacted(command)) {
       const rewritten = parseRewriteResponse(
         runBridgeWithStdin("rewrite", ["--tool", currentToolName], command),
       );

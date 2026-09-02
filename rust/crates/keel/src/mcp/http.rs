@@ -154,10 +154,11 @@ fn authorization_header_matches(header: Option<&str>, expected: &str) -> bool {
     }
     let provided_bytes = provided.as_bytes();
     let expected_bytes = expected.as_bytes();
+    // Constant-time comparison: iterate through expected_bytes so the loop
+    // duration reveals nothing about the provided token's length.
     let mut difference = (provided_bytes.len() ^ expected_bytes.len()) as u8;
-    for index in 0..provided_bytes.len().max(expected_bytes.len()) {
-        difference |= provided_bytes.get(index).copied().unwrap_or_default()
-            ^ expected_bytes.get(index).copied().unwrap_or_default();
+    for (index, &expected_byte) in expected_bytes.iter().enumerate() {
+        difference |= provided_bytes.get(index).copied().unwrap_or_default() ^ expected_byte;
     }
     difference == 0
 }
@@ -527,6 +528,8 @@ fn remote_origin_allowed(origin: &str) -> bool {
 
 fn origin_allowed(origin: Option<&str>) -> bool {
     match origin {
+        // Non-browser clients omit Origin; cross-origin browser requests attach it.
+        // Bearer token authentication gates non-browser clients.
         None => true,
         Some("null") => true,
         Some(value) if local_origin_allowed(value) => true,
