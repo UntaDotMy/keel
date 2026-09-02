@@ -39,9 +39,9 @@ irm https://raw.githubusercontent.com/UntaDotMy/keel/main/install.ps1 | iex
 curl -fsSL https://raw.githubusercontent.com/UntaDotMy/keel/main/install.cmd -o install.cmd && install.cmd && del install.cmd
 ```
 
-The installer detects your OS and architecture, pulls the matching prebuilt binary from [GitHub Releases](https://github.com/UntaDotMy/keel/releases/latest), runs `keel install`, verifies `status`, and cleans up temp downloads only. No Rust toolchain required. Pin a release with `CLAUDE_SKILLS_VERSION=latest` (default) or `CLAUDE_SKILLS_VERSION=bootstrap-<12-char-sha>`. Published tags are `bootstrap-*`. The crate is `0.1.0`. A `vX.Y.Z` pin is not valid until such a tag is cut.
+The installer detects your OS and architecture, pulls the matching prebuilt binary from [GitHub Releases](https://github.com/UntaDotMy/keel/releases/latest), runs `keel install`, verifies `status`, and cleans up temp downloads only. No Rust toolchain required. Pin a release with `CLAUDE_SKILLS_VERSION=latest` (default) or `CLAUDE_SKILLS_VERSION=bootstrap-<sha>`. Published tags are `latest` or `bootstrap-*`. A `vX.Y.Z` pin is not valid until such a tag is cut.
 
-**Install layout:** keel uses a host-neutral home so every host (claude, codex, opencode, cursor, pi, cowork, commandcode, grok) shares one install. The binary, data, and state live in `%USERPROFILE%\.keel` / `~/.keel` (override with `KEEL_HOME`); the Claude-harness engagement files (skills, agents, commands, `settings.json`, user `CLAUDE.md`) stay in `%USERPROFILE%\.claude` / `~/.claude` because the harness only reads them there. Upgrading from an older install copies keel-owned data from `~/.claude` into `~/.keel`, removes only verified identical legacy duplicates after success, and retains mismatches for recovery. The legacy binary is removed only after the replacement is published. Managed files replaced by an install are snapshotted under `<keel-home>/backups/`. User projects, memories, histories, legacy state, and host caches are not deleted by install or update. Native `keel install` (not the downloader) puts the keel home on PATH for **bash**, **zsh** (including non-interactive `zsh -c` via `.zshenv`), **sh/dash** via `.profile`, **fish**, and **Windows User PATH**. Unix is rustup-shaped: a shared env file, thin per-shell sources. Windows writes the user Path and notifies new processes; **open a new console or a new Windows Terminal window**. This window will not see the change. Git Bash inherit is not this cycle. See the [compatibility matrix](docs/compatibility-matrix.md) for what is proven. It does **not** touch Grok session data.
+**Install layout:** keel uses a host-neutral home so every host (claude, codex, opencode, cursor, pi, cowork, commandcode, grok) shares one install. The binary, data, and state live in `%USERPROFILE%\.keel` / `~/.keel` (override with `KEEL_HOME`); the Claude-harness engagement files (skills, agents, commands, `settings.json`, user `CLAUDE.md`) stay in `%USERPROFILE%\.claude` / `~/.claude` because the harness only reads them there. Upgrading from an older install copies keel-owned data from `~/.claude` into `~/.keel`, removes only verified identical legacy duplicates after success, and retains mismatches for recovery. The legacy binary is removed only after the replacement is published. Managed files replaced by an install are snapshotted under `<keel-home>/backups/`. User projects, memories, histories, legacy state, and host caches are not deleted by install or update. Native `keel install` (not `install.sh`, `install.ps1`, or `install.cmd`) is the only PATH writer. It puts the default keel home on PATH for **bash**, **zsh** (including non-interactive `zsh -c` via `.zshenv`), **sh/dash** via `.profile`, **fish** (`set -x PATH` in `env.fish`), and **Windows User PATH**. Unix is rustup-shaped: `$KEEL_HOME/env` plus `$KEEL_HOME/env.fish`, with thin per-shell sources. Windows writes the user Path and broadcasts `WM_SETTINGCHANGE` so **new** consoles and **new** Windows Terminal windows see it. This window will not. Git Bash inherit is not this cycle. A custom `KEEL_HOME` skips PATH; use the explicit binary. See [PATH after install](#path-after-install) and the [compatibility matrix](docs/compatibility-matrix.md). It does **not** touch Grok session data.
 
 **Deterministic indexed retrieval.** The standard binary uses a persistent local
 workspace index for files, symbols, source chunks, paths, and verified import
@@ -135,7 +135,7 @@ Example: a raw `cargo test --workspace` may produce `Rerun that as: keel run -- 
 | Need | Run | Why |
 | --- | --- | --- |
 | First install, no Rust required | Download a release, extract it, run `./keel install` or `.\keel.exe install` | Installs the native binary and managed skills into the harness home. |
-| Check the install | `keel status` (on PATH after install) or `~/.keel/keel status` / `%USERPROFILE%\.keel\keel.exe status` | Confirms the managed harness-home surface. |
+| Check the install | `~/.keel/keel status` / `%USERPROFILE%\.keel\keel.exe status`, or `keel status` in a **new** bash, zsh, sh/dash, fish, or Windows console after a default-home install | Confirms the managed harness-home surface. This session, Git Bash inherit, and a custom `KEEL_HOME` are not guaranteed. |
 | Start normal work | `keel anvil compile --goal "..." --bar "<named command>" --files "<owned files csv>"` |
 | Run the delivery loop | `keel anvil run` |
 | Inspect live gates | `keel anvil sieve`, `keel anvil loop` |
@@ -148,7 +148,7 @@ After install, the preferred global CLI path for agents on supported operating s
 - macOS or Linux: `~/.keel/keel`
 - Windows: `~/.keel/keel.exe`
 
-(Installs also put this directory on PATH, so plain `keel` resolves in new shells.)
+Default-home installs also put this directory on PATH for bash, zsh, sh/dash, fish, and Windows User PATH in **new** sessions. Git Bash inherit and the current Windows console are later. If this session cannot resolve `keel`, use the explicit path above.
 
 This matters because the install metadata remembers the source bundle or checkout so `status`, `update`, `verify`, `doctor`, and `menu` can still work when the installed binary is called from another project. For AI-agent or shell contexts where PATH resolution is not guaranteed, prefer the explicit installed path in the harness home root. `--repo-root <path>` is an advanced override for CI, unusual layouts, or running the binary from a different folder than the extracted release/source checkout.
 
@@ -223,6 +223,29 @@ Manual prune (any time):
 ```bash
 ~/.keel/keel raw prune --older-than 30d
 ```
+
+### PATH after install
+
+Native `path.rs` (invoked by `keel install`) is the only PATH writer. The downloaders only fetch a release, run `keel install`, and print that PATH was configured by that native step.
+
+**Unix (default `~/.keel` only)**
+
+- Writes rustup-shaped `$KEEL_HOME/env` (POSIX `export PATH` behind a `case` guard) and `$KEEL_HOME/env.fish` (`set -x PATH`, not `export`, not `fish_add_path`).
+- Always creates or updates `~/.profile`, `~/.zshenv`, and `~/.config/fish/conf.d/keel.fish` to source those files.
+- Updates `~/.bashrc`, `~/.bash_profile`, and `~/.zshrc` only when those files already exist.
+- This session may not see `keel`. Open a new terminal, or run `~/.keel/keel status`.
+
+**Windows (default `%USERPROFILE%\.keel` only)**
+
+- Appends the keel home to the User Path (`HKCU\Environment\Path`) and broadcasts `Environment`.
+- No `setx`. No PowerShell profile edits.
+- Open a **new** console or a **new** Windows Terminal window, or run `%USERPROFILE%\.keel\keel.exe status`. The current window is not updated.
+
+**Not this cycle:** Git Bash inherit; the already-open Windows console / WT tab.
+
+**Proof bar:** unit tests under a temp `HOME` and a PathPersist test double. CI cheap-parse of `install.sh` / `install.ps1` / `install.cmd` is syntax only (`bash -n`, PowerShell parser, cmd readability / NUL / `@echo off`). That is not hosted fish, zsh, or CMD install proof.
+
+**Uninstall:** `keel uninstall` at the default home silently reverses those PATH files and the User Path entry, and sweeps old triplicate `export PATH="…:$PATH"` marker pairs. Stdout does not say PATH was restored. Open a new session afterward. A custom `KEEL_HOME` was never written, so uninstall does not touch user PATH files for that home.
 
 ## Slash Commands
 
@@ -596,7 +619,7 @@ The interactive manager now keeps five clear choices:
 - Install: sync the managed skill pack into `~/.claude`.
 - Update: refresh an existing install from the current checkout or release source.
 - Verify: prove managed artifact health.
-- Uninstall: remove the managed pack safely.
+- Uninstall: remove the managed pack. At the default keel home, PATH files and the Windows User Path entry are reversed silently; open a new session. Stdout does not claim PATH was restored.
 
 Release download overrides are available for controlled environments:
 
@@ -696,3 +719,5 @@ Install `keel` when the harness needs a clearer path from request to proof:
 - Compact noisy command output before it fills context.
 - Prove the branch locally and on hosted checks.
 - Finish only when the evidence says the scope is actually done.
+
+This repository is licensed under the MIT License. See [`LICENSE`](LICENSE).

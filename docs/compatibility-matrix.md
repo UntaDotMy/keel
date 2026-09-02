@@ -47,20 +47,21 @@ When an AI agent is operating from an arbitrary workspace or a harness home inst
 
 ## Shell PATH
 
-Native `keel install` is the only PATH writer. Downloaders (`install.sh`, `install.ps1`, `install.cmd`) never write PATH. Proof is the PATH tests under temp `HOME` / the PathPersist double, not a hosted fish/zsh/CMD installer job.
+Native `keel install` is the only PATH writer. Downloaders (`install.sh`, `install.ps1`, `install.cmd`) never write PATH. Proof is the PATH tests under temp `HOME` / the PathPersist double, not a hosted fish/zsh/CMD installer job. PATH write and reverse run only for the default keel home.
 
 | Shell / host | After native `keel install` | This cycle | Honest note |
 | --- | --- | --- | --- |
-| bash (interactive) | Shared POSIX env sourced from `.bashrc` | Supported | Existing `.bash_profile` updated only if it already exists |
-| zsh (interactive + `zsh -c`) | Shared env sourced from `.zshenv` | Supported | Do not rely on `.zshrc` alone |
+| bash (interactive) | Shared POSIX `$KEEL_HOME/env` sourced from `.bashrc` | Supported when `.bashrc` already exists | `.bashrc` is not created. Login bash still gets always-created `.profile` |
+| zsh (interactive + `zsh -c`) | Shared env sourced from `.zshenv` | Supported | Do not rely on `.zshrc` alone. Existing `.zshrc` is updated if present |
 | sh/dash login | Always `.profile` | Supported | Login `sh` does not read `.bashrc` |
-| fish | `conf.d/keel.fish` sources `env.fish` | Supported | Not `export`. Not `fish_add_path` alone |
-| Windows User PATH, **new** console / **new** WT window | HKCU + `WM_SETTINGCHANGE` | Supported | No `setx`. No pwsh 5/7 profile edits |
+| fish | `conf.d/keel.fish` sources `env.fish` (`set -x PATH`) | Supported | Not `export`. Not `fish_add_path` |
+| Windows User PATH, **new** console / **new** WT window | HKCU + `WM_SETTINGCHANGE` | Supported | No `setx`. No pwsh 5/7 profile edits. Entry is appended |
 | Current Windows console / current WT tab | Not updated | **Not this cycle** | Open a new console or a new Windows Terminal window |
 | Git Bash inherit | Untouched | **Not this cycle** | Named hole |
 | Hosted fish / zsh / CMD installer | Downloaders only | **Not proven** | `validate.yml` cheap-parse ≠ hosted install |
+| Custom `KEEL_HOME` | PATH not written | Skipped | Use the explicit binary |
 
-Uninstall removes the managed pack; it does not claim to restore PATH.
+Uninstall at the default home silently reverses those PATH files and the User Path entry, and sweeps old triplicate `export PATH="…:$PATH"` marker pairs. Stdout does not claim PATH was restored. Open a new session afterward.
 
 ## Minimum proof expectations
 
