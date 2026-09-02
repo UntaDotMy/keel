@@ -31,8 +31,9 @@ pub(crate) fn rewrite_codex_mcp_command(doc: &mut serde_json::Value, absolute: &
 /// Codex's merged document goes through [`rewrite_codex_mcp_command`]; the
 /// Cursor and Pi wiring extract the `keel` entry value from the shipped
 /// template first, so they rewrite the entry itself before merging. A bare
-/// `keel` command fails on PATH-less hosts (the common case on Windows, where
-/// install does not modify PATH), so the resolved installed path must land in
+/// `keel` command fails on PATH-less hosts, so the resolved installed path is
+/// recorded as a fallback. Native install still writes PATH; this absolute
+/// command is belt-and-suspenders, not a claim that Windows install skips PATH.
 pub(crate) fn rewrite_mcp_entry_command(entry: &mut serde_json::Value, absolute: &str) -> bool {
     let Some(server) = entry.as_object_mut() else {
         return false;

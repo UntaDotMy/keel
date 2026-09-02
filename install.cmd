@@ -12,10 +12,8 @@ set "VERSION=%CLAUDE_SKILLS_VERSION%"
 if "%VERSION%"=="" set "VERSION=latest"
 if defined DOWNLOAD_BASE goto download_base_ready
 if /I "%VERSION%"=="latest" goto download_latest
+REM Do not coerce numeric pins to v*. A missing tag is a missing-release error.
 set "TAG=%VERSION%"
-if /I "%TAG:~0,1%"=="v" goto download_tag_ready
-if /I "%TAG:~0,10%"=="bootstrap-" goto download_tag_ready
-set "TAG=v%TAG%"
 
 :download_tag_ready
 set "DOWNLOAD_BASE=https://github.com/%REPOSITORY%/releases/download/%TAG%"

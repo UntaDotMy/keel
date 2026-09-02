@@ -45,6 +45,23 @@ When an AI agent is operating from an arbitrary workspace or a harness home inst
 - Keep the native CLI as the only install/update surface; shell and PowerShell wrapper launchers are not supported runtime entrypoints.
 - Treat bare `keel ...` as a convenience command shape, not a guarantee that the executable is on PATH in every runtime.
 
+## Shell PATH
+
+Native `keel install` is the only PATH writer. Downloaders (`install.sh`, `install.ps1`, `install.cmd`) never write PATH. Proof is the PATH tests under temp `HOME` / the PathPersist double, not a hosted fish/zsh/CMD installer job.
+
+| Shell / host | After native `keel install` | This cycle | Honest note |
+| --- | --- | --- | --- |
+| bash (interactive) | Shared POSIX env sourced from `.bashrc` | Supported | Existing `.bash_profile` updated only if it already exists |
+| zsh (interactive + `zsh -c`) | Shared env sourced from `.zshenv` | Supported | Do not rely on `.zshrc` alone |
+| sh/dash login | Always `.profile` | Supported | Login `sh` does not read `.bashrc` |
+| fish | `conf.d/keel.fish` sources `env.fish` | Supported | Not `export`. Not `fish_add_path` alone |
+| Windows User PATH, **new** console / **new** WT window | HKCU + `WM_SETTINGCHANGE` | Supported | No `setx`. No pwsh 5/7 profile edits |
+| Current Windows console / current WT tab | Not updated | **Not this cycle** | Open a new console or a new Windows Terminal window |
+| Git Bash inherit | Untouched | **Not this cycle** | Named hole |
+| Hosted fish / zsh / CMD installer | Downloaders only | **Not proven** | `validate.yml` cheap-parse ≠ hosted install |
+
+Uninstall removes the managed pack; it does not claim to restore PATH.
+
 ## Minimum proof expectations
 
 Compatibility claims in this repository should stay tied to real proof:

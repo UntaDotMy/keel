@@ -161,7 +161,9 @@ pub fn write_install_summary(summary: &InstallSummary, output: &mut dyn Write) {
         let _ = writeln!(output, "  Legacy migration: {migration}");
     }
     if let Some(path_status) = &summary.path_wiring {
-        let _ = writeln!(output, "  PATH: {path_status}");
+        for line in path_status.lines() {
+            let _ = writeln!(output, "  {line}");
+        }
     }
 }
 
@@ -624,6 +626,9 @@ pub fn run_uninstall_command(
     // even when the keel root is `~/.keel`.
     let engagement_home = crate::runtime::claude_engagement_home(&claude_home);
     let mut removed_count = 0;
+    if crate::runtime::is_default_keel_home(&claude_home) {
+        super::path::remove_keel_home_from_path(&claude_home);
+    }
     match uninstall_managed_files(&claude_home) {
         Ok(count) => removed_count += count,
         Err(error) => {

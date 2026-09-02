@@ -2650,3 +2650,459 @@ fn grok_platform_override_can_force_and_skip_detection() {
     );
     assert!(!detected.grok);
 }
+
+// ---------------------------------------------------------------------------
+// PATH honesty: temp HOME / PathPersist double. Live HKCU writes are a defect.
+// ---------------------------------------------------------------------------
+
+fn path_test_root(label: &str) -> PathBuf {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let root = std::env::temp_dir().join(format!(
+        "keel-path-honesty-{}-{}-{}",
+        label,
+        std::process::id(),
+        n
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    root
+}
+
+#[test]
+fn fail_closed_keel_home_rejects_relative_empty_dot_and_special_chars() {
+    for bad in [
+        PathBuf::from(""),
+        PathBuf::from("."),
+        PathBuf::from("relative/.keel"),
+        PathBuf::from("/tmp/foo$bar/.keel"),
+        PathBuf::from("/tmp/foo;bar/.keel"),
+        PathBuf::from("/tmp/foo&bar/.keel"),
+        PathBuf::from("/tmp/foo|bar/.keel"),
+        PathBuf::from("/tmp/foo%bar/.keel"),
+        PathBuf::from("/tmp/foo`bar/.keel"),
+        PathBuf::from("/tmp/foo'bar/.keel"),
+        PathBuf::from("/tmp/foo\"bar/.keel"),
+        PathBuf::from("/tmp/foo\nbar/.keel"),
+        PathBuf::from("/tmp/foo\rbar/.keel"),
+    ] {
+        let result = super::path::validate_keel_home(&bad);
+        assert!(
+            result.is_err(),
+            "expected reject for {:?}, got {result:?}",
+            bad
+        );
+    }
+}
+
+#[test]
+fn windows_path_persist_appends_and_broadcasts_environment_without_live_reg() {
+    let persist = super::path::RecordingPathPersist::new(r"%USERPROFILE%\bin", true);
+    let keel_home = PathBuf::from("C:/Users/fixture/.keel");
+    let status = super::path::ensure_windows_path(&keel_home, &persist);
+    assert!(
+        status.contains("keel is on your User PATH"),
+        "success copy must name User PATH: {status}"
+    );
+    assert!(
+        status.contains("new console") || status.contains("PATH already configured"),
+        "must tell the user this window will not see it unless session already has keel: {status}"
+    );
+    let writes = persist.writes.lock().expect("lock").clone();
+    assert_eq!(writes.len(), 1, "exactly one Path write");
+    assert!(
+        writes[0].0.contains(r"%USERPROFILE%\bin"),
+        "must preserve existing expand entry: {}",
+        writes[0].0
+    );
+    assert!(
+        writes[0]
+            .0
+            .to_lowercase()
+            .contains("c:/users/fixture/.keel")
+            || writes[0]
+                .0
+                .to_lowercase()
+                .contains("c:\\users\\fixture\\.keel"),
+        "must append keel home: {}",
+        writes[0].0
+    );
+    assert!(writes[0].1, "REG_EXPAND_SZ must be preserved");
+    let broadcasts = persist.broadcasts.lock().expect("lock").clone();
+    assert_eq!(
+        broadcasts,
+        vec!["Environment".to_string()],
+        "WM_SETTINGCHANGE lParam must be Environment only"
+    );
+}
+
+#[test]
+fn windows_path_persist_is_idempotent_and_case_insensitive() {
+    let persist = super::path::RecordingPathPersist::new("C:/Users/fixture/.keel", false);
+    let keel_home = PathBuf::from("C:/Users/FIXTURE/.keel");
+    let status = super::path::ensure_windows_path(&keel_home, &persist);
+    assert!(
+        status.contains("PATH already configured") || status.contains("keel is on your User PATH"),
+        "{status}"
+    );
+    assert!(
+        persist.writes.lock().expect("lock").is_empty(),
+        "duplicate Path write is a defect"
+    );
+    assert!(
+        persist.broadcasts.lock().expect("lock").is_empty(),
+        "no broadcast when Path is unchanged"
+    );
+}
+
+#[test]
+fn windows_path_persist_process_path_does_not_skip_writer() {
+    let persist = super::path::RecordingPathPersist::new("", false);
+    let keel_home = PathBuf::from("C:/Users/fixture/.keel");
+    let _restore = RestorePath(std::env::var("PATH").ok());
+    let mut with_keel = display_path(&keel_home);
+    if let Some(existing) = &_restore.0 {
+        if cfg!(windows) {
+            with_keel = format!("{with_keel};{existing}");
+        } else {
+            with_keel = format!("{with_keel}:{existing}");
+        }
+    }
+    std::env::set_var("PATH", &with_keel);
+    let status = super::path::ensure_windows_path(&keel_home, &persist);
+    assert!(
+        !persist.writes.lock().expect("lock").is_empty(),
+        "process PATH containing keel_home must not skip the persistent writer: {status}"
+    );
+    assert_eq!(
+        persist.broadcasts.lock().expect("lock").as_slice(),
+        ["Environment"]
+    );
+}
+
+#[test]
+fn windows_path_persist_rejects_percent_and_does_not_write() {
+    let persist = super::path::RecordingPathPersist::new("C:\\Windows", false);
+    let keel_home = PathBuf::from("C:/Users/fi%xture/.keel");
+    let status = super::path::ensure_windows_path(&keel_home, &persist);
+    assert!(
+        status.contains("PATH write skipped"),
+        "forbidden % must fail closed: {status}"
+    );
+    assert!(persist.writes.lock().expect("lock").is_empty());
+    assert!(persist.broadcasts.lock().expect("lock").is_empty());
+}
+
+#[test]
+fn windows_purge_stale_uses_seam_not_live_hive() {
+    let dead = std::env::temp_dir()
+        .join("keel-home-split-purge-fixture")
+        .join(".keel");
+    let _ = fs::remove_dir_all(dead.parent().unwrap());
+    let current = format!("C:\\Windows;{};C:\\Tools", dead.display());
+    let persist = super::path::RecordingPathPersist::new(&current, false);
+    super::path::purge_stale_windows(&persist).unwrap();
+    let writes = persist.writes.lock().expect("lock").clone();
+    assert_eq!(writes.len(), 1);
+    assert!(
+        !writes[0].0.contains("keel-home-split-"),
+        "stale temp entry must be removed: {}",
+        writes[0].0
+    );
+    assert!(writes[0].0.contains("C:\\Windows"));
+    assert!(writes[0].0.contains("C:\\Tools"));
+}
+
+#[cfg(not(windows))]
+fn assert_real_home_untouched(before: &[(PathBuf, Option<String>)]) {
+    for (path, previous) in before {
+        let now = fs::read_to_string(path).ok();
+        assert_eq!(
+            now.as_deref(),
+            previous.as_deref(),
+            "real user HOME rc must be untouched: {}",
+            path.display()
+        );
+    }
+}
+
+#[cfg(not(windows))]
+fn snapshot_real_home_rcs() -> Vec<(PathBuf, Option<String>)> {
+    let Ok(home) = crate::runtime::resolve_user_home() else {
+        return Vec::new();
+    };
+    [".profile", ".bashrc", ".bash_profile", ".zshenv", ".zshrc"]
+        .into_iter()
+        .map(|name| {
+            let path = home.join(name);
+            (path.clone(), fs::read_to_string(&path).ok())
+        })
+        .collect()
+}
+
+#[cfg(not(windows))]
+#[test]
+fn unix_path_writes_shared_env_profile_zshenv_and_fish() {
+    let snapshot = snapshot_real_home_rcs();
+    let root = path_test_root("unix-write");
+    let home = root.join("home");
+    fs::create_dir_all(&home).unwrap();
+    fs::write(home.join(".bashrc"), "# existing bashrc\n").unwrap();
+    fs::write(home.join(".zshrc"), "# existing zshrc\n").unwrap();
+    let keel_home = home.join(".keel");
+    fs::create_dir_all(&keel_home).unwrap();
+    let dir = display_path(&keel_home);
+    let wrote = super::path::unix_write_path_into(&keel_home, &home).unwrap();
+    assert!(wrote);
+
+    let env = fs::read_to_string(keel_home.join("env")).unwrap();
+    assert!(
+        env.contains(&format!("export PATH=\"{dir}:$PATH\"")),
+        "posix env must PATH-prepend the validated dir: {env}"
+    );
+    assert!(
+        env.contains("case \":${PATH}:\"") || env.contains("case \":${PATH}:\""),
+        "posix env must be rustup-shaped: {env}"
+    );
+
+    let fish_env = fs::read_to_string(keel_home.join("env.fish")).unwrap();
+    assert!(
+        fish_env.contains("if not contains") && fish_env.contains("set -x PATH"),
+        "fish env.fish must prepend PATH in fish syntax: {fish_env}"
+    );
+    assert!(
+        !fish_env.contains("export"),
+        "fish must not use export: {fish_env}"
+    );
+    assert!(
+        !fish_env.contains("fish_add_path"),
+        "fish_add_path must not be the mechanism: {fish_env}"
+    );
+
+    let profile = fs::read_to_string(home.join(".profile")).unwrap();
+    assert!(
+        profile
+            .lines()
+            .any(|line| line.trim() == super::path::KEEL_PATH_MARKER),
+        "marker must be a whole line: {profile}"
+    );
+    assert!(
+        profile.contains(&format!(". \"{}/env\"", dir)),
+        ".profile must source the shared env: {profile}"
+    );
+    assert!(
+        !profile.contains("export PATH=") || profile.contains(". \""),
+        "raw export PATH must not be the only mechanism: {profile}"
+    );
+
+    let zshenv = fs::read_to_string(home.join(".zshenv")).unwrap();
+    assert!(
+        zshenv.contains(&format!(". \"{}/env\"", dir)),
+        ".zshenv must source the shared env so zsh -c works: {zshenv}"
+    );
+    let zshrc = fs::read_to_string(home.join(".zshrc")).unwrap();
+    assert!(
+        zshrc.contains(&format!(". \"{}/env\"", dir)),
+        "existing .zshrc must also source the env: {zshrc}"
+    );
+    let bashrc = fs::read_to_string(home.join(".bashrc")).unwrap();
+    assert!(
+        bashrc.contains(&format!(". \"{}/env\"", dir)),
+        "existing .bashrc must source the env: {bashrc}"
+    );
+    assert!(
+        !home.join(".bash_profile").exists(),
+        "must not create .bash_profile"
+    );
+
+    let fish_conf = home
+        .join(".config")
+        .join("fish")
+        .join("conf.d")
+        .join("keel.fish");
+    let fish_conf_text = fs::read_to_string(&fish_conf).unwrap();
+    assert!(
+        fish_conf_text.contains(&format!("source \"{}/env.fish\"", dir)),
+        "fish conf.d must source env.fish: {fish_conf_text}"
+    );
+    assert!(
+        !fish_conf_text.contains("export"),
+        "fish conf.d must not use export: {fish_conf_text}"
+    );
+
+    let env_mode = fs::metadata(keel_home.join("env")).unwrap().permissions();
+    let fish_mode = fs::metadata(keel_home.join("env.fish"))
+        .unwrap()
+        .permissions();
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(env_mode.mode() & 0o777, env_mode.mode() & 0o644);
+    assert_eq!(fish_mode.mode() & 0o777, fish_mode.mode() & 0o644);
+
+    let wrote_again = super::path::unix_write_path_into(&keel_home, &home).unwrap();
+    assert!(!wrote_again, "second install must be idempotent");
+    let profile_again = fs::read_to_string(home.join(".profile")).unwrap();
+    assert_eq!(
+        profile.matches(super::path::KEEL_PATH_MARKER).count(),
+        profile_again.matches(super::path::KEEL_PATH_MARKER).count()
+    );
+
+    assert_real_home_untouched(&snapshot);
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[cfg(not(windows))]
+#[test]
+fn unix_path_updates_existing_bash_profile_only() {
+    let root = path_test_root("unix-bash-profile");
+    let home = root.join("home");
+    fs::create_dir_all(&home).unwrap();
+    fs::write(home.join(".bash_profile"), "# existing\n").unwrap();
+    let keel_home = home.join(".keel");
+    fs::create_dir_all(&keel_home).unwrap();
+    let dir = display_path(&keel_home);
+    super::path::unix_write_path_into(&keel_home, &home).unwrap();
+    let text = fs::read_to_string(home.join(".bash_profile")).unwrap();
+    assert!(text.contains("# existing"));
+    assert!(text.contains(&format!(". \"{}/env\"", dir)));
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[cfg(not(windows))]
+#[test]
+fn unix_fail_closed_skips_write() {
+    let snapshot = snapshot_real_home_rcs();
+    let root = path_test_root("unix-reject");
+    let home = root.join("home");
+    fs::create_dir_all(&home).unwrap();
+    let relative = PathBuf::from("relative/.keel");
+    let status = super::path::validate_keel_home(&relative);
+    assert!(status.is_err());
+    assert!(!home.join(".profile").exists());
+    assert!(!home.join(".zshenv").exists());
+    let special = home.join("foo$bar").join(".keel");
+    assert!(super::path::validate_keel_home(&special).is_err());
+    assert_real_home_untouched(&snapshot);
+    let _ = fs::remove_dir_all(&root);
+}
+
+struct RestorePath(Option<String>);
+impl Drop for RestorePath {
+    fn drop(&mut self) {
+        match &self.0 {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
+        }
+    }
+}
+
+#[cfg(not(windows))]
+#[test]
+fn unix_process_path_does_not_skip_persistent_writers() {
+    let root = path_test_root("unix-process-path");
+    let home = root.join("home");
+    fs::create_dir_all(&home).unwrap();
+    let keel_home = home.join(".keel");
+    fs::create_dir_all(&keel_home).unwrap();
+    let _restore = RestorePath(std::env::var("PATH").ok());
+    let mut path_value = display_path(&keel_home);
+    if let Some(existing) = &_restore.0 {
+        path_value = format!("{path_value}:{existing}");
+    }
+    std::env::set_var("PATH", &path_value);
+    let status = super::path::ensure_unix_path_for_home(&keel_home, &home);
+    assert!(
+        keel_home.join("env").is_file(),
+        "process PATH must not skip env write: {status}"
+    );
+    assert!(
+        keel_home.join("env.fish").is_file(),
+        "process PATH must not skip fish env write: {status}"
+    );
+    assert!(
+        home.join(".profile").is_file(),
+        "process PATH must not skip .profile: {status}"
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[cfg(not(windows))]
+#[test]
+fn unix_uninstall_sweeps_old_triplicate_export() {
+    let root = path_test_root("unix-sweep");
+    let home = root.join("home");
+    fs::create_dir_all(&home).unwrap();
+    let keel_home = home.join(".keel");
+    fs::create_dir_all(&keel_home).unwrap();
+    let dir = display_path(&keel_home);
+    let old = format!(
+        "# user stuff\n{}\nexport PATH=\"{dir}:$PATH\"\n# more\n",
+        super::path::KEEL_PATH_MARKER
+    );
+    fs::write(home.join(".profile"), &old).unwrap();
+    fs::write(home.join(".bashrc"), &old).unwrap();
+    super::path::unix_remove_path_into(&keel_home, &home).unwrap();
+    let profile = fs::read_to_string(home.join(".profile")).unwrap();
+    assert!(
+        profile.contains("# user stuff"),
+        "unmanaged lines must stay: {profile}"
+    );
+    assert!(
+        !profile.contains("export PATH="),
+        "old triplicate export must be swept: {profile}"
+    );
+    assert!(
+        !profile.contains(super::path::KEEL_PATH_MARKER),
+        "marker must be removed: {profile}"
+    );
+    let bashrc = fs::read_to_string(home.join(".bashrc")).unwrap();
+    assert!(!bashrc.contains("export PATH="));
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[cfg(not(windows))]
+#[test]
+fn unix_purge_stale_sweeps_dead_temp_export_only() {
+    let root = path_test_root("unix-purge");
+    let home = root.join("home");
+    fs::create_dir_all(&home).unwrap();
+    let dead = root
+        .join(format!("keel-home-split-{}", std::process::id()))
+        .join(".keel");
+    let _ = fs::remove_dir_all(dead.parent().unwrap());
+    let stale_export = format!(
+        "{}\nexport PATH=\"{}:$PATH\"\n",
+        super::path::KEEL_PATH_MARKER,
+        dead.display()
+    );
+    fs::write(home.join(".profile"), format!("# keep\n{stale_export}")).unwrap();
+    super::path::purge_stale_unix_into(&home).unwrap();
+    let profile = fs::read_to_string(home.join(".profile")).unwrap();
+    assert!(profile.contains("# keep"));
+    assert!(!profile.contains("export PATH="));
+    assert!(!profile.contains(super::path::KEEL_PATH_MARKER));
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn windows_remove_path_uses_seam_not_live_hive() {
+    let persist = super::path::RecordingPathPersist::new(
+        r"C:\Windows;C:/Users/fixture/.keel;C:\Tools",
+        false,
+    );
+    let keel_home = PathBuf::from("C:/Users/fixture/.keel");
+    assert!(super::path::remove_windows_path(&keel_home, &persist).unwrap());
+    let writes = persist.writes.lock().expect("lock").clone();
+    assert_eq!(writes.len(), 1);
+    let lowered = writes[0].0.to_lowercase();
+    assert!(
+        !lowered.contains("fixture"),
+        "keel home must leave user Path: {}",
+        writes[0].0
+    );
+    assert!(lowered.contains(r"c:\windows"), "{}", writes[0].0);
+    assert!(lowered.contains(r"c:\tools"), "{}", writes[0].0);
+    assert_eq!(
+        persist.broadcasts.lock().expect("lock").as_slice(),
+        ["Environment"]
+    );
+}
