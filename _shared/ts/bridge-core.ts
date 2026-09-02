@@ -125,8 +125,10 @@ export function ironLawSatisfied(sessionID: string): boolean {
   const legacyDir = legacyIronLawMarkerDirectory();
   ensureMarkerDirectory(currentDir);
   try {
-    return fs.existsSync(markerPath(currentDir, sessionID, true)) ||
-      fs.existsSync(markerPath(legacyDir, sessionID, true));
+    return (
+      fs.existsSync(markerPath(currentDir, sessionID, true)) ||
+      fs.existsSync(markerPath(legacyDir, sessionID, true))
+    );
   } catch {
     return false;
   }
@@ -224,6 +226,11 @@ function isKeelExecutable(value: string): boolean {
   const basename = value.replace(/\\/g, "/").split("/").pop() ?? value;
   return basename === "keel" || basename === "keel.exe";
 }
+/** True when the command is already wrapped with keel run. */
+export function isAlreadyCompacted(command: string): boolean {
+  const words = shellCommandWords(command.trim().toLowerCase());
+  return words.length >= 2 && isKeelExecutable(words[0]) && words[1] === "run";
+}
 
 export function isKeelReadingCommand(command: string): boolean {
   let words = shellCommandWords(command.trim().toLowerCase());
@@ -244,6 +251,7 @@ export function parseGateResponse(output: string): { status: GateResponse; reaso
     return { status: "deny", reason: output.split("\n").slice(1).join("\n").trim() };
   }
   if (output.startsWith("KEEL_GATE_ALLOW")) return { status: "allow", reason: "" };
+  console.warn("[keel] unknown gate response:", output.slice(0, 200));
   return { status: "unknown", reason: "" };
 }
 

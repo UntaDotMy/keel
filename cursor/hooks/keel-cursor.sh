@@ -137,7 +137,8 @@ case "$HOOK_EVENT" in
     exit 0
     ;;
   stop)
-    "$KEEL_BIN" bridge post-compact --session "$SESSION_ID" --cwd "$CWD" >/dev/null 2>&1 || true
+    # Stop fires on every turn end. Do not run post-compact here to avoid loops.
+    # Learning checkpoints belong on preCompact and sessionEnd.
     echo '{}'
     exit 0
     ;;

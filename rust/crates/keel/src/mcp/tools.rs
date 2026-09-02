@@ -1374,9 +1374,10 @@ fn tool_run_command(arguments: &Value) -> Result<String, String> {
 // entry from the registry.
 // ---------------------------------------------------------------------------
 
-/// Cap per captured stream of a background command. Beyond this the buffer
-/// stops growing and a one-time marker records the truncation.
-const BACKGROUND_STREAM_CAP_CHARS: usize = 2_000_000;
+/// Cap per captured stream of a background command (bytes). Beyond this the
+/// buffer stops growing and a one-time marker records the truncation.
+/// Uses byte length instead of character count to avoid O(n) scan per chunk.
+const BACKGROUND_STREAM_CAP_BYTES: usize = 2_000_000;
 type ReaderState = Arc<(Mutex<usize>, Condvar)>;
 
 struct BackgroundCommand {
@@ -1618,7 +1619,7 @@ fn background_reader_thread(
                     let mut guard = buffer
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    if guard.chars().count() >= BACKGROUND_STREAM_CAP_CHARS {
+                    if guard.len() >= BACKGROUND_STREAM_CAP_BYTES {
                         if !guard.ends_with("[stream truncated at 2MB]") {
                             guard.push_str("\n[stream truncated at 2MB]");
                         }

@@ -3,6 +3,7 @@ import {
   clearIronLawMarker as clearIronLaw,
   clearSessionStarted,
   hasSessionStarted,
+  isAlreadyCompacted,
   isEditClassTool,
   isKeelReadingCommand,
   isShellTool,
@@ -90,14 +91,18 @@ const KeelPlugin: Plugin = async ({ client, directory, $ }) => {
     stdin: string,
   ): Promise<string> {
     try {
-      // Redirect stdin from a Buffer (Bun's documented stdin source) rather than
-      // `echo | cmd`, which mangles JSON across shells.
-      const input = Buffer.from(stdin, "utf-8");
-      const result = await $`${BRIDGE_BIN} bridge ${subcommand} ${args} < ${input}`
-        .timeout(2000)
-        .quiet()
-        .text();
-      return result ?? "";
+      // Use Bun.spawn to pass stdin directly. Shell redirection via
+      // template literals can mangle JSON with special characters.
+      const proc = Bun.spawn([BRIDGE_BIN, "bridge", subcommand, ...args], {
+        stdin: "pipe",
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      await proc.stdin.write(stdin);
+      proc.stdin.end();
+      const result = await new Response(proc.stdout).text();
+      await proc.exited;
+      return result?.trim() ?? "";
     } catch {
       return "";
     }
@@ -216,11 +221,13 @@ const KeelPlugin: Plugin = async ({ client, directory, $ }) => {
           );
         }
 
-        const rewritten = parseRewriteResponse(
-          await runBridgeWithStdin("rewrite", ["--tool", toolName], command),
-        );
-        if (rewritten) {
-          output.args.command = rewritten;
+        if (!isAlreadyCompacted(command)) {
+          const rewritten = parseRewriteResponse(
+            await runBridgeWithStdin("rewrite", ["--tool", toolName], command),
+          );
+          if (rewritten) {
+            output.args.command = rewritten;
+          }
         }
       }
     },
@@ -283,7 +290,9 @@ const KeelPlugin: Plugin = async ({ client, directory, $ }) => {
           console.error("[keel-plugin] event handler error:", e);
           // Never throw from event — fire-and-forget.
         }
-      })();
+      })().catch((e) => {
+        console.error("[keel-plugin] unhandled event error:", e);
+      });
     },
 
     // "experimental.session.compacting" (NAMED, awaited): pre-compact learning

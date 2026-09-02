@@ -6,6 +6,7 @@ import type { ModApi, AgentMod, ModContext } from "@commandcode/harness";
 import {
   clearIronLawMarker,
   ironLawSatisfied,
+  isAlreadyCompacted,
   isEditClassTool,
   isKeelReadingCommand,
   isShellTool,
@@ -181,7 +182,7 @@ export default function keelCmdcMod(cmd: ModApi): void {
               "keel Iron Law shell gate could not be evaluated. Retry after running `keel doctor`.",
           };
         }
-        if (command) {
+        if (command && !isAlreadyCompacted(command)) {
           const rewritten = parseRewriteResponse(
             runBridge("rewrite", ["--tool", tool], 500, command),
           );

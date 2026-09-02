@@ -12,9 +12,9 @@ Side Effects: None — this file is informational.
 **All tasks must follow this loop until production-ready:**
 
 ```
-0. ALIGN → 1. RESEARCH → 2. PLAN → 3. IMPLEMENT → 4. TEST → 5. FIX → 6. VERIFY → 7. REVIEW → 8. RECONCILE
-   ↑                                                                                                        ↓
-   └────────────────────────────────────── If issues found, loop back ───────────────────────────────────────┘
+0. ALIGN → 1. RESEARCH → 2. PLAN → 3. IMPACT → 4. IMPLEMENT → 5. TEST → 6. FIX → 7. VERIFY → 8. REVIEW → 9. RECONCILE
+   ↑                                                                                                                  ↓
+   └──────────────────────────────────────── If issues found, loop back ─────────────────────────────────────────────┘
 ```
 
 **Loop continues until:**

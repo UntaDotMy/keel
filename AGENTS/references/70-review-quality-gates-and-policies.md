@@ -30,8 +30,8 @@ Side Effects: None — this file is informational.
 Before marking any task complete, verify:
 
 ### Linting & Type Checking
-- All linting errors resolved (not disabled with `// eslint-disable`)
-- All TypeScript errors resolved (not suppressed with `@ts-ignore`)
+- All linting errors resolved (not disabled with `// eslint-disable` or `#[allow(...)]` without documented justification)
+- All compiler and type errors resolved (not suppressed with `@ts-ignore` or unsafe casts)
 - Code follows project style guide
 
 ### Testing
@@ -60,12 +60,12 @@ Before marking any task complete, verify:
 - Bundle size within budget
 
 **Tools to use:**
-- ESLint, Prettier for linting/formatting
-- TypeScript for type checking
-- npm audit, yarn audit for security
-- Jest, Vitest, Playwright for testing
-- Lighthouse, WebPageTest for performance
-
+- Rust: `cargo fmt --check`, `cargo clippy --workspace --all-targets` for linting/formatting
+- JS/TS: `ESLint`, `Prettier` for linting/formatting
+- Type checking: `cargo check --workspace` (Rust), `tsc --noEmit` (TypeScript)
+- Security: `cargo audit` (Rust), `npm audit` / `yarn audit` (JS/TS)
+- Testing: `cargo test --workspace` (Rust), `Jest`, `Vitest`, `Playwright` (JS/TS)
+- Performance: `cargo bench` (Rust), `Lighthouse`, `WebPageTest` (web)
 ## Quality Gates
 
 Before completing any task, verify ALL of these:

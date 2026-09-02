@@ -41,6 +41,18 @@ Load specialist skills when the task clearly requires domain expertise:
 - **postgres-migration-safety**: Live-traffic PostgreSQL schema changes — lock-level analysis, expand-and-contract sequencing, bounded backfills, `CREATE INDEX CONCURRENTLY`, and rollback planning
 - **stripe-integration**: Stripe Checkout, Payment Intents, Subscriptions, Connect, webhook reconciliation, idempotency, money handling, refunds, disputes, and 3DS/SCA
 - **websocket-realtime-design**: WebSocket, SSE, and realtime fan-out — frame envelope, reconnect/resume, backpressure, ordering and dedup, multi-process broker choice, auth lifecycle on long-lived connections
+- **domain-driven-design**: Ubiquitous language, bounded contexts, aggregates, domain events, and strategic context maps
+- **dart-and-flutter-expert**: Widget architecture, state management, platform channels, and Flutter performance
+- **designing-agent-teams**: Multi-agent team decomposition, handoff design, and orchestration patterns
+- **dispatching-parallel-agents**: Independent work fan-out, concurrency gates, and cross-task coordination
+- **finishing-a-development-branch**: Branch closeout, review routing, merge/PR options
+- **output-economy**: Per-response output-token economy and verbosity reduction
+- **research-enforcement**: Force web search before implementing against external APIs or libraries
+- **running-anvil**: Anvil delivery loop: compile, cast, sieve, stamp, bounded refinement
+- **subagent-driven-development**: Independent task delegation through fresh-context subagents
+- **systematic-debugging**: Root-cause-first debugging for defects, regressions, and flaky behavior
+- **test-driven-development**: RED-GREEN-REFACTOR loop for behavior changes
+- **writing-plans**: Granular, verifiable implementation plans before touching code
 
 ### Keep It Simple
 
@@ -81,7 +93,8 @@ it reads the matching subagent definition from `.claude/agents/<name>.md` (repo 
 or `~/.claude/agents/<name>.md` (install path). Subagent frontmatter supports:
 `name` (required), `description` (required), `tools` (bare tool names, no scoped
 patterns), `disallowedTools` (denylist applied before allowlist), `model`
-(`sonnet`/`opus`/`haiku`/`fable`/full ID/`inherit`), `permissionMode`, `maxTurns`,
+(supported values: `sonnet`/`opus`/`haiku`/`fable`/full ID/`inherit`, but
+repo-managed profiles must NOT set `model`; see 70-review-quality-gates-and-policies.md), `permissionMode`, `maxTurns`,
 `skills` (preload skill content at startup; skills with `disable-model-invocation:
 true` cannot be preloaded), `mcpServers` (inline or string-reference, scoped to this
 subagent), `hooks` (lifecycle hooks scoped to this subagent), `memory`

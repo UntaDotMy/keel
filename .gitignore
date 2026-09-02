@@ -12,6 +12,12 @@
 /.claude/*
 !/.claude/agents/
 !/.claude/hooks.json
+# Secrets and credentials (defense-in-depth)
+.env*
+*.pem
+*.key
+*.p12
+*.pfx
 
 # Editor folders
 .idea/

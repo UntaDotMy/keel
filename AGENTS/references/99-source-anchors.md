@@ -67,6 +67,18 @@ These skills hand off to or from the AGENTS.md doctrine. Load the matching `<nam
 - `postgres-migration-safety/SKILL.md` — live-traffic Postgres schema changes, backfills, rollback paths.
 - `stripe-integration/SKILL.md` — Checkout, Payment Intents, Subscriptions, Webhooks, Connect, refunds, disputes.
 - `websocket-realtime-design/SKILL.md` — WebSocket, SSE, fan-out, reconnect, backpressure, auth lifecycle.
+- `domain-driven-design/SKILL.md`: ubiquitous language, bounded contexts, aggregates, domain events.
+- `dart-and-flutter-expert/SKILL.md`: Flutter widget architecture, state management, platform channels.
+- `designing-agent-teams/SKILL.md`: multi-agent team decomposition and orchestration patterns.
+- `dispatching-parallel-agents/SKILL.md`: independent work fan-out and concurrency gates.
+- `finishing-a-development-branch/SKILL.md`: branch closeout, review routing, merge/PR options.
+- `output-economy/SKILL.md`: per-response output-token economy.
+- `research-enforcement/SKILL.md`: force web search before external API implementation.
+- `running-anvil/SKILL.md`: Anvil delivery loop: compile, cast, sieve, stamp.
+- `subagent-driven-development/SKILL.md`: independent task delegation through fresh-context subagents.
+- `systematic-debugging/SKILL.md`: root-cause-first debugging for defects and regressions.
+- `test-driven-development/SKILL.md`: RED-GREEN-REFACTOR loop for behavior changes.
+- `writing-plans/SKILL.md`: granular, verifiable implementation plans.
 
 ## Tooling Anchors
 
