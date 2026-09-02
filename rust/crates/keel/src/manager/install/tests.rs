@@ -2655,6 +2655,7 @@ fn grok_platform_override_can_force_and_skip_detection() {
 // PATH honesty: temp HOME / PathPersist double. Live HKCU writes are a defect.
 // ---------------------------------------------------------------------------
 
+#[cfg(not(windows))]
 fn path_test_root(label: &str) -> PathBuf {
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
