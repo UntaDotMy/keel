@@ -98,6 +98,12 @@ fn is_windows_style_absolute(path: &Path) -> bool {
         && (bytes[2] == b'\\' || bytes[2] == b'/')
 }
 
+/// Windows Path entries compare case-insensitively and treat `/` as `\\`.
+#[cfg(any(windows, test))]
+fn windows_path_entry_key(entry: &str) -> String {
+    entry.trim().replace('/', "\\").to_lowercase()
+}
+
 fn is_absolute_keel_home(path: &Path) -> bool {
     path.is_absolute() || is_windows_style_absolute(path)
 }
@@ -245,10 +251,9 @@ pub(crate) fn persist_windows_user_path(
     persist: &dyn PathPersist,
 ) -> Result<bool, String> {
     let (current, has_expand) = persist.read_user_path()?;
-    let lower_current = current.to_lowercase();
-    let lower_home = dir.to_lowercase();
-    for entry in lower_current.split(';') {
-        if entry.trim() == lower_home.trim() {
+    let home_key = windows_path_entry_key(dir);
+    for entry in current.split(';') {
+        if windows_path_entry_key(entry) == home_key {
             return Ok(false);
         }
     }
@@ -277,10 +282,10 @@ pub(crate) fn remove_windows_path(
         Err(_) => return Ok(false),
     };
     let (current, has_expand) = persist.read_user_path()?;
-    let lower_home = dir.to_lowercase();
+    let home_key = windows_path_entry_key(&dir);
     let kept: Vec<&str> = current
         .split(';')
-        .filter(|entry| entry.trim().to_lowercase() != lower_home.trim())
+        .filter(|entry| windows_path_entry_key(entry) != home_key)
         .collect();
     let new_value = kept.join(";");
     if new_value == current {
