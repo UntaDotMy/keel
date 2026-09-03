@@ -833,9 +833,7 @@ fn merge_zcode_config(path: &Path, binary: &Path) -> Result<String, String> {
         ] {
             upsert_zcode_hook(events, event, binary, subcommand)?;
         }
-        // ZCode exposes Stop but no SessionEnd. Run the blocking completion
-        // gate first, then the session-end capture/learning cycle on the same
-        // event so both responsibilities remain active.
+        // ZCode has no SessionEnd, so Stop runs completion before session capture and learning.
         upsert_zcode_hook(events, "Stop", binary, "session-end")?;
     }
 
@@ -926,9 +924,7 @@ fn wire_antigravity_plugin(
     }))
     .unwrap_or_default();
     let quoted_adapter = if cfg!(target_os = "windows") {
-        // Windows file names cannot contain a double quote. Double-quoting is
-        // understood by both cmd.exe and PowerShell, while PowerShell's
-        // single-quote form is not portable to cmd.exe.
+        // Windows file names cannot contain quotes, and both cmd.exe and PowerShell accept them.
         format!("\"{}\"", display_path(&adapter_target))
     } else {
         crate::runner::shell_rewrite::shell_quote(&display_path(&adapter_target))

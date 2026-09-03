@@ -1,8 +1,6 @@
 #!/usr/bin/env node
 
-// Keel Antigravity hook adapter.
-// Translates Antigravity's camelCase hook protocol into Keel's host-neutral
-// bridge commands and translates the gate result back to Antigravity JSON.
+// Translates Antigravity hook payloads to Keel bridge commands and gate results.
 
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
