@@ -157,6 +157,18 @@ pub fn write_install_summary(summary: &InstallSummary, output: &mut dyn Write) {
     if let Some(grok_status) = &summary.grok_wiring {
         let _ = writeln!(output, "  Grok wiring: {grok_status}");
     }
+    if let Some(status) = &summary.agents_gateway_wiring {
+        let _ = writeln!(output, "  Host-neutral gateway skill: {status}");
+    }
+    if let Some(status) = &summary.omp_wiring {
+        let _ = writeln!(output, "  Oh My Pi wiring: {status}");
+    }
+    if let Some(status) = &summary.zcode_wiring {
+        let _ = writeln!(output, "  ZCode wiring: {status}");
+    }
+    if let Some(status) = &summary.antigravity_wiring {
+        let _ = writeln!(output, "  Antigravity wiring: {status}");
+    }
     if let Some(migration) = &summary.migration_report {
         let _ = writeln!(output, "  Legacy migration: {migration}");
     }
@@ -241,6 +253,60 @@ pub(crate) fn remove_deprecated_config_keys(claude_home: &Path) -> Result<(), St
     Ok(())
 }
 
+fn remove_zcode_managed_entries(path: &Path) -> usize {
+    let original = match read_text_if_exists(path) {
+        Ok(text) if !text.trim().is_empty() => text,
+        _ => return 0,
+    };
+    let mut document: serde_json::Value =
+        match serde_json::from_str(original.strip_prefix('\u{feff}').unwrap_or(&original)) {
+            Ok(value) => value,
+            Err(_) => return 0,
+        };
+    let mut changed = false;
+    if let Some(servers) = document
+        .get_mut("mcp")
+        .and_then(|value| value.get_mut("servers"))
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        changed |= servers.remove("keel").is_some();
+    }
+    if let Some(events) = document
+        .get_mut("hooks")
+        .and_then(|value| value.get_mut("events"))
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        for entries in events.values_mut() {
+            if let Some(entries) = entries.as_array_mut() {
+                let before = entries.len();
+                entries.retain(|entry| !entry.to_string().contains("Keel managed lifecycle hook"));
+                changed |= before != entries.len();
+            }
+        }
+        events.retain(|_, value| !value.as_array().is_some_and(Vec::is_empty));
+    }
+    if !changed {
+        return 0;
+    }
+    let rendered = match serde_json::to_string_pretty(&document) {
+        Ok(text) => text,
+        Err(_) => return 0,
+    };
+    if write_text(path, &rendered).is_ok() {
+        1
+    } else {
+        0
+    }
+}
+
+fn remove_gateway_skill(skills_root: &Path) -> usize {
+    let skill = skills_root.join("using-keel");
+    let mut removed = remove_owned_file_if_marked(&skill.join("SKILL.md"), "name: using-keel");
+    removed += remove_empty_directory(&skill);
+    removed += remove_empty_directory(skills_root);
+    removed
+}
+
 pub(crate) fn remove_wired_adapters(claude_home: &Path) -> usize {
     if !is_standard_home(claude_home) {
         return 0;
@@ -260,6 +326,15 @@ pub(crate) fn remove_wired_adapters(claude_home: &Path) -> usize {
 
     let opencode_config = home.join(".config").join("opencode").join("opencode.json");
     removed += remove_json_mcp_entry(&opencode_config, "mcp");
+    removed += remove_owned_file_if_marked(
+        &home
+            .join(".config")
+            .join("opencode")
+            .join("_shared")
+            .join("ts")
+            .join("bridge-core.ts"),
+        "resolveBinary",
+    );
 
     let codex_dir = home.join(".codex").join("plugins").join("keel");
     for (relative, marker) in [
@@ -292,6 +367,8 @@ pub(crate) fn remove_wired_adapters(claude_home: &Path) -> usize {
     // a stale entry would spawn the deleted keel binary every session.
     removed += remove_codex_native_mcp_section(&codex_config);
     removed += remove_codex_managed_agents_md(&home.join(".codex").join("AGENTS.md"));
+    removed += remove_gateway_skill(&home.join(".agents").join("skills"));
+    removed += remove_empty_directory(&home.join(".agents"));
 
     let cursorrules = home.join(".cursorrules");
     if cursorrules.is_file() {
@@ -333,6 +410,16 @@ pub(crate) fn remove_wired_adapters(claude_home: &Path) -> usize {
     ] {
         removed += remove_json_mcp_entry(&mcp_json, "mcpServers");
     }
+    removed += remove_owned_file_if_marked(
+        &home
+            .join(".pi")
+            .join("agent")
+            .join("_shared")
+            .join("ts")
+            .join("bridge-core.ts"),
+        "resolveBinary",
+    );
+    removed += remove_gateway_skill(&home.join(".pi").join("agent").join("skills"));
 
     // Remove the Pi extension from both the correct auto-discovery path
     // (~/.pi/agent/extensions/) and the legacy wrong path (~/.pi/extensions/).
@@ -351,6 +438,14 @@ pub(crate) fn remove_wired_adapters(claude_home: &Path) -> usize {
 
     let cmdc_mcp = home.join(".commandcode").join("mcp.json");
     removed += remove_json_mcp_entry(&cmdc_mcp, "mcpServers");
+    removed += remove_owned_file_if_marked(
+        &home
+            .join(".commandcode")
+            .join("_shared")
+            .join("ts")
+            .join("bridge-core.ts"),
+        "resolveBinary",
+    );
 
     let grok_home = grok_config_home(&home);
     removed += remove_owned_file_if_marked(
@@ -358,6 +453,49 @@ pub(crate) fn remove_wired_adapters(claude_home: &Path) -> usize {
         "hook session-start",
     );
     removed += remove_codex_native_mcp_section(&grok_home.join("config.toml"));
+
+    let omp_root = home.join(".omp").join("agent");
+    removed += remove_owned_file_if_marked(
+        &omp_root.join("extensions").join("keel-pi.ts"),
+        "keel Pi Agent Extension",
+    );
+    removed += remove_owned_file_if_marked(
+        &omp_root.join("_shared").join("ts").join("bridge-core.ts"),
+        "resolveBinary",
+    );
+    removed += remove_json_mcp_entry(&omp_root.join("mcp.json"), "mcpServers");
+    removed += remove_codex_managed_agents_md(&omp_root.join("AGENTS.md"));
+    removed += remove_gateway_skill(&omp_root.join("skills"));
+
+    let zcode_root = home.join(".zcode");
+    removed += remove_zcode_managed_entries(&zcode_root.join("cli").join("config.json"));
+    removed += remove_codex_managed_agents_md(&zcode_root.join("AGENTS.md"));
+    removed += remove_gateway_skill(&zcode_root.join("skills"));
+
+    for antigravity in [
+        home.join(".gemini")
+            .join("config")
+            .join("plugins")
+            .join("keel"),
+        home.join(".gemini")
+            .join("antigravity-cli")
+            .join("plugins")
+            .join("keel"),
+    ] {
+        for (relative, marker) in [
+            ("plugin.json", "Keel managed integration"),
+            ("mcp_config.json", "\"keel\""),
+            ("hooks.json", "\"keel\""),
+            ("keel-antigravity.js", "Keel Antigravity hook adapter"),
+            ("rules/keel.md", "managed by Keel"),
+        ] {
+            removed += remove_owned_file_if_marked(&antigravity.join(relative), marker);
+        }
+        removed += remove_gateway_skill(&antigravity.join("skills"));
+        removed += remove_empty_directory(&antigravity.join("rules"));
+        removed += remove_empty_directory(&antigravity);
+    }
+    removed += remove_codex_managed_agents_md(&home.join(".gemini").join("GEMINI.md"));
 
     removed
 }

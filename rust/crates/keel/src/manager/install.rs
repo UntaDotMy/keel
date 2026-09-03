@@ -26,12 +26,13 @@ pub use executable::{
 };
 pub use flags::InstallOverrides;
 pub(crate) use flags::PlatformName;
-#[cfg(test)]
-pub(crate) use hosts::grok_hooks_payload;
 pub(crate) use hosts::{
-    grok_config_home, grok_hooks_are_current, maybe_wire_codex, maybe_wire_commandcode,
-    maybe_wire_cowork, maybe_wire_cursor, maybe_wire_grok, maybe_wire_opencode, maybe_wire_pi,
+    grok_config_home, grok_hooks_are_effective, maybe_wire_agents_gateway, maybe_wire_antigravity,
+    maybe_wire_codex, maybe_wire_commandcode, maybe_wire_cowork, maybe_wire_cursor,
+    maybe_wire_grok, maybe_wire_omp, maybe_wire_opencode, maybe_wire_pi, maybe_wire_zcode,
 };
+#[cfg(test)]
+pub(crate) use hosts::{grok_hooks_are_current, grok_hooks_payload};
 pub use path::ensure_keel_home_on_path;
 pub(crate) use sync::backup_file_before_managed_overwrite;
 
@@ -149,8 +150,17 @@ pub struct InstallSummary {
     /// Human-readable outcome of installing the Cowork (Claude Desktop) plugin
     /// files, or `None` when skipped. Best-effort.
     pub cowork_wiring: Option<String>,
-    /// Writes `~/.grok/hooks/keel.json` so Grok PreToolUse fires natively.
+    /// Reuses Grok's Claude-compatible hooks by default, with a native fallback
+    /// when Claude hook compatibility is disabled.
     pub grok_wiring: Option<String>,
+    /// Publishes the small host-neutral gateway skill at ~/.agents/skills.
+    pub agents_gateway_wiring: Option<String>,
+    /// Oh My Pi native extension, MCP, instructions, and gateway skill.
+    pub omp_wiring: Option<String>,
+    /// ZCode native MCP, hooks, instructions, and gateway skill.
+    pub zcode_wiring: Option<String>,
+    /// Google Antigravity global plugin and always-on instructions.
+    pub antigravity_wiring: Option<String>,
     /// Human-readable outcome of migrating keel-owned data out of a legacy
     /// `~/.claude` install into the host-neutral root, or `None` when there
     /// was nothing to migrate. Data-preserving by construction.
@@ -331,6 +341,7 @@ pub fn install_from_paths(
     let detection_home = engagement_home.parent().unwrap_or(&engagement_home);
     let detected = super::platform_detect::PlatformDetector::new(detection_home).detect();
     let detected = apply_overrides(detected, overrides);
+    let agents_gateway_wiring = maybe_wire_agents_gateway(repository_root, claude_home);
     let opencode_wiring = maybe_wire_opencode(repository_root, claude_home, detected.opencode);
     let cursor_wiring = maybe_wire_cursor(repository_root, claude_home, detected.cursor);
     let codex_wiring = maybe_wire_codex(repository_root, claude_home, detected.codex);
@@ -339,6 +350,10 @@ pub fn install_from_paths(
     let commandcode_wiring =
         maybe_wire_commandcode(repository_root, claude_home, detected.commandcode);
     let grok_wiring = maybe_wire_grok(claude_home, detected.grok);
+    let omp_wiring = maybe_wire_omp(repository_root, claude_home, detected.omp);
+    let zcode_wiring = maybe_wire_zcode(repository_root, claude_home, detected.zcode);
+    let antigravity_wiring =
+        maybe_wire_antigravity(repository_root, claude_home, detected.antigravity);
     let removed_legacy_duplicates = cleanup_identical_legacy_data(claude_home, &engagement_home);
     if removed_legacy_duplicates > 0 {
         let report = migration_report.get_or_insert_with(String::new);
@@ -369,6 +384,10 @@ pub fn install_from_paths(
         commandcode_wiring,
         cowork_wiring,
         grok_wiring,
+        agents_gateway_wiring,
+        omp_wiring,
+        zcode_wiring,
+        antigravity_wiring,
         migration_report,
         path_wiring,
     })

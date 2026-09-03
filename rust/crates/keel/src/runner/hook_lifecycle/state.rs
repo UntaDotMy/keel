@@ -103,6 +103,10 @@ pub(crate) fn is_edit_class_tool(tool_name: &str) -> bool {
             // Grok maps Claude Edit/Write/MultiEdit onto search_replace.
             | "search_replace"
             | "searchreplace"
+            // Google Antigravity edit-class tool names.
+            | "write_to_file"
+            | "replace_file_content"
+            | "multi_replace_file_content"
     )
 }
 

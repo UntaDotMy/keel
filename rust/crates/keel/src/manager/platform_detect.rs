@@ -19,6 +19,9 @@ pub struct DetectedPlatforms {
     pub cowork: bool,
     pub commandcode: bool,
     pub grok: bool,
+    pub omp: bool,
+    pub zcode: bool,
+    pub antigravity: bool,
 }
 
 pub struct PlatformDetector {
@@ -47,6 +50,12 @@ impl PlatformDetector {
             // Command Code: config dir ~/.commandcode or the cmdc binary on PATH.
             commandcode: self.has_config_dir(".commandcode") || self.has_binary("cmdc"),
             grok: self.grok_home().is_dir() || self.has_binary("grok"),
+            omp: self.has_config_dir(".omp/agent") || self.has_binary("omp"),
+            zcode: self.has_config_dir(".zcode") || self.has_binary("zcode"),
+            antigravity: self.has_config_dir(".gemini/config")
+                || self.has_config_dir(".gemini/antigravity-cli")
+                || self.has_binary("antigravity")
+                || self.has_binary("agy"),
         }
     }
 

@@ -723,6 +723,24 @@ pub(crate) fn report_bridge_host_wiring(
         Some(path) => path,
         None => return,
     };
+    let shared_gateway = home
+        .join(".agents")
+        .join("skills")
+        .join("using-keel")
+        .join("SKILL.md");
+    write_doctor_check(
+        standard_output,
+        shared_gateway.is_file(),
+        &format!(
+            "shared gateway skill: {} ({})",
+            if shared_gateway.is_file() {
+                "installed"
+            } else {
+                "missing - run `keel install` so Codex/OpenCode can discover Keel"
+            },
+            display_path(&shared_gateway)
+        ),
+    );
 
     // OpenCode: plugin file + mcp.keel entry in opencode.json.
     let opencode_plugin = home
@@ -731,6 +749,12 @@ pub(crate) fn report_bridge_host_wiring(
         .join("plugins")
         .join("keel.ts");
     let opencode_json = home.join(".config").join("opencode").join("opencode.json");
+    let opencode_core = home
+        .join(".config")
+        .join("opencode")
+        .join("_shared")
+        .join("ts")
+        .join("bridge-core.ts");
     let opencode_mcp = if opencode_json.is_file() {
         fs::read_to_string(&opencode_json)
             .ok()
@@ -743,7 +767,7 @@ pub(crate) fn report_bridge_host_wiring(
     report_host(
         standard_output,
         "opencode",
-        opencode_plugin.is_file(),
+        opencode_plugin.is_file() && opencode_core.is_file(),
         opencode_mcp,
     );
 
@@ -764,12 +788,42 @@ pub(crate) fn report_bridge_host_wiring(
         .join("agent")
         .join("extensions")
         .join("keel-pi.ts");
+    let pi_core = home
+        .join(".pi")
+        .join("agent")
+        .join("_shared")
+        .join("ts")
+        .join("bridge-core.ts");
     report_host(
         standard_output,
         "pi",
-        pi_agents.is_file() && pi_ext.is_file(),
+        pi_agents.is_file() && pi_ext.is_file() && pi_core.is_file(),
         pi_mcp,
     );
+
+    let commandcode_root = home.join(".commandcode");
+    if commandcode_root.is_dir() {
+        let commandcode_mcp = fs::read_to_string(commandcode_root.join("mcp.json"))
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+            .is_some_and(|doc| {
+                doc.get("mcpServers")
+                    .and_then(|servers| servers.get("keel"))
+                    .is_some()
+            });
+        let commandcode_wired = commandcode_root.join("mods").join("keel-cmdc.ts").is_file()
+            && commandcode_root
+                .join("_shared")
+                .join("ts")
+                .join("bridge-core.ts")
+                .is_file();
+        report_host(
+            standard_output,
+            "commandcode",
+            commandcode_wired,
+            commandcode_mcp,
+        );
+    }
 
     // Codex: plugin dir with manifest + bundled .mcp.json (plugin MCP server).
     // File presence alone is NOT enough: Codex discovers plugins through the
@@ -911,15 +965,130 @@ pub(crate) fn report_bridge_host_wiring(
             .ok()
             .and_then(|text| toml::from_str::<toml::Value>(&text).ok())
             .is_some_and(|document| native_mcp_is_current(&document, &expected_executable));
-        let grok_wired =
-            crate::manager::install::grok_hooks_are_current(&grok_hooks, &expected_executable)
-                && grok_mcp;
+        let grok_wired = crate::manager::install::grok_hooks_are_effective(
+            &grok_dir,
+            keel_home,
+            &expected_executable,
+        ) && grok_mcp;
         let state = if grok_wired {
-            "wired (hooks + MCP)"
+            if grok_hooks.exists() {
+                "wired (native hooks + MCP)"
+            } else {
+                "wired (Claude-compatible hooks + MCP, no duplicates)"
+            }
         } else {
             "not wired (run `keel install --with grok` to repair hooks + MCP)"
         };
         write_doctor_check(standard_output, grok_wired, &format!("grok host: {state}"));
+    }
+
+    let omp_root = home.join(".omp").join("agent");
+    if omp_root.is_dir() {
+        let omp_mcp = fs::read_to_string(omp_root.join("mcp.json"))
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+            .is_some_and(|doc| {
+                doc.get("mcpServers")
+                    .and_then(|servers| servers.get("keel"))
+                    .is_some()
+            });
+        let omp_wired = omp_root.join("AGENTS.md").is_file()
+            && omp_root.join("extensions").join("keel-pi.ts").is_file()
+            && omp_root
+                .join("_shared")
+                .join("ts")
+                .join("bridge-core.ts")
+                .is_file()
+            && omp_root
+                .join("skills")
+                .join("using-keel")
+                .join("SKILL.md")
+                .is_file();
+        report_host(standard_output, "omp", omp_wired, omp_mcp);
+    }
+
+    let zcode_root = home.join(".zcode");
+    if zcode_root.is_dir() {
+        let zcode_config = fs::read_to_string(zcode_root.join("cli").join("config.json"))
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok());
+        let zcode_mcp = zcode_config.as_ref().is_some_and(|doc| {
+            doc.get("mcp")
+                .and_then(|mcp| mcp.get("servers"))
+                .and_then(|servers| servers.get("keel"))
+                .is_some()
+        });
+        let zcode_hooks = zcode_config.as_ref().is_some_and(|doc| {
+            doc.get("hooks")
+                .and_then(|hooks| hooks.get("enabled"))
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+                && doc.to_string().contains("Keel managed lifecycle hook")
+        });
+        let zcode_wired = zcode_hooks
+            && fs::read_to_string(zcode_root.join("AGENTS.md"))
+                .map(|text| text.contains("keel:begin"))
+                .unwrap_or(false)
+            && zcode_root
+                .join("skills")
+                .join("using-keel")
+                .join("SKILL.md")
+                .is_file();
+        report_host(standard_output, "zcode", zcode_wired, zcode_mcp);
+    }
+
+    let antigravity_node = which::which("node").is_ok();
+    let mut antigravity_present = false;
+    for (name, antigravity) in [
+        (
+            "antigravity",
+            home.join(".gemini")
+                .join("config")
+                .join("plugins")
+                .join("keel"),
+        ),
+        (
+            "antigravity-cli",
+            home.join(".gemini")
+                .join("antigravity-cli")
+                .join("plugins")
+                .join("keel"),
+        ),
+    ] {
+        if !antigravity.is_dir() {
+            continue;
+        }
+        antigravity_present = true;
+        let antigravity_mcp = fs::read_to_string(antigravity.join("mcp_config.json"))
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+            .is_some_and(|doc| {
+                doc.get("mcpServers")
+                    .and_then(|servers| servers.get("keel"))
+                    .is_some()
+            });
+        let antigravity_wired = antigravity_node
+            && antigravity.join("plugin.json").is_file()
+            && antigravity.join("hooks.json").is_file()
+            && antigravity.join("keel-antigravity.js").is_file()
+            && antigravity.join("rules").join("keel.md").is_file()
+            && antigravity
+                .join("skills")
+                .join("using-keel")
+                .join("SKILL.md")
+                .is_file();
+        report_host(standard_output, name, antigravity_wired, antigravity_mcp);
+    }
+    if antigravity_present {
+        write_doctor_check(
+            standard_output,
+            antigravity_node,
+            if antigravity_node {
+                "antigravity hook runtime (node): available"
+            } else {
+                "antigravity hook runtime (node): missing from PATH"
+            },
+        );
     }
 }
 
@@ -1211,6 +1380,159 @@ mod tests {
         );
         let _ = fs::remove_dir_all(claude_home.parent().unwrap());
     }
+
+    #[test]
+    fn opencode_host_warns_when_imported_bridge_core_is_missing() {
+        let claude_home = unique_home("opencode-missing-core");
+        let home = claude_home.parent().unwrap();
+        let plugin = home.join(".config").join("opencode").join("plugins");
+        fs::create_dir_all(&plugin).unwrap();
+        fs::write(
+            plugin.join("keel.ts"),
+            "import '../_shared/ts/bridge-core';",
+        )
+        .unwrap();
+        fs::write(
+            home.join(".config").join("opencode").join("opencode.json"),
+            r#"{"mcp":{"keel":{}}}"#,
+        )
+        .unwrap();
+
+        let mut output = Vec::new();
+        report_bridge_host_wiring(&mut output, &claude_home);
+        let output = String::from_utf8(output).unwrap();
+        assert!(
+            output.contains("[warn] opencode host: not wired"),
+            "{output}"
+        );
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn requested_new_hosts_have_truthful_doctor_rows() {
+        let claude_home = unique_home("new-host-status");
+        let home = claude_home.parent().unwrap();
+
+        let gateway = home.join(".agents").join("skills").join("using-keel");
+        fs::create_dir_all(&gateway).unwrap();
+        fs::write(gateway.join("SKILL.md"), "keel").unwrap();
+
+        let omp = home.join(".omp").join("agent");
+        fs::create_dir_all(omp.join("extensions")).unwrap();
+        fs::create_dir_all(omp.join("_shared").join("ts")).unwrap();
+        fs::write(omp.join("extensions").join("keel-pi.ts"), "keel").unwrap();
+        fs::write(
+            omp.join("_shared").join("ts").join("bridge-core.ts"),
+            "keel",
+        )
+        .unwrap();
+        fs::write(omp.join("AGENTS.md"), "keel:begin").unwrap();
+        fs::write(omp.join("mcp.json"), r#"{"mcpServers":{"keel":{}}}"#).unwrap();
+        fs::create_dir_all(omp.join("skills").join("using-keel")).unwrap();
+        fs::write(
+            omp.join("skills").join("using-keel").join("SKILL.md"),
+            "keel",
+        )
+        .unwrap();
+
+        let zcode_config = home.join(".zcode").join("cli").join("config.json");
+        fs::create_dir_all(zcode_config.parent().unwrap()).unwrap();
+        fs::write(
+            zcode_config,
+            r#"{"mcp":{"servers":{"keel":{}}},"hooks":{"enabled":true,"events":{"PreToolUse":[{"hooks":[{"statusMessage":"Keel managed lifecycle hook"}]}]}}}"#,
+        )
+        .unwrap();
+        fs::write(home.join(".zcode").join("AGENTS.md"), "keel:begin").unwrap();
+        fs::create_dir_all(home.join(".zcode").join("skills").join("using-keel")).unwrap();
+        fs::write(
+            home.join(".zcode")
+                .join("skills")
+                .join("using-keel")
+                .join("SKILL.md"),
+            "keel",
+        )
+        .unwrap();
+
+        let antigravity = home
+            .join(".gemini")
+            .join("config")
+            .join("plugins")
+            .join("keel");
+        fs::create_dir_all(&antigravity).unwrap();
+        fs::write(antigravity.join("plugin.json"), r#"{"name":"keel"}"#).unwrap();
+        fs::write(
+            antigravity.join("mcp_config.json"),
+            r#"{"mcpServers":{"keel":{}}}"#,
+        )
+        .unwrap();
+        fs::write(antigravity.join("hooks.json"), r#"{"keel":{}}"#).unwrap();
+        fs::write(antigravity.join("keel-antigravity.js"), "keel").unwrap();
+        fs::create_dir_all(antigravity.join("rules")).unwrap();
+        fs::create_dir_all(antigravity.join("skills").join("using-keel")).unwrap();
+        fs::write(antigravity.join("rules").join("keel.md"), "keel").unwrap();
+        fs::write(
+            antigravity
+                .join("skills")
+                .join("using-keel")
+                .join("SKILL.md"),
+            "keel",
+        )
+        .unwrap();
+
+        let antigravity_cli = home
+            .join(".gemini")
+            .join("antigravity-cli")
+            .join("plugins")
+            .join("keel");
+        fs::create_dir_all(antigravity_cli.join("rules")).unwrap();
+        fs::create_dir_all(antigravity_cli.join("skills").join("using-keel")).unwrap();
+        fs::write(antigravity_cli.join("plugin.json"), r#"{"name":"keel"}"#).unwrap();
+        fs::write(
+            antigravity_cli.join("mcp_config.json"),
+            r#"{"mcpServers":{"keel":{}}}"#,
+        )
+        .unwrap();
+        fs::write(antigravity_cli.join("hooks.json"), r#"{"keel":{}}"#).unwrap();
+        fs::write(antigravity_cli.join("keel-antigravity.js"), "keel").unwrap();
+        fs::write(antigravity_cli.join("rules").join("keel.md"), "keel").unwrap();
+        fs::write(
+            antigravity_cli
+                .join("skills")
+                .join("using-keel")
+                .join("SKILL.md"),
+            "keel",
+        )
+        .unwrap();
+
+        let commandcode = home.join(".commandcode");
+        fs::create_dir_all(commandcode.join("mods")).unwrap();
+        fs::create_dir_all(commandcode.join("_shared").join("ts")).unwrap();
+        fs::write(commandcode.join("mods").join("keel-cmdc.ts"), "keel").unwrap();
+        fs::write(
+            commandcode
+                .join("_shared")
+                .join("ts")
+                .join("bridge-core.ts"),
+            "keel",
+        )
+        .unwrap();
+        fs::write(
+            commandcode.join("mcp.json"),
+            r#"{"mcpServers":{"keel":{}}}"#,
+        )
+        .unwrap();
+
+        let mut output = Vec::new();
+        report_bridge_host_wiring(&mut output, &claude_home);
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("[ok] shared gateway skill:"), "{output}");
+        assert!(output.contains("[ok] commandcode host:"), "{output}");
+        assert!(output.contains("[ok] omp host:"), "{output}");
+        assert!(output.contains("[ok] zcode host:"), "{output}");
+        assert!(output.contains("[ok] antigravity host:"), "{output}");
+        assert!(output.contains("[ok] antigravity-cli host:"), "{output}");
+        let _ = fs::remove_dir_all(home);
+    }
     #[test]
     fn grok_host_reports_wired_when_hooks_and_mcp_are_current() {
         let claude_home = unique_home("grok-wired");
@@ -1237,9 +1559,77 @@ mod tests {
         report_bridge_host_wiring(&mut output, &claude_home);
         let output = String::from_utf8(output).unwrap();
         assert!(
-            output.contains("[ok] grok host: wired (hooks + MCP)"),
+            output.contains("[ok] grok host: wired (native hooks + MCP)"),
             "{output}"
         );
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn grok_host_reuses_claude_compatible_hooks_without_native_duplicate() {
+        let claude_home = unique_home("grok-claude-compatible");
+        let home = claude_home.parent().unwrap();
+        let executable = installed_executable_path(&claude_home);
+        fs::create_dir_all(home.join(".grok")).unwrap();
+        fs::write(
+            home.join(".grok").join("config.toml"),
+            format!(
+                "[mcp_servers.keel]\ncommand = {:?}\nargs = [\"mcp\", \"serve\"]\n",
+                display_path(&executable)
+            ),
+        )
+        .unwrap();
+        let settings = claude_home.join(crate::hooks::claude::SETTINGS_FILE_NAME);
+        fs::create_dir_all(&claude_home).unwrap();
+        fs::write(
+            &settings,
+            crate::runner::hook_lifecycle::build_hooks_payload(&settings, &executable).unwrap(),
+        )
+        .unwrap();
+
+        let mut output = Vec::new();
+        report_bridge_host_wiring(&mut output, &claude_home);
+        let output = String::from_utf8(output).unwrap();
+        assert!(
+            output.contains("[ok] grok host: wired (Claude-compatible hooks + MCP, no duplicates)"),
+            "{output}"
+        );
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn grok_host_warns_when_native_and_claude_compatible_hooks_would_duplicate() {
+        let claude_home = unique_home("grok-duplicate-hooks");
+        let home = claude_home.parent().unwrap();
+        let executable = installed_executable_path(&claude_home);
+        let grok_hooks = home.join(".grok").join("hooks");
+        fs::create_dir_all(&grok_hooks).unwrap();
+        fs::write(
+            grok_hooks.join("keel.json"),
+            serde_json::to_string_pretty(&crate::manager::install::grok_hooks_payload(&executable))
+                .unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            home.join(".grok").join("config.toml"),
+            format!(
+                "[mcp_servers.keel]\ncommand = {:?}\nargs = [\"mcp\", \"serve\"]\n",
+                display_path(&executable)
+            ),
+        )
+        .unwrap();
+        let settings = claude_home.join(crate::hooks::claude::SETTINGS_FILE_NAME);
+        fs::create_dir_all(&claude_home).unwrap();
+        fs::write(
+            &settings,
+            crate::runner::hook_lifecycle::build_hooks_payload(&settings, &executable).unwrap(),
+        )
+        .unwrap();
+
+        let mut output = Vec::new();
+        report_bridge_host_wiring(&mut output, &claude_home);
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("[warn] grok host: not wired"), "{output}");
         let _ = fs::remove_dir_all(home);
     }
 

@@ -154,6 +154,14 @@ pub fn resolve_skill_for_prompt(prompt: &str, skills: &[SkillTerms]) -> Option<S
             score: 0.0,
         });
     }
+    if diagnosis_operation_override(prompt)
+        .is_some_and(|name| skills.iter().any(|skill| skill.name == name))
+    {
+        return Some(SkillMatch {
+            name: "systematic-debugging".to_string(),
+            score: 0.0,
+        });
+    }
     if let Some(found) = score_prompt_against_skills(prompt, skills) {
         return Some(found);
     }
@@ -208,6 +216,32 @@ fn security_audit_override(prompt: &str) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+/// Explicit broken-behavior diagnosis outranks incidental subsystem nouns.
+/// A request such as "memory and skills are not working; find the root cause"
+/// is debugging work even though a feature-specific status skill can score
+/// highly on repeated words like `memory`.
+fn diagnosis_operation_override(prompt: &str) -> Option<&'static str> {
+    let lower = prompt.to_ascii_lowercase();
+    let diagnosis = [
+        "find the root cause",
+        "check why",
+        "why is this not working",
+        "why isn't this working",
+        "not working",
+        "does not work",
+        "doesn't work",
+        "diagnose",
+        "debug",
+        "reproduce the bug",
+    ]
+    .iter()
+    .any(|phrase| lower.contains(phrase));
+    let repair = ["fix", "repair", "root cause", "verify"]
+        .iter()
+        .any(|phrase| lower.contains(phrase));
+    (diagnosis && repair).then_some("systematic-debugging")
 }
 
 /// Curated cross-cutting skill triggers, evaluated only when the statistical
@@ -1596,6 +1630,28 @@ mod tests {
             )
             .map(|found| found.name),
             Some("security-and-compliance-auditor".to_string())
+        );
+    }
+
+    #[test]
+    fn diagnosis_operation_precedes_incidental_feature_vocabulary() {
+        let corpus = vec![
+            skill(
+                "memory-status-reporter",
+                "Reports memory health, recall index status, learned instincts, and document counts.",
+                "Use for memory status and recall health reports.",
+            ),
+            skill(
+                "systematic-debugging",
+                "Finds root causes before changing code and verifies fixes with evidence.",
+                "Use when behavior is broken or a feature is not working.",
+            ),
+        ];
+        let prompt = "The install does not work: Anvil, learn, memory, and skills are not being used. Check why, find the root cause, fix it, and verify everything.";
+
+        assert_eq!(
+            resolve_skill_for_prompt(prompt, &corpus).map(|found| found.name),
+            Some("systematic-debugging".to_string())
         );
     }
 

@@ -231,6 +231,276 @@ fn with_flag_forces_opencode_when_not_detected() {
 }
 
 #[test]
+fn opencode_install_includes_its_runtime_bridge_dependency() {
+    let repo = repository_root();
+    let (home, claude_home) = fake_home_with_claude("keel-opencode-bridge-core");
+    run_install(&repo, &claude_home, &["--with", "opencode"]);
+
+    assert!(
+        home.join(".config")
+            .join("opencode")
+            .join("_shared")
+            .join("ts")
+            .join("bridge-core.ts")
+            .is_file(),
+        "the installed OpenCode plugin imports ../_shared/ts/bridge-core and must include it"
+    );
+    let _ = fs::remove_dir_all(&home);
+}
+
+#[test]
+fn pi_install_includes_its_runtime_bridge_dependency() {
+    let repo = repository_root();
+    let (home, claude_home) = fake_home_with_claude("keel-pi-bridge-core");
+    run_install(&repo, &claude_home, &["--with", "pi"]);
+
+    assert!(
+        home.join(".pi")
+            .join("agent")
+            .join("_shared")
+            .join("ts")
+            .join("bridge-core.ts")
+            .is_file(),
+        "the installed Pi extension imports ../_shared/ts/bridge-core and must include it"
+    );
+    let _ = fs::remove_dir_all(&home);
+}
+
+#[test]
+fn commandcode_install_includes_its_runtime_bridge_dependency() {
+    let repo = repository_root();
+    let (home, claude_home) = fake_home_with_claude("keel-commandcode-bridge-core");
+    run_install(&repo, &claude_home, &["--with", "commandcode"]);
+
+    assert!(
+        home.join(".commandcode")
+            .join("_shared")
+            .join("ts")
+            .join("bridge-core.ts")
+            .is_file(),
+        "the installed Command Code mod imports ../_shared/ts/bridge-core and must include it"
+    );
+    let _ = fs::remove_dir_all(&home);
+}
+
+#[test]
+fn codex_install_publishes_the_host_neutral_gateway_skill() {
+    let repo = repository_root();
+    let (home, claude_home) = fake_home_with_claude("keel-codex-agent-skill");
+    run_install(&repo, &claude_home, &["--with", "codex"]);
+
+    assert!(
+        home.join(".agents")
+            .join("skills")
+            .join("using-keel")
+            .join("SKILL.md")
+            .is_file(),
+        "Codex discovers personal skills from ~/.agents/skills"
+    );
+    let _ = fs::remove_dir_all(&home);
+}
+
+#[test]
+fn with_flag_wires_oh_my_pi_native_surfaces() {
+    let repo = repository_root();
+    let (home, claude_home) = fake_home_with_claude("keel-with-omp");
+    run_install(&repo, &claude_home, &["--with", "omp"]);
+    let omp = home.join(".omp").join("agent");
+
+    assert!(omp.join("extensions").join("keel-pi.ts").is_file());
+    assert!(omp
+        .join("_shared")
+        .join("ts")
+        .join("bridge-core.ts")
+        .is_file());
+    assert!(omp.join("mcp.json").is_file());
+    assert!(omp.join("AGENTS.md").is_file());
+    assert!(omp
+        .join("skills")
+        .join("using-keel")
+        .join("SKILL.md")
+        .is_file());
+    let _ = fs::remove_dir_all(&home);
+}
+
+#[test]
+fn with_flag_wires_zcode_native_surfaces() {
+    let repo = repository_root();
+    let (home, claude_home) = fake_home_with_claude("keel-with-zcode");
+    run_install(&repo, &claude_home, &["--with", "zcode"]);
+    let zcode = home.join(".zcode");
+
+    assert!(zcode.join("AGENTS.md").is_file());
+    assert!(zcode
+        .join("skills")
+        .join("using-keel")
+        .join("SKILL.md")
+        .is_file());
+    let config: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(zcode.join("cli").join("config.json")).unwrap())
+            .unwrap();
+    assert!(config["mcp"]["servers"]["keel"].is_object());
+    assert_eq!(config["hooks"]["enabled"], true);
+    assert!(config["hooks"]["events"]["PreToolUse"].is_array());
+    assert!(
+        config["hooks"]["events"]["PreToolUse"][0]["hooks"][0]["command"]
+            .as_str()
+            .is_some_and(|command| command.contains("keel"))
+    );
+    let stop_commands = config["hooks"]["events"]["Stop"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|group| group["hooks"][0]["args"].as_array())
+        .map(|args| {
+            args.iter()
+                .filter_map(serde_json::Value::as_str)
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect::<Vec<_>>();
+    assert!(stop_commands.iter().any(|command| command == "hook stop"));
+    assert!(
+        stop_commands
+            .iter()
+            .any(|command| command == "hook session-end"),
+        "ZCode has no SessionEnd event, so Stop must also run learning/session capture"
+    );
+    let _ = fs::remove_dir_all(&home);
+}
+
+#[test]
+fn zcode_install_preserves_user_config_and_explicitly_disabled_hooks() {
+    let repo = repository_root();
+    let (home, claude_home) = fake_home_with_claude("keel-zcode-preserve");
+    let config_path = home.join(".zcode").join("cli").join("config.json");
+    fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+    fs::write(
+        &config_path,
+        r#"{"theme":"dark","hooks":{"enabled":false},"mcp":{"servers":{"user":{"command":"user-server"}}}}"#,
+    )
+    .unwrap();
+
+    run_install(&repo, &claude_home, &["--with", "zcode"]);
+    let config: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+    assert_eq!(config["theme"], "dark");
+    assert_eq!(config["hooks"]["enabled"], false);
+    assert_eq!(config["mcp"]["servers"]["user"]["command"], "user-server");
+    assert!(config["mcp"]["servers"]["keel"].is_object());
+    let _ = fs::remove_dir_all(&home);
+}
+
+#[test]
+fn with_flag_wires_antigravity_global_plugin() {
+    let repo = repository_root();
+    let (home, claude_home) = fake_home_with_claude("keel-with-antigravity");
+    run_install(&repo, &claude_home, &["--with", "antigravity"]);
+    let plugin = home
+        .join(".gemini")
+        .join("config")
+        .join("plugins")
+        .join("keel");
+
+    assert!(plugin.join("plugin.json").is_file());
+    assert!(plugin.join("mcp_config.json").is_file());
+    assert!(plugin.join("hooks.json").is_file());
+    assert!(plugin.join("keel-antigravity.js").is_file());
+    assert!(plugin.join("rules").join("keel.md").is_file());
+    assert!(plugin
+        .join("skills")
+        .join("using-keel")
+        .join("SKILL.md")
+        .is_file());
+    let _ = fs::remove_dir_all(&home);
+}
+
+#[test]
+fn existing_antigravity_cli_home_receives_the_cli_plugin() {
+    let repo = repository_root();
+    let (home, claude_home) = fake_home_with_claude("keel-antigravity-cli");
+    fs::create_dir_all(home.join(".gemini").join("antigravity-cli")).unwrap();
+    run_install(&repo, &claude_home, &[]);
+
+    let plugin = home
+        .join(".gemini")
+        .join("antigravity-cli")
+        .join("plugins")
+        .join("keel");
+    assert!(plugin.join("plugin.json").is_file());
+    assert!(plugin.join("mcp_config.json").is_file());
+    assert!(plugin.join("hooks.json").is_file());
+    assert!(plugin.join("keel-antigravity.js").is_file());
+    assert!(plugin
+        .join("skills")
+        .join("using-keel")
+        .join("SKILL.md")
+        .is_file());
+    run_uninstall(&repo, &claude_home);
+    assert!(
+        !plugin.exists(),
+        "uninstall must remove the managed CLI plugin"
+    );
+    let _ = fs::remove_dir_all(&home);
+}
+
+#[test]
+fn uninstall_removes_new_host_wiring_without_removing_user_config() {
+    let repo = repository_root();
+    let (home, claude_home) = fake_home_with_claude("keel-uninstall-new-hosts");
+    let zcode_config = home.join(".zcode").join("cli").join("config.json");
+    fs::create_dir_all(zcode_config.parent().unwrap()).unwrap();
+    fs::write(&zcode_config, r#"{"userKeep":true}"#).unwrap();
+
+    run_install(&repo, &claude_home, &["--with", "omp,zcode,antigravity"]);
+    run_uninstall(&repo, &claude_home);
+
+    assert!(!home
+        .join(".agents")
+        .join("skills")
+        .join("using-keel")
+        .exists());
+    assert!(!home
+        .join(".omp")
+        .join("agent")
+        .join("extensions")
+        .join("keel-pi.ts")
+        .exists());
+    assert!(!home
+        .join(".omp")
+        .join("agent")
+        .join("_shared")
+        .join("ts")
+        .join("bridge-core.ts")
+        .exists());
+    assert!(!home
+        .join(".omp")
+        .join("agent")
+        .join("skills")
+        .join("using-keel")
+        .exists());
+    assert!(!home
+        .join(".gemini")
+        .join("config")
+        .join("plugins")
+        .join("keel")
+        .exists());
+
+    let zcode_after: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&zcode_config).unwrap()).unwrap();
+    assert_eq!(zcode_after["userKeep"], true);
+    assert!(zcode_after["mcp"]["servers"].get("keel").is_none());
+    let pre_tool = zcode_after["hooks"]["events"]["PreToolUse"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(pre_tool
+        .iter()
+        .all(|entry| !entry.to_string().contains("Keel managed lifecycle hook")));
+    let _ = fs::remove_dir_all(&home);
+}
+
+#[test]
 fn without_flag_overrides_detection() {
     let repo = repository_root();
     let (home, claude_home) = fake_home_with_claude("keel-without-overrides");
@@ -263,7 +533,7 @@ fn with_cursor_forces_cursor_wiring() {
 }
 
 #[test]
-fn with_grok_writes_native_mcp_config_and_hooks() {
+fn with_grok_reuses_default_claude_compatible_hooks_without_duplicates() {
     let repo = repository_root();
     let (home, claude_home) = fake_home_with_claude("keel-with-grok");
     run_install(&repo, &claude_home, &["--with", "grok"]);
@@ -288,7 +558,36 @@ fn with_grok_writes_native_mcp_config_and_hooks() {
     );
 
     let hooks = home.join(".grok").join("hooks").join("keel.json");
-    assert!(hooks.is_file(), "Grok native hook config must be installed");
+    assert!(
+        !hooks.exists(),
+        "Grok must not duplicate the managed Claude hooks it loads by default"
+    );
+    assert!(
+        claude_home.join("settings.json").is_file(),
+        "the Claude-compatible hook source must exist"
+    );
+    let _ = fs::remove_dir_all(&home);
+}
+
+#[test]
+fn with_grok_writes_native_hooks_when_claude_hook_compatibility_is_disabled() {
+    let repo = repository_root();
+    let (home, claude_home) = fake_home_with_claude("keel-with-grok-native-hooks");
+    let grok_home = home.join(".grok");
+    fs::create_dir_all(&grok_home).unwrap();
+    fs::write(
+        grok_home.join("config.toml"),
+        "[compat.claude]\nhooks = false\n",
+    )
+    .unwrap();
+
+    run_install(&repo, &claude_home, &["--with", "grok"]);
+
+    let hooks = grok_home.join("hooks").join("keel.json");
+    assert!(
+        hooks.is_file(),
+        "Grok needs native hooks when Claude hook compatibility is disabled"
+    );
     let _ = fs::remove_dir_all(&home);
 }
 
@@ -323,7 +622,11 @@ fn uninstall_removes_only_keel_owned_grok_config() {
     let grok_home = home.join(".grok");
     fs::create_dir_all(&grok_home).unwrap();
     let config = grok_home.join("config.toml");
-    fs::write(&config, "[display]\ntheme = \"dark\"\n").unwrap();
+    fs::write(
+        &config,
+        "[display]\ntheme = \"dark\"\n[compat.claude]\nhooks = false\n",
+    )
+    .unwrap();
 
     run_install(&repo, &claude_home, &["--with", "grok"]);
     let hooks = grok_home.join("hooks").join("keel.json");
