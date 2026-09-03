@@ -1,7 +1,7 @@
 <!--
 Purpose: Carry the full iterative development loop, flow control, loop limits, and general approach previously inline in AGENTS.md.
 Caller: AGENTS.md when implementation is starting and the executing agent needs the loop discipline in depth.
-Dependencies: keel memory, keel orchestration, keel code-search, keel review.
+Dependencies: keel memory, keel anvil, keel code-search, keel review.
 Main Functions: Define loops 0–9, exit criteria, flow control, loop limits, and the general approach.
 Side Effects: None — this file is informational.
 -->

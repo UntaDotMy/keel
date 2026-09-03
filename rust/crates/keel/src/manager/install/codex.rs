@@ -162,9 +162,9 @@ pub(crate) fn ensure_codex_native_mcp(
         // Drop the old section body (until the next table header), then
         // re-emit the section with the desired values.
         let mut end = lines.len();
+        let mut in_multiline = false;
         for (offset, line) in lines[pos + 1..].iter().enumerate() {
-            let trimmed = line.trim();
-            if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            if is_toml_table_header(line, &mut in_multiline) {
                 end = pos + 1 + offset;
                 break;
             }
@@ -420,9 +420,9 @@ pub(crate) fn remove_codex_plugin_section(config_path: &Path) -> usize {
     };
     // Find the end of the section: the next line that starts a new table.
     let mut end = lines.len();
+    let mut in_multiline = false;
     for (offset, line) in lines[pos + 1..].iter().enumerate() {
-        let trimmed = line.trim();
-        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+        if is_toml_table_header(line, &mut in_multiline) {
             end = pos + 1 + offset;
             break;
         }
@@ -466,9 +466,9 @@ pub(crate) fn remove_codex_native_mcp_section(config_path: &Path) -> usize {
         return 0;
     };
     let mut end = lines.len();
+    let mut in_multiline = false;
     for (offset, line) in lines[pos + 1..].iter().enumerate() {
-        let trimmed = line.trim();
-        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+        if is_toml_table_header(line, &mut in_multiline) {
             end = pos + 1 + offset;
             break;
         }
@@ -492,6 +492,19 @@ pub(crate) fn remove_codex_native_mcp_section(config_path: &Path) -> usize {
     1
 }
 
+fn is_toml_table_header(line: &str, in_multiline: &mut bool) -> bool {
+    let trimmed = line.trim();
+    if trimmed.contains("\"\"\"") || trimmed.contains("'''") {
+        let count = trimmed.matches("\"\"\"").count() + trimmed.matches("'''").count();
+        if count % 2 == 1 {
+            *in_multiline = !*in_multiline;
+        }
+    }
+    if *in_multiline {
+        return false;
+    }
+    trimmed.starts_with('[') && trimmed.ends_with(']')
+}
 /// Strip the keel managed block from `~/.codex/AGENTS.md`, preserving any user
 /// content outside it. Deletes the file only if it becomes empty. Returns the
 /// number of paths changed/removed (0 or 1); a missing file or one without the

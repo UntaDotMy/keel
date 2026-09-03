@@ -157,20 +157,45 @@ pub(super) fn increment_counter_file(path: &Path) -> std::io::Result<u64> {
         fs::create_dir_all(parent)?;
     }
 
-    let current = fs::read_to_string(path)
-        .ok()
-        .and_then(|text| text.trim().parse::<u64>().ok())
-        .unwrap_or(0);
+    let mut current = 0u64;
+    for attempt in 0..5 {
+        match fs::read_to_string(path) {
+            Ok(text) => {
+                current = text.trim().parse::<u64>().unwrap_or(0);
+                break;
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                current = 0;
+                break;
+            }
+            Err(_) => {
+                std::thread::sleep(std::time::Duration::from_millis(2 * (attempt + 1)));
+            }
+        }
+    }
 
     let next = current.saturating_add(1);
+    let next_str = next.to_string();
 
-    fs::write(path, next.to_string())?;
+    let mut write_err = None;
+    for attempt in 0..5 {
+        match crate::runtime::write_text(path, &next_str) {
+            Ok(()) => return Ok(next),
+            Err(e) => {
+                write_err = Some(e);
+                std::thread::sleep(std::time::Duration::from_millis(2 * (attempt + 1)));
+            }
+        }
+    }
 
+    if let Some(err) = write_err {
+        return Err(std::io::Error::other(err));
+    }
     Ok(next)
 }
 
 pub(super) fn reset_counter_file(path: &Path) -> std::io::Result<()> {
-    fs::write(path, "0")
+    crate::runtime::write_text(path, "0").map_err(std::io::Error::other)
 }
 
 pub(super) const REVIEW_GATE_ENV_VAR: &str = "CLAUDE_SKILLS_REVIEW_GATE";

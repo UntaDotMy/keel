@@ -1138,8 +1138,31 @@ fn command_requires_confirmation(
     {
         return true;
     }
-    let base = command_base_name(program);
-    if matches!(
+
+    // Unwrap `env` wrappers (e.g. `env -i FOO=bar bash -c ...`)
+    let (real_prog, real_args) = if command_base_name(program) == "env" {
+        let mut iter = arguments.iter();
+        let mut next_prog = None;
+        let mut rem_args = Vec::new();
+        while let Some(arg) = iter.next() {
+            if arg.starts_with('-') || arg.contains('=') {
+                continue;
+            }
+            next_prog = Some(arg.as_str());
+            rem_args.extend(iter.cloned());
+            break;
+        }
+        if let Some(np) = next_prog {
+            (np, rem_args)
+        } else {
+            (program, arguments.to_vec())
+        }
+    } else {
+        (program, arguments.to_vec())
+    };
+
+    let base = command_base_name(real_prog);
+    let is_interpreter_or_shell = matches!(
         base.as_str(),
         "bash"
             | "sh"
@@ -1148,14 +1171,6 @@ fn command_requires_confirmation(
             | "cmd"
             | "powershell"
             | "pwsh"
-            | "python"
-            | "python3"
-            | "node"
-            | "deno"
-            | "bun"
-            | "ruby"
-            | "perl"
-            | "php"
             | "curl"
             | "wget"
             | "ssh"
@@ -1177,12 +1192,47 @@ fn command_requires_confirmation(
             | "parted"
             | "diskpart"
             | "format"
-    ) {
+    ) || base.starts_with("python")
+        || base.starts_with("node")
+        || base.starts_with("ruby")
+        || base.starts_with("perl")
+        || base.starts_with("php")
+        || base.starts_with("deno")
+        || base.starts_with("bun");
+
+    if is_interpreter_or_shell {
         return true;
     }
-    base == "git" && arguments.first().map(String::as_str) == Some("push")
-}
 
+    if base == "git" && real_args.first().map(String::as_str) == Some("push") {
+        return true;
+    }
+
+    let is_known_safe_tool = base == "keel"
+        || base.starts_with("keel-")
+        || base.starts_with("keel_")
+        || matches!(
+            base.as_str(),
+            "cargo"
+                | "rustc"
+                | "git"
+                | "echo"
+                | "cat"
+                | "type"
+                | "grep"
+                | "rg"
+                | "find"
+                | "which"
+                | "where"
+                | "wc"
+                | "diff"
+                | "ls"
+                | "dir"
+                | "pwd"
+        );
+
+    !is_known_safe_tool
+}
 fn enforce_run_command_policy(
     program: &str,
     arguments: &[String],
@@ -3882,6 +3932,24 @@ mod tests {
             "python",
             &["-c".to_string(), "print(1)".to_string()],
             "python -c print(1)",
+            false
+        ));
+        assert!(command_requires_confirmation(
+            "python3.11",
+            &["-c".to_string(), "print(1)".to_string()],
+            "python3.11 -c print(1)",
+            false
+        ));
+        assert!(command_requires_confirmation(
+            "nodejs",
+            &["-e".to_string(), "console.log(1)".to_string()],
+            "nodejs -e console.log(1)",
+            false
+        ));
+        assert!(command_requires_confirmation(
+            "env",
+            &["bash".to_string(), "-c".to_string(), "echo ok".to_string()],
+            "env bash -c echo ok",
             false
         ));
         assert!(command_requires_confirmation(

@@ -98,7 +98,9 @@ fn effective_command_fields(words: &[String], depth: usize) -> Vec<String> {
         }
         "bash" | "sh" | "zsh" => {
             for (offset, word) in words[index + 1..].iter().enumerate() {
-                if word.starts_with('-') && word.contains('c') {
+                if word == "-c"
+                    || (word.starts_with('-') && !word.starts_with("--") && word.ends_with('c'))
+                {
                     if let Some(shell_command) = words.get(index + offset + 2) {
                         let nested = split_shell_words(shell_command);
                         return effective_command_fields(&nested, depth + 1);

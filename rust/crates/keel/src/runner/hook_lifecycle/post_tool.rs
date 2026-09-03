@@ -146,12 +146,19 @@ pub(super) fn run_post_tool_comment_lint(tool_name: &str, input: &JsonDocument) 
     if std::env::var("CLAUDE_SKILLS_COMMENT_LINT_GATE").as_deref() == Ok("off") {
         return None;
     }
-    // Only Edit/Write carry a file path the code can scope to. Other edit-class tools
-    // (apply_patch, str_replace) have no single file, so skip them to avoid noise.
-    let edited_path = if matches!(tool_name, "Edit" | "Write" | "MultiEdit") {
+    let lower = tool_name.to_ascii_lowercase();
+    let is_edit = matches!(
+        lower.as_str(),
+        "edit" | "write" | "multiedit" | "search_replace" | "searchreplace"
+    );
+    let edited_path = if is_edit {
         input
             .get("tool_input")
-            .and_then(|ti| ti.get("file_path"))
+            .and_then(|ti| {
+                ti.get("file_path")
+                    .or_else(|| ti.get("path"))
+                    .or_else(|| ti.get("target_file"))
+            })
             .and_then(JsonDocument::as_str)
             .unwrap_or_default()
     } else {
@@ -203,11 +210,19 @@ pub(super) fn run_post_tool_graph_context(tool_name: &str, input: &JsonDocument)
     if std::env::var("CLAUDE_SKILLS_GRAPH_CONTEXT_GATE").as_deref() == Ok("off") {
         return None;
     }
-    // Only Edit/Write/MultiEdit carry a single file path.
-    let edited_path = if matches!(tool_name, "Edit" | "Write" | "MultiEdit") {
+    let lower = tool_name.to_ascii_lowercase();
+    let is_edit = matches!(
+        lower.as_str(),
+        "edit" | "write" | "multiedit" | "search_replace" | "searchreplace"
+    );
+    let edited_path = if is_edit {
         input
             .get("tool_input")
-            .and_then(|ti| ti.get("file_path"))
+            .and_then(|ti| {
+                ti.get("file_path")
+                    .or_else(|| ti.get("path"))
+                    .or_else(|| ti.get("target_file"))
+            })
             .and_then(JsonDocument::as_str)
             .unwrap_or_default()
     } else {

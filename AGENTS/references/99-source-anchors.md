@@ -94,7 +94,7 @@ Commands referenced by AGENTS.md, with the command surface that owns them:
 - `keel hook install` / `uninstall` / `list` / `show` / `instructions` — managed lifecycle hook wiring.
 - `keel memory scope resolve --create-missing --refresh-system-map` — memory refresh on session start, pre-compact, and session end (hook-driven; agent may also invoke by hand mid-session).
 - `keel memory working-brief` / `system-map refresh` / `completion-gate` — durable memory writes (working brief + system map) and completion probe.
-- `keel orchestration resume-status` / `task begin|progress|complete` / `runtime-preflight` / `checkpoint` — workstream lifecycle.
+- `keel anvil compile` / `cast` / `sieve` / `stamp` / `loop` / `run` — single-root delivery loop.
 - `keel gain` — token-savings analytics.
 
 These commands are owned by the `keel` Rust CLI in `rust/crates/keel/`. If the command surface changes, this anchor needs to update with it.

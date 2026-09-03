@@ -148,12 +148,21 @@ function runBridgeWithStdin(
     return "";
   }
 }
+let fallbackSessionId: string | undefined;
+
+function getFallbackSessionId(): string {
+  if (!fallbackSessionId) {
+    fallbackSessionId = `proc-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  }
+  return fallbackSessionId;
+}
+
 function resolveSessionContext(input: CodexHookInput): {
   sessionID: string;
   cwd: string;
 } {
   return {
-    sessionID: input.session_id ?? "unknown",
+    sessionID: (input.session_id && input.session_id.trim()) ? input.session_id.trim() : getFallbackSessionId(),
     cwd: input.cwd ?? process.cwd(),
   };
 }
@@ -270,9 +279,13 @@ function handlePreToolUse(input: CodexHookInput, isPre: boolean): string {
       );
     }
     if (gateResult.status !== "allow") {
-      return denyOutput(
-        "keel Iron Law shell gate could not be evaluated. Retry after running `keel doctor`.",
-      );
+      if (command && (isKeelReadingCommand(command) || command.trim().startsWith("keel doctor"))) {
+        // Allow recovery command through
+      } else {
+        return denyOutput(
+          "keel Iron Law shell gate could not be evaluated. Retry after running `keel doctor`.",
+        );
+      }
     }
     if (command && !isAlreadyCompacted(command)) {
       const rewritten = parseRewriteResponse(
@@ -351,9 +364,18 @@ function main(): void {
     const buf = Buffer.alloc(65536);
     // eslint-disable-next-line no-constant-condition
     while (true) {
-      const n = fs.readSync(process.stdin.fd, buf, 0, buf.length, null);
+      let n = 0;
+      try {
+        n = fs.readSync(process.stdin.fd, buf, 0, buf.length, null);
+      } catch (err: unknown) {
+        const errObj = err as { code?: string; message?: string } | null;
+        if (errObj && (errObj.code === "EOF" || errObj.message?.includes("EOF"))) {
+          break;
+        }
+        throw err;
+      }
       if (n === 0) break;
-      chunks.push(buf.subarray(0, n));
+      chunks.push(Buffer.from(buf.subarray(0, n)));
     }
     raw = Buffer.concat(chunks).toString("utf-8");
   } catch {

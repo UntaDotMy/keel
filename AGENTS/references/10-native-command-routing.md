@@ -104,7 +104,7 @@ To enable automatic command output compaction, run:
 keel hook install
 ```
 
-The one-line installer refreshes the managed hook set automatically, and `keel hook install` can refresh it manually. The hook set points at the current keel command surface. `PreToolUse` transparently rewrites supported shell commands via `toolInputOverride`; the other supported lifecycle events (`PermissionRequest`, `PostToolUse`, `PreCompact`, `PostCompact`, `SessionStart`, `UserPromptSubmit`, `MessageSend`, `MessageReceive`, `SubagentStop`, `TeammateIdle`, `SubagentStart`, `Resume`, `Stop`, and `Elicitation`) are native lifecycle/checkpoint surfaces. `FileChanged` is also supported (fires on watched file changes; its matcher doubles as a per-repo watch list, so it is not auto-installed when the matcher is empty). `MessageDisplay` fires on every assistant message and emits `hookSpecificOutput.displayContent` — not auto-installed to avoid silently rewriting on-screen text. Both `FileChanged` and `MessageDisplay` are still dispatchable via `keel hook file-changed` and `keel hook message-display` for ad-hoc invocations.
+The one-line installer refreshes the managed hook set automatically, and `keel hook install` can refresh it manually. The hook set points at the current keel command surface. `PreToolUse` transparently rewrites supported shell commands via `updatedInput`; the other supported lifecycle events (`PermissionRequest`, `PostToolUse`, `PostToolUseFailure`, `PostToolBatch`, `PreCompact`, `PostCompact`, `SessionStart`, `UserPromptSubmit`, `UserPromptExpansion`, `Stop`, `StopFailure`, `SubagentStart`, `SubagentStop`, `CwdChanged`, `Notification`, `PermissionDenied`, `SessionEnd`, and `WorktreeDiscard`) are native lifecycle/checkpoint surfaces. `FileChanged` is also supported (fires on watched file changes; its matcher doubles as a per-repo watch list, so it is not auto-installed when the matcher is empty). `MessageDisplay` fires on every assistant message.
 
 ### Supported Command Wrapper
 
@@ -136,13 +136,14 @@ keel rewrite "cargo test --workspace"
 `gain` reads the Rust-native compaction event log from the harness home and reports observed commands, compacted commands, saved bytes, savings percentage, and top commands:
 
 ```bash
-keel gain              # Show all-time dashboard
-keel gain --daily      # Today's stats
-keel gain --weekly     # Last 7 days
-keel gain --monthly    # Last 30 days
-keel gain --top 20     # Top 20 commands by savings
-keel gain --chart      # ASCII chart
-keel gain --json       # Machine-readable output
+keel gain                   # Show summary (since today by default)
+keel gain --since all       # All-time stats
+keel gain --since week      # Last 7 days
+keel gain --since month     # Last 30 days
+keel gain --top 20          # Top 20 commands by savings
+keel gain --adapter tests   # Filter by adapter
+keel gain --json            # Machine-readable output
+keel gain discover          # Discover uncompacted command opportunities
 ```
 
 ### Hook Management

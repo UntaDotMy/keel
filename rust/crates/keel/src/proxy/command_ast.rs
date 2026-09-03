@@ -68,24 +68,22 @@ impl CommandAst {
         ast
     }
 
+    pub fn first_subcommand(&self) -> Option<&str> {
+        self.args
+            .iter()
+            .find(|arg| !arg.starts_with('-'))
+            .map(String::as_str)
+    }
+
     pub fn classify(&mut self) {
         let program_base = self.program_base_name();
         self.detected_kind = match program_base.as_str() {
-            "cargo" => {
-                if self
-                    .args
-                    .iter()
-                    .any(|arg| arg == "test" || arg == "nextest")
-                {
-                    CommandKind::Test
-                } else if self.args.iter().any(|arg| arg == "clippy") {
-                    CommandKind::Lint
-                } else if self.args.iter().any(|arg| arg == "build" || arg == "check") {
-                    CommandKind::Build
-                } else {
-                    CommandKind::Unknown
-                }
-            }
+            "cargo" => match self.first_subcommand() {
+                Some("test" | "nextest") => CommandKind::Test,
+                Some("clippy") => CommandKind::Lint,
+                Some("build" | "check") => CommandKind::Build,
+                _ => CommandKind::Unknown,
+            },
             "pytest" | "jest" | "vitest" | "playwright" => CommandKind::Test,
             // Additional test runners across ecosystems (route to the tests
             // adapter: pass/fail summary + failure signal + rerun hint).
@@ -207,7 +205,10 @@ impl CommandAst {
             // JVM / other-language build+test multiplexers. Test/build split is
             // by subcommand so a `test` task still routes to the tests adapter.
             "sbt" | "lein" | "mill" => {
-                if self.args.iter().any(|arg| arg.contains("test")) {
+                if self
+                    .first_subcommand()
+                    .is_some_and(|arg| arg.contains("test"))
+                {
                     CommandKind::Test
                 } else {
                     CommandKind::Build
@@ -216,9 +217,8 @@ impl CommandAst {
             // Haskell (cabal/stack) and Elixir (mix) build+test multiplexers.
             "cabal" | "stack" | "mix" => {
                 if self
-                    .args
-                    .iter()
-                    .any(|arg| arg == "test" || arg.ends_with(".test"))
+                    .first_subcommand()
+                    .is_some_and(|arg| arg == "test" || arg.ends_with(".test"))
                 {
                     CommandKind::Test
                 } else {
@@ -355,6 +355,15 @@ mod tests {
     #[test]
     fn cargo_build_classifies_as_build() {
         let ast = CommandAst::new("cargo".into(), vec!["build".into()], cwd());
+        assert_eq!(ast.detected_kind, CommandKind::Build);
+    }
+    #[test]
+    fn cargo_build_with_test_flag_classifies_as_build() {
+        let ast = CommandAst::new(
+            "cargo".into(),
+            vec!["build".into(), "--test".into(), "foo".into()],
+            cwd(),
+        );
         assert_eq!(ast.detected_kind, CommandKind::Build);
     }
 

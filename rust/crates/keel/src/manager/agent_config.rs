@@ -71,11 +71,26 @@ pub fn extract_yaml_bool(text: &str, key: &str) -> Option<bool> {
 }
 
 fn decode_basic_json_string(value: &str) -> String {
-    value
-        .replace("\\n", "\n")
-        .replace("\\t", "\t")
-        .replace("\\\"", "\"")
-        .replace("\\\\", "\\")
+    let mut result = String::with_capacity(value.len());
+    let mut chars = value.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            match chars.next() {
+                Some('n') => result.push('\n'),
+                Some('t') => result.push('\t'),
+                Some('"') => result.push('"'),
+                Some('\\') => result.push('\\'),
+                Some(other) => {
+                    result.push('\\');
+                    result.push(other);
+                }
+                None => result.push('\\'),
+            }
+        } else {
+            result.push(ch);
+        }
+    }
+    result
 }
 
 pub fn render_agent_toml(config: &ParsedAgentConfig, agent_name: &str) -> Result<String, String> {

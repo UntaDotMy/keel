@@ -383,6 +383,7 @@ struct HttpHeaders {
     method: String,
     path: String,
     origin: Option<String>,
+    content_type: Option<String>,
     content_length: Option<usize>,
     content_length_valid: bool,
     accept: String,
@@ -405,6 +406,7 @@ fn parse_headers(text: &str) -> HttpHeaders {
     let method = parts.next().unwrap_or("GET").to_string();
     let path = parts.next().unwrap_or("/").to_string();
     let mut origin = None;
+    let mut content_type = None;
     let mut content_length = None;
     let mut content_length_valid = true;
     let mut accept = String::new();
@@ -417,6 +419,7 @@ fn parse_headers(text: &str) -> HttpHeaders {
             let value = value.trim();
             match name.as_str() {
                 "origin" => origin = Some(value.to_string()),
+                "content-type" => content_type = Some(value.to_string()),
                 "content-length" => {
                     if content_length.is_some() {
                         content_length_valid = false;
@@ -439,6 +442,7 @@ fn parse_headers(text: &str) -> HttpHeaders {
         method,
         path,
         origin,
+        content_type,
         content_length,
         content_length_valid,
         accept,
@@ -531,7 +535,7 @@ fn origin_allowed(origin: Option<&str>) -> bool {
         // Non-browser clients omit Origin; cross-origin browser requests attach it.
         // Bearer token authentication gates non-browser clients.
         None => true,
-        Some("null") => true,
+        Some("null") => false,
         Some(value) if local_origin_allowed(value) => true,
         Some(value) if remote_origin_allowed(value) => true,
         Some(_) => false,
@@ -629,6 +633,20 @@ fn handle_post(
     body: &[u8],
     state: &Arc<HttpState>,
 ) -> std::io::Result<()> {
+    let valid_content_type = headers
+        .content_type
+        .as_deref()
+        .map(|ct| ct.to_ascii_lowercase().starts_with("application/json"))
+        .unwrap_or(false);
+    if !valid_content_type {
+        return write_http(
+            stream,
+            415,
+            "text/plain; charset=utf-8",
+            None,
+            b"Content-Type must be application/json",
+        );
+    }
     if !accepts_streamable_http(&headers.accept) {
         return write_http(
             stream,
@@ -697,8 +715,18 @@ fn handle_post(
         return write_http(stream, 202, "text/plain; charset=utf-8", None, b"");
     }
 
-    let is_initialize = value.get("method").and_then(Value::as_str) == Some("initialize");
-    apply_http_cancellations(&value, state, headers.session_id.as_deref());
+    let method = value.get("method").and_then(Value::as_str);
+    if method == Some("tools/call") && headers.session_id.is_none() {
+        return write_http(
+            stream,
+            400,
+            "application/json",
+            None,
+            br#"{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"MCP-Session-Id required for tools/call"}}"#,
+        );
+    }
+
+    let is_initialize = method == Some("initialize");
 
     // Batch members stay in the bounded connection worker; per-item threads
     // would multiply the connection limit by the batch-size limit.
@@ -712,6 +740,12 @@ fn handle_post(
     if is_initialize {
         let session = format!("keel-{}", generate_session_token());
         if let Ok(mut guard) = state.sessions.lock() {
+            const MAX_SESSIONS: usize = 1000;
+            if guard.len() >= MAX_SESSIONS {
+                if let Some(old) = guard.iter().next().cloned() {
+                    guard.remove(&old);
+                }
+            }
             guard.insert(session.clone());
         }
         new_session = Some(session);
@@ -1093,6 +1127,7 @@ mod tests {
     #[test]
     fn origin_allows_localhost_and_rejects_foreign() {
         assert!(origin_allowed(None));
+        assert!(!origin_allowed(Some("null")));
         assert!(origin_allowed(Some("http://127.0.0.1:3000")));
         assert!(origin_allowed(Some("https://localhost:8443")));
         assert!(origin_allowed(Some("http://[::1]:3920")));

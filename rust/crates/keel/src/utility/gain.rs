@@ -454,21 +454,33 @@ pub(crate) fn parse_gain_summary(
                 continue;
             }
         }
+        let compacted = event
+            .get("compacted")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
         let before = event
             .get("tokens_before")
             .or_else(|| event.get("tokensBefore"))
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(0);
-        let after = event
-            .get("tokens_after")
-            .or_else(|| event.get("tokensAfter"))
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0);
-        let saved = before.saturating_sub(after);
-        let compacted = event
-            .get("compacted")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
+        let after = if compacted {
+            event
+                .get("tokens_after")
+                .or_else(|| event.get("tokensAfter"))
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0)
+        } else {
+            event
+                .get("tokens_after")
+                .or_else(|| event.get("tokensAfter"))
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(before)
+        };
+        let saved = if compacted {
+            before.saturating_sub(after)
+        } else {
+            0
+        };
         commands_observed += 1;
         if compacted {
             commands_compacted += 1;
@@ -678,7 +690,7 @@ mod tests {
         assert_eq!(summary.commands_observed, 4);
         assert_eq!(summary.commands_compacted, 1);
         assert_eq!(summary.tokens_before, 500 + 700 + 900 + 300);
-        assert_eq!(summary.tokens_after, 100);
-        assert_eq!(summary.tokens_saved, (500 + 700 + 900 + 300) - 100);
+        assert_eq!(summary.tokens_after, 500 + 700 + 100 + 300);
+        assert_eq!(summary.tokens_saved, 900 - 100);
     }
 }

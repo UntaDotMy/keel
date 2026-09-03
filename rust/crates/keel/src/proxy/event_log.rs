@@ -78,9 +78,10 @@ pub fn record_compaction_event(
     let event_path = claude_home.join(COMMAND_COMPACTION_EVENTS_FILE_NAME);
     rotate_event_log_if_needed(&event_path);
     let injection_patterns: Vec<&str> = findings.iter().map(|f| f.pattern).collect();
+    let redacted_command = crate::adapters::common::redact_possible_secret(&meta.command);
     let payload = serde_json::json!({
         "timestamp": meta.started_at.to_string(),
-        "command": &meta.command,
+        "command": &redacted_command,
         "exit_code": meta.exit_code,
         "exitCode": meta.exit_code,
         "compacted": meta.compacted,
@@ -125,8 +126,18 @@ pub fn record_compaction_event(
     if let Ok(mut file) = fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(event_path)
+        .open(&event_path)
     {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(metadata) = file.metadata() {
+                let mut perms = metadata.permissions();
+                perms.set_mode(0o600);
+                // why: best-effort file permission restriction on Unix
+                let _ = fs::set_permissions(&event_path, perms);
+            }
+        }
         let _ = writeln!(file, "{rendered}");
     }
 }

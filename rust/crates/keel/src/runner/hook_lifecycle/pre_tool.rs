@@ -127,8 +127,8 @@ pub(super) fn iron_law_marker_present(claude_home: &Path, session_id: &str) -> b
 pub(super) fn is_keel_research_tool_name(tool_name: &str) -> bool {
     let lower = tool_name.to_ascii_lowercase();
     // Namespaced MCP: mcp__keel__system_map, keel__system_map, etc.
-    let looks_keel = lower.contains("mcp__keel__")
-        || lower.contains("keel__")
+    let looks_keel = lower.starts_with("mcp__keel__")
+        || lower.starts_with("keel__")
         || lower == "keel"
         || lower.starts_with("keel_");
     if !looks_keel {

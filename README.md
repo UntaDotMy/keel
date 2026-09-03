@@ -16,7 +16,7 @@ Side Effects: Sets contributor and operator expectations for the repo-managed na
 Four rules are restated to the agent on every prompt. You cannot skip them.
 
 - **Read first.** Read SYSTEM_MAP, CLAUDE.md, the owning module, and the existing implementation. Do not propose changes against an imagined version of the file.
-- **Understand before building.** Restate what the request actually asks, confirm the user story, and research what is genuinely needed before writing code. No guessing, no assuming, no building against an imagined spec. Correct code that solved the wrong problem still gets thrown away ,  the research that prevents it is always cheaper than the rebuild.
+- **Understand before building.** Restate what the request actually asks, confirm the user story, and research what is genuinely needed before writing code. No guessing, no assuming, no building against an imagined spec. Correct code that solved the wrong problem still gets thrown away — the research that prevents it is always cheaper than the rebuild.
 - **Invoke relevant skills.** If there is even a 1% chance a skill applies, use the Skill tool *before* writing code or giving a final answer. The cost of skipping a skill that did apply is shipping a regression.
 - **Find the root cause.** Take the symptom as a starting point, not the spec. The real problem is usually one layer below what was asked. Trace the symptom end-to-end against the running code with file:line evidence before changing anything.
 
@@ -61,12 +61,12 @@ keel code-search search --query "run_recall_search"
 | --- | --- |
 | Brownfield gate (unique) | `preserve-existing-flow` forces owner-path evidence before editing established source. Review gates block edits when the flow-check artifact is missing. No other harness has this. |
 | Iron-law hooks | SessionStart loads the bootstrap skill, UserPromptSubmit restates the four rules, PostToolBatch nudges a reviewer pass, PreCompact refreshes SYSTEM_MAP. |
-| Delivery loop | `keel anvil compile|cast|sieve|stamp|loop|run` ,  the only delivery loop. |
+| Delivery loop | `keel anvil compile|cast|sieve|stamp|loop|run` — the only delivery loop. |
 | Review gates | `review pre-pr` / `review pre-commit`, review strictness via plugin `userConfig.review_strictness`, and CI-ready artifacts so non-trivial code never self-reviews. |
-| Memory | Working briefs, completion ledgers, scoped `SYSTEM_MAP.md`, and durable recovery state under `~/.claude/memories/`. |
+| Memory | Working briefs, completion ledgers, scoped `SYSTEM_MAP.md`, and durable recovery state under `~/.keel/memories/` (with `~/.claude/memories/` legacy fallback). |
 | Command compaction | `keel run -- <cmd>` produces compact output for noisy test/build/lint/log/search commands without dropping diagnostic signal. |
 | MCP server | `keel mcp serve` (stdio) and `keel mcp serve-http` (Streamable HTTP on loopback). The manifest exposes the current Rust-native tools: `recall`, `system_map`, `run_command`, `command_output`, `command_kill`, `recall_status`, `skill_route`, `skill_get`, `skill_list`, `memory_status`, `brief_list`, `brief_get`, `brief_create`, `system_map_refresh`, `context_brief`, `cli`, `anvil`, `review`, `git_workflow`, `memory`, `gain`, `raw`, `config_audit`, `skill_lint`, `telemetry`, `session`, `doctor`, `code_search`, `code_index`, `flow`, `code_graph`, `learn`, `observe`, `rewrite`, `skill_eval`, `design_intelligence`, and `stats`, plus `keel://system-map` and `keel://recall/status` resources. |
-| Slash commands | `/keel:anvil`, `/keel:review`, `/keel:recall`, `/keel:gain` ,  discoverable `/`-menu wrappers over implemented CLI surfaces. Shipped via the plugin manifest `commands` key. |
+| Slash commands | `/keel:anvil`, `/keel:review`, `/keel:recall`, `/keel:gain` — discoverable `/`-menu wrappers over implemented CLI surfaces. Shipped via the plugin manifest `commands` key. |
 | Specialist skills | Manifest-driven specialist profiles synced into `~/.claude/agent-profiles/*.toml`, invokable via the Skill tool. Run `keel skill-lint` for the live verified count. |
 
 
@@ -103,32 +103,29 @@ That mounts the skills, agents, and hooks without running the native installer. 
 
 ---
 
-## Native Command Routing ,  Must Follow First
+## Native Command Routing — Must Follow First
 
 When a native `keel` command owns the job, use it instead of recreating the behavior with raw shell, generic search, or ad hoc instructions.
 
 **Token-saving rule:** the goal is to prevent noisy raw command output from entering the harness context. Do not run a raw noisy command first and compact afterward; route through `keel run -- <command>` or the hook-provided `Rerun that as:` wrapper before noisy output is produced.
 
 - **Noisy shell commands:** prefer `keel run -- <command>` for test, build, lint, log, status, search, Docker, Kubernetes, Terraform, package-manager, and CI-style commands. Use `keel rewrite "<command>"` when unsure whether a command has native compaction.
-- **Hook block-and-rerun:** if the managed `PreToolUse` hook returns `Rerun that as: <command>`, immediately run that exact command. Do not ask the user, do not treat the hook block as a task failure, and do not repeat the raw command first.
+- **Hook transparent rewrite:** the managed `PreToolUse` hook transparently rewrites supported shell commands to `keel run -- <command>`. Execution proceeds automatically with the wrapped command; no manual rerun is needed.
 - **Repository search:** prefer `keel code-search search --workspace-root "$PWD" --query "<query>"`. After a fix or implement, run `keel code-search siblings` and handle every hit. Use raw `rg`, `grep`, `find`, or `git grep` only after scoped search is insufficient, and pipe noisy raw search through `keel run --`.
 - **Existing-source edits:** run or validate Preserve Existing Flow evidence first. Use `keel flow start`, `keel flow check`, and `keel flow finish`, and record the owner path in `~/.claude/memories/workspaces/<workspace-slug>/flow/flow-check.json` before patching.
 - **Commit/PR/final response text:** use `keel git-workflow commit-message --from-diff`, `keel git-workflow pr-body --from-diff`, and `keel git-workflow lint-message <file>` against the templates in `templates/commit-body.md`, `templates/pr-body.md`, `templates/final-response.md`, and `templates/review-summary.md` before submitting. Run `keel review pre-pr` and `keel review gates check` before finalizing.
 
 For agent-facing usage in markdown or JSON, run `keel hook instructions` (see also [`docs/hook-usage.md`](docs/hook-usage.md)).
 
-## Hook Retry Handling
+## Hook Transparent Rewrite Handling
 
-The managed hook may return a harness denial whose reason begins with `Rerun that as:`. This is expected behavior, not a failure.
+The managed `PreToolUse` hook transparently rewrites supported shell commands into their `keel run --` wrapped equivalents before execution. This is expected behavior, not a failure.
 
 When that happens:
-1. Copy the command after `Rerun that as:`.
-2. Run it exactly once.
-3. Preserve the resulting exit code and output.
-4. Continue from the compacted output.
-5. Do not ask the user for permission unless the suggested command itself is destructive or outside the requested task.
-
-Example: a raw `cargo test --workspace` may produce `Rerun that as: keel run -- cargo test --workspace`; the correct next action is to run `keel run -- cargo test --workspace` and continue from its compacted output.
+1. The hook replaces the command with the `keel run --` wrapped version.
+2. Execution proceeds automatically without manual intervention.
+3. Output enters context in compact form, with diagnostic signals preserved.
+4. The full raw stream is recorded in the local raw store for recovery via `keel raw`.
 
 ## Start Here
 
@@ -272,7 +269,7 @@ native installer.
 A cross-platform statusline script renders the active model, context usage, and a
 **compaction-savings badge** sourced from `keel gain --json` (the badge
 is omitted when the binary or savings data is unavailable, and the line never
-errors). It is opt-in ,  keel does not overwrite your `statusLine` setting.
+errors). It is opt-in — keel does not overwrite your `statusLine` setting.
 
 `statusline/statusline-keel.sh` (macOS/Linux) and
 `statusline/statusline-keel.ps1` (Windows). To enable, point your
@@ -555,11 +552,11 @@ The one-line installer refreshes the managed harness hooks automatically, and `k
 }
 ```
 
-The hook contract is explicit rerun guidance rather than hidden command mutation. The Rust hook installer manages **18 of the 30** lifecycle events in the `HOOK_EVENTS` table (`rust/crates/keel/src/hooks/claude.rs`), writing them to `~/.claude/settings.json`: `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PostToolBatch`, `PermissionRequest`, `PermissionDenied`, `Notification`, `UserPromptSubmit`, `UserPromptExpansion`, `Stop`, `StopFailure`, `SubagentStart`, `SubagentStop`, `CwdChanged`, `PreCompact`, `PostCompact`, `SessionStart`, and `SessionEnd`. `PreToolUse` owns Iron Law edit-gating plus command compaction before noisy output exists. `SessionStart` delivers the bootstrap skill once per session, `UserPromptSubmit` injects a short research-first iron-law restatement per prompt, and `PostToolBatch` injects the reviewer-on-close reminder before each next turn. Twelve events stay dispatchable but are not auto-installed: reserved no-ops (`TaskCreated`, `TaskCompleted`, `TeammateIdle`, `WorktreeCreate`, `WorktreeRemove`, `Setup`, `InstructionsLoaded`, `ConfigChange`, `Elicitation`, `ElicitationResult`) and structural opt-outs (`FileChanged` ,  matcher is the watch list; `MessageDisplay` ,  would rewrite on-screen text). Ad-hoc invocations like `keel hook file-changed` and `keel hook message-display` still work.
+The hook contract is explicit rerun guidance rather than hidden command mutation. The Rust hook installer manages **18 of the 30** lifecycle events in the `HOOK_EVENTS` table (`rust/crates/keel/src/hooks/claude.rs`), writing them to `~/.claude/settings.json`: `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PostToolBatch`, `PermissionRequest`, `PermissionDenied`, `Notification`, `UserPromptSubmit`, `UserPromptExpansion`, `Stop`, `StopFailure`, `SubagentStart`, `SubagentStop`, `CwdChanged`, `PreCompact`, `PostCompact`, `SessionStart`, and `SessionEnd`. `PreToolUse` owns Iron Law edit-gating plus command compaction before noisy output exists. `SessionStart` delivers the bootstrap skill once per session, `UserPromptSubmit` injects a short research-first iron-law restatement per prompt, and `PostToolBatch` injects the reviewer-on-close reminder before each next turn. Twelve events stay dispatchable but are not auto-installed: reserved no-ops (`TaskCreated`, `TaskCompleted`, `TeammateIdle`, `WorktreeCreate`, `WorktreeRemove`, `Setup`, `InstructionsLoaded`, `ConfigChange`, `Elicitation`, `ElicitationResult`) and structural opt-outs (`FileChanged` — matcher is the watch list; `MessageDisplay` — would rewrite on-screen text). Ad-hoc invocations like `keel hook file-changed` and `keel hook message-display` still work.
 
-## Preserve Existing Flow ,  The Brownfield Gate (Unique to keel)
+## Preserve Existing Flow — The Brownfield Gate (Unique to keel)
 
-This is keel's headline differentiator: **no other harness in the market forces owner-path evidence before editing established source code.** When an agent touches an existing file, `preserve-existing-flow` requires tracing who owns the current behavior, what the source of truth is, and what consumers depend on it ,  before any edit is made. Review gates block the edit when the flow-check artifact is missing or incomplete.
+This is keel's headline differentiator: **no other harness in the market forces owner-path evidence before editing established source code.** When an agent touches an existing file, `preserve-existing-flow` requires tracing who owns the current behavior, what the source of truth is, and what consumers depend on it — before any edit is made. Review gates block the edit when the flow-check artifact is missing or incomplete.
 
 Docs-only, formatting-only, generated-only, and explicitly greenfield work are exempt; established source behavior needs owner-path evidence before review gates pass.
 
@@ -569,7 +566,7 @@ keel flow check
 keel flow finish
 ```
 
-The default artifact is `~/.claude/memories/workspaces/<workspace-slug>/flow/flow-check.json`. It records the target file or function, current behavior to preserve, entry point, producer, source of truth, storage/state/queue owner, side-effect owner, consumers, cleanup/recovery path, edit boundary, validation needed, and validation evidence. The schema is documented in `docs/flow-check-schema.md`. The `flow_check` gate in `keel review pre-commit`, `pre-pr`, and `gates check` is blocking: when the diff modifies established source and the artifact is missing, incomplete, or traces a file you are not editing, review fails and names the files. Added files, non-source extensions, and generated or vendored trees are exempt, so greenfield and docs-only work is never gated. An unresolvable diff range reports a warn rather than a silent pass.
+The default artifact is `<keel-home>/memories/workspaces/<workspace-slug>/flow/flow-check.json` (typically `~/.keel/memories/...`). It records the target file or function, current behavior to preserve, entry point, producer, source of truth, storage/state/queue owner, side-effect owner, consumers, cleanup/recovery path, edit boundary, validation needed, and validation evidence. The schema is documented in `docs/flow-check-schema.md`. The `flow_check` gate in `keel review pre-commit`, `pre-pr`, and `gates check` is blocking: when the diff modifies established source and the artifact is missing, incomplete, or traces a file you are not editing, review fails and names the files. Added files, non-source extensions, and generated or vendored trees are exempt, so greenfield and docs-only work is never blocked.
 
 ## Professional Text Templates
 
@@ -632,13 +629,13 @@ keel works with multiple AI coding agents through dedicated adapters. Each adapt
 
 | Agent | Adapter Type | Mechanism | Files |
 | --- | --- | --- | --- |
-| **Claude Code** (native) | Plugin manifest + hooks | `.claude-plugin/plugin.json` + `~/.claude/settings.json` hooks ,  automatic via `keel install` | `.claude-plugin/` |
+| **Claude Code** (native) | Plugin manifest + hooks | `.claude-plugin/plugin.json` + `~/.claude/settings.json` hooks — automatic via `keel install` | `.claude-plugin/` |
 | **Claude Desktop** (Cowork) | MCP server only | Desktop exposes no hook API, so `keel install` merges the `keel` MCP entry into the Desktop config and stops there. No lifecycle bridge, no Iron Law gate, no command compaction on this host. | `cowork/` |
-| **OpenCode** | TypeScript plugin | `opencode/keel.ts` ,  lifecycle bridge with `bridge` subcommands per event | `opencode/` |
+| **OpenCode** | TypeScript plugin | `opencode/keel.ts` — lifecycle bridge with `bridge` subcommands per event | `opencode/` |
 | **Codex CLI** | Plugin + hooks + script | `codex/.codex-plugin/plugin.json` + `hooks/hooks.json` + `keel-codex.ts` | `codex/` |
 | **Cursor IDE** | Rules + hooks + MCP | `cursor/.cursorrules` + `cursor/hooks/` + `cursor/mcp.json`: iron law, lifecycle bridge (`keel bridge`), MCP tools. Install with `keel install --with cursor` (Cursor is not always auto-detected) | `cursor/` |
 | **Pi Agent** | Rules + hooks + MCP | `pi/AGENTS.md` + `pi/hooks.json` + `pi/keel-pi.ts` + `pi/.mcp.json`: iron law, lifecycle bridge, MCP tools | `pi/` |
-| **Command Code** (cmdc) | Mod (TypeScript) + MCP | `commandcode/keel-cmdc.ts` ,  lifecycle bridge (`keel bridge`) via ModApi hooks + `compaction_start`/`compaction_done` events, MCP tools via `commandcode/mcp.json` | `commandcode/` |
+| **Command Code** (cmdc) | Mod (TypeScript) + MCP | `commandcode/keel-cmdc.ts` — lifecycle bridge (`keel bridge`) via ModApi hooks + `compaction_start`/`compaction_done` events, MCP tools via `commandcode/mcp.json` | `commandcode/` |
 | **Grok CLI** | Native hooks + MCP | `$GROK_HOME/hooks/keel.json` + `[mcp_servers.keel]` in `$GROK_HOME/config.toml` (default `~/.grok`) | `$GROK_HOME/` |
 
 Claude Code is the primary target (native hooks, full lifecycle). OpenCode, Codex, Cursor, Pi, and Command Code ship runtime bridges that map host events to `keel bridge`; Grok uses native hooks plus MCP. Cowork is MCP-only because Claude Desktop exposes no hook API. Cursor often needs `--with cursor` because desktop IDEs are not always detected.

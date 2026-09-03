@@ -16,8 +16,8 @@ This repository is a managed harness skill pack, not a loose prompt collection. 
 
 ## Feature Delivery Rules
 
-- Branch model: `main` ← `dev` ← `feat` ← `task/<task>` [← `task/<task>/<subtask>`]. Never use `feat/<task>` while bare `feat` exists (Git ref collision).
-- One task = one `task/<task>` branch (subtasks nest under it) = merge request into `feat` (or into the parent task for a subtask).
+- Branch model: `main` ← `dev` ← `feat` ← `task/<task>`. Parallel subtask branches use flat sibling names such as `task/<task>-<subtask>`; never use nested `task/<task>/<subtask>` (Git ref collision). Never use `feat/<task>` while bare `feat` exists.
+- One task = one `task/<task>` branch (flat sibling subtasks such as `task/<task>-<subtask>`) = merge request into `feat` (or into the parent task branch).
 - Fixes for in-flight work stay on the same work branch — never open a new branch for a fix to work already underway.
 - Commits: `Add : FEATURE : short info` (capitalized category, spaces around colons).
 - Do not mix unrelated features in the same branch.

@@ -26,7 +26,7 @@ Token-saving rule: prevent noisy raw command output from entering the harness co
 2. **Native commands first** — prefer `keel` surfaces over raw shell when they own the job.
 3. **Memory first** — resolve scoped memory and read `SYSTEM_MAP.md` before broad analysis: `keel memory scope resolve --create-missing --refresh-system-map`.
 4. **Iterative loop** — ALIGN → RESEARCH → PLAN → IMPLEMENT → TEST → FIX → VERIFY → REVIEW → RECONCILE. For multi-piece or multi-step builds, run this as **Anvil** (`running-anvil` / `keel anvil`): compile a named bar into lock+prefix+gates, cast isolated workspaces, sieve with 0-LLM gates, stamp the winner, and bounded-loop only if gates still fail. MCP uses `compile` then `run --dry-run`; live `run`/`loop` stay on the CLI. Nothing half-built is presented as complete.
-5. **Branch model + commit format** — `main` ← `dev` ← `feat` ← `task/<task>` [← `task/<task>/<subtask>`]. Never use `feat/<task>` while bare `feat` exists (Git ref collision). Fixes stay on the same work branch. Never delete branches after push/merge. Commits: `Add : FEATURE : short info` (capitalized category, uppercase FEATURE, spaces around colons). Legacy `add/`/`feature/` branches may continue with a warning.
+5. **Branch model + commit format** — `main` ← `dev` ← `feat` ← `task/<task>`. Parallel subtask branches use flat sibling names such as `task/<task>-<subtask>`; never use nested `task/<task>/<subtask>` (Git ref collision). Never use `feat/<task>` while bare `feat` exists (Git ref collision). Fixes stay on the same work branch. Never delete branches after push/merge. Commits: `Add : FEATURE : short info` (capitalized category, uppercase FEATURE, spaces around colons). Legacy `add/`/`feature/` branches may continue with a warning.
 6. **Release ladder is fail-closed** — Smoke → Functional → Integration → UI → Load → Stress → Security. Mark not-applicable only with explicit, evidence-backed reasoning.
 7. **Completion reconciliation** — re-read the working brief and impacted surface before final answer. Every explicit user requirement **must** map to evidence or a verified blocker. No partial-as-complete.
 8. **Writing Discipline** — all written output (docs, code comments, commit/PR text, review notes, chat) **must** follow: write less, be accurate not impressive, lead with the point, no filler or AI tells, stay on the asked scope. Full rule in `_shared/common-discipline.md` § Writing Discipline.
@@ -55,7 +55,7 @@ Token-saving rule: prevent noisy raw command output from entering the harness co
             └────────────────────────────────────┘
 ```
 
-## Specialist Roster (24)
+## Specialist Roster
 
 1. **software-development-life-cycle** — full SDLC, architecture, cross-domain coordination
 2. **preserve-existing-flow** — brownfield ownership tracing before existing-source edits
@@ -81,6 +81,8 @@ Token-saving rule: prevent noisy raw command output from entering the harness co
 22. **authentication-and-identity** — OAuth2/OIDC, SSO/SAML, sessions, tokens, refresh rotation, MFA/passkeys, password storage
 23. **cloud-cost-and-finops** — cost estimation, rightsizing, commitments, autoscaling/spot, budgets, unit economics
 24. **internationalization-and-localization** — message catalogs, ICU MessageFormat, locale formatting, RTL/bidi, translation workflows
+25. **domain-driven-design** — ubiquitous language, bounded contexts, aggregates, entities, value objects, domain events
+26. **dart-and-flutter-expert** — Dart idioms, Flutter widget lifecycles, state management, platform channels, performance
 
 ## Pointers to Depth
 

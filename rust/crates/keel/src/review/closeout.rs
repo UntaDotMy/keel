@@ -1568,7 +1568,7 @@ pub(crate) fn run_review_closeout_command(
         unresolved_requirement_count,
         standard_output,
     );
-    if flags.bool_value("strict") && status != "passed" {
+    if status != "passed" {
         1
     } else {
         0

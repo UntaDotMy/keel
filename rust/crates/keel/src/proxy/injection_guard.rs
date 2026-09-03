@@ -64,17 +64,42 @@ fn match_block(lines: &[&str], start: usize) -> Option<(&'static str, usize)> {
     if let Some(end) = match_system_prompt_block(lines, start) {
         return Some(("system-prompt-block", end));
     }
-    if let Some(end) = match_billing_header(lines, start) {
-        return Some(("anthropic-billing-header", end));
-    }
     if let Some(end) = match_auto_memory_block(lines, start) {
         return Some(("auto-memory-directive", end));
     }
     if let Some(end) = match_output_style_block(lines, start) {
         return Some(("output-style-override", end));
     }
-    if let Some(end) = match_thinking_tag(lines, start) {
-        return Some(("thinking-mode-tag", end));
+    let norm = normalize(lines.get(start)?);
+    if norm.starts_with("x-anthropic-billing-header:") {
+        return Some(("anthropic-billing-header", start));
+    }
+    if norm.starts_with("<thinking_mode>") || norm.starts_with("<max_thinking_length>") {
+        return Some(("thinking-mode-tag", start));
+    }
+    if norm.starts_with("ignore previous instructions")
+        || norm.starts_with("ignore all previous instructions")
+        || norm.starts_with("disregard previous instructions")
+        || norm.starts_with("disregard all previous instructions")
+        || norm.starts_with("ignore above instructions")
+    {
+        return Some(("instruction-override", start));
+    }
+    if norm.starts_with("<tool_result")
+        || norm.starts_with("</tool_result")
+        || norm.starts_with("<function_results")
+    {
+        return Some(("fake-tool-result", start));
+    }
+    if norm.starts_with("<system>")
+        || norm.starts_with("</system>")
+        || norm.starts_with("<goal>")
+        || norm.starts_with("</goal>")
+    {
+        return Some(("system-xml-tag", start));
+    }
+    if norm.starts_with("human:") || norm.starts_with("assistant:") {
+        return Some(("turn-marker", start));
     }
     None
 }
@@ -104,14 +129,6 @@ fn is_system_prompt_close(line: &str) -> bool {
     let normalized = normalize(line);
     normalized.starts_with("--- end system prompt ---")
         || normalized.starts_with("=== end system prompt ===")
-}
-
-fn match_billing_header(lines: &[&str], start: usize) -> Option<usize> {
-    let normalized = normalize(lines.get(start)?);
-    if normalized.starts_with("x-anthropic-billing-header:") {
-        return Some(start);
-    }
-    None
 }
 
 fn match_auto_memory_block(lines: &[&str], start: usize) -> Option<usize> {
@@ -148,17 +165,12 @@ fn match_output_style_block(lines: &[&str], start: usize) -> Option<usize> {
     Some(end)
 }
 
-fn match_thinking_tag(lines: &[&str], start: usize) -> Option<usize> {
-    let normalized = normalize(lines.get(start)?);
-    if normalized.starts_with("<thinking_mode>") || normalized.starts_with("<max_thinking_length>")
-    {
-        return Some(start);
-    }
-    None
-}
-
 fn normalize(line: &str) -> String {
-    line.trim_start().to_ascii_lowercase()
+    line.trim_start_matches(|c: char| {
+        c.is_whitespace() || matches!(c, '>' | '"' | '\'' | '*' | '_' | '`')
+    })
+    .trim_end()
+    .to_ascii_lowercase()
 }
 
 #[cfg(test)]
