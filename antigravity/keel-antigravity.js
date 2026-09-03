@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-// Translates Antigravity hook payloads to Keel bridge commands and gate results.
+// Keel Antigravity hook adapter translates payloads to bridge commands and gate results.
 
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
