@@ -401,11 +401,14 @@ fn run_bridge_pre_tool_use(
         return 0;
     }
 
-    let session_id = if session.is_empty() {
-        "default"
-    } else {
-        &session
-    };
+    if session.trim().is_empty() {
+        let _ = writeln!(
+            standard_output,
+            "KEEL_GATE_DENY\nkeel Iron Law gate: missing session identifier; research must be recorded under a valid session"
+        );
+        return 0;
+    }
+    let session_id = session.trim();
     match hook_lifecycle::iron_law_gate_decision(session_id) {
         Some(reason) => {
             let _ = writeln!(standard_output, "KEEL_GATE_DENY\n{reason}");
@@ -655,5 +658,59 @@ mod tests {
             &mut stderr,
         );
         assert_ne!(malformed, 0, "parse errors must not run lifecycle effects");
+    }
+    #[test]
+    fn bridge_protocol_contract_test() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        // 1. `bridge rewrite` requires `--tool`; unrecognized flag `--command` returns error 2
+        let code = run_bridge_command(
+            &[
+                "rewrite".to_string(),
+                "--command".to_string(),
+                "foo".to_string(),
+            ],
+            &mut stdout,
+            &mut stderr,
+        );
+        assert_eq!(
+            code, 2,
+            "bridge rewrite must reject unrecognized --command flag"
+        );
+
+        // 2. `bridge pre-tool-use` on ungated tool allows
+        stdout.clear();
+        stderr.clear();
+        let code = run_bridge_command(
+            &[
+                "pre-tool-use".to_string(),
+                "--tool".to_string(),
+                "Read".to_string(),
+            ],
+            &mut stdout,
+            &mut stderr,
+        );
+        assert_eq!(code, 0);
+        assert_eq!(String::from_utf8_lossy(&stdout).trim(), "KEEL_GATE_ALLOW");
+
+        // 3. `bridge pre-tool-use` on gated tool with empty session denies
+        stdout.clear();
+        stderr.clear();
+        let code = run_bridge_command(
+            &[
+                "pre-tool-use".to_string(),
+                "--tool".to_string(),
+                "Edit".to_string(),
+            ],
+            &mut stdout,
+            &mut stderr,
+        );
+        assert_eq!(code, 0);
+        let out = String::from_utf8_lossy(&stdout);
+        assert!(
+            out.starts_with("KEEL_GATE_DENY"),
+            "id-less session must deny: {out}"
+        );
     }
 }

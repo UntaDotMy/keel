@@ -141,13 +141,19 @@ pub fn run_raw_command(
     let _ = writeln!(standard_output, "path: {}", display_path(&raw_dir));
     let _ = writeln!(standard_output, "command: {}", command.trim());
     let _ = writeln!(standard_output, "\n[stdout]");
-    let _ = standard_output.write_all(&stdout);
-    if !stdout.ends_with(b"\n") {
+    let stdout_text = String::from_utf8_lossy(&stdout);
+    let (neutralized_stdout, _) =
+        crate::proxy::injection_guard::neutralize_injection(&stdout_text, raw_id);
+    let _ = standard_output.write_all(neutralized_stdout.as_bytes());
+    if !neutralized_stdout.ends_with('\n') {
         let _ = writeln!(standard_output);
     }
     let _ = writeln!(standard_output, "\n[stderr]");
-    let _ = standard_output.write_all(&stderr);
-    if !stderr.ends_with(b"\n") {
+    let stderr_text = String::from_utf8_lossy(&stderr);
+    let (neutralized_stderr, _) =
+        crate::proxy::injection_guard::neutralize_injection(&stderr_text, raw_id);
+    let _ = standard_output.write_all(neutralized_stderr.as_bytes());
+    if !neutralized_stderr.ends_with('\n') {
         let _ = writeln!(standard_output);
     }
     0

@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use crate::args::FlagSet;
 use crate::runtime::{display_path, resolve_claude_home, resolve_repository_root};
-use crate::utility::{system_map::sanitize_key, workspace_index};
+use crate::utility::workspace_index;
 
 use super::shared::is_help_argument;
 
@@ -58,7 +58,8 @@ pub fn system_map_reference_directory(
     _command_group: &str,
     workspace_root: &Path,
 ) -> PathBuf {
-    let workspace_slug = sanitize_key(&workspace_root.to_string_lossy());
+    let workspace_slug =
+        crate::utility::system_map::workspace_key(&workspace_root.to_string_lossy());
     claude_home
         .join("memories")
         .join("workspaces")

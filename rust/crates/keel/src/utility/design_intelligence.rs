@@ -907,7 +907,7 @@ fn safe_slug(raw: &str) -> String {
 /// Slug a workspace path into a single safe directory segment (same scheme as
 /// code-graph / SYSTEM_MAP lanes).
 fn workspace_slug(raw: &str) -> String {
-    let slug = crate::utility::system_map::bounded_slug(raw, 64);
+    let slug = crate::utility::system_map::workspace_key(raw);
     if slug.is_empty() {
         "workspace".to_string()
     } else {

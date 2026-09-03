@@ -364,9 +364,7 @@ fn run_working_brief_record_summary(
             return 1;
         }
     };
-    let now_millis = crate::utility::record_store::current_timestamp_millis();
-    let summary_id = format!("wbs-{now_millis:x}");
-    let created_at = crate::utility::record_store::format_timestamp_iso8601(now_millis);
+    let (summary_id, created_at) = crate::utility::record_store::unique_timestamped_id("wbs");
     let store = crate::utility::record_store::RecordStore::new(
         &claude_home,
         &format!("{command_group}/working-brief-summaries"),

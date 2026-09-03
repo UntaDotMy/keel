@@ -994,13 +994,17 @@ fn collect_sources(root: &Path) -> Result<Vec<SourceFile>, String> {
     paths.sort();
     let mut sources = Vec::new();
     for absolute_path in paths {
-        let metadata = fs::metadata(&absolute_path)
-            .map_err(|error| format!("stat {}: {error}", display_path(&absolute_path)))?;
+        let metadata = match fs::metadata(&absolute_path) {
+            Ok(meta) => meta,
+            Err(_) => continue,
+        };
         if metadata.len() > MAX_FILE_BYTES {
             continue;
         }
-        let content = fs::read_to_string(&absolute_path)
-            .map_err(|error| format!("read {}: {error}", display_path(&absolute_path)))?;
+        let content = match fs::read_to_string(&absolute_path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
         let relative = absolute_path
             .strip_prefix(root)
             .unwrap_or(&absolute_path)
@@ -1327,11 +1331,6 @@ fn should_skip(name: &str, path: &Path) -> bool {
                 | ".idea"
                 | ".vscode"
                 | "__pycache__"
-                | "hermes-agent"
-                | "karpathy-skills-cmp"
-                | "agent-tools"
-                | "terminals"
-                | "mcps"
         )
     } else {
         name.ends_with(".lock")

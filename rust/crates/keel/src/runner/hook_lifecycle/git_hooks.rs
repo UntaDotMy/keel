@@ -37,9 +37,14 @@ pub(super) fn set_core_hooks_path(git_config: &str, value: &str) -> String {
         lines.push(entry);
     }
 
-    let mut joined = lines.join("\n");
-    if git_config.ends_with('\n') && !joined.ends_with('\n') {
-        joined.push('\n');
+    let line_ending = if git_config.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let mut joined = lines.join(line_ending);
+    if git_config.ends_with('\n') && !joined.ends_with(line_ending) {
+        joined.push_str(line_ending);
     }
     joined
 }

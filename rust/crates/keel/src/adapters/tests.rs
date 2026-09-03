@@ -4,7 +4,9 @@
 //! Main Functions: TestAdapter::compact.
 //! Side Effects: None; proxy::run persists raw and compact output.
 
-use crate::adapters::common::{make_result, merge_streams, normalized_command};
+use crate::adapters::common::{
+    make_result, merge_streams, normalized_command, redact_possible_secret,
+};
 use crate::proxy::adapter::{CommandAdapter, CompactResult};
 use crate::proxy::command_ast::{CommandAst, CommandKind};
 use crate::proxy::raw_store::RunMeta;
@@ -107,7 +109,7 @@ fn collect_failure_lines(text: &str) -> Vec<String> {
             || normalized.contains("expected")
             || normalized.contains("actual");
         if is_signal && !line.trim().is_empty() {
-            failures.push(line.trim().to_string());
+            failures.push(redact_possible_secret(line.trim()));
         }
         if failures.len() >= MAX_FAILURE_LINES {
             failures

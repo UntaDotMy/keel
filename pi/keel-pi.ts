@@ -161,17 +161,21 @@ function bridgeRewrite(command: string, toolName: string): string {
 // Context injection helpers
 // ---------------------------------------------------------------------------
 
+let moduleSessionId: string | undefined;
+
 function resolveSessionId(event: PiSessionLikeEvent, ctx?: PiExtensionContext): string {
-  const raw =
-    event?.sessionId ||
-    ctx?.sessionId ||
-    // PID-based fallback causes session collisions when multiple Pi sessions
-    // run on the same machine. Use a unique identifier instead.
-    (typeof crypto !== "undefined" && crypto.randomUUID
-      ? crypto.randomUUID()
-      : `${Date.now()}-${Math.random().toString(36).slice(2)}`);
-  return String(raw);
+  if (event?.sessionId) return String(event.sessionId);
+  if (ctx?.sessionId) return String(ctx.sessionId);
+  if (!moduleSessionId) {
+    moduleSessionId =
+      (typeof crypto !== "undefined" && crypto.randomUUID
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  }
+  return moduleSessionId;
 }
+
+const recentToolInputs = new Map<string, Record<string, unknown>>();
 
 function resolveCwd(ctx?: PiExtensionContext): string {
   if (ctx?.cwd && typeof ctx.cwd === "string") return ctx.cwd;
@@ -285,11 +289,15 @@ function handleToolCall(
         };
       }
       if (gateResult.status !== "allow") {
-        return {
-          block: true,
-          reason:
-            "keel Iron Law gate could not be evaluated; retry after running `keel doctor`.",
-        };
+        if (command && (isKeelReadingCommand(command) || command.trim().startsWith("keel doctor"))) {
+          // allow recovery command through
+        } else {
+          return {
+            block: true,
+            reason:
+              "keel Iron Law gate could not be evaluated; retry after running `keel doctor`.",
+          };
+        }
       }
     }
 
@@ -301,13 +309,12 @@ function handleToolCall(
       };
     }
 
+    if (event?.toolCallId && event?.input) {
+      recentToolInputs.set(event.toolCallId, event.input);
+    }
+
     if (shellTool && command && !isAlreadyCompacted(command)) {
-      const rewritten = parseRewriteResponse(runBridge("rewrite", [
-        "--tool",
-        toolName,
-        "--command",
-        command,
-      ], 500));
+      const rewritten = parseRewriteResponse(bridgeRewrite(command, toolName));
       if (rewritten && rewritten !== command && event?.input) {
         event.input.command = rewritten;
       }
@@ -315,6 +322,10 @@ function handleToolCall(
     return undefined;
   } catch (err) {
     if (editTool || shellTool) {
+      const cmd = typeof event?.input?.command === "string" ? event.input.command : "";
+      if (shellTool && cmd && (isKeelReadingCommand(cmd) || cmd.trim().startsWith("keel doctor"))) {
+        return undefined;
+      }
       return {
         block: true,
         reason: "keel adapter gate failed closed; retry after running `keel doctor`.",
@@ -346,7 +357,15 @@ function handleToolExecutionEnd(
     "post",
   ];
   if (event?.error) args.push("--failed");
-  runBridge("observe", args, "{}", 2000);
+  let stdin = "{}";
+  if (event?.toolCallId && recentToolInputs.has(event.toolCallId)) {
+    const savedInput = recentToolInputs.get(event.toolCallId);
+    recentToolInputs.delete(event.toolCallId);
+    if (savedInput) {
+      stdin = JSON.stringify(savedInput);
+    }
+  }
+  runBridge("observe", args, stdin, 2000);
 }
 
 function handlePostCompact(event: PiSessionLikeEvent, ctx?: PiExtensionContext): void {

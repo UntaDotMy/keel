@@ -89,14 +89,16 @@ const KeelPlugin: Plugin = async ({ client, directory, $ }) => {
     subcommand: string,
     args: string[],
     stdin: string,
+    timeoutMs: number = 2000,
   ): Promise<string> {
     try {
-      // Use Bun.spawn to pass stdin directly. Shell redirection via
-      // template literals can mangle JSON with special characters.
+      // Use Bun.spawn to pass stdin directly with timeout signal.
+      const signal = AbortSignal.timeout(timeoutMs);
       const proc = Bun.spawn([BRIDGE_BIN, "bridge", subcommand, ...args], {
         stdin: "pipe",
         stdout: "pipe",
         stderr: "pipe",
+        signal,
       });
       await proc.stdin.write(stdin);
       proc.stdin.end();
@@ -216,9 +218,13 @@ const KeelPlugin: Plugin = async ({ client, directory, $ }) => {
           );
         }
         if (gateResult.status !== "allow") {
-          throw new Error(
-            "keel Iron Law gate could not be evaluated (keel did not respond in time). Retry; if it persists, run `keel doctor`.",
-          );
+          if (command && (isKeelReadingCommand(command) || command.trim().startsWith("keel doctor"))) {
+            // Allow recovery command through
+          } else {
+            throw new Error(
+              "keel Iron Law gate could not be evaluated (keel did not respond in time). Retry; if it persists, run `keel doctor`.",
+            );
+          }
         }
 
         if (!isAlreadyCompacted(command)) {
@@ -239,13 +245,24 @@ const KeelPlugin: Plugin = async ({ client, directory, $ }) => {
           typeof metadata === "object" &&
           "error" in metadata &&
           metadata.error != null;
+        let cmd: string | undefined;
+        let toolArgs: unknown;
+        if (input && typeof input === "object" && "args" in input) {
+          toolArgs = input.args;
+          if (toolArgs && typeof toolArgs === "object" && "command" in toolArgs) {
+            const candidate = toolArgs.command;
+            if (typeof candidate === "string") cmd = candidate;
+          }
+        }
         const stdin = JSON.stringify({
+          tool_input: toolArgs,
+          command: cmd,
           output: output.output,
           metadata: output.metadata,
         });
         const args = [
           "--session",
-          input.sessionID,
+          input.sessionID || "default",
           "--cwd",
           cwd,
           "--tool",

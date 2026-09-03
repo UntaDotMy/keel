@@ -241,6 +241,11 @@ pub fn register_mcp_server(claude_home: &Path) -> Result<McpRegistration, String
 
     servers.insert(MCP_SERVER_KEY.to_string(), desired_entry);
 
+    let _ = crate::manager::install::backup_file_before_managed_overwrite(
+        claude_home,
+        &config_path,
+        "config.json",
+    );
     let rendered = serde_json::to_string_pretty(&document)
         .map_err(|error| format!("render {}: {error}", display_path(&config_path)))?;
     write_text(&config_path, &format!("{rendered}\n"))?;

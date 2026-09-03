@@ -19,6 +19,9 @@ use crate::proxy::registry::AdapterRegistry;
 
 pub fn build_adapter_registry() -> AdapterRegistry {
     let mut registry = AdapterRegistry::new();
+    for adapter in crate::proxy::filters::load_project_filter_adapters() {
+        registry.register(adapter);
+    }
     registry.register(Box::new(TestAdapter));
     registry.register(Box::new(GitAdapter));
     registry.register(Box::new(SearchAdapter));
@@ -29,9 +32,6 @@ pub fn build_adapter_registry() -> AdapterRegistry {
     registry.register(Box::new(CloudAdapter));
     registry.register(Box::new(DatabaseAdapter));
     registry.register(Box::new(LogsAdapter));
-    for adapter in crate::proxy::filters::load_project_filter_adapters() {
-        registry.register(adapter);
-    }
     registry.register(Box::new(GenericAdapter));
     registry
 }

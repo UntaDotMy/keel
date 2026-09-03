@@ -110,7 +110,7 @@ pub const HOOK_EVENTS: &[HookEvent] = &[
         // which gates the additionalContext render path — stays false.
         name: "PermissionRequest",
         slug: "permission-request",
-        matcher: "",
+        matcher: "Bash",
         status: "Auto-approving keel commands",
         supports_hook_specific_output: false,
         installs_in_settings: true,

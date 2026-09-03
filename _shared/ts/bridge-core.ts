@@ -36,15 +36,17 @@ export function resolveBinary(): string {
 /** Resolve the host-neutral state root, retaining the legacy bridge fallback. */
 export function keelStateRoot(): string {
   const home = os.homedir();
-  const envHome = process.env.KEEL_HOME;
+  const envHome = process.env.KEEL_HOME || process.env.CLAUDE_TARGET_OVERRIDE;
   if (envHome && envHome.trim()) return path.join(envHome.trim(), "state");
-  const neutralHome = path.join(home, ".keel");
+  const neutralHome = path.join(home, ".keel", "state");
   try {
-    if (fs.existsSync(neutralHome)) return path.join(neutralHome, "state");
+    if (fs.existsSync(neutralHome)) return neutralHome;
+    const legacyHome = path.join(home, ".claude", "state");
+    if (fs.existsSync(legacyHome)) return legacyHome;
   } catch {
-    // fall through to legacy
+    // fall through to default
   }
-  return path.join(home, ".claude", "state");
+  return neutralHome;
 }
 
 export function sessionMarkerDirectory(host: string): string {
@@ -62,7 +64,24 @@ export function legacyIronLawMarkerDirectory(): string {
 /** Match Rust `sanitize_memory_key`: lowercase alnum, other runs become `-`. */
 export function sanitizeSessionKey(sessionID: string): string {
   const raw = (sessionID || "default").trim() || "default";
-  return raw.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "workspace";
+  let key = "";
+  let previousDash = false;
+  for (let i = 0; i < raw.length; i++) {
+    const code = raw.charCodeAt(i);
+    const isAlnum =
+      (code >= 48 && code <= 57) || // 0-9
+      (code >= 65 && code <= 90) || // A-Z
+      (code >= 97 && code <= 122);  // a-z
+    if (isAlnum) {
+      key += raw[i].toLowerCase();
+      previousDash = false;
+    } else if (!previousDash) {
+      key += "-";
+      previousDash = true;
+    }
+  }
+  const trimmed = key.replace(/^-+|-+$/g, "");
+  return trimmed || "workspace";
 }
 
 export function markerPath(dir: string, sessionID: string, sanitize = false): string {

@@ -72,6 +72,11 @@ pub(crate) fn maybe_install_hooks(engagement_home: &Path, keel_home: &Path) -> O
     let hook_path = engagement_home.join(crate::hooks::claude::SETTINGS_FILE_NAME);
     // Point hooks at the installed binary, not the running build artifact.
     let executable = installed_executable_path(keel_home);
+    let _ = crate::manager::install::sync::backup_file_before_managed_overwrite(
+        engagement_home,
+        &hook_path,
+        crate::hooks::claude::SETTINGS_FILE_NAME,
+    );
     match crate::runner::hook_lifecycle::build_hooks_payload(&hook_path, &executable) {
         Ok(payload) => match write_text(&hook_path, &payload) {
             Ok(()) => Some(format!("installed at {}", display_path(&hook_path))),
@@ -307,7 +312,7 @@ pub(crate) fn maybe_wire_grok(claude_home: &Path, detected: bool) -> Option<Stri
         Ok(text) => text,
         Err(error) => return Some(format!("serialize skipped ({error})")),
     };
-    let hook_status = match std::fs::write(&target, rendered) {
+    let hook_status = match write_text(&target, &rendered) {
         Ok(()) => format!("hooks -> {}", display_path(&target)),
         Err(error) => return Some(format!("hooks write skipped ({error})")),
     };

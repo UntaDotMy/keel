@@ -65,7 +65,18 @@ fn git_subcommand(program: &str, args: &[String]) -> Option<String> {
     if program.eq_ignore_ascii_case("gh") || program.to_ascii_lowercase().ends_with("gh.exe") {
         return args.first().map(|arg| format!("gh {arg}"));
     }
-    args.iter().find(|arg| !arg.starts_with('-')).cloned()
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if arg == "-C" || arg == "-c" || arg == "--git-dir" || arg == "--work-tree" {
+            // why: advance past the flag's argument value
+            let _ = iter.next();
+            continue;
+        }
+        if !arg.starts_with('-') {
+            return Some(arg.clone());
+        }
+    }
+    None
 }
 
 fn compact_status(stdout: &str) -> String {

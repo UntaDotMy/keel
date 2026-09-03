@@ -51,9 +51,9 @@ pub fn make_result(
 pub fn compact_edges(text: &str, label: &str, max_lines: usize) -> String {
     let lines: Vec<&str> = text.lines().collect();
     if lines.len() <= max_lines {
-        return text.to_string();
+        return render_lines(&lines);
     }
-    let edge = DEFAULT_EDGE_LINES.min(max_lines / 2).max(5);
+    let edge = (max_lines / 2).clamp(1, DEFAULT_EDGE_LINES);
     let omitted = lines.len().saturating_sub(edge * 2);
     format!(
         "{label}: {} lines\n{}\n... omitted {omitted} lines; raw output saved for recovery ...\n{}",
@@ -135,9 +135,21 @@ pub fn redact_possible_secret(line: &str) -> String {
     let upper = line.to_ascii_uppercase();
     let named_secret = [
         "API_KEY=",
+        "API_KEY\":",
+        "API_KEY':",
+        "\"API_KEY\":",
+        "'API_KEY':",
         "SECRET=",
+        "\"SECRET\":",
+        "'SECRET':",
         "TOKEN=",
+        "\"TOKEN\":",
+        "'TOKEN':",
+        "BEARER ",
+        "AUTHORIZATION:",
         "PASSWORD=",
+        "\"PASSWORD\":",
+        "'PASSWORD':",
         "PRIVATE KEY",
         "AUTH=",
         "CREDENTIAL=",
@@ -159,6 +171,28 @@ pub fn redact_possible_secret(line: &str) -> String {
     ]
     .iter()
     .any(|needle| upper.contains(needle));
+
+    let akia_pattern = line
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|part| {
+            part.len() == 20
+                && part.starts_with("AKIA")
+                && part
+                    .chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+        });
+
+    let connection_uri = [
+        "POSTGRES://",
+        "POSTGRESQL://",
+        "MYSQL://",
+        "REDIS://",
+        "MONGODB://",
+        "AMQP://",
+    ]
+    .iter()
+    .any(|scheme| upper.contains(scheme) && line.contains('@') && line.contains(':'));
+
     let long_token = line
         .split(|character: char| {
             !character.is_ascii_alphanumeric() && character != '_' && character != '-'
@@ -171,7 +205,7 @@ pub fn redact_possible_secret(line: &str) -> String {
                     .count()
                     >= 28
         });
-    if named_secret || long_token {
+    if named_secret || akia_pattern || connection_uri || long_token {
         "[redacted possible secret; see raw output locally]".to_string()
     } else {
         line.to_string()

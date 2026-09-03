@@ -1157,9 +1157,19 @@ pub(super) fn run_hook_post_tool_batch(
     // No gate fired to advisory reminder.
     emit_post_tool_batch_advisory(standard_output, standard_error)
 }
+pub(super) fn stop_gate_blocks_path(claude_home: &Path, session_id: &str) -> PathBuf {
+    let key = if session_id.trim().is_empty() {
+        "no-session".to_string()
+    } else {
+        sanitize_memory_key(session_id)
+    };
+    claude_home.join("state").join("stop-gate-blocks").join(key)
+}
 
-fn stop_gate_is_enforcing(mode: GateMode, max_blocks: u64) -> bool {
-    max_blocks > 0 && matches!(mode, GateMode::Block | GateMode::Escalate)
+fn stop_gate_is_enforcing(mode: GateMode, max_blocks: u64, blocks_issued: u64) -> bool {
+    max_blocks > 0
+        && blocks_issued < max_blocks
+        && matches!(mode, GateMode::Block | GateMode::Escalate)
 }
 
 pub(super) fn run_hook_stop(
@@ -1180,32 +1190,51 @@ pub(super) fn run_hook_stop(
     }
 
     let session_start = session_start_ms(&claude_home, session_id);
+    let stop_counter = stop_gate_blocks_path(&claude_home, session_id);
+    let stop_blocks = read_counter_value(&stop_counter);
+    if stop_blocks >= 3 {
+        return 0;
+    }
+
     let mut blockers: Vec<&str> = Vec::new();
-    if stop_gate_is_enforcing(brief_gate_mode(), brief_gate_max_blocks())
+    let brief_counter = brief_gate_blocks_path(&claude_home, session_id);
+    let brief_blocks = read_counter_value(&brief_counter);
+    if stop_gate_is_enforcing(brief_gate_mode(), brief_gate_max_blocks(), brief_blocks)
         && !brief_written_this_session(&claude_home, &stats.last_cwd, session_start)
     {
         blockers.push("write a current working brief with acceptance criteria");
     }
-    if stop_gate_is_enforcing(completeness_gate_mode(), completeness_gate_max_blocks())
-        && !completeness_marker_ms(&claude_home, &stats.last_cwd)
-            .map(|marker_ms| marker_ms >= stats.last_edit_ms)
-            .unwrap_or(false)
+    let comp_counter = completeness_gate_blocks_path(&claude_home, session_id);
+    let comp_blocks = read_counter_value(&comp_counter);
+    if stop_gate_is_enforcing(
+        completeness_gate_mode(),
+        completeness_gate_max_blocks(),
+        comp_blocks,
+    ) && !completeness_marker_ms(&claude_home, &stats.last_cwd)
+        .map(|marker_ms| marker_ms >= stats.last_edit_ms)
+        .unwrap_or(false)
     {
         blockers.push("run the sibling scan after the latest edit");
     }
-    if stop_gate_is_enforcing(review_gate_mode(), review_gate_max_blocks())
+    let rev_counter = review_gate_blocks_path(&claude_home, session_id);
+    let rev_blocks = read_counter_value(&rev_counter);
+    if stop_gate_is_enforcing(review_gate_mode(), review_gate_max_blocks(), rev_blocks)
         && !review_marker_ms(&claude_home, &stats.last_cwd)
             .map(|marker_ms| marker_ms >= stats.last_edit_ms)
             .unwrap_or(false)
     {
         blockers.push("run a reviewer pass after the latest edit");
     }
-    if stop_gate_is_enforcing(memory_gate_mode(), memory_gate_max_blocks())
+    let mem_counter = memory_gate_blocks_path(&claude_home, session_id);
+    let mem_blocks = read_counter_value(&mem_counter);
+    if stop_gate_is_enforcing(memory_gate_mode(), memory_gate_max_blocks(), mem_blocks)
         && !memory_written_this_session(&claude_home, session_start)
     {
         blockers.push("save the non-trivial result to memory");
     }
-    if stop_gate_is_enforcing(research_gate_mode(), research_gate_max_blocks())
+    let res_counter = research_gate_blocks_path(&claude_home, session_id);
+    let res_blocks = read_counter_value(&res_counter);
+    if stop_gate_is_enforcing(research_gate_mode(), research_gate_max_blocks(), res_blocks)
         && !session_has_research_tool(&claude_home, session_id)
     {
         blockers.push("record research evidence for the implementation");
@@ -1214,6 +1243,7 @@ pub(super) fn run_hook_stop(
         return 0;
     }
 
+    let _ = increment_counter_file(&stop_counter);
     let reason = format!(
         "Keel closeout is incomplete: {}. Complete every item, then stop again.",
         blockers.join("; ")

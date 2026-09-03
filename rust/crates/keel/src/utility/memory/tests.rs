@@ -121,7 +121,7 @@ fn memory_scope_defaults_to_global_workspace_reference_map() {
     let output = String::from_utf8_lossy(&stdout);
     assert!(output.contains("system_map_path="));
     let workspace_key =
-        crate::utility::system_map::sanitize_key(&crate::runtime::display_path(&workspace_root));
+        crate::utility::system_map::workspace_key(&crate::runtime::display_path(&workspace_root));
     let expected_system_map = claude_home
         .join("memories")
         .join("workspaces")

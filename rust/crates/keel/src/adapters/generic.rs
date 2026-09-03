@@ -104,15 +104,15 @@ fn compact_stream(text: &str, label: &str) -> String {
 
 fn compact_edges(text: &str, label: &str, max_lines: usize) -> String {
     let lines: Vec<&str> = text.lines().collect();
-    // At or below the cap, preserve raw output.
-    // This matches common::compact_edges' un-compacted path.
     if lines.len() <= max_lines {
-        return text.to_string();
+        return lines
+            .iter()
+            .map(|line| redact_possible_secret(line))
+            .collect::<Vec<_>>()
+            .join("\n");
     }
 
-    // Above the cap, redact edge lines as common::compact_edges does.
-    // The compact result is sent to model context.
-    let edge = EDGE_LINES.min(max_lines / 2).max(5);
+    let edge = (max_lines / 2).clamp(1, EDGE_LINES);
     let omitted = lines.len().saturating_sub(edge * 2);
     format!(
         "{}\n... omitted {omitted} {label} lines; raw output saved for recovery ...\n{}",

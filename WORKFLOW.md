@@ -7,14 +7,14 @@ Before running raw shell, broad search, or patching existing source, route throu
 **Token-saving rule:** the goal is to prevent noisy raw command output from entering the harness context. Do not run a raw noisy command first and compact afterward; route through `keel run -- <command>` or the hook-provided `Rerun that as:` wrapper before noisy output is produced.
 
 - **Noisy shell commands:** prefer `keel run -- <command>` for test, build, lint, log, status, search, Docker, Kubernetes, Terraform, package-manager, and CI-style commands. Use `keel rewrite "<command>"` when unsure whether a command has native compaction.
-- **Hook block-and-rerun:** if the managed `PreToolUse` hook returns `Rerun that as: <command>`, immediately run that exact command. Do not ask the user, do not treat the hook block as a task failure, and do not repeat the raw command first.
+- **Hook transparent rewrite:** the managed `PreToolUse` hook transparently rewrites supported shell commands to `keel run -- <command>`. Execution proceeds automatically with the wrapped command; no manual rerun is needed.
 - **Repository search:** prefer `keel code-search search --workspace-root "$PWD" --query "<query>"` before raw `rg`/`grep`/`find`/`git grep`. After a fix or implement, run `keel code-search siblings` and handle every hit.
 - **Existing-source edits:** run or validate Preserve Existing Flow evidence with `keel flow start`, `keel flow check`, and `keel flow finish`, and record the owner path in the global per-workspace flow-check artifact before patching.
 - **Commit/PR/final-response text:** use `keel git-workflow commit-message --from-diff`, `keel git-workflow pr-body --from-diff`, and `keel git-workflow lint-message <file>` before submitting, then `keel git-workflow preflight` and `keel review pre-pr` before merge.
 
-## Hook Retry Handling
+## Hook Transparent Rewrite Handling
 
-The managed `PreToolUse` hook may return a harness denial whose reason begins with `Rerun that as:`. This is expected behavior, not a failure. Copy the suggested command, run it exactly once, preserve the exit code and output, and continue from the compacted output. Only ask the user when the suggested command itself is destructive or outside the requested task.
+The managed `PreToolUse` hook transparently rewrites supported shell commands into their `keel run --` wrapped equivalents before execution. This is expected behavior, not a failure. Execution proceeds automatically with the wrapped command, output is compacted, and the full raw stream is preserved in the local raw store for recovery.
 
 ## Git Workflow
 

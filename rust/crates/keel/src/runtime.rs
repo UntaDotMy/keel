@@ -1298,10 +1298,24 @@ pub fn platform_shell_command_parts(command: &str) -> (String, Vec<String>) {
                 ],
             );
         }
-        (
-            "cmd".to_string(),
-            vec!["/C".to_string(), command.to_string()],
-        )
+        let has_metacharacters = command.contains('&')
+            || command.contains('|')
+            || command.contains('<')
+            || command.contains('>')
+            || command.contains(';')
+            || command.contains('%')
+            || command.contains('^');
+        let escaped_command = if has_metacharacters {
+            command
+                .replace('^', "^^")
+                .replace('&', "^&")
+                .replace('|', "^|")
+                .replace('<', "^<")
+                .replace('>', "^>")
+        } else {
+            command.to_string()
+        };
+        ("cmd".to_string(), vec!["/C".to_string(), escaped_command])
     } else {
         (
             "bash".to_string(),

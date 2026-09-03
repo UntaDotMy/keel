@@ -90,7 +90,8 @@ pub fn bump_loop_guard(
 ) -> Result<(u32, bool), String> {
     let store = family_store(claude_home, "memory", "loop-guard");
     let id = sanitize_id(signature);
-    let mut record = store.read_record(&id).ok().flatten().unwrap_or_else(|| {
+    let record_opt = store.read_record(&id).map_err(|e| e.to_string())?;
+    let mut record = record_opt.unwrap_or_else(|| {
         vec![
             ("id".into(), id.clone()),
             ("signature".into(), signature.trim().to_string()),
@@ -111,13 +112,16 @@ pub fn bump_loop_guard(
 pub fn loop_guard_exhausted(claude_home: &Path, signature: &str, budget: u32) -> bool {
     let store = family_store(claude_home, "memory", "loop-guard");
     let id = sanitize_id(signature);
-    let count: u32 = store
-        .read_record(&id)
-        .ok()
-        .flatten()
-        .and_then(|record| field(&record, "count")?.parse().ok())
-        .unwrap_or(0);
-    count >= budget
+    match store.read_record(&id) {
+        Ok(Some(record)) => {
+            let count: u32 = field(&record, "count")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+            count >= budget
+        }
+        Ok(None) => false,
+        Err(_) => true,
+    }
 }
 
 fn now_id(prefix: &str) -> (String, String) {
@@ -867,7 +871,14 @@ fn run_loop_guard(
     };
     let store = family_store(&home, command_group, "loop-guard");
     let id = sanitize_id(&signature);
-    let mut record = store.read_record(&id).ok().flatten().unwrap_or_else(|| {
+    let record_opt = match store.read_record(&id) {
+        Ok(record) => record,
+        Err(e) => {
+            let _ = writeln!(standard_error, "{label}: read error: {e}");
+            return 2;
+        }
+    };
+    let mut record = record_opt.unwrap_or_else(|| {
         vec![
             ("id".into(), id.clone()),
             ("signature".into(), signature.trim().to_string()),

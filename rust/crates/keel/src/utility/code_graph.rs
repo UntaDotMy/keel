@@ -79,9 +79,7 @@ fn resolve_artifact_path(
 /// alphanumeric runs collapse to `-`). Falls back to a length-bounded segment so
 /// the join can never escape the lane.
 fn workspace_slug(raw: &str) -> String {
-    // Canonical system_map normalization, bounded to 64 chars like the other
-    // per-workspace lanes, then pinned to a safe single path segment.
-    let bounded = crate::utility::system_map::bounded_slug(raw, 64);
+    let bounded = crate::utility::system_map::workspace_key(raw);
     safe_path_segment(&bounded).unwrap_or_else(|| "workspace".to_string())
 }
 
@@ -937,12 +935,7 @@ fn should_skip_entry(name: &str, path: &Path) -> bool {
                 | "build"
                 | "tmp"
                 | "coverage"
-                | "hermes-agent"
-                | "karpathy-skills-cmp"
                 | "target-test"
-                | "agent-tools"
-                | "terminals"
-                | "mcps"
         )
     } else {
         false
