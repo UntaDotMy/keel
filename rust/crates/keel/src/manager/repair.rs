@@ -144,6 +144,17 @@ pub fn run_repair_command(
     let detected = crate::manager::install::host_user_home(&claude_home)
         .map(|home| crate::manager::platform_detect::PlatformDetector::new(&home).detect())
         .unwrap_or_default();
+    match crate::manager::install::maybe_wire_agents_gateway(&repo_root, &claude_home) {
+        Some(detail) => {
+            let _ = writeln!(standard_output, "[ok] agents gateway: {detail}");
+        }
+        None => {
+            let _ = writeln!(
+                standard_output,
+                "[--] agents gateway: not a standard ~/.keel or ~/.claude home"
+            );
+        }
+    }
     for (name, status) in [
         (
             "opencode",
@@ -180,6 +191,22 @@ pub fn run_repair_command(
         (
             "grok",
             crate::manager::install::maybe_wire_grok(&claude_home, detected.grok),
+        ),
+        (
+            "omp",
+            crate::manager::install::maybe_wire_omp(&repo_root, &claude_home, detected.omp),
+        ),
+        (
+            "zcode",
+            crate::manager::install::maybe_wire_zcode(&repo_root, &claude_home, detected.zcode),
+        ),
+        (
+            "antigravity",
+            crate::manager::install::maybe_wire_antigravity(
+                &repo_root,
+                &claude_home,
+                detected.antigravity,
+            ),
         ),
     ] {
         match status {
@@ -294,6 +321,13 @@ mod tests {
             artifact_bytes,
         )
         .expect("stage artifact");
+        let gateway = root.join("using-keel");
+        fs::create_dir_all(&gateway).expect("create gateway skill dir");
+        fs::write(
+            gateway.join("SKILL.md"),
+            "---\nname: using-keel\ndescription: Keel gateway\n---\n",
+        )
+        .expect("stage gateway skill");
     }
 
     #[test]
@@ -337,6 +371,17 @@ mod tests {
         assert_eq!(
             fs::read(&executable).expect("executable restored"),
             b"fake-keel"
+        );
+        assert!(
+            claude_home
+                .parent()
+                .unwrap()
+                .join(".agents")
+                .join("skills")
+                .join("using-keel")
+                .join("SKILL.md")
+                .is_file(),
+            "repair must restore the host-neutral gateway skill"
         );
 
         let _ = fs::remove_dir_all(claude_home.parent().unwrap());

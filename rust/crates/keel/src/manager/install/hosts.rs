@@ -32,6 +32,109 @@ fn copy_managed_file(source: &Path, target: &Path) -> Result<ManagedCopyStatus, 
         .map_err(|error| format!("write {}: {error}", display_path(target)))?;
     Ok(ManagedCopyStatus::Copied)
 }
+
+fn copy_bridge_core(repository_root: &Path, host_root: &Path) -> String {
+    let source = repository_root
+        .join("_shared")
+        .join("ts")
+        .join("bridge-core.ts");
+    let target = host_root.join("_shared").join("ts").join("bridge-core.ts");
+    if !source.is_file() {
+        return "bridge core source absent".to_string();
+    }
+    match copy_managed_file(&source, &target) {
+        Ok(ManagedCopyStatus::Copied) => format!("bridge core -> {}", display_path(&target)),
+        Ok(ManagedCopyStatus::AlreadyCurrent) => "bridge core already current".to_string(),
+        Ok(ManagedCopyStatus::PreservedCustom) => {
+            "bridge core preserved (user-customized)".to_string()
+        }
+        Err(error) => format!("bridge core skipped ({error})"),
+    }
+}
+
+fn copy_gateway_skill(repository_root: &Path, skills_root: &Path) -> String {
+    let source = repository_root.join("using-keel").join("SKILL.md");
+    let target = skills_root.join("using-keel").join("SKILL.md");
+    if !source.is_file() {
+        return "gateway skill source absent".to_string();
+    }
+    match copy_managed_file(&source, &target) {
+        Ok(ManagedCopyStatus::Copied) => format!("gateway skill -> {}", display_path(&target)),
+        Ok(ManagedCopyStatus::AlreadyCurrent) => "gateway skill already current".to_string(),
+        Ok(ManagedCopyStatus::PreservedCustom) => {
+            "gateway skill preserved (user-customized)".to_string()
+        }
+        Err(error) => format!("gateway skill skipped ({error})"),
+    }
+}
+
+const MANAGED_HOST_AGENTS_BEGIN: &str =
+    "<!-- keel:begin (managed by keel install — edits inside this block are overwritten; edit outside it freely) -->";
+const MANAGED_HOST_AGENTS_END: &str = "<!-- keel:end -->";
+
+fn sync_host_agents_md(path: &Path, host: &str) -> Result<String, String> {
+    let body = format!(
+        "# keel operating contract (always-on)\n\nInstalled by keel for {host}. Before changing code, config, or architecture: read SYSTEM_MAP and the owning file; restate and research the request; use the keel MCP tools (`context_brief`, `system_map`, `recall`, `skill_route`, `skill_get`, `anvil`, `run_command`); trace the root cause; preserve user data; run affected tests and review before finishing. Do not trust training knowledge over current repository or official documentation."
+    );
+    let block = format!("{MANAGED_HOST_AGENTS_BEGIN}\n{body}\n{MANAGED_HOST_AGENTS_END}");
+    let existing = crate::runtime::read_text_if_exists(path).unwrap_or_default();
+    let stripped = existing.strip_prefix('\u{feff}').unwrap_or(&existing);
+    let merged = super::super::install::codex::merge_managed_region(
+        stripped,
+        &block,
+        MANAGED_HOST_AGENTS_BEGIN,
+        MANAGED_HOST_AGENTS_END,
+    );
+    if merged == stripped {
+        return Ok("AGENTS.md already current".to_string());
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("create {}: {error}", display_path(parent)))?;
+    }
+    write_text(path, &merged)?;
+    Ok(format!("AGENTS.md written to {}", display_path(path)))
+}
+
+fn write_generated_managed_file(
+    target: &Path,
+    content: &str,
+    ownership_marker: &str,
+) -> Result<ManagedCopyStatus, String> {
+    if let Ok(metadata) = std::fs::symlink_metadata(target) {
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Ok(ManagedCopyStatus::PreservedCustom);
+        }
+        let existing = std::fs::read_to_string(target)
+            .map_err(|error| format!("read {}: {error}", display_path(target)))?;
+        if existing == content {
+            return Ok(ManagedCopyStatus::AlreadyCurrent);
+        }
+        if !existing.contains(ownership_marker) {
+            return Ok(ManagedCopyStatus::PreservedCustom);
+        }
+    }
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("create {}: {error}", display_path(parent)))?;
+    }
+    write_text(target, content)?;
+    Ok(ManagedCopyStatus::Copied)
+}
+
+pub(crate) fn maybe_wire_agents_gateway(
+    repository_root: &Path,
+    claude_home: &Path,
+) -> Option<String> {
+    if !is_standard_home(claude_home) {
+        return None;
+    }
+    let home = host_user_home(claude_home)?;
+    Some(copy_gateway_skill(
+        repository_root,
+        &home.join(".agents").join("skills"),
+    ))
+}
 pub(crate) fn maybe_register_mcp_server(claude_home: &Path) -> Option<String> {
     if !super::super::mcp_register::is_standard_claude_home(claude_home) {
         return None;
@@ -148,7 +251,8 @@ pub(crate) fn maybe_wire_opencode(
         Err(error) => format!("MCP skipped ({error})"),
     };
 
-    Some(format!("{plugin_status}; {mcp_status}"))
+    let core_status = copy_bridge_core(repository_root, &home.join(".config").join("opencode"));
+    Some(format!("{plugin_status}; {core_status}; {mcp_status}"))
 }
 
 pub(crate) fn maybe_wire_cursor(
@@ -284,9 +388,11 @@ pub(crate) fn maybe_wire_cursor(
     }
 }
 
-/// Grok loads global hooks from `~/.grok/hooks/*.json`. Claude-compat also
-/// scans `~/.claude/settings.json`, but that scan can be turned off. Write a
-/// native Grok hook file so PreToolUse deny (Iron Law + Anvil) always fires.
+/// Grok loads global hooks from `~/.grok/hooks/*.json` and, by default, merges
+/// the managed hooks from `~/.claude/settings.json`. Reuse that compatible
+/// source when it is current so every lifecycle event fires exactly once.
+/// When Claude hook compatibility is explicitly disabled, install the native
+/// Grok hook file so PreToolUse deny (Iron Law + Anvil) still fires.
 /// Stop must call `keel hook stop` (silent). Grok treats Stop additionalContext
 /// as "keep going"; wiring Stop to post-tool-batch loops until the host cap.
 pub(crate) fn maybe_wire_grok(claude_home: &Path, detected: bool) -> Option<String> {
@@ -301,22 +407,36 @@ pub(crate) fn maybe_wire_grok(claude_home: &Path, detected: bool) -> Option<Stri
         return Some("skipped (not detected)".to_string());
     }
     let grok_dir = grok_config_home(&home);
-    let hooks_dir = grok_dir.join("hooks");
-    if let Err(error) = std::fs::create_dir_all(&hooks_dir) {
-        return Some(format!("hooks dir skipped ({error})"));
-    }
-    let target = hooks_dir.join("keel.json");
+    let target = grok_dir.join("hooks").join("keel.json");
     let binary = installed_executable_path(claude_home);
-    let payload = grok_hooks_payload(&binary);
-    let rendered = match serde_json::to_string_pretty(&payload) {
-        Ok(text) => text,
-        Err(error) => return Some(format!("serialize skipped ({error})")),
-    };
-    let hook_status = match write_text(&target, &rendered) {
-        Ok(()) => format!("hooks -> {}", display_path(&target)),
-        Err(error) => return Some(format!("hooks write skipped ({error})")),
-    };
     let config_path = grok_dir.join("config.toml");
+    let use_claude_compat = grok_claude_hook_compatibility_enabled(&config_path)
+        && claude_compatible_hooks_are_current(claude_home, &binary);
+    let hook_status = if use_claude_compat {
+        match std::fs::remove_file(&target) {
+            Ok(()) => "hooks via Claude compatibility (duplicate native hooks removed)".to_string(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                "hooks via Claude compatibility".to_string()
+            }
+            Err(error) => return Some(format!("duplicate native hook removal skipped ({error})")),
+        }
+    } else {
+        let hooks_dir = target
+            .parent()
+            .expect("Grok hook target always has a parent directory");
+        if let Err(error) = std::fs::create_dir_all(hooks_dir) {
+            return Some(format!("hooks dir skipped ({error})"));
+        }
+        let payload = grok_hooks_payload(&binary);
+        let rendered = match serde_json::to_string_pretty(&payload) {
+            Ok(text) => text,
+            Err(error) => return Some(format!("serialize skipped ({error})")),
+        };
+        match write_text(&target, &rendered) {
+            Ok(()) => format!("native hooks -> {}", display_path(&target)),
+            Err(error) => return Some(format!("hooks write skipped ({error})")),
+        }
+    };
     let mcp_status = match ensure_codex_native_mcp(&config_path, &binary) {
         Ok(CodexNativeMcpResult::Added) => "native MCP registered".to_string(),
         Ok(CodexNativeMcpResult::Updated) => "native MCP command updated".to_string(),
@@ -324,6 +444,42 @@ pub(crate) fn maybe_wire_grok(claude_home: &Path, detected: bool) -> Option<Stri
         Err(error) => format!("native MCP skipped ({error})"),
     };
     Some(format!("{hook_status}; {mcp_status}"))
+}
+
+pub(crate) fn grok_claude_hook_compatibility_enabled(config_path: &Path) -> bool {
+    std::fs::read_to_string(config_path)
+        .ok()
+        .and_then(|text| toml::from_str::<toml::Value>(&text).ok())
+        .and_then(|document| {
+            document
+                .get("compat")
+                .and_then(|compat| compat.get("claude"))
+                .and_then(|claude| claude.get("hooks"))
+                .and_then(toml::Value::as_bool)
+        })
+        .unwrap_or(true)
+}
+
+pub(crate) fn claude_compatible_hooks_are_current(keel_home: &Path, binary: &Path) -> bool {
+    let settings_path = crate::runtime::claude_engagement_home(keel_home)
+        .join(crate::hooks::claude::SETTINGS_FILE_NAME);
+    let current = std::fs::read_to_string(&settings_path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok());
+    let expected = crate::runner::hook_lifecycle::build_hooks_payload(&settings_path, binary)
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok());
+    current.is_some() && current == expected
+}
+
+pub(crate) fn grok_hooks_are_effective(grok_home: &Path, keel_home: &Path, binary: &Path) -> bool {
+    let native_hook = grok_home.join("hooks").join("keel.json");
+    let compat_enabled = grok_claude_hook_compatibility_enabled(&grok_home.join("config.toml"));
+    if compat_enabled && claude_compatible_hooks_are_current(keel_home, binary) {
+        !native_hook.exists()
+    } else {
+        grok_hooks_are_current(&native_hook, binary)
+    }
 }
 
 pub(crate) fn grok_hooks_payload(binary: &Path) -> serde_json::Value {
@@ -480,6 +636,390 @@ pub(crate) fn maybe_wire_pi(
         }
     }
 
+    status_parts.push(copy_bridge_core(
+        repository_root,
+        &home.join(".pi").join("agent"),
+    ));
+    status_parts.push(copy_gateway_skill(
+        repository_root,
+        &home.join(".pi").join("agent").join("skills"),
+    ));
+
+    Some(status_parts.join("; "))
+}
+
+/// Wire Oh My Pi at its native user root. OMP intentionally uses a distinct
+/// `~/.omp/agent` tree; treating the `omp` binary as legacy `pi` leaves the
+/// extension, MCP server, instructions, and skills undiscoverable.
+pub(crate) fn maybe_wire_omp(
+    repository_root: &Path,
+    claude_home: &Path,
+    detected: bool,
+) -> Option<String> {
+    if !is_standard_home(claude_home) {
+        return None;
+    }
+    if !detected {
+        return Some("skipped (not detected)".to_string());
+    }
+    let home = match host_user_home(claude_home) {
+        Some(path) => path,
+        None => return Some("skipped (no home directory)".to_string()),
+    };
+    let omp_root = home.join(".omp").join("agent");
+    let mut status_parts = Vec::new();
+
+    let extension_source = repository_root.join("pi").join("keel-pi.ts");
+    let extension_target = omp_root.join("extensions").join("keel-pi.ts");
+    if extension_source.is_file() {
+        match copy_managed_file(&extension_source, &extension_target) {
+            Ok(ManagedCopyStatus::Copied) => {
+                status_parts.push(format!("extension -> {}", display_path(&extension_target)))
+            }
+            Ok(ManagedCopyStatus::AlreadyCurrent) => {
+                status_parts.push("extension already current".to_string())
+            }
+            Ok(ManagedCopyStatus::PreservedCustom) => {
+                status_parts.push("extension preserved (user-customized)".to_string())
+            }
+            Err(error) => status_parts.push(format!("extension skipped ({error})")),
+        }
+    } else {
+        status_parts.push("extension source absent".to_string());
+    }
+    status_parts.push(copy_bridge_core(repository_root, &omp_root));
+
+    let binary = installed_executable_path(claude_home);
+    let mcp_path = omp_root.join("mcp.json");
+    let mcp_entry = serde_json::json!({
+        "type": "stdio",
+        "command": display_path(&binary),
+        "args": ["mcp", "serve"]
+    });
+    match merge_json_mcp(&mcp_path, "mcpServers", "keel", &mcp_entry, None) {
+        Ok(JsonMcpMergeResult::Added) => {
+            status_parts.push(format!("MCP registered in {}", display_path(&mcp_path)))
+        }
+        Ok(JsonMcpMergeResult::AlreadyCurrent) => {
+            status_parts.push("MCP already current".to_string())
+        }
+        Err(error) => status_parts.push(format!("MCP skipped ({error})")),
+    }
+    match sync_host_agents_md(&omp_root.join("AGENTS.md"), "Oh My Pi") {
+        Ok(status) => status_parts.push(status),
+        Err(error) => status_parts.push(format!("AGENTS.md skipped ({error})")),
+    }
+    status_parts.push(copy_gateway_skill(
+        repository_root,
+        &omp_root.join("skills"),
+    ));
+    Some(status_parts.join("; "))
+}
+
+fn json_object_child_mut<'a>(
+    parent: &'a mut serde_json::Value,
+    key: &str,
+) -> Result<&'a mut serde_json::Map<String, serde_json::Value>, String> {
+    if parent.get(key).is_none() {
+        parent[key] = serde_json::json!({});
+    }
+    parent
+        .get_mut(key)
+        .and_then(serde_json::Value::as_object_mut)
+        .ok_or_else(|| format!("{key} is not an object"))
+}
+
+fn zcode_hook_group(binary: &Path, subcommand: &str) -> serde_json::Value {
+    let status_message = format!("Keel managed lifecycle hook: {subcommand}");
+    serde_json::json!({
+        "matcher": "*",
+        "hooks": [{
+            "type": "process",
+            "command": display_path(binary),
+            "args": ["hook", subcommand],
+            "enabled": true,
+            "timeoutMs": 10000,
+            "statusMessage": status_message
+        }]
+    })
+}
+
+fn upsert_zcode_hook(
+    events: &mut serde_json::Map<String, serde_json::Value>,
+    event: &str,
+    binary: &Path,
+    subcommand: &str,
+) -> Result<(), String> {
+    let value = events
+        .entry(event.to_string())
+        .or_insert_with(|| serde_json::json!([]));
+    let entries = value
+        .as_array_mut()
+        .ok_or_else(|| format!("hooks.events.{event} is not an array"))?;
+    let desired = zcode_hook_group(binary, subcommand);
+    let desired_status = format!("Keel managed lifecycle hook: {subcommand}");
+    if let Some(existing) = entries.iter_mut().find(|entry| {
+        entry
+            .get("hooks")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|hooks| {
+                hooks.iter().any(|hook| {
+                    hook.get("statusMessage")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|status| {
+                            status == desired_status || status == "Keel managed lifecycle hook"
+                        })
+                })
+            })
+    }) {
+        *existing = desired;
+    } else {
+        entries.push(desired);
+    }
+    Ok(())
+}
+
+fn merge_zcode_config(path: &Path, binary: &Path) -> Result<String, String> {
+    let original = crate::runtime::read_text_if_exists(path).unwrap_or_default();
+    let mut document: serde_json::Value = if original.trim().is_empty() {
+        serde_json::json!({})
+    } else {
+        serde_json::from_str(original.strip_prefix('\u{feff}').unwrap_or(&original))
+            .map_err(|error| format!("parse {}: {error}", display_path(path)))?
+    };
+    if !document.is_object() {
+        return Err("root is not an object".to_string());
+    }
+
+    {
+        let mcp = json_object_child_mut(&mut document, "mcp")?;
+        let servers_value = mcp
+            .entry("servers".to_string())
+            .or_insert_with(|| serde_json::json!({}));
+        let servers = servers_value
+            .as_object_mut()
+            .ok_or("mcp.servers is not an object")?;
+        let keel_value = servers
+            .entry("keel".to_string())
+            .or_insert_with(|| serde_json::json!({}));
+        let keel = keel_value
+            .as_object_mut()
+            .ok_or("mcp.servers.keel is not an object")?;
+        keel.insert(
+            "command".to_string(),
+            serde_json::Value::String(display_path(binary)),
+        );
+        keel.insert("args".to_string(), serde_json::json!(["mcp", "serve"]));
+    }
+
+    {
+        let hooks = json_object_child_mut(&mut document, "hooks")?;
+        if !hooks.contains_key("enabled") {
+            hooks.insert("enabled".to_string(), serde_json::Value::Bool(true));
+        }
+        let events_value = hooks
+            .entry("events".to_string())
+            .or_insert_with(|| serde_json::json!({}));
+        let events = events_value
+            .as_object_mut()
+            .ok_or("hooks.events is not an object")?;
+        for (event, subcommand) in [
+            ("SessionStart", "session-start"),
+            ("UserPromptSubmit", "user-prompt-submit"),
+            ("PreToolUse", "pre-tool-use"),
+            ("PostToolUse", "post-tool-use"),
+            ("PostToolUseFailure", "post-tool-use-failure"),
+            ("Stop", "stop"),
+        ] {
+            upsert_zcode_hook(events, event, binary, subcommand)?;
+        }
+        // ZCode has no SessionEnd, so Stop runs completion before session capture and learning.
+        upsert_zcode_hook(events, "Stop", binary, "session-end")?;
+    }
+
+    let rendered = serde_json::to_string_pretty(&document)
+        .map_err(|error| format!("serialize {}: {error}", display_path(path)))?;
+    if rendered == original.trim_end() {
+        return Ok("config already current".to_string());
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("create {}: {error}", display_path(parent)))?;
+    }
+    write_text(path, &rendered)?;
+    Ok(format!("config updated at {}", display_path(path)))
+}
+
+pub(crate) fn maybe_wire_zcode(
+    repository_root: &Path,
+    claude_home: &Path,
+    detected: bool,
+) -> Option<String> {
+    if !is_standard_home(claude_home) {
+        return None;
+    }
+    if !detected {
+        return Some("skipped (not detected)".to_string());
+    }
+    let home = match host_user_home(claude_home) {
+        Some(path) => path,
+        None => return Some("skipped (no home directory)".to_string()),
+    };
+    let zcode_root = home.join(".zcode");
+    let binary = installed_executable_path(claude_home);
+    let mut status_parts = Vec::new();
+    match merge_zcode_config(&zcode_root.join("cli").join("config.json"), &binary) {
+        Ok(status) => status_parts.push(status),
+        Err(error) => status_parts.push(format!("config skipped ({error})")),
+    }
+    match sync_host_agents_md(&zcode_root.join("AGENTS.md"), "ZCode") {
+        Ok(status) => status_parts.push(status),
+        Err(error) => status_parts.push(format!("AGENTS.md skipped ({error})")),
+    }
+    status_parts.push(copy_gateway_skill(
+        repository_root,
+        &zcode_root.join("skills"),
+    ));
+    Some(status_parts.join("; "))
+}
+
+fn wire_antigravity_plugin(
+    repository_root: &Path,
+    claude_home: &Path,
+    plugin: &Path,
+) -> Vec<String> {
+    let adapter_source = repository_root
+        .join("antigravity")
+        .join("keel-antigravity.js");
+    let adapter_target = plugin.join("keel-antigravity.js");
+    let mut status_parts = Vec::new();
+    if adapter_source.is_file() {
+        match copy_managed_file(&adapter_source, &adapter_target) {
+            Ok(ManagedCopyStatus::Copied) => status_parts.push("adapter copied".to_string()),
+            Ok(ManagedCopyStatus::AlreadyCurrent) => {
+                status_parts.push("adapter already current".to_string())
+            }
+            Ok(ManagedCopyStatus::PreservedCustom) => {
+                status_parts.push("adapter preserved (user-customized)".to_string())
+            }
+            Err(error) => status_parts.push(format!("adapter skipped ({error})")),
+        }
+    } else {
+        status_parts.push("adapter source absent".to_string());
+    }
+
+    let binary = installed_executable_path(claude_home);
+    let manifest = serde_json::to_string_pretty(&serde_json::json!({
+        "name": "keel",
+        "description": "Keel managed integration for Antigravity"
+    }))
+    .unwrap_or_default();
+    let mcp = serde_json::to_string_pretty(&serde_json::json!({
+        "mcpServers": {
+            "keel": {
+                "command": display_path(&binary),
+                "args": ["mcp", "serve"]
+            }
+        }
+    }))
+    .unwrap_or_default();
+    let quoted_adapter = if cfg!(target_os = "windows") {
+        // Windows file names cannot contain quotes, and both cmd.exe and PowerShell accept them.
+        format!("\"{}\"", display_path(&adapter_target))
+    } else {
+        crate::runner::shell_rewrite::shell_quote(&display_path(&adapter_target))
+    };
+    let adapter_command = format!("node {quoted_adapter}");
+    let hooks = serde_json::to_string_pretty(&serde_json::json!({
+        "keel": {
+            "PreToolUse": [{
+                "matcher": "*",
+                "hooks": [{"type": "command", "command": format!("{adapter_command} pre-tool-use"), "timeout": 10}]
+            }],
+            "PostToolUse": [{
+                "matcher": "*",
+                "hooks": [{"type": "command", "command": format!("{adapter_command} post-tool-use"), "timeout": 10}]
+            }],
+            "PreInvocation": [
+                {"type": "command", "command": format!("{adapter_command} pre-invocation"), "timeout": 10}
+            ],
+            "Stop": [
+                {"type": "command", "command": format!("{adapter_command} stop"), "timeout": 10}
+            ]
+        }
+    }))
+    .unwrap_or_default();
+    let rule = "# Keel operating contract\n\nThis rule is managed by Keel. Before changing code, config, or architecture, use the Keel MCP tools to read the system map and owning files, route and load relevant skills, compile and dry-run Anvil, preserve existing data, trace root cause, test, and review. Trust current repository evidence and official documentation over model memory.\n";
+    for (path, content, marker) in [
+        (
+            plugin.join("plugin.json"),
+            manifest.as_str(),
+            "Keel managed integration",
+        ),
+        (plugin.join("mcp_config.json"), mcp.as_str(), "\"keel\""),
+        (plugin.join("hooks.json"), hooks.as_str(), "\"keel\""),
+        (
+            plugin.join("rules").join("keel.md"),
+            rule,
+            "managed by Keel",
+        ),
+    ] {
+        match write_generated_managed_file(&path, content, marker) {
+            Ok(ManagedCopyStatus::Copied) => status_parts.push(format!(
+                "{} written",
+                path.file_name().unwrap_or_default().to_string_lossy()
+            )),
+            Ok(ManagedCopyStatus::AlreadyCurrent) => {}
+            Ok(ManagedCopyStatus::PreservedCustom) => status_parts.push(format!(
+                "{} preserved (user-customized)",
+                path.file_name().unwrap_or_default().to_string_lossy()
+            )),
+            Err(error) => status_parts.push(format!(
+                "{} skipped ({error})",
+                path.file_name().unwrap_or_default().to_string_lossy()
+            )),
+        }
+    }
+    status_parts.push(copy_gateway_skill(repository_root, &plugin.join("skills")));
+    status_parts
+}
+
+pub(crate) fn maybe_wire_antigravity(
+    repository_root: &Path,
+    claude_home: &Path,
+    detected: bool,
+) -> Option<String> {
+    if !is_standard_home(claude_home) {
+        return None;
+    }
+    if !detected {
+        return Some("skipped (not detected)".to_string());
+    }
+    let home = match host_user_home(claude_home) {
+        Some(path) => path,
+        None => return Some("skipped (no home directory)".to_string()),
+    };
+    let gemini = home.join(".gemini");
+    let ide_root = gemini.join("config");
+    let cli_root = gemini.join("antigravity-cli");
+    let ide_present = ide_root.is_dir() || which::which("antigravity").is_ok();
+    let cli_present = cli_root.is_dir() || which::which("agy").is_ok();
+    let mut targets = Vec::new();
+    if ide_present || !cli_present {
+        targets.push(("IDE", ide_root.join("plugins").join("keel")));
+    }
+    if cli_present {
+        targets.push(("CLI", cli_root.join("plugins").join("keel")));
+    }
+    let mut status_parts = Vec::new();
+    for (label, plugin) in targets {
+        let details = wire_antigravity_plugin(repository_root, claude_home, &plugin);
+        status_parts.push(format!("{label}: {}", details.join("; ")));
+    }
+    match sync_host_agents_md(&home.join(".gemini").join("GEMINI.md"), "Antigravity") {
+        Ok(status) => status_parts.push(status),
+        Err(error) => status_parts.push(format!("GEMINI.md skipped ({error})")),
+    }
     Some(status_parts.join("; "))
 }
 
@@ -526,6 +1066,10 @@ pub(crate) fn maybe_wire_commandcode(
     } else {
         status_parts.push("mod source absent".to_string());
     }
+    status_parts.push(copy_bridge_core(
+        repository_root,
+        &home.join(".commandcode"),
+    ));
 
     // Merge the keel MCP entry into ~/.commandcode/mcp.json.
     let mcp_source = repository_root.join("commandcode").join("mcp.json");

@@ -193,9 +193,9 @@ fn verify_grok_wiring_at(keel_home: &Path, grok_home: &Path) -> Result<bool, Str
             display_path(&config_path)
         ));
     }
-    if !crate::manager::install::grok_hooks_are_current(&hook_path, &executable) {
+    if !crate::manager::install::grok_hooks_are_effective(grok_home, keel_home, &executable) {
         return Err(format!(
-            "Grok hooks are missing or stale in {}",
+            "Grok hooks are missing, stale, or duplicated in {}",
             display_path(&hook_path)
         ));
     }
@@ -696,7 +696,7 @@ mod tests {
         fs::write(grok_home.join("hooks/keel.json"), "{\"hooks\":{}}").unwrap();
         assert!(verify_grok_wiring_at(&keel_home, &grok_home)
             .unwrap_err()
-            .contains("hooks are missing or stale"));
+            .contains("hooks are missing, stale, or duplicated"));
     }
 
     #[test]

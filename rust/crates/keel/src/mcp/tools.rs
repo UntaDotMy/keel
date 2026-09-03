@@ -2772,7 +2772,8 @@ mod mcp_timeout_tests {
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
         let started = Instant::now();
-        let completion_budget = Duration::from_secs(if cfg!(windows) { 10 } else { 3 });
+        // PowerShell cold starts can exceed ten seconds under the full Windows CI suite.
+        let completion_budget = Duration::from_secs(if cfg!(windows) { 20 } else { 3 });
         let (_, stdout, _) =
             run_command_with_timeout(command, completion_budget, "descendant-pipe-test")
                 .expect("leader exit must close inherited pipes");

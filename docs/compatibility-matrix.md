@@ -26,7 +26,7 @@ The goal is to keep the supported entry points explicit for both human operators
 | --- | --- | --- | --- | --- | --- |
 | `help`, `help advanced`, `version`, `platform` | Supported | Supported | Supported | Supported | Safe discovery surfaces for both operators and agents. |
 | `install`, `update`, `status`, `doctor`, `repair`, `verify`, `uninstall` | Supported | Supported | Supported | Supported | Checkout and packaged-release installs retain their owning source so lifecycle commands work outside the original extraction directory. |
-| Host adapter wiring | Supported | Supported | Supported | Supported | Claude, OpenCode, Codex, Cursor, Pi, Cowork, Command Code, and Grok are detected or selected with `--with`; Grok uses `$GROK_HOME` native hooks and MCP config. |
+| Host adapter wiring | Supported | Supported | Supported | Supported | Claude, OpenCode, Codex, Cursor, Pi, Cowork, Command Code, Grok, Oh My Pi, ZCode, and Antigravity are detected or selected with `--with`; `keel doctor` verifies installed runtime dependencies instead of file presence alone. |
 | `review pre-commit`, `review pre-pr`, `review gates check` | Supported | Supported | Supported | Supported | Native review surfaces are the default deterministic proof path. |
 | `git-workflow preflight` | Supported | Supported | Supported | Supported | Main branch and PR hygiene gate before publish or merge. |
 | `memory scope`, `memory system-map`, `memory working-brief`, `memory completion-gate`, `memory recall` | Supported | Supported | Supported | Supported | Core surfaces of the **unified** `keel memory` group. |
@@ -34,6 +34,21 @@ The goal is to keep the supported entry points explicit for both human operators
 | `code-index refresh|status|map` | Supported | Supported | Supported | Supported | Persistent deterministic workspace index for files, symbols, chunks, paths, relationships, commit generation, and stale-state reporting. |
 | `code-search search` | Supported | Supported | Supported | Supported | Indexed ranked retrieval. Path filters accept `/` and `\` on every platform; results include path, symbol, line range, score, reason, and snippet. |
 | `code-search siblings` | Supported | Supported | Supported | Supported | Indexed completeness scan: searches explicit query text or tokens from the current git diff and lists every other in-repo copy. Writes the completeness-gate marker. Required after a fix or implement. |
+
+## Host integration coverage
+
+| Host | Rules / discovery | Lifecycle enforcement | MCP | Important limitation |
+| --- | --- | --- | --- | --- |
+| Claude Code | Managed global contract and full skill catalog | Native Keel hooks | Native config | Primary, deepest integration. |
+| Codex CLI | `~/.codex/AGENTS.md` plus `~/.agents/skills/using-keel` | Codex plugin hooks | Native `config.toml` entry | Codex may require the user to trust newly installed hooks after restart. |
+| OpenCode | Shared gateway skill plus TypeScript plugin | Plugin lifecycle events | `opencode.json` | The installed plugin requires the bundled `_shared/ts/bridge-core.ts`; doctor verifies it. |
+| Pi Agent / Oh My Pi | Host `AGENTS.md` plus gateway skill | TypeScript extension | Native `mcp.json` | OMP is wired at `~/.omp/agent`, distinct from Pi's home. |
+| ZCode | Global `AGENTS.md` plus gateway skill | Native event hooks in `config.json` | Native `mcp.servers` entry | Keel preserves an explicit user `hooks.enabled = false`; doctor reports hooks disabled. |
+| Google Antigravity | Global plugin rule plus gateway skill | CamelCase JSON hook adapter | Plugin `mcp_config.json` | IDE and `agy` CLI use different global plugin directories; Keel detects each. The hook command requires `node` on PATH and doctor verifies it. |
+| Grok CLI | Native host configuration; Grok also discovers shared Agent Skills | Claude-compatible hooks by default; native fallback when compatibility is disabled | Native TOML entry | Existing sessions must be restarted to load new configuration. Keel keeps exactly one effective hook source. |
+| Cursor | `.cursorrules` | Native hooks | Native JSON entry | Use `--with cursor` when its config directory is absent during installation. |
+| Command Code | Mod-provided instructions | Mod lifecycle events | Native JSON entry | The installed mod requires the bundled `_shared/ts/bridge-core.ts`; doctor verifies it. |
+| Claude Desktop / Cowork | MCP tool descriptions only | Not available | Native Desktop config | Cowork exposes no lifecycle hook surface, so it cannot enforce the pre-edit gate. |
 
 ## Agent execution guidance
 

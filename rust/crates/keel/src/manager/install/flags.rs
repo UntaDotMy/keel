@@ -10,6 +10,9 @@ pub enum PlatformName {
     Cowork,
     Commandcode,
     Grok,
+    Omp,
+    Zcode,
+    Antigravity,
 }
 
 impl PlatformName {
@@ -22,6 +25,9 @@ impl PlatformName {
             "cowork" | "desktop" => Some(Self::Cowork),
             "commandcode" | "cmdc" | "command-code" => Some(Self::Commandcode),
             "grok" | "grok-build" => Some(Self::Grok),
+            "omp" | "oh-my-pi" | "oh_my_pi" => Some(Self::Omp),
+            "zcode" | "z-code" => Some(Self::Zcode),
+            "antigravity" | "agy" | "gemini-antigravity" => Some(Self::Antigravity),
             _ => None,
         }
     }
@@ -73,6 +79,15 @@ pub(crate) fn apply_overrides(
     if overrides.force.contains(&PlatformName::Grok) {
         detected.grok = true;
     }
+    if overrides.force.contains(&PlatformName::Omp) {
+        detected.omp = true;
+    }
+    if overrides.force.contains(&PlatformName::Zcode) {
+        detected.zcode = true;
+    }
+    if overrides.force.contains(&PlatformName::Antigravity) {
+        detected.antigravity = true;
+    }
     if overrides.skip.contains(&PlatformName::Opencode) {
         detected.opencode = false;
     }
@@ -93,6 +108,15 @@ pub(crate) fn apply_overrides(
     }
     if overrides.skip.contains(&PlatformName::Grok) {
         detected.grok = false;
+    }
+    if overrides.skip.contains(&PlatformName::Omp) {
+        detected.omp = false;
+    }
+    if overrides.skip.contains(&PlatformName::Zcode) {
+        detected.zcode = false;
+    }
+    if overrides.skip.contains(&PlatformName::Antigravity) {
+        detected.antigravity = false;
     }
     detected
 }

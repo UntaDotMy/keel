@@ -136,5 +136,33 @@
       "event": {"phase": "compaction_start"},
       "required_event_fields": ["phase"]
     }
+  ],
+  "antigravity": [
+    {
+      "name": "pre-tool",
+      "input": {
+        "conversationId": "antigravity-conversation-1",
+        "workspacePaths": ["/workspace/project"],
+        "toolCall": {"name": "write_to_file", "args": {"path": "README.md"}}
+      },
+      "required_fields": ["conversationId", "workspacePaths", "toolCall"]
+    },
+    {
+      "name": "pre-invocation",
+      "input": {
+        "conversationId": "antigravity-conversation-1",
+        "workspacePaths": ["/workspace/project"],
+        "invocationNum": 0
+      },
+      "required_fields": ["conversationId", "workspacePaths", "invocationNum"]
+    },
+    {
+      "name": "stop",
+      "input": {
+        "conversationId": "antigravity-conversation-1",
+        "workspacePaths": ["/workspace/project"]
+      },
+      "required_fields": ["conversationId", "workspacePaths"]
+    }
   ]
 }

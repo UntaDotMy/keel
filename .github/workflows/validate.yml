@@ -75,6 +75,7 @@ jobs:
               - 'pi/**'
               - 'cowork/**'
               - 'commandcode/**'
+              - 'antigravity/**'
               - 'statusline/**'
               - 'hermes-agent/**'
               - '_shared/**'
@@ -275,6 +276,7 @@ jobs:
           bun --check codex/keel-codex.ts
           bun --check codex/keel-codex.js
           bun --check commandcode/keel-cmdc.ts
+          bun --check antigravity/keel-antigravity.js
       - name: Check Unix statusline syntax
         run: bash -n statusline/statusline-keel.sh
       - name: Run host adapter contract fixtures

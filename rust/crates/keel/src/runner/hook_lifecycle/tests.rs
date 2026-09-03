@@ -1181,6 +1181,9 @@ fn iron_law_tool_classification_strict_requires_keel() {
     );
     assert!(is_edit_class_tool("search_replace"));
     assert!(is_edit_class_tool("Search_Replace"));
+    assert!(is_edit_class_tool("write_to_file"));
+    assert!(is_edit_class_tool("replace_file_content"));
+    assert!(is_edit_class_tool("multi_replace_file_content"));
 }
 
 #[test]

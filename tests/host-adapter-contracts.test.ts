@@ -144,3 +144,26 @@ test("Command Code fixtures match the ModApi lifecycle surface", () => {
   expect(commandCode).toContain('cmd.on("compaction_start"');
   expect(commandCode).toContain('cmd.on("compaction_done"');
 });
+
+test("Antigravity adapter translates the documented camelCase hook contract", () => {
+  const adapter = source("antigravity/keel-antigravity.js");
+  expect(fixtures.antigravity?.length).toBeGreaterThan(0);
+  for (const fixture of fixtures.antigravity ?? []) {
+    assertFields(
+      fixture.input as Fixture | undefined,
+      fixture.required_fields as string[],
+      `antigravity ${fixture.name}`,
+    );
+  }
+  expect(adapter).toContain("toolCall");
+  expect(adapter).toContain("conversationId");
+  expect(adapter).toContain("workspacePaths");
+  expect(adapter).toContain('decision: "deny"');
+  expect(adapter).toContain('decision: "allow"');
+  expect(adapter).toContain('startsWith("KEEL_GATE_DENY")');
+  expect(adapter).toContain('startsWith("KEEL_GATE_ALLOW")');
+  expect(adapter).toContain("injectSteps");
+  expect(adapter).toContain('["hook", "stop"]');
+  expect(adapter).toContain('decision: "continue"');
+  expect(adapter).toContain('"bridge", subcommand');
+});

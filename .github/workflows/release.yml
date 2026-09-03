@@ -68,6 +68,7 @@ jobs:
               - 'pi/**'
               - 'cowork/**'
               - 'commandcode/**'
+              - 'antigravity/**'
               - 'statusline/**'
               - 'hermes-agent/**'
               - '_shared/**'
@@ -315,7 +316,7 @@ jobs:
             cp -R .claude-plugin "$target_dir/.claude-plugin"
           fi
           # Stage cross-agent adapter sources so install can wire non-Claude hosts.
-          for adapter in opencode codex pi cursor cowork commandcode; do
+          for adapter in opencode codex pi cursor cowork commandcode antigravity; do
             if [ -d "$adapter" ]; then
               cp -R "$adapter" "$target_dir/$adapter"
             fi

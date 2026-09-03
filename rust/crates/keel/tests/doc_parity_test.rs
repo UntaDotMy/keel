@@ -389,15 +389,6 @@ fn audit_flagged_commands_are_documented() {
     }
 }
 
-/// The release bundle must stage the cross-agent adapter source directories
-/// (opencode/codex/pi/cursor/cowork) so `keel install` run from a release-bundle
-/// extract can wire non-Claude-Code targets. `maybe_wire_opencode` /
-/// `maybe_wire_codex` / `maybe_wire_pi` / `maybe_wire_cursor` / `maybe_wire_cowork` in
-/// `manager/install.rs` read these dirs from `repository_root`; if the release
-/// staging omits them, install silently reports "plugin source absent" /
-/// "source absent" for every adapter — the exact bug that shipped. This test
-/// pins the staging so the gap cannot recur: remove the staging and CI fails.
-///
 /// Bridge subcommand parity: the `keel bridge <event>` match arms in
 /// `runner/bridge.rs` are the single source of truth for which subcommands
 /// exist. CLAUDE.md's OpenCode-host section and the in-binary `render_bridge_help`
@@ -756,9 +747,11 @@ fn adapters_match_gate_decision_by_prefix_not_substring() {
 }
 
 /// The release bundle must stage the cross-agent adapter source directories
-/// (opencode/codex/pi/cursor/cowork) so `keel install` run from a release-bundle
-/// extract can wire non-Claude-Code targets. `maybe_wire_opencode` /
-/// `maybe_wire_codex` / `maybe_wire_pi` / `maybe_wire_cursor` / `maybe_wire_cowork` in
+/// (opencode/codex/pi/cursor/cowork/commandcode/antigravity) so `keel install`
+/// run from a release-bundle extract can wire non-Claude-Code targets.
+/// `maybe_wire_opencode` / `maybe_wire_codex` / `maybe_wire_pi` /
+/// `maybe_wire_cursor` / `maybe_wire_cowork` / `maybe_wire_commandcode` /
+/// `maybe_wire_antigravity` in
 /// `manager/install.rs` read these dirs from `repository_root`; if the release
 /// staging omits them, install silently reports "plugin source absent" /
 /// "source absent" for every adapter — the exact bug that shipped. This test
@@ -774,11 +767,19 @@ fn release_bundle_stages_adapter_source_dirs() {
     )
     .expect("read .github/workflows/release.yml");
 
-    for adapter in ["opencode", "codex", "pi", "cursor", "cowork", "commandcode"] {
+    for adapter in [
+        "opencode",
+        "codex",
+        "pi",
+        "cursor",
+        "cowork",
+        "commandcode",
+        "antigravity",
+    ] {
         let staged_explicit = release_yml.contains(&format!("cp -R \"{adapter}\""))
             || release_yml.contains(&format!("cp -R {adapter} "));
-        let staged_loop =
-            release_yml.contains("for adapter in opencode codex pi cursor cowork commandcode");
+        let staged_loop = release_yml
+            .contains("for adapter in opencode codex pi cursor cowork commandcode antigravity");
         assert!(
             staged_explicit || staged_loop,
             "release.yml must stage the `{adapter}` adapter dir into the release bundle; \
@@ -787,6 +788,17 @@ fn release_bundle_stages_adapter_source_dirs() {
              Add the adapter to the staging loop or as an explicit `cp -R`."
         );
     }
+}
+
+#[test]
+fn review_closeout_requires_the_antigravity_adapter() {
+    let path = repository_root().join("rust/crates/keel/src/review/closeout.rs");
+    let closeout = fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+    assert!(
+        closeout.matches("antigravity/keel-antigravity.js").count() >= 2,
+        "closeout must verify both the source artifact and release staging contract"
+    );
 }
 /// The release bundle must copy every root directory containing SKILL.md and
 /// verify that the staged count matches the source count.

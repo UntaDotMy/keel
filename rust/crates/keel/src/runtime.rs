@@ -259,7 +259,8 @@ pub fn resolve_user_home() -> Result<PathBuf, String> {
 }
 
 /// keel's host-neutral root home: the binary, data, and state live here so
-/// every host (claude, codex, opencode, cursor, pi, cowork) shares one
+/// every host (claude, codex, opencode, cursor, pi, cowork, commandcode,
+/// grok, omp, zcode, antigravity) shares one
 /// install. Resolution order: explicit flag → `KEEL_HOME` env →
 /// legacy `CLAUDE_TARGET_OVERRIDE` env → `~/.keel` default.
 pub fn resolve_keel_home(requested_home: &str) -> Result<PathBuf, String> {
