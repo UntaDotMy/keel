@@ -132,7 +132,7 @@ fn is_owned_workspace_name(name: &str) -> bool {
 pub fn create_temporary_workspace(
     workspace_root: &Path,
     files: &[String],
-    gates: &[String],
+    _gates: &[String],
 ) -> Result<TemporaryWorkspace, String> {
     let root = canonical_workspace_root(workspace_root)?;
     let dir = loop {
@@ -147,24 +147,26 @@ pub fn create_temporary_workspace(
             Err(error) => return Err(error.to_string()),
         }
     };
-    let result = (|| {
-        let _ = gates;
-        for raw in files {
-            let (relative, source) = source_file(&root, raw)?;
-            if source.is_file() {
-                if let Some(parent) = relative.parent() {
-                    std::fs::create_dir_all(dir.join(parent)).map_err(|error| error.to_string())?;
-                }
-                std::fs::copy(&source, dir.join(&relative)).map_err(|error| error.to_string())?;
+    populate_temporary_workspace(&root, TemporaryWorkspace { path: dir }, files)
+}
+
+fn populate_temporary_workspace(
+    root: &Path,
+    workspace: TemporaryWorkspace,
+    files: &[String],
+) -> Result<TemporaryWorkspace, String> {
+    for raw in files {
+        let (relative, source) = source_file(root, raw)?;
+        if source.is_file() {
+            if let Some(parent) = relative.parent() {
+                std::fs::create_dir_all(workspace.path().join(parent))
+                    .map_err(|error| error.to_string())?;
             }
+            std::fs::copy(&source, workspace.path().join(&relative))
+                .map_err(|error| error.to_string())?;
         }
-        Ok::<(), String>(())
-    })();
-    if let Err(error) = result {
-        let _ = remove_workspace(&dir);
-        return Err(error);
     }
-    Ok(TemporaryWorkspace { path: dir })
+    Ok(workspace)
 }
 
 fn remove_workspace(dir: &Path) -> Result<(), String> {
@@ -280,11 +282,14 @@ mod tests {
     #[test]
     fn failed_workspace_creation_removes_its_temporary_directory() {
         let root = test_root();
-        let sequence = NEXT_WORKSPACE.load(Ordering::Relaxed);
-        let expected =
-            std::env::temp_dir().join(format!("anvil-ws-{}-{sequence}", std::process::id()));
-        let error = create_temporary_workspace(root.path(), &["missing.txt".to_string()], &[])
-            .expect_err("missing source must fail");
+        let expected = root.path().join("failed-workspace");
+        std::fs::create_dir(&expected).expect("workspace");
+        let workspace = TemporaryWorkspace {
+            path: expected.clone(),
+        };
+        let error =
+            populate_temporary_workspace(root.path(), workspace, &["missing.txt".to_string()])
+                .expect_err("missing source must fail");
         assert!(error.contains("missing.txt"));
         assert!(
             !expected.exists(),
