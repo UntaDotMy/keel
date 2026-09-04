@@ -55,6 +55,39 @@ fn run_install(repo_root: &Path, claude_home: &Path, extra: &[&str]) {
     );
 }
 
+fn assert_antigravity_hooks_are_plugin_relative(plugin: &Path) {
+    let text = fs::read_to_string(plugin.join("hooks.json")).expect("read Antigravity hooks.json");
+    let document: serde_json::Value =
+        serde_json::from_str(&text).expect("Antigravity hooks.json must be valid JSON");
+    let commands = [
+        document["keel"]["PreToolUse"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap_or_default(),
+        document["keel"]["PostToolUse"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap_or_default(),
+        document["keel"]["PreInvocation"][0]["command"]
+            .as_str()
+            .unwrap_or_default(),
+        document["keel"]["Stop"][0]["command"]
+            .as_str()
+            .unwrap_or_default(),
+    ];
+    assert_eq!(
+        commands,
+        [
+            "node keel-antigravity.js pre-tool-use",
+            "node keel-antigravity.js post-tool-use",
+            "node keel-antigravity.js pre-invocation",
+            "node keel-antigravity.js stop",
+        ]
+    );
+    assert!(
+        !text.contains("\\\""),
+        "installed Antigravity hooks must not quote the adapter path: {text}"
+    );
+}
+
 fn run_uninstall(repo_root: &Path, claude_home: &Path) {
     let output = Command::new(env!("CARGO_BIN_EXE_keel"))
         .arg("uninstall")
@@ -412,6 +445,49 @@ fn with_flag_wires_antigravity_global_plugin() {
         .join("using-keel")
         .join("SKILL.md")
         .is_file());
+    assert_antigravity_hooks_are_plugin_relative(&plugin);
+
+    let global_mcp_path = home.join(".gemini").join("config").join("mcp_config.json");
+    let global_mcp: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(&global_mcp_path).expect("read Antigravity global MCP config"),
+    )
+    .expect("Antigravity global MCP config must be valid JSON");
+    assert_eq!(
+        global_mcp["mcpServers"]["keel"]["command"].as_str(),
+        Some(
+            claude_home
+                .join(if cfg!(windows) { "keel.exe" } else { "keel" })
+                .to_string_lossy()
+                .as_ref()
+        ),
+        "Antigravity IDE must receive a global MCP registration even before its plugin is enabled"
+    );
+    assert_eq!(
+        global_mcp["mcpServers"]["keel"]["args"],
+        serde_json::json!(["mcp", "serve"])
+    );
+    let _ = fs::remove_dir_all(&home);
+}
+
+#[test]
+fn antigravity_global_mcp_merge_preserves_existing_servers() {
+    let repo = repository_root();
+    let (home, claude_home) = fake_home_with_claude("keel-antigravity-global-mcp-preserve");
+    let global_mcp_path = home.join(".gemini").join("config").join("mcp_config.json");
+    fs::create_dir_all(global_mcp_path.parent().unwrap()).unwrap();
+    fs::write(
+        &global_mcp_path,
+        r#"{"mcpServers":{"user":{"command":"user-server"}},"keep":true}"#,
+    )
+    .unwrap();
+
+    run_install(&repo, &claude_home, &["--with", "antigravity"]);
+
+    let global_mcp: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&global_mcp_path).unwrap()).unwrap();
+    assert_eq!(global_mcp["keep"], true);
+    assert_eq!(global_mcp["mcpServers"]["user"]["command"], "user-server");
+    assert!(global_mcp["mcpServers"]["keel"].is_object());
     let _ = fs::remove_dir_all(&home);
 }
 
@@ -436,6 +512,7 @@ fn existing_antigravity_cli_home_receives_the_cli_plugin() {
         .join("using-keel")
         .join("SKILL.md")
         .is_file());
+    assert_antigravity_hooks_are_plugin_relative(&plugin);
     run_uninstall(&repo, &claude_home);
     assert!(
         !plugin.exists(),
@@ -451,6 +528,13 @@ fn uninstall_removes_new_host_wiring_without_removing_user_config() {
     let zcode_config = home.join(".zcode").join("cli").join("config.json");
     fs::create_dir_all(zcode_config.parent().unwrap()).unwrap();
     fs::write(&zcode_config, r#"{"userKeep":true}"#).unwrap();
+    let antigravity_mcp = home.join(".gemini").join("config").join("mcp_config.json");
+    fs::create_dir_all(antigravity_mcp.parent().unwrap()).unwrap();
+    fs::write(
+        &antigravity_mcp,
+        r#"{"mcpServers":{"user":{"command":"user-server"}},"userKeep":true}"#,
+    )
+    .unwrap();
 
     run_install(&repo, &claude_home, &["--with", "omp,zcode,antigravity"]);
     run_uninstall(&repo, &claude_home);
@@ -485,6 +569,15 @@ fn uninstall_removes_new_host_wiring_without_removing_user_config() {
         .join("plugins")
         .join("keel")
         .exists());
+
+    let antigravity_after: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&antigravity_mcp).unwrap()).unwrap();
+    assert_eq!(antigravity_after["userKeep"], true);
+    assert_eq!(
+        antigravity_after["mcpServers"]["user"]["command"],
+        "user-server"
+    );
+    assert!(antigravity_after["mcpServers"].get("keel").is_none());
 
     let zcode_after: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&zcode_config).unwrap()).unwrap();

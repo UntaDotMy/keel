@@ -2495,6 +2495,67 @@ fn remove_codex_plugin_section_removes_only_keel_section() {
     let _ = fs::remove_dir_all(dir);
 }
 
+fn antigravity_hook_commands(payload: &serde_json::Value) -> Vec<String> {
+    let keel = payload.get("keel").expect("keel root");
+    let grouped = ["PreToolUse", "PostToolUse"].map(|event| {
+        keel[event][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    });
+    let flat = ["PreInvocation", "Stop"].map(|event| {
+        keel[event][0]["command"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    });
+    grouped.into_iter().chain(flat).collect()
+}
+
+#[test]
+fn antigravity_hook_commands_are_plugin_relative_and_unquoted() {
+    let commands = antigravity_hook_commands(&antigravity_hooks_payload());
+    assert_eq!(
+        commands,
+        [
+            "node keel-antigravity.js pre-tool-use",
+            "node keel-antigravity.js post-tool-use",
+            "node keel-antigravity.js pre-invocation",
+            "node keel-antigravity.js stop",
+        ]
+    );
+    let rendered = serde_json::to_string(&antigravity_hooks_payload()).unwrap();
+    assert!(
+        !rendered.contains("\\\""),
+        "JSON must not embed extra quotes around the adapter path: {rendered}"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn quoted_absolute_antigravity_adapter_path_is_joined_as_relative() {
+    let plugin = PathBuf::from(r"C:\Users\Administrator\.gemini\config\plugins\keel");
+    let quoted = format!("\"{}\\keel-antigravity.js\"", plugin.display());
+    let nested = plugin.join(&quoted);
+    let display = nested.to_string_lossy();
+    assert!(
+        display.contains('"'),
+        "quoted absolute path must stay nested under the plugin dir: {display}"
+    );
+    for command in antigravity_hook_commands(&antigravity_hooks_payload()) {
+        let script = command
+            .strip_prefix("node ")
+            .and_then(|rest| rest.split_whitespace().next())
+            .expect("node <script> <event>");
+        let resolved = plugin.join(script);
+        assert_eq!(resolved, plugin.join("keel-antigravity.js"));
+        assert!(
+            !script.contains('"') && !script.contains('\''),
+            "quotes survive into Node module lookup: {script}"
+        );
+    }
+}
+
 #[cfg(windows)]
 #[test]
 fn grok_hook_command_executes_spaced_path_and_forwards_stdin_in_powershell() {

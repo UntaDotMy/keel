@@ -495,6 +495,17 @@ pub(crate) fn remove_wired_adapters(claude_home: &Path) -> usize {
         removed += remove_empty_directory(&antigravity.join("rules"));
         removed += remove_empty_directory(&antigravity);
     }
+    removed += remove_json_mcp_entry(
+        &home.join(".gemini").join("config").join("mcp_config.json"),
+        "mcpServers",
+    );
+    removed += remove_json_mcp_entry(
+        &home
+            .join(".gemini")
+            .join("antigravity-cli")
+            .join("mcp_config.json"),
+        "mcpServers",
+    );
     removed += remove_codex_managed_agents_md(&home.join(".gemini").join("GEMINI.md"));
 
     removed

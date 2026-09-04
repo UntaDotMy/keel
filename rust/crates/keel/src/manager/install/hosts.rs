@@ -883,6 +883,35 @@ pub(crate) fn maybe_wire_zcode(
     Some(status_parts.join("; "))
 }
 
+const ANTIGRAVITY_ADAPTER_FILE: &str = "keel-antigravity.js";
+
+fn antigravity_hook_command(event: &str) -> String {
+    // why: Antigravity cwd is the hooks.json dir and does not strip quotes, so a
+    // quoted absolute path becomes pluginDir\"C:\...\js" (MODULE_NOT_FOUND).
+    format!("node {ANTIGRAVITY_ADAPTER_FILE} {event}")
+}
+
+pub(crate) fn antigravity_hooks_payload() -> serde_json::Value {
+    serde_json::json!({
+        "keel": {
+            "PreToolUse": [{
+                "matcher": "*",
+                "hooks": [{"type": "command", "command": antigravity_hook_command("pre-tool-use"), "timeout": 10}]
+            }],
+            "PostToolUse": [{
+                "matcher": "*",
+                "hooks": [{"type": "command", "command": antigravity_hook_command("post-tool-use"), "timeout": 10}]
+            }],
+            "PreInvocation": [
+                {"type": "command", "command": antigravity_hook_command("pre-invocation"), "timeout": 10}
+            ],
+            "Stop": [
+                {"type": "command", "command": antigravity_hook_command("stop"), "timeout": 10}
+            ]
+        }
+    })
+}
+
 fn wire_antigravity_plugin(
     repository_root: &Path,
     claude_home: &Path,
@@ -890,8 +919,8 @@ fn wire_antigravity_plugin(
 ) -> Vec<String> {
     let adapter_source = repository_root
         .join("antigravity")
-        .join("keel-antigravity.js");
-    let adapter_target = plugin.join("keel-antigravity.js");
+        .join(ANTIGRAVITY_ADAPTER_FILE);
+    let adapter_target = plugin.join(ANTIGRAVITY_ADAPTER_FILE);
     let mut status_parts = Vec::new();
     if adapter_source.is_file() {
         match copy_managed_file(&adapter_source, &adapter_target) {
@@ -923,32 +952,7 @@ fn wire_antigravity_plugin(
         }
     }))
     .unwrap_or_default();
-    let quoted_adapter = if cfg!(target_os = "windows") {
-        // Windows file names cannot contain quotes, and both cmd.exe and PowerShell accept them.
-        format!("\"{}\"", display_path(&adapter_target))
-    } else {
-        crate::runner::shell_rewrite::shell_quote(&display_path(&adapter_target))
-    };
-    let adapter_command = format!("node {quoted_adapter}");
-    let hooks = serde_json::to_string_pretty(&serde_json::json!({
-        "keel": {
-            "PreToolUse": [{
-                "matcher": "*",
-                "hooks": [{"type": "command", "command": format!("{adapter_command} pre-tool-use"), "timeout": 10}]
-            }],
-            "PostToolUse": [{
-                "matcher": "*",
-                "hooks": [{"type": "command", "command": format!("{adapter_command} post-tool-use"), "timeout": 10}]
-            }],
-            "PreInvocation": [
-                {"type": "command", "command": format!("{adapter_command} pre-invocation"), "timeout": 10}
-            ],
-            "Stop": [
-                {"type": "command", "command": format!("{adapter_command} stop"), "timeout": 10}
-            ]
-        }
-    }))
-    .unwrap_or_default();
+    let hooks = serde_json::to_string_pretty(&antigravity_hooks_payload()).unwrap_or_default();
     let rule = "# Keel operating contract\n\nThis rule is managed by Keel. Before changing code, config, or architecture, use the Keel MCP tools to read the system map and owning files, route and load relevant skills, compile and dry-run Anvil, preserve existing data, trace root cause, test, and review. Trust current repository evidence and official documentation over model memory.\n";
     for (path, content, marker) in [
         (
@@ -1006,14 +1010,37 @@ pub(crate) fn maybe_wire_antigravity(
     let cli_present = cli_root.is_dir() || which::which("agy").is_ok();
     let mut targets = Vec::new();
     if ide_present || !cli_present {
-        targets.push(("IDE", ide_root.join("plugins").join("keel")));
+        targets.push((
+            "IDE",
+            ide_root.clone(),
+            ide_root.join("plugins").join("keel"),
+        ));
     }
     if cli_present {
-        targets.push(("CLI", cli_root.join("plugins").join("keel")));
+        targets.push((
+            "CLI",
+            cli_root.clone(),
+            cli_root.join("plugins").join("keel"),
+        ));
     }
     let mut status_parts = Vec::new();
-    for (label, plugin) in targets {
-        let details = wire_antigravity_plugin(repository_root, claude_home, &plugin);
+    let binary = installed_executable_path(claude_home);
+    let mcp_entry = serde_json::json!({
+        "command": display_path(&binary),
+        "args": ["mcp", "serve"]
+    });
+    for (label, root, plugin) in targets {
+        let mut details = wire_antigravity_plugin(repository_root, claude_home, &plugin);
+        let global_mcp = root.join("mcp_config.json");
+        let global_mcp_status =
+            match merge_json_mcp(&global_mcp, "mcpServers", "keel", &mcp_entry, None) {
+                Ok(JsonMcpMergeResult::Added) => {
+                    format!("global MCP registered in {}", display_path(&global_mcp))
+                }
+                Ok(JsonMcpMergeResult::AlreadyCurrent) => "global MCP already current".to_string(),
+                Err(error) => format!("global MCP skipped ({error})"),
+            };
+        details.push(global_mcp_status);
         status_parts.push(format!("{label}: {}", details.join("; ")));
     }
     match sync_host_agents_md(&home.join(".gemini").join("GEMINI.md"), "Antigravity") {
