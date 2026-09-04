@@ -51,7 +51,7 @@ See `../_shared/common-discipline.md` for the canonical rules. Apply them to all
 
 ### Commitment Coverage Targets
 - Cover the stable baseline (the floor of the utilization curve) with reserved instances, savings plans, or committed-use discounts; keep the variable top on-demand or spot.
-- Aim for a coverage target (commonly 70-85% of steady-state) and an explicit utilization target so commitments do not strand.
+- Set coverage and utilization targets from the measured stable baseline, seasonality, roadmap certainty, and provider flexibility. Do not treat a generic percentage range as safe for every fleet.
 - Match commitment term and flexibility to roadmap certainty: convertible or compute-flexible plans when the fleet will shift, standard when it is stable.
 
 ### Tag-or-It-Doesn't-Exist Allocation

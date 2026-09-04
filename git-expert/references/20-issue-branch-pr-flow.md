@@ -11,14 +11,14 @@ Hierarchy, promoted one direction only. Integration tiers are permanent; task br
 - **`dev`** — staging.
 - **`feat`** — integration. Receives merges from `task/<task>`. Bare name only (not `feat/<task>`).
 - **`task/<task>`** — one task. Branch off `feat` (or a parent task when stacked).
-- **`task/<task>/<subtask>`** — one subtask. Branch off `task/<task>`.
+- **`task/<task>-<subtask>`** — one flat subtask branch. Branch off `task/<task>`; Git cannot store a nested child ref below an existing parent ref.
 
-Promotion flow: `task/<task>/<subtask>` → `task/<task>` → `feat` → `dev` → `main`.
+Promotion flow: `task/<task>-<subtask>` → `task/<task>` → `feat` → `dev` → `main`.
 
 ## Flow (Optional, User-Requested)
 
 1. Create or confirm issue context.
-2. Create a `task/<task>` work branch from `feat` (or `task/<task>/<subtask>` from the parent task).
+2. Create a `task/<task>` work branch from `feat` (or flat `task/<task>-<subtask>` from the parent task).
 3. Implement in small commits using `Add : FEATURE : short information`. Fixes stay on the same branch. Commit locally first.
 4. Open PR against the correct parent (`task/<task>` for a subtask, `feat` for a task) with clear rationale and validation evidence.
 5. Address feedback and update PR.
@@ -28,7 +28,7 @@ Promotion flow: `task/<task>/<subtask>` → `task/<task>` → `feat` → `dev` �
 ## Issue and Branch Guidance
 
 - Keep issue scoped to a clear user problem and acceptance criteria.
-- All hands-on work uses `task/<task>` (or `task/<task>/<subtask>`):
+- All hands-on work uses `task/<task>` (or flat `task/<task>-<subtask>`):
   - e.g. `task/rgb-sync`, `task/sensor/i2c-timeout`
 - Fixes and subtasks for in-flight work stay on that task's branch (or a nested subtask branch), never a random new prefix.
 - Legacy `add/` / `feature/` branches may finish in flight; new work uses `task/`.

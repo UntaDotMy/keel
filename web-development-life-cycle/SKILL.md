@@ -14,7 +14,7 @@ You are a senior web engineer building production-ready websites and web applica
 
 ## Research Reuse Defaults · Completion Discipline · Memory and Security Boundaries · Code Implementation Discipline
 
-See `../_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill. For frontend and API code: descriptive component and hook names (no `Btn`, `usrCtx`, `hdlClick`), TSDoc `@param`/`@returns` on shared components, hooks, and utilities, no silent error boundaries that swallow render failures, and one source of truth for shared state — do not introduce a parallel store "just for this page".
+See `../_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill. For frontend and API code: descriptive component and hook names (no `Btn`, `usrCtx`, `hdlClick`), document shared components, hooks, and utilities when their contract is not obvious from types and naming, no silent error boundaries that swallow render failures, and one source of truth for shared state — do not introduce a parallel store "just for this page".
 
 ## Use This Skill When
 

@@ -50,42 +50,21 @@ For each significant cluster of activity, extract:
 - **Failure**: What went wrong? (e.g., "CI failed because doc_parity test expected 45 skills but manifest had 46")
 - **Context**: Why does this matter? (e.g., "without this fix, no observations were written under OpenCode, breaking the entire memory chain")
 
-### Step 3: Write Structured Notes
+### Step 3: Consolidate Through the Native Store
 
-Write each consolidated note as a Markdown file to `~/.claude/memory/consolidated/`:
+Use Keel's implemented consolidation command so records remain in the unified,
+indexed memory layout instead of creating a parallel directory by hand:
 
 ```bash
-keel run -- mkdir -p ~/.claude/memory/consolidated
+keel memory consolidate --window 7
 ```
 
-File naming: `YYYY-MM-DD-HHmm-short-slug.md` (e.g., `2026-06-26-1340-compaction-reroute-all-agents.md`)
+When the review identifies a reusable semantic finding that is not already in a
+working brief or family record, write it through the supported research-cache
+surface with its evidence and freshness guidance:
 
-Note structure:
-
-```markdown
-# [Short title]
-
-## Context
-[1-2 sentences: what was the situation, what was the goal]
-
-## What Happened
-[3-5 sentences: what was done, what tools were used, what decisions were made]
-
-## Key Decisions
-- [Decision 1: why]
-- [Decision 2: why]
-
-## Solutions
-- [Solution 1: file:line evidence]
-- [Solution 2: file:line evidence]
-
-## Failures (if any)
-- [Failure 1: root cause + fix]
-
-## Evidence
-- PR #[N]: [title]
-- Files: [list]
-- Tests: [pass count]
+```bash
+keel memory research-cache record --question "<topic>" --answer "<finding and evidence>" --source "<file, PR, or URL>" --freshness "<guidance>"
 ```
 
 ### Step 4: Deduplicate
@@ -96,10 +75,10 @@ Before writing a new note, check if a similar note already exists:
 keel memory recall "[topic keywords]"
 ```
 
-If a similar note exists:
-- **Same topic, new info**: Append a "## Update YYYY-MM-DD" section to the existing note
-- **Same topic, same info**: Skip — don't duplicate
-- **Different topic**: Write a new note
+If a similar record exists:
+- **Same topic, new info**: record only the changed finding and identify what it supersedes
+- **Same topic, same info**: skip — don't duplicate
+- **Different topic**: create a new scoped record
 
 ### Step 5: Verify Recall
 
@@ -109,10 +88,11 @@ After writing, verify the note is searchable:
 keel memory recall "[keywords from the note]"
 ```
 
-The note should appear in the results. If it doesn't, the recall index may need a refresh:
+The record should appear in the results. If it doesn't, rebuild the recall index and retry:
 
 ```bash
-keel memory recall status
+keel memory index
+keel memory recall "[keywords from the note]"
 ```
 
 ## What NOT to Consolidate
@@ -128,11 +108,11 @@ keel memory recall status
 |---|---|---|---|
 | Observations (episodic) | Raw tool-call signatures | keel automatically | Every tool call |
 | Instincts | Distilled behavioral patterns | keel learning loop | Session end / compaction |
-| Consolidated notes | Structured knowledge | Agent (this skill) | Session end / user request |
+| Consolidated family records | Structured knowledge | Keel + agent review | Session end / user request |
 | Working briefs | Task scope + constraints | Agent (brief tools) | Before non-trivial work |
 | System map | Project structure | keel automatically | Session start / refresh |
 
-Consolidated notes are the bridge between raw observations (episodic, high-volume, low-signal) and instincts (distilled, low-volume, high-signal). They capture the "what did we learn" that neither observations nor instincts express well.
+Consolidated family records bridge raw observations (episodic, high-volume, low-signal) and instincts (distilled, low-volume, high-signal). They capture reusable findings without adding a second memory tree.
 
 ## Brain Analogy
 

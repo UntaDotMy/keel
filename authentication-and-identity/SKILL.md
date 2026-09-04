@@ -58,7 +58,7 @@ See `../_shared/common-discipline.md` for the canonical rules. Apply them to all
 - On password reset or compromise, invalidate sessions, refresh-token families, and cached identity in one coordinated step.
 
 ### Credential Storage
-- Prefer argon2id (OWASP Password Storage Cheat Sheet recommends Argon2id; minimum often cited as ~19 MiB memory, t=2, p=1 — tune on production-class hardware). Use bcrypt (cost >= 12) only where argon2 is unavailable.
+- Prefer Argon2id and start from a current OWASP-listed configuration (for example, 19 MiB, t=2, p=1), then tune on production-class hardware. Use scrypt when Argon2id is unavailable; retain bcrypt mainly for legacy compatibility, with a work factor of at least 10 and its 72-byte input limit handled explicitly.
 - Never use MD5, SHA-1, SHA-256, or any fast hash for passwords. Pepper is optional and managed as a secret; salt is per-credential and library-managed.
 - Plan algorithm migration as rehash-on-login behind the existing verifier.
 

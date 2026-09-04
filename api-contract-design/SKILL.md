@@ -30,7 +30,7 @@ See `../_shared/common-discipline.md` for the canonical rules. Apply them to all
 1. The schema is the contract. If the OpenAPI/GraphQL/proto file disagrees with the handler, the handler is wrong until the schema is updated deliberately.
 2. Versioning is a design decision, not a deployment afterthought. Decide URL-version, header-version, or schema-evolution rules before adding fields.
 3. Errors are part of the contract. A stable error taxonomy with machine-readable codes outranks free-text messages.
-4. Idempotency is mandatory for any retryable mutation. If a client can retry safely, the server must define the deduplication key.
+4. Retry semantics are mandatory for mutations. Use natural HTTP idempotence where the operation truly has it; require an idempotency key or another deduplication mechanism when replay could duplicate a side effect.
 5. Pagination is a contract, not a UI convenience. Cursor vs offset, max page size, and stable ordering are server-side decisions.
 6. Backwards compatibility is the default. Breaking changes require a versioned migration path with overlap windows.
 7. Generated clients are downstream consumers. A schema change that breaks codegen is a breaking change even if the wire format is compatible.
@@ -52,8 +52,8 @@ This skill is self-contained (no `references/` library). The heuristics, deliver
 - For GraphQL, return errors in the `errors[]` array with `extensions.code` set to the same closed code set used elsewhere.
 
 ### Idempotency
-- Every POST/PATCH/PUT/DELETE that can be retried must accept an idempotency key (header for REST, field for GraphQL/gRPC).
-- The server stores the result keyed by `(idempotency_key, route, body_hash)` for a defined window and replays it on duplicate.
+- For non-idempotent or side-effecting retries, define an idempotency key (header for REST, field for GraphQL/gRPC) or an equivalent operation identifier. Do not require a redundant key when stable resource semantics already make replay safe.
+- When keys are used, the server stores the result against a documented operation scope and request fingerprint for a defined window, rejecting accidental key reuse with incompatible input.
 - Document the retention window in the schema description so clients know when retries become unsafe.
 
 ### Pagination

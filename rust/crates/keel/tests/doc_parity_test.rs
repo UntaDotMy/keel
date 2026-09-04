@@ -1163,3 +1163,55 @@ fn plugin_hooks_pretooluse_matcher_is_unscoped() {
         );
     }
 }
+
+/// Managed guidance is executable policy: stale host paths or impossible
+/// version-control/database recipes reach users even when the binaries pass.
+/// Pin the high-impact corrections found by the production-harness audit.
+#[test]
+fn managed_guidance_uses_current_cross_host_contracts() {
+    let repo_root = repository_root();
+
+    for relative in [
+        "using-git-worktrees/SKILL.md",
+        "finishing-a-development-branch/SKILL.md",
+        "git-expert/SKILL.md",
+        "git-expert/references/20-issue-branch-pr-flow.md",
+        "cursor/README.md",
+        "pi/README.md",
+        "pi/AGENTS.md",
+    ] {
+        let path = repo_root.join(relative);
+        let text =
+            fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        assert!(
+            !text.contains("task/<task>/<subtask>"),
+            "{relative} must teach flat task/<task>-<subtask> refs"
+        );
+    }
+
+    let memory_path = repo_root.join("memory-consolidation").join("SKILL.md");
+    let memory = fs::read_to_string(&memory_path)
+        .unwrap_or_else(|e| panic!("read {}: {e}", memory_path.display()));
+    assert!(
+        memory.contains("keel memory consolidate")
+            && !memory.contains("~/.claude/memory/consolidated"),
+        "memory consolidation must use Keel's native indexed store"
+    );
+
+    let postgres_path = repo_root.join("postgres-migration-safety").join("SKILL.md");
+    let postgres = fs::read_to_string(&postgres_path)
+        .unwrap_or_else(|e| panic!("read {}: {e}", postgres_path.display()));
+    assert!(
+        postgres.contains("CHECK (column IS NOT NULL) NOT VALID"),
+        "the portable low-lock NOT NULL recipe must use a prevalidated CHECK"
+    );
+
+    let writing_path = repo_root.join("writing-skills").join("SKILL.md");
+    let writing = fs::read_to_string(&writing_path)
+        .unwrap_or_else(|e| panic!("read {}: {e}", writing_path.display()));
+    assert!(
+        writing.contains("repo-native skill evaluator")
+            && writing.contains("Use a subagent only when"),
+        "skill evaluation must remain usable on hosts or tasks that disallow subagents"
+    );
+}

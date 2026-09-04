@@ -31,7 +31,7 @@ When a native keel command owns the job, use it instead of recreating the behavi
 
 ## Branch and Commit Discipline
 
-- Branch model: `main` <- `dev` <- `feat` <- `task/<task>` [<- `task/<task>/<subtask>`] (never `feat/<task>` while bare `feat` exists)
+- Branch model: `main` <- `dev` <- `feat` <- `task/<task>` [<- flat `task/<task>-<subtask>`] (never nested task refs, or `feat/<task>` while bare `feat` exists)
 - Fix in-flight bugs on the same work branch, never a new branch
 - Commits: `Add : FEATURE : short info`
 - Never delete a branch after push or merge

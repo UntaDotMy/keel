@@ -47,12 +47,12 @@ See `../_shared/common-discipline.md` for the canonical rules. Apply them to all
 Test code is read more than written. Apply these on top of `../_shared/common-discipline.md` § Code Implementation Discipline:
 
 - **Descriptive test names** that read as a sentence: `it("returns 401 when the bearer token is expired")`, not `testAuth1`. The name is the failure message a future engineer will see.
-- **One concept per test.** If the test needs `and` in its name, split it.
+- **One cohesive behavior per test.** A name may include `and` when both observations prove one outcome; split only when the assertions have independent setup, failure meaning, or ownership.
 - **No `try/catch` swallowing in tests.** A test that catches the failure and continues is hiding the regression. Let the assertion fail.
-- **No `sleep`-based waits.** Use the framework's wait-for-condition primitive (`waitFor`, `expect.poll`, `cy.should`). Hard sleeps are the #1 source of flake.
+- **Avoid blind `sleep`-based waits.** Use the framework's wait-for-condition primitive (`waitFor`, `expect.poll`, `cy.should`). When elapsed time is the behavior under test, prefer a fake clock or document why a bounded real delay is necessary.
 - **Reuse fixtures and helpers; do not copy-adapt.** A "test_user_factory_v2" next to the original is a refactor, not a new helper.
-- **Doc-tag shared helpers.** A custom assertion or page-object method gets a `@param` / `@returns` / rustdoc / KDoc block so its contract is visible to the next author.
-- **No retries-to-green.** Marking a test `retries: 3` to dodge an intermittent failure converts a real defect into a hidden one (fail-fast principle).
+- **Document non-obvious shared helpers.** Use the language's normal doc format when a custom assertion or page-object method has surprising inputs, side effects, timing, or return semantics; do not add boilerplate tags that only repeat the signature.
+- **Retries are mitigation, not proof.** Do not use retries to declare a flaky test fixed. A temporary runner retry can reduce release disruption only when the flake is tracked, retry attempts stay visible, and root-cause work has an owner.
 
 ## Mandatory Test Ladder
 

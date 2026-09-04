@@ -43,7 +43,7 @@ pub(crate) use codex::{
     install_codex_plugin, merge_codex_marketplace, remove_codex_managed_agents_md,
     remove_codex_marketplace_entry, remove_codex_native_mcp_section, remove_codex_plugin_cache,
     remove_codex_plugin_section, sync_codex_agents_md, CodexEnableResult, CodexMarketplaceResult,
-    CodexNativeMcpResult, CodexPluginInstallation,
+    CodexNativeMcpResult, CodexPluginInstallation, CODEX_PLUGIN_REFERENCE,
 };
 #[cfg(test)]
 pub(crate) use codex::{

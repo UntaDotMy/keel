@@ -273,6 +273,12 @@ pub fn run_status_command(
         repo_version_from_metadata_or_build(&metadata, build_version)
             .unwrap_or_else(|| "unavailable".to_string())
     };
+    let installed_repo_version = repo_version_from_metadata_or_build(&metadata, build_version);
+    let version_drift = layout.is_ok()
+        && installed_skill_count > 0
+        && installed_repo_version
+            .as_deref()
+            .map_or(true, |installed| installed != repo_version);
     // Content drift (not just count): an install that never re-ran after skill
     // edits can still show 52/52 while SKILL.md bodies are stale. Matcher and
     // Skill() both read the installed tree — stale means wrong guidance.
@@ -281,12 +287,13 @@ pub fn run_status_command(
         .ok()
         .map(|value| stale_managed_skill_names(value, &claude_home))
         .unwrap_or_default();
-    let update_status = match (source_skill_count, stale_skills.is_empty()) {
-        (Some(expected_count), true) if installed_skill_count == expected_count => "current",
-        (Some(_), false) => "refresh recommended (content drift)",
-        (Some(_), true) => "refresh recommended",
-        (None, _) if installed_skill_count == 0 => "not installed",
-        (None, _) => "source unavailable",
+    let update_status = match (source_skill_count, stale_skills.is_empty(), version_drift) {
+        (Some(_), false, _) => "refresh recommended (content drift)",
+        (Some(_), true, true) => "refresh recommended (version drift)",
+        (Some(expected_count), true, false) if installed_skill_count == expected_count => "current",
+        (Some(_), true, false) => "refresh recommended",
+        (None, _, _) if installed_skill_count == 0 => "not installed",
+        (None, _, _) => "source unavailable",
     };
     let synced_skills = match source_skill_count {
         Some(expected_count) => format!("{installed_skill_count}/{expected_count}"),

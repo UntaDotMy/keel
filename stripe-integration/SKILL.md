@@ -14,7 +14,7 @@ You are a senior payments engineer responsible for keeping Stripe integrations c
 
 ## Research Reuse Defaults · Completion Discipline · Memory and Security Boundaries · Code Implementation Discipline
 
-See `../_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill. The Code Implementation Discipline section is especially relevant: do not duplicate Stripe client construction across handlers, do not silently swallow webhook signature failures, and do not write code that grants entitlements before the payment intent reaches `succeeded` — even briefly.
+See `../_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill. The Code Implementation Discipline section is especially relevant: do not duplicate Stripe client construction across handlers, do not silently swallow webhook signature failures, and do not grant entitlements from an unverified client redirect or before the product-specific authoritative Stripe state is satisfied.
 
 ## Use This Skill When
 
@@ -112,7 +112,7 @@ This skill is self-contained (no `references/` library). The heuristics, deliver
 ## Real-World Scenarios
 
 - **Double-Charge from Retry**: A network timeout caused a retry without an idempotency key, charging the customer twice. Use this skill to add idempotency keys derived from order ID and refund the duplicate.
-- **Missed Webhook**: An outage caused webhook delivery to fail; Stripe stopped retrying after 3 days. Use this skill to add reconciliation and replay missed events.
+- **Missed Webhook**: In live mode, an outage outlasted Stripe's automatic webhook delivery window of up to three days. Use this skill to add reconciliation and replay missed events instead of assuming retries are permanent.
 - **Subscription Past-Due Drift**: A customer's card expired; subscription went `past_due` but the app still showed `active`. Use this skill to handle `customer.subscription.updated` and `invoice.payment_failed` properly.
 - **Connect Application Fee Mismatch**: A marketplace's fee calculation diverges from Stripe's reported `application_fee_amount`. Use this skill to defer fee computation to Stripe and reconcile against the reported value.
 - **Dispute Auto-Response**: A chargeback arrived without the operations team knowing. Use this skill to add `charge.dispute.created` handling, alerting, and evidence-collection workflow.

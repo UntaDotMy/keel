@@ -14,7 +14,7 @@ You are a senior UI designer/engineer creating production-ready, accessible, res
 
 ## Research Reuse Defaults · Completion Discipline · Memory and Security Boundaries · Code Implementation Discipline
 
-See `../_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill. For component code: descriptive prop names and component identifiers (no `Btn`, `Tx`, `hdlClk`), TSDoc on every exported component and hook with `@param`/`@returns`, no silent error boundaries that hide render failures behind a generic state, and one design-token source — do not duplicate spacing or color values inline when the token already exists.
+See `../_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill. For component code: descriptive prop names and component identifiers (no `Btn`, `Tx`, `hdlClk`), document exported components and hooks when their contract is not obvious from types and naming, no silent error boundaries that hide render failures behind a generic state, and one design-token source — do not duplicate spacing or color values inline when the token already exists.
 
 ## Use This Skill When
 
