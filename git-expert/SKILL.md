@@ -37,7 +37,7 @@ Empty → confirm repo root before mutating.
 6. **Local commit before server** — no direct server commits.
 
 ## Branch model (this toolkit)
-`main` ← `dev` ← `feat` ← `task/<task>` [← `task/<task>/<subtask>`]. Never commit directly to main/dev/feat. Do not use `feat/<task>` (collides with bare `feat`). Legacy `add/`/`feature/` may finish in flight.
+`main` ← `dev` ← `feat` ← `task/<task>` [← flat `task/<task>-<subtask>`]. Never commit directly to main/dev/feat. Nested task refs collide with their parent ref; do not use `feat/<task>` while bare `feat` exists. Legacy `add/`/`feature/` may finish in flight.
 
 Commit subject: `Add : FEATURE : short info` (Category capitalized; FEATURE uppercase; spaces around colons). Branch uses slash (`task/sensor`); commit uses colons.
 

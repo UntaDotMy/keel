@@ -18,7 +18,7 @@ See `../_shared/common-discipline.md` for the canonical rules. Apply them to all
 
 ## Use This Skill When
 
-- Time to Interactive (TTI) or Interaction to Next Paint (INP) regressed.
+- A current Core Web Vital (LCP, INP, or CLS) regressed, or a diagnostic such as TTI/TBT points to main-thread startup work.
 - React DevTools Profiler shows wide flames or excessive commits per interaction.
 - Bundle size grew without a feature change.
 - Hydration warnings appear in production but not in development.
@@ -32,7 +32,7 @@ See `../_shared/common-discipline.md` for the canonical rules. Apply them to all
 3. `useMemo` and `useCallback` are not free. They cost dependency-array tracking and can mask the real problem.
 4. Re-renders are not always bad. A component re-rendering with the same props is cheap unless its render is expensive.
 5. Bundle size is a budget, not a vibe. Set a per-route budget and enforce it in CI.
-6. Hydration mismatches are bugs, not warnings. They invalidate the entire subtree and re-render it on the client.
+6. Hydration mismatches are bugs, not cosmetic warnings. Recovery scope depends on the React/framework version and boundary placement, and can discard server-rendered work or user state.
 7. Suspense boundaries are layout decisions. Place them where the user accepts a loading state, not where the fetch happens.
 
 ## Reference Map
@@ -49,13 +49,13 @@ This skill is self-contained (no `references/` library). The heuristics, deliver
 - `key` on a list item drives reconciliation. Index-based keys break memoization on insert/delete.
 
 ### Bundle Size
-- Run `next build` or `vite build --mode production` and inspect the route-level chunk sizes. Set a budget per route (e.g., 150KB gzipped initial JS).
+- Run `next build` or `vite build --mode production` and inspect route-level chunk sizes. Set a project-specific budget from the current baseline, target device/network class, and user timing rather than treating one universal byte limit as correct.
 - Dynamic imports (`next/dynamic`, `React.lazy`) split out below-the-fold or interaction-gated components.
 - Tree-shake icon libraries by importing per-icon, not the barrel. Confirm with `source-map-explorer` or `webpack-bundle-analyzer`.
 - Polyfills and locale data are common bloat sources. Audit `core-js`, `moment`, full `lodash` imports.
 
 ### Hydration
-- A hydration mismatch invalidates the server-rendered subtree and re-renders it on the client. The cost equals a CSR-only render plus the wasted SSR.
+- A hydration mismatch can make React recover by client-rendering the affected boundary or root. Measure the actual recovery scope in the project's React/framework version; do not assume every mismatch has the same cost.
 - Common causes: `Date.now()` or `Math.random()` in render, locale-dependent formatting, conditional rendering on `typeof window`, browser-only state read during SSR.
 - Use `useSyncExternalStore` with a server snapshot for data that legitimately differs between server and client.
 
@@ -65,7 +65,7 @@ This skill is self-contained (no `references/` library). The heuristics, deliver
 - Place the Suspense boundary at the level the user accepts a loading state, not at the leaf component.
 
 ### Virtualization
-- Past ~200 visible rows, virtualization is mandatory. `react-window`, `react-virtuoso`, or `tanstack-virtual` are the defaults.
+- Virtualize when measured DOM, layout, paint, or interaction cost exceeds the route budget. Row count alone is not a universal threshold; row complexity and target devices matter. Reuse the project's established virtualizer when one exists.
 - Variable-height rows need a measurement strategy. Estimating from average height is acceptable; relying on observed ranges is more accurate.
 - Sticky headers, drag-and-drop, and accessibility (ARIA roles for grid) require explicit support from the virtualizer.
 
@@ -118,7 +118,7 @@ Recommend a perf block when:
 ## Runtime Boundaries
 
 Do not over-claim certainty when:
-- the Profiler trace was captured in development mode (development builds are 2-5x slower than production)
+- the Profiler trace was captured only in development mode, whose checks and instrumentation are not representative of production behavior
 - bundle size was measured locally without the production minifier and tree-shaker
 - a fix was confirmed on a fast machine but not on the user's actual device class
 - INP was measured synthetically without real user input patterns

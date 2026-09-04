@@ -202,6 +202,99 @@ fn status_uses_installed_inventory_when_source_is_unavailable() {
     let _ = fs::remove_dir_all(non_repository_directory);
 }
 
+#[test]
+fn status_reports_repo_version_drift_even_when_skill_bytes_match() {
+    let repository_root = repository_root();
+    let claude_home = unique_temp_dir("keel-status-version-drift");
+    let _ = fs::remove_dir_all(&claude_home);
+
+    let install_output = Command::new(env!("CARGO_BIN_EXE_keel"))
+        .arg("install")
+        .arg("--repo-root")
+        .arg(&repository_root)
+        .arg("--claude-home")
+        .arg(&claude_home)
+        .output()
+        .expect("run keel install");
+    assert!(
+        install_output.status.success(),
+        "install failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&install_output.stdout),
+        String::from_utf8_lossy(&install_output.stderr)
+    );
+
+    let metadata_path = claude_home.join("state").join("install-metadata.txt");
+    let metadata = fs::read_to_string(&metadata_path).expect("read install metadata");
+    let stale_metadata = metadata
+        .lines()
+        .map(|line| {
+            if line.starts_with("repo_version=") {
+                "repo_version=deadbee"
+            } else {
+                line
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(&metadata_path, stale_metadata).expect("write stale install metadata");
+
+    let status_output = Command::new(env!("CARGO_BIN_EXE_keel"))
+        .arg("status")
+        .arg("--repo-root")
+        .arg(&repository_root)
+        .arg("--claude-home")
+        .arg(&claude_home)
+        .output()
+        .expect("run keel status");
+    assert!(status_output.status.success());
+    let stdout = String::from_utf8_lossy(&status_output.stdout);
+    assert!(
+        stdout.contains("Skill pack update status: refresh recommended (version drift)"),
+        "matching skill counts and bytes must not hide stale install metadata:\n{stdout}"
+    );
+
+    let _ = fs::remove_dir_all(claude_home);
+}
+
+#[test]
+fn doctor_fix_removes_unlocked_stale_executable_siblings() {
+    let repository_root = repository_root();
+    let keel_home = unique_temp_dir("keel-doctor-fix-stale-executable");
+    let _ = fs::remove_dir_all(&keel_home);
+    fs::create_dir_all(&keel_home).expect("create keel home");
+    let executable_name = if cfg!(windows) { "keel.exe" } else { "keel" };
+    fs::write(keel_home.join(executable_name), b"current").expect("write installed executable");
+    let stale = keel_home.join(format!("{executable_name}.stale-1778857819"));
+    fs::write(&stale, b"stale").expect("write stale executable sibling");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_keel"))
+        .arg("doctor")
+        .arg("--fix")
+        .arg("--repo-root")
+        .arg(&repository_root)
+        .arg("--claude-home")
+        .arg(&keel_home)
+        .output()
+        .expect("run keel doctor --fix");
+    assert!(
+        output.status.success(),
+        "doctor failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("[ok] removed 1/1 stale Keel executable sibling(s)"),
+        "{stdout}"
+    );
+    assert!(
+        !stale.exists(),
+        "doctor --fix must remove the exact stale sibling"
+    );
+
+    let _ = fs::remove_dir_all(keel_home);
+}
+
 /// Learned skills under `skills/learned-*` are loop-generated and must not
 /// inflate the managed sync numerator. Status compares managed installed vs
 /// source/inventory; learned count is reported separately (or omitted when 0).

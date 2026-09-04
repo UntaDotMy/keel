@@ -43,7 +43,7 @@ git worktree add ../<repo>-<task> -b task/<task> feat
   `task/<task>` work branch off `feat`, sharing the same `.git`. The main tree is untouched.
 - Name the directory and branch for the work so parallel worktrees are
   distinguishable at a glance. All hands-on work uses `task/<task>`
-  work branches off `feat` (e.g. `task/rgb-sync`, `task/sensor/timeout`); fixes for in-flight
+  work branches off `feat` (e.g. `task/rgb-sync`, `task/sensor-timeout`); fixes for in-flight
   work stay on that feature's existing branch.
 
 ### 2. Work in it normally

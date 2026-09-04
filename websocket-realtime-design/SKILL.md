@@ -27,7 +27,7 @@ See `../_shared/common-discipline.md` for the canonical rules. Apply them to all
 
 ## Operating Stance
 
-1. The transport choice is a contract. WebSocket gives bidirectional binary; SSE gives one-way text with auto-reconnect; long-polling gives broad compatibility at high overhead.
+1. The transport choice is a contract. WebSocket gives bidirectional text or binary messages; SSE gives one-way text events with browser reconnect behavior; long-polling trades extra request churn for broad HTTP compatibility.
 2. Networks fail. Every realtime client must assume reconnects, message gaps, and duplicate delivery are normal.
 3. Auth on connect is not auth forever. Long-lived connections need re-authentication, token refresh, and revocation paths.
 4. Backpressure is a server problem first. If a slow consumer cannot keep up, the server decides whether to drop, buffer, or disconnect.
@@ -45,12 +45,12 @@ This skill is self-contained (no `references/` library). The heuristics, deliver
 - WebSocket: bidirectional, low overhead per message, requires explicit framing protocol on top.
 - SSE: one-way server-to-client, automatic reconnect with `Last-Event-ID`, plays well with HTTP/2 and proxies.
 - Long-polling: works through restrictive proxies but has high latency and connection churn. Use only as a fallback.
-- WebRTC data channels: P2P with low latency, requires signaling, useful for collaborative editing or low-latency cursor sharing.
+- WebRTC data channels: peer-to-peer data with signaling, NAT traversal, and a more complex security/topology model. Use when direct peer transport is a measured requirement, not merely because a feature is collaborative.
 
 ### Reconnect and Resume
-- Every connection has an `id`. The server stores recent message IDs per connection.
-- On reconnect, the client sends the last received message ID. The server replays missed messages from a bounded buffer.
-- If the buffer cannot serve the requested resume point, send a `RESYNC` frame so the client knows to refetch state via REST.
+- If the product requires resumable delivery, define a stable stream/session identity and monotonic or otherwise comparable event IDs.
+- On reconnect, the client can send its last applied event ID and the server can replay from a bounded durable buffer.
+- If resume is not offered or the buffer cannot serve the requested point, signal resynchronization so the client refetches authoritative state. Ephemeral signals such as cursors may intentionally use reconnect-without-replay.
 - Use exponential backoff with jitter. Fixed-interval reconnects from millions of clients create thundering herds.
 
 ### Backpressure
@@ -67,7 +67,7 @@ This skill is self-contained (no `references/` library). The heuristics, deliver
 ### Fan-Out
 - Single-process fan-out: in-memory pub/sub is fine.
 - Multi-process: use Redis Pub/Sub (simple, lossy on disconnect), Redis Streams (ordered, persistent), NATS (low-latency), or Kafka (durable, ordered partitions).
-- Sticky sessions on the load balancer reduce broker load but break horizontal scaling. Avoid unless the protocol genuinely requires server affinity.
+- Sticky sessions can simplify connection-local state but constrain rebalancing, failover, and scale-out. Use them only when the protocol or chosen adapter needs affinity, and keep cross-node state/fan-out explicit.
 
 ### Auth and Lifecycle
 - Authenticate on connect. Re-validate on reconnect (token may have been revoked).
@@ -85,11 +85,11 @@ This skill is self-contained (no `references/` library). The heuristics, deliver
 ### 2. Choose Delivery Semantics
 - At-most-once: simple, accepts loss on disconnect. Suitable for ephemeral indicators.
 - At-least-once with dedup: client and server cooperate to drop duplicates.
-- Exactly-once: requires both deduplication and idempotent application logic.
+- Effectively-once outcomes require durable operation identity, deduplication state, and idempotent application logic; WebSocket itself does not provide exactly-once delivery.
 
 ### 3. Plan Reconnect
-- Define resume vs resync: short-gap reconnects replay from buffer, long-gap reconnects refetch state.
-- Set buffer size and retention window.
+- Define whether each message class is ephemeral, resumable, or state-derived. Replay short gaps only where the contract requires it; otherwise reconnect and refetch authoritative state.
+- When replay exists, set buffer size and retention from the outage/reconnect objective.
 - Define backoff: exponential with jitter, capped at a sensible max (e.g., 30s).
 
 ### 4. Plan Backpressure

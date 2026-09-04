@@ -1,17 +1,16 @@
-# Testing Skills With Subagents
+# Testing Skills In Isolated Evaluation Contexts
 
 The method behind `writing-skills`' iron law: prove a skill changes behavior by
-watching a fresh subagent fail without it, then pass with it. This file is the
-detailed procedure the skill summarizes.
+watching a fresh isolated evaluator handle the scenario without it, then with it.
+This file is the detailed procedure the skill summarizes.
 
-## Why subagents
+## Why isolation
 
-A subagent (dispatched via the Task tool) starts with a fresh context window. It
-does not carry your intent, your knowledge of the skill, or the conversation that
-led here. That makes it a clean test subject: if it makes the right call, it did
-so on the strength of what you gave it, not on shared context you forgot you had.
-Testing a skill in your own context is the equivalent of writing a test after the
-code and never watching it fail — you cannot trust the result.
+A fresh evaluation context avoids carrying the author's intent or prior discussion
+into the test. Depending on the host and task policy, this can be a subagent, the
+repo-native skill evaluator, or a separate disposable session. Explicitly control
+which skill text is loaded. Testing only in the author's current context is the
+equivalent of writing a test after the code and never watching it fail.
 
 ## Building a pressure scenario
 
@@ -30,8 +29,8 @@ correct action is the comfortable one, the scenario tests nothing.
 
 ## RED — capture the failure and its rationalizations
 
-1. Dispatch a subagent the scenario with **no skill loaded**. Phrase it as a real
-   request, not a quiz.
+1. Run the scenario in a fresh isolated evaluator with **no skill loaded**. Phrase
+   it as a real request, not a quiz.
 2. Record the decision it makes.
 3. Record the **exact rationalizations** it uses to justify a wrong call. These
    are gold: the model will reach for the same excuses in production, so the skill
@@ -40,12 +39,12 @@ correct action is the comfortable one, the scenario tests nothing.
    - "This is a small change, review is overkill."
    - "The user is in a hurry, I'll skip the failing-test step."
    - "I'm fairly sure this is the cause" (without tracing).
-4. If the subagent makes the right call unprompted, the skill is not needed for
+4. If the evaluator makes the right call unprompted, the skill is not needed for
    this situation, or the pressure is too weak. Strengthen it or drop the claim.
 
 ## GREEN — write the minimum prose that flips the decision
 
-- Target the captured rationalizations directly. If the subagent said "the tests
+- Target the captured rationalizations directly. If the evaluator said "the tests
   probably still pass," the skill must say "re-run the tests; 'probably' is not
   evidence" — in those terms.
 - Write the least text that would have changed that one decision. Resist writing
@@ -56,7 +55,7 @@ correct action is the comfortable one, the scenario tests nothing.
 
 ## REFACTOR — re-test, then hunt the next loophole
 
-1. Re-run the *same* scenario with the new skill loaded. Pass = the subagent makes
+1. Re-run the *same* scenario with the new skill loaded. Pass = the evaluator makes
    the right call AND cites the skill's reasoning, under the same pressure.
 2. Vary the pressures (swap authority for money, add a second shortcut) and re-run.
    A skill that only holds for one exact wording has a loophole. Each new failure
@@ -66,7 +65,7 @@ correct action is the comfortable one, the scenario tests nothing.
 
 ## What a passing skill looks like
 
-- A captured RED transcript: a subagent making the wrong call without the skill.
+- A captured RED transcript: an isolated evaluator making the wrong call without the skill.
 - A captured GREEN transcript: the same scenario, skill loaded, right call + cited
   reasoning, under maximum pressure.
 - A clean `keel skill-lint` (triggers, within budget, no dangling links).
@@ -81,5 +80,5 @@ from observed behavior, gated by statistical thresholds (recurrence, confidence)
 and a content-hash no-clobber guard. That is a different mechanism — it answers
 "did this pattern recur enough to be worth a skill," not "does this prose change
 behavior under pressure." When you hand-author or refine a skill, this
-subagent-pressure method is the behavioral evidence the statistical loop does not
+isolated-pressure method is the behavioral evidence the statistical loop does not
 provide. Use it on any skill whose prose you wrote or edited by hand.

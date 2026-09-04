@@ -444,7 +444,7 @@ N = absent.
   surfaces into discrete name-triggerable skills and closing the one genuine
   mechanism gap. Eight new skills:
   - `writing-skills` ,  **the headline gap.** superpowers' meta-skill applies TDD to
-    skill *prose*: dispatch a fresh subagent the target situation *without* the skill
+    skill *prose*: run the target situation in a fresh isolated evaluator *without* the skill
     under stacked pressure (time + sunk cost + authority), capture the wrong call and
     its rationalizations, write the minimum prose that flips it, re-test under
     pressure until the subagent decides right and cites the skill. keel had

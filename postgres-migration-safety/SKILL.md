@@ -32,7 +32,7 @@ See `../_shared/common-discipline.md` for the canonical rules. Apply them to all
 2. Expand-and-contract is the default for any breaking schema change. Add the new shape, dual-write, backfill, switch reads, then remove the old shape — across separate deploys.
 3. Backfills run in batches with explicit lock and timeout settings. A single `UPDATE` over millions of rows holds long locks and fills WAL.
 4. Indexes go in `CONCURRENTLY`. The non-concurrent variant blocks writes for the entire build.
-5. `NOT NULL` and `CHECK` constraints accept `NOT VALID` then `VALIDATE CONSTRAINT` to avoid full-table scans under lock.
+5. Constraint syntax is version-specific. `CHECK` and foreign-key constraints support `NOT VALID`; for a broadly compatible low-lock `NOT NULL` rollout, add `CHECK (column IS NOT NULL) NOT VALID`, validate it, then run `ALTER COLUMN ... SET NOT NULL` and drop the helper check. PostgreSQL can use the valid check to skip the `SET NOT NULL` scan.
 6. Replication lag amplifies migration risk. A long migration on the primary delays replicas and can break read-after-write expectations.
 7. Rollback is part of the plan, not an afterthought. If the rollback path requires data restore, say so explicitly before deploying.
 
@@ -107,7 +107,7 @@ This skill is self-contained (no `references/` library). The heuristics, deliver
 
 ## Real-World Scenarios
 
-- **Large NOT NULL Add**: Adding `NOT NULL` to a 50M-row column. Use this skill to: backfill nulls in batches, add constraint as `NOT VALID`, then `VALIDATE CONSTRAINT` separately.
+- **Large NOT NULL Add**: Adding `NOT NULL` to a 50M-row column. Use this skill to backfill nulls in batches, add a named `CHECK (column IS NOT NULL) NOT VALID`, validate it separately, set the column `NOT NULL`, then remove the helper check when safe.
 - **Type Widening**: Changing `id` from `INTEGER` to `BIGINT` on a heavily-referenced table. Use this skill to expand-and-contract: new `id_v2` column, dual-write, backfill, switch FK references, drop old.
 - **Index on Hot Table**: A new index on a 200M-row table with sustained write traffic. Use this skill to confirm `CREATE INDEX CONCURRENTLY`, plan for invalid-index recovery, and validate the new plan with `EXPLAIN`.
 - **Materialized View Refresh**: A `REFRESH MATERIALIZED VIEW` blocks readers for hours. Use this skill to switch to `REFRESH MATERIALIZED VIEW CONCURRENTLY` (requires unique index) or out-of-band rebuild.
@@ -119,7 +119,7 @@ Recommend a migration block when:
 - the migration takes `ACCESS EXCLUSIVE` on a hot table without a `lock_timeout`
 - a backfill runs as a single statement on a multi-million-row table
 - an index is created without `CONCURRENTLY` on a table with active writes
-- a `NOT NULL` or `CHECK` constraint is added without `NOT VALID` first
+- a large-table `CHECK` or foreign-key constraint is added without considering `NOT VALID`, or a low-lock `NOT NULL` plan omits a version-compatible prevalidated check
 - the rollback path requires data restore but PITR window or backups were not confirmed
 - expected replication lag exceeds the downstream tolerance and was not communicated
 

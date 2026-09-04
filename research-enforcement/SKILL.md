@@ -1,6 +1,6 @@
 ---
 name: research-enforcement
-description: Force web search for latest info before implementing anything that touches external libraries, APIs, or frameworks. Prevents stale training data from being trusted as current fact. Use before any implementation that depends on an external dependency's API surface, version behavior, or deprecation status.
+description: Use when implementation depends on unstable or uncertain external-library, API, or framework facts. Verify them against current authoritative sources, reusing a fresh version-matched research-cache record when it fully answers the question and searching only the missing, stale, or time-sensitive delta.
 when_to_use: Implementing changes that touch external libraries, APIs, or frameworks; upgrading dependencies; using a library API that the model may not know the current state of; any situation where "I think this API works like..." is the starting point instead of verified documentation.
 allowed-tools: Read, Grep, Glob, Bash(keel memory:*), Bash(keel recall:*)
 effort: medium
@@ -15,8 +15,9 @@ deprecate endpoints, and frameworks change behavior between releases. Implementi
 against what you *remember* rather than what *is* produces code that compiles but
 fails at runtime, or uses patterns the framework no longer supports.
 
-This skill enforces a mandatory research step before any implementation that
-depends on external library behavior. It is not optional when the trigger applies.
+This skill enforces a mandatory verification step before implementation that
+depends on unstable or uncertain external behavior. Verification may reuse a
+fresh, version-matched cache record; otherwise it requires current research.
 
 ## The Anti-Pattern
 
@@ -28,7 +29,7 @@ begin with verification, not assumption.
 
 ## Mandatory Flow
 
-Before implementing ANY change that touches an external library, API, or framework:
+Before implementing a change that depends on an external library, API, or framework:
 
 ### Step 1 — Identify the external dependency
 
@@ -42,15 +43,16 @@ Ask: does this implementation depend on the behavior of something I do not own?
 If yes, proceed to Step 2. If the change is purely internal logic with no external
 dependency behavior, skip this skill.
 
-### Step 2 — Research the current state
+### Step 2 — Reuse or research the current state
 
-Run at least one of:
+First look for a version-matched research-cache result. If it fully answers the
+question and its freshness guidance still fits the risk, reuse it. Otherwise run
+one or more of:
 
 - `websearch` — search for the current documentation or release notes for the
   specific library/API/framework and version.
 - `context7` — query the library's docs for the specific API surface you will use.
-- `recall` — check if a prior research-cache entry exists for this dependency
-  (and whether it is stale).
+- `recall` — retrieve related records and identify only the missing or stale delta.
 
 Record what you found: the version, the API surface, any deprecation notices, and
 the source URL.
@@ -87,13 +89,13 @@ to change.
 
 ## Staleness Rules
 
-- Research results older than **30 days** trigger a re-research nudge. The agent
-  should check for a newer version or recent release notes before trusting cached
-  research.
-- A major version bump of the dependency always triggers re-research, regardless
-  of cache age.
-- If `recall` returns a research-cache entry, compare its timestamp against the
-  30-day window before using it. Stale entries are hints, not authority.
+- Set freshness from volatility and risk: current service APIs, security guidance,
+  prices, and fast-moving frameworks need shorter windows; stable protocols and
+  version-pinned behavior can use longer windows.
+- Any version mismatch, deprecation signal, contradictory runtime evidence, or
+  explicitly current/latest request triggers targeted re-research regardless of age.
+- Age alone is a nudge, not proof of invalidity. Stale entries remain leads; verify
+  only the claims that can affect the implementation.
 
 ## Integration with keel Memory
 
@@ -101,7 +103,7 @@ This skill uses the `research-cache` memory family under `keel memory`:
 
 - `keel memory research-cache record --question "..." --answer "..." [--source ...]` — store findings.
 - `keel memory research-cache lookup --query "..."` — retrieve prior research.
-- `keel memory research-cache stale` — list entries older than 30 days.
+- `keel memory research-cache stale [--days N]` — list entries beyond a risk-appropriate age.
 - `keel memory research-cache reward --id <id>` — mark an entry still valid.
 
 Research-cache entries live under `<claude-home>/<group>/research-cache/` and are

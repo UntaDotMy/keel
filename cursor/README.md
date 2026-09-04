@@ -102,7 +102,7 @@ After copying, on the first edit-class tool call in a fresh Cursor conversation,
 
 ### Branch and Commit Rules
 
-- Branch model: `main` ← `dev` ← `feat` ← `task/<task>` [← `task/<task>/<subtask>`]
+- Branch model: `main` ← `dev` ← `feat` ← `task/<task>` [← flat `task/<task>-<subtask>`]
 - Commit format: `[category]: [feature_category]: short info` (categories: Add, Config, Refactor, Wip, Fix, Docs; feature_category uppercase)
 - Never delete a branch after push or merge
 

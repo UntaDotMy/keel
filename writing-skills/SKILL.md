@@ -1,6 +1,6 @@
 ---
 name: writing-skills
-description: Author and revise skills with evidence that the prose actually changes behavior, not just that it reads well. Use when creating a new skill, editing an existing SKILL.md, or verifying a skill works — apply TDD to the instructions themselves. Iron law — no skill claim without a failing test first — run the target behavior past a fresh subagent WITHOUT the skill under stacked pressure to capture how it fails and what it rationalizes, write the minimum skill prose that targets those exact failures, then re-test under pressure until the subagent makes the right call and cites the skill. Pairs with skill-lint (the structural gate) and reviewer (the fail-closed verdict).
+description: Author and revise skills with evidence that the prose changes behavior, not just that it reads well. Use when creating or editing SKILL.md. Capture a baseline in a fresh isolated evaluation context without the skill, add the minimum corrective prose, then re-run with the skill. Use a subagent only when the active host and task policy allow one; otherwise use the repo-native skill evaluator or a separate disposable session. Pairs with skill-lint and reviewer.
 when_to_use: Creating, editing, or validating any SKILL.md. Use the RED-GREEN-REFACTOR-on-prose loop and the subagent pressure-test before claiming a skill works. Run keel skill-lint for the structural gate; this skill is the behavioral gate above it.
 allowed-tools: Read, Grep, Glob, Edit, Write, Bash(keel skill-lint:*), Task
 effort: high
@@ -29,11 +29,12 @@ that no scenario exercised are cut.
 
 ## The Iron Law
 
-**No skill claim without a failing test first.** Before you write or trust a
-skill, you must have watched a fresh subagent make the wrong call on the exact
-situation the skill targets — *without* the skill loaded. If you cannot make it
-fail, you do not yet know what the skill is for, and any prose you write is a
-guess. See `references/10-testing-skills-with-subagents.md` for the full method.
+**No skill claim without a baseline behavior test.** Before you write or trust a
+skill, capture how a fresh isolated evaluation context handles the exact situation
+*without* the skill loaded. Prefer a subagent when host policy allows it; otherwise
+use the repo-native skill evaluator or a separate disposable session. If the
+baseline already succeeds, strengthen the scenario or stop. See
+`references/10-testing-skills-with-subagents.md` for the full method and fallbacks.
 
 ## The Loop (RED → GREEN → REFACTOR on prose)
 
@@ -42,7 +43,7 @@ guess. See `references/10-testing-skills-with-subagents.md` for the full method.
 - Write a pressure scenario that stacks 3+ real pressures (time, sunk cost,
   authority, money, a plausible-sounding shortcut). The scenario must have one
   correct action the skill would compel.
-- Dispatch a fresh subagent (Task tool) the scenario *without* the skill loaded.
+- Run the scenario in a fresh isolated context *without* the skill loaded.
   Capture its decision and — critically — the **rationalizations** it invents to
   justify the wrong call ("the tests probably still pass", "this is just a small
   change", "the user is in a hurry so I'll skip the review").
@@ -59,7 +60,7 @@ guess. See `references/10-testing-skills-with-subagents.md` for the full method.
 
 ### REFACTOR — close loopholes, re-test under pressure
 
-- Re-run the scenario *with* the new skill loaded. A pass means the subagent
+- Re-run the scenario *with* the new skill loaded. A pass means the evaluator
   makes the right call AND cites the skill's reasoning, under maximum pressure.
 - When it passes, look for the next loophole: a sibling scenario with different
   pressures that the prose does not yet cover. Each new failure mode is a new RED.

@@ -45,9 +45,9 @@ Stay in the main thread when:
 
 ### 1. Frame the task for a fresh context
 
-- A subagent does not inherit the conversation. Give it the task, the relevant
-  files, the success criteria, and the exact verification check — everything it
-  needs to start from zero. A vague hand-off produces vague work.
+- Context inheritance varies by host and invocation. Give the subagent the task,
+  relevant files, success criteria, and exact verification check explicitly even
+  when the host can fork conversation context. A vague hand-off produces vague work.
 - Specify the return shape: what the subagent should report back (the diff, the
   test output, the decision), not a human-facing essay.
 

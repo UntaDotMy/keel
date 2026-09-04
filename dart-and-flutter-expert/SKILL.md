@@ -29,10 +29,10 @@ See `../_shared/common-discipline.md` for the canonical rules. Apply them to all
 
 ## Widget architecture (the rules)
 
-- **`build` is pure.** No I/O, no writes, no `DateTime.now()`, no network. Side effects go in `initState`, `dispose`, or listeners. `build` re-runs on every rebuild; anything impure there fires repeatedly.
-- **Compose, don't nest deep.** Extract widgets when a `build` method exceeds ~40 lines or nests past 3–4 levels. Small widgets rebuild cheaper and test easier.
-- **`const` constructors everywhere they apply.** `const` widgets are canonicalized and skip rebuilds — the cheapest performance win in Flutter.
-- **`const` at call sites too**: `const Padding(padding: ...)` lets the framework reuse the element.
+- **Keep `build` free of side effects.** No I/O, writes, network calls, or lifecycle mutations. Avoid time/random-dependent output unless that changing value is modeled as state. `build` can run repeatedly.
+- **Compose around ownership and change frequency.** Extract widgets when it clarifies state ownership, isolates changing subtrees, or improves tests; line counts and nesting depth are review signals, not correctness thresholds.
+- **Use `const` constructors where they fit.** Canonicalized widget instances let Flutter short-circuit much of the rebuild work when it encounters the same child instance.
+- **Use `const` at call sites too** when every argument is compile-time constant.
 - **Split stateless vs stateful deliberately.** `StatelessWidget` by default; `StatefulWidget` only when local mutable state is genuinely needed.
 
 ## State management — pick the narrowest fit
@@ -41,7 +41,7 @@ See `../_shared/common-discipline.md` for the canonical rules. Apply them to all
 |---|---|
 | Local widget UI state (toggle, animation) | `setState` inside a `StatefulWidget` |
 | Shared state across a subtree, read-mostly | `Provider` / `InheritedNotifier` |
-| Reactive, testable, fine-grained dependencies | **Riverpod** (preferred for new apps) |
+| Reactive, testable, fine-grained dependencies | Riverpod or another project-standard reactive store |
 | Event-driven, predictable state transitions | **Bloc** / `Cubit` (large teams, strict separation) |
 | Cross-screen persistent state | A repository + Riverpod/Bloc over it |
 
@@ -50,18 +50,18 @@ Do not reach for Bloc when `setState` suffices; do not reach for a global store 
 ## Performance & jank
 
 - **`ListView.builder` / `GridView.builder` for any unbounded list.** Never `Column` with a `List<Widget>` for dynamic data — it builds everything.
-- **`RepaintBoundary`** around independently-animating subtrees to isolate repaints.
-- **`const` widgets** skip rebuilds (see above).
-- **Avoid `Opacity` for fade animations** — use `AnimatedOpacity` / `FadeTransition` (composited on the GPU).
+- **`RepaintBoundary`** around independently-animating subtrees only after paint profiling shows the boundary helps; extra layers also cost memory.
+- **`const` widgets** can short-circuit rebuild work when Flutter sees the same instance (see above).
+- **Avoid rebuilding an `Opacity` value manually for fades.** Use `AnimatedOpacity` for simple implicit transitions or `FadeTransition` when an animation already exists, while remembering that opacity animation still needs an intermediate buffer and can be expensive.
 - **`setState` at the lowest needed scope.** Calling `setState` in a parent rebuilds all children; push state down to the leaf that owns it.
 - **DevTools timeline** is the source of truth for jank — measure before optimizing.
 
 ## Isolates & async (never block the UI thread)
 
-- Any CPU-heavy or I/O work that could exceed ~16ms goes in an `Isolate` (`Isolate.run` for one-shot; `Isolate.spawn` for long-lived).
-- `await` network/file I/O; never synchronous blocking calls on the UI isolate.
-- Cancel `StreamSubscription`s in `dispose()` — an uncancelled subscription is a leak and a use-after-dispose crash.
-- Use `BuildContext` only synchronously after `await` if you've checked `mounted`.
+- Move CPU-heavy synchronous work that causes frame jank to an `Isolate` (`Isolate.run` for one-shot; `Isolate.spawn` for long-lived). Normal asynchronous I/O does not need an isolate.
+- `await` network/file I/O; avoid synchronous blocking calls on the UI isolate and confirm with DevTools when the boundary is uncertain.
+- Cancel owned `StreamSubscription`s in `dispose()` so callbacks and retained state do not outlive the widget.
+- After an async gap, use `BuildContext` only after checking the relevant `context.mounted` or `State.mounted` value.
 
 ## Null-safety & sound typing
 

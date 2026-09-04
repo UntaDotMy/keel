@@ -9,7 +9,10 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-use crate::manager::install::{codex_plugin_installation, CodexPluginInstallation};
+use crate::manager::install::{
+    codex_plugin_installation, find_executable_orphans, remove_executable_orphans,
+    CodexPluginInstallation, CODEX_PLUGIN_REFERENCE,
+};
 use crate::runtime::{
     display_path, installed_executable_path, resolve_claude_home,
     COMMAND_COMPACTION_EVENTS_FILE_NAME,
@@ -155,6 +158,35 @@ pub fn run_doctor_command(
         keel_binary.is_file(),
         &format!("keel binary present: {}", display_path(&keel_binary)),
     );
+    let executable_orphans = find_executable_orphans(&claude_home);
+    if executable_orphans.is_empty() {
+        write_doctor_check(standard_output, true, "no stale Keel executable siblings");
+    } else if fix {
+        let removed = remove_executable_orphans(&claude_home).unwrap_or(0);
+        let remaining = find_executable_orphans(&claude_home);
+        write_doctor_check(
+            standard_output,
+            remaining.is_empty(),
+            &format!(
+                "removed {removed}/{} stale Keel executable sibling(s){}",
+                executable_orphans.len(),
+                if remaining.is_empty() {
+                    String::new()
+                } else {
+                    format!("; {} remain locked and will be retried", remaining.len())
+                }
+            ),
+        );
+    } else {
+        let _ = writeln!(
+            standard_output,
+            "[warn] {} stale Keel executable sibling(s) found; run `keel doctor --fix` to remove unlocked leftovers",
+            executable_orphans.len()
+        );
+        for orphan in executable_orphans {
+            let _ = writeln!(standard_output, "  {}", display_path(&orphan));
+        }
+    }
     let legacy_binary = crate::runtime::legacy_claude_executable_path(&claude_home);
     write_doctor_check(
         standard_output,
@@ -879,10 +911,23 @@ pub(crate) fn report_bridge_host_wiring(
         .unwrap_or(false);
     let codex_installation = codex_plugin_installation(&home);
     let codex_installed = codex_installation == CodexPluginInstallation::Current;
+    let codex_plugin_root = home.join(".codex").join("plugins").join("keel");
+    let codex_hook_keys = codex_plugin_hook_keys(&codex_plugin_root);
+    let trusted_codex_hooks = codex_config_text
+        .as_ref()
+        .map(|document| codex_hook_trust_record_count(document, &codex_hook_keys))
+        .unwrap_or(0);
+    let codex_hook_trust_ready =
+        !codex_hook_keys.is_empty() && trusted_codex_hooks == codex_hook_keys.len();
+    let codex_rules_wired = codex_installed
+        && codex_marketplace_registered
+        && codex_enabled
+        && codex_agents_md
+        && codex_hook_trust_ready;
     report_host(
         standard_output,
         "codex",
-        codex_installed && codex_agents_md,
+        codex_rules_wired,
         codex_native_mcp,
     );
     write_doctor_check(
@@ -931,6 +976,28 @@ pub(crate) fn report_bridge_host_wiring(
                 "not enabled - run `keel install` or enable via /plugins"
             } else {
                 "n/a - plugin not installed"
+            }
+        ),
+    );
+    write_doctor_check(
+        standard_output,
+        codex_hook_trust_ready || !codex_plugin.is_file(),
+        &format!(
+            "codex plugin hook trust records (config.toml [hooks.state]): {}",
+            if !codex_plugin.is_file() {
+                "n/a - plugin not installed".to_string()
+            } else if codex_hook_keys.is_empty() {
+                "hook manifest missing or invalid - run `keel install`".to_string()
+            } else if codex_hook_trust_ready {
+                format!(
+                    "{trusted_codex_hooks}/{} recorded; Codex validates current hashes at runtime",
+                    codex_hook_keys.len()
+                )
+            } else {
+                format!(
+                    "{trusted_codex_hooks}/{} recorded - hooks are inactive until reviewed in Codex `/hooks`",
+                    codex_hook_keys.len()
+                )
             }
         ),
     );
@@ -1145,23 +1212,104 @@ pub(crate) fn native_mcp_is_current(document: &toml::Value, executable: &std::pa
     command_matches && args == ["mcp", "serve"]
 }
 
-/// One summary line per bridge host: name + wired state + MCP state.
-/// `wired` is the host's primary artifact presence; `mcp` is whether an MCP
-/// entry was registered (all four bridge hosts now register one).
-fn report_host(standard_output: &mut dyn Write, name: &str, wired: bool, mcp: bool) {
-    let state = if wired {
-        if mcp {
-            "wired (rules + MCP)".to_string()
-        } else {
-            "wired (rules)".to_string()
+/// Return the Codex hook-state keys for every command hook in Keel's plugin
+/// manifest. Codex owns trust and current-hash validation; Keel only checks
+/// whether a trust record exists for every installed hook so doctor can expose
+/// the otherwise silent "installed but inactive" state.
+fn codex_plugin_hook_keys(plugin_root: &std::path::Path) -> Vec<String> {
+    let hooks_path = plugin_root.join("hooks").join("hooks.json");
+    let Some(events) = fs::read_to_string(hooks_path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|document| {
+            document
+                .get("hooks")
+                .and_then(|value| value.as_object())
+                .cloned()
+        })
+    else {
+        return Vec::new();
+    };
+
+    let mut keys = Vec::new();
+    for (event_name, groups) in events {
+        let Some(groups) = groups.as_array() else {
+            continue;
+        };
+        let event_key = camel_case_to_snake_case(&event_name);
+        for (group_index, group) in groups.iter().enumerate() {
+            let Some(handlers) = group.get("hooks").and_then(serde_json::Value::as_array) else {
+                continue;
+            };
+            for (handler_index, handler) in handlers.iter().enumerate() {
+                if handler.get("type").and_then(serde_json::Value::as_str) != Some("command") {
+                    continue;
+                }
+                keys.push(format!(
+                    "{CODEX_PLUGIN_REFERENCE}:hooks/hooks.json:{event_key}:{group_index}:{handler_index}"
+                ));
+            }
         }
+    }
+    keys.sort();
+    keys
+}
+
+fn camel_case_to_snake_case(value: &str) -> String {
+    let mut output = String::with_capacity(value.len() + 4);
+    for (index, character) in value.chars().enumerate() {
+        if character.is_ascii_uppercase() && index > 0 {
+            output.push('_');
+        }
+        output.push(character.to_ascii_lowercase());
+    }
+    output
+}
+
+fn codex_hook_trust_record_count(document: &toml::Value, keys: &[String]) -> usize {
+    let Some(state) = document
+        .get("hooks")
+        .and_then(|hooks| hooks.get("state"))
+        .and_then(toml::Value::as_table)
+    else {
+        return 0;
+    };
+    keys.iter()
+        .filter(|key| {
+            state
+                .get(key.as_str())
+                .and_then(|entry| entry.get("trusted_hash"))
+                .and_then(toml::Value::as_str)
+                .is_some_and(is_sha256_trust_hash)
+        })
+        .count()
+}
+
+fn is_sha256_trust_hash(value: &str) -> bool {
+    value
+        .strip_prefix("sha256:")
+        .is_some_and(|hash| hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
+}
+
+/// One summary line per bridge host: name + rules/hooks state + MCP state.
+fn report_host(standard_output: &mut dyn Write, name: &str, wired: bool, mcp: bool) {
+    let state = if wired && mcp {
+        "wired (rules + MCP)".to_string()
+    } else if wired {
+        "partially wired (rules present; MCP missing)".to_string()
+    } else if mcp {
+        "partially wired (MCP present; rules/hooks incomplete)".to_string()
     } else {
         format!("not wired (opt in with `keel install --with {name}`)")
     };
     // why: render [ok] only when the host is actually wired. Passing `true`
     // unconditionally painted an unconfigured — or failed-to-wire — host as healthy;
     // a not-wired host is now a [warn] so doctor tells the truth about host state.
-    write_doctor_check(standard_output, wired, &format!("{name} host: {state}"));
+    write_doctor_check(
+        standard_output,
+        wired && mcp,
+        &format!("{name} host: {state}"),
+    );
 }
 
 /// True when `directory` is one of the entries on the current PATH.
@@ -1409,7 +1557,12 @@ mod tests {
         let mut output = Vec::new();
         report_bridge_host_wiring(&mut output, &claude_home);
         let output = String::from_utf8(output).unwrap();
-        assert!(output.contains("[warn] codex host: not wired"), "{output}");
+        assert!(
+            output.contains(
+                "[warn] codex host: partially wired (MCP present; rules/hooks incomplete)"
+            ),
+            "{output}"
+        );
         assert!(
             output.contains("[warn] codex plugin installation: not installed"),
             "{output}"
@@ -1420,7 +1573,110 @@ mod tests {
         assert!(
             output.contains("[ok] codex native MCP (config.toml [mcp_servers.keel]): registered")
         );
+        assert!(
+            output.contains("[warn] codex plugin hook trust records"),
+            "{output}"
+        );
         let _ = fs::remove_dir_all(claude_home.parent().unwrap());
+    }
+
+    #[test]
+    fn codex_bridge_status_requires_trust_records_for_every_plugin_hook() {
+        let claude_home = unique_home("codex-hook-trust");
+        let home = claude_home.parent().unwrap();
+        let plugin_root = home.join(".codex").join("plugins").join("keel");
+        let cache_root = home
+            .join(".codex")
+            .join("plugins")
+            .join("cache")
+            .join("personal-keel")
+            .join("keel")
+            .join("1.0.0");
+        let hooks = r#"{
+            "hooks": {
+                "SessionStart": [{"hooks": [{"type": "command", "command": "node keel-codex.js"}]}],
+                "PreToolUse": [{"hooks": [{"type": "command", "command": "node keel-codex.js"}]}]
+            }
+        }"#;
+        let managed = [
+            (
+                ".codex-plugin/plugin.json",
+                r#"{"name":"keel","version":"1.0.0"}"#,
+            ),
+            ("hooks/hooks.json", hooks),
+            ("keel-codex.js", "// js"),
+            ("keel-codex.ts", "// ts"),
+            (".mcp.json", "{}"),
+        ];
+        for root in [&plugin_root, &cache_root] {
+            for (relative, body) in managed {
+                let path = root.join(relative);
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(path, body).unwrap();
+            }
+        }
+        let marketplace = home
+            .join(".agents")
+            .join("plugins")
+            .join("marketplace.json");
+        fs::create_dir_all(marketplace.parent().unwrap()).unwrap();
+        fs::write(
+            marketplace,
+            r#"{"plugins":[{"name":"keel","source":{"source":"local","path":"./.codex/plugins/keel"}}]}"#,
+        )
+        .unwrap();
+        fs::write(home.join(".codex").join("AGENTS.md"), "keel:begin").unwrap();
+        let config_path = home.join(".codex").join("config.toml");
+        let base_config = format!(
+            "[plugins.\"keel@personal-keel\"]\nenabled = true\n\n[mcp_servers.keel]\ncommand = {:?}\nargs = [\"mcp\", \"serve\"]\n",
+            display_path(&installed_executable_path(&claude_home))
+        );
+        fs::write(&config_path, &base_config).unwrap();
+
+        let mut output = Vec::new();
+        report_bridge_host_wiring(&mut output, &claude_home);
+        let output = String::from_utf8(output).unwrap();
+        assert!(
+            output.contains(
+                "[warn] codex host: partially wired (MCP present; rules/hooks incomplete)"
+            ),
+            "{output}"
+        );
+        assert!(
+            output.contains("0/2 recorded - hooks are inactive"),
+            "{output}"
+        );
+
+        let keys = codex_plugin_hook_keys(&plugin_root);
+        assert_eq!(keys.len(), 2);
+        let trusted = keys
+            .iter()
+            .map(|key| {
+                format!(
+                    "\n[hooks.state.{key:?}]\ntrusted_hash = \"sha256:{}\"\n",
+                    "a".repeat(64)
+                )
+            })
+            .collect::<String>();
+        fs::write(
+            &config_path,
+            format!("{base_config}\n[hooks.state]\n{trusted}"),
+        )
+        .unwrap();
+
+        let mut output = Vec::new();
+        report_bridge_host_wiring(&mut output, &claude_home);
+        let output = String::from_utf8(output).unwrap();
+        assert!(
+            output.contains("[ok] codex host: wired (rules + MCP)"),
+            "{output}"
+        );
+        assert!(
+            output.contains("[ok] codex plugin hook trust records")
+                && output.contains("2/2 recorded"),
+            "{output}"
+        );
+        let _ = fs::remove_dir_all(home);
     }
 
     #[test]
@@ -1444,7 +1700,9 @@ mod tests {
         report_bridge_host_wiring(&mut output, &claude_home);
         let output = String::from_utf8(output).unwrap();
         assert!(
-            output.contains("[warn] opencode host: not wired"),
+            output.contains(
+                "[warn] opencode host: partially wired (MCP present; rules/hooks incomplete)"
+            ),
             "{output}"
         );
         let _ = fs::remove_dir_all(home);
