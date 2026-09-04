@@ -507,7 +507,7 @@ fn release_install_metadata_caches_source_before_the_extract_tree_is_deleted() {
 }
 
 #[test]
-fn publish_native_executable_skips_stale_identical_release_and_uses_debug() {
+fn publish_native_executable_keeps_identical_release_instead_of_using_debug() {
     let (repo, claude_home) = unique_paths("publish-skip-stale-release");
     fs::create_dir_all(&claude_home).unwrap();
     let release_dir = repo.join("target").join("release");
@@ -524,10 +524,10 @@ fn publish_native_executable_skips_stale_identical_release_and_uses_debug() {
     fs::write(&installed, b"old-binary-contents").unwrap();
     let published = publish_native_executable(&repo, &claude_home).unwrap();
     assert!(
-        published,
-        "stale identical release must be skipped so debug can refresh PATH/MCP"
+        !published,
+        "the highest-priority release is already installed"
     );
-    assert_eq!(fs::read(&installed).unwrap(), b"fresh-debug");
+    assert_eq!(fs::read(&installed).unwrap(), b"old-binary-contents");
     let _ = fs::remove_dir_all(&repo);
     let _ = fs::remove_dir_all(&claude_home);
 }
