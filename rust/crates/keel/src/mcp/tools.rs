@@ -2755,34 +2755,17 @@ mod mcp_timeout_tests {
 
     #[test]
     fn mcp_runner_closes_descendant_held_pipes_after_leader_exit() {
-        let mut command = if cfg!(windows) {
-            let mut command = Command::new("powershell");
-            command.args([
-                "-NoLogo",
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                "$p=Start-Process powershell -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds 30' -NoNewWindow -PassThru; Write-Output $p.Id",
-            ]);
-            command
-        } else {
-            let mut command = Command::new("sh");
-            command.args(["-c", "sleep 30 & echo $!"]);
-            command
-        };
+        let mut command = crate::test_support::descendant_pipe_fixture_command();
         command.stdin(Stdio::null());
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
         let started = Instant::now();
-        // PowerShell cold starts can exceed ten seconds under the full Windows CI suite.
-        let completion_budget = Duration::from_secs(if cfg!(windows) { 20 } else { 3 });
+        let completion_budget = Duration::from_secs(3);
         let (_, stdout, _) =
             run_command_with_timeout(command, completion_budget, "descendant-pipe-test")
                 .expect("leader exit must close inherited pipes");
         assert!(started.elapsed() < completion_budget);
-        let descendant = stdout
-            .lines()
-            .find_map(|line| line.trim().parse::<u32>().ok())
+        let descendant = crate::test_support::descendant_pid_from_fixture_output(&stdout)
             .expect("descendant pid");
         let deadline = Instant::now() + Duration::from_secs(2);
         while crate::runtime::process_is_alive(descendant) == Some(true)

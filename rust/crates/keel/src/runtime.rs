@@ -1834,33 +1834,20 @@ mod process_lifecycle_tests {
 
     #[test]
     fn leader_exit_cannot_leave_inherited_pipe_open_in_descendant() {
-        let (program, arguments) = if cfg!(windows) {
-            (
-                "powershell",
-                vec![
-                    "-NoLogo".to_string(),
-                    "-NoProfile".to_string(),
-                    "-NonInteractive".to_string(),
-                    "-Command".to_string(),
-                    "$p=Start-Process powershell -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds 30' -NoNewWindow -PassThru; Write-Output $p.Id"
-                        .to_string(),
-                ],
-            )
-        } else {
-            (
-                "sh",
-                vec!["-c".to_string(), "sleep 30 & echo $!".to_string()],
-            )
-        };
+        let command = crate::test_support::descendant_pipe_fixture_command();
         let started = std::time::Instant::now();
-        let completion_budget = std::time::Duration::from_secs(if cfg!(windows) { 10 } else { 3 });
-        let result = run_command_with_timeout(program, &arguments, None, completion_budget)
-            .expect("leader exit must close descendant-held pipes");
+        let completion_budget = std::time::Duration::from_secs(3);
+        let result = run_prepared_command_with_timeout(
+            command,
+            "descendant-pipe-fixture",
+            completion_budget,
+        )
+        .expect("leader exit must close descendant-held pipes");
         assert!(started.elapsed() < completion_budget);
-        let descendant = String::from_utf8_lossy(&result.stdout)
-            .lines()
-            .find_map(|line| line.trim().parse::<u32>().ok())
-            .expect("descendant pid");
+        let descendant = crate::test_support::descendant_pid_from_fixture_output(
+            &String::from_utf8_lossy(&result.stdout),
+        )
+        .expect("descendant pid");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         while process_is_alive(descendant) == Some(true) && std::time::Instant::now() < deadline {
             std::thread::sleep(std::time::Duration::from_millis(20));
