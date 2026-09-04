@@ -3323,6 +3323,10 @@ fn session_start_emits_hook_specific_output_additional_context() {
     // warning slot. The inner-string assertions live in
     // `session_start_context_embeds_bootstrap_skill_and_memory_pointer`;
     // this test pins the wrapper shape.
+    let _guard = crate::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
 
