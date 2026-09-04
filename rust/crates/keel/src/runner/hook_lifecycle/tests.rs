@@ -434,6 +434,10 @@ fn silenced_high_frequency_hooks_emit_no_additional_context() {
     // SubagentStart is also NOT here: it injects iron law context.
     // UserPromptSubmit and PostToolBatch emit their own context,
     // gated by their own dedicated tests below.
+    let _guard = crate::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
     for subcommand in [
         "post-tool-use",
         "post-tool-use-failure",
@@ -1022,6 +1026,10 @@ fn post_tool_batch_emits_reviewer_on_close_reminder() {
     // before the model's next turn. It's the officially-supported event
     // for "before close" reminders — Stop/SubagentStop don't accept
     // hookSpecificOutput per the schema.
+    let _guard = crate::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
 
