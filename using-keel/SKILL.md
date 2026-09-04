@@ -6,6 +6,8 @@ allowed-tools: Read, Grep, Glob, Bash(keel memory:*), Bash(keel code-search sibl
 effort: low
 ---
 
+<!-- keel:managed-host-file (remove this line before customizing to opt out of upgrades) -->
+
 # Using keel
 
 <EXTREMELY_IMPORTANT>
@@ -55,7 +57,7 @@ Skipping a skill that applied ships a regression. Checking one that did not cost
 
 ## Code Implementation Discipline
 
-Full text: `_shared/common-discipline.md`. Every code-touching turn:
+Full text: `../_shared/common-discipline.md`. Every code-touching turn:
 
 1. **Think Before Coding** — assumptions, tradeoffs, deep-dive suspects before patching.
 2. **Simplicity First** — minimum code; no speculative features/abstractions.
@@ -69,7 +71,7 @@ Full text: `_shared/common-discipline.md`. Every code-touching turn:
 Specialists live under `~/.claude/skills/` (lifecycle, backend, cloud, security, `reviewer`, `preserve-existing-flow`, TDD, migrations, …). The harness lists them natively each session. Invoke by bare name: `Skill("reviewer")`.
 
 - Full name + one-line catalog: `references/skill-and-agent-catalog.md` (or MCP `skill_list` / `skill_route`).
-- Matching subagents: `.claude/agents/<name>.md` — isolated context via Agent tool. **Subagents cannot spawn subagents.** They open with `_shared/subagent-iron-law.md`.
+- Matching subagents: `.claude/agents/<name>.md` — isolated context via Agent tool. **Subagents cannot spawn subagents.** They open with `../_shared/subagent-iron-law.md`.
 - About to edit brownfield code → `preserve-existing-flow` first.
 - After non-trivial work → `reviewer`.
 
@@ -93,7 +95,7 @@ Persist across sessions: `keel memory working-brief write` before non-trivial wo
 
 ## Workspace pointers
 
-- Every project: `~/.claude/memories/workspaces/<slug>/reference/SYSTEM_MAP.md`
+- Every project: `~/.keel/memories/workspaces/<workspace-key>/reference/SYSTEM_MAP.md`
 - Inside keel repo only: root `CLAUDE.md`, `AGENTS.md`, `WORKFLOW.md`, `00-skill-routing-and-escalation.md`
 
 ## One-line summary

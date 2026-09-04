@@ -14,7 +14,7 @@ You are a senior internationalization and localization engineer responsible for 
 
 ## Research Reuse Defaults · Completion Discipline · Memory and Security Boundaries · Code Implementation Discipline
 
-See `_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill. The Code Implementation Discipline section is especially relevant: do not duplicate message keys or formatting helpers across catalogs, do not silently swallow missing-translation or malformed-ICU warnings from the extractor or formatter, and do not hardcode user-facing strings, locale assumptions, or date/number formats outside the catalog and locale layer.
+See `../_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill. The Code Implementation Discipline section is especially relevant: do not duplicate message keys or formatting helpers across catalogs, do not silently swallow missing-translation or malformed-ICU warnings from the extractor or formatter, and do not hardcode user-facing strings, locale assumptions, or date/number formats outside the catalog and locale layer.
 
 ## Use This Skill When
 

@@ -7,7 +7,7 @@ Bridges Pi coding agent lifecycle events to the `keel` Rust CLI for context inje
 Pi coding agent (https://pi.dev) loads `AGENTS.md` from the project root (or `~/.pi/agent/AGENTS.md` globally) as project instructions at startup, and runs TypeScript extensions that subscribe to a rich event set (https://pi.dev/docs/latest/extensions). This bridge has **three layers**, mirroring the OpenCode and Codex adapters:
 
 1. **`AGENTS.md`** — the persistent keel iron law, skill catalog, workflow commands, and branch/commit rules, loaded into the system prompt at startup so the model has keel discipline from the first prompt.
-2. **`keel-pi.ts`** — a TypeScript extension that subscribes to Pi's `session_start`, `input`/`message_start`, `tool_call`, `tool_execution_end`, `session_before_compact`, `session_compact`, and `session_shutdown` events, wiring each to a host-neutral `keel bridge` subcommand. This delivers the same automatic behavior the hook system provides in Claude Code and Codex: bootstrap context injection, the Iron Law edit gate (blocks edits until the model has read first), compaction rerouting for noisy shell commands, observation capture, and the compaction/session-end learning cycle.
+2. **`keel-pi.ts`** — a TypeScript extension that subscribes to Pi's `session_start`, `before_agent_start`, `tool_call`, `tool_execution_end`, `session_before_compact`, `session_compact`, and `session_shutdown` events, wiring each to a host-neutral `keel bridge` subcommand. `before_agent_start` appends the cached session bootstrap and current per-prompt pointer to the turn's system prompt, so the bridge output reaches the model without accumulating persistent messages. The extension also enforces the Iron Law edit gate, reroutes noisy shell commands, records observations, and runs the compaction/session-end learning cycle.
 3. **`.mcp.json`** — registers keel's MCP server so its tools (recall, system_map, skill_route, anvil, etc.; full surface asserted by `tests/doc_parity_test.rs`) are directly callable by the model without spawning the keel binary per invocation.
 
 ## Prerequisites
@@ -226,13 +226,14 @@ Invoke any skill below by routing through the MCP `skill_route` and `skill_get` 
 
 | Pi event | keel bridge subcommand | Behavior |
 |---|---|---|
-| `session_start` | `session-start` | Bootstrap + workspace digest + MCP self-heal (once per session, marker-guarded) |
-| `input` / `message_start` (role=user) | `user-prompt` | Per-prompt context brief (skill routing + iron law + pointers) |
+| `session_start` | `session-start` | Bootstrap + workspace digest + MCP self-heal, cached once for the first `before_agent_start` |
+| `before_agent_start` | `user-prompt` | Appends the per-prompt routing pointer and any cached lifecycle context to this turn's system prompt |
 | `tool_call` (reading tool) | — | Marks Iron Law satisfied, allows |
 | `tool_call` (edit-class) | `pre-tool-use` | Blocks with `{block:true,reason}` until Iron Law satisfied; then records gate state |
 | `tool_call` (bash/shell) | `rewrite` | Mutates `event.input.command` in place to reroute noisy commands through `keel run --` |
 | `tool_execution_end` | `observe` | Records tool observation (fire-and-forget) |
-| `session_compact` | `pre-compact` + `post-compact` | Learning checkpoint before the window rewrite, then post-compaction context injection + idempotent learning upsert |
+| `session_before_compact` | `pre-compact` | Learning checkpoint before the window rewrite |
+| `session_compact` | `post-compact` | Idempotent learning upsert; cache recovery context for the next `before_agent_start` |
 | `session_shutdown` | `session-end` | Learning cycle + session summary capture + marker cleanup |
 
 Every bridge call is capped at a 500ms timeout and fails open to "no context / no block" on any error, so the extension never hangs a turn.

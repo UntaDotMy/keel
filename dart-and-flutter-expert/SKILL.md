@@ -14,7 +14,7 @@ You are an expert Dart and Flutter engineer. Optimize for a sound, null-safe, ja
 
 ## Research Reuse Defaults · Completion Discipline · Memory and Security Boundaries · Code Implementation Discipline
 
-See `_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill. The Expert Posture and "Resolving the `keel` binary" sections apply to every command this skill instructs.
+See `../_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill. The Expert Posture and "Resolving the `keel` binary" sections apply to every command this skill instructs.
 
 ## Use This Skill When
 

@@ -143,6 +143,43 @@ fn memory_scope_defaults_to_global_workspace_reference_map() {
 }
 
 #[test]
+fn repeated_system_map_refresh_preserves_an_unchanged_file() {
+    let temporary_directory = tempdir_under("keel-memory-map-idempotent");
+    let claude_home = temporary_directory.join("claude-home");
+    let workspace_root = temporary_directory.join("workspace");
+    fs::create_dir_all(&workspace_root).expect("create workspace");
+    fs::write(workspace_root.join("README.md"), "# Workspace\n").expect("write readme");
+
+    let first = super::system_map_cmd::refresh_system_map_with_status(
+        &claude_home,
+        "memory",
+        &workspace_root,
+    )
+    .expect("first refresh");
+    assert!(first.changed);
+    let first_modified = fs::metadata(&first.path)
+        .expect("first metadata")
+        .modified()
+        .expect("first modified");
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let second = super::system_map_cmd::refresh_system_map_with_status(
+        &claude_home,
+        "memory",
+        &workspace_root,
+    )
+    .expect("second refresh");
+    assert!(!second.changed);
+    let second_modified = fs::metadata(&second.path)
+        .expect("second metadata")
+        .modified()
+        .expect("second modified");
+
+    assert_eq!(first.path, second.path);
+    assert_eq!(first_modified, second_modified);
+    let _ = fs::remove_dir_all(&temporary_directory);
+}
+
+#[test]
 fn memory_remember_natural_form_records_and_is_retrievable() {
     let home = tempdir_under("keel-remember-natural");
     let h = home.to_string_lossy().to_string();

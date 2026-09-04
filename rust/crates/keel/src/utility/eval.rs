@@ -25,7 +25,7 @@ use std::path::PathBuf;
 
 use crate::args::FlagSet;
 use crate::json::{write_indented, Value};
-use crate::proxy::adapters::build_adapter_registry;
+use crate::proxy::adapters::build_builtin_adapter_registry;
 use crate::proxy::classify::classify_command;
 use crate::proxy::raw_store::RunMeta;
 use crate::proxy::render::render_compact_result;
@@ -76,7 +76,7 @@ pub struct EvalReport {
 /// measure the exact end-to-end token delta. This is the function the tests and
 /// the CLI both call, so there is one measured source of truth.
 pub fn run_compaction_eval() -> EvalReport {
-    let registry = build_adapter_registry();
+    let registry = build_builtin_adapter_registry();
     let mut cases = Vec::new();
     let mut total_raw = 0usize;
     let mut total_compact = 0usize;
@@ -376,6 +376,38 @@ const EVAL_FIXTURES: &[EvalFixture] = &[
 mod tests {
     use super::*;
 
+    #[test]
+    fn eval_ignores_workspace_project_filters() {
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let original_cwd = std::env::current_dir().expect("current directory");
+        let fixture_cwd = std::env::temp_dir().join(format!(
+            "keel-eval-project-filter-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time after epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&fixture_cwd).expect("create eval fixture directory");
+        std::fs::write(
+            fixture_cwd.join("keel.filters.toml"),
+            "[[filter]]\nname = \"cargo-test\"\ncommand = \"cargo test\"\nmatch_mode = \"starts_with\"\nkeep = [\"test result\"]\nmax_lines = 5\n",
+        )
+        .expect("write project filter");
+        std::env::set_current_dir(&fixture_cwd).expect("enter eval fixture directory");
+
+        let result = std::panic::catch_unwind(run_compaction_eval);
+
+        std::env::set_current_dir(&original_cwd).expect("restore current directory");
+        let _ = std::fs::remove_dir_all(&fixture_cwd);
+        assert!(
+            result.is_ok(),
+            "embedded eval fixtures must be hermetic and ignore workspace project filters"
+        );
+    }
+
     /// The core claim of the whole proxy: it removes a large fraction of raw
     /// command-output tokens. This asserts a MEASURED floor over the real
     /// pipeline — if a future adapter change stops compacting, this fails.
@@ -423,7 +455,7 @@ mod tests {
     /// degrades compaction quality; this catches it.
     #[test]
     fn every_fixture_routes_to_expected_adapter() {
-        let registry = build_adapter_registry();
+        let registry = build_builtin_adapter_registry();
         for fixture in EVAL_FIXTURES {
             let args: Vec<String> = fixture.command.iter().map(|s| s.to_string()).collect();
             let ast = classify_command(&args).expect("fixture classifies");
@@ -458,7 +490,7 @@ mod tests {
         );
         // ...but the rendered output must retain the failure marker. Re-run the
         // single fixture through the pipeline to inspect the rendered text.
-        let registry = build_adapter_registry();
+        let registry = build_builtin_adapter_registry();
         let fixture = EVAL_FIXTURES
             .iter()
             .find(|f| f.name == "cargo-test-fail")

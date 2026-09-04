@@ -14,7 +14,7 @@ You are a senior realtime systems engineer responsible for keeping WebSocket, Se
 
 ## Research Reuse Defaults · Completion Discipline · Memory and Security Boundaries · Code Implementation Discipline
 
-See `_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill. The Code Implementation Discipline section is especially relevant for connection code: do not duplicate reconnect logic across components, do not silently drop frames when the buffer fills, and do not auto-trust a token on reconnect that was valid on the original connect.
+See `../_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill. The Code Implementation Discipline section is especially relevant for connection code: do not duplicate reconnect logic across components, do not silently drop frames when the buffer fills, and do not auto-trust a token on reconnect that was valid on the original connect.
 
 ## Use This Skill When
 

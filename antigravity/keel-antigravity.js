@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+// keel:managed-host-file (remove this line before customizing to opt out of upgrades)
 // Keel Antigravity hook adapter translates payloads to bridge commands and gate results.
 
 import { execFileSync } from "node:child_process";
@@ -65,7 +66,19 @@ function cwd(input) {
 }
 
 function toolName(input) {
-  return String(input.toolCall?.name ?? "");
+  const name = String(input.toolCall?.name ?? "");
+  if (name === "call_mcp_tool") {
+    const args = toolArgs(input);
+    if (
+      args &&
+      typeof args === "object" &&
+      args.ServerName === "keel" &&
+      typeof args.ToolName === "string"
+    ) {
+      return `mcp__keel__${args.ToolName}`;
+    }
+  }
+  return name;
 }
 
 function toolArgs(input) {
@@ -140,13 +153,31 @@ function handlePreInvocation(input) {
 }
 
 function handleStop(input) {
+  if (
+    (typeof input.terminationReason === "string" &&
+      input.terminationReason !== "model_stop") ||
+    input.fullyIdle === false
+  ) {
+    runBridge("session-end", [
+      "--session",
+      sessionId(input),
+      "--cwd",
+      cwd(input),
+    ]);
+    return { decision: "allow" };
+  }
+  const executionNum = Number(input.executionNum ?? 1);
+  const stopHookActive =
+    input.stopHookActive === true ||
+    input.stop_hook_active === true ||
+    executionNum > 1;
   const stopOutput = runKeel(
     ["hook", "stop"],
     JSON.stringify({
       ...input,
       session_id: sessionId(input),
       cwd: cwd(input),
-      stop_hook_active: false,
+      stop_hook_active: stopHookActive,
     }),
   );
   if (stopOutput) {

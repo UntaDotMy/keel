@@ -17,7 +17,7 @@ Safe Git: inspect first, explain risk, prefer reversible ops, never auto-commit/
 `$0` branch · `$1` base ref (default `origin/feat`) · `$2` commit subject. Empty → `git status` / current branch. Never destructive from args alone.
 
 ## Shared discipline
-`_shared/common-discipline.md`. No destructive silent fallbacks ("if reset fails, force-push").
+`../_shared/common-discipline.md`. No destructive silent fallbacks ("if reset fails, force-push").
 
 ## When
 Non-trivial Git, history recovery, secret cleanup, worktree/branch/PR coordination, hosted check triage.
@@ -53,4 +53,4 @@ Resolve markers in-place then continue/abort cleanly. PR via `gh`/`glab`; merge 
 Scope_Topic naming; separate requirements/docs/source at top level; always ship `.gitignore` from commit one. Full playbooks: `references/` (00 map, 10 safe ops, 20 issue-branch-PR, 30 review handoff, 40 recovery, 50 Windows, 60 conflicts, 99 anchors).
 
 ## Windows
-`_shared/common-discipline.md` § Windows + `references/50-windows-git-workflows.md`.
+`../_shared/common-discipline.md` § Windows + `references/50-windows-git-workflows.md`.

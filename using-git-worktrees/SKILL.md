@@ -19,7 +19,7 @@ or two efforts stomp on each other's files.
 
 ## Code Implementation Discipline
 
-See `_shared/common-discipline.md` § Code Implementation Discipline. Isolation does
+See `../_shared/common-discipline.md` § Code Implementation Discipline. Isolation does
 not relax the rules: work in a worktree still goes through **Goal-Driven Execution**
 and **Surgical Changes**, and a worktree you abandon must be cleaned up (the
 "clean up only your own mess" rule applies to checkouts, not just code).

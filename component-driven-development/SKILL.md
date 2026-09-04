@@ -16,7 +16,7 @@ CDD inverts the page-first habit ("build the screen, extract components later").
 
 ## Research Reuse Defaults · Completion Discipline · Memory and Security Boundaries · Code Implementation Discipline
 
-See `_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill. The Expert Posture and "Resolving the `keel` binary" sections apply to every command this skill instructs.
+See `../_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill. The Expert Posture and "Resolving the `keel` binary" sections apply to every command this skill instructs.
 
 ## The CDD workflow (bottom-up) · Atomic Design map
 

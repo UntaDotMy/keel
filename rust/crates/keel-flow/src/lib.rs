@@ -220,15 +220,19 @@ pub fn default_workspace_artifact_path(repository_root: &Path) -> PathBuf {
         .join(&key)
         .join("flow")
         .join("flow-check.json");
-    let legacy_key = legacy_workspace_key(repository_root);
-    if legacy_key != key {
+    for legacy_key in workspace_key_aliases(repository_root).into_iter().skip(1) {
         let legacy = home
             .join("memories")
             .join("workspaces")
             .join(legacy_key)
             .join("flow")
             .join("flow-check.json");
-        if legacy.is_file() {
+        if legacy.is_file() && !preferred.is_file() {
+            if let Some(parent) = preferred.parent() {
+                if fs::create_dir_all(parent).is_ok() && fs::copy(&legacy, &preferred).is_ok() {
+                    return preferred;
+                }
+            }
             return legacy;
         }
     }
@@ -263,19 +267,67 @@ fn claude_home_directory() -> PathBuf {
     home_path.join(".claude")
 }
 
-fn workspace_key(repository_root: &Path) -> String {
-    let raw_key = legacy_workspace_key(repository_root);
-    if raw_key.chars().count() <= 64 {
-        return raw_key;
-    }
-    let raw_path = clean_path(repository_root).to_string_lossy().to_string();
-    let prefix: String = raw_key.chars().take(47).collect();
-    format!("{prefix}-{}", fnv1a_64_hash(raw_path.as_bytes()))
+/// Canonical directory key for every workspace-scoped Keel feature.
+///
+/// A hash is always present, including for short paths, so two paths that
+/// sanitize to the same readable slug never share state. The complete key is
+/// capped at 64 characters for portable filesystem components.
+pub fn workspace_key(repository_root: &Path) -> String {
+    let identity = workspace_identity(repository_root);
+    workspace_key_from_identity(&identity)
 }
 
-fn legacy_workspace_key(repository_root: &Path) -> String {
-    let cleaned_root = clean_path(repository_root);
-    let raw_key = path_to_forward_slashes(&cleaned_root.to_string_lossy())
+fn workspace_key_from_identity(identity: &str) -> String {
+    let slug = sanitize_workspace_identity(identity);
+    let hash = fnv1a_64_hash(identity.as_bytes());
+    let short_hash = &hash[..8];
+    let prefix: String = slug.chars().take(55).collect();
+    let prefix = prefix.trim_matches('-');
+    if prefix.is_empty() {
+        format!("ws-{short_hash}")
+    } else {
+        format!("{prefix}-{short_hash}")
+    }
+}
+
+/// Previously shipped workspace keys, ordered from the most common to the
+/// oldest. Callers use these only to copy missing state into the canonical
+/// lane; sources are deliberately retained for recovery.
+pub fn workspace_key_aliases(repository_root: &Path) -> Vec<String> {
+    let mut unique = Vec::new();
+    for identity in [
+        workspace_identity(repository_root),
+        raw_workspace_identity(repository_root),
+    ] {
+        let slug = sanitize_workspace_identity(&identity);
+        let hash = fnv1a_64_hash(identity.as_bytes());
+        let mut aliases = vec![workspace_key_from_identity(&identity), slug.clone()];
+        if slug.chars().count() > 64 {
+            let prefix: String = slug.chars().take(47).collect();
+            aliases.push(format!("{prefix}-{hash}"));
+        }
+        let wide_prefix: String = slug.chars().take(100).collect();
+        let wide_prefix = wide_prefix.trim_matches('-');
+        aliases.push(if wide_prefix.is_empty() {
+            format!("ws-{}", &hash[..8])
+        } else {
+            format!("{wide_prefix}-{}", &hash[..8])
+        });
+        for alias in aliases {
+            if !unique.contains(&alias) {
+                unique.push(alias);
+            }
+        }
+    }
+    unique
+}
+
+pub fn legacy_workspace_key(repository_root: &Path) -> String {
+    sanitize_workspace_identity(&workspace_identity(repository_root))
+}
+
+fn sanitize_workspace_identity(identity: &str) -> String {
+    let raw_key = path_to_forward_slashes(identity)
         .chars()
         .map(|character| {
             if character.is_ascii_alphanumeric() {
@@ -288,6 +340,65 @@ fn legacy_workspace_key(repository_root: &Path) -> String {
         .trim_matches('-')
         .to_string();
     collapse_separator_runs(&raw_key)
+}
+
+fn workspace_identity(repository_root: &Path) -> String {
+    let existing =
+        fs::canonicalize(repository_root).unwrap_or_else(|_| clean_path(repository_root));
+    #[cfg(windows)]
+    let existing = windows_long_path(&existing).unwrap_or(existing);
+    let identity = normalized_workspace_path(&existing);
+    #[cfg(windows)]
+    {
+        identity.to_ascii_lowercase()
+    }
+    #[cfg(not(windows))]
+    identity
+}
+
+fn raw_workspace_identity(repository_root: &Path) -> String {
+    normalized_workspace_path(&clean_path(repository_root))
+}
+
+fn normalized_workspace_path(repository_root: &Path) -> String {
+    let cleaned = clean_path(repository_root).to_string_lossy().to_string();
+    #[cfg(windows)]
+    {
+        if let Some(rest) = cleaned.strip_prefix(r"\\?\UNC\") {
+            return format!(r"\\{rest}");
+        }
+        if let Some(rest) = cleaned.strip_prefix(r"\\?\") {
+            return rest.to_string();
+        }
+    }
+    cleaned
+}
+
+#[cfg(windows)]
+fn windows_long_path(path: &Path) -> Option<PathBuf> {
+    use std::ffi::{OsStr, OsString};
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetLongPathNameW(short_path: *const u16, long_path: *mut u16, capacity: u32) -> u32;
+    }
+
+    let mut input: Vec<u16> = OsStr::new(path.as_os_str())
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let required = unsafe { GetLongPathNameW(input.as_mut_ptr(), std::ptr::null_mut(), 0) };
+    if required == 0 {
+        return None;
+    }
+    let mut output = vec![0u16; required as usize];
+    let written = unsafe { GetLongPathNameW(input.as_ptr(), output.as_mut_ptr(), required) };
+    if written == 0 || written >= required {
+        return None;
+    }
+    output.truncate(written as usize);
+    Some(PathBuf::from(OsString::from_wide(&output)))
 }
 
 fn collapse_separator_runs(value: &str) -> String {
@@ -767,6 +878,66 @@ mod tests {
         assert_ne!(first, second);
         assert!(first.len() <= 64, "key={first}");
         assert!(second.len() <= 64, "key={second}");
+    }
+
+    #[test]
+    fn workspace_key_is_always_hashed_even_for_short_paths() {
+        let workspace = Path::new("C:/work/keel");
+        let key = workspace_key(workspace);
+        let identity = workspace_identity(workspace);
+        let hash = fnv1a_64_hash(identity.as_bytes());
+
+        assert!(
+            key.ends_with(&hash[..8]),
+            "canonical workspace lanes must always carry a path hash: {key}"
+        );
+        assert_ne!(key, legacy_workspace_key(workspace));
+    }
+
+    #[test]
+    fn default_artifact_path_copies_legacy_flow_state_to_canonical_lane() {
+        let _guard = ENV_LOCK.lock().expect("lock environment override");
+        let temporary_directory = tempdir_under("keel-flow-migrate-legacy");
+        let home = temporary_directory.join("home");
+        let workspace = temporary_directory.join("workspace");
+        fs::create_dir_all(&workspace).expect("workspace");
+        let previous_override = std::env::var("KEEL_HOME").ok();
+        std::env::set_var("KEEL_HOME", &home);
+
+        let legacy = home
+            .join("memories")
+            .join("workspaces")
+            .join(legacy_workspace_key(&workspace))
+            .join("flow")
+            .join("flow-check.json");
+        fs::create_dir_all(legacy.parent().expect("legacy parent")).expect("legacy directory");
+        fs::write(&legacy, "legacy flow").expect("legacy artifact");
+
+        let resolved = default_workspace_artifact_path(&workspace);
+        assert!(resolved.is_file());
+        assert_eq!(
+            fs::read_to_string(&resolved).expect("migrated artifact"),
+            "legacy flow"
+        );
+        assert_eq!(
+            resolved
+                .parent()
+                .and_then(Path::parent)
+                .and_then(Path::file_name)
+                .and_then(|value| value.to_str()),
+            Some(workspace_key(&workspace).as_str())
+        );
+        assert!(
+            legacy.is_file(),
+            "migration must retain the recovery source"
+        );
+
+        if let Some(value) = previous_override {
+            std::env::set_var("KEEL_HOME", value);
+        } else {
+            std::env::remove_var("KEEL_HOME");
+        }
+        let _ = fs::remove_dir_all(&temporary_directory);
     }
 
     fn tempdir_under(label: &str) -> PathBuf {

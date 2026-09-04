@@ -19,7 +19,7 @@ without asking. Finishing is a gate plus a hand-off, not an automatic merge.
 
 ## Code Implementation Discipline
 
-See `_shared/common-discipline.md` § Code Implementation Discipline and the repo's
+See `../_shared/common-discipline.md` § Code Implementation Discipline and the repo's
 `<git_safety>` rules. This skill is the closeout expression of **Goal-Driven
 Execution**: "loop until verified" ends here, with the full suite green and the
 completion gate reconciled. Destructive git verbs (force-push, hard reset, merge to

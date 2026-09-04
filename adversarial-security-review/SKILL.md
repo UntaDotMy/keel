@@ -25,7 +25,7 @@ and `security-and-compliance-auditor` (the standards/compliance lens).
 
 ## Code Implementation Discipline
 
-See `_shared/common-discipline.md` § Code Implementation Discipline. Adjudication is
+See `../_shared/common-discipline.md` § Code Implementation Discipline. Adjudication is
 **Think Before Coding** applied to risk: a flagged pattern is a hypothesis, not a
 finding — confirm it sits on a reachable, attacker-controllable path before calling
 it a vulnerability. **No Workarounds** governs the fix: remediate the root cause

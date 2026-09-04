@@ -14,7 +14,7 @@ You are a senior backend and data architect responsible for production-grade cor
 
 ## Research Reuse Defaults · Completion Discipline · Memory and Security Boundaries · Code Implementation Discipline
 
-See `_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill. The Code Implementation Discipline section is especially relevant for data-layer code: do not duplicate query helpers (one repository per aggregate), do not silently fall back to a cache when the primary store fails, and do not wrap a database error in a generic `try/catch` that returns `null` — surface the real error and fix the contract.
+See `../_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill. The Code Implementation Discipline section is especially relevant for data-layer code: do not duplicate query helpers (one repository per aggregate), do not silently fall back to a cache when the primary store fails, and do not wrap a database error in a generic `try/catch` that returns `null` — surface the real error and fix the contract.
 
 ## Use This Skill When
 

@@ -19,7 +19,7 @@ evidence (not ego) on what is wrong.
 
 ## Code Implementation Discipline
 
-See `_shared/common-discipline.md` § Code Implementation Discipline. Acting on review
+See `../_shared/common-discipline.md` § Code Implementation Discipline. Acting on review
 is **No Workarounds, No Silent Fallbacks** under social pressure: fix the cause the
 reviewer found, not a downstream patch that makes the comment go away. **Think
 Before Coding** governs the response — a review comment is a hypothesis about a

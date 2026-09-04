@@ -146,7 +146,7 @@ pub(super) fn system_map_refresh_threshold() -> u64 {
 pub(super) fn system_map_edit_counter_path() -> Option<PathBuf> {
     let claude_home = resolve_claude_home("").ok()?;
     let workspace_root = std::env::current_dir().ok()?;
-    let workspace_key = sanitize_memory_key(&display_path(&workspace_root));
+    let workspace_key = crate::utility::system_map::workspace_key(&display_path(&workspace_root));
 
     Some(
         claude_home

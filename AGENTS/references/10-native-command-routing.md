@@ -27,7 +27,7 @@ When a native `keel` command owns the job, use it instead of recreating the beha
 **Before editing existing source:**
 - Run or validate Preserve Existing Flow evidence first.
 - Use `keel flow start`, `keel flow check`, and `keel flow finish`.
-- Record target file/function, current behavior, entry point, producer, source of truth, state/storage/queue owner, side-effect owner, consumers, cleanup/recovery path, edit boundary, validation needed, and validation evidence in `~/.claude/memories/workspaces/<workspace-slug>/flow/flow-check.json`.
+- Record target file/function, current behavior, entry point, producer, source of truth, state/storage/queue owner, side-effect owner, consumers, cleanup/recovery path, edit boundary, validation needed, and validation evidence in `~/.keel/memories/workspaces/<workspace-key>/flow/flow-check.json`.
 - Do not patch the first suspicious branch until the behavior owner is proven.
 
 **Before commit, PR, or final response:**

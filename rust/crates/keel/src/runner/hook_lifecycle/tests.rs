@@ -721,6 +721,38 @@ fn user_prompt_submit_emits_research_first_pointer() {
 }
 
 #[test]
+fn user_prompt_context_stays_within_per_turn_token_budget() {
+    let _guard = crate::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let empty_home = temp_brief_gate_home("user-prompt-token-budget");
+    let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
+    std::env::set_var("CLAUDE_TARGET_OVERRIDE", &empty_home);
+
+    let context = user_prompt_submit_context("fix the bug");
+
+    match previous_home {
+        Some(value) => std::env::set_var("CLAUDE_TARGET_OVERRIDE", value),
+        None => std::env::remove_var("CLAUDE_TARGET_OVERRIDE"),
+    }
+    let _ = std::fs::remove_dir_all(&empty_home);
+
+    let token_count = crate::proxy::token_meter::TokenMeter::count_text(&context);
+    assert!(
+        token_count <= 500,
+        "UserPromptSubmit costs {token_count} o200k_base tokens; per-turn Keel context must stay at or below 500"
+    );
+    assert!(
+        !context.contains("--- keel workspace push"),
+        "workspace state belongs at SessionStart/PostCompact, not every prompt"
+    );
+    assert!(
+        !context.contains("--- begin "),
+        "per-prompt routing may name a skill but must not inline its body"
+    );
+}
+
+#[test]
 fn mcp_pointer_fires_for_repo_structure_questions() {
     // The skill matcher stays silent on these prompts (no distinctive
     // domain token), so this targeted pointer is the only thing that nudges
@@ -2488,6 +2520,45 @@ fn stop_hook_blocks_until_required_review_is_current() {
     let _ = std::fs::remove_dir_all(&claude_home);
 }
 
+#[test]
+fn active_stop_hook_never_blocks_again() {
+    let _guard = crate::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let claude_home = temp_brief_gate_home("stop-active-loop-guard");
+    let _silenced = NewGatesSilenced::new();
+    let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
+    let previous_review = std::env::var(REVIEW_GATE_ENV_VAR).ok();
+    std::env::set_var("CLAUDE_TARGET_OVERRIDE", &claude_home);
+    std::env::set_var(REVIEW_GATE_ENV_VAR, "block");
+
+    let session_id = "stop-active-session";
+    seed_edit_row(&claude_home, session_id, "D:/workspace/stop-active");
+    let input = format!("{{\"sessionId\":\"{session_id}\",\"stopHookActive\":true}}");
+    let mut output = Vec::new();
+    let mut error = Vec::new();
+
+    assert_eq!(
+        run_hook_stop(&mut input.as_bytes(), &mut output, &mut error),
+        0
+    );
+    assert!(
+        output.is_empty(),
+        "a continuing Stop hook must fail open to prevent a loop: {}",
+        String::from_utf8_lossy(&output)
+    );
+
+    match previous_home {
+        Some(value) => std::env::set_var("CLAUDE_TARGET_OVERRIDE", value),
+        None => std::env::remove_var("CLAUDE_TARGET_OVERRIDE"),
+    }
+    match previous_review {
+        Some(value) => std::env::set_var(REVIEW_GATE_ENV_VAR, value),
+        None => std::env::remove_var(REVIEW_GATE_ENV_VAR),
+    }
+    let _ = std::fs::remove_dir_all(&claude_home);
+}
+
 /// Seed a research-cache record file with a fresh mtime so the memory gate
 /// sees a durable write this session. Mirrors the `memory/research-cache`
 /// layout `keel memory research-cache record` writes to.
@@ -3013,6 +3084,11 @@ fn session_start_context_stays_under_truncation_cap() {
     let _ = std::fs::remove_dir_all(&empty_home);
 
     let byte_len = context.len();
+    let token_count = crate::proxy::token_meter::TokenMeter::count_text(&context);
+    assert!(
+        token_count <= 1_000,
+        "SessionStart costs {token_count} o200k_base tokens before runtime digests; keep the one-time contract at or below 1000"
+    );
     assert!(
             byte_len < TRUNCATION_CEILING_BYTES,
             "SessionStart context is {byte_len} bytes, at/over the {TRUNCATION_CEILING_BYTES}-byte ceiling — the harness truncates additionalContext above ~10KB, so the operating contract would be cut off mid-way and the model would never see the full iron law. Trim the compact bootstrap or move detail into the on-demand Skill(\"using-keel\") body."

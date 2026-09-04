@@ -15,7 +15,7 @@ Only when the user wants a memory report. Routine durable writes stay on the mai
 (`keel memory ...`).
 
 ## Shared discipline
-`_shared/common-discipline.md`. Missing memory files → surface the gap (no silent swallow).
+`../_shared/common-discipline.md`. Missing memory files → surface the gap (no silent swallow).
 
 ## When
 "what did you learn", memory status, mistakes ledger, heuristic growth, needs-I-remember,
@@ -39,7 +39,7 @@ or a bounded report after plan/fix/review loops.
    Use `keel memory status` for family snapshot; compose the narrative yourself.
 5. Working brief list/show; completion-gate check when tracked.
 6. Read outputs before summarizing. Optional save under
-   `~/.claude/memories/reports/<date>-memory-status.md`.
+   `~/.keel/memories/reports/<date>-memory-status.md`.
 7. Before final answer: reconcile requirements; do not present unresolved as complete.
 
 ## Guardrails

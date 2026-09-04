@@ -19,7 +19,7 @@ compaction.
 
 ## Code Implementation Discipline
 
-See `_shared/common-discipline.md` § Code Implementation Discipline. This skill
+See `../_shared/common-discipline.md` § Code Implementation Discipline. This skill
 runs the **Goal-Driven Execution** loop the plan set up — each step's verify check
 is the goal, and "loop until verified" is the per-step rule. **Surgical Changes**
 governs every edit: implement the step as written, do not expand scope mid-plan;

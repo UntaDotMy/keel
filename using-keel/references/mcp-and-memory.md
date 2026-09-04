@@ -1,3 +1,4 @@
+<!-- keel:managed-host-file (remove this line before customizing to opt out of upgrades) -->
 # MCP tools and memory writes (on-demand)
 
 Deep MCP and memory-writer reference. The compact bootstrap lists only the core tools.
@@ -8,7 +9,7 @@ Deep MCP and memory-writer reference. The compact bootstrap lists only the core 
 
 - Tool `context_brief` (full name `mcp__keel__context_brief`) — **call this first when you start a session or task.** One call returns the iron law, the full installed skill catalog (name + when_to_use), durable-memory health, and the newest working brief. This is how you become aware of what the toolkit offers when no skill loaded automatically. After reading it, route with `skill_route`, load with `skill_get`, and reach anything else through `cli`.
 - Tool `system_map` (full name `mcp__keel__system_map`) — **call this before any claim about the current repo's structure or layout** ("what is this project", "how is this organized", "where does X live") instead of guessing or spelunking files blind. Returns the workspace SYSTEM_MAP.md (auto-refreshed copy preferred, freshly rendered fallback).
-- Tool `recall` (full name `mcp__keel__recall`): **call this before claiming what you remember or previously learned.** Full-text search over `~/.claude/memories`, `working-briefs`, and related lanes via the FTS5 index. Same code path as `keel memory recall`.
+- Tool `recall` (full name `mcp__keel__recall`): **call this before claiming what you remember or previously learned.** Full-text search over `~/.keel/memories`, `working-briefs`, and related lanes via the FTS5 index. Same code path as `keel memory recall`.
 - Tool `run_command` (full name `mcp__keel__run_command`) — run a noisy shell command through the proxy capture+compaction pipeline so the compacted output lands in context instead of the raw stream. Prefer it for test/build/lint/log/search commands.
 - Tool `recall_status` (full name `mcp__keel__recall_status`) — recall index health snapshot (document count, schema version, last-sync timestamp).
 - Tool `skill_route` (full name `mcp__keel__skill_route`) — **the on-demand equivalent of the per-prompt skill router.** Pass a prompt; get the single distinctive skill match plus a bounded inline brief of its guidance. Use this when the lifecycle hook that normally injects the brief did not fire (it is unreliable on some platforms) or whenever you are unsure which skill applies.
@@ -33,7 +34,7 @@ Your working memory only lives in the current context window. Anything you want 
 
 | Subcommand | Writes | Trigger — call it when |
 |---|---|---|
-| `keel memory scope resolve --workspace-root <abs> --create-missing --refresh-system-map` | `~/.claude/memories/workspaces/<slug>/reference/SYSTEM_MAP.md` | files moved, packages added, or you noticed the map is stale mid-session. Hooks already fire it at session start, pre-compact, and session end — only call by hand on top of that. |
+| `keel memory scope resolve --workspace-root <abs> --create-missing --refresh-system-map` | `~/.keel/memories/workspaces/<workspace-key>/reference/SYSTEM_MAP.md` | files moved, packages added, or you noticed the map is stale mid-session. Hooks already fire it at session start, pre-compact, and session end — only call by hand on top of that. |
 | `keel memory system-map refresh` | same SYSTEM_MAP.md path | shorthand for the scope-resolve refresh when the workspace is already resolved. |
 | `keel memory working-brief write` | `~/.claude/working-briefs/<id>.json` | starting non-trivial work. Capture the user's request, acceptance criteria, and the files you expect to touch *before* coding so completion can be reconciled against it. Update with `working-brief write` again as scope shifts. |
 | `keel memory completion-gate check` | nothing (probe-only) | before claiming a task complete. Returns the gate's verdict; failures point at the requirement that has no evidence yet. |
@@ -57,7 +58,7 @@ keel memory research-cache lookup --query "stripe webhook"
 
 Prefer small payloads. Prefer MCP `memory_status` / dedicated `recall` over giant `memory` args.
 
-**Relationship to the harness's native Auto memory.** Recent the harness ships its own *Auto memory* (notes the model writes to `~/.claude/projects/<project>/memory/MEMORY.md`). The two are complementary: native Auto memory is passive and machine-local; keel's unified `memory` surface is explicit and structured (SYSTEM_MAP, working briefs, completion gate, FTS5 recall, family records under `~/.claude/memories/` and related lanes). Use native Auto memory for incidental notes; use `keel memory ...` when an artifact must survive compaction and be reconcilable. Do not duplicate the same fact into both.
+**Relationship to the harness's native Auto memory.** Recent the harness ships its own *Auto memory* (notes the model writes to `~/.claude/projects/<project>/memory/MEMORY.md`). The two are complementary: native Auto memory is passive and machine-local; Keel's unified `memory` surface is explicit and structured (SYSTEM_MAP, working briefs, completion gate, FTS5 recall, family records under `~/.keel/memories/` and related lanes). Use native Auto memory for incidental notes; use `keel memory ...` when an artifact must survive compaction and be reconcilable. Do not duplicate the same fact into both.
 
 | Thought | Reality |
 |---|---|

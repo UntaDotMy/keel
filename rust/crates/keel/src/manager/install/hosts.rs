@@ -9,6 +9,35 @@ enum ManagedCopyStatus {
     PreservedCustom,
 }
 
+const MANAGED_HOST_FILE_MARKER: &str = "keel:managed-host-file";
+
+fn legacy_managed_host_file(target: &Path, content: &str) -> bool {
+    let file_name = target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    match file_name {
+        "keel-pi.ts" => content.contains("keel Pi Agent Extension"),
+        "keel-antigravity.js" => content.contains("Keel Antigravity hook adapter"),
+        "keel.ts" => {
+            content.contains("@opencode-ai/plugin") && content.contains("../_shared/ts/bridge-core")
+        }
+        "keel-cursor.sh" => content.contains("keel Cursor adapter"),
+        "keel-cmdc.ts" => content.contains("keel Command Code (cmdc) Mod"),
+        "keel-codex.ts" => content.contains("keel Codex CLI Plugin"),
+        "keel-codex.js" => content.contains("codex/keel-codex.ts"),
+        "bridge-core.ts" => content.contains("resolveBinary") && content.contains("keel.exe"),
+        "SKILL.md" => {
+            content.contains("name: using-keel") && content.contains("Trust the codebase")
+        }
+        "common-discipline.md" => content.contains("Shared Discipline — Common Standards"),
+        "subagent-iron-law.md" => content.contains("Subagent Iron Law — Read First"),
+        "mcp-and-memory.md" => content.contains("MCP tools and memory writes"),
+        "skill-and-agent-catalog.md" => content.contains("Skill and agent catalog"),
+        _ => false,
+    }
+}
+
 fn copy_managed_file(source: &Path, target: &Path) -> Result<ManagedCopyStatus, String> {
     let source_bytes =
         std::fs::read(source).map_err(|error| format!("read {}: {error}", display_path(source)))?;
@@ -18,11 +47,20 @@ fn copy_managed_file(source: &Path, target: &Path) -> Result<ManagedCopyStatus, 
         }
         let target_bytes = std::fs::read(target)
             .map_err(|error| format!("read {}: {error}", display_path(target)))?;
-        return Ok(if target_bytes == source_bytes {
-            ManagedCopyStatus::AlreadyCurrent
-        } else {
-            ManagedCopyStatus::PreservedCustom
-        });
+        if target_bytes == source_bytes {
+            return Ok(ManagedCopyStatus::AlreadyCurrent);
+        }
+        let source_text = String::from_utf8_lossy(&source_bytes);
+        let target_text = String::from_utf8_lossy(&target_bytes);
+        if !source_text.contains(MANAGED_HOST_FILE_MARKER)
+            || (!target_text.contains(MANAGED_HOST_FILE_MARKER)
+                && !legacy_managed_host_file(target, &target_text))
+        {
+            return Ok(ManagedCopyStatus::PreservedCustom);
+        }
+        std::fs::write(target, &source_bytes)
+            .map_err(|error| format!("write {}: {error}", display_path(target)))?;
+        return Ok(ManagedCopyStatus::Copied);
     }
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent)
@@ -53,19 +91,64 @@ fn copy_bridge_core(repository_root: &Path, host_root: &Path) -> String {
 }
 
 fn copy_gateway_skill(repository_root: &Path, skills_root: &Path) -> String {
-    let source = repository_root.join("using-keel").join("SKILL.md");
-    let target = skills_root.join("using-keel").join("SKILL.md");
-    if !source.is_file() {
+    let source = repository_root.join("using-keel");
+    let target = skills_root.join("using-keel");
+    if !source.join("SKILL.md").is_file() {
         return "gateway skill source absent".to_string();
     }
-    match copy_managed_file(&source, &target) {
-        Ok(ManagedCopyStatus::Copied) => format!("gateway skill -> {}", display_path(&target)),
-        Ok(ManagedCopyStatus::AlreadyCurrent) => "gateway skill already current".to_string(),
-        Ok(ManagedCopyStatus::PreservedCustom) => {
-            "gateway skill preserved (user-customized)".to_string()
-        }
-        Err(error) => format!("gateway skill skipped ({error})"),
+
+    let mut counts = [0usize; 3];
+    if let Err(error) = copy_managed_tree(&source, &target, &mut counts) {
+        return format!("gateway skill skipped ({error})");
     }
+    let shared_source = repository_root.join("_shared");
+    if shared_source.is_dir() {
+        if let Err(error) =
+            copy_managed_tree(&shared_source, &skills_root.join("_shared"), &mut counts)
+        {
+            return format!("gateway skill shared resources skipped ({error})");
+        }
+    }
+    if counts[2] > 0 {
+        format!(
+            "gateway skill current ({} files copied, {} user-customized preserved)",
+            counts[0], counts[2]
+        )
+    } else if counts[0] > 0 {
+        format!(
+            "gateway skill -> {} ({} files)",
+            display_path(&target),
+            counts[0]
+        )
+    } else {
+        "gateway skill already current".to_string()
+    }
+}
+
+fn copy_managed_tree(source: &Path, target: &Path, counts: &mut [usize; 3]) -> Result<(), String> {
+    let entries = std::fs::read_dir(source)
+        .map_err(|error| format!("read {}: {error}", display_path(source)))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("read directory entry: {error}"))?;
+        let file_type = entry.file_type().map_err(|error| {
+            format!(
+                "read file type for {}: {error}",
+                display_path(&entry.path())
+            )
+        })?;
+        let source_path = entry.path();
+        let target_path = target.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_managed_tree(&source_path, &target_path, counts)?;
+        } else if file_type.is_file() {
+            match copy_managed_file(&source_path, &target_path)? {
+                ManagedCopyStatus::Copied => counts[0] += 1,
+                ManagedCopyStatus::AlreadyCurrent => counts[1] += 1,
+                ManagedCopyStatus::PreservedCustom => counts[2] += 1,
+            }
+        }
+    }
+    Ok(())
 }
 
 const MANAGED_HOST_AGENTS_BEGIN: &str =

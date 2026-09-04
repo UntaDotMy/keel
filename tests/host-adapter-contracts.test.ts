@@ -145,6 +145,15 @@ test("Command Code fixtures match the ModApi lifecycle surface", () => {
   expect(commandCode).toContain('cmd.on("compaction_done"');
 });
 
+test("Pi and OMP inject Keel context through the current before_agent_start seam", () => {
+  const pi = source("pi/keel-pi.ts");
+  expect(pi).toContain('pi.on("before_agent_start"');
+  expect(pi).toContain("systemPrompt:");
+  expect(pi).toContain('runBridge("pre-tool-use", gateArgs, undefined, 5000)');
+  expect(pi).not.toContain('pi.on("input"');
+  expect(pi).not.toContain('pi.on("message_start"');
+});
+
 test("Antigravity adapter translates the documented camelCase hook contract", () => {
   const adapter = source("antigravity/keel-antigravity.js");
   expect(fixtures.antigravity?.length).toBeGreaterThan(0);
@@ -165,5 +174,57 @@ test("Antigravity adapter translates the documented camelCase hook contract", ()
   expect(adapter).toContain("injectSteps");
   expect(adapter).toContain('["hook", "stop"]');
   expect(adapter).toContain('decision: "continue"');
+  expect(adapter).toContain("executionNum > 1");
+  expect(adapter).toContain('input.terminationReason !== "model_stop"');
+  expect(adapter).toContain("input.fullyIdle === false");
+  expect(adapter).not.toContain("stop_hook_active: false");
   expect(adapter).toContain('"bridge", subcommand');
+});
+
+test("Antigravity MCP research call satisfies the edit gate end to end", async () => {
+  const tempHome = await mkdtemp(join(tmpdir(), "keel-antigravity-e2e-"));
+  const invoke = async (event: "pre-tool-use" | "post-tool-use", toolCall: Fixture): Promise<Fixture> => {
+    const child = Bun.spawn(["node", "antigravity/keel-antigravity.js", event], {
+      cwd: repoRoot,
+      env: {
+        ...process.env,
+        KEEL_HOME: join(repoRoot, "target", "debug"),
+        HOME: tempHome,
+        USERPROFILE: tempHome,
+        CLAUDE_TARGET_OVERRIDE: join(tempHome, ".claude"),
+      },
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    child.stdin.write(
+      JSON.stringify({
+        conversationId: "antigravity-mcp-e2e",
+        workspacePaths: [repoRoot],
+        toolCall,
+      }),
+    );
+    child.stdin.end();
+    const output = await new Response(child.stdout).text();
+    expect(await child.exited).toBe(0);
+    return JSON.parse(output) as Fixture;
+  };
+
+  try {
+    const researchCall = {
+      name: "call_mcp_tool",
+      args: { ServerName: "keel", ToolName: "system_map", Arguments: {} },
+    };
+    const research = await invoke("pre-tool-use", researchCall);
+    expect(research.decision).toBe("allow");
+    await invoke("post-tool-use", researchCall);
+
+    const edit = await invoke("pre-tool-use", {
+      name: "write_to_file",
+      args: { TargetFile: join(repoRoot, "never-written.txt"), CodeContent: "x" },
+    });
+    expect(edit.decision).toBe("allow");
+  } finally {
+    await rm(tempHome, { recursive: true, force: true });
+  }
 });

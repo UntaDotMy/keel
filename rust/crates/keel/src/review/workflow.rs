@@ -1,6 +1,5 @@
 use super::*;
 use crate::runtime::{resolve_claude_home, resolve_repository_root};
-use crate::utility::hashing::fnv1a64_hex;
 use crate::utility::record_store::RecordStore;
 
 /// Preferred work-branch prefix going forward (`task/<task>`). Integration
@@ -226,35 +225,47 @@ pub(crate) const WORKFLOW_PREF_RECORD_ID: &str = "active";
 
 pub(crate) fn workflow_pref_store(repository_root: &Path, claude_home: &Path) -> RecordStore {
     let slug = workflow_slug(&repository_root.to_string_lossy());
-    RecordStore::new(
-        claude_home,
-        &format!("memories/workspaces/{slug}/git-workflow"),
-    )
+    let canonical_group = format!("memories/workspaces/{slug}/git-workflow");
+    let canonical_record = claude_home
+        .join(&canonical_group)
+        .join(format!("{WORKFLOW_PREF_RECORD_ID}.json"));
+    if !canonical_record.is_file() {
+        for alias in
+            crate::utility::system_map::workspace_key_aliases(&repository_root.to_string_lossy())
+                .into_iter()
+                .skip(1)
+        {
+            let legacy_record = claude_home
+                .join("memories")
+                .join("workspaces")
+                .join(alias)
+                .join("git-workflow")
+                .join(format!("{WORKFLOW_PREF_RECORD_ID}.json"));
+            if legacy_record.is_file() {
+                if let Some(parent) = canonical_record.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                if std::fs::copy(&legacy_record, &canonical_record).is_err() {
+                    return RecordStore::new(
+                        claude_home,
+                        &legacy_record
+                            .parent()
+                            .and_then(|path| path.strip_prefix(claude_home).ok())
+                            .map(|path| path.to_string_lossy().replace('\\', "/"))
+                            .unwrap_or_else(|| canonical_group.clone()),
+                    );
+                }
+                break;
+            }
+        }
+    }
+    RecordStore::new(claude_home, &canonical_group)
 }
 
 /// Slug a workspace path into a safe directory segment (mirrors the SYSTEM_MAP
 /// per-workspace lane naming).
 pub(crate) fn workflow_slug(raw: &str) -> String {
-    let mut slug = String::with_capacity(raw.len());
-    let mut last_dash = false;
-    for ch in raw.chars() {
-        if ch.is_ascii_alphanumeric() {
-            slug.push(ch.to_ascii_lowercase());
-            last_dash = false;
-        } else if !last_dash {
-            slug.push('-');
-            last_dash = true;
-        }
-    }
-    let normalized = slug.trim_matches('-');
-    if normalized.is_empty() {
-        "workspace".to_string()
-    } else if normalized.chars().count() <= 64 {
-        normalized.to_string()
-    } else {
-        let prefix: String = normalized.chars().take(47).collect();
-        format!("{prefix}-{}", fnv1a64_hex(raw))
-    }
+    crate::utility::system_map::workspace_key(raw)
 }
 
 pub(crate) fn run_git_workflow_configure(

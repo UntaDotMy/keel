@@ -39,12 +39,12 @@ pub(super) use workflow::{
 };
 /// PostToolBatch review gate.
 ///
-/// why: only a PASSING `gates` / `pre-pr` / `pre-commit` is a real reviewer
-/// pass. A non-zero exit (blocking findings) must not satisfy the gate, or
-/// run-and-ignore clears it; and the informational `diff` / `init` surfaces
-/// review nothing, so they never clear it.
+/// why: only a passing full `pre-pr` or acceptance-criteria `closeout` supplies
+/// enough evidence to clear the reviewer gate. Fast format/lint and arbitrary
+/// `gates` checks can pass while tests, impact, or the requested behavior remain
+/// unfinished; informational `diff` / `init` surfaces review nothing.
 fn review_pass_clears_gate(surface: &str, code: u8) -> bool {
-    code == 0 && matches!(surface, "gates" | "pre-pr" | "pre-commit")
+    code == 0 && matches!(surface, "pre-pr" | "closeout")
 }
 
 pub fn run_review_command(
@@ -58,7 +58,15 @@ pub fn run_review_command(
     }
     match arguments[0].as_str() {
         "closeout" => {
-            closeout::run_review_closeout_command(&arguments[1..], standard_output, standard_error)
+            let code = closeout::run_review_closeout_command(
+                &arguments[1..],
+                standard_output,
+                standard_error,
+            );
+            if review_pass_clears_gate("closeout", code) {
+                crate::runner::hook_lifecycle::record_review_gate_clear();
+            }
+            code
         }
         "gates" => {
             let code = run_review_gates_command(&arguments[1..], standard_output, standard_error);

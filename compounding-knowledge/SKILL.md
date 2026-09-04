@@ -22,7 +22,7 @@ as a readable artifact and wires it into discovery.
 
 ## Code Implementation Discipline
 
-See `_shared/common-discipline.md` § Code Implementation Discipline. Capturing
+See `../_shared/common-discipline.md` § Code Implementation Discipline. Capturing
 knowledge is **Goal-Driven Execution** closing the loop — the artifact records the
 verified outcome and the evidence that proved it. **No Duplication** is the core
 discipline here: dedupe against existing notes before writing, and consolidate

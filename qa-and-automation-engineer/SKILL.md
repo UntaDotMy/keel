@@ -14,7 +14,7 @@ You are a senior QA and automation engineer responsible for production-grade con
 
 ## Research Reuse Defaults · Completion Discipline · Memory and Security Boundaries · Code Implementation Discipline
 
-See `_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill. Test code is production code: the Code Implementation Discipline section there — four behavioral pillars (Think Before Coding, Simplicity First, Surgical Changes, Goal-Driven Execution) plus tactical rules (YAGNI, no shortforms, no silent fallbacks, no duplication, less comments + structured doc tags) — applies to fixtures, helpers, and assertion utilities the same as it does to the system under test.
+See `../_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill. Test code is production code: the Code Implementation Discipline section there — four behavioral pillars (Think Before Coding, Simplicity First, Surgical Changes, Goal-Driven Execution) plus tactical rules (YAGNI, no shortforms, no silent fallbacks, no duplication, less comments + structured doc tags) — applies to fixtures, helpers, and assertion utilities the same as it does to the system under test.
 
 ## Use This Skill When
 
@@ -44,7 +44,7 @@ See `_shared/common-discipline.md` for the canonical rules. Apply them to all wo
 
 ## Test Code Quality
 
-Test code is read more than written. Apply these on top of `_shared/common-discipline.md` § Code Implementation Discipline:
+Test code is read more than written. Apply these on top of `../_shared/common-discipline.md` § Code Implementation Discipline:
 
 - **Descriptive test names** that read as a sentence: `it("returns 401 when the bearer token is expired")`, not `testAuth1`. The name is the failure message a future engineer will see.
 - **One concept per test.** If the test needs `and` in its name, split it.

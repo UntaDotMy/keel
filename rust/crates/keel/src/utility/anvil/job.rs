@@ -4,7 +4,7 @@ use serde_json::Value as JsonValue;
 
 use crate::runtime::resolve_claude_home;
 use crate::utility::anvil::lock::validate_lock;
-use crate::utility::system_map::sanitize_key;
+use crate::utility::system_map::workspace_key;
 
 pub struct JobLease {
     path: PathBuf,
@@ -96,12 +96,13 @@ impl JobPaths {
     }
 
     pub fn from_resolved(workspace: PathBuf, home: PathBuf) -> Self {
-        let slug = sanitize_key(&workspace.to_string_lossy());
-        let dir = home
+        let slug = workspace_key(&workspace.to_string_lossy());
+        let preferred = home
             .join("memories")
             .join("workspaces")
             .join(slug)
             .join("anvil");
+        let dir = migrate_anvil_lane(&home, &workspace, &preferred);
         Self {
             workspace,
             home,
@@ -179,11 +180,9 @@ pub fn active_jobs_summary(
 ) -> Vec<(String, String)> {
     let workspaces = claude_home.join("memories").join("workspaces");
     let lanes: Vec<PathBuf> = match workspace_root {
-        Some(root) => vec![workspaces
-            .join(crate::utility::system_map::sanitize_key(
-                &root.to_string_lossy(),
-            ))
-            .join("anvil")],
+        Some(root) => {
+            vec![JobPaths::from_resolved(root.to_path_buf(), claude_home.to_path_buf()).dir]
+        }
         None => std::fs::read_dir(&workspaces)
             .map(|entries| {
                 entries
@@ -216,6 +215,49 @@ pub fn active_jobs_summary(
     }
     jobs.sort();
     jobs
+}
+
+fn migrate_anvil_lane(home: &Path, workspace: &Path, preferred: &Path) -> PathBuf {
+    if preferred.is_dir() {
+        return preferred.to_path_buf();
+    }
+    let workspace_text = workspace.to_string_lossy();
+    for alias in crate::utility::system_map::workspace_key_aliases(&workspace_text)
+        .into_iter()
+        .skip(1)
+    {
+        let legacy = home
+            .join("memories")
+            .join("workspaces")
+            .join(alias)
+            .join("anvil");
+        if !legacy.is_dir() {
+            continue;
+        }
+        if copy_directory_missing(&legacy, preferred).is_ok() {
+            return preferred.to_path_buf();
+        }
+        return legacy;
+    }
+    preferred.to_path_buf()
+}
+
+fn copy_directory_missing(source: &Path, destination: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(destination)?;
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let target = destination.join(entry.file_name());
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
+            copy_directory_missing(&entry.path(), &target)?;
+        } else if file_type.is_file() && !target.exists() {
+            std::fs::copy(entry.path(), target)?;
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -408,6 +450,32 @@ mod tests {
     }
 
     #[test]
+    fn legacy_anvil_bank_is_copied_to_the_canonical_lane() {
+        let workspace = TempTestDir::new("job-migrate-ws");
+        let home = TempTestDir::new("job-migrate-home");
+        let legacy_slug =
+            crate::utility::system_map::sanitize_key(&workspace.path().to_string_lossy());
+        let legacy = home
+            .path()
+            .join("memories")
+            .join("workspaces")
+            .join(legacy_slug)
+            .join("anvil");
+        std::fs::create_dir_all(&legacy).expect("legacy lane");
+        std::fs::write(legacy.join("anvil.lock.json"), "{}\n").expect("legacy lock");
+
+        let paths = JobPaths::from_resolved(workspace.path().into(), home.path().into());
+        assert_eq!(
+            paths.dir.parent().and_then(Path::file_name),
+            Some(std::ffi::OsStr::new(&workspace_key(
+                &workspace.path().to_string_lossy()
+            )))
+        );
+        assert!(paths.lock_path().is_file());
+        assert!(legacy.join("anvil.lock.json").is_file());
+    }
+
+    #[test]
     fn active_jobs_summary_reports_lock_and_report_state() {
         let workspace = TempTestDir::new("sum-ws");
         let home = TempTestDir::new("sum-home");
@@ -419,7 +487,7 @@ mod tests {
         paths.ensure_dir().unwrap();
         std::fs::write(paths.lock_path(), "{}").unwrap();
         let summary = active_jobs_summary(home.path(), Some(workspace.path()));
-        let lane_id = sanitize_key(&workspace.path().to_string_lossy());
+        let lane_id = workspace_key(&workspace.path().to_string_lossy());
         assert_eq!(summary, vec![(lane_id.clone(), "active".to_string())]);
 
         std::fs::write(paths.report_path(), "{}").unwrap();

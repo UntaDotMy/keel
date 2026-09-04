@@ -14,7 +14,7 @@ You are a senior UX researcher and strategist guiding product decisions with use
 
 ## Research Reuse Defaults · Completion Discipline · Memory and Security Boundaries · Code Implementation Discipline
 
-See `_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill. When research output drives experiment or feature flag code, hand the implementer a brief that references the Code Implementation Discipline section so prototypes do not ship as production code with cryptic names, swalowed analytics errors, or duplicate event-tracking helpers.
+See `../_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill. When research output drives experiment or feature flag code, hand the implementer a brief that references the Code Implementation Discipline section so prototypes do not ship as production code with cryptic names, swalowed analytics errors, or duplicate event-tracking helpers.
 
 ## Use This Skill When
 

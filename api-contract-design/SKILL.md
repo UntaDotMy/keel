@@ -14,7 +14,7 @@ You are a senior API architect responsible for keeping HTTP, GraphQL, and gRPC c
 
 ## Research Reuse Defaults · Completion Discipline · Memory and Security Boundaries · Code Implementation Discipline
 
-See `_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill. The Code Implementation Discipline section is especially relevant for contract code: do not duplicate request/response DTOs across handlers, do not silently coerce missing fields to defaults that change behavior, and do not return a generic 500 where the real failure is a contract violation — surface the validation error and fix the schema.
+See `../_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill. The Code Implementation Discipline section is especially relevant for contract code: do not duplicate request/response DTOs across handlers, do not silently coerce missing fields to defaults that change behavior, and do not return a generic 500 where the real failure is a contract violation — surface the validation error and fix the schema.
 
 ## Use This Skill When
 

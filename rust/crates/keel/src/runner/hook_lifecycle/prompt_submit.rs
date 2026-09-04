@@ -3,46 +3,20 @@
 use super::*;
 
 pub(super) fn user_prompt_submit_core() -> String {
-    format!(
-        "FOLLOW THE IRON LAW. USE KEEL. These are mandatory on every turn — not optional reminders.\n\
-         \n\
-         Iron Law (every turn):\n\
-         1. Research-first: trust the codebase, not your knowledge base. Read SYSTEM_MAP and the owning module before claiming behavior.\n\
-         2. Use keel before guessing: native keel MCP tools are always available — prefer them over ad-hoc shell or invented paths: `system_map` (workspace layout — call once per turn when you lack the map, then reuse; call again only if you created/moved/deleted files), `recall` (prior decisions/learnings — call once when you need memory, then reuse; call again only if you wrote new memory this turn), `context_brief` (iron law + skill catalog + memory health + newest brief — call first when starting a task), `skill_route`/`skill_get` (pick and load skills), `run_command` (noisy shell through compaction), `code_search` (live tree search). CLI forms (`keel memory …`, `keel doctor`, `keel code-search …`) count the same. No tool-call loops: re-calling system_map/recall with no intervening change is a loop — re-read context.\n\
-         3. Invoke any relevant skill via the Skill tool BEFORE responding — even a 1% chance it applies means use it. Delivery is Anvil only (`anvil` MCP: compile/cast/sieve/stamp/run --dry-run in-process; loop and live run start in the background — poll command_output).\n\
-         4. Understand before building: restate what the request actually asks, confirm the user story, and research what is genuinely needed before writing code — no guessing, no assuming, no building against an imagined spec. Researching first is what stops you building the wrong thing.\n\
-         5. Find the root cause, not just the surface symptom: suspicion is a hypothesis, not a finding — trace the symptom end-to-end with file:line evidence and confirm the suspect is on that path before changing it. Then scan the class: `keel code-search siblings` (or MCP code_search action=siblings) and handle every similar, related, and leftover copy in this turn. A one-site fix is unfinished. No assumptions. No jumping from \"this may be the case\" to a patch.\n\
-         6. Edit gate (STRICT): code edits are blocked until this session used a keel research tool (system_map/recall/context_brief/skill_*/code_search or matching keel CLI). Plain Read alone does not clear it.\n\
-         \n\
-         Memory & learning (part of the Iron Law — do not skip):\n\
-         - Recall first: before claiming what you remember, decided earlier, or how this project works, call `recall` (or `keel memory recall`). Memory-first navigation: if SYSTEM_MAP, recall, or a working brief already names the file or module, go there — do not `ls`/list the whole tree or broad-scan the repo to rediscover known paths.\n\
-         - Working brief: on non-trivial work, write or update a brief BEFORE coding (`brief_create` / `keel memory working-brief write --request \"...\" --acceptance-criteria \"...\"`) so completion can be reconciled.\n\
-         - Save durable learnings: when you discover a decision, root cause, convention, or fix worth keeping across sessions, write it now — do not wait for \"later\" or SessionEnd. Use `keel memory research-cache`, working-brief updates, or the project's memory write path. Compaction wipes chat; disk does not.\n\
-         - Learn loop: after non-trivial solved problems, capture with compounding-knowledge / memory-consolidation patterns; instincts and learned skills promote at session end — feed them by recording observations (hooks do this on tool use) and by writing explicit notes when something should stick.\n\
-         - Before close: `keel memory completion-gate check` when claiming done; run reviewer / `keel review pre-pr` for non-trivial code.\n\
-         \n\
-         Request fidelity: implement only what the user asked; do not invent features, refactors, files, APIs, or \"improvements\" outside the request. Ask when unclear: if the request is unclear, conflicting, incomplete, or you fear drift into inventing scope, stop and ask the user a concrete question before coding — never decide silently and never \"just pick one and go.\" Never trust knowledge-base alone: training data is not this project's structure, stories, or implementation path; read SYSTEM_MAP, owning files, and the user's stories here. Code comments: never summarize what the code does; write contracts only (`@param`/`@returns`/`# Errors`/`// why:`) or omit. Preserve existing data: never remove or replace a field, column, output, or record to fit a new format — ADD alongside and ASK before dropping anything the user did not name. Implementation discipline applies on every code-touching turn — Think Before Coding, Simplicity First, Surgical Changes, Goal-Driven Execution. Parallel fan-out: only batch agents in the same message when all four hold — no shared inputs, no shared file or git-index writes, no need to cancel/steer one based on another's interim result, and the work fits the current task scope. If any check fails, dispatch sequentially. {}",
-        memory_scope_summary()
-    )
+    "Understand before building: research what is needed and avoid building the wrong thing. \
+No assumptions: suspicion is a hypothesis, not a finding; trace the symptom and root cause before patching, never jump from \"this may be the case\".\n\
+Skill tool: invoke a relevant skill before responding; use Anvil for delivery.\n\
+Memory & learning: Recall first. Use Memory-first navigation, write a Working brief for non-trivial work, Save durable learnings, run the Learn loop, then completion-gate and reviewer before close.\n\
+Request fidelity: only the requested scope. Ask when unclear. Never trust knowledge-base alone. Preserve existing data. Code comments are contracts only.\n\
+Implementation discipline: Think Before Coding, Simplicity First, Surgical Changes, Goal-Driven Execution."
+        .to_string()
 }
 
 /// Per-prompt action strip: what is enforced this turn (not optional prose).
 pub(super) const USER_PROMPT_ENFORCEMENT_STRIP: &str = "\
-ENFORCED THIS TURN (not optional):\n\
-• Follow the Iron Law. Use keel tools — do not guess from training data.\n\
-• PreToolUse DENIES Edit/Write, non-keel Bash, and Agent/Task until a keel research \
-tool runs this session (context_brief / system_map / recall / skill_route / skill_get / \
-code_search, or matching `keel …` CLI).\n\
-• Read/Grep/Glob stay allowed; they do not clear STRICT mode by themselves.\n\
-• Memory: recall before claiming prior work; write a working brief before non-trivial \
-coding; save durable learnings to disk when you learn something worth keeping.\n\
-• After edits: `keel code-search siblings` (MCP code_search action=siblings). Fix every \
-copy of the same shape. A one-site change is unfinished.";
-
-/// Max bytes of workspace digest to push on every UserPromptSubmit (on top of
-/// the iron-law text). Keeps per-prompt cost bounded while still *pushing* map
-/// and brief content so the agent does not have to choose to call system_map.
-pub(super) const USER_PROMPT_DIGEST_MAX_BYTES: usize = 1400;
+ENFORCED THIS TURN (mandatory on every turn): FOLLOW THE IRON LAW. USE KEEL.\n\
+Research-first: trust the codebase. Read SYSTEM_MAP; use system_map, recall, context_brief, run_command, skill_route/skill_get, and code_search instead of guessing.\n\
+PreToolUse DENIES Edit/Write and shell work until a keel research tool runs. After edits, run code_search siblings.";
 
 pub(crate) fn user_prompt_submit_context(prompt_text: &str) -> String {
     // Build optional mid-body pointers first, then force the enforcement strip
@@ -50,17 +24,13 @@ pub(crate) fn user_prompt_submit_context(prompt_text: &str) -> String {
     let mut body = user_prompt_submit_core();
     let claude_home = resolve_claude_home("").ok();
 
-    // Inline the matched skill's own guidance when the prompt distinctively
-    // matches one installed skill.
+    // Name one matched skill; its body remains on-demand instead of becoming
+    // recurring per-prompt context.
     if let (false, Some(home)) = (prompt_text.trim().is_empty(), claude_home.as_ref()) {
         if let Some(matched) =
             crate::utility::skill_match::match_skill_for_prompt(home, prompt_text)
         {
-            let pointer = match crate::utility::skill_match::skill_inline_brief(home, &matched.name)
-            {
-                Some(brief) => skill_pointer_text(&matched.name, &brief),
-                None => skill_pointer_fallback(&matched.name),
-            };
+            let pointer = skill_pointer_fallback(&matched.name);
             body = format!("{pointer}\n\n{body}");
         }
     }
@@ -79,38 +49,8 @@ pub(crate) fn user_prompt_submit_context(prompt_text: &str) -> String {
         }
     }
 
-    // PUSH workspace map/brief content every prompt (not only SessionStart).
-    let digest = workspace_memory_digest();
-    if !digest.trim().is_empty() {
-        let pushed = truncate_on_line_boundary(&digest, USER_PROMPT_DIGEST_MAX_BYTES);
-        body.push_str(
-            "\n\n--- keel workspace push (already loaded — use this; do not re-guess the repo) ---\n",
-        );
-        body.push_str(&pushed);
-        body.push_str("\n--- end keel workspace push ---");
-    }
-
     // Absolute lead: hard enforcement strip (must be first bytes of context).
     format!("{USER_PROMPT_ENFORCEMENT_STRIP}\n\n{body}")
-}
-
-/// Concrete per-prompt skill guidance. Emitted only when the prompt
-/// distinctively matches one installed skill (see
-/// `utility::skill_match::match_skill_for_prompt`).
-///
-/// Two parts, deliberately ordered:
-///   1. A one-line header naming the matched skill and the `Skill("<name>")`
-///      call that loads its full body.
-///   2. The skill's *own* bounded brief (`brief`) — its description plus the
-///      opening of its body. This is the model-independence fix: the operative
-///      guidance is injected as input context for this turn, so it lands even
-///      if the gateway model never makes the `Skill()` call. Earlier this hook
-///      only asked the model to call `Skill()`; whether the skill loaded then
-///      depended entirely on the model honoring that instruction.
-pub(super) fn skill_pointer_text(skill_name: &str, brief: &str) -> String {
-    format!(
-        "Skill match: this prompt strongly matches the `{skill_name}` skill. Its guidance is inlined below and applies now — follow it before writing code or giving a final answer. For the complete skill, call Skill(\"{skill_name}\"). If, after reading, the skill turns out not to apply, say so and proceed.\n\n--- begin {skill_name} skill brief ---\n{brief}\n--- end {skill_name} skill brief ---"
-    )
 }
 
 /// Fallback per-prompt skill pointer used when the matched skill's body cannot
@@ -257,7 +197,7 @@ pub(super) fn work_intent_pointer_for_prompt(prompt: &str) -> Option<&'static st
 /// The read-map / recall / write-brief / preserve-flow reminder injected for
 /// code-change prompts. A `const` so both match arms above return the exact same
 /// text and the test asserting its content has a single source of truth.
-pub(super) const WORK_INTENT_REMINDER: &str = "This prompt asks you to change the codebase. Before editing: (1) read the workspace SYSTEM_MAP and the owning file — if you have not already this turn, call the keel MCP `system_map` tool to get it; never edit against an imagined version (if you already called `system_map` this turn, reuse that result; call again only if you have since created, moved, or deleted files); (2) if you have not already this turn, call `recall` to surface any prior work, decisions, or conventions on this topic (reuse the result if you already called it this turn; call again only if you wrote new memory since); (3) write a working brief with `keel memory working-brief write --request \"...\" --acceptance-criteria \"...\"` capturing what the task actually asks and how completion is judged BEFORE you start (this also clears the default-on working-brief gate); (4) if you are about to edit existing code, invoke the `preserve-existing-flow` skill first. After the first site: run `keel code-search siblings` (or MCP code_search action=siblings) and handle every similar/related hit — other hosts, CLIs, tests, install/update/uninstall. A one-site fix or implement is unfinished. Memory-first: if map/recall/brief already names the path, open that file — do not list the whole tree or broad-scan to rediscover known locations. Request fidelity: implement only the asked work; no invented extras. Ask when unclear: if confused, incomplete, or drift-risk, stop and ask the user before coding — do not invent the answer yourself. Never trust knowledge-base alone as this project's structure or stories — read this repo. Comments: contracts only (`@param`/`# Errors`/`// why:`), never summary restatements of the code. Understand before building — correct code that solved the wrong problem is the most expensive failure.";
+pub(super) const WORK_INTENT_REMINDER: &str = "Code change: read SYSTEM_MAP and the owner; Memory-first recall; write a working brief; use preserve-existing-flow. Keep Request fidelity. Ask when unclear. Never trust knowledge-base alone. Comments: contracts only. After edits, run code_search siblings.";
 
 /// True when `cue` (e.g. `"fix "`) appears in `lowered` used as a verb rather
 /// than a noun — that is, at least one occurrence is NOT immediately preceded by

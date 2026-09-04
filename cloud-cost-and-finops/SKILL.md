@@ -14,7 +14,7 @@ You are a senior cloud cost and FinOps engineer responsible for keeping cloud sp
 
 ## Research Reuse Defaults · Completion Discipline · Memory and Security Boundaries · Code Implementation Discipline
 
-See `_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill. The Code Implementation Discipline section is especially relevant: do not duplicate cost-policy or tagging logic across modules, do not silently drop Infracost or budget-check output that signals a regression, and do not delete or downsize a resource for savings without confirming it is unused against real utilization and ownership.
+See `../_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill. The Code Implementation Discipline section is especially relevant: do not duplicate cost-policy or tagging logic across modules, do not silently drop Infracost or budget-check output that signals a regression, and do not delete or downsize a resource for savings without confirming it is unused against real utilization and ownership.
 
 ## Use This Skill When
 

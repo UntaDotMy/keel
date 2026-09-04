@@ -56,10 +56,11 @@ fn gh_pending_exit_code_still_reads_the_check_table() {
 /// the informational diff/init surfaces must not clear the review gate.
 #[test]
 fn review_pass_clears_gate_only_on_passing_real_surface() {
-    // Passing real reviewer surfaces clear the gate.
-    assert!(review_pass_clears_gate("gates", 0));
+    // Only a full pre-PR or acceptance-criteria closeout clears the gate.
     assert!(review_pass_clears_gate("pre-pr", 0));
-    assert!(review_pass_clears_gate("pre-commit", 0));
+    assert!(review_pass_clears_gate("closeout", 0));
+    assert!(!review_pass_clears_gate("gates", 0));
+    assert!(!review_pass_clears_gate("pre-commit", 0));
     // Failing (non-zero) review must NOT clear the gate.
     assert!(!review_pass_clears_gate("gates", 1));
     assert!(!review_pass_clears_gate("pre-pr", 2));
@@ -478,10 +479,11 @@ fn parse_glab_status_reads_name_status_pairs() {
 
 #[test]
 fn workflow_slug_is_safe_and_lowercase() {
-    assert_eq!(
-        workflow_slug("D:\\Nasri\\Project\\keel"),
-        "d-nasri-project-keel"
-    );
+    let slug = workflow_slug("D:\\Nasri\\Project\\keel");
+    assert!(slug.starts_with("d-nasri-project-keel-"));
+    assert!(slug.chars().all(|character| character.is_ascii_lowercase()
+        || character.is_ascii_digit()
+        || character == '-'));
     assert!(!workflow_slug("").is_empty());
 }
 
@@ -497,6 +499,39 @@ fn workflow_slug_keeps_distinct_long_paths_distinct() {
     );
     assert!(first.len() <= 64);
     assert!(second.len() <= 64);
+}
+
+#[test]
+fn workflow_slug_matches_the_canonical_workspace_lane() {
+    let raw = r"D:\Nasri\Project\keel";
+    assert_eq!(
+        workflow_slug(raw),
+        crate::utility::system_map::workspace_key(raw)
+    );
+}
+
+#[test]
+fn workflow_preferences_copy_from_the_legacy_lane() {
+    let repository = crate::test_support::unique_temp_dir("keel-workflow-migrate-repo");
+    let home = crate::test_support::unique_temp_dir("keel-workflow-migrate-home");
+    let legacy_slug = crate::utility::system_map::sanitize_key(&repository.to_string_lossy());
+    let legacy_store = crate::utility::record_store::RecordStore::new(
+        &home,
+        &format!("memories/workspaces/{legacy_slug}/git-workflow"),
+    );
+    legacy_store
+        .write_record(
+            WORKFLOW_PREF_RECORD_ID,
+            &vec![("model".to_string(), "four-tier".to_string())],
+        )
+        .expect("legacy preference");
+
+    let canonical = workflow_pref_store(&repository, &home);
+    assert!(canonical
+        .read_record(WORKFLOW_PREF_RECORD_ID)
+        .expect("canonical preference")
+        .is_some());
+    assert!(legacy_store.record_path(WORKFLOW_PREF_RECORD_ID).is_file());
 }
 
 #[test]

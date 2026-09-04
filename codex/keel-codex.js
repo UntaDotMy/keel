@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+// keel:managed-host-file (remove this line before customizing to opt out of upgrades)
 // codex/keel-codex.ts
 import * as fs2 from "node:fs";
 import { execFileSync } from "node:child_process";

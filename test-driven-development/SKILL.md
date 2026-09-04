@@ -22,7 +22,7 @@ inner unit/module loop.
 
 ## Code Implementation Discipline
 
-See `_shared/common-discipline.md` § Code Implementation Discipline for the
+See `../_shared/common-discipline.md` § Code Implementation Discipline for the
 canonical rules. This skill is the operational expression of its **Goal-Driven
 Execution** pillar — "write the failing test, then make it pass" — and of
 **Simplicity First** in the GREEN step: write the minimum code that turns the

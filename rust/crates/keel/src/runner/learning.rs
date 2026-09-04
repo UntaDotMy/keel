@@ -464,7 +464,7 @@ fn count_trusted_predicted_signatures(
             continue;
         }
         let trigger = field(record, "trigger").unwrap_or("");
-        if !predicted_set.contains(trigger) {
+        if !predicted_set.contains(trigger) || !is_learning_worthy_signature(trigger) {
             continue;
         }
         let confidence: i64 = field(record, "confidence")
@@ -522,7 +522,8 @@ pub fn project_instinct_digest(claude_home: &Path, cwd: &str) -> String {
             continue;
         }
         let guidance = field(record, "guidance").unwrap_or("").trim();
-        if guidance.is_empty() {
+        let trigger = field(record, "trigger").unwrap_or("");
+        if guidance.is_empty() || !is_learning_worthy_signature(trigger) {
             continue;
         }
         lines.push((
@@ -962,7 +963,7 @@ fn normalize_learning_signature(raw: &str) -> Option<String> {
         let stem = stem.rsplit(['/', '\\']).next().unwrap_or(stem);
         cleaned = stem.to_string();
     }
-    if is_noise_learning_signature(&cleaned) {
+    if is_noise_learning_signature(&cleaned) || !is_learning_worthy_signature(&cleaned) {
         return None;
     }
     if failed {
@@ -1000,6 +1001,59 @@ fn is_noise_learning_signature(signature: &str) -> bool {
             | "powershell"
             | "pwsh"
     )
+}
+
+/// Keep learned behavior scoped to repeatable project procedures and verification.
+/// Routine inspection, file-edit telemetry, wrapper syntax, and shell fragments are
+/// evidence that an agent was active, not evidence of a user convention worth teaching.
+fn is_learning_worthy_signature(signature: &str) -> bool {
+    let base = signature
+        .strip_suffix(crate::runner::observation::FAILURE_SIGNATURE_SUFFIX)
+        .unwrap_or(signature)
+        .trim()
+        .to_ascii_lowercase();
+    if base.is_empty()
+        || base.starts_with("edit:")
+        || base.starts_with('$')
+        || base.starts_with('@')
+        || base.contains("://")
+        || base.contains(['\'', '"', '(', ')', '{', '}'])
+    {
+        return false;
+    }
+
+    let words: Vec<&str> = base.split_whitespace().collect();
+    let Some(program) = words.first().copied() else {
+        return false;
+    };
+    let verb = words.get(1).copied().unwrap_or("");
+    match program {
+        "cargo" => matches!(
+            verb,
+            "test" | "check" | "clippy" | "fmt" | "build" | "bench" | "run" | "doc"
+        ),
+        "git" => matches!(
+            verb,
+            "commit" | "push" | "pull" | "fetch" | "merge" | "rebase" | "tag"
+        ),
+        "npm" | "pnpm" | "yarn" => match verb {
+            "test" | "build" | "lint" | "check" | "install" | "ci" => true,
+            "run" | "exec" | "dlx" => words.get(2).is_some_and(|target| !target.starts_with('-')),
+            _ => false,
+        },
+        "npx" => words.get(1).is_some_and(|target| !target.starts_with('-')),
+        "bun" | "deno" => matches!(verb, "test" | "check" | "lint" | "build" | "run"),
+        "go" => matches!(verb, "test" | "build" | "generate" | "vet"),
+        "dotnet" => matches!(verb, "test" | "build" | "format" | "publish"),
+        "python" | "python3" => matches!(verb, "pytest" | "ruff" | "mypy"),
+        "pytest" | "ruff" | "mypy" | "eslint" | "vitest" | "playwright" => true,
+        "make" => !verb.is_empty() && !verb.starts_with('-'),
+        "docker" => matches!(verb, "build" | "compose" | "run" | "push"),
+        "kubectl" => matches!(verb, "apply" | "diff" | "rollout" | "test"),
+        "terraform" | "tofu" => matches!(verb, "plan" | "apply" | "test" | "validate"),
+        "gh" => matches!(verb, "pr" | "release"),
+        _ => false,
+    }
 }
 
 /// Derive a project name from an absolute cwd. The last path component is a
@@ -2108,10 +2162,7 @@ mod tests {
         assert_eq!(normalize_learning_signature("cd"), None);
         assert_eq!(normalize_learning_signature("ls"), None);
         assert_eq!(normalize_learning_signature("pwsh"), None);
-        assert_eq!(
-            normalize_learning_signature("keel.exe'").as_deref(),
-            Some("keel")
-        );
+        assert_eq!(normalize_learning_signature("keel.exe'").as_deref(), None);
         assert_eq!(
             normalize_learning_signature("cargo test").as_deref(),
             Some("cargo test")
@@ -2124,6 +2175,18 @@ mod tests {
             .as_deref(),
             Some("cargo test (failed)")
         );
+        assert_eq!(normalize_learning_signature("edit:tsx"), None);
+        assert_eq!(normalize_learning_signature("git status"), None);
+        assert_eq!(normalize_learning_signature("git diff"), None);
+        assert_eq!(normalize_learning_signature("git branch"), None);
+        assert_eq!(normalize_learning_signature("try"), None);
+        assert_eq!(normalize_learning_signature("127.0.0.1:3101"), None);
+        assert_eq!(normalize_learning_signature("$env:path"), None);
+        assert_eq!(normalize_learning_signature("playwright\")"), None);
+        assert_eq!(
+            normalize_learning_signature("npm exec eslint").as_deref(),
+            Some("npm exec eslint")
+        );
     }
 
     #[test]
@@ -2131,6 +2194,28 @@ mod tests {
         isolated_home("noise", |root| {
             seed_bash("noisep", "cd", 10, 2);
             seed_bash("noisep", "ls -la", 10, 2);
+            let mut log = Vec::new();
+            let report = run_learning_cycle(root, &CycleOptions::default(), &mut log);
+            assert_eq!(report.instincts_recorded, 0);
+            assert_eq!(report.skills_generated, 0);
+        });
+    }
+
+    #[test]
+    fn routine_tool_noise_never_becomes_instincts_or_skills() {
+        isolated_home("routine-noise", |root| {
+            for signature in [
+                "edit:tsx",
+                "git status",
+                "git diff",
+                "git branch",
+                "try",
+                "$env:path",
+                "127.0.0.1:3101",
+                "playwright\")",
+            ] {
+                seed_bash("noisy", signature, 12, 3);
+            }
             let mut log = Vec::new();
             let report = run_learning_cycle(root, &CycleOptions::default(), &mut log);
             assert_eq!(report.instincts_recorded, 0);
@@ -2487,6 +2572,42 @@ mod tests {
             );
             assert_removed_eventually(&skills_directory(root).join("learned-rbproj"));
             assert_removed_eventually(&agents_directory(root).join("learned-rbproj.md"));
+        });
+    }
+
+    #[test]
+    fn formerly_promoted_routine_noise_rolls_back_template_skill() {
+        isolated_home("a2-noise-rollback", |root| {
+            seed_generated_skill(
+                root,
+                "noisyproj",
+                &["edit:tsx", "git status", "git diff", "npx", "try"],
+            );
+            let store = RecordStore::new(root, INSTINCT_GROUP);
+            for trigger in ["edit:tsx", "git status", "git diff", "npx", "try"] {
+                let id = instinct_id("noisyproj", trigger);
+                store
+                    .write_record(
+                        &id,
+                        &vec![
+                            ("id".into(), id.clone()),
+                            ("trigger".into(), trigger.into()),
+                            ("guidance".into(), "legacy generated guidance".into()),
+                            ("confidence".into(), "10".into()),
+                            ("sessions".into(), "3".into()),
+                            ("project".into(), "noisyproj".into()),
+                            ("source".into(), SOURCE_OBSERVED.into()),
+                        ],
+                    )
+                    .expect("seed legacy trusted noise");
+            }
+            seed_bash("liveproj", "npm test", 4, 2);
+
+            let mut log = Vec::new();
+            let report = run_learning_cycle(root, &CycleOptions::default(), &mut log);
+            assert_eq!(report.skills_rolled_back, 1);
+            assert_removed_eventually(&skills_directory(root).join("learned-noisyproj"));
+            assert_removed_eventually(&agents_directory(root).join("learned-noisyproj.md"));
         });
     }
 

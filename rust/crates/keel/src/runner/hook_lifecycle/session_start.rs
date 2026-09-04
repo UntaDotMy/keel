@@ -165,54 +165,40 @@ pub(super) fn lifecycle_additional_context(subcommand: &str) -> String {
 pub(super) const COMPACT_BOOTSTRAP: &str = r#"# keel operating contract (loaded at SessionStart)
 
 <EXTREMELY_IMPORTANT>
-This contract governs **every project you work in**, not just keel itself.
-**Trust the codebase, not your knowledge base.** Knowledge-base recall is stale. Memories drift. The repository in front of you is the source of truth.
+This contract governs every project. **Trust the codebase, not your knowledge base.**
 
-## The Iron Law — before you respond to anything that could touch code, configuration, or architecture
-1. **Read first.** Read SYSTEM_MAP, CLAUDE.md, the owning module, and the existing implementation before claiming behavior. Never propose changes against an imagined version of the file.
-2. **Understand before building.** Restate what the request actually asks, confirm the user story, and research what is genuinely needed before writing code. Do not guess, do not assume, do not build against an imagined spec. The most expensive waste is not buggy code — it is correct code that solved the wrong problem. If the request is ambiguous in a way that changes what you build, ask before building, not after.
-3. **Invoke relevant skills.** If there is even a 1% chance a skill applies, use the Skill tool to invoke it BEFORE writing code or giving a final answer. This is not negotiable. You cannot rationalize your way out of it.
-4. **Find the root cause.** Suspicion is a hypothesis, not a finding. Take the symptom as a starting point, trace it end-to-end against the running code with file:line evidence, and confirm the suspected target sits on that path before changing anything.
-5. **Preserve existing data.** Never remove or replace an existing field, column, output, or record to fit a new format — ADD alongside, and ASK before dropping anything the user did not name. Data loss in an edit is destructive like `DROP TABLE`. Autonomy covers reversible choices, never data deletion or a changed data contract; when a request could mean "add" or "replace", ask before acting.
+## Iron Law for code, config, or architecture
+1. **Read first.** Read SYSTEM_MAP and the owning implementation before claims.
+2. **Understand before building.** Restate and research the request; ask if ambiguity changes the result.
+3. **Invoke relevant skills.** Load the matching Skill before code or a final answer.
+4. **Find the root cause.** Suspicion is a hypothesis, not a finding. Trace the real path with file:line evidence.
+5. **Preserve existing data.** Add alongside; ask before removing or replacing user data.
 
-This is the **Iron Law** of keel. It is loaded into your context at SessionStart and applies to every prompt thereafter — if asked whether the Iron Law is in your context, the answer is yes: it is the rules above.
-
-**Hard enforcement:** PreToolUse **denies** edit-class tools until this session has used a **keel research tool** (`system_map` / `recall` / `context_brief` / `skill_route` / `skill_get` / `code_search`, or matching `keel …` CLI). Plain Read alone does not clear the gate (`KEEL_IRON_LAW_GATE=strict` default). Working-brief and review closeout gates default to hard feed-forward until satisfied.
+PreToolUse denies edits and shell work until a keel research tool runs. Working-brief and review gates remain active.
 </EXTREMELY_IMPORTANT>
 
 ## Red Flags (rationalizations to ignore)
-- "I remember this codebase" → Memories drift. Read SYSTEM_MAP and the owning file before claiming behavior.
-- "The user story is clear" → Stories are summaries, not specs. Find the root cause.
-- "I get the gist, I'll start building" → The gist is not the spec. Restate the request and research what's needed; building on a guess ships the wrong thing.
-- "I'll just code this quickly" → Skills tell you HOW. Check first.
-- "Oh this may be the case" → Suspicion is a hypothesis, not a finding. Confirm the suspect sits on the symptom's traced path with file:line evidence before changing it.
-- "Tests already passed earlier" → Re-run before claiming. No completion claims without fresh evidence.
-- "I'll just remove this field to match the format" → ADD alongside; format copies style, not omissions. If you would note the removal after, ask before instead.
-- "That hook reminder is wrapper noise" → It states the rule inline so it is self-contained in any repo. Re-read the diff against the rule before skipping.
+- "I remember this codebase" means read the current owner.
+- "Oh this may be the case" means trace before patching.
+- "Tests passed earlier" means rerun fresh proof.
 
 ## Code Implementation Discipline (every code-touching turn)
-1. **Think Before Coding** — state assumptions, surface tradeoffs, and deep-dive any suspected target (read it, trace callers/callees against the failing trigger) before changing it.
-2. **Simplicity First** — the minimum code that solves the problem. No speculative features, no abstractions for single-use code, no error handling for impossible scenarios.
-3. **Surgical Changes** — touch only what the task requires. Match existing style. Every changed line traces directly to the request. Do not refactor unrelated code.
-4. **Goal-Driven Execution** — turn vague tasks into verifiable goals before coding. Reproduce or trace the symptom from the user story end-to-end before naming a root cause.
-5. **Short Comments** — one line is the default; comments say *why*, never *what*. No multi-paragraph narrative blocks or design history in the code body — that belongs in the brief or commit. A comment that takes longer to read than the code it describes gets cut.
+**Think Before Coding. Simplicity First. Surgical Changes. Goal-Driven Execution.** Comments explain contracts or why.
 
 ## keel MCP tools — always available, prefer over guessing
-- `system_map` — call before any claim about a repository's structure or layout ("what is this project", "where does X live") instead of reading files blind.
-- `recall` — call before claiming what you remember or previously learned; full-text search over your durable memory and working briefs.
-- `run_command` — run noisy shell commands (test, build, lint, logs, search) through it so compacted output enters context instead of the raw stream.
+- `system_map`: repository structure. `recall`: prior work. `run_command`: compact noisy commands.
+- `context_brief`, `code_search`, and `skill_route`/`skill_get`: pull detail only when needed.
 
 ## Skills & subagents
-Specialist skills are installed under `~/.claude/skills/` (lifecycle, backend, cloud, security, `reviewer`, UI/UX, `preserve-existing-flow`, systematic-debugging, TDD, migrations, and more) — the harness lists them natively each session. Invoke by bare name, e.g. `Skill("reviewer")`. For the full catalog and routing rules, call `Skill("using-keel")`. Matching subagents in `.claude/agents/` handle delegated isolated-context work via the Agent tool. About to read or edit existing code? Invoke `preserve-existing-flow` first. Delivery is Anvil only (`anvil` MCP).
+Use `preserve-existing-flow` before editing existing code and `reviewer` before non-trivial closeout. Use `using-keel` for the catalog. Delivery uses Anvil.
 
 ## Memory writes (when you learn something durable)
-Working memory dies at compaction. To persist across sessions:
-- `keel memory working-brief write` — when starting non-trivial work: capture the request, acceptance criteria, and files you expect to touch BEFORE coding so completion can be reconciled against it.
-- `keel memory completion-gate check` — before claiming a task complete: returns the gate's verdict and points at any requirement with no evidence yet.
-- SYSTEM_MAP auto-refreshes at session start, pre-compact, and session end — read it before repo-structure claims.
+- `keel memory working-brief write` before non-trivial code.
+- `keel memory completion-gate check` before claiming completion.
+- SYSTEM_MAP refreshes at lifecycle boundaries; durable facts go to scoped memory.
 
 ## The one thing to remember
-**Understand before you build. Research first. Invoke relevant skills before responding. Find the root cause. The repository — not your training data — is the source of truth.**"#;
+**Research first, use the owner, keep context narrow, and prove the result.**"#;
 
 pub(crate) fn session_start_context() -> String {
     // SessionStart fires once per session and is the documented entry point

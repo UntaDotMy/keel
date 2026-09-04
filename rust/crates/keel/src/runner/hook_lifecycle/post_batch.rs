@@ -834,7 +834,7 @@ pub(super) fn review_marker_ms(claude_home: &Path, workspace_cwd: &str) -> Optio
 
 /// Record that a reviewer pass ran for the current workspace, clearing the
 /// review gate for edits made up to now. Called from the `keel review`
-/// surface (pre-pr / pre-commit / gates). Best-effort: any failure is silently
+/// surface (pre-pr / closeout). Best-effort: any failure is silently
 /// ignored — a missing marker only means the gate may block once more, which
 /// the per-session cap still bounds.
 pub fn record_review_gate_clear() {
@@ -1180,6 +1180,14 @@ pub(super) fn run_hook_stop(
     let Some(input) = read_json_stdin_fail_open(standard_input) else {
         return 0;
     };
+    if input
+        .get("stop_hook_active")
+        .or_else(|| input.get("stopHookActive"))
+        .and_then(JsonDocument::as_bool)
+        .unwrap_or(false)
+    {
+        return 0;
+    }
     let session_id = hook_session_id(&input);
     let Ok(claude_home) = resolve_claude_home("") else {
         return 0;

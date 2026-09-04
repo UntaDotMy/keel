@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::Serialize;
 
 use crate::runtime::{display_path, resolve_claude_home};
@@ -73,6 +73,20 @@ struct SourceFile {
     symbols: Vec<ParsedSymbol>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StoredFileMetadata {
+    hash: String,
+    modified_at: u128,
+    size: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SourceSnapshot {
+    path: String,
+    modified_at: u128,
+    size: u64,
+}
+
 #[derive(Debug, Clone)]
 struct ParsedSymbol {
     kind: String,
@@ -92,12 +106,13 @@ struct Candidate {
 
 pub fn database_path(workspace_root: &Path, claude_home_flag: &str) -> Result<PathBuf, String> {
     let home = resolve_claude_home(claude_home_flag)?;
-    let raw_workspace = display_path(workspace_root);
-    let slug = crate::utility::system_map::bounded_slug(&raw_workspace, 64);
+    let canonical = canonical_workspace_root(workspace_root)?;
+    let raw_workspace = display_path(&canonical);
+    let slug = crate::utility::system_map::workspace_key(&raw_workspace);
     Ok(home
         .join("memories")
         .join("workspaces")
-        .join(if slug.is_empty() { "workspace" } else { &slug })
+        .join(slug)
         .join("code-index")
         .join("workspace-index.sqlite3"))
 }
@@ -113,20 +128,51 @@ pub fn refresh(
         .map_err(|error| format!("create index directory: {error}"))?;
     let mut connection = open_connection(&path)?;
     ensure_schema(&connection)?;
-    let sources = collect_sources(&root)?;
     let existing = existing_file_metadata(&connection)?;
     let previous_commit = meta(&connection, "indexed_commit");
-    let mut report = RefreshReport::default();
+    let indexed_commit = git_head(&root);
+    let commit_changed = previous_commit.as_deref() != Some(indexed_commit.as_str());
+    let source_paths = collect_source_paths(&root)?;
+    let snapshots = collect_source_snapshots(&root, &source_paths);
+    let mut report = RefreshReport {
+        files_indexed: snapshots.len() as u64,
+        generation: meta(&connection, "generation")
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0),
+        indexed_commit: indexed_commit.clone(),
+        ..RefreshReport::default()
+    };
+
+    let metadata_unchanged = snapshots.len() == existing.len()
+        && snapshots.iter().all(|snapshot| {
+            existing.get(&snapshot.path).is_some_and(|stored| {
+                stored.size == snapshot.size && stored.modified_at == snapshot.modified_at
+            })
+        });
+    if !force && !commit_changed && metadata_unchanged {
+        return Ok(report);
+    }
+
+    let sources = collect_sources_from_paths(&root, source_paths)?;
+    let active_paths: BTreeSet<String> = sources.iter().map(|source| source.path.clone()).collect();
+    let files_changed = sources.iter().any(|source| {
+        existing
+            .get(&source.path)
+            .map(|stored| stored.hash != source.hash || stored.size != source.size)
+            .unwrap_or(true)
+    }) || existing.keys().any(|path| !active_paths.contains(path));
+
+    if !force && !files_changed && !commit_changed {
+        return Ok(report);
+    }
 
     let transaction = connection
-        .transaction()
+        .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| format!("begin workspace index refresh: {error}"))?;
-    let mut active_paths = BTreeSet::new();
     for source in &sources {
-        active_paths.insert(source.path.clone());
         let unchanged = existing
             .get(&source.path)
-            .map(|metadata| metadata == &(source.hash.clone(), source.size))
+            .map(|metadata| metadata.hash == source.hash && metadata.size == source.size)
             .unwrap_or(false);
         if unchanged && !force {
             continue;
@@ -265,9 +311,11 @@ pub fn refresh(
         report.files_removed += 1;
     }
 
-    transaction
-        .execute("DELETE FROM edges", [])
-        .map_err(|error| format!("clear workspace edges: {error}"))?;
+    if force || files_changed {
+        transaction
+            .execute("DELETE FROM edges", [])
+            .map_err(|error| format!("clear workspace edges: {error}"))?;
+    }
     let path_set: BTreeSet<String> = sources.iter().map(|source| source.path.clone()).collect();
     for source in &sources {
         for import in &source.imports {
@@ -345,8 +393,6 @@ pub fn refresh(
             }
         }
     }
-    let indexed_commit = git_head(&root);
-    let commit_changed = previous_commit.as_deref() != Some(indexed_commit.as_str());
     let has_changes = force
         || commit_changed
         || report.files_added > 0
@@ -655,30 +701,62 @@ fn open_connection(path: &Path) -> Result<Connection, String> {
     let connection = crate::utility::sqlite::open_connection(path)
         .map_err(|error| format!("open {}: {error}", display_path(path)))?;
     connection
-        .busy_timeout(std::time::Duration::from_secs(5))
+        .busy_timeout(std::time::Duration::from_millis(250))
         .map_err(|error| format!("set workspace index busy timeout: {error}"))?;
+    for attempt in 0..20 {
+        match connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;") {
+            Ok(()) => break,
+            Err(error) if sqlite_lock_error(&error) && attempt < 19 => {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            Err(error) => return Err(format!("configure workspace index: {error}")),
+        }
+    }
     connection
-        .execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")
-        .map_err(|error| format!("configure workspace index: {error}"))?;
+        .busy_timeout(std::time::Duration::from_secs(10))
+        .map_err(|error| format!("set workspace index transaction timeout: {error}"))?;
     Ok(connection)
+}
+
+fn sqlite_lock_error(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(code, _)
+            if matches!(
+                code.code,
+                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+            )
+    )
 }
 
 fn existing_file_metadata(
     connection: &Connection,
-) -> Result<HashMap<String, (String, u64)>, String> {
+) -> Result<HashMap<String, StoredFileMetadata>, String> {
     let mut statement = connection
-        .prepare("SELECT path, hash, size FROM files")
+        .prepare("SELECT path, hash, modified_at, size FROM files")
         .map_err(|error| format!("prepare existing workspace files: {error}"))?;
     let rows = statement
         .query_map([], |row| {
-            Ok((row.get(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?))
+            Ok((
+                row.get(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
         })
         .map_err(|error| format!("read existing workspace files: {error}"))?;
     let mut result = HashMap::new();
     for row in rows {
-        let (path, hash, size) =
+        let (path, hash, modified_at, size) =
             row.map_err(|error| format!("read existing workspace file: {error}"))?;
-        result.insert(path, (hash, size.max(0) as u64));
+        result.insert(
+            path,
+            StoredFileMetadata {
+                hash,
+                modified_at: modified_at.parse::<u128>().unwrap_or(0),
+                size: size.max(0) as u64,
+            },
+        );
     }
     Ok(result)
 }
@@ -963,7 +1041,7 @@ fn fuse_candidates(channels: Vec<Vec<Candidate>>, limit: usize) -> Vec<SearchHit
     hits
 }
 
-fn collect_sources(root: &Path) -> Result<Vec<SourceFile>, String> {
+fn collect_source_paths(root: &Path) -> Result<Vec<PathBuf>, String> {
     let mut paths = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(directory) = stack.pop() {
@@ -992,6 +1070,36 @@ fn collect_sources(root: &Path) -> Result<Vec<SourceFile>, String> {
         }
     }
     paths.sort();
+    Ok(paths)
+}
+
+fn collect_source_snapshots(root: &Path, paths: &[PathBuf]) -> Vec<SourceSnapshot> {
+    paths
+        .iter()
+        .filter_map(|absolute_path| {
+            let metadata = fs::metadata(absolute_path).ok()?;
+            if metadata.len() > MAX_FILE_BYTES {
+                return None;
+            }
+            Some(SourceSnapshot {
+                path: absolute_path
+                    .strip_prefix(root)
+                    .unwrap_or(absolute_path)
+                    .to_string_lossy()
+                    .replace('\\', "/"),
+                modified_at: metadata
+                    .modified()
+                    .ok()
+                    .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+                    .map(|value| value.as_millis())
+                    .unwrap_or(0),
+                size: metadata.len(),
+            })
+        })
+        .collect()
+}
+
+fn collect_sources_from_paths(root: &Path, paths: Vec<PathBuf>) -> Result<Vec<SourceFile>, String> {
     let mut sources = Vec::new();
     for absolute_path in paths {
         let metadata = match fs::metadata(&absolute_path) {
@@ -1431,6 +1539,7 @@ fn now_millis() -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Barrier};
 
     fn temp_workspace(label: &str) -> (crate::test_support::TestTempDir, PathBuf) {
         let root = crate::test_support::unique_temp_dir(&format!("keel-index-{label}"));
@@ -1457,8 +1566,67 @@ mod tests {
         let status = status(&root, &home.to_string_lossy()).expect("status");
         assert_eq!(status.file_count, 2);
         assert!(!status.stale);
+        let index_path = database_path(&root, &home.to_string_lossy()).expect("index path");
+        let first_updated = meta(
+            &open_connection(&index_path).expect("open index"),
+            "updated_at_millis",
+        );
         let second = refresh(&root, &home.to_string_lossy(), false).expect("no-op refresh");
+        let second_updated = meta(
+            &open_connection(&index_path).expect("reopen index"),
+            "updated_at_millis",
+        );
         assert_eq!(second.generation, report.generation);
+        assert_eq!(second.files_added, 0);
+        assert_eq!(second.files_updated, 0);
+        assert_eq!(second.files_removed, 0);
+        assert_eq!(second.edges_indexed, 0);
+        assert_eq!(first_updated, second_updated);
+    }
+
+    #[test]
+    fn database_path_uses_the_canonical_workspace_lane() {
+        let (root, home) = temp_workspace("canonical-lane");
+        let canonical_root = canonical_workspace_root(&root).expect("canonical root");
+        let path = database_path(&canonical_root, &home.to_string_lossy()).expect("index path");
+        let actual_lane = path
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::file_name)
+            .and_then(|value| value.to_str())
+            .expect("workspace lane");
+        let expected = crate::utility::system_map::workspace_key(&display_path(&canonical_root));
+
+        assert_eq!(actual_lane, expected);
+    }
+
+    #[test]
+    fn concurrent_refreshes_wait_for_the_active_writer() {
+        let (root, home) = temp_workspace("concurrent-refresh");
+        for index in 0..40 {
+            fs::write(
+                root.join("src").join(format!("item-{index:02}.rs")),
+                format!("pub fn item_{index:02}() {{}}\n"),
+            )
+            .expect("source");
+        }
+        let root_path = root.to_path_buf();
+        let writers = 8;
+        let barrier = Arc::new(Barrier::new(writers));
+        let mut threads = Vec::new();
+        for _ in 0..writers {
+            let thread_root = root_path.clone();
+            let thread_home = home.clone();
+            let thread_barrier = Arc::clone(&barrier);
+            threads.push(std::thread::spawn(move || {
+                thread_barrier.wait();
+                refresh(&thread_root, &thread_home.to_string_lossy(), true)
+            }));
+        }
+        for thread in threads {
+            let result = thread.join().expect("refresh thread");
+            assert!(result.is_ok(), "parallel refresh failed: {result:?}");
+        }
     }
 
     #[test]

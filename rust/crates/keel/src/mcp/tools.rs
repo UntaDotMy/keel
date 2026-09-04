@@ -37,7 +37,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 use crate::runtime::{display_path, resolve_claude_home, safe_path_segment};
-use crate::utility::memory::refresh_system_map;
+use crate::utility::memory::refresh_system_map_with_status;
 use crate::utility::memory_families::family_counts;
 use crate::utility::recall::{collapse_dashes, search_recall_index, RecallSearchResult};
 use crate::utility::record_store::{current_timestamp_millis, format_timestamp_iso8601};
@@ -279,7 +279,7 @@ fn tools_list_catalog() -> Value {
             },
             {
                 "name": "system_map_refresh",
-                "description": "Regenerate the cached workspace SYSTEM_MAP.md (system_map only reads it). Use after creating, deleting, moving, or renaming files so the next system_map call reflects the current tree. Writes under ~/.claude/memories/workspaces/<slug>/reference/.",
+                "description": "Regenerate the cached workspace SYSTEM_MAP.md (system_map only reads it). Use after creating, deleting, moving, or renaming files so the next system_map call reflects the current tree. Writes under ~/.keel/memories/workspaces/<workspace-key>/reference/.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -2187,11 +2187,13 @@ fn tool_system_map_refresh(arguments: &Value) -> Result<String, String> {
         None => env::current_dir().map_err(|error| format!("system_map_refresh: cwd: {error}"))?,
     };
     let claude_home = tool_claude_home("system_map_refresh")?;
-    let path = refresh_system_map(&claude_home, DEFAULT_MEMORY_GROUP, &workspace_root)
-        .map_err(|error| format!("system_map_refresh: {error}"))?;
+    let report =
+        refresh_system_map_with_status(&claude_home, DEFAULT_MEMORY_GROUP, &workspace_root)
+            .map_err(|error| format!("system_map_refresh: {error}"))?;
     let payload = json!({
-        "refreshed": true,
-        "path": display_path(&path),
+        "refreshed": report.changed,
+        "changed": report.changed,
+        "path": display_path(&report.path),
         "workspaceRoot": display_path(&workspace_root),
     });
     mcp_json_compact(&payload).map_err(|error| format!("system_map_refresh: {error}"))

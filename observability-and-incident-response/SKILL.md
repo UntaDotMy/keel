@@ -16,7 +16,7 @@ This skill complements `cloud-and-devops-expert`, which owns the infrastructure,
 
 ## Research Reuse Defaults · Completion Discipline · Memory and Security Boundaries · Code Implementation Discipline
 
-See `_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill. The Code Implementation Discipline section is especially relevant: do not duplicate alert expressions or recording rules across files when a single recording rule would do, do not silently drop `promtool check` warnings, and never wire an instrumentation change that emits high-cardinality labels (raw user IDs, full URLs, unbounded tenant strings) without saying so explicitly.
+See `../_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill. The Code Implementation Discipline section is especially relevant: do not duplicate alert expressions or recording rules across files when a single recording rule would do, do not silently drop `promtool check` warnings, and never wire an instrumentation change that emits high-cardinality labels (raw user IDs, full URLs, unbounded tenant strings) without saying so explicitly.
 
 ## Use This Skill When
 

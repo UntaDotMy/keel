@@ -9,6 +9,10 @@ use keel_platform::detect_current_target;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+fn read_file(path: &Path) -> String {
+    fs::read_to_string(path).unwrap()
+}
+
 #[test]
 fn merge_json_mcp_opencode_preserves_existing_keys_and_adds_keel() {
     let dir = std::env::temp_dir().join(format!("ulw-mcp-merge-{}", std::process::id()));
@@ -172,6 +176,36 @@ fn wire_opencode_lands_under_claude_home_parent_not_env_home() {
     let _ = fs::remove_dir_all(&base);
     let _ = fs::remove_dir_all(&repo);
 }
+
+#[test]
+fn host_neutral_gateway_installs_its_referenced_resources() {
+    let (repo, owner_home) = unique_paths("gateway-resources");
+    let claude_home = owner_home.join(".claude");
+    let skill = repo.join("using-keel");
+    fs::create_dir_all(skill.join("references")).unwrap();
+    fs::create_dir_all(repo.join("_shared")).unwrap();
+    fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: using-keel\ndescription: gateway\n---\nSee references/catalog.md and ../_shared/common-discipline.md.\n",
+    )
+    .unwrap();
+    fs::write(skill.join("references/catalog.md"), "catalog\n").unwrap();
+    fs::write(repo.join("_shared/common-discipline.md"), "discipline\n").unwrap();
+
+    let status = maybe_wire_agents_gateway(&repo, &claude_home).expect("standard home");
+    let installed = owner_home.join(".agents/skills");
+    assert!(
+        installed.join("using-keel/references/catalog.md").is_file(),
+        "gateway references must be usable after installation: {status}"
+    );
+    assert!(
+        installed.join("_shared/common-discipline.md").is_file(),
+        "shared references must resolve from the skill directory: {status}"
+    );
+
+    let _ = fs::remove_dir_all(&repo);
+    let _ = fs::remove_dir_all(&owner_home);
+}
 #[test]
 fn wire_opencode_preserves_custom_plugin_file() {
     let base = std::env::temp_dir().join(format!("ulw-wire-owner-{}", std::process::id()));
@@ -194,6 +228,81 @@ fn wire_opencode_preserves_custom_plugin_file() {
         fs::read_to_string(&target).unwrap(),
         "export default userPlugin;\n"
     );
+
+    let _ = fs::remove_dir_all(&base);
+    let _ = fs::remove_dir_all(&repo);
+}
+
+#[test]
+fn wire_opencode_upgrades_legacy_keel_plugin() {
+    let base =
+        std::env::temp_dir().join(format!("ulw-wire-opencode-upgrade-{}", std::process::id()));
+    let claude_home = base.join(".claude");
+    let repo = create_minimal_layout("wire-opencode-upgrade-repo");
+    let source = repo.join("opencode").join("keel.ts");
+    fs::create_dir_all(source.parent().unwrap()).unwrap();
+    fs::write(
+        &source,
+        "// keel:managed-host-file\nimport type { Plugin } from \"@opencode-ai/plugin\";\nimport {} from \"../_shared/ts/bridge-core\";\n",
+    )
+    .unwrap();
+    let target = base
+        .join(".config")
+        .join("opencode")
+        .join("plugins")
+        .join("keel.ts");
+    fs::create_dir_all(target.parent().unwrap()).unwrap();
+    fs::write(
+        &target,
+        "import type { Plugin } from \"@opencode-ai/plugin\";\nimport {} from \"../_shared/ts/bridge-core\";\n",
+    )
+    .unwrap();
+
+    let summary = maybe_wire_opencode(&repo, &claude_home, true).unwrap();
+    assert!(summary.contains("plugin ->"), "{summary}");
+    assert_eq!(read_file(&target), read_file(&source));
+
+    let _ = fs::remove_dir_all(&base);
+    let _ = fs::remove_dir_all(&repo);
+}
+
+#[test]
+fn wire_omp_upgrades_legacy_keel_adapter_but_preserves_unmarked_custom_file() {
+    let base = std::env::temp_dir().join(format!("ulw-wire-omp-upgrade-{}", std::process::id()));
+    let claude_home = base.join(".claude");
+    let repo = create_minimal_layout("wire-omp-upgrade-repo");
+    let source = repo.join("pi").join("keel-pi.ts");
+    fs::create_dir_all(source.parent().unwrap()).unwrap();
+    fs::write(
+        &source,
+        "// keel:managed-host-file\n// keel Pi Agent Extension\nexport const current = true;\n",
+    )
+    .unwrap();
+    let target = base
+        .join(".omp")
+        .join("agent")
+        .join("extensions")
+        .join("keel-pi.ts");
+    fs::create_dir_all(target.parent().unwrap()).unwrap();
+    fs::write(
+        &target,
+        "// keel Pi Agent Extension — legacy generated adapter\nexport const stale = true;\n",
+    )
+    .unwrap();
+
+    let upgraded = maybe_wire_omp(&repo, &claude_home, true).unwrap();
+    assert!(upgraded.contains("extension ->"), "{upgraded}");
+    assert_eq!(read_file(&target), read_file(&source));
+
+    fs::write(&target, "export const userOwned = true;\n").unwrap();
+    fs::write(
+        &source,
+        "// keel:managed-host-file\n// keel Pi Agent Extension\nexport const newer = true;\n",
+    )
+    .unwrap();
+    let preserved = maybe_wire_omp(&repo, &claude_home, true).unwrap();
+    assert!(preserved.contains("user-customized"), "{preserved}");
+    assert_eq!(read_file(&target), "export const userOwned = true;\n");
 
     let _ = fs::remove_dir_all(&base);
     let _ = fs::remove_dir_all(&repo);

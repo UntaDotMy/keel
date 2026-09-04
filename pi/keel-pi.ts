@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+// keel:managed-host-file (remove this line before customizing to opt out of upgrades)
 // ---------------------------------------------------------------------------
 // keel Pi Agent Extension — bridges Pi lifecycle events to `keel bridge`.
 //
@@ -9,13 +10,13 @@
 // adapter's coverage so a Pi session gets the same keel discipline as Claude
 // Code or Codex:
 //
-//   session_start           -> keel bridge session-start   (bootstrap + digest, once)
-//   input / message_start   -> keel bridge user-prompt     (per-prompt context)
+//   session_start           -> keel bridge session-start   (bootstrap + digest, cached once)
+//   before_agent_start      -> keel bridge user-prompt     (per-prompt system context)
 //   tool_call (edit-class)  -> keel bridge pre-tool-use    (Iron Law edit gate; block on deny)
 //   tool_call (bash)        -> keel bridge rewrite         (compaction reroute, in place)
 //   tool_execution_end      -> keel bridge observe          (tool observation, fire-and-forget)
-//   session_compact         -> keel bridge pre-compact + post-compact
-//                             (learning checkpoint + post-compaction context)
+//   session_before_compact  -> keel bridge pre-compact      (learning checkpoint)
+//   session_compact         -> keel bridge post-compact     (context cached for next turn)
 //   session_shutdown        -> keel bridge session-end      (learning + session capture)
 //
 // Pi's tool_call contract (from official docs):
@@ -68,6 +69,7 @@ interface PiToolExecutionEndEvent {
   toolName?: string;
   toolCallId?: string;
   error?: unknown;
+  isError?: boolean;
   [key: string]: unknown;
 }
 
@@ -77,14 +79,9 @@ interface PiSessionLikeEvent {
   [key: string]: unknown;
 }
 
-interface PiMessageEvent {
-  sessionId?: string;
-  cwd?: string;
-  role?: string;
-  // Pi exposes message text via a `text` or `parts` field depending on version
-  text?: string;
-  parts?: unknown[];
-  [key: string]: unknown;
+interface PiBeforeAgentStartEvent extends PiSessionLikeEvent {
+  prompt?: string;
+  systemPrompt?: string;
 }
 
 interface PiExtensionContext {
@@ -99,12 +96,24 @@ interface PiBlockResult {
   reason?: string;
 }
 
+interface PiBeforeAgentStartResult {
+  systemPrompt: string;
+}
+
 interface PiExtensionAPI {
   // Handlers may return undefined/void to allow the action (with any in-place
   // mutation to event.input), or { block: true, reason? } to block it.
   on(
     event: string,
-    handler: (event: any, ctx?: PiExtensionContext) => void | Promise<void> | undefined | PiBlockResult | Promise<PiBlockResult | undefined>,
+    handler: (
+      event: any,
+      ctx?: PiExtensionContext,
+    ) =>
+      | void
+      | undefined
+      | PiBlockResult
+      | PiBeforeAgentStartResult
+      | Promise<void | PiBlockResult | PiBeforeAgentStartResult | undefined>,
   ): void;
   [key: string]: unknown;
 }
@@ -176,6 +185,7 @@ function resolveSessionId(event: PiSessionLikeEvent, ctx?: PiExtensionContext): 
 }
 
 const recentToolInputs = new Map<string, Record<string, unknown>>();
+const pendingLifecycleContext = new Map<string, string>();
 
 function resolveCwd(ctx?: PiExtensionContext): string {
   if (ctx?.cwd && typeof ctx.cwd === "string") return ctx.cwd;
@@ -184,25 +194,6 @@ function resolveCwd(ctx?: PiExtensionContext): string {
   } catch {
     return "";
   }
-}
-
-// Extract user message text from a Pi message event (field shape varies).
-function extractUserText(event: PiMessageEvent): string {
-  if (typeof event?.text === "string" && event.text.trim()) return event.text;
-  const parts = event?.parts;
-  if (Array.isArray(parts)) {
-    const collected: string[] = [];
-    for (const part of parts) {
-      if (part && typeof part === "object") {
-        const text = (part as { text?: unknown }).text;
-        if (typeof text === "string" && text.trim()) collected.push(text);
-      } else if (typeof part === "string" && part.trim()) {
-        collected.push(part);
-      }
-    }
-    if (collected.length) return collected.join("\n");
-  }
-  return "";
 }
 
 // ---------------------------------------------------------------------------
@@ -214,34 +205,35 @@ function handleSessionStart(event: PiSessionLikeEvent, ctx?: PiExtensionContext)
   if (hasStarted(sessionID)) return;
   markStarted(sessionID);
 
-  // session-start prints the bootstrap + workspace digest and self-heals the
-  // MCP registration. Running it (even if the text is discarded) keeps the
-  // session's keel state coherent. The persistent Iron Law itself rides in
-  // the AGENTS.md context file, loaded into the system prompt at startup.
-  runBridge("session-start", ["--session", sessionID, "--cwd", resolveCwd(ctx)]);
+  const context = runBridge("session-start", [
+    "--session",
+    sessionID,
+    "--cwd",
+    resolveCwd(ctx),
+  ]);
+  if (context) pendingLifecycleContext.set(sessionID, context);
 }
 
-function handleUserPrompt(event: PiMessageEvent, ctx?: PiExtensionContext): void {
+function handleBeforeAgentStart(
+  event: PiBeforeAgentStartEvent,
+  ctx?: PiExtensionContext,
+): PiBeforeAgentStartResult | undefined {
   const sessionID = resolveSessionId(event, ctx);
-  const promptText = extractUserText(event);
-  if (!promptText) return;
-
-  // user-prompt composes the per-prompt context (skill brief + iron law +
-  // pointers). The bridge reads the prompt from the --prompt flag (not stdin)
-  // and resolves the workspace from --cwd, so both must be passed. As with
-  // session-start, running it keeps the session's keel state coherent and drives
-  // skill routing; the persistent Iron Law itself rides in the AGENTS.md context
-  // file loaded into the system prompt, and the model can call skill_route /
-  // context_brief via the MCP tools. The stdout is not injected into model
-  // context here (Pi has no seam for it on this event), matching session-start.
-  runBridge("user-prompt", [
+  const promptContext = runBridge("user-prompt", [
     "--session",
     sessionID,
     "--cwd",
     resolveCwd(ctx),
     "--prompt",
-    promptText,
+    event?.prompt ?? "",
   ]);
+  const lifecycleContext = pendingLifecycleContext.get(sessionID) ?? "";
+  pendingLifecycleContext.delete(sessionID);
+  const context = [lifecycleContext, promptContext].filter(Boolean).join("\n\n");
+  if (!context) return undefined;
+  return {
+    systemPrompt: `${event?.systemPrompt ?? ""}\n\n${context}`,
+  };
 }
 
 /**
@@ -277,7 +269,9 @@ function handleToolCall(
         toolName,
       ];
       if (command) gateArgs.push("--command", command);
-      const gateResult = parseGateResponse(runBridge("pre-tool-use", gateArgs, 5000));
+      const gateResult = parseGateResponse(
+        runBridge("pre-tool-use", gateArgs, undefined, 5000),
+      );
       if (gateResult.status === "deny") {
         return {
           block: true,
@@ -356,7 +350,7 @@ function handleToolExecutionEnd(
     "--phase",
     "post",
   ];
-  if (event?.error) args.push("--failed");
+  if (event?.error || event?.isError) args.push("--failed");
   let stdin = "{}";
   if (event?.toolCallId && recentToolInputs.has(event.toolCallId)) {
     const savedInput = recentToolInputs.get(event.toolCallId);
@@ -368,11 +362,20 @@ function handleToolExecutionEnd(
   runBridge("observe", args, stdin, 2000);
 }
 
+function handlePreCompact(event: PiSessionLikeEvent, ctx?: PiExtensionContext): void {
+  const sessionID = resolveSessionId(event, ctx);
+  runBridge("pre-compact", ["--session", sessionID, "--cwd", resolveCwd(ctx)]);
+}
+
 function handlePostCompact(event: PiSessionLikeEvent, ctx?: PiExtensionContext): void {
   const sessionID = resolveSessionId(event, ctx);
-  // Pre-window checkpoint, then post-compaction learning + context (idempotent).
-  runBridge("pre-compact", ["--session", sessionID, "--cwd", resolveCwd(ctx)]);
-  runBridge("post-compact", ["--session", sessionID, "--cwd", resolveCwd(ctx)]);
+  const context = runBridge("post-compact", [
+    "--session",
+    sessionID,
+    "--cwd",
+    resolveCwd(ctx),
+  ]);
+  if (context) pendingLifecycleContext.set(sessionID, context);
 }
 
 function handleSessionShutdown(event: PiSessionLikeEvent, ctx?: PiExtensionContext): void {
@@ -382,6 +385,7 @@ function handleSessionShutdown(event: PiSessionLikeEvent, ctx?: PiExtensionConte
   } finally {
     clearStarted(sessionID);
     clearIronLawMarker(sessionID);
+    pendingLifecycleContext.delete(sessionID);
   }
 }
 
@@ -399,20 +403,13 @@ function setup(pi: PiExtensionAPI): void {
     }
   });
 
-  // user input — per-prompt context brief. Pi fires `input` for raw user
-  // input; some versions also fire `message_start` with role=user.
-  pi.on("input", (event: PiMessageEvent, ctx?: PiExtensionContext) => {
+  // Official Pi seam: this return value replaces the system prompt for this
+  // turn, so bridge output reaches the model without accumulating messages.
+  pi.on("before_agent_start", (event: PiBeforeAgentStartEvent, ctx?: PiExtensionContext) => {
     try {
-      handleUserPrompt(event, ctx);
+      return handleBeforeAgentStart(event, ctx);
     } catch {
-      /* degrade */
-    }
-  });
-  pi.on("message_start", (event: PiMessageEvent, ctx?: PiExtensionContext) => {
-    try {
-      if (event?.role === "user") handleUserPrompt(event, ctx);
-    } catch {
-      /* degrade */
+      return undefined;
     }
   });
 
@@ -430,7 +427,14 @@ function setup(pi: PiExtensionAPI): void {
     }
   });
 
-  // Compaction cycle: pre-compact checkpoint + post-compact context on the event.
+  pi.on("session_before_compact", (event: PiSessionLikeEvent, ctx?: PiExtensionContext) => {
+    try {
+      handlePreCompact(event, ctx);
+    } catch {
+      /* degrade */
+    }
+  });
+
   pi.on("session_compact", (event: PiSessionLikeEvent, ctx?: PiExtensionContext) => {
     try {
       handlePostCompact(event, ctx);

@@ -302,7 +302,34 @@ fn remove_zcode_managed_entries(path: &Path) -> usize {
 fn remove_gateway_skill(skills_root: &Path) -> usize {
     let skill = skills_root.join("using-keel");
     let mut removed = remove_owned_file_if_marked(&skill.join("SKILL.md"), "name: using-keel");
+    for (relative, marker) in [
+        (
+            "references/mcp-and-memory.md",
+            "MCP tools and memory writes",
+        ),
+        (
+            "references/skill-and-agent-catalog.md",
+            "Skill and agent catalog",
+        ),
+    ] {
+        removed += remove_owned_file_if_marked(&skill.join(relative), marker);
+    }
+    removed += remove_empty_directory(&skill.join("references"));
     removed += remove_empty_directory(&skill);
+
+    let shared = skills_root.join("_shared");
+    for (relative, marker) in [
+        (
+            "common-discipline.md",
+            "Shared Discipline — Common Standards",
+        ),
+        ("subagent-iron-law.md", "Subagent Iron Law — Read First"),
+        ("ts/bridge-core.ts", "keel:managed-host-file"),
+    ] {
+        removed += remove_owned_file_if_marked(&shared.join(relative), marker);
+    }
+    removed += remove_empty_directory(&shared.join("ts"));
+    removed += remove_empty_directory(&shared);
     removed += remove_empty_directory(skills_root);
     removed
 }

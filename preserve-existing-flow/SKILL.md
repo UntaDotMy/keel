@@ -15,7 +15,7 @@ Before editing brownfield code: trace ownership and current behavior, then **lay
 Any edit to existing handlers, loops, state machines, transport, queues, or SoT modules. **Proactive** before the first Write/Edit on existing source.
 
 ## Shared discipline
-`_shared/common-discipline.md`. Surgical Changes applies: touch only the ownership path you traced.
+`../_shared/common-discipline.md`. Surgical Changes applies: touch only the ownership path you traced.
 
 ## Non-negotiables
 1. **Trace before change** — entry point, producer, source of truth, consumers, side effects (file:line).

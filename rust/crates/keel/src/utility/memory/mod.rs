@@ -14,7 +14,7 @@ mod working_brief_cmd;
 mod tests;
 
 // Re-exports used by mcp/tools.rs and utility/mod.rs
-pub use system_map_cmd::{refresh_system_map, system_map_reference_directory};
+pub use system_map_cmd::{refresh_system_map_with_status, system_map_reference_directory};
 
 use std::io::Write;
 

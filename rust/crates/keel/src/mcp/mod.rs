@@ -26,6 +26,20 @@ use crate::utility::workspace_index;
 mod http;
 mod tools;
 
+pub(crate) fn tools_list_context_snapshot() -> (usize, usize) {
+    let list = tools::handle_tools_list();
+    let tool_count = list
+        .get("tools")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    let serialized = serde_json::to_string(&list).unwrap_or_default();
+    (
+        tool_count,
+        crate::proxy::token_meter::TokenMeter::count_text(&serialized),
+    )
+}
+
 /// Maximum bytes accepted for a single newline-delimited JSON-RPC frame. A peer
 /// that streams data without a terminating newline would otherwise grow the
 /// read buffer without bound and exhaust memory; capping the per-frame read
