@@ -1433,25 +1433,15 @@ mod tests {
 
     #[test]
     fn mcp_probe_timeout_reaps_descendant_held_pipes() {
-        let (program, arguments) = if cfg!(windows) {
-            (
-                "powershell",
-                vec![
-                    "-NoProfile".to_string(),
-                    "-Command".to_string(),
-                    "$p=Start-Process powershell -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds 30' -NoNewWindow -PassThru; exit 0"
-                        .to_string(),
-                ],
-            )
-        } else {
-            (
-                "sh",
-                vec!["-c".to_string(), "sleep 30 & exit 0".to_string()],
-            )
-        };
+        let command = crate::test_support::descendant_pipe_fixture_command();
+        let program = command.get_program().to_string_lossy().into_owned();
+        let arguments = command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
         let started = std::time::Instant::now();
         assert!(!probe_mcp_initialize_with_timeout(
-            program,
+            &program,
             &arguments,
             std::time::Duration::from_millis(100),
         ));
