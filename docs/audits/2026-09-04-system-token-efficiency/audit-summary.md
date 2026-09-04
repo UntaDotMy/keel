@@ -8,7 +8,7 @@ Scope: current source, installed Windows runtime, all host adapters, the 37-tool
 
 The reported Antigravity failure was not an MCP registration failure. Antigravity had discovered all 37 tools and the installed server completed `initialize` and `tools/list`. Its installed hook adapter was an older Keel-generated file that did not translate Antigravity's generic `call_mcp_tool` payload to `mcp__keel__<ToolName>`. The installer classified every differing adapter as user-customized, so reinstalling the latest release preserved the broken generated file.
 
-The adapter, installer upgrade path and executable priority, host skill resources, Pi/OMP lifecycle seam, prompt overhead, eval isolation, token accounting, workspace identity, learning signal quality, and review marker were repaired. Requested live hosts now report wired: OpenCode, Pi, Codex, Cursor, Grok, OMP, ZCode, and Antigravity.
+The adapter, installer upgrade path and executable priority, host skill resources, Pi/OMP lifecycle seam, prompt overhead, eval isolation, token accounting, workspace identity, learning signal quality, review marker, and strict closeout Flow refresh were repaired. Requested live hosts now report wired: OpenCode, Pi, Codex, Cursor, Grok, OMP, ZCode, and Antigravity.
 
 Antigravity 2.12.0 and an older 2.5.5 "Antigravity IDE" are both installed on this machine. The current 2.12.0 configuration launches the repaired `C:\Users\Administrator\.keel\keel.exe`; an already-open process must be restarted to reload the updated plugin and MCP server. Neither application was removed.
 
@@ -30,6 +30,7 @@ Antigravity 2.12.0 and an older 2.5.5 "Antigravity IDE" are both installed on th
 | F12 | High | Review and stop gates | Passing formatting-oriented `pre-commit` or arbitrary gates cleared the required reviewer marker; repeated Antigravity Stop calls could re-block. | Only successful `pre-pr` or strict `closeout` clears review state; honor Antigravity execution count and Claude-compatible `stop_hook_active`. | Review-marker and active-stop regressions pass; an installed second Stop invocation returns `allow`, preventing a loop. |
 | F13 | Medium | Flow status | `flow check` hard-coded `finalized` to whether the current command was `finish`, so an immediate check falsely reported a finalized artifact as unfinished. | Derive `finalized` from persisted evidence and add `current` from the live HEAD/diff fingerprint. | Regression covers current and stale artifacts; the live finish followed by check reports both fields true. |
 | F14 | High | Installed executable | When the installed binary already matched the highest-priority release artifact, publication skipped it and copied the first lower-priority differing debug artifact. | Select the first existing artifact by strict priority, then decide whether publication is needed; never fall through because the preferred artifact is already installed. | Eight focused publication tests pass, including identical-release retention and true debug fallback; repeated live install preserves release identity. |
+| F15 | High | Strict review closeout | Automatic closeout evidence ran `flow start` for one changed source and evaluated the Flow gate before `flow finish`, so strict closeout always produced incomplete evidence. | Build the complete changed-source target set and finish the generated artifact before collecting review gates. | Regression protects multi-file targets and the finish command; strict closeout passes with zero unresolved findings or requirements. |
 
 ## Token ledger
 
@@ -106,9 +107,9 @@ The installed server negotiated MCP protocol `2025-11-25`, identified itself as 
 | Live Antigravity adapter | research pre-call allow -> successful post observation -> edit pre-call allow. |
 | Full workspace suite before the final concurrency fix | 1,301 tests passed. |
 | Concurrent workspace-index regression | Passed; three parallel live sibling scans also passed. |
-| Final post-fix workspace suite | 1,319 tests passed. |
+| Final post-fix workspace suite | 1,320 tests passed. |
 | Format, lint, whitespace | `cargo fmt --all -- --check`, workspace Clippy with warnings denied, and `git diff --check` passed. |
-| Reviewer gates | `review diff`: pass with 0 findings; branch-wide review gates: pass with 0 warnings or blocking failures. |
+| Reviewer gates | `review diff` and branch-wide gates pass; strict closeout reports zero unresolved findings and requirements. The reviewed exact-ID static baseline expires 2026-12-04 and cannot suppress dynamic or changed-line findings. |
 | Installed release identity | Release and installed executable SHA-256 hashes match exactly. |
 | Executable publication priority | Eight focused tests pass; an identical preferred release is retained instead of being replaced by a debug build. |
 | Installed host assets | Antigravity source and installed adapter hashes match; every requested host reports wired. |

@@ -764,6 +764,71 @@ fn add_wiring_findings(repository_root: &Path, findings: &mut Vec<ReviewFinding>
     }
 }
 
+fn flow_refresh_arguments(
+    repository_root: &Path,
+    changed_paths: &[String],
+) -> (String, Vec<String>, Vec<String>) {
+    let root_display = display_path(repository_root);
+    let source_targets: Vec<String> = changed_paths
+        .iter()
+        .filter(|path| {
+            Path::new(path)
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| FLOW_SOURCE_EXTENSIONS.contains(&extension))
+        })
+        .cloned()
+        .collect();
+    let target = source_targets
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "rust/crates/keel/src/review.rs".to_string());
+    let mut start = vec![
+        "flow".to_string(),
+        "start".to_string(),
+        "--target-file".to_string(),
+        target.clone(),
+    ];
+    if !source_targets.is_empty() {
+        start.extend(["--target-files".to_string(), source_targets.join(",")]);
+    }
+    start.extend([
+        "--target-function".to_string(),
+        "run_review_closeout_command".to_string(),
+        "--current-behavior".to_string(),
+        "Runs the persistent review closeout scan and reconciles its ledger".to_string(),
+        "--entry-point".to_string(),
+        "review closeout CLI command".to_string(),
+        "--producer".to_string(),
+        "review.rs dispatcher".to_string(),
+        "--source-of-truth".to_string(),
+        "closeout ledger and review gate collector".to_string(),
+        "--storage-state-queue-owner".to_string(),
+        "review closeout ledger and command registry".to_string(),
+        "--side-effect-owner".to_string(),
+        "review scans, flow refresh, and ledger writes".to_string(),
+        "--cleanup-recovery-path".to_string(),
+        "ledger history and command termination".to_string(),
+        "--consumers".to_string(),
+        "review command and closeout ledger".to_string(),
+        "--edit-boundary".to_string(),
+        "closeout evidence refresh and gate scan".to_string(),
+        "--validation-needed".to_string(),
+        "rerun review closeout after fixes".to_string(),
+        "--validation-evidence".to_string(),
+        "automatic closeout evidence refresh".to_string(),
+        "--repo-root".to_string(),
+        root_display.clone(),
+    ]);
+    let finish = vec![
+        "flow".to_string(),
+        "finish".to_string(),
+        "--repo-root".to_string(),
+        root_display,
+    ];
+    (target, start, finish)
+}
+
 fn refresh_evidence(
     repository_root: &Path,
     changed_paths: &[String],
@@ -816,55 +881,24 @@ fn refresh_evidence(
         });
     }
 
-    let target = changed_paths
-        .iter()
-        .find(|path| {
-            Path::new(path)
-                .extension()
-                .and_then(|extension| extension.to_str())
-                .is_some_and(|extension| FLOW_SOURCE_EXTENSIONS.contains(&extension))
-        })
-        .cloned()
-        .unwrap_or_else(|| "rust/crates/keel/src/review.rs".to_string());
-    let flow_arguments = vec![
-        "flow".to_string(),
-        "start".to_string(),
-        "--target-file".to_string(),
-        target.clone(),
-        "--target-function".to_string(),
-        "run_review_closeout_command".to_string(),
-        "--current-behavior".to_string(),
-        "Runs the persistent review closeout scan and reconciles its ledger".to_string(),
-        "--entry-point".to_string(),
-        "review closeout CLI command".to_string(),
-        "--producer".to_string(),
-        "review.rs dispatcher".to_string(),
-        "--source-of-truth".to_string(),
-        "closeout ledger and review gate collector".to_string(),
-        "--storage-state-queue-owner".to_string(),
-        "review closeout ledger and command registry".to_string(),
-        "--side-effect-owner".to_string(),
-        "review scans, flow refresh, and ledger writes".to_string(),
-        "--cleanup-recovery-path".to_string(),
-        "ledger history and command termination".to_string(),
-        "--consumers".to_string(),
-        "review command and closeout ledger".to_string(),
-        "--edit-boundary".to_string(),
-        "closeout evidence refresh and gate scan".to_string(),
-        "--validation-needed".to_string(),
-        "rerun review closeout after fixes".to_string(),
-        "--validation-evidence".to_string(),
-        "automatic closeout evidence refresh".to_string(),
-        "--repo-root".to_string(),
-        root_display,
-    ];
+    let (target, flow_arguments, flow_finish_arguments) =
+        flow_refresh_arguments(repository_root, changed_paths);
     let mut flow_stdout = Vec::new();
     let mut flow_stderr = Vec::new();
-    let flow_code = crate::commands::Application::new(env!("CARGO_PKG_VERSION")).run(
+    let flow_start_code = crate::commands::Application::new(env!("CARGO_PKG_VERSION")).run(
         &flow_arguments,
         &mut flow_stdout,
         &mut flow_stderr,
     );
+    let flow_code = if flow_start_code == 0 {
+        crate::commands::Application::new(env!("CARGO_PKG_VERSION")).run(
+            &flow_finish_arguments,
+            &mut flow_stdout,
+            &mut flow_stderr,
+        )
+    } else {
+        flow_start_code
+    };
     let flow_output = String::from_utf8_lossy(&flow_stdout);
     let flow_error = String::from_utf8_lossy(&flow_stderr);
     if flow_code == 0 {
@@ -1754,6 +1788,25 @@ mod tests {
         let clean = scope_fingerprint("head", &["a.rs".to_string(), "b.rs".to_string()], "clean");
         assert_eq!(first, second);
         assert_ne!(first, clean);
+    }
+
+    #[test]
+    fn flow_refresh_covers_all_changed_sources_and_finishes_evidence() {
+        let root = Path::new("D:/repo");
+        let changed = vec![
+            "rust/src/a.rs".to_string(),
+            "docs/readme.md".to_string(),
+            "web/app.ts".to_string(),
+        ];
+        let (target, start, finish) = flow_refresh_arguments(root, &changed);
+        assert_eq!(target, "rust/src/a.rs");
+        let target_files = start
+            .windows(2)
+            .find(|pair| pair[0] == "--target-files")
+            .map(|pair| pair[1].as_str());
+        assert_eq!(target_files, Some("rust/src/a.rs,web/app.ts"));
+        assert_eq!(finish[0..2], ["flow", "finish"]);
+        assert!(finish.iter().any(|argument| argument == "--repo-root"));
     }
 
     #[test]
