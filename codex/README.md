@@ -43,7 +43,7 @@ Copy-Item -Recurse codex "$env:USERPROFILE\.codex\plugins\keel"
       "name": "keel",
       "source": {
         "source": "local",
-        "path": "~/.codex/plugins/keel"
+        "path": "./.codex/plugins/keel"
       },
       "policy": {
         "installation": "AVAILABLE",
@@ -55,7 +55,16 @@ Copy-Item -Recurse codex "$env:USERPROFILE\.codex\plugins\keel"
 }
 ```
 
-3. Restart Codex and enable the plugin from the plugin directory.
+3. Install the plugin through Codex so it creates the runtime cache:
+
+```bash
+codex plugin add keel@personal-keel --json
+```
+
+4. Start a new Codex conversation (or restart ChatGPT Desktop), open `/hooks`,
+   review the eight Keel hook definitions, and trust them if they match this
+   bundle. Codex intentionally keeps new or changed plugin hooks inactive until
+   the user approves them.
 
 ### Option B: Project-scoped install
 

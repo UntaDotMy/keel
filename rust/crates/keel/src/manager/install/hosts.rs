@@ -1333,35 +1333,63 @@ pub(crate) fn maybe_wire_codex(
             .join(".agents")
             .join("plugins")
             .join("marketplace.json");
-        match merge_codex_marketplace(&marketplace_path) {
-            Ok(CodexMarketplaceResult::Added) => wire_status.push(format!(
-                "marketplace entry added in {}",
-                display_path(&marketplace_path)
-            )),
-            Ok(CodexMarketplaceResult::AlreadyCurrent) => {
-                wire_status.push("marketplace entry already current".to_string())
+        let marketplace_ready = match merge_codex_marketplace(&marketplace_path) {
+            Ok(CodexMarketplaceResult::Added) => {
+                wire_status.push(format!(
+                    "marketplace entry added in {}",
+                    display_path(&marketplace_path)
+                ));
+                true
             }
-            Ok(CodexMarketplaceResult::Updated) => wire_status.push(format!(
-                "marketplace entry updated in {}",
-                display_path(&marketplace_path)
-            )),
-            Err(error) => wire_status.push(format!("marketplace skipped ({error})")),
-        }
+            Ok(CodexMarketplaceResult::AlreadyCurrent) => {
+                wire_status.push("marketplace entry already current".to_string());
+                true
+            }
+            Ok(CodexMarketplaceResult::Updated) => {
+                wire_status.push(format!(
+                    "marketplace entry updated in {}",
+                    display_path(&marketplace_path)
+                ));
+                true
+            }
+            Err(error) => {
+                wire_status.push(format!("marketplace skipped ({error})"));
+                false
+            }
+        };
         let codex_config = home_dir.join(".codex").join("config.toml");
-        match ensure_codex_plugin_enabled(&codex_config) {
+        let plugin_enabled = match ensure_codex_plugin_enabled(&codex_config) {
             Ok(CodexEnableResult::Added) => {
-                wire_status.push(format!("plugin enabled in {}", display_path(&codex_config)))
+                wire_status.push(format!("plugin enabled in {}", display_path(&codex_config)));
+                true
             }
             Ok(CodexEnableResult::AlreadyEnabled) => {
-                wire_status.push("plugin already enabled".to_string())
+                wire_status.push("plugin already enabled".to_string());
+                true
             }
             Ok(CodexEnableResult::UnchangedDisabled) => {
-                wire_status.push("plugin disabled by user (enable via Codex /plugins)".to_string())
+                wire_status.push("plugin disabled by user (enable via Codex /plugins)".to_string());
+                false
             }
-            Err(error) => wire_status.push(format!("enablement skipped ({error})")),
+            Err(error) => {
+                wire_status.push(format!("enablement skipped ({error})"));
+                false
+            }
+        };
+        if marketplace_ready && plugin_enabled {
+            if codex_plugin_installation(home_dir) == CodexPluginInstallation::Current {
+                wire_status.push("plugin installation already current".to_string());
+            } else {
+                match install_codex_plugin(home_dir) {
+                    Ok(status) => wire_status.push(status),
+                    Err(error) => wire_status.push(format!(
+                        "plugin installation pending ({error}); run `codex plugin add keel@personal-keel --json`"
+                    )),
+                }
+            }
         }
-        // Native MCP registration: Codex on Windows never loads a plugin's
-        // bundled MCP (openai/codex#26693), and [mcp_servers.keel] works everywhere.
+        // Native MCP registration is retained as a direct, cross-platform tool
+        // path even when the plugin hook cache is unavailable or awaiting trust.
         let binary = installed_executable_path(claude_home);
         match ensure_codex_native_mcp(&codex_config, &binary) {
             Ok(CodexNativeMcpResult::Added) => wire_status.push(format!(
@@ -1377,8 +1405,7 @@ pub(crate) fn maybe_wire_codex(
             }
             Err(error) => wire_status.push(format!("native MCP skipped ({error})")),
         }
-        // Always-on contract: Codex hooks are unreliable (absent on Windows),
-        // and the user-global AGENTS.md is the hook-independent surface.
+        // Always-on contract while plugin hooks await explicit user review.
         let codex_agents = home_dir.join(".codex").join("AGENTS.md");
         match sync_codex_agents_md(&codex_agents) {
             Ok(status) => wire_status.push(status),

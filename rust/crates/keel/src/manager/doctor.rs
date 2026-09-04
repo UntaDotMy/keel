@@ -9,6 +9,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
+use crate::manager::install::{codex_plugin_installation, CodexPluginInstallation};
 use crate::runtime::{
     display_path, installed_executable_path, resolve_claude_home,
     COMMAND_COMPACTION_EVENTS_FILE_NAME,
@@ -834,12 +835,6 @@ pub(crate) fn report_bridge_host_wiring(
         .join("keel")
         .join(".codex-plugin")
         .join("plugin.json");
-    let codex_mcp = home
-        .join(".codex")
-        .join("plugins")
-        .join("keel")
-        .join(".mcp.json")
-        .is_file();
     let codex_marketplace_registered = fs::read_to_string(
         home.join(".agents")
             .join("plugins")
@@ -849,9 +844,19 @@ pub(crate) fn report_bridge_host_wiring(
     .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
     .and_then(|doc| doc.get("plugins").and_then(|p| p.as_array()).cloned())
     .map(|entries| {
-        entries
-            .iter()
-            .any(|entry| entry.get("name").and_then(|n| n.as_str()) == Some("keel"))
+        entries.iter().any(|entry| {
+            entry.get("name").and_then(|n| n.as_str()) == Some("keel")
+                && entry
+                    .get("source")
+                    .and_then(|source| source.get("source"))
+                    .and_then(|value| value.as_str())
+                    == Some("local")
+                && entry
+                    .get("source")
+                    .and_then(|source| source.get("path"))
+                    .and_then(|value| value.as_str())
+                    == Some("./.codex/plugins/keel")
+        })
     })
     .unwrap_or(false);
     let codex_config_text = fs::read_to_string(home.join(".codex").join("config.toml"))
@@ -872,7 +877,29 @@ pub(crate) fn report_bridge_host_wiring(
     let codex_agents_md = fs::read_to_string(home.join(".codex").join("AGENTS.md"))
         .map(|text| text.contains("keel:begin"))
         .unwrap_or(false);
-    report_host(standard_output, "codex", codex_plugin.is_file(), codex_mcp);
+    let codex_installation = codex_plugin_installation(&home);
+    let codex_installed = codex_installation == CodexPluginInstallation::Current;
+    report_host(
+        standard_output,
+        "codex",
+        codex_installed && codex_agents_md,
+        codex_native_mcp,
+    );
+    write_doctor_check(
+        standard_output,
+        codex_installed || !codex_plugin.is_file(),
+        &format!(
+            "codex plugin installation: {}",
+            match codex_installation {
+                CodexPluginInstallation::Current => "installed and current",
+                CodexPluginInstallation::Stale => "stale - run `keel install` to refresh",
+                CodexPluginInstallation::Missing if codex_plugin.is_file() => {
+                    "not installed - run `keel install`"
+                }
+                CodexPluginInstallation::Missing => "n/a - source plugin not installed",
+            }
+        ),
+    );
     write_doctor_check(
         standard_output,
         codex_marketplace_registered || !codex_plugin.is_file(),
@@ -1357,7 +1384,7 @@ mod tests {
         let _ = fs::remove_dir_all(claude_home.parent().unwrap());
     }
     #[test]
-    fn codex_bridge_status_reads_full_config_document() {
+    fn codex_bridge_status_rejects_source_only_plugin_as_uninstalled() {
         let claude_home = unique_home("codex-config");
         let home = claude_home.parent().unwrap();
         let config_path = home.join(".codex").join("config.toml");
@@ -1372,13 +1399,21 @@ mod tests {
         .unwrap();
         let plugin_root = home.join(".codex").join("plugins").join("keel");
         fs::create_dir_all(plugin_root.join(".codex-plugin")).unwrap();
-        fs::write(plugin_root.join(".codex-plugin").join("plugin.json"), "{}").unwrap();
+        fs::write(
+            plugin_root.join(".codex-plugin").join("plugin.json"),
+            r#"{"name":"keel","version":"1.0.0"}"#,
+        )
+        .unwrap();
         fs::write(plugin_root.join(".mcp.json"), "{}").unwrap();
 
         let mut output = Vec::new();
         report_bridge_host_wiring(&mut output, &claude_home);
         let output = String::from_utf8(output).unwrap();
-        assert!(output.contains("[ok] codex host: wired (rules + MCP)"));
+        assert!(output.contains("[warn] codex host: not wired"), "{output}");
+        assert!(
+            output.contains("[warn] codex plugin installation: not installed"),
+            "{output}"
+        );
         assert!(output.contains(
             "[ok] codex plugin enablement (config.toml [plugins.\"keel@personal-keel\"]): enabled"
         ));

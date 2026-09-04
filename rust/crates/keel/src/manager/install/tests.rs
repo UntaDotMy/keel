@@ -2216,7 +2216,7 @@ fn merge_codex_marketplace_creates_catalog_when_absent() {
     let plugins = doc["plugins"].as_array().unwrap();
     assert_eq!(plugins.len(), 1);
     assert_eq!(plugins[0]["name"], "keel");
-    assert_eq!(plugins[0]["source"]["path"], "~/.codex/plugins/keel");
+    assert_eq!(plugins[0]["source"]["path"], "./.codex/plugins/keel");
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -2264,8 +2264,71 @@ fn merge_codex_marketplace_updates_stale_keel_entry() {
         "stale keel entry must report Updated, got {result:?}"
     );
     let doc: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-    assert_eq!(doc["plugins"][0]["source"]["path"], "~/.codex/plugins/keel");
+    assert_eq!(doc["plugins"][0]["source"]["path"], "./.codex/plugins/keel");
     let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn codex_plugin_installation_requires_a_current_versioned_cache() {
+    let home = std::env::temp_dir().join(format!(
+        "keel-codex-cache-state-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let source = home.join(".codex").join("plugins").join("keel");
+    let cache = home
+        .join(".codex")
+        .join("plugins")
+        .join("cache")
+        .join(CODEX_PERSONAL_MARKETPLACE_NAME)
+        .join("keel")
+        .join("1.0.0");
+    let managed = [
+        (
+            ".codex-plugin/plugin.json",
+            r#"{"name":"keel","version":"1.0.0"}"#,
+        ),
+        ("hooks/hooks.json", "{}"),
+        ("keel-codex.js", "// js"),
+        ("keel-codex.ts", "// ts"),
+        (".mcp.json", "{}"),
+    ];
+    for (relative, contents) in managed {
+        let path = source.join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, contents).unwrap();
+    }
+    let source_only_state = codex_plugin_installation(&home);
+    assert_eq!(
+        source_only_state,
+        CodexPluginInstallation::Missing,
+        "source-only plugin must remain uninstalled"
+    );
+    for (relative, _) in managed {
+        let target = cache.join(relative);
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::copy(source.join(relative), target).unwrap();
+    }
+    let matching_cache_state = codex_plugin_installation(&home);
+    assert_eq!(
+        matching_cache_state,
+        CodexPluginInstallation::Current,
+        "matching cache must be current"
+    );
+    fs::write(cache.join("hooks/hooks.json"), "stale").unwrap();
+    let changed_cache_state = codex_plugin_installation(&home);
+    assert_eq!(
+        changed_cache_state,
+        CodexPluginInstallation::Stale,
+        "changed cache bytes must be stale"
+    );
+    assert!(remove_codex_plugin_cache(&home) >= 1);
+    assert!(!cache.exists());
+    assert!(
+        source.exists(),
+        "cache cleanup must preserve the source bundle"
+    );
+    let _ = fs::remove_dir_all(home);
 }
 
 #[test]
