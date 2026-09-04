@@ -33,12 +33,12 @@ pub fn publish_native_executable(
         target_dir.join("debug").join(executable_file_name()),
     ];
     let target_path = installed_executable_path(claude_home);
-    let Some(source_path) = probes
-        .into_iter()
-        .find(|probe| probe.is_file() && !executables_are_identical(probe, &target_path))
-    else {
+    let Some(source_path) = probes.into_iter().find(|probe| probe.is_file()) else {
         return Ok(false);
     };
+    if executables_are_identical(&source_path, &target_path) {
+        return Ok(false);
+    }
     atomic_copy_executable(&source_path, &target_path)?;
     Ok(true)
 }
