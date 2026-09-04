@@ -19,7 +19,7 @@ the tasks genuinely cannot interfere.
 
 ## Code Implementation Discipline
 
-See `_shared/common-discipline.md` § Code Implementation Discipline. Parallel
+See `../_shared/common-discipline.md` § Code Implementation Discipline. Parallel
 dispatch is **Goal-Driven Execution** at fan-out scale: each agent gets its own
 verifiable goal and check, and results are reconciled in the controller.
 **Surgical Changes** is why the independence test matters — two agents editing the

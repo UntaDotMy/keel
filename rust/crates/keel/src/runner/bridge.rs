@@ -530,8 +530,8 @@ mod tests {
     /// different working directory than the user's workspace still resolves the
     /// correct workspace. Previously they ignored `--cwd` and always resolved from
     /// the bridge process's own cwd. We prove the fix by passing a workspace path
-    /// carrying a distinctive lowercase-alnum marker (survives `sanitize_key`
-    /// verbatim) and asserting the marker appears in the workspace-scope summary,
+    /// carrying a distinctive marker and asserting its canonical hashed lane
+    /// appears in the workspace-scope summary,
     /// then that omitting `--cwd` falls back to the process cwd (no marker).
     #[test]
     fn bridge_context_subcommands_honor_cwd() {
@@ -550,6 +550,10 @@ mod tests {
         let marker = format!("keelcwdmarker{}{nanos}", std::process::id());
         let workspace = std::env::temp_dir().join(&marker);
         std::fs::create_dir_all(&workspace).expect("create test workspace");
+        let canonical_workspace = workspace.canonicalize().expect("canonical workspace");
+        let expected_lane = crate::utility::system_map::workspace_key(
+            &crate::runtime::display_path(&canonical_workspace),
+        );
 
         let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
         std::env::set_var("CLAUDE_TARGET_OVERRIDE", &temp);
@@ -571,8 +575,8 @@ mod tests {
         assert_eq!(code, 0, "session-start must exit 0: {stderr:?}");
         let out_with_cwd = String::from_utf8_lossy(&stdout);
         assert!(
-            out_with_cwd.contains(&marker),
-            "session-start must resolve the passed --cwd workspace (marker {marker}); got: {out_with_cwd}"
+            out_with_cwd.contains(&expected_lane),
+            "session-start must resolve the passed --cwd workspace (lane {expected_lane}); got: {out_with_cwd}"
         );
 
         // Without --cwd: falls back to the process cwd (the crate dir), so the
@@ -590,8 +594,8 @@ mod tests {
         );
         let out_no_cwd = String::from_utf8_lossy(&stdout_no_cwd);
         assert!(
-            !out_no_cwd.contains(&marker),
-            "without --cwd the workspace marker must not appear (used process cwd): {out_no_cwd}"
+            !out_no_cwd.contains(&expected_lane),
+            "without --cwd the passed workspace lane must not appear (used process cwd): {out_no_cwd}"
         );
 
         match previous_home {

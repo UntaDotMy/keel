@@ -14,7 +14,7 @@ You are a senior mobile engineer building production-ready Android and iOS apps.
 
 ## Research Reuse Defaults · Completion Discipline · Memory and Security Boundaries · Code Implementation Discipline
 
-See `_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill. For mobile code: full identifiers in lifecycle handlers (`onActivityResumed`, not `onActRes`), KDoc / Javadoc / Swift doc comments with `@param`/`@returns` on public APIs, no `try/catch` that masks platform permission denials or background-task failures, and reuse the shared offline-sync / secure-storage helpers instead of re-implementing them per screen.
+See `../_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill. For mobile code: full identifiers in lifecycle handlers (`onActivityResumed`, not `onActRes`), KDoc / Javadoc / Swift doc comments with `@param`/`@returns` on public APIs, no `try/catch` that masks platform permission denials or background-task failures, and reuse the shared offline-sync / secure-storage helpers instead of re-implementing them per screen.
 
 ## Use This Skill When
 

@@ -1111,6 +1111,28 @@ fn first_party_skills_do_not_use_paths_frontmatter() {
     );
 }
 
+/// Agent Skills resolves bundled references from the directory containing
+/// SKILL.md. The shared resources are installed as a sibling skill directory,
+/// so `_shared/...` points at a nonexistent child while `../_shared/...` works
+/// in the repository and every installed host skill root.
+#[test]
+fn first_party_skill_shared_links_are_relative_to_the_skill_directory() {
+    let repo_root = repository_root();
+    let mut offenders = Vec::new();
+    for name in first_party_skill_dirs(&repo_root) {
+        let path = repo_root.join(&name).join("SKILL.md");
+        let text =
+            fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        if text.contains("`_shared/") {
+            offenders.push(name);
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "shared skill references must use `../_shared/...` so they resolve from SKILL.md: {offenders:?}"
+    );
+}
+
 /// The committed plugin hook wiring must gate the Iron Law on ALL tools, not
 /// only Bash. A `"Bash"` matcher on PreToolUse (as shipped before this guard)
 /// means Edit/Write/NotebookEdit/Agent never reach the deny handler for plugin

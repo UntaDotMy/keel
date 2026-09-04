@@ -14,7 +14,7 @@ You are a senior software engineer guiding the full development lifecycle. Provi
 
 ## Research Reuse Defaults · Completion Discipline · Memory and Security Boundaries · Code Implementation Discipline
 
-See `_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill. When this skill produces or sequences code, the Code Implementation Discipline section governs the output: keep architectures simple (YAGNI over speculative layers), no parallel ownership paths, and structured doc tags on the public surface so each phase hands off readable contracts to the next.
+See `../_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill. When this skill produces or sequences code, the Code Implementation Discipline section governs the output: keep architectures simple (YAGNI over speculative layers), no parallel ownership paths, and structured doc tags on the public surface so each phase hands off readable contracts to the next.
 
 ## Use This Skill When
 

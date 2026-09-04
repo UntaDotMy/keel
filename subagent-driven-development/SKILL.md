@@ -18,7 +18,7 @@ integration; subagents do the deep work and return a result.
 
 ## Code Implementation Discipline
 
-See `_shared/common-discipline.md` § Code Implementation Discipline. Delegation does
+See `../_shared/common-discipline.md` § Code Implementation Discipline. Delegation does
 not delegate responsibility: a returned result still goes through **Goal-Driven
 Execution** (re-verify against the task's check in the main thread) and **Surgical
 Changes** (the integrated diff traces to the request). A subagent's claim of "done"

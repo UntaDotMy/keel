@@ -23,7 +23,7 @@ Do not start with entities and repositories when the problem is still "which tea
 
 ## Research Reuse Defaults · Completion Discipline · Memory and Security Boundaries · Code Implementation Discipline
 
-See `_shared/common-discipline.md` for the canonical rules. Apply them here. Especially: do not invent domain rules the user or domain expert never stated; do not add speculative layers "for DDD purity."
+See `../_shared/common-discipline.md` for the canonical rules. Apply them here. Especially: do not invent domain rules the user or domain expert never stated; do not add speculative layers "for DDD purity."
 
 ## Glossary (use these terms correctly)
 

@@ -18,9 +18,9 @@ Use a write-ahead pattern for volatile-but-critical context:
 - Scan each new user message for corrections, decisions, proper nouns, preferences, and specific values that must survive context compaction.
 - If such a detail appears, write it to scoped session-state storage before composing the response.
 - The durable write path is:
-  - `~/.claude/memories/workspaces/<workspace-slug>/workstreams/<workstream-key>/memory/SESSION-STATE.md`
-  - `~/.claude/memories/workspaces/<workspace-slug>/workstreams/<workstream-key>/memory/session-wal.jsonl`
-- The native memory writer keeps durable state under the unified layout (`~/.claude/memories/workspaces/<workspace-slug>/workstreams/<workstream-key>/…`) for retrieval, scope resolution, and future resume work.
+  - `~/.keel/memories/workspaces/<workspace-key>/workstreams/<workstream-key>/memory/SESSION-STATE.md`
+  - `~/.keel/memories/workspaces/<workspace-key>/workstreams/<workstream-key>/memory/session-wal.jsonl`
+- The native memory writer keeps durable state under the unified layout (`~/.keel/memories/workspaces/<workspace-key>/workstreams/<workstream-key>/…`) for retrieval, scope resolution, and future resume work.
 - Treat the markdown file as the readable current state and the JSONL file as the append-only recovery log.
 - The urge to answer first is a failure mode. Write first, then respond.
 
@@ -32,7 +32,7 @@ Use a scoped working buffer when context gets crowded:
 - When the runtime does not expose a reliable context meter, activate the working buffer as soon as context pressure feels high or a multi-step task is still in flight and the next turns will need compact reconstruction.
 
 - Append fresh turn-level breadcrumbs to:
-  - `~/.claude/memories/workspaces/<workspace-slug>/workstreams/<workstream-key>/memory/working-buffer.md`
+  - `~/.keel/memories/workspaces/<workspace-key>/workstreams/<workstream-key>/memory/working-buffer.md`
 - After compaction or resets, read the latest working-buffer entries before assuming the thread is still intact.
 
 ## Project System Map
@@ -66,7 +66,7 @@ Treat compaction as a normal lifecycle event, not as a surprise failure:
 Use one home per fact. Information flows downward; it should not be duplicated blindly across layers.
 
 - **L1 (Brain)**: small always-read workspace guidance, summaries, session state, and working buffer. Keep each file around 500 to 1,000 tokens and keep the actively loaded total under about 7,000 tokens.
-- **L2 (Memory)**: scoped memory lanes under `~/.claude/memories/workspaces/<workspace-slug>/...`; store daily notes, workstream breadcrumbs, bounded working context, and family records here.
+- **L2 (Memory)**: scoped memory lanes under `~/.keel/memories/workspaces/<workspace-key>/...`; store daily notes, workstream breadcrumbs, bounded working context, and family records here.
 - **L3 (Reference)**: deeper playbooks, SOPs, and research under scoped `reference/` lanes and repo docs; open them on demand, never blindly.
 
 ## Trim Protocol
@@ -76,7 +76,7 @@ Use one home per fact. Information flows downward; it should not be duplicated b
 - Measure the active L1 files against per-file and total token budgets.
 - Move overflow into archive files instead of deleting it.
 - Keep the newest relevant context in L1 and archive older material under:
-  - `~/.claude/memories/archive/<workspace-slug>/workstreams/<workstream-key>/`
+  - `~/.keel/memories/archive/<workspace-key>/workstreams/<workstream-key>/`
 - Report before and after token counts and every archive file created.
 
 ## Recalibrate Protocol
@@ -102,7 +102,7 @@ Keep self-improvement claims concrete and evidence-backed:
 Make closure a checked state instead of a vibe:
 
 - For non-trivial tasks, record the explicit user requirements in the scoped completion ledger at:
-  - `~/.claude/memories/workspaces/<workspace-slug>/workstreams/<workstream-key>/memory/completion-gate.json`
+  - `~/.keel/memories/workspaces/<workspace-key>/workstreams/<workstream-key>/memory/completion-gate.json`
 - Use `keel memory completion-gate record-requirement` as the workstream evolves so the ledger reflects the current status of each explicit ask.
 - Run `keel memory completion-gate check` before the final answer and treat `closure_ready: true` as the required close signal for non-trivial tasks.
 - If the gate still shows `pending`, `in_progress`, or `blocked` items, loop again for fixable work or surface the real blocker honestly instead of soft-closing.

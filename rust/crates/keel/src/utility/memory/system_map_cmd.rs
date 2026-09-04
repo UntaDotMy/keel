@@ -71,11 +71,17 @@ pub fn system_map_reference_directory(
 /// Backs both the CLI `system-map refresh` subcommand and the MCP
 /// `system_map_refresh` tool so the two share one render+write path. `Err`
 /// carries a caller-ready message; the caller decides how to surface it.
-pub fn refresh_system_map(
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SystemMapRefresh {
+    pub path: PathBuf,
+    pub changed: bool,
+}
+
+pub fn refresh_system_map_with_status(
     claude_home: &Path,
     command_group: &str,
     workspace_root: &Path,
-) -> Result<PathBuf, String> {
+) -> Result<SystemMapRefresh, String> {
     if !workspace_root.is_dir() {
         return Err(format!(
             "workspace-root not a directory: {}",
@@ -88,9 +94,21 @@ pub fn refresh_system_map(
     fs::create_dir_all(&reference_directory)
         .map_err(|error| format!("create {}: {error}", display_path(&reference_directory)))?;
     let map_content = workspace_index::render_map(workspace_root, &claude_home.to_string_lossy())?;
+    if fs::read_to_string(&system_map_path)
+        .map(|existing| existing == map_content)
+        .unwrap_or(false)
+    {
+        return Ok(SystemMapRefresh {
+            path: system_map_path,
+            changed: false,
+        });
+    }
     crate::runtime::write_text(&system_map_path, &map_content)
         .map_err(|error| format!("write {}: {error}", display_path(&system_map_path)))?;
-    Ok(system_map_path)
+    Ok(SystemMapRefresh {
+        path: system_map_path,
+        changed: true,
+    })
 }
 
 fn run_system_map_refresh(
@@ -126,12 +144,13 @@ fn run_system_map_refresh(
         );
         return 1;
     };
-    match refresh_system_map(&claude_home, command_group, &workspace_root) {
-        Ok(system_map_path) => {
+    match refresh_system_map_with_status(&claude_home, command_group, &workspace_root) {
+        Ok(report) => {
             let _ = writeln!(
                 standard_output,
-                "{command_group} system-map refresh: wrote {}",
-                display_path(&system_map_path)
+                "{command_group} system-map refresh: {} {}",
+                if report.changed { "wrote" } else { "unchanged" },
+                display_path(&report.path)
             );
             0
         }

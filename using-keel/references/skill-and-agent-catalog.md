@@ -1,3 +1,4 @@
+<!-- keel:managed-host-file (remove this line before customizing to opt out of upgrades) -->
 # Skill and agent catalog (on-demand)
 
 Load when routing or discovering skills. Always-on SessionStart does **not** embed this list.
@@ -113,7 +114,7 @@ form so subagents do not fall back to memory-based defaults.
 
 The one pointer that exists on **every** project is the workspace map:
 
-- Workspace `SYSTEM_MAP.md` lives at `~/.claude/memories/workspaces/<workspace-key>/reference/SYSTEM_MAP.md` and is auto-refreshed by `keel memory scope resolve --refresh-system-map` at session start, pre-compact, and session end. Read it before making structural claims about the current repo. This is keyed to whatever project you are in, so it is always present.
+- Workspace `SYSTEM_MAP.md` lives at `~/.keel/memories/workspaces/<workspace-key>/reference/SYSTEM_MAP.md` and is auto-refreshed by `keel memory scope resolve --refresh-system-map` at session start, pre-compact, and session end. Read it before making structural claims about the current repo. This is keyed to whatever project you are in, so it is always present.
 
 The files below ship **only inside the keel repository** and are synced to disk only when you are working in that repo. On any other project they do not exist — read the current project's own `CLAUDE.md`/`AGENTS.md`/`README` instead, and fall back to the SYSTEM_MAP above:
 

@@ -18,7 +18,7 @@ fix the source of truth, prove with a test.
 
 ## Code Implementation Discipline
 
-See `_shared/common-discipline.md` § Code Implementation Discipline. This skill
+See `../_shared/common-discipline.md` § Code Implementation Discipline. This skill
 operationalizes its **Think Before Coding** deep-dive ("a function that looks
 like the cause is a hypothesis, not a finding") and **No Workarounds, No Silent
 Fallbacks** ("fix the root cause, repair the source of truth instead of patching

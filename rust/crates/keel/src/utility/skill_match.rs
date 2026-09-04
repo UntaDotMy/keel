@@ -205,9 +205,9 @@ fn security_audit_override(prompt: &str) -> Option<&'static str> {
         "oidc",
         "authentication",
         "auth",
-        "token",
-        "tokens",
-        "refresh",
+        "jwt",
+        "credential",
+        "credentials",
     ]
     .iter()
     .any(|token| tokens.contains(*token));
@@ -261,6 +261,18 @@ fn diagnosis_operation_override(prompt: &str) -> Option<&'static str> {
 /// not a request to author a new test. The UI and UX phrase sets are kept
 /// disjoint (visual-craft vs. research/flow) so the two never collide.
 const CURATED_SKILL_TRIGGERS: &[(&str, &[&str])] = &[
+    (
+        "critic",
+        &[
+            "adversarial review",
+            "review this implementation adversarially",
+            "challenge this implementation",
+            "find weaknesses in this implementation",
+            "half-baked",
+            "half baked",
+            "unfinished work",
+        ],
+    ),
     (
         "reviewer",
         &[
@@ -1630,6 +1642,38 @@ mod tests {
             )
             .map(|found| found.name),
             Some("security-and-compliance-auditor".to_string())
+        );
+    }
+
+    #[test]
+    fn token_efficiency_audit_is_not_misrouted_as_security() {
+        let corpus = vec![
+            skill(
+                "security-and-compliance-auditor",
+                "security review for authentication and OAuth",
+                "auditing auth and exploitability",
+            ),
+            skill(
+                "systematic-debugging",
+                "find root causes and verify broken behavior",
+                "debug behavior that is not working",
+            ),
+        ];
+        let prompt = "audit token efficiency because the system map keeps regenerating; find the root cause, fix it, and verify";
+
+        assert_ne!(
+            resolve_skill_for_prompt(prompt, &corpus).map(|found| found.name),
+            Some("security-and-compliance-auditor".to_string())
+        );
+    }
+
+    #[test]
+    fn adversarial_half_baked_review_routes_to_critic() {
+        assert_eq!(
+            curated_skill_for_prompt(
+                "review this implementation adversarially so half-baked unfinished work cannot pass"
+            ),
+            Some("critic")
         );
     }
 

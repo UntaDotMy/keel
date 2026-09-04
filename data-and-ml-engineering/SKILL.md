@@ -15,7 +15,7 @@ This skill owns the analytical and ML data flow — pipelines, warehouse/lakehou
 
 ## Research Reuse Defaults · Completion Discipline · Memory and Security Boundaries · Code Implementation Discipline
 
-See `_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill. The Code Implementation Discipline section is especially relevant: do not duplicate transformation logic across models and pipelines (one source of truth per metric), do not silently drop rows that fail a quality check, and do not ship a model whose training and serving feature code diverge.
+See `../_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill. The Code Implementation Discipline section is especially relevant: do not duplicate transformation logic across models and pipelines (one source of truth per metric), do not silently drop rows that fail a quality check, and do not ship a model whose training and serving feature code diverge.
 
 ## Use This Skill When
 

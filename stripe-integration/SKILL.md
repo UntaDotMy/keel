@@ -14,7 +14,7 @@ You are a senior payments engineer responsible for keeping Stripe integrations c
 
 ## Research Reuse Defaults · Completion Discipline · Memory and Security Boundaries · Code Implementation Discipline
 
-See `_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill. The Code Implementation Discipline section is especially relevant: do not duplicate Stripe client construction across handlers, do not silently swallow webhook signature failures, and do not write code that grants entitlements before the payment intent reaches `succeeded` — even briefly.
+See `../_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill. The Code Implementation Discipline section is especially relevant: do not duplicate Stripe client construction across handlers, do not silently swallow webhook signature failures, and do not write code that grants entitlements before the payment intent reaches `succeeded` — even briefly.
 
 ## Use This Skill When
 

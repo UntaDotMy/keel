@@ -24,7 +24,7 @@ The working brief captures the agreed behavior as the anti-drift **spec**. This 
 
 ## Research Reuse Defaults · Completion Discipline · Memory and Security Boundaries · Code Implementation Discipline
 
-See `_shared/common-discipline.md` for the canonical rules. Do not invent scenarios the user never required; do not automate every scenario if a manual check is enough for a one-off.
+See `../_shared/common-discipline.md` for the canonical rules. Do not invent scenarios the user never required; do not automate every scenario if a manual check is enough for a one-off.
 
 ## Core ideas
 

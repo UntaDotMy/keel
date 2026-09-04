@@ -111,8 +111,28 @@ pub fn run_gain_command(
                 Value::Number(summary.tokens_saved.to_string()),
             ),
             (
+                "grossTokensSaved".into(),
+                Value::Number(summary.tokens_saved.to_string()),
+            ),
+            (
+                "tokensOverhead".into(),
+                Value::Number(summary.tokens_overhead.to_string()),
+            ),
+            (
+                "netTokensSaved".into(),
+                Value::Number(summary.net_tokens_saved.to_string()),
+            ),
+            (
                 "savingsPercent".into(),
                 Value::Number(format!("{:.2}", summary.savings_percent())),
+            ),
+            (
+                "grossSavingsPercent".into(),
+                Value::Number(format!("{:.2}", summary.savings_percent())),
+            ),
+            (
+                "netSavingsPercent".into(),
+                Value::Number(format!("{:.2}", summary.net_savings_percent())),
             ),
             ("topCommands".into(), Value::Array(top_commands)),
             ("topReducers".into(), Value::Array(top_reducers)),
@@ -133,11 +153,30 @@ pub fn run_gain_command(
     );
     let _ = writeln!(standard_output, "Tokens before: {}", summary.tokens_before);
     let _ = writeln!(standard_output, "Tokens after: {}", summary.tokens_after);
-    let _ = writeln!(standard_output, "Tokens saved: {}", summary.tokens_saved);
     let _ = writeln!(
         standard_output,
-        "Savings: {:.2}%",
+        "Tokens saved (gross): {}",
+        summary.tokens_saved
+    );
+    let _ = writeln!(
+        standard_output,
+        "Wrapper overhead: {}",
+        summary.tokens_overhead
+    );
+    let _ = writeln!(
+        standard_output,
+        "Tokens saved (net): {}",
+        summary.net_tokens_saved
+    );
+    let _ = writeln!(
+        standard_output,
+        "Gross savings: {:.2}%",
         summary.savings_percent()
+    );
+    let _ = writeln!(
+        standard_output,
+        "Net savings: {:.2}%",
+        summary.net_savings_percent()
     );
     if !summary.top_commands.is_empty() {
         let _ = writeln!(standard_output, "\nTop Commands by Savings:");
@@ -428,6 +467,8 @@ pub(crate) fn parse_gain_summary(
     let mut tokens_before: u64 = 0;
     let mut tokens_after: u64 = 0;
     let mut tokens_saved: u64 = 0;
+    let mut tokens_overhead: u64 = 0;
+    let mut net_tokens_saved: i64 = 0;
     let mut command_map: std::collections::HashMap<String, (u64, u64)> =
         std::collections::HashMap::new();
     let mut reducer_map: std::collections::HashMap<String, (u64, u64)> =
@@ -488,6 +529,8 @@ pub(crate) fn parse_gain_summary(
         tokens_before += before;
         tokens_after += after;
         tokens_saved += saved;
+        tokens_overhead = tokens_overhead.saturating_add(after.saturating_sub(before));
+        net_tokens_saved = net_tokens_saved.saturating_add(signed_token_delta(before, after));
         if let Some(command) = event.get("command").and_then(serde_json::Value::as_str) {
             let entry = command_map.entry(command.to_string()).or_insert((0, 0));
             entry.0 += saved;
@@ -537,6 +580,8 @@ pub(crate) fn parse_gain_summary(
         tokens_before,
         tokens_after,
         tokens_saved,
+        tokens_overhead,
+        net_tokens_saved,
         top_commands,
         top_reducers,
         top_families,
@@ -570,6 +615,8 @@ pub(crate) struct GainSummary {
     pub tokens_before: u64,
     pub tokens_after: u64,
     pub tokens_saved: u64,
+    pub tokens_overhead: u64,
+    pub net_tokens_saved: i64,
     pub top_commands: Vec<GainCommandSummary>,
     top_reducers: Vec<GainDimensionSummary>,
     top_families: Vec<GainDimensionSummary>,
@@ -583,6 +630,19 @@ impl GainSummary {
             (self.tokens_saved as f64 / self.tokens_before as f64) * 100.0
         }
     }
+
+    pub fn net_savings_percent(&self) -> f64 {
+        if self.tokens_before == 0 {
+            0.0
+        } else {
+            (self.net_tokens_saved as f64 / self.tokens_before as f64) * 100.0
+        }
+    }
+}
+
+fn signed_token_delta(before: u64, after: u64) -> i64 {
+    let delta = before as i128 - after as i128;
+    delta.clamp(i64::MIN as i128, i64::MAX as i128) as i64
 }
 
 #[derive(Clone)]
@@ -692,5 +752,22 @@ mod tests {
         assert_eq!(summary.tokens_before, 500 + 700 + 900 + 300);
         assert_eq!(summary.tokens_after, 500 + 700 + 100 + 300);
         assert_eq!(summary.tokens_saved, 900 - 100);
+    }
+
+    #[test]
+    fn gain_summary_reports_wrapper_overhead_and_signed_net_savings() {
+        let events = concat!(
+            r#"{"timestamp":1000,"command":"cargo test","compacted":true,"tokens_before":100,"tokens_after":20}"#,
+            "\n",
+            r#"{"timestamp":1100,"command":"echo marker","compacted":false,"tokens_before":10,"tokens_after":13}"#,
+            "\n",
+        );
+
+        let summary = parse_gain_summary(events, None, None);
+
+        assert_eq!(summary.tokens_saved, 80, "legacy gross field is preserved");
+        assert_eq!(summary.tokens_overhead, 3);
+        assert_eq!(summary.net_tokens_saved, 77);
+        assert_eq!(summary.net_savings_percent(), 70.0);
     }
 }

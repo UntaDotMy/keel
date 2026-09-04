@@ -14,7 +14,7 @@ You are a senior engineer responsible for performing dependency and supply-chain
 
 ## Research Reuse Defaults · Completion Discipline · Memory and Security Boundaries · Code Implementation Discipline
 
-See `_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill. The Code Implementation Discipline section is especially relevant: do not pin a vulnerable version with an inline ignore comment instead of upgrading, do not silently delete a lockfile to force resolution, and do not bump a manifest range without regenerating and committing the matching lockfile.
+See `../_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill. The Code Implementation Discipline section is especially relevant: do not pin a vulnerable version with an inline ignore comment instead of upgrading, do not silently delete a lockfile to force resolution, and do not bump a manifest range without regenerating and committing the matching lockfile.
 
 ## Use This Skill When
 

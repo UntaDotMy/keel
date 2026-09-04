@@ -250,7 +250,9 @@ pub(crate) fn is_keel_research_command(command: &str) -> bool {
 }
 
 pub(super) fn is_host_shell_tool_name(tool_name: &str) -> bool {
-    is_shell_tool_name(tool_name) || tool_name.eq_ignore_ascii_case("run_terminal_command")
+    is_shell_tool_name(tool_name)
+        || tool_name.eq_ignore_ascii_case("run_terminal_command")
+        || tool_name.eq_ignore_ascii_case("run_command")
 }
 
 /// True when this tool call is evidence that clears the iron-law gate under `mode`.

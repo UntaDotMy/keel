@@ -384,7 +384,7 @@ fn detect_hallucinated_apis(
     added_lines: &[(usize, String)],
     findings: &mut Vec<SlopFinding>,
 ) {
-    for (line_no, line) in added_lines {
+    for (index, (line_no, line)) in added_lines.iter().enumerate() {
         let trimmed = line.trim();
         // `.fetch_all()` is sqlx's canonical method and was removed as a
         // needle after flagging legitimate code.
@@ -399,15 +399,26 @@ fn detect_hallucinated_apis(
                         .to_string(),
             });
         }
-        // Analyze one line only; multiline bindings can evade this check.
+        let mut statement = String::new();
+        for (expected_line, (candidate_line, candidate)) in
+            (*line_no..).zip(added_lines.iter().skip(index).take(8))
+        {
+            if *candidate_line != expected_line {
+                break;
+            }
+            statement.push_str(candidate.trim());
+            if candidate.contains(';') {
+                break;
+            }
+        }
         if trimmed.contains("serde_json::from_str(")
-            && !trimmed.contains('?')
-            && !trimmed.contains("match ")
-            && !trimmed.contains("if let")
-            && !trimmed.contains(".unwrap_or")
-            && !trimmed.contains(".ok()")
-            && !trimmed.contains(".unwrap")
-            && !trimmed.contains("expect(")
+            && !statement.contains('?')
+            && !statement.contains("match ")
+            && !statement.contains("if let")
+            && !statement.contains(".unwrap_or")
+            && !statement.contains(".ok()")
+            && !statement.contains(".unwrap")
+            && !statement.contains("expect(")
         {
             findings.push(SlopFinding {
                 file: file.to_string(),
@@ -723,6 +734,18 @@ mod tests {
                 .iter()
                 .any(|f| f.pattern == "hallucinated-api" && f.message.contains("serde_json")),
             "handled serde should be exempt: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn multiline_serde_from_str_with_expect_is_exempt() {
+        let diff = "+++ b/src/x.rs\n@@ -0,0 +1,3 @@\n+let parsed: Value = serde_json::from_str(\n+    &fs::read_to_string(&path).expect(\"read config\"),\n+).expect(\"valid JSON\");\n";
+        let findings = scan_unified_diff_for_slop(diff);
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.pattern == "hallucinated-api" && f.message.contains("serde_json")),
+            "handled multiline serde should be exempt: {findings:?}"
         );
     }
 

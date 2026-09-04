@@ -1,7 +1,7 @@
 //! Purpose: Build the command-adapter registry for the token-saving proxy.
 //! Caller: proxy::run when preparing a proxied command.
 //! Dependencies: Built-in Rust adapters plus optional project filter adapters.
-//! Main Functions: build_adapter_registry.
+//! Main Functions: build_adapter_registry, build_builtin_adapter_registry.
 //! Side Effects: Reads optional project filter configuration files from the current workspace.
 
 use crate::adapters::build::BuildAdapter;
@@ -22,6 +22,17 @@ pub fn build_adapter_registry() -> AdapterRegistry {
     for adapter in crate::proxy::filters::load_project_filter_adapters() {
         registry.register(adapter);
     }
+    register_builtin_adapters(&mut registry);
+    registry
+}
+
+pub fn build_builtin_adapter_registry() -> AdapterRegistry {
+    let mut registry = AdapterRegistry::new();
+    register_builtin_adapters(&mut registry);
+    registry
+}
+
+fn register_builtin_adapters(registry: &mut AdapterRegistry) {
     registry.register(Box::new(TestAdapter));
     registry.register(Box::new(GitAdapter));
     registry.register(Box::new(SearchAdapter));
@@ -33,7 +44,6 @@ pub fn build_adapter_registry() -> AdapterRegistry {
     registry.register(Box::new(DatabaseAdapter));
     registry.register(Box::new(LogsAdapter));
     registry.register(Box::new(GenericAdapter));
-    registry
 }
 
 pub fn adapter_names() -> &'static str {

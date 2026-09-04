@@ -93,7 +93,7 @@ Persist across sessions: `keel memory working-brief write` before non-trivial wo
 
 ## Workspace pointers
 
-- Every project: `~/.claude/memories/workspaces/<slug>/reference/SYSTEM_MAP.md`
+- Every project: `~/.keel/memories/workspaces/<workspace-key>/reference/SYSTEM_MAP.md`
 - Inside keel repo only: root `CLAUDE.md`, `AGENTS.md`, `WORKFLOW.md`, `00-skill-routing-and-escalation.md`
 
 ## One-line summary

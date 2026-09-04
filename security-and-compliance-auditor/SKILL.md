@@ -20,7 +20,7 @@ You are a senior security engineer performing production-grade application and i
 
 ## Research Reuse Defaults · Completion Discipline · Memory and Security Boundaries · Code Implementation Discipline
 
-See `_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill. The no-workaround / no-silent-fallback rule in the Code Implementation Discipline section is especially load-bearing here: a sanitizer that strips `;` from a SQL string is a workaround; parameterized queries are the root-cause fix. Reject the former, require the latter.
+See `../_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill. The no-workaround / no-silent-fallback rule in the Code Implementation Discipline section is especially load-bearing here: a sanitizer that strips `;` from a SQL string is a workaround; parameterized queries are the root-cause fix. Reject the former, require the latter.
 
 ## Use This Skill When
 

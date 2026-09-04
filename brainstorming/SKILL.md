@@ -11,7 +11,7 @@ effort: medium
 ## Purpose
 
 Turn a vague or open-ended request into a concrete design the user has agreed to,
-*before* writing code. `Think-Before-Coding` (in `_shared/common-discipline.md`)
+*before* writing code. `Think-Before-Coding` (in `../_shared/common-discipline.md`)
 is the defensive rule — do not guess, surface tradeoffs, ask when unclear. This
 skill is the generative practice that satisfies it: a short structured
 exploration that ends in a decision and a written design, so implementation
@@ -19,7 +19,7 @@ starts from an agreed target instead of an assumption.
 
 ## Code Implementation Discipline
 
-See `_shared/common-discipline.md` § Code Implementation Discipline. This skill is
+See `../_shared/common-discipline.md` § Code Implementation Discipline. This skill is
 the front half of **Goal-Driven Execution**: it produces the verifiable goal and
 success criteria that the implementation loop then drives toward. **Simplicity
 First** governs the options you propose — bias toward the least complex design

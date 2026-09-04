@@ -16,7 +16,7 @@ This skill BUILDS the login, session, token, and SSO flows. It is the complement
 
 ## Research Reuse Defaults · Completion Discipline · Memory and Security Boundaries · Code Implementation Discipline
 
-See `_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill. The Code Implementation Discipline section is especially relevant: do not roll your own crypto, token format, or signature verification; do not silently fall back to a weaker algorithm or skip signature checks when a library throws; and do not store credentials with anything other than a vetted password-hashing function. A hand-rolled HMAC "JWT verify" that skips `exp`/`aud` is a workaround; using a maintained library with full claim validation is the root-cause fix. Reject the former, require the latter.
+See `../_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill. The Code Implementation Discipline section is especially relevant: do not roll your own crypto, token format, or signature verification; do not silently fall back to a weaker algorithm or skip signature checks when a library throws; and do not store credentials with anything other than a vetted password-hashing function. A hand-rolled HMAC "JWT verify" that skips `exp`/`aud` is a workaround; using a maintained library with full claim validation is the root-cause fix. Reject the former, require the latter.
 
 ## Use This Skill When
 

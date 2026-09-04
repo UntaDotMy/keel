@@ -19,7 +19,7 @@ of fresh decisions. A plan that cannot be verified step by step is a wish list.
 
 ## Code Implementation Discipline
 
-See `_shared/common-discipline.md` § Code Implementation Discipline. This skill is
+See `../_shared/common-discipline.md` § Code Implementation Discipline. This skill is
 the planning expression of **Goal-Driven Execution** — its per-step verify checks
 are the "transform vague tasks into verifiable goals" rule applied before any code
 exists. **Simplicity First** governs the plan: the fewest steps that deliver the

@@ -109,7 +109,7 @@ Use a human-style engineering analogy:
 
 - **working memory** = active brief, current files, immediate validation target
 - **workspace memory** = shared repo notes keyed by workspace slug
-- **workstream memory** = focused branch, feature, or task notes under `~/.claude/memories/workspaces/<workspace-slug>/workstreams/<workstream-key>/`
+- **workstream memory** = focused branch, feature, or task notes under `~/.keel/memories/workspaces/<workspace-key>/workstreams/<workstream-key>/`
 - **role memory** = reviewer, worker, architect, or other role-local notes under scoped role or lane folders in the unified memory layout
 - **agent-instance memory** = one bounded lane under the scoped workstream so reused sub-agents keep local context without loading every same-role note
 - **episodic memory** = rollout summaries and recent task outcomes
@@ -151,7 +151,7 @@ Use the smallest acceptable step for classification, routing, candidate filterin
 - `AGENTS.md` requires a working brief before research or coding
 - `AGENTS.md` requires a context retrieval ladder before broad context loading
 - The Rust-native `keel install` command injects the shared execution-policy lines, including the cache-first research reuse gate, into `~/.claude/config.toml`
-- The Rust-native `keel install` command scaffolds workspace, workstream, role, agent-instance, research-cache, archive, and report directories under `~/.claude/memories/`
+- The Rust-native `keel install` command scaffolds workspace, workstream, role, agent-instance, research-cache, archive, and report directories under `~/.keel/memories/`
 - `keel code-search search` queries the persistent local workspace index for ranked file/symbol/chunk evidence; refresh it with `keel code-index refresh` when status reports stale. There is no live-scan or legacy fallback.
 - `keel memory scope resolve` resolves scoped search order and write targets for the active workspace
 - `keel memory scope resolve` proves where the unified workspace, workstream, lane, and reference artifacts live

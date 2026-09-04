@@ -7,24 +7,29 @@
 use std::path::Path;
 #[cfg(windows)]
 use std::path::PathBuf;
+use std::time::Duration;
 
 use rusqlite::Connection;
 #[cfg(windows)]
 use rusqlite::OpenFlags;
 
 pub(crate) fn open_connection(path: &Path) -> rusqlite::Result<Connection> {
-    #[cfg(windows)]
-    {
-        Connection::open_with_flags_and_vfs(
-            windows_extended_path(path),
-            OpenFlags::default(),
-            "win32-longpath",
-        )
-    }
-    #[cfg(not(windows))]
-    {
-        Connection::open(path)
-    }
+    let connection = {
+        #[cfg(windows)]
+        {
+            Connection::open_with_flags_and_vfs(
+                windows_extended_path(path),
+                OpenFlags::default(),
+                "win32-longpath",
+            )
+        }
+        #[cfg(not(windows))]
+        {
+            Connection::open(path)
+        }
+    }?;
+    connection.busy_timeout(Duration::from_secs(10))?;
+    Ok(connection)
 }
 
 pub(crate) fn create_parent_directory(path: &Path) -> std::io::Result<()> {

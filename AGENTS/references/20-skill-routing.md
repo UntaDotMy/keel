@@ -111,7 +111,7 @@ The profiles mirror the specialist skills one-to-one:
 - **git-expert**: Git workflows, history surgery, branching, and release hygiene
 - **memory-status-reporter**: Memory health, learning recaps, mistake ledgers, user-needs summaries, and heuristic status reporting
 - **mobile-development-life-cycle**: Android and iOS lifecycle, permissions, offline sync, and release flow
-- **preserve-existing-flow**: Brownfield ownership tracing, `~/.claude/memories/workspaces/<workspace-slug>/flow/flow-check.json` evidence, and behavior preservation before existing-source edits
+- **preserve-existing-flow**: Brownfield ownership tracing, `~/.keel/memories/workspaces/<workspace-key>/flow/flow-check.json` evidence, and behavior preservation before existing-source edits
 - **qa-and-automation-engineer**: Test automation, regression coverage, E2E flow, and validation strategy
 - **reviewer**: Feedback, code review, production-readiness checks, and final quality gate
 - **security-and-compliance-auditor**: Vulnerability hunting, threat modeling, and compliance checks

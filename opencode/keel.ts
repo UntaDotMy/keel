@@ -1,3 +1,4 @@
+// keel:managed-host-file (remove this line before customizing to opt out of upgrades)
 import type { Plugin } from "@opencode-ai/plugin";
 import {
   clearIronLawMarker as clearIronLaw,

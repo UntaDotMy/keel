@@ -10,8 +10,7 @@ use std::path::PathBuf;
 
 use crate::args::FlagSet;
 use crate::json::{write_indented, Value};
-use crate::runtime::{display_path, resolve_claude_home, resolve_repository_root, write_text};
-use crate::utility::workspace_index;
+use crate::runtime::{display_path, resolve_claude_home, resolve_repository_root};
 
 use super::shared::is_help_argument;
 
@@ -111,22 +110,18 @@ fn run_scope_resolve(
             return 1;
         }
     }
+    let mut system_map_changed = false;
     if flag_set.bool_value("refresh-system-map") || !system_map_path.is_file() {
-        let map_content =
-            match workspace_index::render_map(&workspace_root, &claude_home.to_string_lossy()) {
-                Ok(content) => content,
-                Err(error) => {
-                    let _ = writeln!(standard_error, "build indexed system map: {error}");
-                    return 1;
-                }
-            };
-        if let Err(error) = write_text(&system_map_path, &map_content) {
-            let _ = writeln!(
-                standard_error,
-                "write {}: {error}",
-                display_path(&system_map_path)
-            );
-            return 1;
+        match super::system_map_cmd::refresh_system_map_with_status(
+            &claude_home,
+            command_group,
+            &workspace_root,
+        ) {
+            Ok(report) => system_map_changed = report.changed,
+            Err(error) => {
+                let _ = writeln!(standard_error, "build indexed system map: {error}");
+                return 1;
+            }
         }
     }
     let format = flag_set.string_value("format");
@@ -157,6 +152,7 @@ fn run_scope_resolve(
                 "systemMapPath".into(),
                 Value::String(display_path(&system_map_path)),
             ),
+            ("systemMapChanged".into(), Value::Bool(system_map_changed)),
         ]);
         return write_indented(standard_output, &payload).map_or(1, |_| 0);
     }

@@ -1,3 +1,4 @@
+<!-- keel:managed-host-file (remove this line before customizing to opt out of upgrades) -->
 # Subagent Iron Law — Read First Every Invocation
 
 You are a subagent. You spawned with a fresh context window. The parent's

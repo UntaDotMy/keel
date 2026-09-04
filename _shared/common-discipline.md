@@ -1,3 +1,4 @@
+<!-- keel:managed-host-file (remove this line before customizing to opt out of upgrades) -->
 # Shared Discipline — Common Standards Across Skills
 
 This file factors out instructions that previously repeated verbatim across the specialist SKILL.md files. Each skill now references this file instead of duplicating the text. Loaded on demand by the active skill — saves tokens on every skill activation.
@@ -271,4 +272,3 @@ Applies to every word written for a human or the record: docs, code comments, co
 - [Martin Fowler — Code As Documentation](https://martinfowler.com/bliki/CodeAsDocumentation.html)
 - [Rust API Guidelines — Documentation](https://rust-lang.github.io/api-guidelines/documentation.html)
 - [TSDoc — TypeScript Documentation Standard](https://tsdoc.org/)
-

@@ -99,8 +99,16 @@ pub fn run_stats_command(
 /// the owning readers; `stats` adds no parsing of its own on top of them.
 struct StatsSnapshot {
     tokens_saved: u64,
+    tokens_overhead: u64,
+    net_tokens_saved: i64,
     tokens_before: u64,
     savings_percent: f64,
+    net_savings_percent: f64,
+    session_start_context_tokens_now: usize,
+    user_prompt_base_context_tokens_now: usize,
+    user_prompt_code_change_context_tokens_now: usize,
+    mcp_catalog_tokens_now: usize,
+    mcp_tool_count: usize,
     commands_observed: u64,
     commands_compacted: u64,
     top_commands: Vec<(String, u64)>,
@@ -177,11 +185,30 @@ fn collect_snapshot(
     // Real anvil state, scoped to the requested workspace. Empty means nothing
     // was ever run there; renderers must omit the axis instead of faking one.
     let anvil_jobs = active_jobs_summary(claude_home, Some(Path::new(workspace_root)));
+    let session_start_context_tokens_now = crate::proxy::token_meter::TokenMeter::count_text(
+        &crate::runner::hook_lifecycle::session_start_context(),
+    );
+    let user_prompt_base_context_tokens_now = crate::proxy::token_meter::TokenMeter::count_text(
+        &crate::runner::hook_lifecycle::user_prompt_submit_context(""),
+    );
+    let user_prompt_code_change_context_tokens_now =
+        crate::proxy::token_meter::TokenMeter::count_text(
+            &crate::runner::hook_lifecycle::user_prompt_submit_context("fix the bug"),
+        );
+    let (mcp_tool_count, mcp_catalog_tokens_now) = crate::mcp::tools_list_context_snapshot();
 
     StatsSnapshot {
         tokens_saved: gain.tokens_saved,
+        tokens_overhead: gain.tokens_overhead,
+        net_tokens_saved: gain.net_tokens_saved,
         tokens_before: gain.tokens_before,
         savings_percent: gain.savings_percent(),
+        net_savings_percent: gain.net_savings_percent(),
+        session_start_context_tokens_now,
+        user_prompt_base_context_tokens_now,
+        user_prompt_code_change_context_tokens_now,
+        mcp_catalog_tokens_now,
+        mcp_tool_count,
         commands_observed: gain.commands_observed,
         commands_compacted: gain.commands_compacted,
         top_commands,
@@ -232,8 +259,26 @@ impl StatsSnapshot {
     fn render_text(&self, standard_output: &mut dyn Write, days: u64) {
         let _ = writeln!(
             standard_output,
-            "keel stats (last {}d): {} tokens saved ({:.1}% of {})",
-            days, self.tokens_saved, self.savings_percent, self.tokens_before
+            "keel stats (last {}d): {} net tokens saved ({:.1}% of {})",
+            days, self.net_tokens_saved, self.net_savings_percent, self.tokens_before
+        );
+        let _ = writeln!(
+            standard_output,
+            "  command compaction: {} gross saved ({:.1}%), {} wrapper overhead",
+            self.tokens_saved, self.savings_percent, self.tokens_overhead
+        );
+        let _ = writeln!(
+            standard_output,
+            "  context now (o200k_base): session-start {}, user-prompt base {}/turn, code-change {}/turn, MCP catalog {} ({} tools)",
+            self.session_start_context_tokens_now,
+            self.user_prompt_base_context_tokens_now,
+            self.user_prompt_code_change_context_tokens_now,
+            self.mcp_catalog_tokens_now,
+            self.mcp_tool_count
+        );
+        let _ = writeln!(
+            standard_output,
+            "  scope: command savings exclude hook and MCP catalog context; end-to-end net depends on host usage"
         );
         let _ = writeln!(
             standard_output,
@@ -325,12 +370,59 @@ impl StatsSnapshot {
                 Value::Number(self.tokens_saved.to_string()),
             ),
             (
+                "grossTokensSaved".into(),
+                Value::Number(self.tokens_saved.to_string()),
+            ),
+            (
+                "tokensOverhead".into(),
+                Value::Number(self.tokens_overhead.to_string()),
+            ),
+            (
+                "netTokensSaved".into(),
+                Value::Number(self.net_tokens_saved.to_string()),
+            ),
+            (
                 "tokensBefore".into(),
                 Value::Number(self.tokens_before.to_string()),
             ),
             (
                 "savingsPercent".into(),
                 Value::Number(format!("{:.2}", self.savings_percent)),
+            ),
+            (
+                "grossSavingsPercent".into(),
+                Value::Number(format!("{:.2}", self.savings_percent)),
+            ),
+            (
+                "netSavingsPercent".into(),
+                Value::Number(format!("{:.2}", self.net_savings_percent)),
+            ),
+            (
+                "sessionStartContextTokensNow".into(),
+                Value::Number(self.session_start_context_tokens_now.to_string()),
+            ),
+            (
+                "userPromptBaseContextTokensNow".into(),
+                Value::Number(self.user_prompt_base_context_tokens_now.to_string()),
+            ),
+            (
+                "userPromptCodeChangeContextTokensNow".into(),
+                Value::Number(self.user_prompt_code_change_context_tokens_now.to_string()),
+            ),
+            (
+                "mcpCatalogTokensNow".into(),
+                Value::Number(self.mcp_catalog_tokens_now.to_string()),
+            ),
+            (
+                "mcpToolCount".into(),
+                Value::Number(self.mcp_tool_count.to_string()),
+            ),
+            (
+                "measurementScope".into(),
+                Value::String(
+                    "command-output net excludes hook and MCP catalog context; current context costs are reported separately"
+                        .into(),
+                ),
             ),
             (
                 "commandsObserved".into(),
@@ -454,10 +546,11 @@ mod tests {
     fn snapshot_reports_real_anvil_jobs_for_seeded_store() {
         with_isolated_home("render-seeded", |home| {
             let workspace_root = "C:/anvil-stats-ws";
+            let expected_lane = crate::utility::system_map::workspace_key(workspace_root);
             let lane = home
                 .join("memories")
                 .join("workspaces")
-                .join("c-anvil-stats-ws")
+                .join(&expected_lane)
                 .join("anvil");
             fs::create_dir_all(&lane).expect("seed lane");
             fs::write(lane.join("anvil.lock.json"), "{}").expect("seed lock");
@@ -468,7 +561,7 @@ mod tests {
             let rendered = String::from_utf8_lossy(&out);
             assert!(rendered.contains("anvil: 1 job(s)"), "rendered: {rendered}");
             assert!(
-                rendered.contains("c-anvil-stats-ws [active]"),
+                rendered.contains(&format!("{expected_lane} [active]")),
                 "rendered: {rendered}"
             );
         });
@@ -484,6 +577,17 @@ mod tests {
             let keys: Vec<&str> = map.iter().map(|(key, _)| key.as_str()).collect();
             for expected in [
                 "tokensSaved",
+                "grossTokensSaved",
+                "tokensOverhead",
+                "netTokensSaved",
+                "grossSavingsPercent",
+                "netSavingsPercent",
+                "sessionStartContextTokensNow",
+                "userPromptBaseContextTokensNow",
+                "userPromptCodeChangeContextTokensNow",
+                "mcpCatalogTokensNow",
+                "mcpToolCount",
+                "measurementScope",
                 "commandsObserved",
                 "topCommands",
                 "topTools",

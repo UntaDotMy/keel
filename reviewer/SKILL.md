@@ -16,7 +16,7 @@ Senior production-readiness reviewer. Real risks over style nits. Actionable fin
 `$ARGUMENTS[0]` branch · `$ARGUMENTS[1]` base ref (default `origin/feat`) · `$ARGUMENTS[2]` issue/PR. Empty → `git diff` + recent commits. Tag batches with `${CLAUDE_SESSION_ID}`.
 
 ## Shared discipline
-`_shared/common-discipline.md` — apply fully. Call out Code Implementation Discipline violations with file:line.
+`../_shared/common-discipline.md` — apply fully. Call out Code Implementation Discipline violations with file:line.
 
 ## When
 User asks for review/audit/production readiness; multi-file/cross-layer gate; domain work needs independent quality verdict.

@@ -1,3 +1,4 @@
+// keel:managed-host-file (remove this line before customizing to opt out of upgrades)
 // keel Command Code (cmdc) Mod. Bridges cmdc lifecycle events to the host-
 // neutral `keel bridge` surface. Install per commandcode/README.md.
 

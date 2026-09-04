@@ -1039,9 +1039,10 @@ pub(crate) fn report_bridge_host_wiring(
 
     let antigravity_node = which::which("node").is_ok();
     let mut antigravity_present = false;
-    for (name, antigravity) in [
+    for (name, antigravity_root, antigravity) in [
         (
             "antigravity",
+            home.join(".gemini").join("config"),
             home.join(".gemini")
                 .join("config")
                 .join("plugins")
@@ -1049,6 +1050,7 @@ pub(crate) fn report_bridge_host_wiring(
         ),
         (
             "antigravity-cli",
+            home.join(".gemini").join("antigravity-cli"),
             home.join(".gemini")
                 .join("antigravity-cli")
                 .join("plugins")
@@ -1059,7 +1061,7 @@ pub(crate) fn report_bridge_host_wiring(
             continue;
         }
         antigravity_present = true;
-        let antigravity_mcp = fs::read_to_string(antigravity.join("mcp_config.json"))
+        let antigravity_mcp = fs::read_to_string(antigravity_root.join("mcp_config.json"))
             .ok()
             .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
             .is_some_and(|doc| {
@@ -1077,7 +1079,12 @@ pub(crate) fn report_bridge_host_wiring(
                 .join("using-keel")
                 .join("SKILL.md")
                 .is_file();
-        report_host(standard_output, name, antigravity_wired, antigravity_mcp);
+        report_host(
+            standard_output,
+            name,
+            antigravity_wired && antigravity_mcp,
+            antigravity_mcp,
+        );
     }
     if antigravity_present {
         write_doctor_check(
@@ -1465,6 +1472,11 @@ mod tests {
             r#"{"mcpServers":{"keel":{}}}"#,
         )
         .unwrap();
+        fs::write(
+            home.join(".gemini").join("config").join("mcp_config.json"),
+            r#"{"mcpServers":{"keel":{}}}"#,
+        )
+        .unwrap();
         fs::write(antigravity.join("hooks.json"), r#"{"keel":{}}"#).unwrap();
         fs::write(antigravity.join("keel-antigravity.js"), "keel").unwrap();
         fs::create_dir_all(antigravity.join("rules")).unwrap();
@@ -1489,6 +1501,13 @@ mod tests {
         fs::write(antigravity_cli.join("plugin.json"), r#"{"name":"keel"}"#).unwrap();
         fs::write(
             antigravity_cli.join("mcp_config.json"),
+            r#"{"mcpServers":{"keel":{}}}"#,
+        )
+        .unwrap();
+        fs::write(
+            home.join(".gemini")
+                .join("antigravity-cli")
+                .join("mcp_config.json"),
             r#"{"mcpServers":{"keel":{}}}"#,
         )
         .unwrap();
@@ -1531,6 +1550,42 @@ mod tests {
         assert!(output.contains("[ok] zcode host:"), "{output}");
         assert!(output.contains("[ok] antigravity host:"), "{output}");
         assert!(output.contains("[ok] antigravity-cli host:"), "{output}");
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn antigravity_host_warns_when_plugin_mcp_exists_but_global_mcp_is_missing() {
+        let claude_home = unique_home("antigravity-missing-global-mcp");
+        let home = claude_home.parent().unwrap();
+        let plugin = home
+            .join(".gemini")
+            .join("config")
+            .join("plugins")
+            .join("keel");
+        fs::create_dir_all(plugin.join("rules")).unwrap();
+        fs::create_dir_all(plugin.join("skills").join("using-keel")).unwrap();
+        fs::write(plugin.join("plugin.json"), r#"{"name":"keel"}"#).unwrap();
+        fs::write(
+            plugin.join("mcp_config.json"),
+            r#"{"mcpServers":{"keel":{}}}"#,
+        )
+        .unwrap();
+        fs::write(plugin.join("hooks.json"), r#"{"keel":{}}"#).unwrap();
+        fs::write(plugin.join("keel-antigravity.js"), "keel").unwrap();
+        fs::write(plugin.join("rules").join("keel.md"), "keel").unwrap();
+        fs::write(
+            plugin.join("skills").join("using-keel").join("SKILL.md"),
+            "keel",
+        )
+        .unwrap();
+
+        let mut output = Vec::new();
+        report_bridge_host_wiring(&mut output, &claude_home);
+        let output = String::from_utf8(output).unwrap();
+        assert!(
+            output.contains("[warn] antigravity host: not wired"),
+            "doctor must not report a plugin-only MCP registration as active: {output}"
+        );
         let _ = fs::remove_dir_all(home);
     }
     #[test]

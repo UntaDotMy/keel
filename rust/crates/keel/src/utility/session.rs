@@ -62,6 +62,8 @@ pub fn run_session_command(
             .or_else(|| event.get("tokensSaved"))
             .and_then(serde_json::Value::as_u64)
             .unwrap_or_else(|| tokens_before.saturating_sub(tokens_after));
+        let tokens_overhead = tokens_after.saturating_sub(tokens_before);
+        let net_tokens_saved = signed_token_delta(tokens_before, tokens_after);
         let compacted = event
             .get("compacted")
             .and_then(serde_json::Value::as_bool)
@@ -76,6 +78,8 @@ pub fn run_session_command(
             tokens_before,
             tokens_after,
             tokens_saved,
+            tokens_overhead,
+            net_tokens_saved,
             compacted,
             exit_code,
         });
@@ -118,6 +122,8 @@ pub fn run_session_command(
                         tokens_before: event.tokens_before,
                         tokens_after: event.tokens_after,
                         tokens_saved: event.tokens_saved,
+                        tokens_overhead: event.tokens_overhead,
+                        net_tokens_saved: event.net_tokens_saved,
                         failed: if event.exit_code != 0 { 1 } else { 0 },
                     },
                 );
@@ -132,6 +138,12 @@ pub fn run_session_command(
             session.tokens_before += event.tokens_before;
             session.tokens_after += event.tokens_after;
             session.tokens_saved += event.tokens_saved;
+            session.tokens_overhead = session
+                .tokens_overhead
+                .saturating_add(event.tokens_overhead);
+            session.net_tokens_saved = session
+                .net_tokens_saved
+                .saturating_add(event.net_tokens_saved);
             if event.exit_code != 0 {
                 session.failed += 1;
             }
@@ -144,6 +156,8 @@ pub fn run_session_command(
                 tokens_before: event.tokens_before,
                 tokens_after: event.tokens_after,
                 tokens_saved: event.tokens_saved,
+                tokens_overhead: event.tokens_overhead,
+                net_tokens_saved: event.net_tokens_saved,
                 failed: if event.exit_code != 0 { 1 } else { 0 },
             });
         }
@@ -157,6 +171,11 @@ pub fn run_session_command(
     let total_before: u64 = sessions.iter().map(|session| session.tokens_before).sum();
     let total_after: u64 = sessions.iter().map(|session| session.tokens_after).sum();
     let total_saved: u64 = sessions.iter().map(|session| session.tokens_saved).sum();
+    let total_overhead: u64 = sessions.iter().map(|session| session.tokens_overhead).sum();
+    let total_net_saved: i64 = sessions
+        .iter()
+        .map(|session| session.net_tokens_saved)
+        .sum();
     let total_failed: u64 = sessions.iter().map(|session| session.failed).sum();
 
     if flag_set.bool_value("json") {
@@ -193,6 +212,18 @@ pub fn run_session_command(
                         "tokensSaved".into(),
                         Value::Number(session.tokens_saved.to_string()),
                     ),
+                    (
+                        "grossTokensSaved".into(),
+                        Value::Number(session.tokens_saved.to_string()),
+                    ),
+                    (
+                        "tokensOverhead".into(),
+                        Value::Number(session.tokens_overhead.to_string()),
+                    ),
+                    (
+                        "netTokensSaved".into(),
+                        Value::Number(session.net_tokens_saved.to_string()),
+                    ),
                 ])
             })
             .collect();
@@ -227,6 +258,18 @@ pub fn run_session_command(
                 Value::Number(total_saved.to_string()),
             ),
             (
+                "totalGrossTokensSaved".into(),
+                Value::Number(total_saved.to_string()),
+            ),
+            (
+                "totalTokensOverhead".into(),
+                Value::Number(total_overhead.to_string()),
+            ),
+            (
+                "totalNetTokensSaved".into(),
+                Value::Number(total_net_saved.to_string()),
+            ),
+            (
                 "savingsPercent".into(),
                 Value::Number(format!(
                     "{:.1}",
@@ -237,21 +280,32 @@ pub fn run_session_command(
                     }
                 )),
             ),
+            (
+                "netSavingsPercent".into(),
+                Value::Number(format!(
+                    "{:.1}",
+                    if total_before == 0 {
+                        0.0
+                    } else {
+                        total_net_saved as f64 / total_before as f64 * 100.0
+                    }
+                )),
+            ),
         ]);
         return write_indented(standard_output, &payload).map_or(1, |_| 0);
     }
 
     let _ = writeln!(
         standard_output,
-        " {:<11} {:>8} {:>8} {:>8} {:>8} {:>7} {:>9}",
-        "Session", "Cmds", "Saved", "Before", "After", "Savings", "Compacted"
+        " {:<11} {:>8} {:>8} {:>8} {:>8} {:>8} {:>7} {:>9}",
+        "Session", "Cmds", "Net", "Gross", "Over", "Before", "Savings", "Compacted"
     );
     let _ = writeln!(
         standard_output,
         " {}",
         format_args!(
-            "{:-<11} {:-<8} {:-<8} {:-<8} {:-<8} {:-<7} {:-<9}",
-            "", "", "", "", "", "", ""
+            "{:-<11} {:-<8} {:-<8} {:-<8} {:-<8} {:-<8} {:-<7} {:-<9}",
+            "", "", "", "", "", "", "", ""
         )
     );
     for session in &sessions {
@@ -259,16 +313,17 @@ pub fn run_session_command(
         let savings = if session.tokens_before == 0 {
             0.0
         } else {
-            session.tokens_saved as f64 / session.tokens_before as f64 * 100.0
+            session.net_tokens_saved as f64 / session.tokens_before as f64 * 100.0
         };
         let _ = writeln!(
             standard_output,
-            " {:<11} {:>8} {:>8} {:>8} {:>8} {:>6.1}% {:>9}",
+            " {:<11} {:>8} {:>8} {:>8} {:>8} {:>8} {:>6.1}% {:>9}",
             label,
             session.commands,
+            format_signed_count(session.net_tokens_saved),
             format_count(session.tokens_saved),
+            format_count(session.tokens_overhead),
             format_count(session.tokens_before),
-            format_count(session.tokens_after),
             savings,
             session.compacted,
         );
@@ -277,23 +332,24 @@ pub fn run_session_command(
         standard_output,
         " {}",
         format_args!(
-            "{:-<11} {:-<8} {:-<8} {:-<8} {:-<8} {:-<7} {:-<9}",
-            "", "", "", "", "", "", ""
+            "{:-<11} {:-<8} {:-<8} {:-<8} {:-<8} {:-<8} {:-<7} {:-<9}",
+            "", "", "", "", "", "", "", ""
         )
     );
     let total_savings = if total_before == 0 {
         0.0
     } else {
-        total_saved as f64 / total_before as f64 * 100.0
+        total_net_saved as f64 / total_before as f64 * 100.0
     };
     let _ = writeln!(
         standard_output,
-        " {:<11} {:>8} {:>8} {:>8} {:>8} {:>6.1}% {:>9}",
+        " {:<11} {:>8} {:>8} {:>8} {:>8} {:>8} {:>6.1}% {:>9}",
         if all_sessions { "Overall" } else { "Period" },
         total_commands,
+        format_signed_count(total_net_saved),
         format_count(total_saved),
+        format_count(total_overhead),
         format_count(total_before),
-        format_count(total_after),
         total_savings,
         total_compacted,
     );
@@ -371,11 +427,26 @@ fn format_count(count: u64) -> String {
     }
 }
 
+fn format_signed_count(count: i64) -> String {
+    if count < 0 {
+        format!("-{}", format_count(count.unsigned_abs()))
+    } else {
+        format_count(count as u64)
+    }
+}
+
+fn signed_token_delta(before: u64, after: u64) -> i64 {
+    let delta = before as i128 - after as i128;
+    delta.clamp(i64::MIN as i128, i64::MAX as i128) as i64
+}
+
 struct SessionEvent {
     timestamp: u64,
     tokens_before: u64,
     tokens_after: u64,
     tokens_saved: u64,
+    tokens_overhead: u64,
+    net_tokens_saved: i64,
     compacted: bool,
     exit_code: i32,
 }
@@ -388,6 +459,8 @@ struct SessionSummary {
     tokens_before: u64,
     tokens_after: u64,
     tokens_saved: u64,
+    tokens_overhead: u64,
+    net_tokens_saved: i64,
     failed: u64,
 }
 
@@ -482,6 +555,13 @@ mod tests {
         assert_eq!(format_count(999), "999");
         assert_eq!(format_count(1000), "1.0K");
         assert_eq!(format_count(1_000_000), "1.0M");
+    }
+
+    #[test]
+    fn signed_token_delta_exposes_output_growth() {
+        assert_eq!(signed_token_delta(100, 20), 80);
+        assert_eq!(signed_token_delta(10, 13), -3);
+        assert_eq!(format_signed_count(-1_500), "-1.5K");
     }
 
     #[test]

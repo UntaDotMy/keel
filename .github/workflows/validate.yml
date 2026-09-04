@@ -267,7 +267,16 @@ jobs:
         run: bun install --frozen-lockfile
       - name: Audit OpenCode dependencies
         working-directory: opencode
-        run: bun audit
+        run: |
+          out=$(bun audit 2>&1) || status=$?
+          echo "$out"
+          if [ "${status:-0}" -ne 0 ]; then
+            if echo "$out" | grep -Eq "503|502|504|ETIMEDOUT|ECONNRESET|fetch failed"; then
+              echo "::warning::bun audit failed due to upstream npm registry service unavailability; ignoring transient outage."
+              exit 0
+            fi
+            exit "$status"
+          fi
       - name: Check TypeScript adapter syntax
         run: |
           bun --check _shared/ts/bridge-core.ts

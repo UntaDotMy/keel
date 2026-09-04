@@ -20,7 +20,7 @@ actually change the decision).
 
 ## Code Implementation Discipline
 
-See `_shared/common-discipline.md` § Code Implementation Discipline. This skill is
+See `../_shared/common-discipline.md` § Code Implementation Discipline. This skill is
 **Goal-Driven Execution** applied to instructions: "write the failing test, then
 make it pass" becomes "prove the model fails without the skill, then write the
 minimum prose that makes it pass." **Simplicity First** governs the prose — the

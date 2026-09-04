@@ -24,7 +24,7 @@
 7. Read every command output before responding. Do not paraphrase away uncertainty.
 8. If tool-use mistakes were part of the work, ensure the rollout summary captures the tool name, failure symptom, cause, verified fix, and prevention note so future reports can surface it.
 9. If research produced a reusable finding, record it inside the scoped working brief so the next task rereads it with source and freshness context, and archive stale or superseded entries instead of replaying them forever.
-10. If the user wants a saved artifact, write the composed report to a file with the `Write` tool under `~/.claude/memories/reports/<date>-memory-status.md`.
+10. If the user wants a saved artifact, write the composed report under `~/.keel/memories/reports/<date>-memory-status.md`.
 11. If the user wants a broader window, widen the file walk to a trailing seven-day slice ending on the anchor date by filtering scoped files by their dated names or modification times.
 12. When the user supplies a durable correction or decision, the main lane should persist it through the right layer before this skill summarizes the updated memory state. For corrections that must survive a single task (a name spelling, a permanent preference, a confirmed constraint), append to `SESSION-STATE.md` with the `Write` tool. For task-scoped decisions tied to active work, capture them in the scoped working brief instead:
    ```bash
@@ -54,18 +54,18 @@
 
 ## Source Priority
 
-1. `~/.claude/memories/agents/<role>/<workspace-slug>/workstreams/<workstream-key>/instances/<agent-instance>/MEMORY.md` for the current scoped role instance memory
-2. `~/.claude/memories/agents/<role>/<workspace-slug>/workstreams/<workstream-key>/MEMORY.md` for role-local notes within the active workstream
-3. `~/.claude/memories/workspaces/<workspace-slug>/workstreams/<workstream-key>/memory/SESSION-STATE.md` and `working-buffer.md` for WAL-backed corrections and high-context breadcrumbs
-4. `~/.claude/memories/workspaces/<workspace-slug>/workstreams/<workstream-key>/SUMMARY.md` and `MEMORY.md` for focused branch or task notes
-5. `~/.claude/memories/workspaces/<workspace-slug>/SUMMARY.md` and `MEMORY.md` for workspace-shared notes
-6. `~/.claude/memories/research_cache/<workspace-slug>/cache.jsonl` for shared reusable findings, freshness notes, and reward or penalty status
-7. Matching `~/.claude/memories/rollout_summaries/*.md` summary entries for dated task outcomes, reusable knowledge, rewarded patterns, penalty patterns, research-cache updates, and captured tool-use failure patterns; follow each summary's `rollout_path` into the deeper session `.jsonl` only when exact evidence is needed
-8. `~/.claude/memories/workspaces/<workspace-slug>/reference/` and `~/.claude/memories/workspaces/<workspace-slug>/workstreams/<workstream-key>/reference/` for deeper L3 references opened on demand
-9. `~/.claude/memories/archive/<workspace-slug>/workstreams/<workstream-key>/` for stale or superseded notes that should not be replayed by default
-10. `~/.claude/memories/MEMORY.md` for durable cross-session learnings
-11. `~/.claude/memories/memory_summary.md` for user-needs context
-12. `~/.claude/memories/raw_memories.md` only when higher-priority files are too thin
+1. `~/.keel/memories/agents/<role>/<workspace-key>/workstreams/<workstream-key>/instances/<agent-instance>/MEMORY.md` for the current scoped role instance memory
+2. `~/.keel/memories/agents/<role>/<workspace-key>/workstreams/<workstream-key>/MEMORY.md` for role-local notes within the active workstream
+3. `~/.keel/memories/workspaces/<workspace-key>/workstreams/<workstream-key>/memory/SESSION-STATE.md` and `working-buffer.md` for WAL-backed corrections and high-context breadcrumbs
+4. `~/.keel/memories/workspaces/<workspace-key>/workstreams/<workstream-key>/SUMMARY.md` and `MEMORY.md` for focused branch or task notes
+5. `~/.keel/memories/workspaces/<workspace-key>/SUMMARY.md` and `MEMORY.md` for workspace-shared notes
+6. `~/.keel/memories/research_cache/<workspace-key>/cache.jsonl` for shared reusable findings, freshness notes, and reward or penalty status
+7. Matching `~/.keel/memories/rollout_summaries/*.md` summary entries for dated task outcomes, reusable knowledge, rewarded patterns, penalty patterns, research-cache updates, and captured tool-use failure patterns; follow each summary's `rollout_path` into the deeper session `.jsonl` only when exact evidence is needed
+8. `~/.keel/memories/workspaces/<workspace-key>/reference/` and `~/.keel/memories/workspaces/<workspace-key>/workstreams/<workstream-key>/reference/` for deeper L3 references opened on demand
+9. `~/.keel/memories/archive/<workspace-key>/workstreams/<workstream-key>/` for stale or superseded notes that should not be replayed by default
+10. `~/.keel/memories/MEMORY.md` for durable cross-session learnings
+11. `~/.keel/memories/memory_summary.md` for user-needs context
+12. `~/.keel/memories/raw_memories.md` only when higher-priority files are too thin
 
 ## Guardrails
 

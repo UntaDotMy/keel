@@ -29,7 +29,7 @@ pub(crate) use flags::PlatformName;
 #[cfg(all(test, windows))]
 pub(crate) use hosts::grok_hooks_are_current;
 #[cfg(test)]
-pub(crate) use hosts::grok_hooks_payload;
+pub(crate) use hosts::{antigravity_hooks_payload, grok_hooks_payload};
 pub(crate) use hosts::{
     grok_config_home, grok_hooks_are_effective, maybe_wire_agents_gateway, maybe_wire_antigravity,
     maybe_wire_codex, maybe_wire_commandcode, maybe_wire_cowork, maybe_wire_cursor,

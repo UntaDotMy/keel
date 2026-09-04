@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# keel:managed-host-file (remove this line before customizing to opt out of upgrades)
 # ---------------------------------------------------------------------------
 # keel Cursor adapter — bridges Cursor hook events to `keel bridge`.
 #

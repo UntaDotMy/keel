@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+// keel:managed-host-file (remove this line before customizing to opt out of upgrades)
 // ---------------------------------------------------------------------------
 // keel Codex CLI Plugin — bridges Codex lifecycle events to `keel bridge`
 //

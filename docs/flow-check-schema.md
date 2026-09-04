@@ -2,18 +2,18 @@
 Purpose: Document the native preserve-existing-flow evidence artifact schema.
 Caller: Agents, reviewers, and native review gates that need machine-checkable brownfield evidence.
 Dependencies: keel-flow schema validation and keel flow commands.
-Main Functions: Defines ~/.claude/memories/workspaces/<workspace-slug>/flow/flow-check.json fields, exemptions, and validation rules.
+Main Functions: Defines ~/.keel/memories/workspaces/<workspace-key>/flow/flow-check.json fields, exemptions, and validation rules.
 Side Effects: None.
 -->
 # Preserve Existing Flow Check Schema
 
-Existing source-file edits need a flow-check artifact before review gates pass. The default path is `~/.claude/memories/workspaces/<workspace-slug>/flow/flow-check.json`, created with:
+Existing source-file edits need a flow-check artifact before review gates pass. The default path is `~/.keel/memories/workspaces/<workspace-key>/flow/flow-check.json`, created with:
 
 ```bash
 keel flow start --target-file rust/crates/keel/src/commands.rs --target-function Application::run
 ```
 
-The default artifact lives in the harness-global per-workspace storage, not in the repository checkout. CI review gates should read that same global path or an explicit `--artifact <path>` override; do not commit the default runtime artifact into the user workspace. It records the evidence that must exist before editing established code.
+The default artifact lives at `~/.keel/memories/workspaces/<workspace-key>/flow/flow-check.json`, not in the repository checkout. The key is a bounded slug plus a hash of the canonical absolute workspace path. CI review gates should read that same global path or an explicit `--artifact <path>` override; do not commit the default runtime artifact into the user workspace. It records the evidence that must exist before editing established code.
 
 ## Schema
 
@@ -46,6 +46,8 @@ The default artifact lives in the harness-global per-workspace storage, not in t
 ## Validation Rules
 
 `keel flow check` and native review gates require `version`, `target_file`, the owner path fields, at least one consumer, at least one validation target, and at least one validation evidence item for existing-source edits.
+
+`keel flow finish` records the current repository HEAD and diff fingerprint. JSON output from a later `flow check` reports `finalized: true` when that evidence exists and `current: true` only while HEAD and the working diff still match. Further edits make the artifact stale until it is finished again.
 
 Docs-only, formatting-only, generated-only, and greenfield changes are explicit exemptions. Review gates do not require a flow check when all changed source files are newly added, and they do not require it for docs-only changes.
 

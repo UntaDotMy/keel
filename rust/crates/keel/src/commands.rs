@@ -9,8 +9,8 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use keel_flow::{
-    finalize_check, load_check, new_template_check, resolve_artifact_path, validate_check,
-    validate_finished_check, write_check, DEFAULT_ARTIFACT_PATH, SCHEMA_VERSION,
+    finalize_check, load_check, new_template_check, repository_state, resolve_artifact_path,
+    validate_check, validate_finished_check, write_check, DEFAULT_ARTIFACT_PATH, SCHEMA_VERSION,
 };
 use keel_platform::{detect_current_target, Target};
 use keel_releaseassets::{
@@ -779,9 +779,11 @@ impl Application {
                 );
                 return 1;
             }
-            if let Err(error) =
-                write_check(&repository_root, flag_set.string_value("artifact"), check)
-            {
+            if let Err(error) = write_check(
+                &repository_root,
+                flag_set.string_value("artifact"),
+                check.clone(),
+            ) {
                 let _ = writeln!(
                     standard_error,
                     "Unable to persist finalized flow evidence: {error}"
@@ -789,6 +791,14 @@ impl Application {
                 return 1;
             }
         }
+
+        let finalized = validate_finished_check(check.clone()).is_empty();
+        let current = finalized
+            && repository_state(&repository_root)
+                .map(|(head, fingerprint)| {
+                    head == check.repository_head && fingerprint == check.diff_fingerprint
+                })
+                .unwrap_or(false);
 
         if flag_set.bool_value("json") {
             let payload = Value::Object(vec![
@@ -798,7 +808,8 @@ impl Application {
                 ),
                 ("schema".into(), Value::Number(SCHEMA_VERSION.to_string())),
                 ("valid".into(), Value::Bool(true)),
-                ("finalized".into(), Value::Bool(finish)),
+                ("finalized".into(), Value::Bool(finalized)),
+                ("current".into(), Value::Bool(current)),
             ]);
             return render_json(standard_output, standard_error, &payload);
         }
@@ -807,6 +818,10 @@ impl Application {
             "Flow check artifact is valid at {}",
             path_to_display_string(&artifact_path)
         );
+        if finalized {
+            let state = if current { "current" } else { "stale" };
+            let _ = writeln!(standard_output, "Flow evidence is finalized and {state}.");
+        }
         0
     }
 }
@@ -1018,6 +1033,59 @@ mod tests {
             "unexpected finish stdout: {}",
             String::from_utf8_lossy(&finish_stdout)
         );
+
+        let mut check_stdout = Vec::new();
+        let mut check_stderr = Vec::new();
+        assert_eq!(
+            application.run(
+                &[
+                    "flow".to_string(),
+                    "check".to_string(),
+                    "--repo-root".to_string(),
+                    repository_root.to_string_lossy().to_string(),
+                    "--artifact".to_string(),
+                    artifact.clone(),
+                    "--json".to_string(),
+                ],
+                &mut check_stdout,
+                &mut check_stderr,
+            ),
+            0,
+            "flow check stderr: {}",
+            String::from_utf8_lossy(&check_stderr)
+        );
+        let current_output = String::from_utf8_lossy(&check_stdout);
+        assert!(current_output.contains("\"finalized\": true"));
+        assert!(current_output.contains("\"current\": true"));
+
+        std::fs::write(
+            repository_root.join("README.md"),
+            "# changed after finish\n",
+        )
+        .expect("change tracked file after flow finish");
+        let mut stale_stdout = Vec::new();
+        let mut stale_stderr = Vec::new();
+        assert_eq!(
+            application.run(
+                &[
+                    "flow".to_string(),
+                    "check".to_string(),
+                    "--repo-root".to_string(),
+                    repository_root.to_string_lossy().to_string(),
+                    "--artifact".to_string(),
+                    artifact,
+                    "--json".to_string(),
+                ],
+                &mut stale_stdout,
+                &mut stale_stderr,
+            ),
+            0,
+            "stale flow check stderr: {}",
+            String::from_utf8_lossy(&stale_stderr)
+        );
+        let stale_output = String::from_utf8_lossy(&stale_stdout);
+        assert!(stale_output.contains("\"finalized\": true"));
+        assert!(stale_output.contains("\"current\": false"));
         let _ = std::fs::remove_dir_all(&repository_root);
     }
 

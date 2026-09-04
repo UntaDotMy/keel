@@ -21,7 +21,7 @@ loop.
 
 ## Code Implementation Discipline
 
-See `_shared/common-discipline.md` § Code Implementation Discipline. Team design is
+See `../_shared/common-discipline.md` § Code Implementation Discipline. Team design is
 **Goal-Driven Execution** at the orchestration layer — each agent gets a verifiable
 goal and an explicit output contract before any work starts. **Simplicity First**
 governs the team size: the fewest agents that cover the work with clean seams, not

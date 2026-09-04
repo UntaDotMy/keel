@@ -238,8 +238,12 @@ fn command_signature_depth(command: &str, depth: u8) -> Option<String> {
     if tokens.is_empty() {
         return None;
     }
+    let raw_program = strip_matching_quotes(tokens[0]).to_ascii_lowercase();
+    if is_shell_control_noise(&raw_program) {
+        return None;
+    }
     let program = normalize_program_name(tokens[0]);
-    if program.is_empty() {
+    if program.is_empty() || is_shell_control_noise(&program) {
         return None;
     }
 
@@ -252,6 +256,13 @@ fn command_signature_depth(command: &str, depth: u8) -> Option<String> {
 
     // A subcommand is the next bare word (not a flag, not an assignment) for the
     // small set of multiplexer tools where the subcommand is the real verb.
+    if program == "npx" {
+        let target = tokens.iter().skip(1).copied().find(|token| {
+            !token.starts_with('-') && !token.contains('=') && token.chars().all(is_signature_char)
+        })?;
+        return Some(format!("npx {}", normalize_program_name(target)));
+    }
+
     let take_subcommand = matches!(
         program.as_str(),
         "git"
@@ -272,13 +283,64 @@ fn command_signature_depth(command: &str, depth: u8) -> Option<String> {
             | "keel"
     );
     if take_subcommand {
-        if let Some(subcommand) = tokens.iter().skip(1).copied().find(|token| {
-            !token.starts_with('-') && !token.contains('=') && token.chars().all(is_signature_char)
-        }) {
+        if let Some((subcommand_index, subcommand)) =
+            tokens.iter().enumerate().skip(1).find(|(_, token)| {
+                !token.starts_with('-')
+                    && !token.contains('=')
+                    && token.chars().all(is_signature_char)
+            })
+        {
+            let subcommand = *subcommand;
+            if matches!(program.as_str(), "npm" | "pnpm" | "yarn")
+                && matches!(subcommand, "run" | "exec" | "dlx")
+            {
+                if let Some(target) =
+                    tokens
+                        .iter()
+                        .skip(subcommand_index + 1)
+                        .copied()
+                        .find(|token| {
+                            *token != "--"
+                                && !token.starts_with('-')
+                                && !token.contains('=')
+                                && token.chars().all(is_signature_char)
+                        })
+                {
+                    return Some(format!("{program} {subcommand} {target}"));
+                }
+            }
             return Some(format!("{program} {subcommand}"));
         }
     }
     Some(program)
+}
+
+fn is_shell_control_noise(program: &str) -> bool {
+    program.starts_with('$')
+        || program.starts_with('@')
+        || program.contains("://")
+        || program.parse::<std::net::IpAddr>().is_ok()
+        || program.split_once(':').is_some_and(|(host, port)| {
+            host.parse::<std::net::IpAddr>().is_ok() && port.parse::<u16>().is_ok()
+        })
+        || matches!(
+            program,
+            "try"
+                | "catch"
+                | "finally"
+                | "if"
+                | "else"
+                | "elseif"
+                | "for"
+                | "foreach"
+                | "while"
+                | "do"
+                | "switch"
+                | "function"
+                | "begin"
+                | "process"
+                | "end"
+        )
 }
 
 /// Quote-aware tokenizer so `bash -lc 'cargo test --workspace'` keeps the
@@ -728,6 +790,37 @@ mod tests {
             command_signature(r#"& 'C:\Users\HP\.claude\keel.exe' run -- git status"#).as_deref(),
             Some("git status")
         );
+    }
+
+    #[test]
+    fn command_signature_keeps_the_real_npm_runner_target() {
+        assert_eq!(
+            command_signature("npx vitest run --coverage").as_deref(),
+            Some("npx vitest")
+        );
+        assert_eq!(
+            command_signature("npm.cmd exec -- eslint src").as_deref(),
+            Some("npm exec eslint")
+        );
+        assert_eq!(
+            command_signature("pnpm run test -- --watch=false").as_deref(),
+            Some("pnpm run test")
+        );
+    }
+
+    #[test]
+    fn command_signature_rejects_powershell_control_and_assignment_noise() {
+        assert_eq!(
+            command_signature("$env:Path = 'C:\\tools;' + $env:Path"),
+            None
+        );
+        assert_eq!(
+            command_signature("try { cargo test } catch { exit 1 }"),
+            None
+        );
+        assert_eq!(command_signature("@'\nfixture text\n'@"), None);
+        assert_eq!(command_signature("127.0.0.1:3101"), None);
+        assert_eq!(command_signature("https://example.test/path"), None);
     }
 
     #[test]

@@ -14,7 +14,7 @@ You are a senior database engineer responsible for keeping PostgreSQL schema cha
 
 ## Research Reuse Defaults · Completion Discipline · Memory and Security Boundaries · Code Implementation Discipline
 
-See `_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill. The Code Implementation Discipline section is especially relevant: do not duplicate migration helpers across migrations, do not silently swallow `WARNING` output from `psql`, and do not run a destructive migration without a backup or PITR confirmation.
+See `../_shared/common-discipline.md` for the canonical rules. Apply them to all work in this skill. The Code Implementation Discipline section is especially relevant: do not duplicate migration helpers across migrations, do not silently swallow `WARNING` output from `psql`, and do not run a destructive migration without a backup or PITR confirmation.
 
 ## Use This Skill When
 
