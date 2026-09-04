@@ -40,7 +40,7 @@ The goal is to keep the supported entry points explicit for both human operators
 | Host | Rules / discovery | Lifecycle enforcement | MCP | Important limitation |
 | --- | --- | --- | --- | --- |
 | Claude Code | Managed global contract and full skill catalog | Native Keel hooks | Native config | Primary, deepest integration. |
-| Codex CLI | `~/.codex/AGENTS.md` plus `~/.agents/skills/using-keel` | Codex plugin hooks | Native `config.toml` entry | Codex may require the user to trust newly installed hooks after restart. |
+| Codex CLI and ChatGPT Desktop | `~/.codex/AGENTS.md` plus `~/.agents/skills/using-keel` | Installed Codex plugin hooks | Native `config.toml` entry | Keel verifies the versioned plugin cache. Codex requires the user to review and trust new or changed hooks after a new conversation or restart. |
 | OpenCode | Shared gateway skill plus TypeScript plugin | Plugin lifecycle events | `opencode.json` | The installed plugin requires the bundled `_shared/ts/bridge-core.ts`; doctor verifies it. |
 | Pi Agent / Oh My Pi | Host `AGENTS.md` plus gateway skill | TypeScript extension | Native `mcp.json` | OMP is wired at `~/.omp/agent`, distinct from Pi's home. |
 | ZCode | Global `AGENTS.md` plus gateway skill | Native event hooks in `config.json` | Native `mcp.servers` entry | Keel preserves an explicit user `hooks.enabled = false`; doctor reports hooks disabled. |

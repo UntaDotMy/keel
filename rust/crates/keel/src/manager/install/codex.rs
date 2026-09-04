@@ -2,6 +2,8 @@
 use super::*;
 use crate::runtime::{display_path, write_text};
 use std::path::Path;
+use std::process::Command;
+use std::time::Duration;
 /// Result of merging the keel entry into the personal Codex marketplace.
 #[derive(Debug)]
 pub(crate) enum CodexMarketplaceResult {
@@ -14,14 +16,23 @@ pub(crate) enum CodexMarketplaceResult {
 /// as `<plugin>@<marketplace>` in config.toml, so this constant is part of the
 /// enablement key and must stay stable across installs.
 pub(crate) const CODEX_PERSONAL_MARKETPLACE_NAME: &str = "personal-keel";
+pub(crate) const CODEX_PLUGIN_REFERENCE: &str = "keel@personal-keel";
 
-/// The marketplace entry that makes ~/.codex/plugins/keel discoverable. The
-/// shape (source/policy/category) follows the Codex marketplace schema; the
-/// `~` in `path` is expanded by Codex itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CodexPluginInstallation {
+    Missing,
+    Stale,
+    Current,
+}
+
+/// The marketplace entry that makes ~/.codex/plugins/keel discoverable. Codex
+/// resolves local sources from the marketplace root and silently skips paths
+/// that do not start with `./`, so the personal-marketplace path is relative to
+/// the user home rather than expressed with an unexpanded `~`.
 pub(crate) fn codex_marketplace_entry() -> serde_json::Value {
     serde_json::json!({
         "name": "keel",
-        "source": { "source": "local", "path": "~/.codex/plugins/keel" },
+        "source": { "source": "local", "path": "./.codex/plugins/keel" },
         "policy": {
             "installation": "AVAILABLE",
             "authentication": "ON_INSTALL"
@@ -83,6 +94,99 @@ pub(crate) fn merge_codex_marketplace(
     } else {
         CodexMarketplaceResult::Added
     })
+}
+
+/// Report whether Codex's installed cache is present and byte-current with the
+/// source bundle managed by keel. Marketplace registration alone only makes a
+/// plugin available; Codex executes the versioned cache created by `plugin add`.
+pub(crate) fn codex_plugin_installation(home: &Path) -> CodexPluginInstallation {
+    let source = home.join(".codex").join("plugins").join("keel");
+    let manifest = source.join(".codex-plugin").join("plugin.json");
+    let Ok(text) = std::fs::read_to_string(&manifest) else {
+        return CodexPluginInstallation::Missing;
+    };
+    let Ok(document) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return CodexPluginInstallation::Stale;
+    };
+    let Some(version) = document.get("version").and_then(|value| value.as_str()) else {
+        return CodexPluginInstallation::Stale;
+    };
+    let cache = home
+        .join(".codex")
+        .join("plugins")
+        .join("cache")
+        .join(CODEX_PERSONAL_MARKETPLACE_NAME)
+        .join("keel")
+        .join(version);
+    let managed = [
+        ".codex-plugin/plugin.json",
+        "hooks/hooks.json",
+        "keel-codex.js",
+        "keel-codex.ts",
+        ".mcp.json",
+    ];
+    if managed.iter().all(|relative| {
+        let source_file = source.join(relative);
+        let cache_file = cache.join(relative);
+        match (std::fs::read(source_file), std::fs::read(cache_file)) {
+            (Ok(source_bytes), Ok(cache_bytes)) => source_bytes == cache_bytes,
+            _ => false,
+        }
+    }) {
+        CodexPluginInstallation::Current
+    } else if cache.is_dir() {
+        CodexPluginInstallation::Stale
+    } else {
+        CodexPluginInstallation::Missing
+    }
+}
+
+/// Ask Codex to install or refresh the local marketplace plugin. The command
+/// is idempotent and creates the cache from which Codex actually loads hooks.
+pub(crate) fn install_codex_plugin(home: &Path) -> Result<String, String> {
+    let mut command = Command::new("codex");
+    command.args(["plugin", "add", CODEX_PLUGIN_REFERENCE, "--json"]);
+    command.env("HOME", home);
+    command.env("USERPROFILE", home);
+    command.env("CODEX_HOME", home.join(".codex"));
+    let result = crate::runtime::run_prepared_command_with_timeout(
+        command,
+        "codex plugin add",
+        Duration::from_secs(30),
+    )?;
+    if result.code == 0 {
+        return match codex_plugin_installation(home) {
+            CodexPluginInstallation::Current => Ok("plugin installed and current".to_string()),
+            CodexPluginInstallation::Missing => {
+                Err("codex reported success but the installed plugin cache is missing".to_string())
+            }
+            CodexPluginInstallation::Stale => {
+                Err("codex reported success but the installed plugin cache is stale".to_string())
+            }
+        };
+    }
+    let stderr = String::from_utf8_lossy(&result.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&result.stdout).trim().to_string();
+    let detail = if stderr.is_empty() { stdout } else { stderr };
+    let detail = detail.chars().take(500).collect::<String>();
+    Err(if detail.is_empty() {
+        format!("codex plugin add exited {}", result.code)
+    } else {
+        format!("codex plugin add exited {}: {detail}", result.code)
+    })
+}
+
+/// Remove only the versioned cache owned by keel's personal marketplace entry.
+/// The source bundle and user configuration are handled by their existing,
+/// independently surgical uninstall steps.
+pub(crate) fn remove_codex_plugin_cache(home: &Path) -> usize {
+    let cache = home
+        .join(".codex")
+        .join("plugins")
+        .join("cache")
+        .join(CODEX_PERSONAL_MARKETPLACE_NAME)
+        .join("keel");
+    remove_path_if_exists_counted(&cache).unwrap_or(0)
 }
 
 /// Result of ensuring the keel plugin is enabled in Codex config.toml.
@@ -219,11 +323,10 @@ pub(crate) const MANAGED_CODEX_AGENTS_END: &str = "<!-- keel:end -->";
 
 /// The always-on operating contract written into `~/.codex/AGENTS.md`.
 ///
-/// why: Codex hooks do not fire on Windows and plugin-bundled hooks require
-/// approval elsewhere, so the hook channel that carries the iron law on the
-/// claude host is unreliable here. Codex loads the user-global AGENTS.md into
-/// every session, making it the hook-independent surface. Kept compact because
-/// it is paid on every session of every project.
+/// why: Plugin-bundled hooks require explicit review before they become active.
+/// Codex loads the user-global AGENTS.md into every session, making it the
+/// hook-independent surface before trust is granted. Kept compact because it
+/// is paid on every session of every project.
 const MANAGED_CODEX_AGENTS_BODY: &str = r#"# keel operating contract (always-on)
 
 Installed by keel into `~/.codex/AGENTS.md` and loaded into every Codex session — independent of hooks. Applies to every project you work in, not just keel.

@@ -364,6 +364,7 @@ pub(crate) fn remove_wired_adapters(claude_home: &Path) -> usize {
     );
 
     let codex_dir = home.join(".codex").join("plugins").join("keel");
+    removed += remove_codex_plugin_cache(&home);
     for (relative, marker) in [
         ("hooks/hooks.json", "keel-codex.js"),
         ("hooks/hooks.json", "keel-codex.ts"),

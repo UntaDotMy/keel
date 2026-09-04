@@ -31,6 +31,7 @@ Antigravity 2.12.0 and an older 2.5.5 "Antigravity IDE" are both installed on th
 | F13 | Medium | Flow status | `flow check` hard-coded `finalized` to whether the current command was `finish`, so an immediate check falsely reported a finalized artifact as unfinished. | Derive `finalized` from persisted evidence and add `current` from the live HEAD/diff fingerprint. | Regression covers current and stale artifacts; the live finish followed by check reports both fields true. |
 | F14 | High | Installed executable | When the installed binary already matched the highest-priority release artifact, publication skipped it and copied the first lower-priority differing debug artifact. | Select the first existing artifact by strict priority, then decide whether publication is needed; never fall through because the preferred artifact is already installed. | Eight focused publication tests pass, including identical-release retention and true debug fallback; repeated live install preserves release identity. |
 | F15 | High | Strict review closeout | Automatic closeout evidence ran `flow start` for one changed source and evaluated the Flow gate before `flow finish`, so strict closeout always produced incomplete evidence. | Build the complete changed-source target set and finish the generated artifact before collecting review gates. | Regression protects multi-file targets and the finish command; strict closeout passes with zero unresolved findings or requirements. |
+| F16 | High | Codex plugin installation | Keel copied a source bundle and enabled its marketplace key but used an invalid `~` source path, never ran Codex's install step, and doctor treated source presence as runtime wiring. Hooks therefore remained absent from ChatGPT Desktop and Codex while doctor reported success. | Use Codex's required `./` local path, run the idempotent host-native plugin install, verify the versioned cache byte-for-byte, and remove that cache on uninstall. | Source-only regression warns; 25 focused Codex tests pass; live `codex plugin list` reports `keel@personal-keel` installed and enabled; doctor reports the plugin installed and current. Hook trust remains an explicit user decision. |
 
 ## Token ledger
 
@@ -68,7 +69,7 @@ The MCP catalog remains the largest fixed context cost. Hiding tools would break
 |---|---|---|---|---|---|
 | Claude Code | Yes | Native hooks | Yes | Wired | Primary lifecycle owner; doctor launches MCP. |
 | OpenCode | Yes | Plugin | Yes | Wired | Explicitly installed; plugin and bridge contract tested. |
-| Codex | AGENTS + plugin | Plugin hooks | Native MCP | Wired | Plugin registered/enabled and native MCP current. |
+| Codex | AGENTS + plugin | Plugin hooks | Native MCP | Wired | Marketplace source, installed runtime cache, enablement, and native MCP are current. New or changed hooks remain inactive until the user reviews and trusts them. |
 | Cursor | Rules | Native hook adapter | Yes | Wired | Installer/platform tests; managed script migrated. |
 | Pi | AGENTS + skill | Extension | Yes | Wired | Current `before_agent_start` seam and exact source hash installed. |
 | Oh My Pi | AGENTS + skill | Pi-compatible extension at OMP root | Yes | Wired | Stale extension upgraded after F2/F3. |

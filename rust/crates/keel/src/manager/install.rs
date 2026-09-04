@@ -39,10 +39,11 @@ pub use path::ensure_keel_home_on_path;
 pub(crate) use sync::backup_file_before_managed_overwrite;
 
 pub(crate) use codex::{
-    ensure_codex_native_mcp, ensure_codex_plugin_enabled, merge_codex_marketplace,
-    remove_codex_managed_agents_md, remove_codex_marketplace_entry,
-    remove_codex_native_mcp_section, remove_codex_plugin_section, sync_codex_agents_md,
-    CodexEnableResult, CodexMarketplaceResult, CodexNativeMcpResult,
+    codex_plugin_installation, ensure_codex_native_mcp, ensure_codex_plugin_enabled,
+    install_codex_plugin, merge_codex_marketplace, remove_codex_managed_agents_md,
+    remove_codex_marketplace_entry, remove_codex_native_mcp_section, remove_codex_plugin_cache,
+    remove_codex_plugin_section, sync_codex_agents_md, CodexEnableResult, CodexMarketplaceResult,
+    CodexNativeMcpResult, CodexPluginInstallation,
 };
 #[cfg(test)]
 pub(crate) use codex::{

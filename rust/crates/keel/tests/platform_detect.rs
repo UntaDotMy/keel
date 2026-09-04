@@ -1064,16 +1064,23 @@ fn codex_install_registers_marketplace_and_enablement() {
     let marketplace_doc: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&marketplace).unwrap())
             .expect("marketplace.json must be valid JSON");
-    let has_keel = marketplace_doc
+    let keel_entry = marketplace_doc
         .get("plugins")
         .and_then(|p| p.as_array())
-        .map(|entries| {
+        .and_then(|entries| {
             entries
                 .iter()
-                .any(|entry| entry.get("name").and_then(|n| n.as_str()) == Some("keel"))
+                .find(|entry| entry.get("name").and_then(|n| n.as_str()) == Some("keel"))
         })
-        .unwrap_or(false);
-    assert!(has_keel, "marketplace.json must contain the keel entry");
+        .expect("marketplace.json must contain the keel entry");
+    assert_eq!(
+        keel_entry
+            .get("source")
+            .and_then(|source| source.get("path"))
+            .and_then(|path| path.as_str()),
+        Some("./.codex/plugins/keel"),
+        "local marketplace paths must use Codex's required ./ relative form"
+    );
 
     let config_toml = home.join(".codex").join("config.toml");
     assert!(
