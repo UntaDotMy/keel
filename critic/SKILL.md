@@ -1,7 +1,7 @@
 ---
 name: critic
 description: Proactive in-flight critic that catches blind-code, no-test, no-memory, and skipped-workflow patterns DURING and BEFORE work — not after. Use when implementation is underway or about to start, to surface problems early enough to fix them cheaply. Distinct from reviewer (post-implementation gate) and deliberation (multi-expert disagreement). Emits structured findings and routes them to receiving-code-review for the implementation author to act on.
-when_to_use: Proactive critique during/before implementation. Use when asked to critique this, say what am I missing, stress-test this approach, need some critics, or catch blind code, missing tests, missing memory, skipped workflow, assumed facts, or shortcut work BEFORE close.
+when_to_use: Proactive critique during/before implementation. Use for requests to critique an implementation, identify omissions, stress-test an approach, or catch blind code, missing tests, missing memory, skipped workflow, assumed facts, or shortcut work BEFORE close.
 allowed-tools: Read, Grep, Glob, Bash(git diff:*), Bash(git status), Bash(git log -5:*), Bash(keel recall:*), Bash(keel memory working-brief list:*), Bash(keel memory system-map show:*), Bash(keel memory working-brief write:*), Bash(keel flow start:*), Bash(keel flow check:*), Bash(keel review pre-pr:*), Bash(keel review gates check:*)
 argument-hint: "[scope-or-file]"
 effort: medium
@@ -22,7 +22,7 @@ The goal is to notice what is bad **before it ships**, then hand the findings to
 ## When to use
 
 - Implementation has started or is about to start, and you want an early critic pass before the author digs in deeper.
-- The user says "critique this", "what am I missing", "stress-test this approach", "is this sound before I go further", "need some critics".
+- The user requests critique, an omission check, a stress test, a soundness check, or a critic pass.
 - Anvil lock field `critic: none|blind_ab` is a stamp strategy, not this skill. Do not treat a green `critic:none` sieve as a critic pass.
 - A working brief or plan exists and you want to check the implementation against it mid-flight.
 - You observe the symptoms the harness was built to prevent: blind edits, no tests, no memory recall, skipped iron law.

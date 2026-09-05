@@ -33,7 +33,7 @@ Skipping a skill that applied ships a regression. Checking one that did not cost
 | "I remember this codebase" | Read SYSTEM_MAP and the owning file. |
 | "I'll call system_map/recall again to be safe" | Loop. Reuse this turn's result unless you changed files/memory. |
 | "The story is clear" / "I get the gist" | Restate + research. Gist is not the spec. |
-| "I'll assume X and proceed" | Never assume, never guess. If it changes what you build, ask first. |
+| "Silent assumption" | Never assume, never guess. If it changes what you build, ask first. |
 | "I'll skip this test/review/scan" | Never skip or shortcut required work. Do the whole class. |
 | "While I'm here I'll also add…" | Request fidelity failed — stay on asked scope. |
 | "Unclear but I'll pick one" | Ask. Silent choice is drift. |
