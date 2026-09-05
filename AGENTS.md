@@ -62,11 +62,25 @@ keel hook git-hooks install
 | Hook | What It Checks | Consequence |
 |------|----------------|-------------|
 | **pre-commit** | Auto-detects project language (Rust/Go/Python/JS/C++) and runs format + lint | Commit is **blocked** if checks fail |
-| **pre-push** | Branch policy (blocks direct pushes to `main` or `dev`) | Push is **blocked** |
+| **pre-push** | Branch policy (blocks direct pushes to `main` or `dev`) | Push is **blocked**
+**Installation Note**: `keel hook git-hooks install` configures git hooks path but requires ` .githooks/` directory to exist in your repository. Copy from keel workspace or ensure the directory is present.
+
+### What the Hooks Enforce
 
 ### Bypassing Hooks
 
 **Do not bypass hooks** (`git commit --no-verify` or `git push --no-verify`) unless genuine emergency. Document the bypass in the commit message and follow up with a cleanup commit.
+
+
+## Review Gate Enforcement (Optional Hard Blocking)
+
+The reviewer skill provides advisory reminders but does not block turns by default. To enable hard enforcement:
+
+Set environment variable `CLAUDE_SKILLS_REVIEW_GATE=block` → reviewer reminders become blocking gates
+
+Default behavior (no env var set): Advisory-only reminders that can be ignored. This allows flexibility while still prompting quality practices.
+
+See [70-review-quality-gates-and-policies.md](AGENTS/references/70-review-quality-gates-and-policies.md) for full details on review surfaces and gates.
 
 ## Summary
 

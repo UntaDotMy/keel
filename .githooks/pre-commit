@@ -158,4 +158,16 @@ fi
 
 echo ""
 echo "✓ All pre-commit checks passed."
+
+# [keel flow check] Running preserve-existing-flow gate...
+if ! keel review pre-commit --repo-root "$(pwd)" 2>/dev/null; then
+    echo ""
+    echo "✗ Preserve-existing-flow gate failed"
+    echo "  Before editing existing source files, run:"
+    echo "    keel flow start --target <file_or_function>"
+    echo "  Then complete your changes and run:"
+    echo "    keel flow finish"
+    exit 1
+fi
+echo "✓ Preserve-existing-flow gate passed"
 exit 0
