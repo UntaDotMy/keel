@@ -3946,7 +3946,13 @@ fn stop_hooks_fail_open_on_missing_payload_without_looping() {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
 
-        let code = run_hook_command(&[subcommand.to_string()], &mut stdout, &mut stderr);
+        let mut stdin = std::io::Cursor::new(b"");
+        let code = run_hook_command_with_stdin(
+            &[subcommand.to_string()],
+            &mut stdin,
+            &mut stdout,
+            &mut stderr,
+        );
 
         assert_eq!(
             code,
@@ -5205,4 +5211,25 @@ fn empty_session_id_falls_back_to_shared_default_key() {
         hook_session_id(&serde_json::json!({"sessionId": "abc"})),
         "abc"
     );
+}
+
+#[test]
+fn test_tool_input_command_variants() {
+    let doc1 = serde_json::json!({"command": "cargo test"});
+    assert_eq!(pre_tool::tool_input_command(&doc1), Some("cargo test"));
+
+    let doc2 = serde_json::json!({"CommandLine": "keel doctor"});
+    assert_eq!(pre_tool::tool_input_command(&doc2), Some("keel doctor"));
+
+    let doc3 = serde_json::json!({"tool_input": {"CommandLine": "git status"}});
+    assert_eq!(pre_tool::tool_input_command(&doc3), Some("git status"));
+
+    let doc4 = serde_json::json!({"toolInput": {"cmd": "npm test"}});
+    assert_eq!(pre_tool::tool_input_command(&doc4), Some("npm test"));
+
+    let doc5 = serde_json::json!({"input": {"script": "pytest"}});
+    assert_eq!(pre_tool::tool_input_command(&doc5), Some("pytest"));
+
+    let doc6 = serde_json::json!({"other": 123});
+    assert_eq!(pre_tool::tool_input_command(&doc6), None);
 }

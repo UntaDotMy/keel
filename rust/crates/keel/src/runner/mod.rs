@@ -21,7 +21,8 @@ use crate::runtime::{display_path, run_command};
 
 // Re-export the public API callers depend on
 pub use bridge::run_bridge_command;
-pub use hook_lifecycle::run_hook_command;
+#[allow(unused_imports)]
+pub use hook_lifecycle::{run_hook_command, run_hook_command_with_stdin};
 pub use learning::run_learn_command;
 pub use shell_rewrite::rewrite_for_doctor;
 pub use telemetry::run_telemetry_command;

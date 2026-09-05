@@ -250,7 +250,7 @@ pub(crate) fn is_keel_research_command(command: &str) -> bool {
     HITS.iter().any(|h| body.contains(h))
 }
 
-pub(super) fn is_host_shell_tool_name(tool_name: &str) -> bool {
+pub(crate) fn is_host_shell_tool_name(tool_name: &str) -> bool {
     is_shell_tool_name(tool_name)
         || tool_name.eq_ignore_ascii_case("run_terminal_command")
         || tool_name.eq_ignore_ascii_case("run_command")
@@ -288,17 +288,23 @@ pub(crate) fn tool_satisfies_iron_law(
 
 /// Extract a shell command string from a hook tool_input object when present.
 pub(super) fn tool_input_command(input: &JsonDocument) -> Option<&str> {
-    input
+    for key in &["command", "CommandLine", "cmd", "script"] {
+        if let Some(cmd) = input.get(*key).and_then(JsonDocument::as_str) {
+            return Some(cmd);
+        }
+    }
+    let nested = input
         .get("tool_input")
         .or_else(|| input.get("toolInput"))
-        .and_then(|tool_input| tool_input.get("command"))
-        .and_then(JsonDocument::as_str)
-        .or_else(|| {
-            input
-                .get("input")
-                .and_then(|inner| inner.get("command"))
-                .and_then(JsonDocument::as_str)
-        })
+        .or_else(|| input.get("input"));
+    if let Some(nested) = nested {
+        for key in &["command", "CommandLine", "cmd", "script"] {
+            if let Some(cmd) = nested.get(*key).and_then(JsonDocument::as_str) {
+                return Some(cmd);
+            }
+        }
+    }
+    None
 }
 
 /// If this successful PostToolUse/observe event is keel research evidence, mark the session.

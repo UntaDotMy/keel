@@ -32,7 +32,7 @@ mod session_start;
 mod settings;
 mod state;
 
-pub use dispatch::run_hook_command;
+pub use dispatch::{run_hook_command, run_hook_command_with_stdin};
 use git_hooks::run_hook_git_hooks;
 #[cfg(test)]
 pub use post_batch::completeness_marker_key;
@@ -50,8 +50,8 @@ pub use pre_tool::record_anvil_gate_clear;
 #[cfg(test)]
 pub(crate) use pre_tool::{emit_pretool_deny, iron_law_gate_decision, is_keel_research_tool_name};
 pub(crate) use pre_tool::{
-    maybe_mark_iron_law_from_parts, maybe_mark_iron_law_from_tool_event, pre_tool_gate_decision,
-    tool_is_iron_law_gated,
+    is_host_shell_tool_name, maybe_mark_iron_law_from_parts, maybe_mark_iron_law_from_tool_event,
+    pre_tool_gate_decision, tool_is_iron_law_gated,
 };
 use pre_tool::{run_hook_pre_tool_use, IRON_LAW_LEGACY_GATE_DIR, IRON_LAW_SATISFIED_DIR};
 use prompt_submit::run_hook_user_prompt_submit;

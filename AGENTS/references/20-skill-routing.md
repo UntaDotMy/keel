@@ -142,6 +142,54 @@ The profiles mirror the specialist skills one-to-one:
 
 The old generic `default`, `explorer`, `worker`, `architect`, and `awaiter` TOMLs are not the repo-managed profile surface anymore. Runtime helper roles may still exist inside the harness, but the managed install should mirror these specialist skill profiles instead.
 
+## Universal 5-Role Multi-Agent Architecture
+
+For cross-adapter multi-agent workflows (Codex, Antigravity, Claude Code, OpenCode, Pi, Cursor), non-trivial tasks decompose into five coordinated roles:
+
+1. **`planner`** (Read-Only | High-Reasoning / Strategist Tier):
+   - Establishes project context, identifies existing behavior to preserve, and selects best-fit skills.
+   - For UI/UX work, executes the 6-step human design workflow (Idea -> User Flow -> Wireframe -> First Draft -> Iterations -> Final Design).
+   - Produces targeted exploration questions and files for `code_explorer`. Never implements or writes code.
+2. **`code_explorer`** (Read-Only | Fast / Medium-Reasoning Tier):
+   - Starts strictly after the Planner handoff.
+   - Performs targeted evidence gathering: traces routes, symbols, callers/callees, API schemas, state owners, and test commands.
+   - Refuses broad whole-repo scans; stays on the execution path.
+3. **Parent Implementation Contract & Orchestration**:
+   - The orchestrating parent validates Planner + Explorer handoffs.
+   - Formulates the authoritative `FINAL IMPLEMENTATION CONTRACT` before dispatching workers: goal, current/target behavior, regression boundaries, exact files, workstreams with disjoint ownership, dependencies, and validation commands.
+4. **`implementer`** (Workspace-Write | Fast / Low-Reasoning / Token-Saving Tier):
+   - One to four parallel instances assigned only when workstreams have disjoint file and symbol write sets.
+   - Operates with exclusive ownership of assigned files. Stops and returns `BLOCKED` if an ownership boundary or dependency conflict arises.
+   - Makes minimal defensible changes and executes local workstream tests.
+5. **`reviewer`** (Read-Only | High-Reasoning / AGI-Gate Tier):
+   - Starts only after all workers complete and parent records `INTEGRATION CHECK: PASS`.
+   - Freezes review target; investigates diff with causal defect chains (`trigger/state -> reachable execution path -> violated contract -> observable result`).
+   - Bounded fix loops: max 2 re-review rounds on `FIX REQUIRED`.
+6. **`pusher`** (Workspace-Write | Fast / Authorization-Only Tier):
+   - Permitted only after final Reviewer `PASS`, consolidated change summary, and explicit user authorization (`nak commit dan push?`).
+   - Verifies git status, branch, remotes, diff, and secret scans without altering feature logic.
+
+## Provider-Aware Model Tiering Matrix
+
+To maximize token economy and reasoning quality, map roles to model tiers based on the active provider:
+
+| Provider | Light / Implementer / Explorer (Token-Saving, Fast Iteration) | Critic / Planner / Verifier (Deep Reasoning, Spec Gate) |
+|---|---|---|
+| **Google** (Antigravity) | `gemini-2.5-flash` / `gemini-1.5-flash` | `gemini-2.5-pro` / `gemini-1.5-pro` / `gemini-ultra` |
+| **Anthropic** (Claude Code) | `claude-3-5-haiku` | `claude-3-7-sonnet` (high effort) / `claude-3-opus` |
+| **OpenAI** (Codex) | `gpt-5.6-luna` / `gpt-4o-mini` | `gpt-5.6-sol` / `o3` / `gpt-4o` |
+
+## Antigravity Teamwork & Research Partner Doctrine
+
+Grounding multi-agent collaboration in research-partner principles:
+- **Dynamic Team Scaling**: Scale subagent teams dynamically to match task complexity: 1 focused worker for coupled/moderate changes, 2-4 parallel workers for cleanly disjoint subsystems.
+- **Decoupled Orchestration**:
+  - *Iterative Coding*: Continuous local feedback loops (Anvil compile -> test -> fix).
+  - *Distributed Coding*: Parallel workstreams bounded by disjoint file ownership contracts.
+  - *Long Proof Tournament Networks*: Competing hypotheses for complex bugs; adversarial falsification before adopting a solution.
+  - *Self-Verification*: Rigorous adversarial proof chains rather than trusting optimistic claims.
+- **Cross-Round Pitfall Registry**: Record failure modes, traps, and dead-ends in shared memory (`.keel-task-context.md` / `working-brief`) across turns so subsequent workers never repeat the same mistake.
+
 ## Routing Principles (Detailed)
 
 These 53 numbered principles previously lived in `00-skill-routing-and-escalation.md`. They were moved here so the root file stays tight while the depth remains searchable.

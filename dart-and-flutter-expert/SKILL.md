@@ -72,6 +72,11 @@ Do not reach for Bloc when `setState` suffices; do not reach for a global store 
 
 ## Dependencies & pubspec
 
+- **Modern package selection on pub.dev (no reinventing the wheel):**
+  - Check `pub.dev` score, likes, popularity, and recent update cadence before adding any third-party dependency.
+  - Require full Dart 3 sound null-safety and compatible Flutter SDK constraints.
+  - Zero deprecated or discontinued packages; replace with standard community-maintained alternatives.
+  - Never hand-roll custom implementations for problems solved by audited standard packages (e.g. `dio`/`http`, `go_router`, `flutter_riverpod`, `freezed`, `shared_preferences`).
 - Pin to caret ranges (`^1.2.3`) for libraries, exact for first-party apps if reproducibility matters.
 - Run `dart pub outdated` and resolve major-version drift deliberately, not silently.
 - Prefer `flutter pub add` over hand-editing `pubspec.yaml` (keeps lockfile correct).

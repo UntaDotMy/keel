@@ -42,10 +42,13 @@ Side Effects: None — this file is informational.
 - For workflow validation, prove behavior from the execution contexts users actually depend on, not only from the source checkout.
 - For workflow, release, build-entrypoint, or GitHub Actions edits, verify every referenced path is tracked by Git with `git ls-files --error-unmatch`, confirm new entrypoints are not masked by ignore rules with `git check-ignore -v --no-index`, rerun Rust validation with `cargo test --workspace` or an equivalent cache-busting proof when local green results are part of the evidence, and if GitHub auth is available inspect the real hosted run with `gh run view --job --log` or `gh pr checks --watch` before calling the change done.
 - For bug reproduction and validation, reproduce the user-facing failure first, then choose the inspection tool that can observe the real surface: browser automation such as Playwright for web flows, desktop-runtime inspection with screenshots or equivalent visual evidence for desktop flows, and the most direct runtime-native inspection tool for CLI, service, workflow, or device issues.
-- Strengthen vague prompts from repository evidence, runtime evidence, and prior memory before acting.
-- If business logic is still ambiguous after that pass, clarify with the user instead of drifting into guesses.
+- Strengthen vague prompts from repository evidence, runtime evidence, and prior memory before acting: expand the raw ask into a detailed technical specification, explicit boundaries, and non-goals.
+- If business logic, UX flow, or architecture is still ambiguous after that pass, clarify with the user instead of drifting into guesses. Use the host's native question-asking mechanism:
+  - **Antigravity**: invoke `ask_question` with structured multiple-choice options, clear explanations, and a recommended default.
+  - **Claude Code**: invoke `AskFollowupQuestion` with structured selectable options.
+  - **Codex / OpenCode / CLI**: present an interactive prompt or concise multiple-choice question in the turn and stop before executing edits.
 - Autonomy applies to reversible, low-stakes choices only (naming, formatting, equivalent implementations). It never covers removing or replacing existing data, changing a data contract, schema, or output shape, or any ambiguity whose two readings differ in what is kept versus discarded. When a request could mean "add" or "replace", ask "add alongside, or replace?" and wait — do not pick the destructive reading to keep moving.
-- For non-trivial product, workflow, or architecture work, add a front-loaded alignment checkpoint before implementation: if repo inspection still leaves multiple plausible interpretations, acceptance-criterion gaps, or non-obvious tradeoffs, use `request_user_input` when available or ask the user directly before coding.
+- For non-trivial product, workflow, or architecture work, add a front-loaded alignment checkpoint before implementation: if repo inspection still leaves multiple plausible interpretations, acceptance-criterion gaps, or non-obvious tradeoffs, use the native question tool when available or ask the user directly before coding.
 - When another skill contributes, include the working brief so the contribution stays aligned and specific.
 
 **Exit criteria:**

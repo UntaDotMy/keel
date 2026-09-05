@@ -375,9 +375,30 @@ pub(crate) fn remove_wired_adapters(claude_home: &Path) -> usize {
             "\"mcpServers\": \"./.mcp.json\"",
         ),
         (".mcp.json", "keel MCP server registration"),
+        ("config.toml", "keel:managed-host-file"),
+        ("task-context.template.md", "keel:managed-host-file"),
     ] {
         removed += remove_owned_file_if_marked(&codex_dir.join(relative), marker);
     }
+    let codex_agents_dir = home.join(".codex").join("agents");
+    for agent_file in [
+        "planner.toml",
+        "code-explorer.toml",
+        "implementer.toml",
+        "reviewer.toml",
+        "pusher.toml",
+    ] {
+        removed += remove_owned_file_if_marked(
+            &codex_agents_dir.join(agent_file),
+            "keel:managed-host-file",
+        );
+        removed += remove_owned_file_if_marked(
+            &codex_dir.join("agents").join(agent_file),
+            "keel:managed-host-file",
+        );
+    }
+    removed += remove_empty_directory(&codex_dir.join("agents"));
+    removed += remove_empty_directory(&codex_agents_dir);
     removed += remove_empty_directory(&codex_dir.join("hooks"));
     removed += remove_empty_directory(&codex_dir.join(".codex-plugin"));
     removed += remove_empty_directory(&codex_dir);

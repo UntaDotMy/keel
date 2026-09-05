@@ -472,6 +472,63 @@ pub(crate) fn ensure_codex_plugin_enabled(config_path: &Path) -> Result<CodexEna
     Ok(CodexEnableResult::Added)
 }
 
+/// The config.toml section for Codex custom agents configuration.
+pub(crate) const CODEX_AGENTS_CONFIG_SECTION: &str = "[agents]";
+
+/// Ensure `[agents] enabled = true` is present in `~/.codex/config.toml`.
+/// Also sets `max_concurrent_threads_per_session = 5` when adding the table.
+pub(crate) fn ensure_codex_agents_enabled(config_path: &Path) -> Result<CodexEnableResult, String> {
+    let existing_text = crate::runtime::read_text_if_exists(config_path).unwrap_or_default();
+    let stripped = existing_text
+        .strip_prefix('\u{feff}')
+        .unwrap_or(&existing_text);
+    if !stripped.trim().is_empty() {
+        let doc: toml::Value =
+            toml::from_str(stripped).map_err(|error| format!("parse error: {error}"))?;
+        let enabled = doc
+            .get("agents")
+            .and_then(|a| a.get("enabled"))
+            .and_then(|v| v.as_bool());
+        match enabled {
+            Some(true) => return Ok(CodexEnableResult::AlreadyEnabled),
+            Some(false) => return Ok(CodexEnableResult::UnchangedDisabled),
+            None => {}
+        }
+    }
+    let header = CODEX_AGENTS_CONFIG_SECTION;
+    let lines: Vec<&str> = stripped.lines().collect();
+    let mut new_text: String =
+        if let Some(pos) = lines.iter().position(|line| line.trim() == header) {
+            let mut rebuilt: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+            rebuilt.insert(
+                pos + 1,
+                "enabled = true\nmax_concurrent_threads_per_session = 5".to_string(),
+            );
+            rebuilt.join("\n")
+        } else {
+            let mut out = stripped.to_string();
+            if !out.is_empty() && !out.ends_with('\n') {
+                out.push('\n');
+            }
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(header);
+            out.push('\n');
+            out.push_str("enabled = true\nmax_concurrent_threads_per_session = 5\n");
+            out
+        };
+    if new_text.is_empty() {
+        new_text = format!("{header}\nenabled = true\nmax_concurrent_threads_per_session = 5\n");
+    }
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("create {}: {error}", display_path(parent)))?;
+    }
+    write_text(config_path, &new_text)?;
+    Ok(CodexEnableResult::Added)
+}
+
 /// Remove the `keel` entry from the personal Codex marketplace manifest.
 /// Preserves sibling entries and other keys; deletes the manifest only when it
 /// becomes an empty catalog that install itself created shape for.

@@ -4,9 +4,17 @@ use super::*;
 
 pub fn run_hook_command(
     arguments: &[String],
-
     standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let mut stdin = std::io::stdin();
+    run_hook_command_with_stdin(arguments, &mut stdin, standard_output, standard_error)
+}
 
+pub fn run_hook_command_with_stdin(
+    arguments: &[String],
+    standard_input: &mut dyn Read,
+    standard_output: &mut dyn Write,
     standard_error: &mut dyn Write,
 ) -> u8 {
     if arguments.is_empty() || is_help_argument(&arguments[0]) {
@@ -39,10 +47,7 @@ pub fn run_hook_command(
         // PostToolUseFailure carries the same `duration_ms` field PostToolUse
         "post-tool-use-failure" => run_hook_post_tool_use_failure(standard_error),
 
-        "stop" | "subagent-stop" => {
-            let mut stdin = std::io::stdin().lock();
-            run_hook_stop(&mut stdin, standard_output, standard_error)
-        }
+        "stop" | "subagent-stop" => run_hook_stop(standard_input, standard_output, standard_error),
 
         // Notification fires when the harness wants the user's attention
         "notification" => run_hook_notification(standard_output),
@@ -50,22 +55,19 @@ pub fn run_hook_command(
         // PermissionRequest: auto-approve keel commands to reduce
         // permission prompt friction. Reads stdin to check tool_name/tool_input.
         "permission-request" => {
-            let mut stdin = std::io::stdin().lock();
-            run_hook_permission_request(&mut stdin, standard_output, standard_error)
+            run_hook_permission_request(standard_input, standard_output, standard_error)
         }
 
         // PermissionDenied: signal retry:true so the model knows it can
         // retry the denied call. Reads stdin to check tool context.
         "permission-denied" => {
-            let mut stdin = std::io::stdin().lock();
-            run_hook_permission_denied(&mut stdin, standard_output, standard_error)
+            run_hook_permission_denied(standard_input, standard_output, standard_error)
         }
 
         // SubagentStart: inject iron law context into spawned subagents so
         // they start informed instead of blind. Reads stdin for agent_type.
         "subagent-start" => {
-            let mut stdin = std::io::stdin().lock();
-            run_hook_subagent_start(&mut stdin, standard_output, standard_error)
+            run_hook_subagent_start(standard_input, standard_output, standard_error)
         }
 
         // CwdChanged: refresh system map when the working directory changes
@@ -74,14 +76,12 @@ pub fn run_hook_command(
 
         // UserPromptSubmit reads the same stdin payload the harness delivers to
         "user-prompt-submit" => {
-            let mut stdin = std::io::stdin().lock();
-            run_hook_user_prompt_submit(&mut stdin, standard_output, standard_error)
+            run_hook_user_prompt_submit(standard_input, standard_output, standard_error)
         }
 
         // PostToolBatch reads stdin for `session_id` so the optional review gate
         "post-tool-batch" => {
-            let mut stdin = std::io::stdin().lock();
-            run_hook_post_tool_batch(&mut stdin, standard_output, standard_error)
+            run_hook_post_tool_batch(standard_input, standard_output, standard_error)
         }
 
         // SessionStart re-asserts the keel MCP registration before the
@@ -91,10 +91,7 @@ pub fn run_hook_command(
         }
 
         // SessionEnd reads stdin for `session_id` so the auto-capture can scope a
-        "session-end" => {
-            let mut stdin = std::io::stdin().lock();
-            run_hook_session_end(&mut stdin, standard_output, standard_error)
-        }
+        "session-end" => run_hook_session_end(standard_input, standard_output, standard_error),
 
         // Every other slug is dispatched if and only if it appears in the canonical
         other if event_by_slug(other).is_some() => {

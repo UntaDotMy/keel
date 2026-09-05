@@ -185,14 +185,34 @@ Codex injects `PLUGIN_ROOT` and `PLUGIN_DATA` into hook command environments (pl
 keel/
 ├── .codex-plugin/
 │   └── plugin.json          # Plugin manifest (name, version, hooks path, interface)
+├── agents/                  # Native Codex custom agent definitions
+│   ├── planner.toml         # High-level architecture, 6-step design workflow, skill routing
+│   ├── code-explorer.toml   # Read-only evidence gathering, routes, symbols, test paths
+│   ├── implementer.toml     # Scoped code changes with exclusive file ownership
+│   ├── reviewer.toml        # Adversarial quality gate with causal defect chains
+│   └── pusher.toml          # Authorization-only Git shipping agent
 ├── hooks/
 │   └── hooks.json           # Lifecycle hook registrations (default-discovered by Codex)
+├── config.toml              # Session-level thread limits (max_concurrent_threads_per_session = 5)
+├── task-context.template.md # Fallback snapshot template (.codex-task-context.md)
 ├── keel-codex.ts            # TypeScript source
 ├── keel-codex.js            # Bundled Node.js runtime used by hooks
 └── README.md                # This file
 ```
 
-The manifest at `.codex-plugin/plugin.json` references `hooks` at `./hooks/hooks.json` and `mcpServers` at `./.mcp.json` (both default-discovered by Codex). The `.mcp.json` bundles the keel MCP server (`keel mcp serve`), exposing all keel tools (`recall`, `skill_route`, `skill_get`, `anvil`, `brief_create`, etc.) as native MCP tool calls in Codex — no CLI shell-out required for tool access. Codex loads plugin-bundled MCP servers per the [official plugin spec](https://developers.openai.com/codex/plugins/build); enable/disable and tool-approval policy are controlled under `plugins.keel.mcp_servers.keel` in your Codex config without editing the plugin. (There is no `skills/` directory — keel skills are reached via the `skill_route`/`skill_get` MCP tools, not bundled as Codex skills.)
+The manifest at `.codex-plugin/plugin.json` references `hooks` at `./hooks/hooks.json` and `mcpServers` at `./.mcp.json` (both default-discovered by Codex). The `.mcp.json` bundles the keel MCP server (`keel mcp serve`), exposing all keel tools (`recall`, `skill_route`, `skill_get`, `anvil`, `brief_create`, etc.) as native MCP tool calls in Codex (no CLI shell-out required for tool access).
+
+## Custom Agent Roles & Multi-Agent Workflow
+
+Codex natively supports custom agents located in `~/.codex/agents/*.toml` or plugin bundles. Keel provides a cohesive 5-role workflow:
+
+1. **`planner`** (`gpt-5.6-sol`, high reasoning): Researches project behavior, reusable patterns, and selects available skills. For UI tasks, follows the 6-step human design workflow (Idea -> User Flow -> Wireframe -> First Draft -> Iterations -> Final Design).
+2. **`code_explorer`** (`gpt-5.6-luna`, medium reasoning): Discovers exact files, symbols, contracts, and test commands based on Planner handoff. Read-only.
+3. **Parent Implementation Contract**: Orchestrating parent reconciles findings, validates safety, and constructs the authoritative `FINAL IMPLEMENTATION CONTRACT`.
+4. **`implementer`** (`gpt-5.6-luna`, low reasoning): Dispatches 1 to 4 parallel workers only when file write sets are strictly disjoint. Stops immediately with `BLOCKED` if an overlap or dependency conflict occurs.
+5. **Parent Integration Check**: Verifies all workers completed and outputs align, recording `INTEGRATION CHECK: PASS`.
+6. **`reviewer`** (`gpt-5.6-sol`, high reasoning): Adversarial read-only gate. Requires causal defect chains (`trigger/state -> reachable execution path -> violated contract -> observable result`). Allows at most 2 incremental re-review rounds.
+7. **Pusher Authorization Gate**: After final Reviewer `PASS`, parent emits `nak commit dan push?`. Only affirmative user confirmation authorizes spawning `pusher`.
 
 ## Differences from the OpenCode Adapter
 

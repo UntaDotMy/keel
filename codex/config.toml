@@ -1,0 +1,4 @@
+# keel:managed-host-file (remove this line before customizing to opt out of upgrades)
+[agents]
+enabled = true
+max_concurrent_threads_per_session = 5

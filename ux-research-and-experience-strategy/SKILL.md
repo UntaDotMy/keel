@@ -52,7 +52,7 @@ Capture: target users, jobs-to-be-done, trigger, primary journey, decision point
 Classify the flow type, identify the dominant UX risk (trust, comprehension, motivation, overload, recovery, speed, feedback), choose a posture (reassure, guide, accelerate, compare, confirm, recover), and define what the user must understand in the first screen, first action, and first error state.
 
 ### Quality Proof
-Benchmark against 2-3 mature products in the same category. Test the primary task path, first error state, and main recovery path. Keep brownfield changes targeted unless broader evidence proves the flow is broken.
+Benchmark against 2-3 mature products or top-grossing applications in the same category. Analyze verified onboarding flows, navigation hierarchy, paywalls, and retention loops. Test the primary task path, first error state, and main recovery path. Enforce anti-slop discipline: eliminate generic AI filler, hollow marketing buzzwords, and vague UX heuristics in favor of concrete, evidence-backed user journey maps. Keep brownfield changes targeted unless broader evidence proves the flow is broken.
 
 ### Decision Architecture
 Make one next step dominant, group related decisions, explain consequences before irreversible actions, use defaults and previews to reduce blank-page anxiety, show reassurance near commitment moments, surface decision criteria when comparing options, and preserve progress across multi-step tasks.

@@ -632,7 +632,7 @@ keel works with multiple AI coding agents through dedicated adapters. Each adapt
 | **Claude Code** (native) | Plugin manifest + hooks | `.claude-plugin/plugin.json` + `~/.claude/settings.json` hooks — automatic via `keel install` | `.claude-plugin/` |
 | **Claude Desktop** (Cowork) | MCP server only | Desktop exposes no hook API, so `keel install` merges the `keel` MCP entry into the Desktop config and stops there. No lifecycle bridge, no Iron Law gate, no command compaction on this host. | `cowork/` |
 | **OpenCode** | TypeScript plugin | `opencode/keel.ts` — lifecycle bridge with `bridge` subcommands per event | `opencode/` |
-| **Codex CLI** | Plugin + hooks + script | `codex/.codex-plugin/plugin.json` + `hooks/hooks.json` + `keel-codex.ts` | `codex/` |
+| **Codex CLI** | Plugin + hooks + agents + script | `codex/.codex-plugin/plugin.json` + `hooks/hooks.json` + `agents/*.toml` + `keel-codex.ts` | `codex/` |
 | **Cursor IDE** | Rules + hooks + MCP | `cursor/.cursorrules` + `cursor/hooks/` + `cursor/mcp.json`: iron law, lifecycle bridge (`keel bridge`), MCP tools. Install with `keel install --with cursor` (Cursor is not always auto-detected) | `cursor/` |
 | **Pi Agent** | Rules + hooks + MCP | `pi/AGENTS.md` + `pi/hooks.json` + `pi/keel-pi.ts` + `pi/.mcp.json`: iron law, lifecycle bridge, MCP tools | `pi/` |
 | **Command Code** (cmdc) | Mod (TypeScript) + MCP | `commandcode/keel-cmdc.ts` — lifecycle bridge (`keel bridge`) via ModApi hooks + `compaction_start`/`compaction_done` events, MCP tools via `commandcode/mcp.json` | `commandcode/` |
@@ -644,6 +644,35 @@ keel works with multiple AI coding agents through dedicated adapters. Each adapt
 Claude Code is the primary target (native hooks, full lifecycle). OpenCode, Codex, Cursor, Pi, Oh My Pi, Command Code, and Antigravity ship runtime bridges that map host events to `keel bridge`; ZCode uses native hooks plus MCP. Grok reuses those Claude hooks when compatibility is enabled and falls back to native hooks when it is disabled, so events do not fire twice. Cowork is MCP-only because Claude Desktop exposes no hook API. Cursor often needs `--with cursor` because desktop IDEs are not always detected.
 
 `keel install` auto-detects which AI CLIs are installed (via config dirs, env vars, and binary-on-PATH) and wires only the matching adapters. Use `--with <name>` to force an adapter even when not detected (e.g. `--with grok,cursor`), and `--without <name>` to skip a detected adapter (e.g. `--without opencode`). Names: `opencode`, `codex`, `pi`, `cursor`, `cowork`, `commandcode`, `grok`, `omp`, `zcode`, `antigravity`. Grok receives one effective hook source plus `[mcp_servers.keel]` in `$GROK_HOME/config.toml` (default `~/.grok/config.toml`). Manual file copying is no longer required.
+
+## Universal 5-Role Multi-Agent Architecture
+
+For non-trivial tasks across all supported adapters (Codex, Antigravity, Claude Code, OpenCode, Pi, Cursor), Keel structures multi-agent orchestration into five coordinated roles:
+
+1. **`planner`** (read-only, high reasoning): Establishes project context, identifies existing behavior to preserve, and selects best-fit skills. Follows the 6-step human design workflow for interface requests.
+2. **`code_explorer`** (read-only, fast iteration): Traces routes, symbols, callers and callees, API schemas, state owners, and test commands from the Planner handoff without broad full-tree scans.
+3. **Parent Implementation Contract**: The orchestrating parent validates handoffs and specifies goals, boundaries, exact files, disjoint workstreams, and validation commands before dispatching workers.
+4. **`implementer`** (workspace write, token-saving): Parallel instances with disjoint file ownership sets. Halts with `BLOCKED` if an ownership conflict arises.
+5. **`reviewer`** (read-only, deep reasoning gate): Evaluates the combined patch only after the parent integration check passes. Enforces causal defect proof chains (`trigger -> execution path -> violated contract -> observable result`).
+6. **`pusher`** (workspace write, authorization gate): Active only after final Reviewer pass, consolidated change summary, and explicit user confirmation (`nak commit dan push?`).
+
+### Provider-Aware Model Tiering
+
+| Provider | Light / Implementer / Explorer (Token-Saving) | Critic / Planner / Verifier (Deep Reasoning) |
+| --- | --- | --- |
+| Google (Antigravity) | `gemini-2.5-flash` / `gemini-1.5-flash` | `gemini-2.5-pro` / `gemini-ultra` |
+| Anthropic (Claude Code) | `claude-3-5-haiku` | `claude-3-7-sonnet` / `claude-3-opus` |
+| OpenAI (Codex) | `gpt-5.6-luna` / `gpt-4o-mini` | `gpt-5.6-sol` / `o3` / `gpt-4o` |
+
+### Human 6-Step Design Workflow & Appllama Native Intelligence
+
+For interface design and UI implementation:
+1. **Idea and Concept Definition**: Problem statement, core value proposition, reference benchmarks from top-grossing applications.
+2. **User Flow & Navigation Architecture**: Strict navigation semantics (`push` for hierarchy, `replace` for peer tabs, bottom sheet or drawer for contextual tasks, modal for destructive decision gates).
+3. **Wireframe & Information Architecture**: Content budgeting, responsive grids, visual hierarchy, breakpoint behaviors.
+4. **First Draft & Semantic Design Tokens**: Zero raw hex codes and zero hardcoded numeric literals. Strict semantic tokens with WCAG 2.2 AA contrast verification.
+5. **Iterations & Motion Polish**: Native-thread animations (60/120fps), declarative animation worklets, and frame-by-frame gesture scrubbing.
+6. **Final Production Design**: Tested on real devices, responsive across screen densities, accessible, and maintainable.
 
 ## Managed Agent Profiles
 

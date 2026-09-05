@@ -38,6 +38,27 @@ For **component-first build order** (atoms → molecules → pages, Storybook is
 | 7 | Ship Safely | Pair meaningful UI risk with rollout controls, telemetry, or rollback options |
 | 8 | High Taste, Low Vagueness | Deliver polished, modern direction with concrete hierarchy, layout, spacing, typography, states, and copy decisions |
 
+## Human 6-Step Design Workflow & Native Intelligence
+
+Follow the 6-step human design workflow for all interface design and UI code generation:
+1. **Idea & Concept Definition**: Problem statement, core value proposition, reference benchmarks from leading products (Stripe, Linear, Apple, Airbnb, top-grossing apps).
+2. **User Flow & Navigation Architecture**: Strict navigation semantics:
+   - `push`: for hierarchical transitions into deeper details.
+   - `replace`: for peer tab switching and authentication flows.
+   - `bottom sheet` / `drawer`: for contextual tasks, filters, and multi-step forms.
+   - `modal`: reserved strictly for destructive or blocking decision gates.
+   - Never disorient the user with ambiguous transitions.
+3. **Wireframe & Information Architecture**: Content budgeting, responsive layout grids, visual hierarchy, breakpoint behaviors.
+4. **First Draft & Semantic Design Tokens**:
+   - Zero raw hex codes and zero hardcoded numeric literals.
+   - Strict semantic tokens: `--bg-surface`, `--text-primary`, `--border-subtle`, 4/8pt spacing scale.
+   - Anti-slop enforcement: no generic filler, no AI tells, WCAG 2.2 AA contrast verified.
+5. **Iterations & Motion Polish**:
+   - Native-thread animations (60/120fps, zero JS event-loop hitching).
+   - Use declarative animation worklets (e.g. React Native Reanimated, Flutter Ticker/Tween, CSS compositor transitions).
+   - Frame-by-frame scrubbing check: verify that gestures, swipes, and velocity tracking feel physical and fluid.
+6. **Final Production Design**: Pixel-perfect, tokenized, tested on real devices, responsive across screen densities, accessible, maintainable.
+
 ## Execution Reality
 
 - Inspect current components, tokens, layout constraints, and implementation gaps before recommending a UI strategy.

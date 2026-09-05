@@ -19,6 +19,20 @@ Side Effects: None — this file is informational.
 
 **Mid-flight critique** (use critic skill) during or before implementation for early cheap fixes (blind code, no-test, no-memory, skipped-workflow, symptom-patch); route findings via receiving-code-review.
 
+### Three-Phase Multi-Agent Quality Loops
+1. **Start Gate (QA Spec & Clarity Gate)**:
+   - Validates prompt alignment and rejects underspecified requirements.
+   - Requires a complete Implementation Contract before worker dispatch: exact goal, boundaries, files, disjoint workstreams, and validation commands.
+2. **Mid Gate (In-Flight Critic & Integration Gate)**:
+   - Evaluates active workers; halts immediately with `BLOCKED` if an ownership boundary or dependency conflict is found.
+   - Requires all workers complete and outputs connect cleanly before issuing `INTEGRATION CHECK: PASS`.
+3. **Finish Gate (Adversarial Causal Proof QC & Pusher Gate)**:
+   - Evaluates the combined change as one patch.
+   - Reports only proven defects with causal chains: `trigger/state -> reachable execution path -> violated contract -> observable result`.
+   - Limits fix cycles to at most 2 incremental re-review rounds.
+   - On final Reviewer `PASS`, provides a CONSOLIDATED FINAL CHANGE SUMMARY and ends with the standalone authorization prompt: `nak commit dan push?`.
+   - Pusher executes git shipping actions only upon explicit affirmative user authorization.
+
 **Security review required** for:
 - User input handling
 - Database queries

@@ -247,15 +247,17 @@ fn extract_command_from_observe_payload(payload: &str) -> Option<String> {
     }
     // Full tool_input JSON object.
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
-        if let Some(cmd) = value.get("command").and_then(|v| v.as_str()) {
-            return Some(cmd.to_string());
+        for key in &["command", "CommandLine", "cmd", "script"] {
+            if let Some(cmd) = value.get(*key).and_then(|v| v.as_str()) {
+                return Some(cmd.to_string());
+            }
         }
-        if let Some(cmd) = value
-            .get("tool_input")
-            .and_then(|ti| ti.get("command"))
-            .and_then(|v| v.as_str())
-        {
-            return Some(cmd.to_string());
+        if let Some(ti) = value.get("tool_input").or_else(|| value.get("toolInput")) {
+            for key in &["command", "CommandLine", "cmd", "script"] {
+                if let Some(cmd) = ti.get(*key).and_then(|v| v.as_str()) {
+                    return Some(cmd.to_string());
+                }
+            }
         }
         return None;
     }
@@ -404,7 +406,10 @@ fn run_bridge_pre_tool_use(
     // why: only a *shell* tool's gate decision reads the command, and an
     // inherited open stdin made this block until the adapter timed out.
     let mut stdin_command = String::new();
-    if command_flag.trim().is_empty() && shell_rewrite::is_shell_tool_name(tool_name) {
+    if command_flag.trim().is_empty()
+        && (shell_rewrite::is_shell_tool_name(tool_name)
+            || hook_lifecycle::is_host_shell_tool_name(tool_name))
+    {
         let _ = std::io::stdin().read_to_string(&mut stdin_command);
     }
     let command = if !command_flag.trim().is_empty() {
@@ -734,6 +739,33 @@ mod tests {
         assert!(
             out.starts_with("KEEL_GATE_DENY"),
             "id-less session must deny: {out}"
+        );
+    }
+
+    #[test]
+    fn test_extract_command_from_observe_payload() {
+        let expected = Some("keel doctor".to_string());
+        assert_eq!(
+            extract_command_from_observe_payload(r#"{"command": "keel doctor"}"#),
+            expected
+        );
+        assert_eq!(
+            extract_command_from_observe_payload(r#"{"CommandLine": "keel doctor"}"#),
+            expected
+        );
+        assert_eq!(
+            extract_command_from_observe_payload(
+                r#"{"tool_input": {"CommandLine": "keel doctor"}}"#
+            ),
+            expected
+        );
+        assert_eq!(
+            extract_command_from_observe_payload(r#"{"toolInput": {"cmd": "keel doctor"}}"#),
+            expected
+        );
+        assert_eq!(
+            extract_command_from_observe_payload("cargo test"),
+            Some("cargo test".to_string())
         );
     }
 }

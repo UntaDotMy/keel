@@ -1262,6 +1262,13 @@ pub(crate) fn maybe_wire_codex(
         "keel-codex.js",
         ".codex-plugin/plugin.json",
         ".mcp.json",
+        "config.toml",
+        "task-context.template.md",
+        "agents/planner.toml",
+        "agents/code-explorer.toml",
+        "agents/implementer.toml",
+        "agents/reviewer.toml",
+        "agents/pusher.toml",
     ] {
         let source = codex_source_dir.join(entry);
         let target = plugin_target.join(entry);
@@ -1283,6 +1290,33 @@ pub(crate) fn maybe_wire_codex(
                     }
                 }
                 Err(_) => {}
+            }
+        }
+    }
+    // Also copy custom agents directly into ~/.codex/agents/ for native discovery.
+    let codex_agents_source = codex_source_dir.join("agents");
+    let codex_agents_target = home.join(".codex").join("agents");
+    if codex_agents_source.is_dir() {
+        let _ = std::fs::create_dir_all(&codex_agents_target);
+        for agent_file in [
+            "planner.toml",
+            "code-explorer.toml",
+            "implementer.toml",
+            "reviewer.toml",
+            "pusher.toml",
+        ] {
+            let src = codex_agents_source.join(agent_file);
+            let tgt = codex_agents_target.join(agent_file);
+            if src.is_file() {
+                match copy_managed_file(&src, &tgt) {
+                    Ok(ManagedCopyStatus::Copied) => {
+                        copied += 1;
+                    }
+                    Ok(ManagedCopyStatus::PreservedCustom) => {
+                        preserved += 1;
+                    }
+                    _ => {}
+                }
             }
         }
     }
@@ -1376,6 +1410,18 @@ pub(crate) fn maybe_wire_codex(
                 false
             }
         };
+        match ensure_codex_agents_enabled(&codex_config) {
+            Ok(CodexEnableResult::Added) => {
+                wire_status.push("codex agents configuration enabled".to_string());
+            }
+            Ok(CodexEnableResult::AlreadyEnabled) => {}
+            Ok(CodexEnableResult::UnchangedDisabled) => {
+                wire_status.push("codex agents disabled by user in config.toml".to_string());
+            }
+            Err(error) => {
+                wire_status.push(format!("codex agents config skipped ({error})"));
+            }
+        }
         if marketplace_ready && plugin_enabled {
             if codex_plugin_installation(home_dir) == CodexPluginInstallation::Current {
                 wire_status.push("plugin installation already current".to_string());

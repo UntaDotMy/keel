@@ -29,6 +29,17 @@ The goal is to notice what is bad **before it ships**, then hand the findings to
 
 Do NOT use for: final production-readiness verdict (use `reviewer`), multi-expert disagreement resolution (use `deliberation`), or security exploit-finding (use `adversarial-security-review`).
 
+## Multi-Agent Quality Loop (Start & Mid Gates)
+
+1. **Start Gate: QA Spec & Clarity Check**:
+   - Run BEFORE any implementation begins.
+   - Verify prompt alignment: reject vague requests, hidden assumptions, or destructive interpretations ("add" vs "replace").
+   - Ensure a complete Implementation Contract exists: goals, current/target behavior, regression boundaries, exact files, workstreams, exclusive ownership, and test plans.
+2. **Mid Gate: In-Flight Critic & Integration Check**:
+   - Run DURING implementation or before multi-worker handoff.
+   - Verify safe parallelism: disjoint file write sets, no conflicting shared state mutations, and valid output contracts.
+   - Check the combined patch with `INTEGRATION CHECK: PASS` before handing off to the final Reviewer.
+
 ## The five failure modes (check each, with evidence)
 
 Walk these in order. For each, state **Pass** or **Finding** with a concrete pointer (`file:line`, command, or observation). A finding without evidence is not a finding — it is a hunch.
