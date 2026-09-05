@@ -829,22 +829,30 @@ fn flow_refresh_arguments(
     (target, start, finish)
 }
 
+fn sibling_refresh_arguments(repository_root: &Path, base_ref: &str) -> Vec<String> {
+    let mut arguments = vec![
+        "siblings".to_string(),
+        "--workspace-root".to_string(),
+        display_path(repository_root),
+        "--query".to_string(),
+        "review closeout sibling implementation".to_string(),
+    ];
+    if !base_ref.trim().is_empty() {
+        arguments.extend(["--base-ref".to_string(), base_ref.trim().to_string()]);
+    }
+    arguments.push("--json".to_string());
+    arguments
+}
+
 fn refresh_evidence(
     repository_root: &Path,
+    base_ref: &str,
     changed_paths: &[String],
     head: &str,
     findings: &mut Vec<ReviewFinding>,
     snapshots: &mut Vec<ReviewGateSnapshot>,
 ) {
-    let root_display = display_path(repository_root);
-    let sibling_arguments = vec![
-        "siblings".to_string(),
-        "--workspace-root".to_string(),
-        root_display.clone(),
-        "--query".to_string(),
-        "review closeout sibling implementation".to_string(),
-        "--json".to_string(),
-    ];
+    let sibling_arguments = sibling_refresh_arguments(repository_root, base_ref);
     let mut sibling_stdout = Vec::new();
     let mut sibling_stderr = Vec::new();
     let sibling_code = crate::utility::run_code_search_command(
@@ -1356,6 +1364,7 @@ pub(crate) fn run_review_closeout_command(
     });
     refresh_evidence(
         &repository_root,
+        base_ref,
         &changed_paths,
         &head_sha,
         &mut current_findings,
@@ -1807,6 +1816,18 @@ mod tests {
         assert_eq!(target_files, Some("rust/src/a.rs,web/app.ts"));
         assert_eq!(finish[0..2], ["flow", "finish"]);
         assert!(finish.iter().any(|argument| argument == "--repo-root"));
+    }
+
+    #[test]
+    fn sibling_refresh_carries_branch_base_ref() {
+        let arguments = sibling_refresh_arguments(Path::new("D:/repo"), "origin/main");
+        assert_eq!(
+            arguments
+                .windows(2)
+                .find(|pair| pair[0] == "--base-ref")
+                .map(|pair| pair[1].as_str()),
+            Some("origin/main")
+        );
     }
 
     #[test]
