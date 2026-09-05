@@ -72,6 +72,7 @@ INPUT=$(cat)
 HOOK_EVENT=$(printf '%s' "$INPUT" | "$JQ_BIN" -r '.hook_event_name // empty' 2>/dev/null) || HOOK_EVENT=""
 TOOL_NAME=$(printf '%s' "$INPUT" | "$JQ_BIN" -r '.tool_name // empty' 2>/dev/null) || TOOL_NAME=""
 CMD=$(printf '%s' "$INPUT" | "$JQ_BIN" -r '.tool_input.command // empty' 2>/dev/null) || CMD=""
+TOOL_PATH=$(printf '%s' "$INPUT" | "$JQ_BIN" -r '.tool_input.path // .tool_input.file_path // .tool_input.filePath // .path // empty' 2>/dev/null) || TOOL_PATH=""
 CWD=$(printf '%s' "$INPUT" | "$JQ_BIN" -r '.cwd // empty' 2>/dev/null) || CWD=""
 [ -z "$CWD" ] && CWD="$PWD"
 # conversation_id is the stable session identifier across a Cursor conversation.
@@ -207,7 +208,9 @@ if is_edit_class_tool "$TOOL_NAME"; then
   # Map the Cursor tool name to the canonical name so the Rust gate recognizes
   # it (e.g. StrReplace -> str_replace); without this the gate answered ALLOW.
   CANON_TOOL=$(canonical_keel_tool "$TOOL_NAME")
-  GATE=$("$KEEL_BIN" bridge pre-tool-use --session "$SESSION_ID" --cwd "$CWD" --tool "$CANON_TOOL" 2>/dev/null) || GATE=""
+  GATE_ARGS=(--session "$SESSION_ID" --cwd "$CWD" --tool "$CANON_TOOL")
+  [ -n "$TOOL_PATH" ] && GATE_ARGS+=(--path "$TOOL_PATH")
+  GATE=$("$KEEL_BIN" bridge pre-tool-use "${GATE_ARGS[@]}" 2>/dev/null) || GATE=""
   case "$GATE" in
     KEEL_GATE_DENY*)
       REASON=$(printf '%s' "$GATE" | sed '1d')

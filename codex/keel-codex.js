@@ -360,7 +360,10 @@ function handlePreToolUse(input, isPre) {
     observeArgs.push("--failed");
   runBridgeWithStdin("observe", observeArgs, stdin);
   if (isEditClassTool(currentToolName)) {
-    const gate = runBridge("pre-tool-use", ["--session", sessionID, "--cwd", cwd, "--tool", currentToolName], 5000);
+    const pathArg = (input.tool_input && (input.tool_input.path || input.tool_input.file_path || input.tool_input.filePath)) || input.path || "";
+    const gateArgs = ["--session", sessionID, "--cwd", cwd, "--tool", currentToolName];
+    if (pathArg) gateArgs.push("--path", String(pathArg));
+    const gate = runBridge("pre-tool-use", gateArgs, 5000);
     const gateResult = parseGateResponse(gate);
     if (gateResult.status === "deny") {
       return denyOutput(gateResult.reason || "keel Iron Law gate: call system_map/recall/context_brief before editing.");
@@ -448,7 +451,7 @@ function main() {
       const n = fs2.readSync(process.stdin.fd, buf, 0, buf.length, null);
       if (n === 0)
         break;
-      chunks.push(buf.subarray(0, n));
+      chunks.push(Buffer.from(buf.subarray(0, n)));
     }
     raw = Buffer.concat(chunks).toString("utf-8");
   } catch {

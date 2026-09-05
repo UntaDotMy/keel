@@ -473,7 +473,13 @@ fn system_map_refresh_fires_on_session_start_pre_compact_and_session_end() {
     // about to be compacted, and after the session ends. Any change to
     // this trigger set is a behavior change the user should see — this
     // test pins it.
-    for event_name in ["SessionStart", "PreCompact", "SessionEnd"] {
+    for event_name in [
+        "SessionStart",
+        "PreCompact",
+        "SessionEnd",
+        "CwdChanged",
+        "DirectoryAdded",
+    ] {
         assert!(
             should_refresh_system_map(event_name),
             "{event_name} must auto-refresh the workspace SYSTEM_MAP"
@@ -1227,6 +1233,56 @@ fn iron_law_tool_classification_strict_requires_keel() {
 }
 
 #[test]
+fn grok_xd_mcp_write_is_keel_research_not_an_edit() {
+    assert_eq!(
+        effective_tool_name("Write", "xd://mcp__keel_system_map"),
+        "mcp__keel_system_map"
+    );
+    assert!(is_keel_research_tool_name(effective_tool_name(
+        "Write",
+        "xd://mcp__keel_system_map"
+    )));
+    assert_eq!(
+        effective_tool_name("Write", "src/main.rs"),
+        "Write",
+        "ordinary Write must stay an edit"
+    );
+    assert_eq!(
+        effective_tool_name("Write", "xd://mcp__vendor_keel_x"),
+        "Write",
+        "foreign MCP rewrite must not look like keel research"
+    );
+    let claude_write = serde_json::json!({
+        "tool_name": "Write",
+        "tool_input": {"file_path": "xd://mcp__keel_system_map"}
+    });
+    assert_eq!(
+        hook_tool_name(&claude_write),
+        "mcp__keel_system_map",
+        "official file_path must remap Grok MCP writes"
+    );
+}
+
+#[test]
+fn official_2026_09_hook_events_are_dispatchable() {
+    for slug in ["directory-added", "pre-model-switch", "post-model-switch"] {
+        assert!(
+            event_by_slug(slug).is_some(),
+            "official event `{slug}` must be in HOOK_EVENTS so keel hook {slug} is not unknown"
+        );
+    }
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let exit = run_hook_command(&["directory-added".to_string()], &mut stdout, &mut stderr);
+    assert_eq!(exit, 0, "directory-added must dispatch, not unknown");
+    let err = String::from_utf8_lossy(&stderr);
+    assert!(
+        !err.contains("Unknown hook command"),
+        "directory-added must not be unknown: {err}"
+    );
+}
+
+#[test]
 fn iron_law_research_command_rejects_bypass_and_non_research_surfaces() {
     // why: a compound command must not smuggle a non-keel tail past the gate.
     assert!(!is_keel_research_command("keel doctor && python exfil.py"));
@@ -1399,13 +1455,14 @@ fn grok_camel_case_session_does_not_inherit_satisfied_default_gate() {
         "sessionId": "grok-unsatisfied-session",
         "toolName": "search_replace"
     });
-    assert!(iron_law_gate_decision(hook_session_id(&input)).is_some());
-
+    let reason = pre_tool_gate_decision(hook_session_id(&input), hook_tool_name(&input), None, "")
+        .expect("unsatisfied grok session must deny");
     let mut output = Vec::new();
     let mut error = Vec::new();
-    assert_eq!(run_iron_law_gate(&input, &mut output, &mut error), 0);
+    emit_pretool_deny(reason, &mut output, &mut error);
     let payload: serde_json::Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(payload["decision"], "deny");
+    assert_eq!(payload["hookSpecificOutput"]["permissionDecision"], "deny");
     assert!(error.is_empty());
 
     match previous_home {

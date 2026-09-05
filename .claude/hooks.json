@@ -134,6 +134,18 @@
         ]
       }
     ],
+    "DirectoryAdded": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "keel hook directory-added",
+            "statusMessage": "Refreshing system map for a newly added working directory"
+          }
+        ]
+      }
+    ],
     "PermissionRequest": [
       {
         "matcher": "Bash",
@@ -334,6 +346,30 @@
             "type": "command",
             "command": "keel hook elicitation-result",
             "statusMessage": "Elicitation-result hook (reserved; dispatch is currently a no-op)"
+          }
+        ]
+      }
+    ],
+    "PreModelSwitch": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "keel hook pre-model-switch",
+            "statusMessage": "Model-switch hook (reserved; dispatch is currently a no-op)"
+          }
+        ]
+      }
+    ],
+    "PostModelSwitch": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "keel hook post-model-switch",
+            "statusMessage": "Post-model-switch hook (reserved; dispatch is currently a no-op)"
           }
         ]
       }

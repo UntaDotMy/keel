@@ -48,6 +48,7 @@ import {
   parseRewriteResponse,
   resolveBinary,
   sessionMarkerDirectory,
+  toolPathFromPayload,
 } from "../_shared/ts/bridge-core";
 
 // ---------------------------------------------------------------------------
@@ -269,6 +270,8 @@ function handleToolCall(
         toolName,
       ];
       if (command) gateArgs.push("--command", command);
+      const pathArg = toolPathFromPayload(event);
+      if (pathArg) gateArgs.push("--path", pathArg);
       const gateResult = parseGateResponse(
         runBridge("pre-tool-use", gateArgs, undefined, 5000),
       );

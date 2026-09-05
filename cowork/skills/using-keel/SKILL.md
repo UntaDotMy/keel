@@ -31,7 +31,8 @@ Skipping a skill that applied ships a regression. Checking one that did not cost
 | "I remember this codebase" | Read SYSTEM_MAP and the owning file. |
 | "I'll call system_map/recall again to be safe" | Loop. Reuse this turn's result unless you changed files/memory. |
 | "The story is clear" / "I get the gist" | Restate + research. Gist is not the spec. |
-| "I'll assume X and proceed" | If it changes what you build, ask first. |
+| "I'll assume X and proceed" | Never assume, never guess. If it changes what you build, ask first. |
+| "I'll skip this test/review/scan" | Never skip or shortcut required work. Do the whole class. |
 | "While I'm here I'll also add…" | Request fidelity failed — stay on asked scope. |
 | "Unclear but I'll pick one" | Ask. Silent choice is drift. |
 | "I'll ls the repo" | Memory-first: system_map/recall, then open the known path. |
@@ -98,4 +99,4 @@ Persist across sessions: `keel memory working-brief write` before non-trivial wo
 
 ## One-line summary
 
-**Understand before you build. Research first. Invoke relevant skills. Find the root cause. The repository — not training data — is the source of truth.**
+**Understand before you build. Never assume, never guess, never skip or shortcut. Research first. Invoke relevant skills. Find the root cause. The repository — not training data — is the source of truth.**

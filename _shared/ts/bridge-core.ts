@@ -63,6 +63,25 @@ export function legacyIronLawMarkerDirectory(): string {
 }
 
 /** Match Rust `sanitize_memory_key`: lowercase alnum, other runs become `-`. */
+/** Path from host hook JSON (`path` / official `file_path`). */
+export function toolPathFromPayload(input: unknown): string {
+  if (!input || typeof input !== "object") return "";
+  const record = input as Record<string, unknown>;
+  const nestedCandidates = [record.args, record.tool_input, record.toolInput, record.input];
+  const nested = nestedCandidates.find(
+    (value) => value && typeof value === "object",
+  ) as Record<string, unknown> | undefined;
+  const pick = (obj: Record<string, unknown> | undefined): string => {
+    if (!obj) return "";
+    for (const key of ["path", "file_path", "filePath"]) {
+      const value = obj[key];
+      if (typeof value === "string" && value.trim()) return value;
+    }
+    return "";
+  };
+  return pick(nested) || pick(record);
+}
+
 export function sanitizeSessionKey(sessionID: string): string {
   const raw = (sessionID || "default").trim() || "default";
   let key = "";

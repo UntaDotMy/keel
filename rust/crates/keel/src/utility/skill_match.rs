@@ -264,13 +264,19 @@ const CURATED_SKILL_TRIGGERS: &[(&str, &[&str])] = &[
     (
         "critic",
         &[
-            "adversarial review",
+            "critique this",
+            "what am i missing",
+            "stress-test this approach",
+            "stress test this approach",
+            "is this sound before i go further",
             "review this implementation adversarially",
             "challenge this implementation",
             "find weaknesses in this implementation",
             "half-baked",
             "half baked",
             "unfinished work",
+            "need some critics",
+            "critics about",
         ],
     ),
     (
@@ -1674,6 +1680,28 @@ mod tests {
                 "review this implementation adversarially so half-baked unfinished work cannot pass"
             ),
             Some("critic")
+        );
+    }
+
+    #[test]
+    fn critic_skill_body_phrases_route_to_critic() {
+        for prompt in [
+            "critique this",
+            "what am i missing in this implementation",
+            "stress-test this approach before I go further",
+            "is this sound before i go further",
+            "i need some critics about the current codebases",
+        ] {
+            assert_eq!(
+                curated_skill_for_prompt(prompt),
+                Some("critic"),
+                "critic skill body phrase must route: {prompt}"
+            );
+        }
+        assert_eq!(
+            curated_skill_for_prompt("the critical path is slow"),
+            None,
+            "critical must not match critic"
         );
     }
 

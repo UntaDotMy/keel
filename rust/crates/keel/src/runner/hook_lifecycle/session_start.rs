@@ -285,7 +285,7 @@ pub(super) fn subagent_start_context() -> String {
 pub(super) fn should_refresh_system_map(event_name: &str) -> bool {
     matches!(
         event_name,
-        "SessionStart" | "PreCompact" | "SessionEnd" | "CwdChanged"
+        "SessionStart" | "PreCompact" | "SessionEnd" | "CwdChanged" | "DirectoryAdded"
     )
 }
 

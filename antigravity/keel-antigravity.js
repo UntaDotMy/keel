@@ -105,6 +105,8 @@ function handlePreToolUse(input) {
   ];
   const command = commandFrom(args);
   if (command) bridgeArgs.push("--command", command);
+  const pathArg = args.path || args.file_path || args.filePath || "";
+  if (pathArg) bridgeArgs.push("--path", String(pathArg));
   const gate = parseGate(
     runBridge("pre-tool-use", bridgeArgs, JSON.stringify(args)),
   );

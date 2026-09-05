@@ -31,6 +31,7 @@ import {
   parseRewriteResponse,
   resolveBinary,
   sessionMarkerDirectory,
+  toolPathFromPayload,
 } from "../_shared/ts/bridge-core";
 
 // ---------------------------------------------------------------------------
@@ -242,9 +243,12 @@ function handlePreToolUse(input: CodexHookInput, isPre: boolean): string {
   // Edit-class: Rust core is source of truth (evidence-based deny). This gate
   // is fail-CLOSED: an empty result means the bridge timed out or errored.
   if (isEditClassTool(currentToolName)) {
+    const pathArg = toolPathFromPayload(input);
+    const gateArgs = ["--session", sessionID, "--cwd", cwd, "--tool", currentToolName];
+    if (pathArg) gateArgs.push("--path", pathArg);
     const gate = runBridge(
       "pre-tool-use",
-      ["--session", sessionID, "--cwd", cwd, "--tool", currentToolName],
+      gateArgs,
       5000,
     );
     const gateResult = parseGateResponse(gate);

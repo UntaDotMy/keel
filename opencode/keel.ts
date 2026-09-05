@@ -13,6 +13,7 @@ import {
   parseRewriteResponse,
   resolveBinary,
   sessionMarkerDirectory,
+  toolPathFromPayload,
 } from "../_shared/ts/bridge-core";
 
 // ---------------------------------------------------------------------------
@@ -175,9 +176,12 @@ const KeelPlugin: Plugin = async ({ client, directory, $ }) => {
       // (Windows Defender scan on first run), so the gate call gets a larger
       // budget than the advisory calls.
       if (isEditClassTool(toolName)) {
+        const pathArg = toolPathFromPayload(input);
+        const gateArgs = ["--session", sessionID, "--cwd", cwd, "--tool", toolName];
+        if (pathArg) gateArgs.push("--path", pathArg);
         const result = await runBridge(
           "pre-tool-use",
-          ["--session", sessionID, "--cwd", cwd, "--tool", toolName],
+          gateArgs,
           5000,
         );
         const gateResult = parseGateResponse(result);

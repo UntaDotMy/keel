@@ -243,6 +243,38 @@ pub const HOOK_EVENTS: &[HookEvent] = &[
         supports_hook_specific_output: false,
         installs_in_settings: true,
     },
+    // DirectoryAdded: official event when /add-dir or SDK register_repo_root
+    // adds a working directory mid-session. Same production need as
+    // CwdChanged — SYSTEM_MAP must follow the new root. Official schema
+    // has no decision control (side-effect only).
+    HookEvent {
+        name: "DirectoryAdded",
+        slug: "directory-added",
+        matcher: "",
+        status: "Refreshing system map for a newly added working directory",
+        supports_hook_specific_output: false,
+        installs_in_settings: true,
+    },
+    // PreModelSwitch / PostModelSwitch: official as of Claude Code v2.1.251.
+    // Reserved dispatch so `keel hook pre-model-switch` is not unknown.
+    // Not auto-installed: a no-op PreModelSwitch that times out blocks the
+    // switch, and PostModelSwitch has no default guidance worth injecting.
+    HookEvent {
+        name: "PreModelSwitch",
+        slug: "pre-model-switch",
+        matcher: "",
+        status: "Model-switch hook (reserved; dispatch is currently a no-op)",
+        supports_hook_specific_output: false,
+        installs_in_settings: false,
+    },
+    HookEvent {
+        name: "PostModelSwitch",
+        slug: "post-model-switch",
+        matcher: "",
+        status: "Post-model-switch hook (reserved; dispatch is currently a no-op)",
+        supports_hook_specific_output: false,
+        installs_in_settings: false,
+    },
     HookEvent {
         name: "PreCompact",
         slug: "pre-compact",
@@ -436,6 +468,9 @@ mod tests {
             "Elicitation",
             "ElicitationResult",
             "MessageDisplay",
+            "DirectoryAdded",
+            "PreModelSwitch",
+            "PostModelSwitch",
         ] {
             assert!(
                 event_by_name(expected).is_some(),
@@ -547,6 +582,8 @@ mod tests {
                 "TeammateIdle",
                 "WorktreeCreate",
                 "WorktreeRemove",
+                "PreModelSwitch",
+                "PostModelSwitch",
                 "Setup",
                 "InstructionsLoaded",
                 "ConfigChange",

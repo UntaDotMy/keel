@@ -124,10 +124,11 @@ pub(super) fn iron_law_marker_present(claude_home: &Path, session_id: &str) -> b
 
 /// Substrings that identify a keel *research* tool name (MCP or host-neutral).
 /// Management/install tools are excluded so installing keel does not clear the gate.
-pub(super) fn is_keel_research_tool_name(tool_name: &str) -> bool {
+pub(crate) fn is_keel_research_tool_name(tool_name: &str) -> bool {
     let lower = tool_name.to_ascii_lowercase();
     // Namespaced MCP: mcp__keel__system_map, keel__system_map, etc.
     let looks_keel = lower.starts_with("mcp__keel__")
+        || lower.starts_with("mcp__keel_")
         || lower.starts_with("keel__")
         || lower == "keel"
         || lower.starts_with("keel_");
@@ -451,18 +452,27 @@ pub(crate) fn iron_law_gate_decision(session_id: &str) -> Option<&'static str> {
     })
 }
 
-pub(super) fn run_iron_law_gate(
-    input: &JsonDocument,
-    standard_output: &mut dyn Write,
-    standard_error: &mut dyn Write,
-) -> u8 {
-    let session_id = hook_session_id(input);
-
-    let Some(reason) = iron_law_gate_decision(session_id) else {
-        return 0;
-    };
-    emit_pretool_deny(reason, standard_output, standard_error);
-    0
+pub(crate) fn pre_tool_gate_decision(
+    session_id: &str,
+    tool_name: &str,
+    command: Option<&str>,
+    cwd: &str,
+) -> Option<&'static str> {
+    if !tool_is_iron_law_gated(tool_name, command) {
+        return None;
+    }
+    if let Some(reason) = iron_law_gate_decision(session_id) {
+        return Some(reason);
+    }
+    if anvil_gate_enabled() && is_edit_class_tool(tool_name) {
+        let satisfied = resolve_claude_home("")
+            .ok()
+            .is_some_and(|home| anvil_satisfied_this_session(&home, session_id, cwd));
+        if !satisfied {
+            return Some(ANVIL_GATE_DENIAL);
+        }
+    }
+    None
 }
 
 pub(super) fn run_hook_pre_tool_use(
@@ -505,29 +515,20 @@ pub(super) fn run_hook_pre_tool_use(
     };
     let session_id = hook_session_id(&input);
 
-    // Hard Iron Law blocks edit tools until research evidence exists.
-    if tool_is_iron_law_gated(tool_name, command_opt) {
-        if iron_law_gate_decision(session_id).is_some() {
-            return run_iron_law_gate(&input, standard_output, standard_error);
-        }
-        if anvil_gate_enabled()
-            && is_edit_class_tool(tool_name)
-            && !tool_is_anvil_surface(tool_name, command_opt)
-        {
-            let claude_home = resolve_claude_home("").ok();
-            let cwd = std::env::current_dir()
-                .ok()
-                .map(|path| display_path(&path))
-                .unwrap_or_default();
-            let satisfied = claude_home
-                .as_ref()
-                .map(|home| anvil_satisfied_this_session(home, session_id, &cwd))
-                .unwrap_or(false);
-            if !satisfied {
-                emit_pretool_deny(ANVIL_GATE_DENIAL, standard_output, standard_error);
-                return 0;
-            }
-        }
+    let cwd = hook_str(&input, &["cwd", "workspaceRoot"]);
+    let current_directory;
+    let cwd = if cwd.is_empty() {
+        current_directory = std::env::current_dir()
+            .ok()
+            .map(|path| display_path(&path))
+            .unwrap_or_default();
+        current_directory.as_str()
+    } else {
+        cwd
+    };
+    if let Some(reason) = pre_tool_gate_decision(session_id, tool_name, command_opt, cwd) {
+        emit_pretool_deny(reason, standard_output, standard_error);
+        return 0;
     }
 
     // Compaction rewrite only applies to shell tools.
@@ -620,7 +621,7 @@ pub(super) fn run_hook_pre_tool_use(
 ///
 /// PostToolUse stays silent on `additionalContext` (the model already sees the
 /// tool result), so we never emit JSON — only do the side-effect and return 0.
-pub(super) fn emit_pretool_deny(
+pub(crate) fn emit_pretool_deny(
     reason: &str,
     standard_output: &mut dyn Write,
     standard_error: &mut dyn Write,
@@ -664,8 +665,10 @@ pub(super) fn tool_is_anvil_surface(tool_name: &str, command: Option<&str>) -> b
     false
 }
 
+#[cfg(test)]
 pub(super) const ANVIL_SATISFIED_DIR: &str = "anvil-satisfied";
 
+#[cfg(test)]
 pub(super) fn anvil_satisfied_path(claude_home: &Path, session_id: &str) -> PathBuf {
     claude_home
         .join("state")
@@ -705,15 +708,12 @@ pub(super) fn anvil_satisfied_this_session(
     session_id: &str,
     workspace_cwd: &str,
 ) -> bool {
-    if anvil_satisfied_path(claude_home, session_id).exists() {
-        return true;
-    }
     let Some(marker) = anvil_workspace_marker_ms(claude_home, workspace_cwd) else {
         return false;
     };
     match session_start_ms(claude_home, session_id) {
         Some(start) => marker.saturating_add(BRIEF_GATE_SESSION_GRACE_MS) >= start,
-        None => true,
+        None => false,
     }
 }
 

@@ -123,7 +123,36 @@ pub(super) fn hook_str<'a>(input: &'a JsonDocument, keys: &[&str]) -> &'a str {
 }
 
 pub(super) fn hook_tool_name(input: &JsonDocument) -> &str {
-    hook_str(input, &["tool_name", "toolName"])
+    let tool_name = hook_str(input, &["tool_name", "toolName"]);
+    let tool_input = input
+        .get("tool_input")
+        .or_else(|| input.get("toolInput"))
+        .or_else(|| input.get("input"));
+    let path = tool_input
+        .and_then(|value| {
+            value
+                .get("path")
+                .or_else(|| value.get("file_path"))
+                .or_else(|| value.get("filePath"))
+        })
+        .and_then(JsonDocument::as_str)
+        .unwrap_or("");
+    effective_tool_name(tool_name, path)
+}
+
+pub(crate) fn effective_tool_name<'a>(tool_name: &'a str, path: &'a str) -> &'a str {
+    if tool_name.eq_ignore_ascii_case("write") {
+        if let Some(device) = path.strip_prefix("xd://") {
+            if device.starts_with("mcp__keel_")
+                && device
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+            {
+                return device;
+            }
+        }
+    }
+    tool_name
 }
 
 pub(super) fn hook_session_id(input: &JsonDocument) -> &str {

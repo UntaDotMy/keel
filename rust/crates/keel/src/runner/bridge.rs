@@ -66,7 +66,7 @@ fn render_bridge_help(standard_output: &mut dyn Write) {
          \x20 pre-compact   --session <id> --cwd <path>\n\
          \x20 post-compact  --session <id> --cwd <path>\n\
          \x20 gate-status   --session <id> --cwd <path>\n\
-         \x20 pre-tool-use  --session <id> --cwd <path> --tool <name>\n\
+         \x20 pre-tool-use  --session <id> --cwd <path> --tool <name> [--command <text>] [--path <file>]\n\
          \x20 rewrite       --tool <name>  (command on stdin)"
     );
 }
@@ -200,7 +200,24 @@ fn run_bridge_observe(
         } else {
             session.as_str()
         };
-        hook_lifecycle::maybe_mark_iron_law_from_parts(session_id, tool_name, command.as_deref());
+        let input: serde_json::Value =
+            serde_json::from_str(&tool_input_json).unwrap_or(serde_json::Value::Null);
+        let nested = input.get("tool_input").or_else(|| input.get("toolInput"));
+        let path = input
+            .get("path")
+            .or_else(|| input.get("file_path"))
+            .or_else(|| input.get("filePath"))
+            .or_else(|| nested.and_then(|value| value.get("path")))
+            .or_else(|| nested.and_then(|value| value.get("file_path")))
+            .or_else(|| nested.and_then(|value| value.get("filePath")))
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        let effective_tool = hook_lifecycle::effective_tool_name(tool_name, path);
+        hook_lifecycle::maybe_mark_iron_law_from_parts(
+            session_id,
+            effective_tool,
+            command.as_deref(),
+        );
     }
 
     match observation::record_observation_from_parts(
@@ -375,12 +392,14 @@ fn run_bridge_pre_tool_use(
     let mut flags = bridge_flag_set("bridge pre-tool-use");
     flags.string_flag("tool", "");
     flags.string_flag("command", "");
+    flags.string_flag("path", "");
     if let Err(parse_error) = flags.parse(arguments) {
         let _ = writeln!(standard_error, "{}", parse_error.message);
         return 2;
     }
-    let (session, _cwd) = resolve_bridge_args(&flags, standard_error);
-    let tool_name = flags.string_value("tool");
+    let (session, cwd) = resolve_bridge_args(&flags, standard_error);
+    let tool_name =
+        hook_lifecycle::effective_tool_name(flags.string_value("tool"), flags.string_value("path"));
     let command_flag = flags.string_value("command");
     // why: only a *shell* tool's gate decision reads the command, and an
     // inherited open stdin made this block until the adapter timed out.
@@ -409,7 +428,7 @@ fn run_bridge_pre_tool_use(
         return 0;
     }
     let session_id = session.trim();
-    match hook_lifecycle::iron_law_gate_decision(session_id) {
+    match hook_lifecycle::pre_tool_gate_decision(session_id, tool_name, command, &cwd) {
         Some(reason) => {
             let _ = writeln!(standard_output, "KEEL_GATE_DENY\n{reason}");
         }

@@ -39,6 +39,12 @@ try {
 $HookEvent = $Payload.hook_event_name
 $ToolName = $Payload.tool_name
 $Command = if ($Payload.tool_input -and $Payload.tool_input.command) { $Payload.tool_input.command } else { "" }
+$ToolPath = ""
+if ($Payload.tool_input) {
+    if ($Payload.tool_input.path) { $ToolPath = [string]$Payload.tool_input.path }
+    elseif ($Payload.tool_input.file_path) { $ToolPath = [string]$Payload.tool_input.file_path }
+    elseif ($Payload.tool_input.filePath) { $ToolPath = [string]$Payload.tool_input.filePath }
+}
 $Cwd = if ($Payload.cwd) { $Payload.cwd } else { $PWD.Path }
 $SessionId = if ($Payload.conversation_id) { $Payload.conversation_id } else { "default" }
 
@@ -59,6 +65,30 @@ switch ($HookEvent) {
         exit 0
     }
     "postToolUse" {
+        Write-Output "{}"
+        exit 0
+    }
+    "preToolUse" {
+        $GateArgs = @("bridge", "pre-tool-use", "--session", $SessionId, "--cwd", $Cwd, "--tool", $ToolName)
+        if (-not [string]::IsNullOrWhiteSpace($Command)) {
+            $GateArgs += @("--command", $Command)
+        }
+        if (-not [string]::IsNullOrWhiteSpace($ToolPath)) {
+            $GateArgs += @("--path", $ToolPath)
+        }
+        $Gate = & $KeelBin @GateArgs 2>$null
+        if ($Gate -like "KEEL_GATE_DENY*") {
+            $Reason = (($Gate -split "`n") | Select-Object -Skip 1) -join "`n"
+            if ([string]::IsNullOrWhiteSpace($Reason)) {
+                $Reason = "keel Iron Law gate: call system_map/recall/context_brief before editing."
+            }
+            @{
+                permission = "deny"
+                user_message = $Reason
+                agent_message = $Reason
+            } | ConvertTo-Json -Compress
+            exit 0
+        }
         Write-Output "{}"
         exit 0
     }

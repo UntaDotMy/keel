@@ -77,6 +77,18 @@ const TRIGGER_FIXTURES: &[TriggerFixture] = &[
         accept: &["reviewer", "requesting-code-review"],
     },
     TriggerFixture {
+        prompt: "critique this implementation and tell me what am i missing",
+        accept: &["critic"],
+    },
+    TriggerFixture {
+        prompt: "i need some critics about the current codebases",
+        accept: &["critic"],
+    },
+    TriggerFixture {
+        prompt: "stress-test this approach before I go further",
+        accept: &["critic"],
+    },
+    TriggerFixture {
         prompt: "the test is failing intermittently, help me find the root cause",
         accept: &["systematic-debugging"],
     },

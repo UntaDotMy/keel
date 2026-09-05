@@ -16,6 +16,7 @@ Implementation discipline: Think Before Coding, Simplicity First, Surgical Chang
 pub(super) const USER_PROMPT_ENFORCEMENT_STRIP: &str = "\
 ENFORCED THIS TURN (mandatory on every turn): FOLLOW THE IRON LAW. USE KEEL.\n\
 Research-first: trust the codebase. Read SYSTEM_MAP; use system_map, recall, context_brief, run_command, skill_route/skill_get, and code_search instead of guessing.\n\
+Never assume, never guess, never skip required tests, review, or sibling scans.\n\
 PreToolUse DENIES Edit/Write and shell work until a keel research tool runs. After edits, run code_search siblings.";
 
 pub(crate) fn user_prompt_submit_context(prompt_text: &str) -> String {

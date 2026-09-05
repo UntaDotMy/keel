@@ -115,7 +115,7 @@ pub fn run_gates_scored_bounded(
         }
     }
     GateScore {
-        ok: all_ok,
+        ok: all_ok && total > 0,
         passed,
         total,
         logs: compress_output(&logs),
@@ -172,7 +172,7 @@ pub fn sieve_lock_in_directory(
         logs.push_str(&piece_logs);
         if pass && !gates.is_empty() {
             greens += 1;
-        } else if spec.critic == "none" {
+        } else {
             ok = false;
         }
     }
@@ -264,9 +264,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sieve_no_gate_done_picks_green() {
-        let (ok, _) = run_gates(&[]);
-        assert!(ok);
+    fn empty_gates_cannot_pass_without_evidence() {
+        assert!(!run_gates(&[]).0);
+        assert!(!run_gates(&[" \n".into()]).0);
     }
 
     #[test]

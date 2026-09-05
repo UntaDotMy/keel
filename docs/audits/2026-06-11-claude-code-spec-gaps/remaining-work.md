@@ -33,7 +33,7 @@ warned; `config-audit` 0 high / 0 medium / 0 low; `review pre-commit` gate=pass.
 | 13 | Subagent `background` | explicit `background: false` | `.claude/agents/reviewer.md` |
 | 14 | Subagent `isolation: worktree` | applied to a write-capable subagent | `.claude/agents/postgres-migration-safety.md` |
 | 15 | Subagent `memory` | `memory: project` | `.claude/agents/reviewer.md`, `.claude/agents/preserve-existing-flow.md` |
-| 16 | Subagent inline `mcpServers` | `mcpServers: [keel]` (string reference to the bundled server) | `.claude/agents/data-and-ml-engineering.md` |
+| 16 | Subagent inline `mcpServers` | Removed: official plugin-shipped agents ignore `hooks`/`mcpServers`/`permissionMode` (plugins-reference 2026-09). Keel MCP stays on the plugin `mcpServers.keel` alwaysLoad path. | `.claude/agents/data-and-ml-engineering.md` |
 | 17 | Plugin manifest `outputStyles`, `lspServers` | `outputStyles: ./output-styles/` + `lspServers: ./.lsp.json`; created `.lsp.json` (rust-analyzer with clippy check) and `output-styles/keel-delivery.md` | `.claude-plugin/plugin.json`, `.lsp.json`, `output-styles/` |
 
 ---

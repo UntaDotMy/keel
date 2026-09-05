@@ -21,8 +21,9 @@ architecture:
    not propose changes against an imagined version of a file. If the task
    references SYSTEM_MAP, CLAUDE.md, AGENTS.md, or a specific path, open it.
 2. **Understand before building.** Before writing code, restate what the task
-   actually asks and research what is genuinely needed. Do not guess, do not
-   assume, do not build against an imagined spec. **Request fidelity:** implement
+   actually asks and research what is genuinely needed. Never assume, never
+   guess, never skip or shortcut a required research, test, review, sibling-scan,
+   or official-contract check. Do not build against an imagined spec. **Request fidelity:** implement
    only the asked work; no invented features or extras. **Ask when unclear:** if
    confused, incomplete, or drift-risk, stop and ask (or report the question) —
    never invent the answer. **Never trust knowledge-base alone** as this

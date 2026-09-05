@@ -15,6 +15,7 @@ import {
   parseRewriteResponse,
   resolveBinary,
   sanitizeSessionKey,
+  toolPathFromPayload,
 } from "../_shared/ts/bridge-core";
 
 
@@ -195,9 +196,12 @@ export default function keelCmdcMod(cmd: ModApi): void {
 
       // Edit-class: Rust core is source of truth. Fail-CLOSED on timeout/error.
       if (isEditClassTool(tool) && !ironLawSatisfied(sessionId)) {
+        const pathArg = toolPathFromPayload(input);
+        const gateArgs = ["--session", sessionId, "--cwd", cmd.cwd, "--tool", tool];
+        if (pathArg) gateArgs.push("--path", pathArg);
         const gate = runBridge(
           "pre-tool-use",
-          ["--session", sessionId, "--cwd", cmd.cwd, "--tool", tool],
+          gateArgs,
           5000,
         );
         const gateResult = parseGateResponse(gate);

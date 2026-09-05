@@ -95,10 +95,17 @@ Git cannot store both `refs/heads/task/<task>` and `refs/heads/task/<task>/<subt
 - **Destructive Reading of Ambiguity**: Picking "replace" over "add" when the request supports both, to keep moving
 - **Flag-After Instead of Ask-Before**: Disclosing a removal after acting instead of asking before
 
+### Process Shortcuts (CRITICAL)
+- **Assuming**: Treating training data, memory, or an imagined spec as the official contract
+- **Guessing**: Picking among designs, host behaviors, or schema fields without evidence
+- **Skipping required work**: Omitting research, tests, review, sibling scan, flow-check, or a release-ladder rung to "save time"
+- **Shortcut closeout**: Presenting partial work as done, or fixing one site of a class bug
+
 ### Testing Shortcuts
 - **Test Skipping**: Using `.skip()`, `.only()`, or commenting out failing tests
 - **Incomplete Coverage**: Skipping tests for "simple" code or edge cases
 - **Mock Abuse**: Mocking critical validation or business logic
+- **Test theater**: A passing test that does not drive the shipped entry point, hard-codes the expected value, or re-implements the code under test
 
 ### Security Shortcuts
 - **Validation Skipping**: Removing validation "temporarily" or only validating client-side

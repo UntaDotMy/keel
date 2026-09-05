@@ -212,15 +212,25 @@ fn validate_value(v: &JsonValue) -> Result<(), String> {
                 ));
             }
         }
+        // why: lock `critic` is Anvil stamp strategy (none|blind_ab), not the
+        // critic technique skill. A green critic:none sieve is not a critic pass.
         let critic = o.get("critic").and_then(|x| x.as_str()).unwrap_or("");
         if !matches!(critic, "none" | "blind_ab") {
             return Err(format!("lock: piece {id} critic must be none|blind_ab"));
         }
         let gates = o.get("gates").and_then(|x| x.as_array());
-        if critic == "none" && gates.map_or(true, |g| g.is_empty()) {
-            return Err(format!(
-                "lock: piece {id} critic:none requires at least one gate"
-            ));
+        if gates.map_or(true, |g| g.is_empty()) {
+            return Err(format!("lock: piece {id} requires at least one gate"));
+        }
+        if let Some(gates) = gates {
+            if gates.iter().any(|gate| {
+                gate.as_str()
+                    .map_or(true, |command| command.trim().is_empty())
+            }) {
+                return Err(format!("lock: piece {id} gates must be non-empty strings"));
+            }
+        } else if o.contains_key("gates") {
+            return Err(format!("lock: piece {id} gates must be an array"));
         }
     }
     Ok(())
@@ -266,6 +276,28 @@ mod tests {
         let text = minimal_lock(false, 1).replace("\"critic\":\"none\"", "\"critic\":\"blind_ab\"");
         let v: JsonValue = serde_json::from_str(&text).unwrap();
         assert!(validate_value(&v).is_err());
+    }
+
+    #[test]
+    fn rejects_blank_and_non_string_gates() {
+        for gate in [serde_json::json!("  "), serde_json::json!(7)] {
+            let mut value: JsonValue = serde_json::from_str(&minimal_lock(true, 3)).unwrap();
+            value["pieces"][0]["gates"] = serde_json::json!([gate]);
+            assert!(validate_value(&value).is_err());
+        }
+    }
+
+    #[test]
+    fn rejects_empty_gates_for_none_and_blind_ab() {
+        for critic in ["none", "blind_ab"] {
+            let mut value: JsonValue = serde_json::from_str(&minimal_lock(true, 3)).unwrap();
+            value["pieces"][0]["critic"] = serde_json::json!(critic);
+            value["pieces"][0]["gates"] = serde_json::json!([]);
+            assert!(
+                validate_value(&value).is_err(),
+                "{critic} must not ship with empty gates"
+            );
+        }
     }
 
     #[test]
