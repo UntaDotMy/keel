@@ -22,7 +22,7 @@ pub fn run_code_search_command(
             standard_output,
             "Usage: keel code-search search|siblings [flags]\n\
              search     --query <text> [--workspace-root <path>] [--claude-home <path>] [--path <filter>] [--limit N] [--json]\n\
-             siblings   [--query <text>] [--workspace-root <path>] [--claude-home <path>] [--json]"
+             siblings   [--query <text>] [--base-ref <ref>] [--workspace-root <path>] [--claude-home <path>] [--json]"
         );
         return if arguments.is_empty() { 1 } else { 0 };
     }
@@ -225,6 +225,7 @@ fn run_code_search_siblings(
 ) -> u8 {
     let mut flags = FlagSet::new("code-search siblings");
     flags.string_flag("query", "");
+    flags.string_flag("base-ref", "");
     flags.string_flag("workspace-root", "");
     flags.string_flag("claude-home", "");
     flags.bool_flag("json", false);
@@ -252,7 +253,13 @@ fn run_code_search_siblings(
         );
         return 1;
     }
-    let changed = changed_paths_from_git(&root);
+    let changed = match changed_paths_from_git(&root, flags.string_value("base-ref")) {
+        Ok(changed) => changed,
+        Err(error) => {
+            let _ = writeln!(standard_error, "code-search siblings: {error}");
+            return 1;
+        }
+    };
     let mut sibling_hits = Vec::new();
     for query in &queries {
         let hits =
@@ -437,17 +444,41 @@ fn git_added_text(root: &Path) -> String {
     text
 }
 
-fn changed_paths_from_git(root: &Path) -> Vec<String> {
+fn changed_paths_from_git(root: &Path, base_ref: &str) -> Result<Vec<String>, String> {
+    let working_tree = git_diff_paths(root, &["diff", "--name-only", "HEAD"])?;
+    let mut changed = working_tree;
+    if !base_ref.trim().is_empty() {
+        let range = format!("{}...HEAD", base_ref.trim());
+        let branch = git_diff_paths(root, &["diff", "--name-only", &range])?;
+        changed = merge_changed_paths(&changed.join("\n"), &branch.join("\n"));
+    }
+    Ok(merge_changed_paths(
+        &changed.join("\n"),
+        &untracked_paths_from_git(root).join("\n"),
+    ))
+}
+
+fn git_diff_paths(root: &Path, arguments: &[&str]) -> Result<Vec<String>, String> {
     let output = std::process::Command::new("git")
         .arg("-C")
         .arg(root)
-        .args(["diff", "--name-only", "HEAD"])
-        .output();
-    let Ok(output) = output else {
-        return Vec::new();
-    };
-    let tracked = String::from_utf8_lossy(&output.stdout);
-    merge_changed_paths(&tracked, &untracked_paths_from_git(root).join("\n"))
+        .args(arguments)
+        .output()
+        .map_err(|error| format!("could not run git diff: {error}"))?;
+    if !output.status.success() {
+        let details = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if details.is_empty() {
+            "git diff failed".to_string()
+        } else {
+            details
+        });
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| line.replace('\\', "/"))
+        .collect())
 }
 
 fn untracked_paths_from_git(root: &Path) -> Vec<String> {

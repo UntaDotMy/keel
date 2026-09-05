@@ -237,7 +237,7 @@
           {
             "type": "command",
             "command": "keel hook stop",
-            "statusMessage": "Stop hook (silenced; closeout rides PostToolBatch)"
+            "statusMessage": "Stop hook (bounded closeout decision)"
           }
         ]
       }

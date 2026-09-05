@@ -187,28 +187,134 @@ pub(super) fn system_map_edit_counter_path() -> Option<PathBuf> {
     )
 }
 
+const COUNTER_LOCK_ATTEMPTS: usize = 200;
+const COUNTER_LOCK_RETRY_MS: u64 = 5;
+const COUNTER_LOCK_STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// A small inter-process lock for the read-modify-write counter files.
+///
+/// Hook handlers are separate short-lived processes, so an in-process mutex
+/// cannot protect the counter. create_new gives us an atomic claim on every
+/// supported host. The bounded retry and stale-lock cleanup keep a killed hook
+/// from wedging all future gate updates.
+struct CounterFileLock {
+    path: PathBuf,
+}
+
+impl Drop for CounterFileLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+fn counter_lock_path(path: &Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_else(|| std::borrow::Cow::Borrowed("counter"));
+    path.with_file_name(format!("{name}.lock"))
+}
+
+fn remove_stale_counter_lock(path: &Path) {
+    if let Ok(owner) = fs::read_to_string(path.join("owner")) {
+        if let Ok(process_id) = owner.trim().parse::<u32>() {
+            match crate::runtime::process_is_alive(process_id) {
+                Some(true) => return,
+                Some(false) => {
+                    let _ = fs::remove_dir_all(path);
+                    return;
+                }
+                None => {}
+            }
+        }
+    }
+    let Ok(metadata) = fs::metadata(path) else {
+        return;
+    };
+    let Ok(modified) = metadata.modified() else {
+        return;
+    };
+    let Ok(age) = modified.elapsed() else {
+        return;
+    };
+    if age >= COUNTER_LOCK_STALE_AFTER {
+        if metadata.is_dir() {
+            let _ = fs::remove_dir_all(path);
+        } else {
+            let _ = fs::remove_file(path); // stale-lock recovery cleanup is best effort
+        }
+    }
+}
+
+fn acquire_counter_lock(path: &Path) -> std::io::Result<CounterFileLock> {
+    let lock_path = counter_lock_path(path);
+    for attempt in 0..COUNTER_LOCK_ATTEMPTS {
+        match fs::create_dir(&lock_path) {
+            Ok(()) => {
+                if let Err(error) =
+                    fs::write(lock_path.join("owner"), std::process::id().to_string())
+                {
+                    let _ = fs::remove_dir_all(&lock_path);
+                    return Err(error);
+                }
+                return Ok(CounterFileLock { path: lock_path });
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                remove_stale_counter_lock(&lock_path);
+                if attempt + 1 < COUNTER_LOCK_ATTEMPTS {
+                    std::thread::sleep(std::time::Duration::from_millis(COUNTER_LOCK_RETRY_MS));
+                }
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::NotFound
+                ) =>
+            {
+                remove_stale_counter_lock(&lock_path);
+                if attempt + 1 < COUNTER_LOCK_ATTEMPTS {
+                    std::thread::sleep(std::time::Duration::from_millis(COUNTER_LOCK_RETRY_MS));
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    Err(std::io::Error::new(
+        std::io::ErrorKind::WouldBlock,
+        format!("counter lock remained held: {}", display_path(&lock_path)),
+    ))
+}
+
+fn read_counter_value_locked(path: &Path) -> std::io::Result<u64> {
+    match fs::read_to_string(path) {
+        Ok(text) => text.trim().parse::<u64>().map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid counter {}: {error}", display_path(path)),
+            )
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(error) => Err(error),
+    }
+}
+
 pub(super) fn increment_counter_file(path: &Path) -> std::io::Result<u64> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-
-    let mut current = 0u64;
-    for attempt in 0..5 {
-        match fs::read_to_string(path) {
-            Ok(text) => {
-                current = text.trim().parse::<u64>().unwrap_or(0);
-                break;
-            }
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                current = 0;
-                break;
-            }
-            Err(_) => {
-                std::thread::sleep(std::time::Duration::from_millis(2 * (attempt + 1)));
-            }
-        }
-    }
-
+    let _lock = acquire_counter_lock(path).map_err(|error| {
+        std::io::Error::new(
+            error.kind(),
+            format!("lock {}: {error}", display_path(path)),
+        )
+    })?;
+    let current = read_counter_value_locked(path).map_err(|error| {
+        std::io::Error::new(
+            error.kind(),
+            format!("read {}: {error}", display_path(path)),
+        )
+    })?;
     let next = current.saturating_add(1);
     let next_str = next.to_string();
 
@@ -216,20 +322,23 @@ pub(super) fn increment_counter_file(path: &Path) -> std::io::Result<u64> {
     for attempt in 0..5 {
         match crate::runtime::write_text(path, &next_str) {
             Ok(()) => return Ok(next),
-            Err(e) => {
-                write_err = Some(e);
+            Err(error) => {
+                write_err = Some(format!("write {}: {error}", display_path(path)));
                 std::thread::sleep(std::time::Duration::from_millis(2 * (attempt + 1)));
             }
         }
     }
 
-    if let Some(err) = write_err {
-        return Err(std::io::Error::other(err));
-    }
-    Ok(next)
+    Err(std::io::Error::other(
+        write_err.expect("counter write retries always record an error"),
+    ))
 }
 
 pub(super) fn reset_counter_file(path: &Path) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let _lock = acquire_counter_lock(path)?;
     crate::runtime::write_text(path, "0").map_err(std::io::Error::other)
 }
 

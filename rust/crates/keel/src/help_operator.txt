@@ -35,7 +35,7 @@
   bridge <session-start|user-prompt|observe|session-end|post-compact|gate-status|pre-tool-use|rewrite> [flags]
   learn [status|dry-run|run] [--window <days>] [--json]
   code-search search --query <text> [--workspace-root <path>] [--claude-home <path>] [--path <filter>] [--limit <n>] [--json]
-  code-search siblings [--query <text>] [--workspace-root <path>] [--json]
+  code-search siblings [--query <text>] [--base-ref <ref>] [--workspace-root <path>] [--json]
   code-index refresh|status|map [--workspace-root <path>] [--claude-home <path>] [--force] [--json]
   code-graph build|impact [--workspace-root <path>] [--output <path>] [--changed <a,b,c>] [--json]
   skill-lint --repo-root <path> [--json]

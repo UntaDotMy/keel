@@ -51,13 +51,13 @@ Example: a raw `cargo test --workspace` is transparently rewritten to `keel run 
 
 ## Automatic lifecycle guidance
 
-Lifecycle hooks return `hookSpecificOutput.additionalContext`. The harness adds that text to context as a system reminder at the hook firing point:
+Most lifecycle hooks return `hookSpecificOutput.additionalContext`. The Stop closeout hook uses the top-level `decision: "block"` contract instead; SubagentStop and SessionEnd remain silent. The harness adds context as a system reminder at the hook firing point:
 
 - `SessionStart`: injects the operating contract and refreshes the workspace memory scope/system map.
 - `UserPromptSubmit`: **always** injects `FOLLOW THE IRON LAW. USE KEEL.` plus the research-first contract, keel MCP tools, and the memory loop (recall first, working brief, save durable learnings, learn loop, completion-gate / review before close).
 - `PostToolUse`: reminds the harness to update proof state after tool results and save durable facts.
 - `PreCompact`/`PostCompact`: preserve and restore workflow, memory, validation, and review continuity around compaction.
-- `Stop`/`SubagentStop`/`SessionEnd`: enforce closeout reminders before final responses or session end.
+- `Stop`: applies the bounded end-of-turn closeout decision and allows on `stop_hook_active` or state errors.
 
 ## Compaction surface hierarchy
 

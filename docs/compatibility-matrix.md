@@ -26,14 +26,14 @@ The goal is to keep the supported entry points explicit for both human operators
 | --- | --- | --- | --- | --- | --- |
 | `help`, `help advanced`, `version`, `platform` | Supported | Supported | Supported | Supported | Safe discovery surfaces for both operators and agents. |
 | `install`, `update`, `status`, `doctor`, `repair`, `verify`, `uninstall` | Supported | Supported | Supported | Supported | Checkout and packaged-release installs retain their owning source so lifecycle commands work outside the original extraction directory. |
-| Host adapter wiring | Supported | Supported | Supported | Supported | Claude, OpenCode, Codex, Cursor, Pi, Cowork, Command Code, Grok, Oh My Pi, ZCode, and Antigravity are detected or selected with `--with`; `keel doctor` verifies installed runtime dependencies instead of file presence alone. |
+| Host adapter wiring | Supported | Supported | Supported | Supported | Claude, OpenCode, Codex, Cursor, Pi, Cowork, Command Code, Grok, Oh My Pi, ZCode, and Antigravity are detected or selected with `--with`; `keel doctor` verifies the installed files and configuration, plus runtime prerequisites on adapters that declare them. |
 | `review pre-commit`, `review pre-pr`, `review gates check` | Supported | Supported | Supported | Supported | Native review surfaces are the default deterministic proof path. |
 | `git-workflow preflight` | Supported | Supported | Supported | Supported | Main branch and PR hygiene gate before publish or merge. |
 | `memory scope`, `memory system-map`, `memory working-brief`, `memory completion-gate`, `memory recall` | Supported | Supported | Supported | Supported | Core surfaces of the **unified** `keel memory` group. |
 | `memory research-cache`, `maintenance`, `agent-registry`, `agent-packets`, `loop-guard`, `entity`, `graph`, `retrieve`, `status`, `instincts`, `consolidate` | Supported | Supported | Supported | Supported | Family commands under the single memory group. `memory report` (alias for `status`) and `memory index` (rebuilds the recall index) are also supported; `memory hook` points to `keel hook ...`; `memory consolidate` scans family directories and reports counts/previews (status summary, not a merge/promote). |
 | `code-index refresh|status|map` | Supported | Supported | Supported | Supported | Persistent deterministic workspace index for files, symbols, chunks, paths, relationships, commit generation, and stale-state reporting. |
 | `code-search search` | Supported | Supported | Supported | Supported | Indexed ranked retrieval. Path filters accept `/` and `\` on every platform; results include path, symbol, line range, score, reason, and snippet. |
-| `code-search siblings` | Supported | Supported | Supported | Supported | Indexed completeness scan: searches explicit query text or tokens from the current git diff and lists every other in-repo copy. Writes the completeness-gate marker. Required after a fix or implement. |
+| `code-search siblings` | Supported | Supported | Supported | Supported | Indexed completeness scan: searches explicit query text or tokens from the current git diff and lists every other in-repo copy. Pass `--base-ref <ref>` to include committed work on a feature branch. Writes the completeness-gate marker. Required after a fix or implement. |
 
 ## Host integration coverage
 

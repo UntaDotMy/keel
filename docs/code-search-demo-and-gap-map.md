@@ -16,6 +16,8 @@ keel code-index map
 keel code-search search --query "run_recall_search" --json
 keel code-search search --query "FlagSet" --path "rust/crates/keel"
 keel code-search siblings --query "the bug shape"
+# Include committed work on a feature branch when reviewing against its base:
+keel code-search siblings --base-ref origin/main --query "the bug shape"
 ```
 
 The workspace index is stored in the global per-workspace memory lane. It never

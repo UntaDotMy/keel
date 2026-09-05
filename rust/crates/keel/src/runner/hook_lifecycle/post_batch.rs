@@ -811,6 +811,51 @@ pub(super) fn read_counter_value(path: &Path) -> u64 {
         .unwrap_or(0)
 }
 
+/// Read a gate counter while preserving the distinction between an absent
+/// counter (the normal zero state) and unusable persisted state. Stop hooks use
+/// this checked form so a corrupt or unreadable counter cannot be interpreted
+/// as zero and trigger an unbounded blocking loop.
+fn read_counter_value_checked(path: &Path) -> std::io::Result<u64> {
+    match fs::read_to_string(path) {
+        Ok(text) => text.trim().parse::<u64>().map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid counter {}: {error}", display_path(path)),
+            )
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(error) => Err(error),
+    }
+}
+
+pub(super) fn stop_counter_read(path: &Path, standard_error: &mut dyn Write) -> Option<u64> {
+    match read_counter_value_checked(path) {
+        Ok(value) => Some(value),
+        Err(error) => {
+            let _ = writeln!(
+                standard_error,
+                "keel stop gate: counter read failed for {}: {error}; allowing stop",
+                display_path(path)
+            );
+            None
+        }
+    }
+}
+
+fn increment_gate_counter(path: &Path, standard_error: &mut dyn Write) -> bool {
+    match increment_counter_file(path) {
+        Ok(_) => true,
+        Err(error) => {
+            let _ = writeln!(
+                standard_error,
+                "keel gate: counter update failed for {}: {error}; allowing this checkpoint",
+                display_path(path)
+            );
+            false
+        }
+    }
+}
+
 pub(super) fn review_gate_blocks_path(claude_home: &Path, session_id: &str) -> PathBuf {
     let key = if session_id.trim().is_empty() {
         "no-session".to_string()
@@ -1115,7 +1160,9 @@ pub(super) fn run_hook_post_tool_batch(
             if decision != GateDecision::Advisory {
                 // Increment before rendering so the per-session cap advances
                 // even if output rendering fails or the message is ignored.
-                let _ = increment_counter_file(&blocks_path);
+                if !increment_gate_counter(&blocks_path, standard_error) {
+                    return emit_post_tool_batch_advisory(standard_output, standard_error);
+                }
                 return emit_gate_decision(
                     decision,
                     brief_gate_message(decision),
@@ -1139,7 +1186,9 @@ pub(super) fn run_hook_post_tool_batch(
                 scanned,
             );
             if decision != GateDecision::Advisory {
-                let _ = increment_counter_file(&blocks_path);
+                if !increment_gate_counter(&blocks_path, standard_error) {
+                    return emit_post_tool_batch_advisory(standard_output, standard_error);
+                }
                 return emit_gate_decision(
                     decision,
                     completeness_gate_message(decision),
@@ -1164,7 +1213,9 @@ pub(super) fn run_hook_post_tool_batch(
                 reviewed,
             );
             if decision != GateDecision::Advisory {
-                let _ = increment_counter_file(&blocks_path);
+                if !increment_gate_counter(&blocks_path, standard_error) {
+                    return emit_post_tool_batch_advisory(standard_output, standard_error);
+                }
                 return emit_gate_decision(
                     decision,
                     review_gate_message(decision),
@@ -1188,7 +1239,9 @@ pub(super) fn run_hook_post_tool_batch(
                 satisfied,
             );
             if decision != GateDecision::Advisory {
-                let _ = increment_counter_file(&blocks_path);
+                if !increment_gate_counter(&blocks_path, standard_error) {
+                    return emit_post_tool_batch_advisory(standard_output, standard_error);
+                }
                 return emit_gate_decision(
                     decision,
                     memory_gate_message(decision),
@@ -1212,7 +1265,9 @@ pub(super) fn run_hook_post_tool_batch(
                 satisfied,
             );
             if decision != GateDecision::Advisory {
-                let _ = increment_counter_file(&blocks_path);
+                if !increment_gate_counter(&blocks_path, standard_error) {
+                    return emit_post_tool_batch_advisory(standard_output, standard_error);
+                }
                 return emit_gate_decision(
                     decision,
                     research_gate_message(decision),
@@ -1229,7 +1284,9 @@ pub(super) fn run_hook_post_tool_batch(
             evaluate_learned_skill_gate(&claude_home, session_id, learned_mode)
         {
             let (decision, message, blocks_path) = decision_and_message;
-            let _ = increment_counter_file(&blocks_path);
+            if !increment_gate_counter(&blocks_path, standard_error) {
+                return emit_post_tool_batch_advisory(standard_output, standard_error);
+            }
             return emit_gate_decision(decision, message, standard_output, standard_error);
         }
     }
@@ -1279,21 +1336,27 @@ pub(super) fn run_hook_stop(
 
     let session_start = session_start_ms(&claude_home, session_id);
     let stop_counter = stop_gate_blocks_path(&claude_home, session_id);
-    let stop_blocks = read_counter_value(&stop_counter);
+    let Some(stop_blocks) = stop_counter_read(&stop_counter, standard_error) else {
+        return 0;
+    };
     if stop_blocks >= 3 {
         return 0;
     }
 
     let mut blockers: Vec<&str> = Vec::new();
     let brief_counter = brief_gate_blocks_path(&claude_home, session_id);
-    let brief_blocks = read_counter_value(&brief_counter);
+    let Some(brief_blocks) = stop_counter_read(&brief_counter, standard_error) else {
+        return 0;
+    };
     if stop_gate_is_enforcing(brief_gate_mode(), brief_gate_max_blocks(), brief_blocks)
         && !brief_written_this_session(&claude_home, &stats.last_cwd, session_start)
     {
         blockers.push("write a current working brief with acceptance criteria");
     }
     let comp_counter = completeness_gate_blocks_path(&claude_home, session_id);
-    let comp_blocks = read_counter_value(&comp_counter);
+    let Some(comp_blocks) = stop_counter_read(&comp_counter, standard_error) else {
+        return 0;
+    };
     if stop_gate_is_enforcing(
         completeness_gate_mode(),
         completeness_gate_max_blocks(),
@@ -1305,7 +1368,9 @@ pub(super) fn run_hook_stop(
         blockers.push("run the sibling scan after the latest edit");
     }
     let rev_counter = review_gate_blocks_path(&claude_home, session_id);
-    let rev_blocks = read_counter_value(&rev_counter);
+    let Some(rev_blocks) = stop_counter_read(&rev_counter, standard_error) else {
+        return 0;
+    };
     if stop_gate_is_enforcing(review_gate_mode(), review_gate_max_blocks(), rev_blocks)
         && !review_marker_ms(&claude_home, &stats.last_cwd)
             .map(|marker_ms| marker_ms >= stats.last_edit_ms)
@@ -1314,14 +1379,18 @@ pub(super) fn run_hook_stop(
         blockers.push("run a reviewer pass after the latest edit");
     }
     let mem_counter = memory_gate_blocks_path(&claude_home, session_id);
-    let mem_blocks = read_counter_value(&mem_counter);
+    let Some(mem_blocks) = stop_counter_read(&mem_counter, standard_error) else {
+        return 0;
+    };
     if stop_gate_is_enforcing(memory_gate_mode(), memory_gate_max_blocks(), mem_blocks)
         && !memory_written_this_session(&claude_home, session_start)
     {
         blockers.push("save the non-trivial result to memory");
     }
     let res_counter = research_gate_blocks_path(&claude_home, session_id);
-    let res_blocks = read_counter_value(&res_counter);
+    let Some(res_blocks) = stop_counter_read(&res_counter, standard_error) else {
+        return 0;
+    };
     if stop_gate_is_enforcing(research_gate_mode(), research_gate_max_blocks(), res_blocks)
         && !session_has_research_tool(&claude_home, session_id)
     {
@@ -1331,7 +1400,14 @@ pub(super) fn run_hook_stop(
         return 0;
     }
 
-    let _ = increment_counter_file(&stop_counter);
+    if let Err(error) = increment_counter_file(&stop_counter) {
+        let _ = writeln!(
+            standard_error,
+            "keel stop gate: counter update failed for {}: {error}; allowing stop",
+            display_path(&stop_counter)
+        );
+        return 0;
+    }
     let reason = format!(
         "Keel closeout is incomplete: {}. Complete every item, then stop again.",
         blockers.join("; ")

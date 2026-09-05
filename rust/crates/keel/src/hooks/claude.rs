@@ -28,11 +28,11 @@ pub const SETTINGS_FILE_NAME: &str = "settings.json";
 /// schema accepts additionalContext on ten events: SessionStart, Setup,
 /// SubagentStart, UserPromptSubmit, UserPromptExpansion, PreToolUse,
 /// PostToolUse, PostToolUseFailure, PostToolBatch, and Stop. The flag is set on
-/// the first nine only. Stop stays false because there the field is non-error
-/// feedback that continues the turn, so an unconditional emit loops (see the
-/// Stop row below). Other events must use top-level fields (`systemMessage`,
-/// `decision`, etc). Keeping the flag on the row prevents `hook_lifecycle` from
-/// re-stating the rule in a parallel `matches!`.
+/// the first nine only. Stop stays false because its closeout guard emits a
+/// top-level `decision: "block"` response and never uses additionalContext.
+/// Other events must use top-level fields (`systemMessage`, `decision`, etc).
+/// Keeping the flag on the row prevents `hook_lifecycle` from re-stating
+/// the rule in a parallel `matches!`.
 ///
 /// `installs_in_settings`: whether `keel hook install` should write
 /// a stanza for this event into `settings.json`. The dispatch table still
@@ -151,19 +151,12 @@ pub const HOOK_EVENTS: &[HookEvent] = &[
         installs_in_settings: true,
     },
     HookEvent {
-        // Stop is deliberately silent. The schema *does* allow
-        // hookSpecificOutput.additionalContext here, but additionalContext on a
-        // Stop hook means "continue the turn" — so injecting it unconditionally
-        // makes the agent loop forever (finish -> inject -> forced to continue ->
-        // finish -> inject -> ...). The closeout reminder lives on PostToolBatch
-        // instead, which fires mid-turn before the next model call and cannot
-        // loop. The handler also always exits 0 — a non-zero Stop exit cascades
-        // into a re-run loop of its own. See the regression history in
-        // run_hook_command's "stop" arm.
+        // Stop uses the official top-level decision contract for a bounded
+        // closeout guard and honors stop_hook_active to prevent continuation loops.
         name: "Stop",
         slug: "stop",
         matcher: "",
-        status: "Closing native session state",
+        status: "Bounded closeout decision",
         supports_hook_specific_output: false,
         installs_in_settings: true,
     },
@@ -184,10 +177,8 @@ pub const HOOK_EVENTS: &[HookEvent] = &[
         installs_in_settings: true,
     },
     HookEvent {
-        // SubagentStop is deliberately silent (same reasoning as Stop): the
-        // schema allows additionalContext but emitting it would force the
-        // subagent to continue. The handler emits nothing, so the flag stays
-        // false to match the render path it actually takes.
+        // SubagentStop remains lifecycle-only. It emits no context or decision,
+        // so the flag stays false to match the render path it actually takes.
         name: "SubagentStop",
         slug: "subagent-stop",
         matcher: "",
@@ -243,10 +234,8 @@ pub const HOOK_EVENTS: &[HookEvent] = &[
         supports_hook_specific_output: false,
         installs_in_settings: true,
     },
-    // DirectoryAdded: official event when /add-dir or SDK register_repo_root
-    // adds a working directory mid-session. Same production need as
-    // CwdChanged — SYSTEM_MAP must follow the new root. Official schema
-    // has no decision control (side-effect only).
+    // DirectoryAdded is the official event for /add-dir or SDK register_repo_root.
+    // It refreshes SYSTEM_MAP after a working directory is added.
     HookEvent {
         name: "DirectoryAdded",
         slug: "directory-added",
@@ -255,10 +244,8 @@ pub const HOOK_EVENTS: &[HookEvent] = &[
         supports_hook_specific_output: false,
         installs_in_settings: true,
     },
-    // PreModelSwitch / PostModelSwitch: official as of Claude Code v2.1.251.
-    // Reserved dispatch so `keel hook pre-model-switch` is not unknown.
-    // Not auto-installed: a no-op PreModelSwitch that times out blocks the
-    // switch, and PostModelSwitch has no default guidance worth injecting.
+    // PreModelSwitch and PostModelSwitch are official as of Claude Code v2.1.251.
+    // They remain dispatchable but are not auto-installed because no-op switches can block.
     HookEvent {
         name: "PreModelSwitch",
         slug: "pre-model-switch",
@@ -597,9 +584,9 @@ mod tests {
     }
 
     /// Pins the events for which this crate renders an additionalContext payload.
-    /// Stop is excluded even though the official schema permits it there, because
-    /// the field is non-error feedback that continues the turn and an
-    /// unconditional emit loops. SubagentStop is excluded because the official
+    /// Stop is excluded even though the official schema permits it there,
+    /// because the closeout guard uses the top-level decision contract rather
+    /// than additionalContext. SubagentStop is excluded because the official
     /// schema does not list it. PermissionRequest and PermissionDenied emit
     /// `decision` and `retry` through dedicated handlers rather than
     /// additionalContext, so the flag that gates that render path stays false.
@@ -636,7 +623,7 @@ mod tests {
             "post-tool-use-failure"
         );
         assert_eq!(lifecycle_subcommand("ZZZ"), "unknown");
-        assert_eq!(status_message("Stop"), "Closing native session state");
+        assert_eq!(status_message("Stop"), "Bounded closeout decision");
         assert_eq!(status_message("ZZZ"), "Native lifecycle hook");
         assert_eq!(pre_tool_matcher(), "");
         assert_eq!(post_tool_matcher(), "");

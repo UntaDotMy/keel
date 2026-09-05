@@ -429,8 +429,8 @@ fn silenced_high_frequency_hooks_emit_no_additional_context() {
     // in CLAUDE.md and SessionStart, both paid at most once per session.
     // These events must stay silent.
     //
-    // Stop is deliberately NOT in this list: per the official docs it
-    // supports additionalContext and we now use it for closeout context.
+    // Stop is deliberately NOT in this list: its closeout guard uses the
+    // official top-level decision contract rather than additionalContext.
     // SubagentStart is also NOT here: it injects iron law context.
     // UserPromptSubmit and PostToolBatch emit their own context,
     // gated by their own dedicated tests below.
@@ -2972,6 +2972,59 @@ fn edit_counter_increments_and_resets_at_threshold() {
     let after_reset = increment_counter_file(&counter).unwrap();
     assert_eq!(after_reset, 1);
 
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn counter_increment_is_atomic_and_rejects_corrupt_state() {
+    let dir = crate::test_support::unique_temp_dir("keel-counter-atomic");
+    std::fs::create_dir_all(&dir).unwrap();
+    let counter = dir.join("counter");
+
+    std::fs::write(&counter, "not-a-counter").unwrap();
+    let error = increment_counter_file(&counter).expect_err("corrupt counters must be rejected");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+
+    std::fs::write(&counter, "0").unwrap();
+    let workers = 8;
+    let increments_per_worker = 16;
+    let handles = (0..workers)
+        .map(|_| {
+            let counter = counter.clone();
+            std::thread::spawn(move || {
+                for _ in 0..increments_per_worker {
+                    increment_counter_file(&counter).expect("concurrent increment");
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    for handle in handles {
+        handle.join().expect("counter worker must finish");
+    }
+
+    assert_eq!(
+        read_counter_value(&counter),
+        (workers * increments_per_worker) as u64
+    );
+    assert!(
+        !counter.with_file_name("counter.lock").exists(),
+        "counter lock must be released after the update"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn stop_counter_read_fails_open_for_unreadable_state() {
+    let dir = crate::test_support::unique_temp_dir("keel-stop-counter-read");
+    let counter = dir.join("counter");
+    std::fs::create_dir_all(&counter).unwrap();
+    let mut standard_error = Vec::new();
+
+    assert!(stop_counter_read(&counter, &mut standard_error).is_none());
+    assert!(
+        String::from_utf8_lossy(&standard_error).contains("allowing stop"),
+        "unreadable stop state must be diagnosed and fail open"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
