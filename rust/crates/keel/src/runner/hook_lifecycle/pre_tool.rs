@@ -713,7 +713,9 @@ pub(super) fn anvil_satisfied_this_session(
     };
     match session_start_ms(claude_home, session_id) {
         Some(start) => marker.saturating_add(BRIEF_GATE_SESSION_GRACE_MS) >= start,
-        None => false,
+        // why: fail open like the brief gate: the marker proves the dry-run ran;
+        // unknown start (empty session, older host) must not wedge edits forever.
+        None => true,
     }
 }
 

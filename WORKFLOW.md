@@ -4,7 +4,7 @@
 
 Before running raw shell, broad search, or patching existing source, route through the native `keel` surface:
 
-**Token-saving rule:** the goal is to prevent noisy raw command output from entering the harness context. Do not run a raw noisy command first and compact afterward; route through `keel run -- <command>` or the hook-provided `Rerun that as:` wrapper before noisy output is produced.
+**Token-saving rule:** the goal is to prevent noisy raw command output from entering the harness context. Do not run a raw noisy command first and compact afterward; route through `keel run -- <command>` or rely on the hook's transparent rewrite before noisy output is produced.
 
 - **Noisy shell commands:** prefer `keel run -- <command>` for test, build, lint, log, status, search, Docker, Kubernetes, Terraform, package-manager, and CI-style commands. Use `keel rewrite "<command>"` when unsure whether a command has native compaction.
 - **Hook transparent rewrite:** the managed `PreToolUse` hook transparently rewrites supported shell commands to `keel run -- <command>`. Execution proceeds automatically with the wrapped command; no manual rerun is needed.

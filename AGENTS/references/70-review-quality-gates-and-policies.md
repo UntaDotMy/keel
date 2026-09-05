@@ -17,6 +17,8 @@ Side Effects: None — this file is informational.
 - Security-sensitive code
 - Performance-critical code
 
+**Mid-flight critique** (use critic skill) during or before implementation for early cheap fixes (blind code, no-test, no-memory, skipped-workflow, symptom-patch); route findings via receiving-code-review.
+
 **Security review required** for:
 - User input handling
 - Database queries

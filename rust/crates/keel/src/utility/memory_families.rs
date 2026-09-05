@@ -98,10 +98,14 @@ pub fn bump_loop_guard(
             ("count".into(), "0".into()),
         ]
     });
-    let mut count: u32 = field(&record, "count")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
-    count = count.saturating_add(1);
+    let parsed: Option<u32> = field(&record, "count").and_then(|v| v.parse().ok());
+    let Some(previous) = parsed else {
+        // why: a corrupt count must not silently reset the budget: refuse loudly.
+        return Err(format!(
+            "loop-guard count corrupt for signature {signature:?}; refusing to reset budget"
+        ));
+    };
+    let count = previous.saturating_add(1);
     set_field(&mut record, "count", count.to_string());
     store
         .write_record(&id, &record)
@@ -114,9 +118,11 @@ pub fn loop_guard_exhausted(claude_home: &Path, signature: &str, budget: u32) ->
     let id = sanitize_id(signature);
     match store.read_record(&id) {
         Ok(Some(record)) => {
-            let count: u32 = field(&record, "count")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0);
+            // why: corrupt counts fail closed: an unreadable budget blocks the loop.
+            let Some(count): Option<u32> = field(&record, "count").and_then(|v| v.parse().ok())
+            else {
+                return true;
+            };
             count >= budget
         }
         Ok(None) => false,
@@ -885,9 +891,19 @@ fn run_loop_guard(
             ("count".into(), "0".into()),
         ]
     });
-    let mut count: u32 = field(&record, "count")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
+    let parsed: Option<u32> = field(&record, "count").and_then(|v| v.parse().ok());
+    let mut count = match parsed {
+        Some(value) => value,
+        // why: corrupt counts fail closed: record refuses, check reports exhausted.
+        None if action == "record" => {
+            let _ = writeln!(
+                standard_error,
+                "{label}: count corrupt for signature {signature:?}; refusing to reset budget"
+            );
+            return 1;
+        }
+        None => budget,
+    };
     if action == "record" {
         count += 1;
         set_field(&mut record, "count", count.to_string());
@@ -2061,6 +2077,45 @@ mod tests {
         assert_eq!(count, 2);
         assert!(exhausted);
         assert!(loop_guard_exhausted(&home, "anvil-loop:all", 2));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn loop_guard_corrupt_count_fails_closed() {
+        let home = temp_home("lg-corrupt");
+        let h = home.to_string_lossy().to_string();
+        let store = family_store(&home, "memory", "loop-guard");
+        let id = sanitize_id("same error");
+        let seed = vec![
+            ("id".to_string(), id.clone()),
+            ("signature".to_string(), "same error".to_string()),
+            ("count".to_string(), "garbage".to_string()),
+        ];
+        assert!(
+            store.write_record(&id, &seed).is_ok(),
+            "seed corrupt record"
+        );
+        assert!(
+            bump_loop_guard(&home, "same error", 2).is_err(),
+            "corrupt count must not silently reset the budget"
+        );
+        assert!(
+            loop_guard_exhausted(&home, "same error", 2),
+            "corrupt count must read as exhausted"
+        );
+        let (code, out, _) = run(
+            "memory",
+            "loop-guard",
+            &["check", "--signature", "same error", "--claude-home", &h],
+        );
+        assert_eq!(code, 2, "corrupt check must exit 2; stdout: {out}");
+        assert!(out.contains("exhausted=true"), "stdout: {out}");
+        let (code, _, err) = run(
+            "memory",
+            "loop-guard",
+            &["record", "--signature", "same error", "--claude-home", &h],
+        );
+        assert_eq!(code, 1, "corrupt record must refuse; stderr: {err}");
         let _ = std::fs::remove_dir_all(&home);
     }
 

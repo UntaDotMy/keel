@@ -279,7 +279,12 @@ fn run_code_search_siblings(
             break;
         }
     }
-    crate::runner::hook_lifecycle::record_completeness_gate_clear_for(&root);
+    crate::runner::hook_lifecycle::record_completeness_gate_clear_for(
+        &root,
+        &queries,
+        &changed,
+        sibling_hits.len(),
+    );
     if flags.bool_value("json") {
         let payload = serde_json::json!({
             "queries": queries,

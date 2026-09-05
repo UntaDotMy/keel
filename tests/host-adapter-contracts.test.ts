@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { sanitizeSessionKey } from "../_shared/ts/bridge-core";
 
 type Fixture = Record<string, unknown>;
 
@@ -183,16 +184,32 @@ test("Antigravity adapter translates the documented camelCase hook contract", ()
 
 test("Antigravity MCP research call satisfies the edit gate end to end", async () => {
   const tempHome = await mkdtemp(join(tmpdir(), "keel-antigravity-e2e-"));
+  const keelHome = join(tempHome, ".keel");
+  const keelBin = join(repoRoot, "target", "debug", process.platform === "win32" ? "keel.exe" : "keel");
+  const baseEnv = {
+    ...process.env,
+    KEEL_BIN: keelBin,
+    KEEL_HOME: keelHome,
+    HOME: tempHome,
+    USERPROFILE: tempHome,
+    CLAUDE_TARGET_OVERRIDE: join(tempHome, ".claude"),
+  };
+  const runKeel = async (args: string[]): Promise<number> => {
+    const child = Bun.spawn([keelBin, ...args], {
+      cwd: repoRoot,
+      env: baseEnv,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const err = await new Response(child.stderr).text();
+    const code = await child.exited;
+    expect(code, `keel ${args.join(" ")} failed: ${err}`).toBe(0);
+    return code;
+  };
   const invoke = async (event: "pre-tool-use" | "post-tool-use", toolCall: Fixture): Promise<Fixture> => {
     const child = Bun.spawn(["node", "antigravity/keel-antigravity.js", event], {
       cwd: repoRoot,
-      env: {
-        ...process.env,
-        KEEL_HOME: join(repoRoot, "target", "debug"),
-        HOME: tempHome,
-        USERPROFILE: tempHome,
-        CLAUDE_TARGET_OVERRIDE: join(tempHome, ".claude"),
-      },
+      env: baseEnv,
       stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe",
@@ -219,6 +236,11 @@ test("Antigravity MCP research call satisfies the edit gate end to end", async (
     expect(research.decision).toBe("allow");
     await invoke("post-tool-use", researchCall);
 
+    // The edit gate has two locks: iron-law research (satisfied above) and
+    // Anvil delivery evidence. Compile a bar and dry-run it in the isolated home.
+    await runKeel(["anvil", "compile", "--goal", "antigravity e2e probe", "--bar", "cargo test --test doc_parity_test", "--files", "README.md"]);
+    await runKeel(["anvil", "run", "--dry-run"]);
+
     const edit = await invoke("pre-tool-use", {
       name: "write_to_file",
       args: { TargetFile: join(repoRoot, "never-written.txt"), CodeContent: "x" },
@@ -227,4 +249,24 @@ test("Antigravity MCP research call satisfies the edit gate end to end", async (
   } finally {
     await rm(tempHome, { recursive: true, force: true });
   }
+});
+
+const keyVectors = JSON.parse(
+  readFileSync(join(import.meta.dir, "fixtures", "host-adapters", "session-key-vectors.json"), "utf8"),
+) as { vectors: Array<{ input: string; key: string }> };
+
+test("Session keys match the Rust sanitizer contract", () => {
+  expect(keyVectors.vectors.length).toBeGreaterThan(0);
+  for (const vector of keyVectors.vectors) {
+    expect(sanitizeSessionKey(vector.input)).toBe(vector.key);
+  }
+});
+
+test("Adapters never share one literal default session key", () => {
+  for (const file of ["opencode/keel.ts", "codex/keel-codex.ts", "pi/keel-pi.ts"]) {
+    expect(source(file)).not.toContain('|| "default"');
+  }
+  expect(source("opencode/keel.ts")).toContain("getFallbackSessionId");
+  expect(source("codex/keel-codex.ts")).toContain("getFallbackSessionId");
+  expect(source("pi/keel-pi.ts")).toContain("moduleSessionId");
 });

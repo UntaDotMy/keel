@@ -36,6 +36,12 @@ Load specialist skills when the task clearly requires domain expertise:
 - **ux-research-and-experience-strategy**: UX research, user testing, journey friction, decision architecture, and recovery-path quality
 - **git-expert**: Complex git operations, issue-driven worktree flow, branching strategy, and clean push hygiene
 - **memory-status-reporter**: Memory health, daily learnings, mistake ledgers, heuristic status reporting, and explicit recap reporting
+- **authentication-and-identity**: OAuth2/OIDC (authorization-code + PKCE), SSO/SAML, session and token lifecycles, refresh-token rotation with reuse detection, MFA/passkeys/WebAuthn, and argon2/bcrypt password storage
+- **cloud-cost-and-finops**: Cost estimation before deploy, rightsizing, commitment planning, autoscaling and spot strategy, cost allocation and tagging, budget guardrails, and unit economics
+- **data-and-ml-engineering**: Data pipelines, warehouse/lakehouse modeling, orchestration, data quality, and the ML lifecycle from features to serving and drift
+- **dependency-and-supply-chain**: Dependency upgrades, lockfile hygiene, major-version migration, transitive triage, SBOM, and provenance/signing
+- **observability-and-incident-response**: Metrics, logs, traces, SLO/error budgets, alerting and burn-rate paging, runbooks, and blameless postmortems
+- **internationalization-and-localization**: Message-catalog design and extraction, ICU MessageFormat and plurals, locale-aware number/date/currency formatting, RTL/bidi, translation workflows and fallback chains, and Unicode correctness
 - **api-contract-design**: REST, GraphQL, and gRPC contract evolution; breaking-change classification, error taxonomy, idempotency, pagination, generated-client and SDK migration windows
 - **react-performance-audit**: React render-cost tracing, memoization decisions, bundle-size analysis, list virtualization, Suspense and concurrent rendering, Core Web Vitals on React routes
 - **postgres-migration-safety**: Live-traffic PostgreSQL schema changes — lock-level analysis, expand-and-contract sequencing, bounded backfills, `CREATE INDEX CONCURRENTLY`, and rollback planning
@@ -62,6 +68,7 @@ Load specialist skills when the task clearly requires domain expertise:
   - **Non-trivial work** (logic changes, multi-file edits, public-API touches, security-sensitive surfaces, brownfield behavior changes, release-impacting work): route through `reviewer` before close.
   - **Trivial work** (docs-only, formatting-only, generated-only, single-line typo or comment fixes, and explicitly throw-away work): skip `reviewer` and rely on native or local validation.
 - Don't route to `reviewer` as reflex triage when a primary domain skill or focused local path already fits and the change is trivial under the rule above
+- **Mid-flight critic**: run `critic` during/before implementation for early cheap fixes (blind code, no-test, no-memory, skipped-workflow, symptom-patch); route findings via `receiving-code-review`. `reviewer` remains the post-implementation gate.
 - Let the harness CLI's native capabilities handle basic operations
 
 ## Skill-Focused Execution
@@ -130,6 +137,8 @@ The profiles mirror the specialist skills one-to-one:
 - **authentication-and-identity**: OAuth2/OIDC (authorization-code + PKCE), SSO/SAML, session and token lifecycles, refresh-token rotation with reuse detection, MFA/passkeys/WebAuthn, and argon2/bcrypt password storage
 - **cloud-cost-and-finops**: Cost estimation before deploy, rightsizing, commitment planning, autoscaling and spot strategy, cost allocation and tagging, budget guardrails, and unit economics
 - **internationalization-and-localization**: Message-catalog design and extraction, ICU MessageFormat and plurals, locale-aware number/date/currency formatting, RTL/bidi, translation workflows and fallback chains, and Unicode correctness
+- **domain-driven-design**: Ubiquitous language, bounded contexts, aggregates, domain events, and strategic context maps
+- **dart-and-flutter-expert**: Widget architecture, state management, platform channels, and Flutter performance
 
 The old generic `default`, `explorer`, `worker`, `architect`, and `awaiter` TOMLs are not the repo-managed profile surface anymore. Runtime helper roles may still exist inside the harness, but the managed install should mirror these specialist skill profiles instead.
 

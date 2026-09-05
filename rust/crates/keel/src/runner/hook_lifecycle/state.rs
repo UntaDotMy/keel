@@ -158,6 +158,8 @@ pub(crate) fn effective_tool_name<'a>(tool_name: &'a str, path: &'a str) -> &'a 
 pub(super) fn hook_session_id(input: &JsonDocument) -> &str {
     let value = hook_str(input, &["session_id", "sessionId"]);
     if value.is_empty() {
+        // why: hook handlers are short-lived processes, so a per-process random fallback
+        // would mint a new key per call; id-less callers intentionally share "default".
         "default"
     } else {
         value

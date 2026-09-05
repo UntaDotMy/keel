@@ -132,7 +132,7 @@ Delegation is about *context isolation*; parallelism is about *concurrency*. A t
 can be delegated and run alone, or delegated and run alongside others. When the
 plan marks tasks **independent** (disjoint files, no shared output), hand them to
 `dispatching-parallel-agents` to fan out. When tasks depend on each other, delegate
-them sequentially even if each is isolated.
+them sequentially even if each is isolated. Model choice per delegate (frontier vs cheap) is host configuration; keel does not route models: state it in the brief.
 
 ## Anti-Patterns
 

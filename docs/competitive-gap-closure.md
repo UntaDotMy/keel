@@ -52,7 +52,7 @@ were validated where executable.
    degrading gracefully (exit 0, badge omitted when unavailable). Opt-in via
    `settings.json`. Test matrix passed on both shells.
 4. **Doc accuracy aligned to official docs.** Corrected the CLAUDE.md hook-count
-   claim (30 in `HOOK_EVENTS`, 18 install by default, 12 opt-out: reserved no-ops plus `FileChanged`/`MessageDisplay`; all 30 dispatchable ,  historical 29/28 note corrected) and the stale `::EVENTS`
+   claim (33 in `HOOK_EVENTS`, 19 install by default, 14 opt-out: reserved no-ops plus `FileChanged`/`MessageDisplay`; all 33 dispatchable ,  historical 29/28 note corrected) and the stale `::EVENTS`
    cross-reference (it is `HOOK_EVENTS`).
 
 ## Toolchain (resolved)

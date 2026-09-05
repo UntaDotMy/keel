@@ -225,15 +225,21 @@ pub fn run_loop(
     built.improvement_delta = delta;
     built.gate_pass_rate = if final_pass { 1.0 } else { last_score };
     if !final_pass {
-        if let Ok((_, exhausted)) =
-            crate::utility::memory_families::bump_loop_guard(&paths.home, &guard_signature, 2)
-        {
-            if exhausted {
+        match crate::utility::memory_families::bump_loop_guard(&paths.home, &guard_signature, 2) {
+            Ok((_, true)) => {
                 let _ = writeln!(
                     standard_error,
                     "anvil loop: loop-guard exhausted for {guard_signature}"
                 );
             }
+            // why: surface bump failures: a corrupt guard must be visible, not a silent fresh budget.
+            Err(error) => {
+                let _ = writeln!(
+                    standard_error,
+                    "anvil loop: loop-guard bump failed: {error}"
+                );
+            }
+            Ok((_, false)) => {}
         }
     }
     if let Err(error) = report::write_report(&paths, &built) {

@@ -5,7 +5,7 @@
 subagents, hooks, plugins) and 13 competitor harness repos.
 
 The audit surfaced 17 findings — features the official spec documents that
-keel's 41 skills, 24 subagents, and 30 hook events did not yet use.
+keel's 41 skills, 24 subagents, and 30 hook events (at audit date; now 50 skills, 26 agents, 33 events) did not yet use.
 **All 17 are now implemented.** This file records the closure so the next agent
 sees what was done and where.
 

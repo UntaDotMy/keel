@@ -198,19 +198,106 @@ pub(super) fn completeness_gate_blocks_path(claude_home: &Path, session_id: &str
         .join(key)
 }
 
-pub fn record_completeness_gate_clear_for(workspace: &Path) {
+/// A completeness scan record: when the scan ran, what it asked, what the
+/// tree looked like, and how many outside hits it reported. The review gate
+/// verifies the recorded changed set still covers the files under review, so
+/// a scan of an unrelated change (or a forged timestamp) no longer satisfies.
+pub struct CompletenessScan {
+    pub at_ms: u64,
+    pub queries: Vec<String>,
+    pub changed: Vec<String>,
+    pub sibling_count: usize,
+}
+
+/// Marker filename key for a workspace display path.
+pub fn completeness_marker_key(workspace_cwd: &str) -> String {
+    sanitize_memory_key(workspace_cwd)
+}
+
+pub fn record_completeness_gate_clear_for(
+    workspace: &Path,
+    queries: &[String],
+    changed: &[String],
+    sibling_count: usize,
+) {
     let Ok(claude_home) = resolve_claude_home("") else {
         return;
     };
-    let key = sanitize_memory_key(&display_path(workspace));
+    let key = completeness_marker_key(&display_path(workspace));
     let dir = claude_home.join("state").join("completeness-gate");
     if fs::create_dir_all(&dir).is_err() {
         return;
     }
-    let _ = fs::write(dir.join(format!("{key}.scanned")), now_ms().to_string());
+    let payload = serde_json::json!({
+        "at_ms": now_ms(),
+        "queries": queries,
+        "changed": changed,
+        "sibling_count": sibling_count,
+    });
+    let _ = fs::write(dir.join(format!("{key}.scanned")), payload.to_string());
+}
+
+/// Read the scan record, accepting the legacy bare-millisecond marker (which
+/// carries no content and therefore never satisfies a coverage check).
+pub fn completeness_marker_record(
+    claude_home: &Path,
+    workspace_cwd: &str,
+) -> Option<CompletenessScan> {
+    let path = claude_home
+        .join("state")
+        .join("completeness-gate")
+        .join(format!(
+            "{}.scanned",
+            completeness_marker_key(workspace_cwd)
+        ));
+    let text = fs::read_to_string(&path).ok()?;
+    let trimmed = text.trim();
+    if let Ok(at_ms) = trimmed.parse::<u64>() {
+        return Some(CompletenessScan {
+            at_ms,
+            queries: Vec::new(),
+            changed: Vec::new(),
+            sibling_count: 0,
+        });
+    }
+    let parsed: serde_json::Value = serde_json::from_str(trimmed).ok()?;
+    Some(CompletenessScan {
+        at_ms: parsed
+            .get("at_ms")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0),
+        queries: scan_string_list(parsed.get("queries")),
+        changed: scan_string_list(parsed.get("changed")),
+        sibling_count: parsed
+            .get("sibling_count")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0) as usize,
+    })
+}
+
+/// Workspace-level scan record read: resolves the home directory first, so
+/// review gates share one read path instead of each resolving the home.
+pub fn completeness_marker_record_for_workspace(workspace_cwd: &str) -> Option<CompletenessScan> {
+    let claude_home = resolve_claude_home("").ok()?;
+    completeness_marker_record(&claude_home, workspace_cwd)
+}
+
+fn scan_string_list(value: Option<&serde_json::Value>) -> Vec<String> {
+    value
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// True when `keel code-search siblings` ran for this workspace at or after `after_ms`.
+/// Mtime only (hook reminder level): the review gate additionally requires the
+/// recorded changed set to cover the files under review.
 pub fn completeness_scan_satisfies(workspace_cwd: &str, after_ms: u64) -> bool {
     let Ok(claude_home) = resolve_claude_home("") else {
         return false;
@@ -221,14 +308,7 @@ pub fn completeness_scan_satisfies(workspace_cwd: &str, after_ms: u64) -> bool {
 }
 
 pub(super) fn completeness_marker_ms(claude_home: &Path, workspace_cwd: &str) -> Option<u64> {
-    let key = sanitize_memory_key(workspace_cwd);
-    let path = claude_home
-        .join("state")
-        .join("completeness-gate")
-        .join(format!("{key}.scanned"));
-    fs::read_to_string(&path)
-        .ok()
-        .and_then(|text| text.trim().parse::<u64>().ok())
+    completeness_marker_record(claude_home, workspace_cwd).map(|record| record.at_ms)
 }
 
 pub(super) fn completeness_gate_message(decision: GateDecision) -> String {

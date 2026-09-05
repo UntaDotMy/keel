@@ -611,6 +611,47 @@ const CURATED_SKILL_TRIGGERS: &[(&str, &[&str])] = &[
             "streaming ingestion",
         ],
     ),
+    // Disagreement-adjudication asks ("disagree"/"approach" are high-frequency,
+    // so IDF stays silent); these phrases route that class to the specialist.
+    (
+        "deliberation",
+        &[
+            "deliberation",
+            "deliberate between",
+            "adjudicate",
+            "conflicting opinions",
+            "experts disagree",
+            "disagree on the approach",
+        ],
+    ),
+    // Backend systems asks. Backend nouns recur across API/data skills; these
+    // phrases anchor the services/messaging/caching class to the specialist.
+    (
+        "backend-and-data-architecture",
+        &[
+            "microservice boundaries",
+            "message queue",
+            "message queues",
+            "cache invalidation",
+            "read replica",
+            "read replicas",
+            "connection pool",
+        ],
+    ),
+    // DDD asks. "domain"/"model" are everywhere; these phrases target the
+    // bounded-context/aggregate/language class.
+    (
+        "domain-driven-design",
+        &[
+            "bounded context",
+            "bounded contexts",
+            "ubiquitous language",
+            "aggregate root",
+            "domain event",
+            "domain events",
+            "context map",
+        ],
+    ),
 ];
 
 /// Pure curated-tier lookup (no IO) so the trigger phrases are unit-testable.

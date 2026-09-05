@@ -290,6 +290,8 @@ jobs:
         run: bash -n statusline/statusline-keel.sh
       - name: Run host adapter contract fixtures
         run: bun test tests/host-adapter-contracts.test.ts
+      - name: Run skill routing eval fixtures
+        run: cargo run --locked -p keel -- skill-eval
 
   security-audit:
     needs: changes

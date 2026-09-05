@@ -44,6 +44,17 @@ function clearMarker(sessionID: string): void {
   clearSessionStarted(STARTED_DIR, sessionID);
 }
 
+let fallbackSessionId: string | undefined;
+
+// why: id-less sessions must not share one "default" key: A's research would
+// unlock B's gate. Per-process random, mirroring codex getFallbackSessionId.
+function getFallbackSessionId(): string {
+  if (!fallbackSessionId) {
+    fallbackSessionId = `proc-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  }
+  return fallbackSessionId;
+}
+
 // ---------------------------------------------------------------------------
 // User-text extraction
 // ---------------------------------------------------------------------------
@@ -267,7 +278,7 @@ const KeelPlugin: Plugin = async ({ client, directory, $ }) => {
         });
         const args = [
           "--session",
-          input.sessionID || "default",
+          input.sessionID || getFallbackSessionId(),
           "--cwd",
           cwd,
           "--tool",

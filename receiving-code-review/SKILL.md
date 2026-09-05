@@ -1,7 +1,7 @@
 ---
 name: receiving-code-review
 description: Evaluate code-review feedback with rigor instead of reflexive agreement, as the author acting on a review. Use when you receive review comments, a reviewer verdict, or change requests — judge each point on its merits, fix what is right at the root cause, push back with evidence on what is wrong, and re-verify before claiming the feedback addressed. Use when the user relays review comments, when reviewer returns Conditional Pass or Fail, or says "address the review", "the reviewer said", or "respond to these comments". The author-side counterpart to reviewer; reviewer renders the verdict, this acts on it honestly.
-when_to_use: Acting on code-review feedback as the author. Evaluate each point on merit, fix root causes, push back with evidence where the feedback is wrong, and re-verify. Pairs with reviewer (the verdict) and systematic-debugging (root-cause fixes).
+when_to_use: Acting on code-review feedback as the author. Evaluate each point on merit, fix root causes, push back with evidence where the feedback is wrong, and re-verify. Pairs with reviewer (the verdict), critic (in-flight findings as review input), and systematic-debugging (root-cause fixes).
 allowed-tools: Read, Grep, Glob, Edit, Write, Bash
 effort: medium
 ---

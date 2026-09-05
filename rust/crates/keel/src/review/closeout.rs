@@ -816,7 +816,7 @@ fn flow_refresh_arguments(
         "--validation-needed".to_string(),
         "rerun review closeout after fixes".to_string(),
         "--validation-evidence".to_string(),
-        "automatic closeout evidence refresh".to_string(),
+        "automatic closeout evidence refresh (self-attested)".to_string(),
         "--repo-root".to_string(),
         root_display.clone(),
     ]);

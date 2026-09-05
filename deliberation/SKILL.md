@@ -16,6 +16,10 @@ what is genuinely contested, what one expert uniquely saw, and what nobody menti
 The result is a scored analysis the user can act on, not a coin flip disguised as
 judgment.
 
+## Shared discipline
+
+`../_shared/common-discipline.md`: apply fully. Never assume, never guess, never skip or shortcut a required research, test, review, sibling-scan, or official-contract check.
+
 ## When To Use It
 
 - Two or more subagents return different recommendations for the same decision.

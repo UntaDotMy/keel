@@ -34,8 +34,11 @@ mod state;
 
 pub use dispatch::run_hook_command;
 use git_hooks::run_hook_git_hooks;
+#[cfg(test)]
+pub use post_batch::completeness_marker_key;
 pub(crate) use post_batch::gate_status_rows;
 pub use post_batch::{
+    completeness_marker_record, completeness_marker_record_for_workspace,
     completeness_scan_satisfies, record_completeness_gate_clear_for, record_review_gate_clear,
 };
 use post_batch::{

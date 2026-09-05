@@ -1,4 +1,5 @@
 use super::*;
+use crate::runner::hook_lifecycle::completeness_marker_record_for_workspace;
 use crate::runtime::resolve_repository_root;
 use std::fs;
 
@@ -396,15 +397,25 @@ pub(crate) fn completeness_check_gate(
 
     let after_ms = newest_source_mtime_ms(repository_root, &touched);
     let workspace = crate::runtime::display_path(repository_root);
-    if crate::runner::hook_lifecycle::completeness_scan_satisfies(&workspace, after_ms) {
+    // why: the mtime half proves a scan ran recently; the coverage half proves it
+    // saw these files. Either half failing means the scan does not cover this change.
+    let scanned_current =
+        crate::runner::hook_lifecycle::completeness_scan_satisfies(&workspace, after_ms);
+    if scanned_current && completeness_scan_covers_changed(&workspace, &touched) {
         return GateResult {
             name: "completeness_check".to_string(),
             status: GateStatus::Pass,
             blocking: true,
-            details: Some(format!(
-                "{} source file(s) changed; sibling scan is current",
-                touched.len()
-            )),
+            details: Some({
+                let siblings = completeness_marker_record_for_workspace(&workspace)
+                    .map(|record| record.sibling_count)
+                    .unwrap_or(0);
+                format!(
+                    "{} source file(s) changed; sibling scan is current ({} sibling(s) reported)",
+                    touched.len(),
+                    siblings
+                )
+            }),
         };
     }
 
@@ -412,14 +423,43 @@ pub(crate) fn completeness_check_gate(
         name: "completeness_check".to_string(),
         status: GateStatus::Fail,
         blocking: true,
-        details: Some(format!(
-            "{} source file(s) changed ({}) but `keel code-search siblings` has not run since those edits. \
-             A one-site fix is unfinished. Run `keel code-search siblings --query \"<the bug shape>\"` \
-             (or MCP code_search action=siblings) and handle every hit, or mark it out of scope.",
-            touched.len(),
-            preview_touched_paths(&touched)
-        )),
+        details: Some(if scanned_current {
+            let queries = completeness_marker_record_for_workspace(&workspace)
+                .map(|record| record.queries.len())
+                .unwrap_or(0);
+            format!(
+                "{} source file(s) changed ({}) but the recorded sibling scan ({} recorded queries) covered a different change. \
+                 A one-site fix is unfinished. Re-run `keel code-search siblings --query \"<the bug shape>\"` \
+                 on the current change and handle every hit, or mark it out of scope.",
+                touched.len(),
+                preview_touched_paths(&touched),
+                queries
+            )
+        } else {
+            format!(
+                "{} source file(s) changed ({}) but `keel code-search siblings` has not run since those edits. \
+                 A one-site fix is unfinished. Run `keel code-search siblings --query \"<the bug shape>\"` \
+                 (or MCP code_search action=siblings) and handle every hit, or mark it out of scope.",
+                touched.len(),
+                preview_touched_paths(&touched)
+            )
+        }),
     }
+}
+
+/// Coverage half of the completeness gate: the recorded scan-time changed set
+/// must cover every touched file (tolerant path matching). Legacy markers and
+/// scans that predate the current edits fail closed here: re-run siblings.
+pub(crate) fn completeness_scan_covers_changed(workspace_cwd: &str, touched: &[String]) -> bool {
+    let Ok(claude_home) = crate::runtime::resolve_claude_home("") else {
+        return false;
+    };
+    let Some(record) =
+        crate::runner::hook_lifecycle::completeness_marker_record(&claude_home, workspace_cwd)
+    else {
+        return false;
+    };
+    artifact_targets_all_touched_files(&record.changed, touched)
 }
 
 /// Union of the named range and the working tree vs HEAD. `gates check

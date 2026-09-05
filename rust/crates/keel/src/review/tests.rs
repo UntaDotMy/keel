@@ -202,10 +202,84 @@ fn completeness_scan_satisfies_after_marker() {
     assert!(!crate::runner::hook_lifecycle::completeness_scan_satisfies(
         &cwd, 1
     ));
-    crate::runner::hook_lifecycle::record_completeness_gate_clear_for(&workspace);
+    crate::runner::hook_lifecycle::record_completeness_gate_clear_for(&workspace, &[], &[], 0);
     assert!(crate::runner::hook_lifecycle::completeness_scan_satisfies(
         &cwd, 0
     ));
+    match previous {
+        Some(value) => std::env::set_var("CLAUDE_TARGET_OVERRIDE", value),
+        None => std::env::remove_var("CLAUDE_TARGET_OVERRIDE"),
+    }
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// The review gate binds the marker to content: a scan of one change must not
+/// satisfy the gate for a different change, and legacy bare-millisecond
+/// markers (no changed set) fail the coverage half while still satisfying the
+/// mtime reminder path.
+#[test]
+fn completeness_cover_requires_recorded_changed_set() {
+    let _guard = crate::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let home = std::env::temp_dir().join(format!(
+        "keel-completeness-cover-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    let previous = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
+    std::env::set_var("CLAUDE_TARGET_OVERRIDE", &home);
+    let workspace = home.join("ws");
+    std::fs::create_dir_all(&workspace).expect("ws");
+    let cwd = crate::runtime::display_path(&workspace);
+    let touched = vec!["src/auth.rs".to_string(), "src/db.rs".to_string()];
+    // No marker: neither half passes.
+    assert!(!crate::runner::hook_lifecycle::completeness_scan_satisfies(
+        &cwd, 0
+    ));
+    assert!(!completeness_scan_covers_changed(&cwd, &touched));
+    // Legacy bare-millisecond marker: mtime half passes, coverage never does.
+    let dir = home.join("state").join("completeness-gate");
+    std::fs::create_dir_all(&dir).expect("marker dir");
+    std::fs::write(
+        dir.join(format!(
+            "{}.scanned",
+            crate::runner::hook_lifecycle::completeness_marker_key(&cwd)
+        )),
+        "9999999999999",
+    )
+    .expect("legacy marker");
+    assert!(crate::runner::hook_lifecycle::completeness_scan_satisfies(
+        &cwd, 0
+    ));
+    assert!(!completeness_scan_covers_changed(&cwd, &touched));
+    // JSON scan covering only auth: covers [auth], not [auth, db].
+    crate::runner::hook_lifecycle::record_completeness_gate_clear_for(
+        &workspace,
+        &["auth shape".to_string()],
+        &["src/auth.rs".to_string()],
+        2,
+    );
+    assert!(completeness_scan_covers_changed(
+        &cwd,
+        &["src/auth.rs".to_string()]
+    ));
+    assert!(!completeness_scan_covers_changed(&cwd, &touched));
+    // Full coverage passes.
+    crate::runner::hook_lifecycle::record_completeness_gate_clear_for(
+        &workspace,
+        &["auth shape".to_string()],
+        &["src/auth.rs".to_string(), "src/db.rs".to_string()],
+        2,
+    );
+    assert!(completeness_scan_covers_changed(&cwd, &touched));
+    let record = crate::runner::hook_lifecycle::completeness_marker_record_for_workspace(&cwd)
+        .expect("scan record present");
+    assert_eq!(record.sibling_count, 2);
+    assert_eq!(record.queries, vec!["auth shape".to_string()]);
     match previous {
         Some(value) => std::env::set_var("CLAUDE_TARGET_OVERRIDE", value),
         None => std::env::remove_var("CLAUDE_TARGET_OVERRIDE"),

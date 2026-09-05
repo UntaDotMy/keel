@@ -117,6 +117,70 @@ const TRIGGER_FIXTURES: &[TriggerFixture] = &[
         prompt: "choose a color palette and typography for the product dashboard layout",
         accept: &["ui-design-systems-and-responsive-interfaces"],
     },
+    TriggerFixture {
+        prompt: "fix flutter widget rebuild jank with riverpod state management and platform channels",
+        accept: &["dart-and-flutter-expert"],
+    },
+    TriggerFixture {
+        prompt: "report memory health learnings and mistake ledger for this session",
+        accept: &["memory-status-reporter"],
+    },
+    TriggerFixture {
+        prompt: "run a red green refactor loop with failing test first for the checkout validator",
+        accept: &["test-driven-development"],
+    },
+    TriggerFixture {
+        prompt: "complex git history surgery with interactive rebase reflog recovery and cherry pick",
+        accept: &["git-expert"],
+    },
+    TriggerFixture {
+        prompt: "sequence a cross domain delivery plan with architecture framing and milestone coordination",
+        accept: &["software-development-life-cycle"],
+    },
+    TriggerFixture {
+        prompt: "handle android activity lifecycle with offline sync and push notification permissions",
+        accept: &["mobile-development-life-cycle"],
+    },
+    TriggerFixture {
+        prompt: "improve web vitals with seo meta tags and browser caching for the marketing site",
+        accept: &["web-development-life-cycle"],
+    },
+    TriggerFixture {
+        prompt: "rightsize overprovisioned kubernetes nodes and compare reserved versus spot commitments",
+        accept: &["cloud-cost-and-finops"],
+    },
+    TriggerFixture {
+        prompt: "extract message catalogs with icu plurals and rtl layout for arabic locale",
+        accept: &["internationalization-and-localization"],
+    },
+    TriggerFixture {
+        prompt: "trace react rerenders and cut bundle size with virtualization for a long list",
+        accept: &["react-performance-audit"],
+    },
+    TriggerFixture {
+        prompt: "trace ownership of the checkout handler and its callers before editing existing behavior",
+        accept: &["preserve-existing-flow"],
+    },
+    TriggerFixture {
+        prompt: "fan out independent migrations to parallel agents sharing no files",
+        accept: &["dispatching-parallel-agents"],
+    },
+    TriggerFixture {
+        prompt: "address the review comments point by point with evidence for each fix",
+        accept: &["receiving-code-review"],
+    },
+    TriggerFixture {
+        prompt: "two senior engineers disagree on sync versus async at the payment boundary; adjudicate the tradeoff with a scored analysis",
+        accept: &["deliberation"],
+    },
+    TriggerFixture {
+        prompt: "design microservice boundaries with message queues cache invalidation and read replicas",
+        accept: &["backend-and-data-architecture"],
+    },
+    TriggerFixture {
+        prompt: "define bounded contexts aggregates and ubiquitous language for orders inventory and shipping",
+        accept: &["domain-driven-design"],
+    },
     // should-NOT-trigger: ordinary requests with no distinctive skill vocabulary.
     TriggerFixture {
         prompt: "can you help me write a small helper function",
@@ -149,6 +213,17 @@ const TRIGGER_FIXTURES: &[TriggerFixture] = &[
         // via the own-name boost. Must never route to a learned-<project> skill;
         // stays silent in the repo corpus (which has no learned skills) too.
         prompt: "fix this rust borrow checker error",
+        accept: &[],
+    },
+    TriggerFixture {
+        // Bare "disagree" with no adjudication shape must not trip the
+        // deliberation curated phrases.
+        prompt: "i disagree with the project timeline",
+        accept: &[],
+    },
+    TriggerFixture {
+        // Bare "deliberate" with no between-phrase must not trip deliberation.
+        prompt: "was the five second timeout in this function deliberate",
         accept: &[],
     },
 ];

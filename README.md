@@ -107,7 +107,7 @@ That mounts the skills, agents, and hooks without running the native installer. 
 
 When a native `keel` command owns the job, use it instead of recreating the behavior with raw shell, generic search, or ad hoc instructions.
 
-**Token-saving rule:** the goal is to prevent noisy raw command output from entering the harness context. Do not run a raw noisy command first and compact afterward; route through `keel run -- <command>` or the hook-provided `Rerun that as:` wrapper before noisy output is produced.
+**Token-saving rule:** the goal is to prevent noisy raw command output from entering the harness context. Do not run a raw noisy command first and compact afterward; route through `keel run -- <command>` or rely on the hook's transparent rewrite before noisy output is produced.
 
 - **Noisy shell commands:** prefer `keel run -- <command>` for test, build, lint, log, status, search, Docker, Kubernetes, Terraform, package-manager, and CI-style commands. Use `keel rewrite "<command>"` when unsure whether a command has native compaction.
 - **Hook transparent rewrite:** the managed `PreToolUse` hook transparently rewrites supported shell commands to `keel run -- <command>`. Execution proceeds automatically with the wrapped command; no manual rerun is needed.
@@ -478,8 +478,8 @@ What is implemented today:
 - Built-in adapters cover `tests`, `git`, `search`, `files`, `build`, `lint`, `containers`, `cloud`, `database`, `logs`, and `generic`. Test adapters handle cargo/pytest/go/JS-style failure signals; git/search/files adapters summarize diffs, matches, and large reads; the `containers` adapter compacts docker/kubectl/helm; the `cloud` adapter reduces aws/az/gcloud output (structure-only JSON, secret redaction, failure-first); the `database` adapter reduces psql/mysql/sqlite3/redis-cli/mongosh result sets (header + sampled rows, structure-only JSON, credential redaction).
 - `raw <raw_id>`, `raw --path <raw_id>`, `raw list`, `raw prune --older-than 30d`, and `replay <raw_id>` provide local recovery and retention controls.
 - `rewrite --json "<command>"` returns supported/reason/rewritten-command metadata and preserves direct argv where possible; composite shell syntax uses PowerShell on Windows and Bash on Unix, while explicit MCP scripts never change shells.
-- `hook install` writes the documented global the harness lifecycle hook set, with `PreToolUse` handling block-and-rerun command compaction.
-- `hook instructions` prints the agent-facing rerun contract in markdown or JSON.
+- `hook install` writes the documented global the harness lifecycle hook set, with `PreToolUse` handling transparent rewrite via `toolInputOverride`.
+- `hook instructions` prints the agent-facing hook contract in markdown or JSON.
 - `gain` reads native compaction events from the harness home and reports observed commands, compacted/passthrough counts, exact tokens before/after/saved, savings percentage, adapter breakdowns, and top commands.
 - `gain discover` reports missed-savings opportunities: commands that ran through the proxy but were not compacted (passthrough), grouped by command with the estimated uncompacted tokens that entered context. `gain` reports what was saved; `discover` reports what was left on the table.
 - `doctor` checks the binary, raw store, event log, adapter registry, rewrite behavior, and hook/proxy setup with ok/warn/fix-style output.
@@ -519,14 +519,14 @@ Limitations and safety:
 
 ### Hook path
 
-The one-line installer refreshes the managed harness hooks automatically, and `keel hook install` can refresh them manually. The hook set is written to `~/.claude/settings.json`. `PreToolUse` keeps the `Bash` matcher because command-output wrapping is scoped to shell commands; the other lifecycle events use native lifecycle handlers.
+The one-line installer refreshes the managed harness hooks automatically, and `keel hook install` can refresh them manually. The hook set is written to `~/.claude/settings.json`. `PermissionRequest` keeps the `Bash` matcher because auto-approval is scoped to shell commands; `PreToolUse` uses an empty matcher so the Iron Law gate and edit-counter fire on every tool call. The other lifecycle events use native lifecycle handlers.
 
 ```json
 {
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Bash",
+        "matcher": "",
         "hooks": [
           {
             "type": "command",
@@ -552,7 +552,7 @@ The one-line installer refreshes the managed harness hooks automatically, and `k
 }
 ```
 
-The hook contract is explicit rerun guidance rather than hidden command mutation. The Rust hook installer manages **19 of the 33** lifecycle events in the `HOOK_EVENTS` table (`rust/crates/keel/src/hooks/claude.rs`), writing them to `~/.claude/settings.json`: `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PostToolBatch`, `PermissionRequest`, `PermissionDenied`, `Notification`, `UserPromptSubmit`, `UserPromptExpansion`, `Stop`, `StopFailure`, `SubagentStart`, `SubagentStop`, `CwdChanged`, `DirectoryAdded`, `PreCompact`, `PostCompact`, `SessionStart`, and `SessionEnd`. `PreToolUse` owns Iron Law edit-gating plus command compaction before noisy output exists. `SessionStart` delivers the bootstrap skill once per session, `UserPromptSubmit` injects a short research-first iron-law restatement per prompt, and `PostToolBatch` injects the reviewer-on-close reminder before each next turn. Fourteen events stay dispatchable but are not auto-installed: reserved no-ops (`TaskCreated`, `TaskCompleted`, `TeammateIdle`, `WorktreeCreate`, `WorktreeRemove`, `Setup`, `InstructionsLoaded`, `ConfigChange`, `Elicitation`, `ElicitationResult`, `PreModelSwitch`, `PostModelSwitch`) and structural opt-outs (`FileChanged` — matcher is the watch list; `MessageDisplay` — would rewrite on-screen text). Ad-hoc invocations like `keel hook file-changed` and `keel hook message-display` still work.
+The hook contract is transparent rewrite via `toolInputOverride` rather than manual rerun. The Rust hook installer manages **19 of the 33** lifecycle events in the `HOOK_EVENTS` table (`rust/crates/keel/src/hooks/claude.rs`), writing them to `~/.claude/settings.json`: `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PostToolBatch`, `PermissionRequest`, `PermissionDenied`, `Notification`, `UserPromptSubmit`, `UserPromptExpansion`, `Stop`, `StopFailure`, `SubagentStart`, `SubagentStop`, `CwdChanged`, `DirectoryAdded`, `PreCompact`, `PostCompact`, `SessionStart`, and `SessionEnd`. `PreToolUse` owns Iron Law edit-gating plus command compaction before noisy output exists. `SessionStart` delivers the bootstrap skill once per session, `UserPromptSubmit` injects a short research-first iron-law restatement per prompt, and `PostToolBatch` injects the reviewer-on-close reminder before each next turn. Fourteen events stay dispatchable but are not auto-installed: reserved no-ops (`TaskCreated`, `TaskCompleted`, `TeammateIdle`, `WorktreeCreate`, `WorktreeRemove`, `Setup`, `InstructionsLoaded`, `ConfigChange`, `Elicitation`, `ElicitationResult`, `PreModelSwitch`, `PostModelSwitch`) and structural opt-outs (`FileChanged`: matcher is the watch list; `MessageDisplay`: would rewrite on-screen text). Ad-hoc invocations like `keel hook file-changed` and `keel hook message-display` still work.
 
 ## Preserve Existing Flow — The Brownfield Gate (Unique to keel)
 

@@ -1215,3 +1215,45 @@ fn managed_guidance_uses_current_cross_host_contracts() {
         "skill evaluation must remain usable on hosts or tasks that disallow subagents"
     );
 }
+
+/// Critic routing is enforced by tests: if no guidance names the mid-flight
+/// critic, it only fires on exact phrases, and findings arrive after code
+/// bakes. Pin the firing slot, the shared-discipline import, and the handoff.
+#[test]
+fn critic_routing_is_pinned_across_guidance() {
+    let repo_root = repository_root();
+    let routing = fs::read_to_string(repo_root.join("00-skill-routing-and-escalation.md"))
+        .expect("read routing pointer");
+    assert!(
+        routing.contains("Run `critic` mid-flight"),
+        "00 Rule 1 must schedule the mid-flight critic"
+    );
+    let depth = fs::read_to_string(repo_root.join("AGENTS/references/20-skill-routing.md"))
+        .expect("read routing depth");
+    assert!(
+        depth.contains("Mid-flight critic"),
+        "20-skill-routing must name the mid-flight critic"
+    );
+    let gates = fs::read_to_string(
+        repo_root.join("AGENTS/references/70-review-quality-gates-and-policies.md"),
+    )
+    .expect("read quality gates");
+    assert!(
+        gates.contains("Mid-flight critique"),
+        "70-review must carry the critic trigger"
+    );
+    for skill in ["critic", "deliberation"] {
+        let body = fs::read_to_string(repo_root.join(skill).join("SKILL.md"))
+            .unwrap_or_else(|e| panic!("read {skill}/SKILL.md: {e}"));
+        assert!(
+            body.contains("../_shared/common-discipline.md"),
+            "{skill} must import the shared discipline canon"
+        );
+    }
+    let receiving = fs::read_to_string(repo_root.join("receiving-code-review").join("SKILL.md"))
+        .expect("read receiving-code-review");
+    assert!(
+        receiving.contains("critic (in-flight findings"),
+        "receiving-code-review must reciprocate the critic handoff"
+    );
+}

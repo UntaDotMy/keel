@@ -26,7 +26,7 @@ architecture:
    or official-contract check. Do not build against an imagined spec. **Request fidelity:** implement
    only the asked work; no invented features or extras. **Ask when unclear:** if
    confused, incomplete, or drift-risk, stop and ask (or report the question) —
-   never invent the answer. **Never trust knowledge-base alone** as this
+   never invent the answer. Do not guess the request. **Never trust knowledge-base alone** as this
    project's structure or stories — read this repo. Correct code that solves
    the wrong problem is the most expensive mistake you can make — it passes every
    test and still has to be thrown away.

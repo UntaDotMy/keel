@@ -4721,7 +4721,12 @@ fn completeness_gate_nudges_when_edits_have_no_sibling_scan() {
         "completeness gate must name itself: {out1_text}"
     );
 
-    crate::runner::hook_lifecycle::record_completeness_gate_clear_for(std::path::Path::new(cwd));
+    crate::runner::hook_lifecycle::record_completeness_gate_clear_for(
+        std::path::Path::new(cwd),
+        &[],
+        &[],
+        0,
+    );
     let mut out2 = Vec::new();
     let mut err2 = Vec::new();
     let code2 = run_hook_post_tool_batch(&mut stdin_json.as_bytes(), &mut out2, &mut err2);
@@ -5078,4 +5083,73 @@ fn observing_an_anvil_command_does_not_clear_the_edit_gate() {
             "only the successful Anvil implementation may write the workspace marker"
         );
     });
+}
+
+#[test]
+fn anvil_marker_with_unknown_session_start_satisfies_gate() {
+    let keel_home = crate::test_support::unique_temp_dir("keel-anvil-unknown-start");
+    let home_text = keel_home.to_string_lossy().into_owned();
+    with_env_vars(&[("KEEL_HOME", Some(home_text.as_str()))], || {
+        let workspace = "C:\\repo\\ws";
+        let key = sanitize_memory_key(workspace);
+        let dir = keel_home.join("state").join("anvil-gate");
+        std::fs::create_dir_all(&dir).expect("marker dir");
+        std::fs::write(dir.join(format!("{key}.compiled")), "9999999999999").expect("marker");
+        // No tool-timings rows exist for this session, so session_start_ms is None.
+        assert!(
+            anvil_satisfied_this_session(&keel_home, "no-timings-session", workspace),
+            "a workspace marker must satisfy the gate when session start is unknown (fail open like the brief gate); otherwise edits wedge forever on hosts without timing history"
+        );
+        assert!(
+            !anvil_satisfied_this_session(&keel_home, "no-timings-session", "C:\\other\\ws"),
+            "a workspace without a marker must not satisfy"
+        );
+    });
+}
+
+/// Session-key sanitization is a cross-implementation contract: the TypeScript
+/// adapters and Rust must derive identical keys or markers diverge by host.
+/// The vectors live in tests/fixtures/host-adapters/session-key-vectors.json so
+/// bun and cargo assert the same truth.
+#[test]
+fn session_key_vectors_match_typescript_contract() {
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(3)
+        .expect("workspace root")
+        .join("tests")
+        .join("fixtures")
+        .join("host-adapters")
+        .join("session-key-vectors.json");
+    let text = std::fs::read_to_string(&fixture).expect("read session key vectors");
+    let parsed: serde_json::Value = serde_json::from_str(&text).expect("parse vectors");
+    let vectors = parsed
+        .get("vectors")
+        .and_then(serde_json::Value::as_array)
+        .expect("vectors array");
+    assert!(!vectors.is_empty(), "vectors must not be empty");
+    for vector in vectors {
+        let input = vector
+            .get("input")
+            .and_then(serde_json::Value::as_str)
+            .expect("input");
+        let expected = vector
+            .get("key")
+            .and_then(serde_json::Value::as_str)
+            .expect("key");
+        assert_eq!(sanitize_memory_key(input), expected, "input {input:?}");
+    }
+}
+
+#[test]
+fn empty_session_id_falls_back_to_shared_default_key() {
+    assert_eq!(hook_session_id(&serde_json::json!({})), "default");
+    assert_eq!(
+        hook_session_id(&serde_json::json!({"session_id": ""})),
+        "default"
+    );
+    assert_eq!(
+        hook_session_id(&serde_json::json!({"sessionId": "abc"})),
+        "abc"
+    );
 }

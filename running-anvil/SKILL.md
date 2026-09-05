@@ -49,7 +49,7 @@ keel anvil compile --goal "CLI that pretty-prints JSON logs" --bar "jq 1.7" --fi
 `cast` and `run` create evidence. Relative `--workspace-root .` resolves to the
 absolute scoped lane, never a global `workspaces/anvil` lane.
 
-### 2. Cast — N isolated builders (cheap model, parallel)
+### 2. Cast: N isolated builders (host-CLI builders, parallel)
 
 ```bash
 keel anvil cast --piece parse              # one piece

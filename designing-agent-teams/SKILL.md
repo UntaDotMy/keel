@@ -81,6 +81,7 @@ just chat — hand-offs must survive a context window ending.
 - Decide the execution mode: parallel fan-out (apply the `dispatching-parallel-agents`
   four-condition independence test before parallelizing anything), sequential
   pipeline, or hybrid.
+- Execution runs on the host (native subagents/Task, or Anvil host-CLI builders for code); keel ships no coded orchestrator and no model router: orchestrator/implementer model splits are host configuration, recorded in the brief, never assumed.
 - Define what happens on failure: a single agent failing, a reviewer rejecting
   output past the retry cap, a timeout, or two agents producing conflicting results.
   Name the fallback for each rather than discovering it live.
