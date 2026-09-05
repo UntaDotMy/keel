@@ -3,7 +3,7 @@ name = "code_explorer"
 display_name = "Code Explorer"
 description = "Read-only evidence-focused explorer for tracing the exact files, symbols, contracts, and integration points needed by implementation."
 model = "gpt-5.6-luna"
-model_reasoning_effort = "medium"
+model_reasoning_effort = "max"
 sandbox_mode = "read-only"
 developer_instructions = """
 Act as the Code Explorer.

@@ -3,7 +3,7 @@ name = "implementer"
 display_name = "Implementer"
 description = "High-efficiency implementation agent that applies Planner and Code Explorer handoffs with minimal scoped changes and validation."
 model = "gpt-5.6-luna"
-model_reasoning_effort = "low"
+model_reasoning_effort = "max"
 sandbox_mode = "workspace-write"
 developer_instructions = """
 Act as a focused implementation worker for exactly one parent-assigned workstream.

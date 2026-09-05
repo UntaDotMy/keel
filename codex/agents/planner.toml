@@ -2,8 +2,8 @@
 name = "planner"
 display_name = "Planner"
 description = "Read-only high-level project planner that identifies reusable behavior, scope, risks, and targeted exploration questions."
-model = "gpt-5.6-sol"
-model_reasoning_effort = "high"
+model = "gpt-6-Astra"
+model_reasoning_effort = "low"
 sandbox_mode = "read-only"
 developer_instructions = """
 Act as the planning specialist.

@@ -175,9 +175,9 @@ To maximize token economy and reasoning quality, map roles to model tiers based 
 
 | Provider | Light / Implementer / Explorer (Token-Saving, Fast Iteration) | Critic / Planner / Verifier (Deep Reasoning, Spec Gate) |
 |---|---|---|
-| **Google** (Antigravity) | `gemini-2.5-flash` / `gemini-1.5-flash` | `gemini-2.5-pro` / `gemini-1.5-pro` / `gemini-ultra` |
+| **Google** (Antigravity) | `gemini-3.7-flash` (high) | `gemini-pro-thinking` (AGI / deep reasoning mode) / `gemini-3.8-flash` (high) |
 | **Anthropic** (Claude Code) | `claude-3-5-haiku` | `claude-3-7-sonnet` (high effort) / `claude-3-opus` |
-| **OpenAI** (Codex) | `gpt-5.6-luna` / `gpt-4o-mini` | `gpt-5.6-sol` / `o3` / `gpt-4o` |
+| **OpenAI** (Codex) | `gpt-5.6-luna` (max) | `gpt-6-Astra` (low) |
 
 ## Antigravity Teamwork & Research Partner Doctrine
 

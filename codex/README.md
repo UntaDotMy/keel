@@ -206,13 +206,13 @@ The manifest at `.codex-plugin/plugin.json` references `hooks` at `./hooks/hooks
 
 Codex natively supports custom agents located in `~/.codex/agents/*.toml` or plugin bundles. Keel provides a cohesive 5-role workflow:
 
-1. **`planner`** (`gpt-5.6-sol`, high reasoning): Researches project behavior, reusable patterns, and selects available skills. For UI tasks, follows the 6-step human design workflow (Idea -> User Flow -> Wireframe -> First Draft -> Iterations -> Final Design).
-2. **`code_explorer`** (`gpt-5.6-luna`, medium reasoning): Discovers exact files, symbols, contracts, and test commands based on Planner handoff. Read-only.
+1. **`planner`** (`gpt-6-Astra`, low reasoning): Researches project behavior, reusable patterns, and selects available skills. For UI tasks, follows the 6-step human design workflow (Idea -> User Flow -> Wireframe -> First Draft -> Iterations -> Final Design).
+2. **`code_explorer`** (`gpt-5.6-luna`, max reasoning): Discovers exact files, symbols, contracts, and test commands based on Planner handoff. Read-only.
 3. **Parent Implementation Contract**: Orchestrating parent reconciles findings, validates safety, and constructs the authoritative `FINAL IMPLEMENTATION CONTRACT`.
-4. **`implementer`** (`gpt-5.6-luna`, low reasoning): Dispatches 1 to 4 parallel workers only when file write sets are strictly disjoint. Stops immediately with `BLOCKED` if an overlap or dependency conflict occurs.
+4. **`implementer`** (`gpt-5.6-luna`, max reasoning): Dispatches 1 to 4 parallel workers only when file write sets are strictly disjoint. Stops immediately with `BLOCKED` if an overlap or dependency conflict occurs.
 5. **Parent Integration Check**: Verifies all workers completed and outputs align, recording `INTEGRATION CHECK: PASS`.
-6. **`reviewer`** (`gpt-5.6-sol`, high reasoning): Adversarial read-only gate. Requires causal defect chains (`trigger/state -> reachable execution path -> violated contract -> observable result`). Allows at most 2 incremental re-review rounds.
-7. **Pusher Authorization Gate**: After final Reviewer `PASS`, parent emits `nak commit dan push?`. Only affirmative user confirmation authorizes spawning `pusher`.
+6. **`reviewer`** (`gpt-6-Astra`, low reasoning): Adversarial read-only gate. Requires causal defect chains (`trigger/state -> reachable execution path -> violated contract -> observable result`). Allows at most 2 incremental re-review rounds.
+7. **Pusher Authorization Gate**: After final Reviewer `PASS`, parent emits `nak commit dan push?`. Only affirmative user confirmation authorizes spawning `pusher` (`gpt-5.6-luna`, max reasoning).
 
 ## Differences from the OpenCode Adapter
 

@@ -660,9 +660,9 @@ For non-trivial tasks across all supported adapters (Codex, Antigravity, Claude 
 
 | Provider | Light / Implementer / Explorer (Token-Saving) | Critic / Planner / Verifier (Deep Reasoning) |
 | --- | --- | --- |
-| Google (Antigravity) | `gemini-2.5-flash` / `gemini-1.5-flash` | `gemini-2.5-pro` / `gemini-ultra` |
+| Google (Antigravity) | `gemini-3.7-flash` (high) | `gemini-pro-thinking` (AGI / deep reasoning mode) / `gemini-3.8-flash` (high) |
 | Anthropic (Claude Code) | `claude-3-5-haiku` | `claude-3-7-sonnet` / `claude-3-opus` |
-| OpenAI (Codex) | `gpt-5.6-luna` / `gpt-4o-mini` | `gpt-5.6-sol` / `o3` / `gpt-4o` |
+| OpenAI (Codex) | `gpt-5.6-luna` (max) | `gpt-6-Astra` (low) |
 
 ### Human 6-Step Design Workflow & Appllama Native Intelligence
 

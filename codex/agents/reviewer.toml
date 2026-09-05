@@ -2,8 +2,8 @@
 name = "reviewer"
 display_name = "Reviewer"
 description = "Read-only adversarial quality gate for correctness, security, regressions, contracts, and validation."
-model = "gpt-5.6-sol"
-model_reasoning_effort = "high"
+model = "gpt-6-Astra"
+model_reasoning_effort = "low"
 sandbox_mode = "read-only"
 developer_instructions = """
 Act as the single adversarial Reviewer for the current task and stay read-only.
