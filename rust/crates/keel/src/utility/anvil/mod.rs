@@ -1,6 +1,6 @@
 pub mod cache;
-pub mod clarify;
 pub mod cast;
+pub mod clarify;
 pub mod compile;
 pub mod filter;
 pub mod job;
@@ -552,14 +552,8 @@ mod tests {
             ],
         ));
         assert_eq!(code, 1, "stderr={stderr}");
-        assert!(
-            stderr.contains("CLARIFY_BLOCKED"),
-            "stderr={stderr}"
-        );
-        assert!(
-            stderr.contains("clarify.packet.json"),
-            "stderr={stderr}"
-        );
+        assert!(stderr.contains("CLARIFY_BLOCKED"), "stderr={stderr}");
+        assert!(stderr.contains("clarify.packet.json"), "stderr={stderr}");
         assert!(!job.paths.lock_path().is_file());
         assert_eq!(
             job.paths.clarify_packet_path(),

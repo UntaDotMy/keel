@@ -199,7 +199,6 @@ pub fn write_lock(
     Ok(hash)
 }
 
-
 fn preserve_clarify_artifacts(from: &Path, to: &Path) -> Result<(), String> {
     use crate::utility::anvil::clarify::{CLARIFY_PACKET_FILE, CLARIFY_REQUIRED_SENTINEL};
     for name in [CLARIFY_PACKET_FILE, CLARIFY_REQUIRED_SENTINEL] {
@@ -208,9 +207,8 @@ fn preserve_clarify_artifacts(from: &Path, to: &Path) -> Result<(), String> {
             continue;
         }
         std::fs::create_dir_all(to).map_err(|error| error.to_string())?;
-        std::fs::copy(&src, to.join(name)).map_err(|error| {
-            format!("anvil: preserve {name}: {error}")
-        })?;
+        std::fs::copy(&src, to.join(name))
+            .map_err(|error| format!("anvil: preserve {name}: {error}"))?;
     }
     Ok(())
 }

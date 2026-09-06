@@ -42,9 +42,14 @@ const VALID_TRIGGERS: &[&str] = &[
 pub enum ClarifyGateError {
     Missing,
     Malformed(String),
-    HardBlock { missing_ids: Vec<String> },
+    HardBlock {
+        missing_ids: Vec<String>,
+    },
     Drift(String),
-    GoalMismatch { locked: String, compile_goal: String },
+    GoalMismatch {
+        locked: String,
+        compile_goal: String,
+    },
 }
 
 impl std::fmt::Display for ClarifyGateError {
@@ -185,8 +190,7 @@ pub fn sanitize_answer_text(raw: &str) -> Result<String, String> {
 
 /// Validate and parse ClarifyPacket JSON text. Answers are sanitized.
 pub fn parse_clarify_packet(text: &str) -> Result<ClarifyPacket, String> {
-    let value: JsonValue =
-        serde_json::from_str(text).map_err(|e| format!("invalid JSON: {e}"))?;
+    let value: JsonValue = serde_json::from_str(text).map_err(|e| format!("invalid JSON: {e}"))?;
     parse_clarify_value(&value)
 }
 
@@ -323,9 +327,7 @@ fn parse_questions(raw: Option<&JsonValue>) -> Result<Vec<ClarifyQuestion>, Stri
             .trim()
             .to_string();
         if !matches!(qtype.as_str(), "choice" | "text" | "yesno") {
-            return Err(format!(
-                "questions[{index}].type must be choice|text|yesno"
-            ));
+            return Err(format!("questions[{index}].type must be choice|text|yesno"));
         }
         let mut options = Vec::new();
         if let Some(opts) = obj.get("options").and_then(|v| v.as_array()) {
@@ -440,13 +442,19 @@ fn coerce_answer(raw: Option<&JsonValue>, index: usize) -> Result<AnswerValue, S
             }
             Ok(AnswerValue::List(list))
         }
-        JsonValue::Bool(b) => Ok(AnswerValue::Text(if *b { "yes".into() } else { "no".into() })),
+        JsonValue::Bool(b) => Ok(AnswerValue::Text(if *b {
+            "yes".into()
+        } else {
+            "no".into()
+        })),
         JsonValue::Number(n) => {
             let s = n.to_string();
             Ok(AnswerValue::Text(sanitize_answer_text(&s)?))
         }
         JsonValue::Null => Ok(AnswerValue::Text(String::new())),
-        _ => Err(format!("answers[{index}].value must be string|string[]|bool|number")),
+        _ => Err(format!(
+            "answers[{index}].value must be string|string[]|bool|number"
+        )),
     }
 }
 
@@ -603,9 +611,8 @@ pub fn enforce_clarify_for_compile(
     if !path.is_file() {
         return Err(ClarifyGateError::Missing);
     }
-    let text = std::fs::read_to_string(&path).map_err(|e| {
-        ClarifyGateError::Malformed(format!("read {}: {e}", path.display()))
-    })?;
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| ClarifyGateError::Malformed(format!("read {}: {e}", path.display())))?;
     let packet = parse_clarify_packet(&text).map_err(ClarifyGateError::Malformed)?;
     if is_hard_blocked(&packet) {
         return Err(ClarifyGateError::HardBlock {
@@ -716,8 +723,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = clarify_packet_path(&dir);
         std::fs::write(&path, valid_packet_json("locked goal", "cli", false)).unwrap();
-        let err = enforce_clarify_for_compile(&dir, "different goal", true)
-            .expect_err("mismatch");
+        let err = enforce_clarify_for_compile(&dir, "different goal", true).expect_err("mismatch");
         assert!(matches!(err, ClarifyGateError::GoalMismatch { .. }));
         let _ = std::fs::remove_dir_all(&dir);
     }
