@@ -171,13 +171,14 @@ For cross-adapter multi-agent workflows (Codex, Antigravity, Claude Code, OpenCo
 
 ## Provider-Aware Model Tiering Matrix
 
-To maximize token economy and reasoning quality, map roles to model tiers based on the active provider. In Google Antigravity, `/boost` activates the multi-agent reasoning pipeline:
+Canonical table: `docs/model-tiers.md`. Keel does **not** route models at runtime; anvil keeps `frontier`/`cheap`/`mid`. Map roles to model tiers based on the active provider. In Google Antigravity, `/boost` activates the multi-agent reasoning pipeline:
 
 | Provider | Light Tasks / Implementers / Explorers (Token-Saving, Fast Iteration) | Critics / Architecture / Planners (Deep Reasoning, Spec Gate) |
 |---|---|---|
 | **Google** (Antigravity `/boost`) | `gemini-3.7-flash` (high) | Gemini Pro / Thinking (AGI / deep reasoning mode) / `gemini-3.8-flash` (high) |
 | **OpenAI** (Codex) | `gpt-5.6-luna` (max) | `gpt-6-Astra` (low) |
-| **Anthropic** (Claude Code) | `claude-3-5-haiku` | `claude-3-7-sonnet` (high effort) / `claude-3-opus` |
+| **Anthropic** (Claude Code) | `claude-haiku-4-5` | `claude-sonnet-5` / `claude-opus-5` / `claude-fable-5-1` |
+| **Z.ai** | `glm-5.3-flash` | `glm-5.3` |
 
 ## Antigravity Teamwork & Research Partner Doctrine
 

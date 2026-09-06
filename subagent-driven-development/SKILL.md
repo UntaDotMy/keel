@@ -64,8 +64,13 @@ Stay in the main thread when:
   - Light Tasks: `gpt-5.6-luna` (max reasoning).
   - Critics / Planners: `gpt-6-Astra` (low reasoning).
 - **Anthropic (Claude Code)**:
-  - Light Tasks: `claude-3-5-haiku`.
-  - Critics / Planners: `claude-3-7-sonnet` (high effort) or `claude-3-opus`.
+  - Light Tasks: `claude-haiku-4-5`.
+  - Critics / Planners: `claude-sonnet-5`, `claude-opus-5`, or `claude-fable-5-1`.
+  - Canonical tiers: `docs/model-tiers.md` (Keel does not route models at runtime).
+
+### ClarifyPacket (orchestrator-owned)
+
+Subagents **must not** answer, invent answers, or skip `clarify.packet.json`. Escalate to the main orchestrator. Unanswered required questions are `CLARIFY_BLOCKED` / hard_block — no AFK continue. See `running-anvil` and `docs/model-tiers.md`.
 
 ### 3. Integrate and re-verify in the main thread
 

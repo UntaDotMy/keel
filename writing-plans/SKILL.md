@@ -20,7 +20,7 @@ of fresh decisions. A plan that cannot be verified step by step is a wish list.
 ### Provider Model Recommendations
 - **Google (Antigravity)**: `/boost for gemini`: Gemini Pro / Thinking (AGI / deep reasoning mode) or `gemini-3.8-flash` (high).
 - **OpenAI (Codex)**: `gpt-6-Astra` (low).
-- **Anthropic (Claude Code)**: `claude-3-7-sonnet` (high effort).
+- **Anthropic (Claude Code)**: `claude-sonnet-5` / `claude-opus-5` (see `docs/model-tiers.md`).
 
 ## Code Implementation Discipline
 

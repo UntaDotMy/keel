@@ -32,6 +32,8 @@ This file is the entry point for the harness CLI on skill routing, native comman
 | Source anchors, related skills, tooling anchors | [AGENTS/references/99-source-anchors.md](AGENTS/references/99-source-anchors.md) |
 | Knowledge map for AGENTS doctrine | [AGENTS/references/00-knowledge-map.md](AGENTS/references/00-knowledge-map.md) |
 
+Model tier guidance (frontier/cheap/mid, provider-aware IDs): [`docs/model-tiers.md`](docs/model-tiers.md). Keel does **not** route models at runtime. Skills audit: [`docs/skills-audit-p1.md`](docs/skills-audit-p1.md). ClarifyPacket: `clarify.packet.json` in the anvil bank when gated.
+
 ## Core Operating Contract
 
 These rules **must** be followed on every turn. They are short by design; the reference files carry the depth.

@@ -78,6 +78,15 @@ Native `keel install` is the only PATH writer. Downloaders (`install.sh`, `insta
 
 Uninstall at the default home silently reverses those PATH files and the User Path entry, and sweeps old triplicate `export PATH="…:$PATH"` marker pairs. Stdout does not claim PATH was restored. Open a new session afterward.
 
+## ClarifyPacket and model tiers (SUPERHARNESS P1)
+
+| Surface | Status | Notes |
+| --- | --- | --- |
+| `clarify.packet.json` | Supported when gated | Lives at `<keel-home>/memories/workspaces/<slug>/anvil/clarify.packet.json`. `anvil compile --clarify-required` (or existing packet / `clarify.required` sentinel) refuses on missing, malformed, `hard_block` (unanswered required), or `drift_check` / immutable goal mismatch. Status token: `CLARIFY_BLOCKED`. |
+| AskUser adapters | Orchestrator-owned | Claude AskUserQuestion, Cursor ask_user, Gemini AskQuestion / external pause. Subagents escalate only. Answers are untrusted — no eval/shell interpolation. |
+| Model tiers docs | Guidance only | See [model-tiers.md](./model-tiers.md). Keel does **not** route models at runtime. Anvil keeps `frontier` / `cheap` / `mid`. |
+| Skills audit | P1 deliverable | [skills-audit-p1.md](./skills-audit-p1.md) — keep/merge/retire; no new megaskill this cycle. |
+
 ## Minimum proof expectations
 
 Compatibility claims in this repository should stay tied to real proof:
