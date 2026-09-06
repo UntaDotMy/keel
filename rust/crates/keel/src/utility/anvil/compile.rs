@@ -200,12 +200,14 @@ pub fn write_lock(
 }
 
 fn preserve_clarify_artifacts(from: &Path, to: &Path) -> Result<(), String> {
-    use crate::utility::anvil::clarify::{CLARIFY_PACKET_FILE, CLARIFY_REQUIRED_SENTINEL};
+    use crate::utility::anvil::clarify::{
+        safe_clarify_artifact_path, CLARIFY_PACKET_FILE, CLARIFY_REQUIRED_SENTINEL,
+    };
     for name in [CLARIFY_PACKET_FILE, CLARIFY_REQUIRED_SENTINEL] {
-        let src = from.join(name);
-        if !src.is_file() {
+        // Symlink / out-of-bank artifacts refuse — never follow via is_file/copy.
+        let Some(src) = safe_clarify_artifact_path(from, name)? else {
             continue;
-        }
+        };
         std::fs::create_dir_all(to).map_err(|error| error.to_string())?;
         std::fs::copy(&src, to.join(name))
             .map_err(|error| format!("anvil: preserve {name}: {error}"))?;

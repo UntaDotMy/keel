@@ -42,8 +42,12 @@ const VALID_TRIGGERS: &[&str] = &[
 pub enum ClarifyGateError {
     Missing,
     Malformed(String),
+    /// Symlink or path-jail refusal for clarify artifacts (not Missing).
+    Refuse(String),
     HardBlock {
         missing_ids: Vec<String>,
+        /// Secret-shaped answers were present; Display must never echo them.
+        secret_shaped_answers: bool,
     },
     Drift(String),
     GoalMismatch {
@@ -60,21 +64,48 @@ impl std::fmt::Display for ClarifyGateError {
                 "{STATUS_CLARIFY_BLOCKED}: missing {CLARIFY_PACKET_FILE} (clarify required)"
             ),
             Self::Malformed(detail) => {
-                write!(f, "{STATUS_CLARIFY_BLOCKED}: malformed {CLARIFY_PACKET_FILE}: {detail}")
+                let detail = scrub_secrets_in_text(detail);
+                write!(
+                    f,
+                    "{STATUS_CLARIFY_BLOCKED}: malformed {CLARIFY_PACKET_FILE}: {detail}"
+                )
             }
-            Self::HardBlock { missing_ids } => write!(
-                f,
-                "{STATUS_CLARIFY_BLOCKED}: hard_block — unanswered required questions: {}",
-                missing_ids.join(", ")
-            ),
-            Self::Drift(detail) => write!(f, "{STATUS_CLARIFY_BLOCKED}: drift_check failed: {detail}"),
+            Self::Refuse(detail) => {
+                let detail = scrub_secrets_in_text(detail);
+                write!(f, "{STATUS_CLARIFY_BLOCKED}: refused: {detail}")
+            }
+            Self::HardBlock {
+                missing_ids,
+                secret_shaped_answers,
+            } => {
+                write!(
+                    f,
+                    "{STATUS_CLARIFY_BLOCKED}: hard_block — unanswered required questions: {}",
+                    missing_ids.join(", ")
+                )?;
+                if *secret_shaped_answers {
+                    write!(
+                        f,
+                        "; secret-shaped answer values redacted — prefer env names in locked_brief (do not paste keys/tokens/PEM)"
+                    )?;
+                }
+                Ok(())
+            }
+            Self::Drift(detail) => {
+                let detail = scrub_secrets_in_text(detail);
+                write!(f, "{STATUS_CLARIFY_BLOCKED}: drift_check failed: {detail}")
+            }
             Self::GoalMismatch {
                 locked,
                 compile_goal,
-            } => write!(
-                f,
-                "{STATUS_CLARIFY_BLOCKED}: locked_brief.goal is immutable (locked={locked:?} compile={compile_goal:?})"
-            ),
+            } => {
+                let locked = scrub_secrets_in_text(locked);
+                let compile_goal = scrub_secrets_in_text(compile_goal);
+                write!(
+                    f,
+                    "{STATUS_CLARIFY_BLOCKED}: locked_brief.goal is immutable (locked={locked:?} compile={compile_goal:?})"
+                )
+            }
         }
     }
 }
@@ -105,18 +136,38 @@ pub struct ClarifyQuestion {
     pub required: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum AnswerValue {
     Text(String),
     List(Vec<String>),
+}
+
+impl std::fmt::Debug for AnswerValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Text(s) => f
+                .debug_tuple("Text")
+                .field(&redact_secret_for_display(s))
+                .finish(),
+            Self::List(items) => {
+                let redacted: Vec<String> =
+                    items.iter().map(|s| redact_secret_for_display(s)).collect();
+                f.debug_tuple("List").field(&redacted).finish()
+            }
+        }
+    }
 }
 
 impl AnswerValue {
     #[allow(dead_code)] // used by unit tests / future receipts
     pub fn as_display(&self) -> String {
         match self {
-            Self::Text(s) => s.clone(),
-            Self::List(items) => items.join(", "),
+            Self::Text(s) => redact_secret_for_display(s),
+            Self::List(items) => items
+                .iter()
+                .map(|s| redact_secret_for_display(s))
+                .collect::<Vec<_>>()
+                .join(", "),
         }
     }
 
@@ -155,11 +206,204 @@ pub fn clarify_required_path(anvil_dir: &Path) -> PathBuf {
     anvil_dir.join(CLARIFY_REQUIRED_SENTINEL)
 }
 
+fn path_exists_metadata(path: &Path) -> bool {
+    // Use symlink_metadata so a jailbreak symlink still trips the gate and is
+    // refused explicitly (is_file follows links and would hide the jail).
+    std::fs::symlink_metadata(path).is_ok()
+}
+
 /// True when compile must enforce ClarifyPacket (flag, sentinel, or existing packet).
 pub fn clarify_gate_required(anvil_dir: &Path, flag_required: bool) -> bool {
     flag_required
-        || clarify_required_path(anvil_dir).is_file()
-        || clarify_packet_path(anvil_dir).is_file()
+        || path_exists_metadata(&clarify_required_path(anvil_dir))
+        || path_exists_metadata(&clarify_packet_path(anvil_dir))
+}
+
+fn path_is_under_bank(bank: &Path, candidate: &Path) -> bool {
+    candidate.starts_with(bank)
+}
+
+/// Ensure `path` is a non-symlink regular file whose canonicalize() stays under
+/// the anvil bank directory. Call only after symlink_metadata confirmed presence.
+fn ensure_bank_regular_file(
+    anvil_dir: &Path,
+    path: &Path,
+    label: &str,
+) -> Result<(), ClarifyGateError> {
+    let meta = std::fs::symlink_metadata(path)
+        .map_err(|e| ClarifyGateError::Malformed(format!("stat {label}: {e}")))?;
+    if meta.file_type().is_symlink() {
+        return Err(ClarifyGateError::Refuse(format!(
+            "{label} must not be a symlink (anvil bank path jail)"
+        )));
+    }
+    if !meta.is_file() {
+        return Err(ClarifyGateError::Refuse(format!(
+            "{label} must be a regular file (anvil bank path jail)"
+        )));
+    }
+    let bank = anvil_dir
+        .canonicalize()
+        .map_err(|e| ClarifyGateError::Malformed(format!("canonicalize anvil bank: {e}")))?;
+    // Canonicalize the path itself only after rejecting symlinks so we never
+    // follow a jailbreak link via read/copy. Parent-first is unnecessary once
+    // the leaf is confirmed non-symlink, but still require under-bank.
+    let canonical = path.canonicalize().map_err(|e| {
+        ClarifyGateError::Refuse(format!(
+            "{label} could not be resolved inside anvil bank: {e}"
+        ))
+    })?;
+    if !path_is_under_bank(&bank, &canonical) {
+        return Err(ClarifyGateError::Refuse(format!(
+            "{label} resolves outside anvil bank directory"
+        )));
+    }
+    Ok(())
+}
+
+/// Preserve/copy helper: `Ok(None)` if absent; `Ok(Some(path))` if safe regular
+/// in-bank file; `Err` on symlink / out-of-bank / IO (never follow jailbreaks).
+pub fn safe_clarify_artifact_path(bank_dir: &Path, name: &str) -> Result<Option<PathBuf>, String> {
+    let path = bank_dir.join(name);
+    match std::fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("anvil: stat {name}: {error}")),
+        Ok(meta) if meta.file_type().is_symlink() => {
+            Err(format!("anvil: refuse symlink {name} (clarify path jail)"))
+        }
+        Ok(meta) if !meta.is_file() => {
+            Err(format!("anvil: refuse non-file {name} (clarify path jail)"))
+        }
+        Ok(_) => match ensure_bank_regular_file(bank_dir, &path, name) {
+            Ok(()) => Ok(Some(path)),
+            Err(ClarifyGateError::Refuse(detail) | ClarifyGateError::Malformed(detail)) => {
+                Err(format!("anvil: {detail}"))
+            }
+            Err(other) => Err(format!("anvil: {other}")),
+        },
+    }
+}
+
+/// Detect API-key / PEM private-key / long bearer-token shaped answer text.
+pub fn answer_looks_like_secret(value: &str) -> bool {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let upper = trimmed.to_ascii_uppercase();
+    if upper.contains("BEGIN ") && upper.contains("PRIVATE KEY") {
+        return true;
+    }
+    if upper.contains("BEGIN OPENSSH PRIVATE KEY") {
+        return true;
+    }
+    // Assignment-style leaks: api_key=..., token=...
+    if upper.contains("API_KEY=")
+        || upper.contains("APIKEY=")
+        || upper.contains("SECRET_KEY=")
+        || upper.contains("ACCESS_TOKEN=")
+        || upper.contains("PRIVATE_KEY=")
+    {
+        return true;
+    }
+    if upper.starts_with("BEARER ") && trimmed.len() >= 40 {
+        return true;
+    }
+    token_looks_like_secret(trimmed)
+        || trimmed
+            .split(|character: char| {
+                !character.is_ascii_alphanumeric() && character != '_' && character != '-'
+            })
+            .any(token_looks_like_secret)
+}
+
+fn token_looks_like_secret(part: &str) -> bool {
+    if part.is_empty() {
+        return false;
+    }
+    let upper = part.to_ascii_uppercase();
+    // sk-/pk-/ghp-/gho-/xox*/AKIA-like and common cloud key prefixes.
+    let prefixed = upper.starts_with("AKIA")
+        || upper.starts_with("SK-")
+        || upper.starts_with("PK-")
+        || upper.starts_with("SK_LIVE_")
+        || upper.starts_with("SK_TEST_")
+        || upper.starts_with("GHP_")
+        || upper.starts_with("GHO_")
+        || upper.starts_with("GHU_")
+        || upper.starts_with("GHS_")
+        || upper.starts_with("XOX") // xoxb-/xoxa-/xoxp-/…
+        || upper.starts_with("EYJ") // JWT header
+        || upper.starts_with("NPM_")
+        || upper.starts_with("RK_LIVE_")
+        || upper.starts_with("RK_TEST_");
+    if prefixed {
+        return true;
+    }
+    // Long bearer-ish opaque token.
+    part.len() >= 32
+        && part
+            .chars()
+            .filter(|character| character.is_ascii_alphanumeric())
+            .count()
+            >= 28
+}
+
+/// Redact secret-shaped values for logs / Display (last-4 + short hash). Non-secrets pass through.
+pub fn redact_secret_for_display(value: &str) -> String {
+    if !answer_looks_like_secret(value) {
+        return value.to_string();
+    }
+    let last4: String = value
+        .chars()
+        .rev()
+        .take(4)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    let hash = fnv1a64_hex(value);
+    let hash_short = hash.get(..8).unwrap_or(hash.as_str());
+    format!("[redacted secret …{last4} hash={hash_short}]")
+}
+
+fn scrub_secrets_in_text(text: &str) -> String {
+    if answer_looks_like_secret(text) {
+        return redact_secret_for_display(text);
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut last_end = 0usize;
+    // Walk whitespace-separated tokens; redact any secret-shaped token in place.
+    for (idx, ch) in text.char_indices() {
+        if ch.is_whitespace() {
+            let token = &text[last_end..idx];
+            if !token.is_empty() {
+                if answer_looks_like_secret(token) {
+                    out.push_str(&redact_secret_for_display(token));
+                } else {
+                    out.push_str(token);
+                }
+            }
+            out.push(ch);
+            last_end = idx + ch.len_utf8();
+        }
+    }
+    let token = &text[last_end..];
+    if !token.is_empty() {
+        if answer_looks_like_secret(token) {
+            out.push_str(&redact_secret_for_display(token));
+        } else {
+            out.push_str(token);
+        }
+    }
+    out
+}
+
+fn answers_contain_secret(packet: &ClarifyPacket) -> bool {
+    packet.answers.values().any(|answer| match answer {
+        AnswerValue::Text(s) => answer_looks_like_secret(s),
+        AnswerValue::List(items) => items.iter().any(|s| answer_looks_like_secret(s)),
+    })
 }
 
 /// Hash of goal text at gate open (canonical trim). Used by drift_check.
@@ -607,16 +851,46 @@ pub fn enforce_clarify_for_compile(
     if !clarify_gate_required(anvil_dir, flag_required) {
         return Ok(None);
     }
-    let path = clarify_packet_path(anvil_dir);
-    if !path.is_file() {
-        return Err(ClarifyGateError::Missing);
+
+    // Sentinel: missing is fine; symlink / out-of-bank is Refuse (not a silent follow).
+    let sentinel = clarify_required_path(anvil_dir);
+    match std::fs::symlink_metadata(&sentinel) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(ClarifyGateError::Malformed(format!(
+                "stat {CLARIFY_REQUIRED_SENTINEL}: {error}"
+            )));
+        }
+        Ok(_) => {
+            ensure_bank_regular_file(anvil_dir, &sentinel, CLARIFY_REQUIRED_SENTINEL)?;
+        }
     }
+
+    let path = clarify_packet_path(anvil_dir);
+    match std::fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ClarifyGateError::Missing);
+        }
+        Err(error) => {
+            return Err(ClarifyGateError::Malformed(format!(
+                "stat {CLARIFY_PACKET_FILE}: {error}"
+            )));
+        }
+        Ok(_) => {
+            // Symlink / out-of-bank → Refuse (never treat as Missing; never follow).
+            ensure_bank_regular_file(anvil_dir, &path, CLARIFY_PACKET_FILE)?;
+        }
+    }
+
     let text = std::fs::read_to_string(&path)
-        .map_err(|e| ClarifyGateError::Malformed(format!("read {}: {e}", path.display())))?;
+        .map_err(|e| ClarifyGateError::Malformed(format!("read {CLARIFY_PACKET_FILE}: {e}")))?;
     let packet = parse_clarify_packet(&text).map_err(ClarifyGateError::Malformed)?;
     if is_hard_blocked(&packet) {
+        // Prefer env names in locked_brief over pasting secrets into answers;
+        // never echo secret-shaped answer bodies in the refuse Display path.
         return Err(ClarifyGateError::HardBlock {
             missing_ids: unanswered_required(&packet),
+            secret_shaped_answers: answers_contain_secret(&packet),
         });
     }
     check_drift(&packet).map_err(ClarifyGateError::Drift)?;
@@ -628,6 +902,8 @@ pub fn enforce_clarify_for_compile(
             compile_goal: goal.to_string(),
         });
     }
+    // Packet may still store sanitized answer text for the compile gate; any
+    // logging/Display path must use redact_secret_for_display / as_display.
     Ok(Some(packet))
 }
 
@@ -808,5 +1084,171 @@ mod tests {
         assert!(text.contains("Gemini"));
         assert!(text.contains("untrusted"));
         assert!(text.contains("shell-interpolate"));
+    }
+
+    fn temp_clarify_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "clarify-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_symlink_packet() {
+        let dir = temp_clarify_dir("symlink-packet");
+        let outside = dir
+            .parent()
+            .unwrap()
+            .join(format!("clarify-outside-packet-{}", std::process::id()));
+        std::fs::write(&outside, valid_packet_json("g", "cli", false)).unwrap();
+        std::os::unix::fs::symlink(&outside, clarify_packet_path(&dir)).unwrap();
+        let err = enforce_clarify_for_compile(&dir, "g", true).expect_err("symlink");
+        assert!(
+            matches!(err, ClarifyGateError::Refuse(_)),
+            "expected Refuse, got {err:?}"
+        );
+        assert!(!matches!(err, ClarifyGateError::Missing));
+        let msg = err.to_string();
+        assert!(
+            msg.contains("symlink") || msg.contains("refused"),
+            "msg={msg}"
+        );
+        let _ = std::fs::remove_file(&outside);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_symlink_clarify_required() {
+        let dir = temp_clarify_dir("symlink-required");
+        let outside = dir
+            .parent()
+            .unwrap()
+            .join(format!("clarify-outside-required-{}", std::process::id()));
+        std::fs::write(&outside, "1").unwrap();
+        std::os::unix::fs::symlink(&outside, clarify_required_path(&dir)).unwrap();
+        // Gate trips on sentinel presence; symlink must Refuse (not Missing/silent follow).
+        let err = enforce_clarify_for_compile(&dir, "any", false).expect_err("symlink required");
+        assert!(
+            matches!(err, ClarifyGateError::Refuse(_)),
+            "expected Refuse, got {err:?}"
+        );
+        let _ = std::fs::remove_file(&outside);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_packet_resolving_outside_bank() {
+        let root = temp_clarify_dir("outside-bank-root");
+        let bank = root.join("bank");
+        let outside_dir = root.join("outside");
+        std::fs::create_dir_all(&bank).unwrap();
+        std::fs::create_dir_all(&outside_dir).unwrap();
+        let outside_packet = outside_dir.join(CLARIFY_PACKET_FILE);
+        std::fs::write(
+            &outside_packet,
+            valid_packet_json("locked goal", "cli", false),
+        )
+        .unwrap();
+
+        // Direct containment: a regular file outside the bank must refuse.
+        let err = ensure_bank_regular_file(&bank, &outside_packet, CLARIFY_PACKET_FILE)
+            .expect_err("outside");
+        assert!(
+            matches!(err, ClarifyGateError::Refuse(_)),
+            "expected Refuse, got {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("outside") || msg.contains("jail") || msg.contains("refused"),
+            "msg={msg}"
+        );
+
+        // Symlink leaf under the bank whose canonicalize() lands outside.
+        std::os::unix::fs::symlink(&outside_packet, clarify_packet_path(&bank)).unwrap();
+        let err = enforce_clarify_for_compile(&bank, "locked goal", true).expect_err("outside");
+        assert!(
+            matches!(err, ClarifyGateError::Refuse(_)),
+            "expected Refuse, got {err:?}"
+        );
+        // Preserve helper must also refuse (never copy following a jailbreak symlink).
+        let preserved = safe_clarify_artifact_path(&bank, CLARIFY_PACKET_FILE);
+        assert!(preserved.is_err(), "preserve must refuse outside/symlink");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn secret_shaped_answer_not_echoed_in_refuse_error() {
+        let secret = "sk-abcdefghijklmnopqrstuvwxyz0123456789SECRETleak";
+        assert!(answer_looks_like_secret(secret));
+        let redacted = redact_secret_for_display(secret);
+        assert!(!redacted.contains(secret));
+        assert!(!redacted.contains("abcdefghijklmnopqrstuvwxyz0123456789SECRETleak"));
+        assert!(redacted.contains("redacted"));
+
+        // as_display / Debug must not echo the full secret.
+        let answer = AnswerValue::Text(secret.to_string());
+        assert!(!answer.as_display().contains(secret));
+        assert!(!format!("{answer:?}").contains(secret));
+
+        // Malformed Display scrubber (refuse path that might include answer text).
+        let malformed = ClarifyGateError::Malformed(format!("answer rejected: {secret}"));
+        let malformed_msg = malformed.to_string();
+        assert!(
+            !malformed_msg.contains(secret),
+            "malformed Display leaked secret: {malformed_msg}"
+        );
+
+        // hard_block enforce path with a secret-shaped answer present.
+        let dir = temp_clarify_dir("secret-hardblock");
+        std::fs::write(
+            clarify_packet_path(&dir),
+            valid_packet_json("ship clarify gate", secret, true),
+        )
+        .unwrap();
+        let err =
+            enforce_clarify_for_compile(&dir, "ship clarify gate", true).expect_err("hard_block");
+        assert!(matches!(
+            err,
+            ClarifyGateError::HardBlock {
+                secret_shaped_answers: true,
+                ..
+            }
+        ));
+        let msg = err.to_string();
+        assert!(
+            !msg.contains(secret),
+            "hard_block Display leaked secret: {msg}"
+        );
+        assert!(
+            !msg.contains("abcdefghijklmnopqrstuvwxyz0123456789SECRETleak"),
+            "hard_block Display leaked secret body: {msg}"
+        );
+        assert!(
+            msg.contains("redacted") || msg.contains("env names"),
+            "expected redaction guidance in msg={msg}"
+        );
+
+        // PEM-shaped private key in a GoalMismatch-adjacent Display scrub.
+        let pem = "-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANTHISisAFakePrivateKeyMaterialABCDEFGHIJKLMNOPQRSTUV\n-----END PRIVATE KEY-----";
+        assert!(answer_looks_like_secret(pem));
+        let mismatch = ClarifyGateError::GoalMismatch {
+            locked: pem.to_string(),
+            compile_goal: "normal goal".into(),
+        };
+        let mismatch_msg = mismatch.to_string();
+        assert!(
+            !mismatch_msg.contains("BEGIN PRIVATE KEY"),
+            "GoalMismatch Display leaked PEM: {mismatch_msg}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
