@@ -4,6 +4,15 @@ Operator-facing notes. No release-tag pin until a tag exists.
 
 ## Unreleased
 
+### SUPERHARNESS P1 — ClarifyPacket gate, model tiers, skills audit
+
+- **ClarifyPacket gate:** when armed (`--clarify-required`, `clarify.required` sentinel, or existing `clarify.packet.json`), refuse anvil **lock write** on missing/malformed packet, `hard_block` (unanswered required questions), `drift_check` failure, or immutable `locked_brief.goal` mismatch vs compile/run `--goal`. Status: `CLARIFY_BLOCKED`. Enforced in `compile::write_lock` for both `anvil compile` and `anvil run` auto-compile. Packet/sentinel preserved across compile generation swap.
+- **AppSec:** clarify artifacts must be non-symlink regular files inside the anvil bank (path jail). Answer text is untrusted (sanitize/size-bound); secret-shaped values redacted on refuse Display paths — prefer env names in `locked_brief`.
+- **docs/model-tiers.md:** provider-aware frontier/cheap/mid guidance; Keel does **not** route models at runtime; Claude 3.x removed as current from README/AGENTS/skills.
+- **docs/skills-audit-p1.md:** keep|merge-into|retire for installed `SKILL.md` packs; no new megaskill; remote skill load N/A (pin+hash if ever added).
+
+Merged: PR #255 (`cde6192c45f740cacff907b8dbf4c371d62d3572`).
+
 ### PATH honesty
 
 Native `keel install` is the only PATH writer. `install.sh`, `install.ps1`, and `install.cmd` download a release and invoke that native step; they do not edit PATH. Installers no longer coerce a numeric pin into `v*`.

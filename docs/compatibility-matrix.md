@@ -82,8 +82,12 @@ Uninstall at the default home silently reverses those PATH files and the User Pa
 
 | Surface | Status | Notes |
 | --- | --- | --- |
-| `clarify.packet.json` | Supported when gated | Lives at `<keel-home>/memories/workspaces/<slug>/anvil/clarify.packet.json`. `anvil compile --clarify-required` (or existing packet / `clarify.required` sentinel) refuses on missing, malformed, `hard_block` (unanswered required), or `drift_check` / immutable goal mismatch. Status token: `CLARIFY_BLOCKED`. |
-| AskUser adapters | Orchestrator-owned | Claude AskUserQuestion, Cursor ask_user, Gemini AskQuestion / external pause. Subagents escalate only. Answers are untrusted — no eval/shell interpolation. |
+| `clarify.packet.json` | Supported when gated | Lives at `<keel-home>/memories/workspaces/<slug>/anvil/clarify.packet.json`. Gate is armed by `anvil compile|run --clarify-required`, existing packet, or `clarify.required` sentinel. |
+| Lock-write enforcement | Supported | `compile::write_lock` enforces before **every** lock write (`anvil compile` and `anvil run` auto-compile). Ungated writes skip the packet. |
+| Refuse conditions | Supported | Missing, malformed, `hard_block` (unanswered required), `drift_check` / immutable `locked_brief.goal` mismatch. Status token: `CLARIFY_BLOCKED`. |
+| Path jail | Supported | Packet and sentinel must be non-symlink regular files whose canonical path stays under the anvil bank. Symlink / out-of-bank → refuse (not silent follow). |
+| Secret answer redaction | Supported | Secret-shaped answer values redacted on refuse Display paths; prefer env names in `locked_brief`. Answers remain untrusted — no eval / shell interpolation. |
+| AskUser adapters | Orchestrator-owned | Claude AskUserQuestion, Cursor ask_user, Gemini AskQuestion / external pause. Subagents escalate only. Keel prints playbook text on refuse; it does not drive host AskUser itself. |
 | Model tiers docs | Guidance only | See [model-tiers.md](./model-tiers.md). Keel does **not** route models at runtime. Anvil keeps `frontier` / `cheap` / `mid`. |
 | Skills audit | P1 deliverable | [skills-audit-p1.md](./skills-audit-p1.md) — keep/merge/retire; no new megaskill this cycle. |
 

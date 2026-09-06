@@ -58,9 +58,11 @@ Vague or multi-path work must not reach a real compile without a completed Clari
 - Open the gate only for: `ambiguous_req` | `multi_path` | `irreversible_side_effect` | `missing_env_fact` | `conflicting_constraints`. Anti-spam: **1–4** questions, one packet, one pause.
 - Schema (min): `version`, `questions[]`, `answers[]` (UNTRUSTED), `locked_brief` (goal **immutable** after lock), `drift_check`, `hard_block`, `unanswered_policy: hard_block`.
 - Unanswered required questions ⇒ `hard_block` / status `CLARIFY_BLOCKED` — **no AFK continue**.
-- `keel anvil compile --clarify-required ...` refuses when the packet is missing, malformed, hard-blocked, or drifted. An existing packet or `clarify.required` sentinel also arms the gate.
+- `keel anvil compile --clarify-required …` and `keel anvil run --clarify-required …` refuse lock write when the packet is missing, malformed, hard-blocked, drifted, or goal-mismatched. An existing packet or `clarify.required` sentinel also arms the gate. Enforcement is inside lock write (`write_lock`), so run auto-compile cannot bypass it.
 - **Orchestrator** owns AskUser adapters (Claude AskUserQuestion, Cursor ask_user, Gemini AskQuestion / external pause). **Subagents escalate only** — never answer or skip.
 - Sanitize/size-bound answers; never shell-interpolate or eval user answers / AskUser payloads.
+- **Path jail:** `clarify.packet.json` and `clarify.required` must be regular files inside the anvil bank — symlinks and out-of-bank paths are refused (`CLARIFY_BLOCKED: refused`).
+- **Secret redaction:** secret-shaped answer values are redacted on refuse Display paths; prefer env names in `locked_brief` (do not paste keys/tokens/PEM). Answers stay untrusted: sanitize/size-bound only; never shell-interpolate or eval.
 - Brainstorming remains Socratic design help — **not** a substitute for this gate.
 - Model tier guidance: `docs/model-tiers.md` (Keel does not route models at runtime).
 
