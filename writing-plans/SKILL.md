@@ -17,6 +17,11 @@ of fresh decisions. A plan that cannot be verified step by step is a wish list.
 *proof* for each step. The plan becomes the working-brief artifact that
 `executing-plans` drives against and `reviewer` Stage 1 checks the result against.
 
+### Provider Model Recommendations
+- **Google (Antigravity)**: `/boost for gemini`: Gemini Pro / Thinking (AGI / deep reasoning mode) or `gemini-3.8-flash` (high).
+- **OpenAI (Codex)**: `gpt-6-Astra` (low).
+- **Anthropic (Claude Code)**: `claude-3-7-sonnet` (high effort).
+
 ## Code Implementation Discipline
 
 See `../_shared/common-discipline.md` § Code Implementation Discipline. This skill is

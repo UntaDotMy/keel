@@ -41,7 +41,7 @@ Do NOT use for: final production-readiness verdict (use `reviewer`), multi-exper
    - Check the combined patch with `INTEGRATION CHECK: PASS` before handing off to the final Reviewer.
 
 ### Provider Model Recommendations
-- **Google (Antigravity)**: Gemini Pro / Thinking (AGI / deep reasoning mode) or `gemini-3.8-flash` (high).
+- **Google (Antigravity)**: `/boost for gemini`: Gemini Pro / Thinking (AGI / deep reasoning mode) or `gemini-3.8-flash` (high).
 - **OpenAI (Codex)**: `gpt-6-Astra` (low).
 - **Anthropic (Claude Code)**: `claude-3-7-sonnet` (high effort).
 

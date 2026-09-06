@@ -128,7 +128,7 @@ Do not pin a model to achieve these settings. Preserve reasoning effort in repo-
 - Use the current harness tool surface (`eval`, `bash`, `hub`, or native keel commands) when it is the clearest fit; do not require one tool for every call.
 
 ### Multi-Agent Role Tiering
-- **Google (Antigravity)**: Light tasks, Implementers, and Explorers use `gemini-3.7-flash` (high reasoning). Critics, Architecture, and Planners use Gemini Pro / Thinking (AGI / deep reasoning mode) or `gemini-3.8-flash` (high reasoning).
+- **Google (Antigravity)**: `/boost for gemini`: Light tasks, Implementers, and Explorers use `gemini-3.7-flash` (high reasoning). Critics, Architecture, and Planners use Gemini Pro / Thinking (AGI / deep reasoning mode) or `gemini-3.8-flash` (high reasoning).
 - **OpenAI (Codex)**: Light tasks use `gpt-5.6-luna` (max reasoning). Critics and Planners use `gpt-6-Astra` (low reasoning).
 - **Anthropic (Claude Code)**: Light tasks use `claude-3-5-haiku`. Critics and Planners use `claude-3-7-sonnet` (high effort) or `claude-3-opus`.
 

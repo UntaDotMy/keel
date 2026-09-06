@@ -56,6 +56,11 @@ Start with the smallest reference set that answers the task:
 
 ## Architecture Heuristics
 
+### Provider Model Recommendations
+- **Google (Antigravity)**: `/boost for gemini`: Gemini Pro / Thinking (AGI / deep reasoning mode) or `gemini-3.8-flash` (high).
+- **OpenAI (Codex)**: `gpt-6-Astra` (low).
+- **Anthropic (Claude Code)**: `claude-3-7-sonnet` (high effort).
+
 ### Service Boundaries
 - Prefer a monolith or modular monolith until you have proven reasons to split ownership, scaling, or deployment.
 - Extract a service boundary only when you can name the contract, ownership, operational need, and data authority clearly.

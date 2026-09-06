@@ -56,6 +56,17 @@ Stay in the main thread when:
 - Use the Task tool with the right specialist subagent type when one fits.
 - The subagent works in its own window; the controller does not micromanage it.
 
+#### Provider Model Recommendations
+- **Google (Antigravity `/boost`)**:
+  - Light Tasks / Implementers / Explorers: `gemini-3.7-flash` (high reasoning).
+  - Critics / Architecture / Planners: Gemini Pro / Thinking (AGI / deep reasoning mode) or `gemini-3.8-flash` (high reasoning).
+- **OpenAI (Codex)**:
+  - Light Tasks: `gpt-5.6-luna` (max reasoning).
+  - Critics / Planners: `gpt-6-Astra` (low reasoning).
+- **Anthropic (Claude Code)**:
+  - Light Tasks: `claude-3-5-haiku`.
+  - Critics / Planners: `claude-3-7-sonnet` (high effort) or `claude-3-opus`.
+
 ### 3. Integrate and re-verify in the main thread
 
 - Treat the returned result as a proposal. Read the diff, run the task's

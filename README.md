@@ -658,11 +658,13 @@ For non-trivial tasks across all supported adapters (Codex, Antigravity, Claude 
 
 ### Provider-Aware Model Tiering
 
-| Provider | Light / Implementer / Explorer (Token-Saving) | Critic / Planner / Verifier (Deep Reasoning) |
+For multi-agent workflows, Keel maps roles to model tiers based on the active provider. In Google Antigravity, `/boost` triggers the multi-agent reasoning pipeline:
+
+| Provider | Light Tasks / Implementers / Explorers | Critics / Architecture / Planners |
 | --- | --- | --- |
-| Google (Antigravity) | `gemini-3.7-flash` (high) | `gemini-pro-thinking` (AGI / deep reasoning mode) / `gemini-3.8-flash` (high) |
-| Anthropic (Claude Code) | `claude-3-5-haiku` | `claude-3-7-sonnet` / `claude-3-opus` |
+| Google (Antigravity `/boost`) | `gemini-3.7-flash` (high) | `gemini-pro-thinking` (AGI / deep reasoning mode) / `gemini-3.8-flash` (high) |
 | OpenAI (Codex) | `gpt-5.6-luna` (max) | `gpt-6-Astra` (low) |
+| Anthropic (Claude Code) | `claude-3-5-haiku` | `claude-3-7-sonnet` (high effort) / `claude-3-opus` |
 
 ### Human 6-Step Design Workflow & Appllama Native Intelligence
 

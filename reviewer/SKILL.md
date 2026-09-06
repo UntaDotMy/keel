@@ -57,7 +57,7 @@ Blocker (Critical / High) · Major · Minor · Nit
 - Bounded fix loops: when `FIX REQUIRED` is emitted, allow at most two incremental re-review rounds on the combined patch. After two unresolved rounds, stop automatic fix dispatch and report the blocker for user direction.
 
 ### Provider Model Recommendations
-- **Google (Antigravity)**: Gemini Pro / Thinking (AGI / deep reasoning mode) or `gemini-3.8-flash` (high).
+- **Google (Antigravity)**: `/boost for gemini`: Gemini Pro / Thinking (AGI / deep reasoning mode) or `gemini-3.8-flash` (high).
 - **OpenAI (Codex)**: `gpt-6-Astra` (low).
 - **Anthropic (Claude Code)**: `claude-3-7-sonnet` (high effort).
 

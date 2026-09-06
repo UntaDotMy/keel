@@ -171,17 +171,18 @@ For cross-adapter multi-agent workflows (Codex, Antigravity, Claude Code, OpenCo
 
 ## Provider-Aware Model Tiering Matrix
 
-To maximize token economy and reasoning quality, map roles to model tiers based on the active provider:
+To maximize token economy and reasoning quality, map roles to model tiers based on the active provider. In Google Antigravity, `/boost` activates the multi-agent reasoning pipeline:
 
-| Provider | Light / Implementer / Explorer (Token-Saving, Fast Iteration) | Critic / Planner / Verifier (Deep Reasoning, Spec Gate) |
+| Provider | Light Tasks / Implementers / Explorers (Token-Saving, Fast Iteration) | Critics / Architecture / Planners (Deep Reasoning, Spec Gate) |
 |---|---|---|
-| **Google** (Antigravity) | `gemini-3.7-flash` (high) | `gemini-pro-thinking` (AGI / deep reasoning mode) / `gemini-3.8-flash` (high) |
-| **Anthropic** (Claude Code) | `claude-3-5-haiku` | `claude-3-7-sonnet` (high effort) / `claude-3-opus` |
+| **Google** (Antigravity `/boost`) | `gemini-3.7-flash` (high) | Gemini Pro / Thinking (AGI / deep reasoning mode) / `gemini-3.8-flash` (high) |
 | **OpenAI** (Codex) | `gpt-5.6-luna` (max) | `gpt-6-Astra` (low) |
+| **Anthropic** (Claude Code) | `claude-3-5-haiku` | `claude-3-7-sonnet` (high effort) / `claude-3-opus` |
 
 ## Antigravity Teamwork & Research Partner Doctrine
 
 Grounding multi-agent collaboration in research-partner principles:
+- **`/boost` Deep Reasoning Pipeline**: Invoking `/boost for gemini` triggers an in-depth multi-agent exploration and verification pipeline. Light tasks, implementers, and explorers run on `gemini-3.7-flash` (high reasoning effort), while critics, architecture planners, and specification gates route to Gemini Pro / Thinking (AGI / deep reasoning mode) or `gemini-3.8-flash` (high reasoning effort).
 - **Dynamic Team Scaling**: Scale subagent teams dynamically to match task complexity: 1 focused worker for coupled/moderate changes, 2-4 parallel workers for cleanly disjoint subsystems.
 - **Decoupled Orchestration**:
   - *Iterative Coding*: Continuous local feedback loops (Anvil compile -> test -> fix).
