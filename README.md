@@ -667,6 +667,16 @@ Keel does **not** route models at runtime. See [docs/model-tiers.md](./docs/mode
 | Anthropic (Claude Code) | `claude-haiku-4-5` | `claude-sonnet-5` / `claude-opus-5` / `claude-fable-5-1` |
 | Z.ai | `glm-5.3-flash` | `glm-5.3` |
 
+
+### ClarifyPacket (SUPERHARNESS P1)
+
+When the gate is armed, Keel refuses to write `anvil.lock.json` until `clarify.packet.json` is present, valid, not `hard_block`, drift-clean, and `locked_brief.goal` matches the compile/run `--goal`. Status token: `CLARIFY_BLOCKED`.
+
+- Arm: `keel anvil compile --clarify-required …` (or `anvil run --clarify-required …`), or place `clarify.required` / an existing packet in the anvil bank.
+- AppSec: packet and sentinel must be regular files inside the anvil bank (symlink / out-of-bank refused). Answer text is untrusted; secret-shaped values are redacted on refuse Display paths — prefer env names in `locked_brief`, do not paste keys/tokens/PEM.
+- Orchestrator owns AskUser adapters; subagents escalate only. Keel does not shell-interpolate answers.
+- Model tiers: [docs/model-tiers.md](./docs/model-tiers.md) (Keel does **not** route models). Skills audit: [docs/skills-audit-p1.md](./docs/skills-audit-p1.md).
+
 ### Human 6-Step Design Workflow & Appllama Native Intelligence
 
 For interface design and UI implementation:
@@ -700,7 +710,7 @@ The native CLI is the primary surface. The unified `memory` family verbs (`resea
 | Compatibility matrix | [./docs/compatibility-matrix.md](./docs/compatibility-matrix.md) |
 | Model tiers (provider-aware; no runtime routing) | [./docs/model-tiers.md](./docs/model-tiers.md) |
 | Skills audit (P1 keep/merge/retire) | [./docs/skills-audit-p1.md](./docs/skills-audit-p1.md) |
-| ClarifyPacket (anvil pre-compile when gated) | `clarify.packet.json` under `<keel-home>/memories/workspaces/<slug>/anvil/` — see `running-anvil` + compatibility matrix |
+| ClarifyPacket (gated anvil lock write) | `clarify.packet.json` under `<keel-home>/memories/workspaces/<slug>/anvil/` — enforced before **every** lock write (`anvil compile` and `anvil run` auto-compile). Arm with `--clarify-required`, `clarify.required`, or an existing packet. See `running-anvil`, [compatibility-matrix](./docs/compatibility-matrix.md), and [RUNBOOK](./docs/RUNBOOK.md) § ClarifyPacket |
 | Why `keel` over native harness, runtime-shell comparator, and workflow-teaching comparator | [./docs/why-keel.md](./docs/why-keel.md) |
 | Competitive gap closure (named comparators + remaining work) | [./docs/competitive-gap-closure.md](./docs/competitive-gap-closure.md) |
 | Release notes | [./docs/release-notes.md](./docs/release-notes.md) |

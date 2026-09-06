@@ -32,7 +32,9 @@ This file is the entry point for the harness CLI on skill routing, native comman
 | Source anchors, related skills, tooling anchors | [AGENTS/references/99-source-anchors.md](AGENTS/references/99-source-anchors.md) |
 | Knowledge map for AGENTS doctrine | [AGENTS/references/00-knowledge-map.md](AGENTS/references/00-knowledge-map.md) |
 
-Model tier guidance (frontier/cheap/mid, provider-aware IDs): [`docs/model-tiers.md`](docs/model-tiers.md). Keel does **not** route models at runtime. Skills audit: [`docs/skills-audit-p1.md`](docs/skills-audit-p1.md). ClarifyPacket: `clarify.packet.json` in the anvil bank when gated.
+Model tier guidance (frontier/cheap/mid, provider-aware IDs): [`docs/model-tiers.md`](docs/model-tiers.md). Keel does **not** route models at runtime. Skills audit: [`docs/skills-audit-p1.md`](docs/skills-audit-p1.md).
+
+**ClarifyPacket (when gated):** artifact `clarify.packet.json` under `<keel-home>/memories/workspaces/<slug>/anvil/`. Arm with `keel anvil compile|run --clarify-required`, sentinel `clarify.required`, or an existing packet. Gate runs before **every** anvil lock write (`compile::write_lock`). Refuse on missing/malformed/`hard_block` (unanswered required)/`drift_check` failure/`locked_brief.goal` ≠ `--goal` — status `CLARIFY_BLOCKED`. AppSec: no symlink / out-of-bank packet or sentinel; secret-shaped answers redacted on Display — prefer env names in `locked_brief`. Orchestrator owns AskUser; **subagents escalate only** (see `running-anvil`, `subagent-driven-development`). Details: [`docs/compatibility-matrix.md`](docs/compatibility-matrix.md), [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
 
 ## Core Operating Contract
 

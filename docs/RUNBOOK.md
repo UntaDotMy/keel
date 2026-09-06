@@ -62,3 +62,50 @@ Operator steps for the PATH behavior shipped in native `keel install` / `keel un
 That is syntax only. It is not proof that a hosted fish, zsh, or CMD install wired PATH.
 
 PATH writer tests run against a temp `HOME` (Unix) and a PathPersist double (Windows). They do not touch the live HKCU hive.
+
+## ClarifyPacket gate (SUPERHARNESS P1)
+
+Operator surface for the gated anvil lock-write gate. Not a product marketing page.
+
+### When the gate is armed
+
+Any of:
+
+1. `keel anvil compile --clarify-required --goal "…" --bar "…" --files …`
+2. `keel anvil run --clarify-required …` (auto-compile path uses the same lock write)
+3. File `clarify.required` present in the anvil bank
+4. File `clarify.packet.json` already present in the anvil bank
+
+Bank path:
+
+`<keel-home>/memories/workspaces/<slug>/anvil/`
+
+(`KEEL_HOME` / `--claude-home`; never the user workspace root.)
+
+When **not** armed, lock write proceeds without a packet (ungated compile/run).
+
+### What refuse looks like
+
+Stderr includes status token `CLARIFY_BLOCKED` and one of:
+
+- missing `clarify.packet.json`
+- malformed packet
+- refused (symlink / non-file / resolves outside anvil bank)
+- `hard_block` — unanswered required questions (no AFK continue)
+- `drift_check` failed (goal hash drift; goal is not an allowed delta)
+- `locked_brief.goal` immutable mismatch vs `--goal`
+
+On refuse, stderr may also print AskUser adapter playbook notes (orchestrator-owned). Subagents must escalate, not answer or skip.
+
+### AppSec constraints (shipped)
+
+- Do **not** replace `clarify.packet.json` or `clarify.required` with symlinks. Symlinks and out-of-bank paths are refused (path jail).
+- Treat answers as untrusted data. Do not paste API keys, tokens, or PEM private keys into answers; put env **names** in `locked_brief` when needed. Secret-shaped answer text is redacted on refuse Display / debug paths.
+- Never shell-interpolate or eval AskUser / answer payloads.
+
+### Related docs
+
+- Skill doctrine: `running-anvil` § ClarifyPacket
+- Matrix: [compatibility-matrix.md](./compatibility-matrix.md)
+- Model guidance (not a router): [model-tiers.md](./model-tiers.md)
+- Skills decisions: [skills-audit-p1.md](./skills-audit-p1.md)
