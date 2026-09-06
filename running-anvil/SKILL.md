@@ -49,6 +49,21 @@ keel anvil compile --goal "CLI that pretty-prints JSON logs" --bar "jq 1.7" --fi
 `cast` and `run` create evidence. Relative `--workspace-root .` resolves to the
 absolute scoped lane, never a global `workspaces/anvil` lane.
 
+
+### 1b. ClarifyPacket gate (when gated)
+
+Vague or multi-path work must not reach a real compile without a completed ClarifyPacket.
+
+- Artifact ID: `clarify.packet.json` under `<keel-home>/memories/workspaces/<slug>/anvil/` (same bank as the lock).
+- Open the gate only for: `ambiguous_req` | `multi_path` | `irreversible_side_effect` | `missing_env_fact` | `conflicting_constraints`. Anti-spam: **1–4** questions, one packet, one pause.
+- Schema (min): `version`, `questions[]`, `answers[]` (UNTRUSTED), `locked_brief` (goal **immutable** after lock), `drift_check`, `hard_block`, `unanswered_policy: hard_block`.
+- Unanswered required questions ⇒ `hard_block` / status `CLARIFY_BLOCKED` — **no AFK continue**.
+- `keel anvil compile --clarify-required ...` refuses when the packet is missing, malformed, hard-blocked, or drifted. An existing packet or `clarify.required` sentinel also arms the gate.
+- **Orchestrator** owns AskUser adapters (Claude AskUserQuestion, Cursor ask_user, Gemini AskQuestion / external pause). **Subagents escalate only** — never answer or skip.
+- Sanitize/size-bound answers; never shell-interpolate or eval user answers / AskUser payloads.
+- Brainstorming remains Socratic design help — **not** a substitute for this gate.
+- Model tier guidance: `docs/model-tiers.md` (Keel does not route models at runtime).
+
 ### 2. Cast: N isolated builders (host-CLI builders, parallel)
 
 ```bash

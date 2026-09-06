@@ -24,6 +24,7 @@ pub fn run_compile(
     flags.string_flag("workspace-root", "");
     flags.string_flag("claude-home", "");
     flags.bool_flag("json", false);
+    flags.bool_flag("clarify-required", false);
     if let Err(error) = flags.parse(arguments) {
         let _ = writeln!(standard_error, "{}", error.message);
         return 1;
@@ -60,6 +61,25 @@ pub fn run_compile(
         .collect();
     if files.is_empty() {
         let _ = writeln!(standard_error, "anvil compile: --files is required");
+        return 1;
+    }
+    let clarify_required = flags.bool_value("clarify-required");
+    if let Err(error) = crate::utility::anvil::clarify::enforce_clarify_for_compile(
+        &paths.dir,
+        &goal,
+        clarify_required,
+    ) {
+        let _ = writeln!(
+            standard_error,
+            "anvil compile: {error}\n  packet: {}\n  sentinel: {}",
+            paths.clarify_packet_path().display(),
+            paths.clarify_required_path().display()
+        );
+        let _ = writeln!(
+            standard_error,
+            "{}",
+            crate::utility::anvil::clarify::ask_user_adapter_playbook()
+        );
         return 1;
     }
     match write_lock(&paths, &goal, &bar, &files, flags.string_value("out")) {
@@ -125,6 +145,8 @@ pub fn write_lock(
     }
     let mut staged_paths = paths.clone();
     staged_paths.dir = staging.clone();
+    // Preserve ClarifyPacket artifacts across generation swap (same anvil bank path).
+    preserve_clarify_artifacts(&paths.dir, &staging)?;
     let staged = (|| {
         let hash = prefix::write_prefix_files(&staged_paths, &prefix)?;
         write_text(&staged_paths.lock_path(), &lock_text)
@@ -175,6 +197,22 @@ pub fn write_lock(
         remove_directory_with_retry(&backup)?;
     }
     Ok(hash)
+}
+
+
+fn preserve_clarify_artifacts(from: &Path, to: &Path) -> Result<(), String> {
+    use crate::utility::anvil::clarify::{CLARIFY_PACKET_FILE, CLARIFY_REQUIRED_SENTINEL};
+    for name in [CLARIFY_PACKET_FILE, CLARIFY_REQUIRED_SENTINEL] {
+        let src = from.join(name);
+        if !src.is_file() {
+            continue;
+        }
+        std::fs::create_dir_all(to).map_err(|error| error.to_string())?;
+        std::fs::copy(&src, to.join(name)).map_err(|error| {
+            format!("anvil: preserve {name}: {error}")
+        })?;
+    }
+    Ok(())
 }
 
 fn discard_staging(path: &Path) {

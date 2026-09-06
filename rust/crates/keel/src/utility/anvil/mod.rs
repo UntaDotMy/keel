@@ -1,4 +1,5 @@
 pub mod cache;
+pub mod clarify;
 pub mod cast;
 pub mod compile;
 pub mod filter;
@@ -35,8 +36,8 @@ pub fn run_anvil_command(
              run          compile->cast->sieve->stamp->loop orchestrator\n\
              prefix-check verify prefix SHA256 stability\n\
              \n\
-             Common flags: --workspace-root <path> --claude-home <path> --json --dry-run --strict\n\
-             Bank: <keel-home>/memories/workspaces/<slug>/anvil/ (never the user workspace)"
+             Common flags: --workspace-root <path> --claude-home <path> --json --dry-run --strict --clarify-required\n\
+             Bank: <keel-home>/memories/workspaces/<slug>/anvil/ (never the user workspace)\n             ClarifyPacket: clarify.packet.json — when gated, compile refuses on missing/hard_block/drift"
         );
         return if action.is_empty() { 1 } else { 0 };
     }
@@ -534,6 +535,112 @@ mod tests {
         assert!(!job.workspace.join("anvil").exists());
         let lock = job::load_lock(&job.paths).expect("lock");
         assert_eq!(lock["goal"], "pretty json");
+    }
+
+    #[test]
+    fn compile_refuses_when_clarify_required_and_packet_missing() {
+        let job = temp_job("clarify-missing");
+        let (code, _, stderr) = run_cmd(&with_job(
+            &job,
+            vec![
+                "compile".into(),
+                "--goal".into(),
+                "vague feature".into(),
+                "--bar".into(),
+                "echo ok".into(),
+                "--clarify-required".into(),
+            ],
+        ));
+        assert_eq!(code, 1, "stderr={stderr}");
+        assert!(
+            stderr.contains("CLARIFY_BLOCKED"),
+            "stderr={stderr}"
+        );
+        assert!(
+            stderr.contains("clarify.packet.json"),
+            "stderr={stderr}"
+        );
+        assert!(!job.paths.lock_path().is_file());
+        assert_eq!(
+            job.paths.clarify_packet_path(),
+            job.paths.dir.join("clarify.packet.json")
+        );
+        assert_eq!(
+            job.paths.clarify_required_path(),
+            job.paths.dir.join("clarify.required")
+        );
+    }
+
+    #[test]
+    fn compile_refuses_on_clarify_hard_block_and_drift() {
+        let job = temp_job("clarify-hard");
+        std::fs::create_dir_all(&job.paths.dir).unwrap();
+        let goal = "ship clarify gate";
+        let hash = crate::utility::anvil::clarify::goal_hash(goal);
+        // unanswered => hard_block
+        let unanswered = format!(
+            r#"{{"version":1,"trigger":"ambiguous_req","questions":[{{"id":"scope","header":"Scope","question":"Which?","type":"choice","options":["cli","docs"],"required":true}}],"answers":[],"locked_brief":{{"goal":"{goal}","non_goals":[],"constraints":[],"acceptance":[],"open_risks":[]}},"unanswered_policy":"hard_block","drift_check":{{"original_goal_hash":"{hash}","allowed_delta_fields":["constraints","acceptance","non_goals","open_risks"]}},"hard_block":false}}"#
+        );
+        std::fs::write(job.paths.clarify_packet_path(), unanswered).unwrap();
+        let (code, _, stderr) = run_cmd(&with_job(
+            &job,
+            vec![
+                "compile".into(),
+                "--goal".into(),
+                goal.into(),
+                "--bar".into(),
+                "echo ok".into(),
+            ],
+        ));
+        assert_eq!(code, 1, "stderr={stderr}");
+        assert!(stderr.contains("hard_block"), "stderr={stderr}");
+
+        // answered but drifted goal hash
+        let drifted = format!(
+            r#"{{"version":1,"trigger":"ambiguous_req","questions":[{{"id":"scope","header":"Scope","question":"Which?","type":"choice","options":["cli","docs"],"required":true}}],"answers":[{{"id":"scope","value":"cli"}}],"locked_brief":{{"goal":"{goal}","non_goals":[],"constraints":[],"acceptance":[],"open_risks":[]}},"unanswered_policy":"hard_block","drift_check":{{"original_goal_hash":"deadbeefdeadbeef","allowed_delta_fields":["constraints"]}},"hard_block":false}}"#
+        );
+        std::fs::write(job.paths.clarify_packet_path(), drifted).unwrap();
+        let (code, _, stderr) = run_cmd(&with_job(
+            &job,
+            vec![
+                "compile".into(),
+                "--goal".into(),
+                goal.into(),
+                "--bar".into(),
+                "echo ok".into(),
+            ],
+        ));
+        assert_eq!(code, 1, "stderr={stderr}");
+        assert!(stderr.contains("drift_check"), "stderr={stderr}");
+    }
+
+    #[test]
+    fn compile_accepts_complete_clarify_packet_and_preserves_it() {
+        let job = temp_job("clarify-ok");
+        std::fs::create_dir_all(&job.paths.dir).unwrap();
+        let goal = "pretty json";
+        let hash = crate::utility::anvil::clarify::goal_hash(goal);
+        let packet = format!(
+            r#"{{"version":1,"trigger":"ambiguous_req","questions":[{{"id":"scope","header":"Scope","question":"Which?","type":"choice","options":["cli","docs"],"required":true}}],"answers":[{{"id":"scope","value":"cli"}}],"locked_brief":{{"goal":"{goal}","non_goals":["P2"],"constraints":["MIT"],"acceptance":["gate works"],"open_risks":[]}},"unanswered_policy":"hard_block","drift_check":{{"original_goal_hash":"{hash}","allowed_delta_fields":["constraints","acceptance","non_goals","open_risks"]}},"hard_block":false,"ownership":{{"orchestrator":"owns AskUser adapters","subagents":"escalate only"}}}}"#
+        );
+        std::fs::write(job.paths.clarify_packet_path(), packet).unwrap();
+        let (code, stdout, stderr) = run_cmd(&with_job(
+            &job,
+            vec![
+                "compile".into(),
+                "--goal".into(),
+                goal.into(),
+                "--bar".into(),
+                "echo ok".into(),
+            ],
+        ));
+        assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+        assert!(
+            job.paths.clarify_packet_path().is_file(),
+            "clarify packet must survive compile generation swap"
+        );
+        let lock = job::load_lock(&job.paths).expect("lock");
+        assert_eq!(lock["goal"], goal);
     }
 
     #[test]
