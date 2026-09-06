@@ -187,23 +187,49 @@ pub(super) fn system_map_edit_counter_path() -> Option<PathBuf> {
     )
 }
 
-const COUNTER_LOCK_ATTEMPTS: usize = 200;
+const COUNTER_LOCK_ATTEMPTS: usize = 400;
 const COUNTER_LOCK_RETRY_MS: u64 = 5;
 const COUNTER_LOCK_STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
+const COUNTER_LOCK_RELEASE_ATTEMPTS: usize = 40;
+
+/// Serialize same-process counter updates. Hook handlers are usually separate
+/// processes (covered by the mkdir lock below), but tests and any in-process
+/// callers can race threads; without this gate, a Windows `remove_dir_all`
+/// that fails in `Drop` leaves `counter.lock` owned by our still-alive PID and
+/// every subsequent acquire times out with WouldBlock.
+fn counter_in_process_gate() -> std::sync::MutexGuard<'static, ()> {
+    static GATE: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    GATE.get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+}
+
+fn counter_held_locks() -> std::sync::MutexGuard<'static, std::collections::HashSet<PathBuf>> {
+    static HELD: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<PathBuf>>> =
+        std::sync::OnceLock::new();
+    HELD.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+}
 
 /// A small inter-process lock for the read-modify-write counter files.
 ///
 /// Hook handlers are separate short-lived processes, so an in-process mutex
-/// cannot protect the counter. create_new gives us an atomic claim on every
-/// supported host. The bounded retry and stale-lock cleanup keep a killed hook
-/// from wedging all future gate updates.
+/// alone cannot protect the counter across processes. `create_dir` gives an
+/// atomic claim on every supported host. Bounded retry, same-PID orphan
+/// reclaim (Windows Drop can leave the lock dir behind while AV briefly holds
+/// `owner`), and stale-lock cleanup keep a killed hook from wedging updates.
 struct CounterFileLock {
     path: PathBuf,
 }
 
 impl Drop for CounterFileLock {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
+        {
+            let mut held = counter_held_locks();
+            held.remove(&self.path);
+        }
+        release_counter_lock_dir(&self.path);
     }
 }
 
@@ -215,17 +241,43 @@ fn counter_lock_path(path: &Path) -> PathBuf {
     path.with_file_name(format!("{name}.lock"))
 }
 
-fn remove_stale_counter_lock(path: &Path) {
-    if let Ok(owner) = fs::read_to_string(path.join("owner")) {
-        if let Ok(process_id) = owner.trim().parse::<u32>() {
-            match crate::runtime::process_is_alive(process_id) {
-                Some(true) => return,
-                Some(false) => {
-                    let _ = fs::remove_dir_all(path);
-                    return;
-                }
-                None => {}
+/// Best-effort lock directory teardown. On Windows, delete `owner` first so a
+/// briefly open scan handle does not keep `RemoveDirectory` failing forever.
+fn release_counter_lock_dir(path: &Path) {
+    let owner = path.join("owner");
+    for _ in 0..COUNTER_LOCK_RELEASE_ATTEMPTS {
+        let _ = fs::remove_file(&owner);
+        match fs::remove_dir_all(path) {
+            Ok(()) => return,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Err(_) => {
+                let _ = fs::remove_dir(path);
+                std::thread::sleep(std::time::Duration::from_millis(5));
             }
+        }
+    }
+}
+
+fn lock_owner_process_id(path: &Path) -> Option<u32> {
+    fs::read_to_string(path.join("owner"))
+        .ok()
+        .and_then(|owner| owner.trim().parse::<u32>().ok())
+}
+
+fn remove_stale_counter_lock(path: &Path) {
+    if let Some(process_id) = lock_owner_process_id(path) {
+        // Same-PID locks are handled by acquire: either another thread holds
+        // them (see held set) or Drop failed and they are reclaimable orphans.
+        if process_id == std::process::id() {
+            return;
+        }
+        match crate::runtime::process_is_alive(process_id) {
+            Some(true) => return,
+            Some(false) => {
+                release_counter_lock_dir(path);
+                return;
+            }
+            None => {}
         }
     }
     let Ok(metadata) = fs::metadata(path) else {
@@ -239,11 +291,33 @@ fn remove_stale_counter_lock(path: &Path) {
     };
     if age >= COUNTER_LOCK_STALE_AFTER {
         if metadata.is_dir() {
-            let _ = fs::remove_dir_all(path);
+            release_counter_lock_dir(path);
         } else {
             let _ = fs::remove_file(path); // stale-lock recovery cleanup is best effort
         }
     }
+}
+
+fn reclaim_counter_lock_if_possible(lock_path: &Path) -> bool {
+    if let Some(process_id) = lock_owner_process_id(lock_path) {
+        if process_id == std::process::id() {
+            let held = counter_held_locks();
+            if !held.contains(lock_path) {
+                // Orphaned after a failed Drop in this process (common on
+                // Windows when remove_dir_all races with AV / indexer handles).
+                drop(held);
+                release_counter_lock_dir(lock_path);
+                return true;
+            }
+            return false;
+        }
+        if crate::runtime::process_is_alive(process_id) == Some(false) {
+            release_counter_lock_dir(lock_path);
+            return true;
+        }
+    }
+    remove_stale_counter_lock(lock_path);
+    false
 }
 
 fn acquire_counter_lock(path: &Path) -> std::io::Result<CounterFileLock> {
@@ -254,13 +328,14 @@ fn acquire_counter_lock(path: &Path) -> std::io::Result<CounterFileLock> {
                 if let Err(error) =
                     fs::write(lock_path.join("owner"), std::process::id().to_string())
                 {
-                    let _ = fs::remove_dir_all(&lock_path);
+                    release_counter_lock_dir(&lock_path);
                     return Err(error);
                 }
+                counter_held_locks().insert(lock_path.clone());
                 return Ok(CounterFileLock { path: lock_path });
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                remove_stale_counter_lock(&lock_path);
+                let _ = reclaim_counter_lock_if_possible(&lock_path);
                 if attempt + 1 < COUNTER_LOCK_ATTEMPTS {
                     std::thread::sleep(std::time::Duration::from_millis(COUNTER_LOCK_RETRY_MS));
                 }
@@ -271,7 +346,7 @@ fn acquire_counter_lock(path: &Path) -> std::io::Result<CounterFileLock> {
                     std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::NotFound
                 ) =>
             {
-                remove_stale_counter_lock(&lock_path);
+                let _ = reclaim_counter_lock_if_possible(&lock_path);
                 if attempt + 1 < COUNTER_LOCK_ATTEMPTS {
                     std::thread::sleep(std::time::Duration::from_millis(COUNTER_LOCK_RETRY_MS));
                 }
@@ -300,6 +375,7 @@ fn read_counter_value_locked(path: &Path) -> std::io::Result<u64> {
 }
 
 pub(super) fn increment_counter_file(path: &Path) -> std::io::Result<u64> {
+    let _gate = counter_in_process_gate();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -335,6 +411,7 @@ pub(super) fn increment_counter_file(path: &Path) -> std::io::Result<u64> {
 }
 
 pub(super) fn reset_counter_file(path: &Path) -> std::io::Result<()> {
+    let _gate = counter_in_process_gate();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
