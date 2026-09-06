@@ -37,7 +37,7 @@ pub fn run_anvil_command(
              prefix-check verify prefix SHA256 stability\n\
              \n\
              Common flags: --workspace-root <path> --claude-home <path> --json --dry-run --strict --clarify-required\n\
-             Bank: <keel-home>/memories/workspaces/<slug>/anvil/ (never the user workspace)\n             ClarifyPacket: clarify.packet.json — when gated, compile refuses on missing/hard_block/drift"
+             Bank: <keel-home>/memories/workspaces/<slug>/anvil/ (never the user workspace)\n             ClarifyPacket: clarify.packet.json — when gated, compile/run refuse lock write on missing/hard_block/drift"
         );
         return if action.is_empty() { 1 } else { 0 };
     }
@@ -120,6 +120,7 @@ fn run_orchestrator(
     flags.bool_flag("dry-run", false);
     flags.bool_flag("strict", false);
     flags.bool_flag("json", false);
+    flags.bool_flag("clarify-required", false);
     flags.string_flag("goal", "");
     flags.string_flag("bar", "");
     flags.string_flag("files", "");
@@ -221,7 +222,14 @@ fn run_orchestrator(
             );
             return 1;
         }
-        if let Err(error) = compile::write_lock(&paths, &goal, &bar, &files, "") {
+        if let Err(error) = compile::write_lock(
+            &paths,
+            &goal,
+            &bar,
+            &files,
+            "",
+            flags.bool_value("clarify-required"),
+        ) {
             let _ = writeln!(standard_error, "anvil run: compile: {error}");
             return 1;
         }
@@ -638,6 +646,135 @@ mod tests {
     }
 
     #[test]
+    fn run_refuses_lock_write_when_clarify_required_and_packet_missing() {
+        let job = temp_job("run-clarify-missing");
+        let (code, _, stderr) = run_cmd(&with_job(
+            &job,
+            vec![
+                "run".into(),
+                "--goal".into(),
+                "vague feature".into(),
+                "--bar".into(),
+                "echo ok".into(),
+                "--files".into(),
+                "input.txt".into(),
+                "--clarify-required".into(),
+            ],
+        ));
+        assert_eq!(code, 1, "stderr={stderr}");
+        assert!(stderr.contains("CLARIFY_BLOCKED"), "stderr={stderr}");
+        assert!(stderr.contains("clarify.packet.json"), "stderr={stderr}");
+        assert!(
+            !job.paths.lock_path().is_file(),
+            "run must not write lock when gated"
+        );
+        assert!(!job.paths.dir.exists() || !job.paths.lock_path().is_file());
+    }
+
+    #[test]
+    fn run_refuses_lock_write_on_clarify_hard_block_and_drift() {
+        let job = temp_job("run-clarify-hard");
+        std::fs::create_dir_all(&job.paths.dir).unwrap();
+        let goal = "ship clarify gate";
+        let hash = crate::utility::anvil::clarify::goal_hash(goal);
+        let unanswered = format!(
+            r#"{{"version":1,"trigger":"ambiguous_req","questions":[{{"id":"scope","header":"Scope","question":"Which?","type":"choice","options":["cli","docs"],"required":true}}],"answers":[],"locked_brief":{{"goal":"{goal}","non_goals":[],"constraints":[],"acceptance":[],"open_risks":[]}},"unanswered_policy":"hard_block","drift_check":{{"original_goal_hash":"{hash}","allowed_delta_fields":["constraints","acceptance","non_goals","open_risks"]}},"hard_block":false}}"#
+        );
+        std::fs::write(job.paths.clarify_packet_path(), unanswered).unwrap();
+        let (code, _, stderr) = run_cmd(&with_job(
+            &job,
+            vec![
+                "run".into(),
+                "--goal".into(),
+                goal.into(),
+                "--bar".into(),
+                "echo ok".into(),
+                "--files".into(),
+                "input.txt".into(),
+            ],
+        ));
+        assert_eq!(code, 1, "stderr={stderr}");
+        assert!(stderr.contains("hard_block"), "stderr={stderr}");
+        assert!(!job.paths.lock_path().is_file());
+
+        let drifted = format!(
+            r#"{{"version":1,"trigger":"ambiguous_req","questions":[{{"id":"scope","header":"Scope","question":"Which?","type":"choice","options":["cli","docs"],"required":true}}],"answers":[{{"id":"scope","value":"cli"}}],"locked_brief":{{"goal":"{goal}","non_goals":[],"constraints":[],"acceptance":[],"open_risks":[]}},"unanswered_policy":"hard_block","drift_check":{{"original_goal_hash":"deadbeefdeadbeef","allowed_delta_fields":["constraints"]}},"hard_block":false}}"#
+        );
+        std::fs::write(job.paths.clarify_packet_path(), drifted).unwrap();
+        let (code, _, stderr) = run_cmd(&with_job(
+            &job,
+            vec![
+                "run".into(),
+                "--goal".into(),
+                goal.into(),
+                "--bar".into(),
+                "echo ok".into(),
+                "--files".into(),
+                "input.txt".into(),
+            ],
+        ));
+        assert_eq!(code, 1, "stderr={stderr}");
+        assert!(stderr.contains("drift_check"), "stderr={stderr}");
+        assert!(!job.paths.lock_path().is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_refuses_lock_write_when_clarify_packet_is_symlink() {
+        let job = temp_job("run-clarify-jail");
+        std::fs::create_dir_all(&job.paths.dir).unwrap();
+        let outside = job
+            .home
+            .join(format!("clarify-outside-run-{}", std::process::id()));
+        let goal = "jail goal";
+        let hash = crate::utility::anvil::clarify::goal_hash(goal);
+        let packet = format!(
+            r#"{{"version":1,"trigger":"ambiguous_req","questions":[{{"id":"scope","header":"Scope","question":"Which?","type":"choice","options":["cli","docs"],"required":true}}],"answers":[{{"id":"scope","value":"cli"}}],"locked_brief":{{"goal":"{goal}","non_goals":[],"constraints":[],"acceptance":[],"open_risks":[]}},"unanswered_policy":"hard_block","drift_check":{{"original_goal_hash":"{hash}","allowed_delta_fields":["constraints"]}},"hard_block":false}}"#
+        );
+        std::fs::write(&outside, packet).unwrap();
+        std::os::unix::fs::symlink(&outside, job.paths.clarify_packet_path()).unwrap();
+        let (code, _, stderr) = run_cmd(&with_job(
+            &job,
+            vec![
+                "run".into(),
+                "--goal".into(),
+                goal.into(),
+                "--bar".into(),
+                "echo ok".into(),
+                "--files".into(),
+                "input.txt".into(),
+                "--clarify-required".into(),
+            ],
+        ));
+        assert_eq!(code, 1, "stderr={stderr}");
+        assert!(
+            stderr.contains("CLARIFY_BLOCKED")
+                && (stderr.contains("symlink")
+                    || stderr.contains("refused")
+                    || stderr.contains("jail")),
+            "stderr={stderr}"
+        );
+        assert!(!job.paths.lock_path().is_file());
+        let _ = std::fs::remove_file(&outside);
+    }
+
+    #[test]
+    fn write_lock_skips_clarify_when_not_required() {
+        let job = temp_job("clarify-ungated-write");
+        let hash = compile::write_lock(
+            &job.paths,
+            "ungated goal",
+            "echo ok",
+            &["input.txt".into()],
+            "",
+            false,
+        )
+        .expect("ungated write_lock must succeed without packet");
+        assert!(!hash.is_empty());
+        assert!(job.paths.lock_path().is_file());
+    }
+
+    #[test]
     fn compile_requires_at_least_one_owned_file() {
         let job = temp_job("compile-files");
         let (code, _, stderr) = run_cmd(&[
@@ -709,6 +846,7 @@ mod tests {
             "echo ok",
             &["missing.txt".into()],
             "",
+            false,
         );
         assert!(result.is_err());
         assert_eq!(

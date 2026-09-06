@@ -63,26 +63,14 @@ pub fn run_compile(
         let _ = writeln!(standard_error, "anvil compile: --files is required");
         return 1;
     }
-    let clarify_required = flags.bool_value("clarify-required");
-    if let Err(error) = crate::utility::anvil::clarify::enforce_clarify_for_compile(
-        &paths.dir,
+    match write_lock(
+        &paths,
         &goal,
-        clarify_required,
+        &bar,
+        &files,
+        flags.string_value("out"),
+        flags.bool_value("clarify-required"),
     ) {
-        let _ = writeln!(
-            standard_error,
-            "anvil compile: {error}\n  packet: {}\n  sentinel: {}",
-            paths.clarify_packet_path().display(),
-            paths.clarify_required_path().display()
-        );
-        let _ = writeln!(
-            standard_error,
-            "{}",
-            crate::utility::anvil::clarify::ask_user_adapter_playbook()
-        );
-        return 1;
-    }
-    match write_lock(&paths, &goal, &bar, &files, flags.string_value("out")) {
         Ok(hash) => {
             if flags.bool_value("json") {
                 let _ = writeln!(
@@ -111,7 +99,21 @@ pub fn write_lock(
     bar: &str,
     files: &[String],
     out_flag: &str,
+    clarify_required: bool,
 ) -> Result<String, String> {
+    // Gate every lock write (compile + run auto-compile) so no caller can bypass.
+    if let Err(error) = crate::utility::anvil::clarify::enforce_clarify_for_compile(
+        &paths.dir,
+        goal,
+        clarify_required,
+    ) {
+        return Err(format!(
+            "{error}\n  packet: {}\n  sentinel: {}\n{}",
+            paths.clarify_packet_path().display(),
+            paths.clarify_required_path().display(),
+            crate::utility::anvil::clarify::ask_user_adapter_playbook()
+        ));
+    }
     let quality_bar = bar.trim();
     let prefix = prefix::build_static_prefix(goal, quality_bar);
     let generation = format!(

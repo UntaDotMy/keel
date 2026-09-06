@@ -1,4 +1,4 @@
-//! ClarifyPacket gate for anvil compile (SUPERHARNESS P1).
+//! ClarifyPacket gate for every anvil lock write (SUPERHARNESS P1).
 //!
 //! Artifact path (product ID): `clarify.packet.json` under the workspace anvil
 //! bank — `<keel-home>/memories/workspaces/<slug>/anvil/clarify.packet.json`.
