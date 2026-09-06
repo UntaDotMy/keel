@@ -59,7 +59,7 @@ Start with the smallest reference set that answers the task:
 ### Provider Model Recommendations
 - **Google (Antigravity)**: `/boost for gemini`: Gemini Pro / Thinking (AGI / deep reasoning mode) or `gemini-3.8-flash` (high).
 - **OpenAI (Codex)**: `gpt-6-Astra` (low).
-- **Anthropic (Claude Code)**: `claude-3-7-sonnet` (high effort).
+- **Anthropic (Claude Code)**: `claude-sonnet-5` (see `docs/model-tiers.md`).
 
 ### Service Boundaries
 - Prefer a monolith or modular monolith until you have proven reasons to split ownership, scaling, or deployment.

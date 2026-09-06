@@ -658,13 +658,14 @@ For non-trivial tasks across all supported adapters (Codex, Antigravity, Claude 
 
 ### Provider-Aware Model Tiering
 
-For multi-agent workflows, Keel maps roles to model tiers based on the active provider. In Google Antigravity, `/boost` triggers the multi-agent reasoning pipeline:
+Keel does **not** route models at runtime. See [docs/model-tiers.md](./docs/model-tiers.md) for frontier/cheap/mid guidance and current provider IDs. Anvil lock keeps `frontier` / `cheap` / `mid`. For multi-agent workflows, map roles to model tiers based on the active provider. In Google Antigravity, `/boost` triggers the multi-agent reasoning pipeline:
 
 | Provider | Light Tasks / Implementers / Explorers | Critics / Architecture / Planners |
 | --- | --- | --- |
 | Google (Antigravity `/boost`) | `gemini-3.7-flash` (high) | `gemini-pro-thinking` (AGI / deep reasoning mode) / `gemini-3.8-flash` (high) |
 | OpenAI (Codex) | `gpt-5.6-luna` (max) | `gpt-6-Astra` (low) |
-| Anthropic (Claude Code) | `claude-3-5-haiku` | `claude-3-7-sonnet` (high effort) / `claude-3-opus` |
+| Anthropic (Claude Code) | `claude-haiku-4-5` | `claude-sonnet-5` / `claude-opus-5` / `claude-fable-5-1` |
+| Z.ai | `glm-5.3-flash` | `glm-5.3` |
 
 ### Human 6-Step Design Workflow & Appllama Native Intelligence
 
@@ -697,6 +698,9 @@ The native CLI is the primary surface. The unified `memory` family verbs (`resea
 | Workflow rules | [./WORKFLOW.md](./WORKFLOW.md) |
 | Agent rules | [./AGENTS.md](./AGENTS.md) |
 | Compatibility matrix | [./docs/compatibility-matrix.md](./docs/compatibility-matrix.md) |
+| Model tiers (provider-aware; no runtime routing) | [./docs/model-tiers.md](./docs/model-tiers.md) |
+| Skills audit (P1 keep/merge/retire) | [./docs/skills-audit-p1.md](./docs/skills-audit-p1.md) |
+| ClarifyPacket (anvil pre-compile when gated) | `clarify.packet.json` under `<keel-home>/memories/workspaces/<slug>/anvil/` — see `running-anvil` + compatibility matrix |
 | Why `keel` over native harness, runtime-shell comparator, and workflow-teaching comparator | [./docs/why-keel.md](./docs/why-keel.md) |
 | Competitive gap closure (named comparators + remaining work) | [./docs/competitive-gap-closure.md](./docs/competitive-gap-closure.md) |
 | Release notes | [./docs/release-notes.md](./docs/release-notes.md) |

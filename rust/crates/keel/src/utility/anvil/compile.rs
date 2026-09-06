@@ -24,6 +24,7 @@ pub fn run_compile(
     flags.string_flag("workspace-root", "");
     flags.string_flag("claude-home", "");
     flags.bool_flag("json", false);
+    flags.bool_flag("clarify-required", false);
     if let Err(error) = flags.parse(arguments) {
         let _ = writeln!(standard_error, "{}", error.message);
         return 1;
@@ -62,7 +63,14 @@ pub fn run_compile(
         let _ = writeln!(standard_error, "anvil compile: --files is required");
         return 1;
     }
-    match write_lock(&paths, &goal, &bar, &files, flags.string_value("out")) {
+    match write_lock(
+        &paths,
+        &goal,
+        &bar,
+        &files,
+        flags.string_value("out"),
+        flags.bool_value("clarify-required"),
+    ) {
         Ok(hash) => {
             if flags.bool_value("json") {
                 let _ = writeln!(
@@ -91,7 +99,21 @@ pub fn write_lock(
     bar: &str,
     files: &[String],
     out_flag: &str,
+    clarify_required: bool,
 ) -> Result<String, String> {
+    // Gate every lock write (compile + run auto-compile) so no caller can bypass.
+    if let Err(error) = crate::utility::anvil::clarify::enforce_clarify_for_compile(
+        &paths.dir,
+        goal,
+        clarify_required,
+    ) {
+        return Err(format!(
+            "{error}\n  packet: {}\n  sentinel: {}\n{}",
+            paths.clarify_packet_path().display(),
+            paths.clarify_required_path().display(),
+            crate::utility::anvil::clarify::ask_user_adapter_playbook()
+        ));
+    }
     let quality_bar = bar.trim();
     let prefix = prefix::build_static_prefix(goal, quality_bar);
     let generation = format!(
@@ -125,6 +147,8 @@ pub fn write_lock(
     }
     let mut staged_paths = paths.clone();
     staged_paths.dir = staging.clone();
+    // Preserve ClarifyPacket artifacts across generation swap (same anvil bank path).
+    preserve_clarify_artifacts(&paths.dir, &staging)?;
     let staged = (|| {
         let hash = prefix::write_prefix_files(&staged_paths, &prefix)?;
         write_text(&staged_paths.lock_path(), &lock_text)
@@ -175,6 +199,22 @@ pub fn write_lock(
         remove_directory_with_retry(&backup)?;
     }
     Ok(hash)
+}
+
+fn preserve_clarify_artifacts(from: &Path, to: &Path) -> Result<(), String> {
+    use crate::utility::anvil::clarify::{
+        safe_clarify_artifact_path, CLARIFY_PACKET_FILE, CLARIFY_REQUIRED_SENTINEL,
+    };
+    for name in [CLARIFY_PACKET_FILE, CLARIFY_REQUIRED_SENTINEL] {
+        // Symlink / out-of-bank artifacts refuse — never follow via is_file/copy.
+        let Some(src) = safe_clarify_artifact_path(from, name)? else {
+            continue;
+        };
+        std::fs::create_dir_all(to).map_err(|error| error.to_string())?;
+        std::fs::copy(&src, to.join(name))
+            .map_err(|error| format!("anvil: preserve {name}: {error}"))?;
+    }
+    Ok(())
 }
 
 fn discard_staging(path: &Path) {

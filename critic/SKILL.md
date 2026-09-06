@@ -43,7 +43,7 @@ Do NOT use for: final production-readiness verdict (use `reviewer`), multi-exper
 ### Provider Model Recommendations
 - **Google (Antigravity)**: `/boost for gemini`: Gemini Pro / Thinking (AGI / deep reasoning mode) or `gemini-3.8-flash` (high).
 - **OpenAI (Codex)**: `gpt-6-Astra` (low).
-- **Anthropic (Claude Code)**: `claude-3-7-sonnet` (high effort).
+- **Anthropic (Claude Code)**: `claude-sonnet-5` / `claude-opus-5` / `claude-fable-5-1` (see `docs/model-tiers.md`).
 
 ## The five failure modes (check each, with evidence)
 
