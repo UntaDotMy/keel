@@ -152,7 +152,7 @@ fn run_research_cache(
              \n\
              record   --question \"...\" --answer \"...\" [--source ...] [--freshness ...]\n\
                       aliases: --query = --question, --result = --answer\n\
-             lookup   --query \"...\"\n\
+             lookup   --query \"...\" [--include-stale]\n\
              stale    [--days N]\n\
              reward   --id <id>\n\
              list"
@@ -205,7 +205,8 @@ fn run_research_cache(
                 return 1;
             };
             let (id, at) = now_id("rc");
-            let record: Record = vec![
+            let freshness = flags.string_value("freshness").trim().to_string();
+            let mut record: Record = vec![
                 ("id".into(), id.clone()),
                 ("question".into(), question),
                 ("answer".into(), answer),
@@ -213,13 +214,13 @@ fn run_research_cache(
                     "source".into(),
                     flags.string_value("source").trim().to_string(),
                 ),
-                (
-                    "freshness".into(),
-                    flags.string_value("freshness").trim().to_string(),
-                ),
+                ("freshness".into(), freshness.clone()),
                 ("state".into(), "fresh".into()),
                 ("recordedAt".into(), at),
             ];
+            if let Some(expires_at) = freshness_expiry(&freshness, current_timestamp_millis()) {
+                record.push(("expiresAt".into(), expires_at));
+            }
             let store = family_store(&home, command_group, "research-cache");
             match store.write_record(&id, &record) {
                 Ok(path) => {
@@ -253,6 +254,7 @@ fn run_research_cache(
             let mut flags = FlagSet::new(format!("{label} lookup"));
             flags.string_flag("query", "");
             flags.string_flag("claude-home", "");
+            flags.bool_flag("include-stale", false);
             flags.bool_flag("json", false);
             if let Err(error) = flags.parse(&arguments[1..]) {
                 let _ = writeln!(standard_error, "{}", error.message);
@@ -279,22 +281,42 @@ fn run_research_cache(
                     return 1;
                 }
             };
-            let matches: Vec<&Record> = records
-                .iter()
-                .map(|(_, record)| record)
-                .filter(|record| {
-                    let haystack = format!(
-                        "{} {}",
-                        field(record, "question").unwrap_or(""),
-                        field(record, "answer").unwrap_or("")
-                    )
-                    .to_lowercase();
-                    query.split_whitespace().all(|term| haystack.contains(term))
-                })
-                .collect();
+            let now = format_timestamp_iso8601(current_timestamp_millis());
+            let include_stale = flags.bool_value("include-stale");
+            let mut stale_matches = Vec::new();
+            let mut matches = Vec::new();
+            for (_, record) in &records {
+                let haystack = format!(
+                    "{} {}",
+                    field(record, "question").unwrap_or(""),
+                    field(record, "answer").unwrap_or("")
+                )
+                .to_lowercase();
+                if !query.split_whitespace().all(|term| haystack.contains(term)) {
+                    continue;
+                }
+                if research_cache_record_is_stale(record, &now) {
+                    stale_matches.push(record);
+                    if include_stale {
+                        matches.push(record);
+                    }
+                } else {
+                    matches.push(record);
+                }
+            }
             if flags.bool_value("json") {
                 let payload = Value::Object(vec![
                     ("count".into(), Value::Number(matches.len().to_string())),
+                    ("includeStale".into(), Value::Bool(include_stale)),
+                    (
+                        "staleMatches".into(),
+                        Value::Array(
+                            stale_matches
+                                .iter()
+                                .map(|record| record_to_value(record))
+                                .collect(),
+                        ),
+                    ),
                     (
                         "matches".into(),
                         Value::Array(
@@ -308,6 +330,13 @@ fn run_research_cache(
                 return render_json(standard_output, standard_error, &payload);
             }
             let _ = writeln!(standard_output, "{label}: {} match(es)", matches.len());
+            if !include_stale && !stale_matches.is_empty() {
+                let _ = writeln!(
+                    standard_output,
+                    "  skipped {} stale match(es); rerun with --include-stale to inspect",
+                    stale_matches.len()
+                );
+            }
             for record in &matches {
                 let _ = writeln!(
                     standard_output,
@@ -1789,6 +1818,68 @@ fn split_flag_list(value: &str) -> Vec<String> {
         .collect()
 }
 
+/// Convert a compact freshness guidance value into an absolute expiry. The
+/// research cache intentionally keeps the original guidance verbatim, but
+/// recognizes unambiguous TTL forms so lookup can avoid silently reusing
+/// time-sensitive findings. Accepted forms include `30d`, `30 days`, `12h`,
+/// `90m`, `7w`, and an optional `ttl=` prefix. Free-form guidance such as
+/// `refresh when the vendor releases a new version` remains advisory only.
+fn freshness_expiry(freshness: &str, recorded_at_millis: u128) -> Option<String> {
+    let ttl_millis = parse_freshness_ttl_millis(freshness)?;
+    let expires_at_millis = recorded_at_millis.checked_add(ttl_millis)?;
+    Some(format_timestamp_iso8601(expires_at_millis))
+}
+
+fn parse_freshness_ttl_millis(freshness: &str) -> Option<u128> {
+    let normalized = freshness.trim().to_ascii_lowercase();
+    let value = normalized
+        .strip_prefix("ttl=")
+        .or_else(|| normalized.strip_prefix("ttl:"))
+        .unwrap_or(&normalized)
+        .trim();
+    if value.is_empty() {
+        return None;
+    }
+
+    let (amount, unit) = if value.chars().all(|character| character.is_ascii_digit()) {
+        // A bare number is deliberately not interpreted: its unit is unknown.
+        return None;
+    } else if value.split_whitespace().count() == 2 {
+        let mut parts = value.split_whitespace();
+        (parts.next()?, parts.next()?)
+    } else {
+        let split_at = value
+            .find(|character: char| !character.is_ascii_digit())
+            .unwrap_or(value.len());
+        value.split_at(split_at)
+    };
+    let amount = amount.parse::<u128>().ok()?;
+    let unit_millis = match unit.trim() {
+        "s" | "sec" | "secs" | "second" | "seconds" => 1_000,
+        "m" | "min" | "mins" | "minute" | "minutes" => 60_000,
+        "h" | "hr" | "hrs" | "hour" | "hours" => 3_600_000,
+        "d" | "day" | "days" => 86_400_000,
+        "w" | "wk" | "wks" | "week" | "weeks" => 7 * 86_400_000,
+        "mo" | "month" | "months" => 30 * 86_400_000,
+        _ => return None,
+    };
+    amount.checked_mul(unit_millis)
+}
+
+fn research_cache_record_is_stale(record: &Record, now: &str) -> bool {
+    matches!(
+        field(record, "state")
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "stale" | "expired"
+    ) || field(record, "expiresAt")
+        .map(str::trim)
+        .filter(|expires_at| !expires_at.is_empty())
+        .is_some_and(|expires_at| expires_at <= now)
+}
+
 /// Set the `state` field on one research-cache record (used by `stale --id` and `reward`).
 fn mark_cache_entry_state(
     store: &RecordStore,
@@ -2040,6 +2131,93 @@ mod tests {
         assert_eq!(code, 0, "stderr: {err}");
         assert!(out.contains("alias answer body"), "stdout: {out}");
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn research_cache_lookup_excludes_expired_entries_until_opted_in() {
+        let home = temp_home("rc-freshness");
+        let h = home.to_string_lossy().to_string();
+        let (code, _, err) = run(
+            "memory",
+            "research-cache",
+            &[
+                "record",
+                "--question",
+                "time-sensitive provider behavior",
+                "--answer",
+                "refresh this answer before reuse",
+                "--freshness",
+                "0s",
+                "--claude-home",
+                &h,
+            ],
+        );
+        assert_eq!(code, 0, "record must succeed; stderr: {err}");
+        let stored = family_store(&home, "memory", "research-cache")
+            .list_records()
+            .expect("list records");
+        assert_eq!(stored.len(), 1);
+        assert!(
+            field(&stored[0].1, "expiresAt").is_some(),
+            "recognized TTL must persist an absolute expiry"
+        );
+
+        let (code, out, err) = run(
+            "memory",
+            "research-cache",
+            &[
+                "lookup",
+                "--query",
+                "provider behavior",
+                "--json",
+                "--claude-home",
+                &h,
+            ],
+        );
+        assert_eq!(code, 0, "fresh lookup must succeed; stderr: {err}");
+        assert!(out.contains("\"count\": 0"), "expired entry leaked: {out}");
+        assert!(
+            out.contains("\"staleMatches\"") && out.contains("refresh this answer"),
+            "lookup must expose the omitted stale match: {out}"
+        );
+
+        let (code, out, err) = run(
+            "memory",
+            "research-cache",
+            &[
+                "lookup",
+                "--query",
+                "provider behavior",
+                "--include-stale",
+                "--json",
+                "--claude-home",
+                &h,
+            ],
+        );
+        assert_eq!(code, 0, "include-stale lookup must succeed; stderr: {err}");
+        assert!(
+            out.contains("\"count\": 1"),
+            "stale opt-in missing match: {out}"
+        );
+        assert!(
+            out.contains("\"includeStale\": true"),
+            "flag not exposed: {out}"
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn freshness_ttl_parser_rejects_ambiguous_guidance() {
+        assert_eq!(parse_freshness_ttl_millis("30d"), Some(30 * 86_400_000));
+        assert_eq!(
+            parse_freshness_ttl_millis("TTL: 12 hours"),
+            Some(12 * 3_600_000)
+        );
+        assert_eq!(
+            parse_freshness_ttl_millis("refresh when upstream changes"),
+            None
+        );
+        assert_eq!(parse_freshness_ttl_millis("30"), None);
     }
 
     #[test]

@@ -124,14 +124,65 @@ fn expand_builder_arg(value: &str, workspace: &Path, piece: &str, gates: &[Strin
         .replace("{gates}", &gates.join(" | "))
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct BuilderRun {
+    pub logs: String,
+    pub output_bytes: u64,
+    pub output_token_estimate: u64,
+    pub model_usage: Option<cache::ProviderUsage>,
+    pub provider: String,
+}
+
+pub(crate) fn builder_brief(
+    workspace: &Path,
+    piece: &str,
+    gates: &[String],
+    prefix_text: &str,
+    failure_feedback: Option<&str>,
+) -> String {
+    let feedback = failure_feedback.unwrap_or("null");
+    format!(
+        "Anvil builder brief\n\
+         Use the current host CLI tools (Read/Write/run). Do not call an external LLM API.\n\
+         Workspace: {}\n\
+         Piece: {}\n\
+         Gates: {}\n\
+         Tools: read_file, write_file, run (cwd=workspace)\n\
+         Forbidden: git commit, git push, git rebase, git branch\n\
+         Failure feedback from the previous bounded attempt (JSON, or null):\n\
+         {}\n\
+         ---\n\
+         {}",
+        workspace.display(),
+        piece,
+        gates.join(" | "),
+        feedback,
+        prefix_text
+    )
+}
+
+pub(crate) fn write_builder_brief(
+    workspace: &Path,
+    piece: &str,
+    gates: &[String],
+    prefix_text: &str,
+    failure_feedback: Option<&str>,
+) -> Result<(), String> {
+    write_text(
+        &workspace.join("BUILDER.md"),
+        &builder_brief(workspace, piece, gates, prefix_text, failure_feedback),
+    )
+    .map_err(|error| format!("anvil cast: builder brief: {error}"))
+}
+
 pub(crate) fn run_builder_with_budget(
     workspace: &Path,
     piece: &str,
     gates: &[String],
     timeout: Duration,
     max_tool_chars: usize,
-    max_tokens: u64,
-) -> Result<String, String> {
+    max_model_tokens: u64,
+) -> Result<BuilderRun, String> {
     let argv = builder_argv()?;
     let program = &argv[0];
     let arguments: Vec<String> = argv[1..]
@@ -150,11 +201,17 @@ pub(crate) fn run_builder_with_budget(
     let captured_bytes = result
         .original_stdout_bytes
         .saturating_add(result.original_stderr_bytes) as u64;
-    let estimated_tokens = captured_bytes.saturating_add(3) / 4;
-    if estimated_tokens > max_tokens {
-        return Err(format!(
-            "anvil builder: estimated output tokens {estimated_tokens} exceed configured token budget {max_tokens}"
-        ));
+    let output_token_estimate = captured_bytes.saturating_add(3) / 4;
+    let model_usage = cache::usage_from_host_output(&result.stdout, &result.stderr);
+    let provider = cache::provider_from_env();
+    if let Some(usage) = &model_usage {
+        if let Some(total_tokens) = usage.total_tokens() {
+            if total_tokens > max_model_tokens {
+                return Err(format!(
+                    "anvil builder: provider-reported model tokens {total_tokens} exceed configured model-token budget {max_model_tokens}"
+                ));
+            }
+        }
     }
     let logs = format!(
         "stdout:\n{}\nstderr:\n{}",
@@ -168,7 +225,13 @@ pub(crate) fn run_builder_with_budget(
             supervisor::clip_output(&logs, max_tool_chars)
         ));
     }
-    Ok(supervisor::clip_output(&logs, max_tool_chars))
+    Ok(BuilderRun {
+        logs: supervisor::clip_output(&logs, max_tool_chars),
+        output_bytes: captured_bytes,
+        output_token_estimate,
+        model_usage,
+        provider,
+    })
 }
 
 pub fn run_cast(
@@ -260,9 +323,13 @@ pub fn run_cast(
             return 1;
         }
     };
-    let prefix_text = workspace::paginated_read(&paths.prefix_path(), 0, 80)
-        .unwrap_or_else(|_| prefix::build_static_prefix("anvil", "host-cli"));
-    let headers = cache::cache_headers_for("openai");
+    let prefix_text = match prefix::read_verified_prefix(&paths) {
+        Ok(text) => text,
+        Err(error) => {
+            let _ = writeln!(standard_error, "{error}");
+            return 1;
+        }
+    };
     let mut written = 0u64;
     let mut occupied_candidate_ids =
         match candidate_indices(&dir, !flags.string_value("piece").is_empty()) {
@@ -298,25 +365,14 @@ pub fn run_cast(
                     return 1;
                 }
             };
-            let brief = format!(
-                "Anvil builder brief\n\
-                 Use the current host CLI tools (Read/Write/run). Do not call an external LLM API.\n\
-                 Workspace: {}\n\
-                 Piece: {}\n\
-                 Gates: {}\n\
-                 Tools: read_file, write_file, run (cwd=workspace)\n\
-                 Forbidden: git commit, git push, git rebase, git branch\n\
-                 ---\n\
-                 {prefix_text}",
-                isolated.path().display(),
-                piece.id,
-                piece.gates.join(" | ")
-            );
-            if let Err(error) = write_text(&isolated.path().join("BUILDER.md"), &brief) {
+            if let Err(error) =
+                write_builder_brief(isolated.path(), &piece.id, &piece.gates, &prefix_text, None)
+            {
                 let _ = writeln!(standard_error, "anvil cast: builder: {error}");
                 return 1;
             }
-            let mut builder_result = Err("anvil builder did not run".to_string());
+            let mut builder_result: Result<BuilderRun, String> =
+                Err("anvil builder did not run".to_string());
             for _attempt in 0..=budget.builder_retries {
                 let remaining = deadline.saturating_duration_since(std::time::Instant::now());
                 if remaining.is_zero() {
@@ -340,8 +396,8 @@ pub fn run_cast(
                     break;
                 }
             }
-            let builder_logs = match builder_result {
-                Ok(logs) => logs,
+            let builder_run = match builder_result {
+                Ok(run) => run,
                 Err(error) => {
                     let _ = writeln!(standard_error, "{error}");
                     return 1;
@@ -355,10 +411,11 @@ pub fn run_cast(
             );
             let gate_ok = scored.ok;
             let gate_logs = scored.logs;
-            let logs = if builder_logs.is_empty() {
+            let gate_output_bytes = gate_logs.len() as u64;
+            let logs = if builder_run.logs.is_empty() {
                 gate_logs
             } else {
-                format!("{builder_logs}\ngates:\n{gate_logs}")
+                format!("{}\ngates:\n{gate_logs}", builder_run.logs)
             };
             let clipped = supervisor::clip_output(&logs, budget.max_tool_chars);
             if let Err(error) = std::fs::remove_file(isolated.path().join("BUILDER.md")) {
@@ -408,8 +465,14 @@ pub fn run_cast(
                 "workspace": bank_workspace.display().to_string(),
                 "dry_run": dry_run,
                 "gate_ok": gate_ok,
-                "headers": headers.len(),
                 "clipped_len": clipped.len(),
+                "output_bytes": builder_run.output_bytes.saturating_add(gate_output_bytes),
+                "output_token_estimate": builder_run.output_token_estimate.saturating_add((gate_output_bytes.saturating_add(3)) / 4),
+                "model_usage": builder_run.model_usage.as_ref().map(cache::ProviderUsage::to_json),
+                "model_usage_source": builder_run.model_usage.as_ref().map(|_| format!("{}:json", builder_run.provider)),
+                "provider": builder_run.provider,
+                "model_token_budget": budget.max_tokens_cast,
+                "model_token_budget_enforced": builder_run.model_usage.as_ref().and_then(cache::ProviderUsage::total_tokens).is_some(),
                 "model": job::env_model("ANVIL_CAST_MODEL", "host-cli")
             });
             if let Err(error) = write_text(&staging.join("result.json"), &payload.to_string()) {
@@ -426,12 +489,11 @@ pub fn run_cast(
     }
     let _ = writeln!(
         standard_output,
-        "anvil cast: pieces={} casts={} results={} dry_run={} host-cli headers={}",
+        "anvil cast: pieces={} casts={} results={} dry_run={} model-usage=host-json-or-unavailable",
         pieces.len(),
         casts,
         written,
-        dry_run,
-        headers.len()
+        dry_run
     );
     0
 }
@@ -507,4 +569,23 @@ fn replaced_result_paths(
         replaced.push(paths.report_path());
     }
     Ok(replaced)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builder_brief_carries_structured_failure_feedback() {
+        let brief = builder_brief(
+            Path::new("workspace"),
+            "main",
+            &["cargo test".into()],
+            "stable prefix",
+            Some(r#"{"attempt":2,"gate_pass_rate":0.5}"#),
+        );
+        assert!(brief.contains("Failure feedback from the previous bounded attempt"));
+        assert!(brief.contains(r#"{"attempt":2,"gate_pass_rate":0.5}"#));
+        assert!(brief.contains("stable prefix"));
+    }
 }

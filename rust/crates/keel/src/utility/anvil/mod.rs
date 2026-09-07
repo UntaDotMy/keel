@@ -301,6 +301,16 @@ fn run_orchestrator(
         stamp_winner,
         loop_report.as_ref(),
     );
+    let mut built = built;
+    if loop_report.is_none() {
+        match report::read_cast_metrics(&paths) {
+            Ok(metrics) => built.apply_cast_metrics(&metrics),
+            Err(error) => {
+                let _ = writeln!(standard_error, "{error}");
+                return 1;
+            }
+        }
+    }
     if let Err(error) = report::write_report(&paths, &built) {
         let _ = writeln!(standard_error, "{error}");
         return 1;
@@ -343,6 +353,15 @@ fn merge_pipeline_metrics(
         built.loop_iterations = loop_report.loop_iterations;
         built.improvement_delta = loop_report.improvement_delta;
         built.gate_pass_rate = loop_report.gate_pass_rate;
+        built.refinement_feedback = loop_report.refinement_feedback.clone();
+        built.cache_hit_ratio = loop_report.cache_hit_ratio;
+        built.tokens_uncached = loop_report.tokens_uncached;
+        built.tokens_cached = loop_report.tokens_cached;
+        built.model_input_tokens = loop_report.model_input_tokens;
+        built.model_output_tokens = loop_report.model_output_tokens;
+        built.model_usage_source = loop_report.model_usage_source.clone();
+        built.output_bytes = loop_report.output_bytes;
+        built.output_token_estimate = loop_report.output_token_estimate;
         if built.winner_id == "sieve" && loop_report.winner_id != "none" {
             built.winner_id = loop_report.winner_id.clone();
         }
@@ -1050,6 +1069,31 @@ mod tests {
         assert!(isolated.contains("cast_0"));
         assert!(std::path::Path::new(isolated).starts_with(&job.paths.dir));
         assert!(std::path::Path::new(isolated).join("built.txt").is_file());
+        assert!(value["output_bytes"].as_u64().unwrap_or(0) > 0);
+        assert!(value["output_token_estimate"].as_u64().is_some());
+        assert!(value["model_usage"].is_null());
+        assert_eq!(value["model_token_budget_enforced"], false);
+    }
+
+    #[test]
+    fn live_cast_rejects_prefix_hash_mismatch() {
+        let job = temp_job("cast-prefix-mismatch");
+        let (compile_code, _, compile_stderr) = run_cmd(&with_job(
+            &job,
+            vec![
+                "compile".into(),
+                "--goal".into(),
+                "g".into(),
+                "--bar".into(),
+                "echo ok".into(),
+            ],
+        ));
+        assert_eq!(compile_code, 0, "stderr={compile_stderr}");
+        std::fs::write(job.paths.prefix_path(), "tampered prefix\n").expect("tamper prefix");
+        let (code, _, stderr) = with_builder(|| run_cmd(&with_job(&job, vec!["cast".into()])));
+        assert_eq!(code, 1, "stderr={stderr}");
+        assert!(stderr.contains("prefix.sha256 mismatch"), "stderr={stderr}");
+        assert!(!job.paths.dir.join("cast_0").exists());
     }
 
     #[test]

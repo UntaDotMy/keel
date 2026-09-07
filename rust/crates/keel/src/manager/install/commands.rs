@@ -592,7 +592,7 @@ pub(crate) fn remove_wired_adapters(claude_home: &Path) -> usize {
 }
 
 pub fn run_update_command(
-    build_version: &str,
+    _build_version: &str,
     arguments: &[String],
     standard_output: &mut dyn Write,
     standard_error: &mut dyn Write,
@@ -619,7 +619,7 @@ pub fn run_update_command(
                 return 1;
             }
         };
-    if !repository_root.join(".git").is_dir() {
+    if !is_git_checkout(&repository_root) {
         return run_packaged_release_update(&claude_home, standard_output, standard_error);
     }
     let current_branch =
@@ -661,10 +661,11 @@ pub fn run_update_command(
             "--release".to_string(),
             "--bin".to_string(),
             "keel".to_string(),
+            "--message-format=json-render-diagnostics".to_string(),
         ],
         Some(&repository_root),
     );
-    match build_result {
+    let built_executable = match build_result {
         Ok(result) if result.code != 0 => {
             let _ = writeln!(
                 standard_error,
@@ -678,29 +679,112 @@ pub fn run_update_command(
             let _ = writeln!(standard_error, "cargo build failed: {error}");
             return 1;
         }
-        Ok(_) => {}
-    }
-    let _ = writeln!(standard_output, "Installing updated skill pack");
-    match install_from_paths(
-        build_version,
-        &repository_root,
-        &claude_home,
-        &InstallOverrides::default(),
-        install_purge_stale_enabled(false, false),
-    ) {
-        Ok(summary) => {
-            write_install_summary(&summary, standard_output);
-            let _ = writeln!(
+        Ok(result) => match cargo_built_executable(&result, &repository_root) {
+            Ok(path) => path,
+            Err(error) => {
+                let _ = writeln!(standard_error, "cargo build artifact not found: {error}");
+                return 1;
+            }
+        },
+    };
+    let _ = writeln!(
+        standard_output,
+        "Installing updated skill pack from {}",
+        display_path(&built_executable)
+    );
+    // Hand installation to the exact artifact Cargo just emitted; the running
+    // updater is old, so pass that artifact through the private env override.
+    let mut install_command = Command::new(&built_executable);
+    install_command.args([
+        "install".to_string(),
+        "--repo-root".to_string(),
+        repository_root.to_string_lossy().into_owned(),
+        "--claude-home".to_string(),
+        claude_home.to_string_lossy().into_owned(),
+    ]);
+    install_command.env("KEEL_UPDATE_BUILD_ARTIFACT", &built_executable);
+    let install_result = crate::runtime::run_prepared_command_with_timeout(
+        install_command,
+        "updated keel install",
+        Duration::from_secs(300),
+    );
+    match install_result {
+        Ok(process_result) => {
+            crate::runtime::forward_process_result(
+                &process_result,
                 standard_output,
-                "Feature set: standard (persistent deterministic code and memory indexes)"
+                standard_error,
             );
-            0
+            process_result.code.clamp(0, 255) as u8
         }
         Err(error) => {
-            let _ = writeln!(standard_error, "install failed: {error}");
+            let _ = writeln!(standard_error, "updated install failed: {error}");
             1
         }
     }
+}
+
+/// A linked Git worktree stores `.git` as a gitfile rather than a directory.
+/// Both forms identify a source checkout; packaged bundles have neither.
+pub(crate) fn is_git_checkout(repository_root: &Path) -> bool {
+    let git_entry = repository_root.join(".git");
+    git_entry.is_dir() || git_entry.is_file()
+}
+
+/// Cargo's JSON artifact event is the source of truth for the binary produced
+/// by the preceding update build. Fixed target-directory probes can select a
+/// stale artifact when `CARGO_TARGET_DIR` or multiple target layouts exist.
+pub(crate) fn cargo_built_executable(
+    result: &crate::runtime::ProcessResult,
+    repository_root: &Path,
+) -> Result<PathBuf, String> {
+    let mut executable = None;
+    for line in String::from_utf8_lossy(&result.stdout).lines() {
+        let Ok(document) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if document.get("reason").and_then(serde_json::Value::as_str) != Some("compiler-artifact") {
+            continue;
+        }
+        let target = document.get("target");
+        if target
+            .and_then(|value| value.get("name"))
+            .and_then(serde_json::Value::as_str)
+            != Some("keel")
+        {
+            continue;
+        }
+        let is_binary = target
+            .and_then(|value| value.get("kind"))
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|kinds| kinds.iter().any(|kind| kind.as_str() == Some("bin")));
+        if !is_binary {
+            continue;
+        }
+        let Some(path) = document
+            .get("executable")
+            .and_then(serde_json::Value::as_str)
+            .filter(|path| !path.trim().is_empty())
+        else {
+            continue;
+        };
+        let path = PathBuf::from(path);
+        executable = Some(if path.is_absolute() {
+            path
+        } else {
+            repository_root.join(path)
+        });
+    }
+    let Some(path) = executable else {
+        return Err("Cargo emitted no keel compiler-artifact executable".to_string());
+    };
+    if !path.is_file() {
+        return Err(format!(
+            "Cargo artifact does not exist: {}",
+            display_path(&path)
+        ));
+    }
+    Ok(path)
 }
 
 /// Bounded failure detail from a captured external command: the trailing
@@ -756,35 +840,28 @@ fn run_packaged_release_update(
         return 1;
     }
     let _ = writeln!(standard_output, "Updating from the latest packaged release");
+    let release_download_script =
+        format!("https://api.github.com/repos/{repository}/releases/latest");
     let mut command = if cfg!(windows) {
         let mut command = Command::new("powershell");
         command.args([
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-Command",
-                r#"$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; $d=Join-Path ([IO.Path]::GetTempPath()) ('keel-update-'+[Guid]::NewGuid().ToString('N')); try { New-Item -ItemType Directory -Path $d | Out-Null; $s=Join-Path $d 'install.ps1'; $c=Join-Path $d 'install.ps1.sha256'; Invoke-WebRequest -TimeoutSec 60 -Uri ($args[0]+'/install.ps1') -OutFile $s; Invoke-WebRequest -TimeoutSec 60 -Uri ($args[0]+'/install.ps1.sha256') -OutFile $c; $expected=((Get-Content -Raw $c).Trim() -split '\s+')[0].ToUpperInvariant(); if($expected -notmatch '^[0-9A-F]{64}$'){throw 'Invalid installer checksum'}; $actual=(Get-FileHash -Algorithm SHA256 $s).Hash.ToUpperInvariant(); if($actual -ne $expected){throw 'Installer checksum mismatch'}; & $s; exit $LASTEXITCODE } finally { if(Test-Path -LiteralPath $d){Remove-Item -LiteralPath $d -Recurse -Force} }"#,
-                &format!(
-                    "https://github.com/{repository}/releases/latest/download"
-                ),
-            ]);
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            packaged_windows_update_script(),
+        ]);
         command
     } else {
         let mut command = Command::new("bash");
-        command.args([
-                "-c",
-                "set -euo pipefail; d=$(mktemp -d \"${TMPDIR:-/tmp}/keel-update.XXXXXX\"); trap 'rm -rf \"$d\"' EXIT; curl -fsSL --connect-timeout 15 --max-time 60 -o \"$d/install.sh\" \"$1/install.sh\"; curl -fsSL --connect-timeout 15 --max-time 60 -o \"$d/install.sh.sha256\" \"$1/install.sh.sha256\"; expected=$(awk 'NF {print tolower($1); exit}' \"$d/install.sh.sha256\"); case \"$expected\" in (*[!0-9a-f]*|'') echo 'Invalid installer checksum' >&2; exit 1;; esac; if [ ${#expected} -ne 64 ]; then echo 'Invalid installer checksum' >&2; exit 1; fi; if command -v sha256sum >/dev/null 2>&1; then actual=$(sha256sum \"$d/install.sh\" | awk '{print tolower($1)}'); else actual=$(shasum -a 256 \"$d/install.sh\" | awk '{print tolower($1)}'); fi; [ \"$actual\" = \"$expected\" ] || { echo 'Installer checksum mismatch' >&2; exit 1; }; bash \"$d/install.sh\"",
-                "keel-update",
-                &format!(
-                    "https://github.com/{repository}/releases/latest/download"
-                ),
-            ]);
+        command.args(["-c", packaged_unix_update_script(), "keel-update"]);
         command
     };
     command
         .env("KEEL_HOME", keel_home)
         .env("CLAUDE_SKILLS_REPOSITORY", repository)
-        .env("CLAUDE_SKILLS_VERSION", "latest");
+        .env("CLAUDE_SKILLS_VERSION", "latest")
+        .env("KEEL_UPDATE_RELEASE_API", release_download_script);
     let result = crate::runtime::run_prepared_command_with_timeout(
         command,
         "packaged release update",
@@ -804,6 +881,14 @@ fn run_packaged_release_update(
             1
         }
     }
+}
+
+pub(crate) fn packaged_windows_update_script() -> &'static str {
+    r#"$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; $repository=$env:CLAUDE_SKILLS_REPOSITORY; $api=$env:KEEL_UPDATE_RELEASE_API; if([string]::IsNullOrWhiteSpace($repository) -or [string]::IsNullOrWhiteSpace($api)){throw 'Missing packaged update repository configuration'}; $headers=@{Accept='application/vnd.github+json'; 'User-Agent'='keel-updater'}; $release=Invoke-RestMethod -TimeoutSec 60 -Uri $api -Headers $headers; $tag=[string]$release.tag_name; if([string]::IsNullOrWhiteSpace($tag) -or $tag -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$'){throw 'Invalid latest keel release tag'}; $base='https://github.com/'+$repository+'/releases/download/'+$tag; $d=Join-Path ([IO.Path]::GetTempPath()) ('keel-update-'+[Guid]::NewGuid().ToString('N')); try { New-Item -ItemType Directory -Path $d | Out-Null; $s=Join-Path $d 'install.ps1'; $c=Join-Path $d 'install.ps1.sha256'; Invoke-WebRequest -TimeoutSec 60 -Uri ($base+'/install.ps1') -OutFile $s; Invoke-WebRequest -TimeoutSec 60 -Uri ($base+'/install.ps1.sha256') -OutFile $c; $expected=((Get-Content -Raw $c).Trim() -split '\s+')[0].ToUpperInvariant(); if($expected -notmatch '^[0-9A-F]{64}$'){throw 'Invalid installer checksum'}; $actual=(Get-FileHash -Algorithm SHA256 $s).Hash.ToUpperInvariant(); if($actual -ne $expected){throw 'Installer checksum mismatch'}; & $s -Version $tag -Repository $repository; exit $LASTEXITCODE } finally { if(Test-Path -LiteralPath $d){Remove-Item -LiteralPath $d -Recurse -Force} }"#
+}
+
+pub(crate) fn packaged_unix_update_script() -> &'static str {
+    r#"set -euo pipefail; repository="${CLAUDE_SKILLS_REPOSITORY:?missing repository}"; api="${KEEL_UPDATE_RELEASE_API:?missing release API}"; release_json=$(curl -fsSL --connect-timeout 15 --max-time 60 -H 'Accept: application/vnd.github+json' -H 'User-Agent: keel-updater' "$api"); release_tag=$(printf '%s\n' "$release_json" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1); case "$release_tag" in (""|*[!A-Za-z0-9._-]*) echo 'Invalid release tag' >&2; exit 1;; esac; base="https://github.com/$repository/releases/download/$release_tag"; d=$(mktemp -d "${TMPDIR:-/tmp}/keel-update.XXXXXX"); trap 'rm -rf "$d"' EXIT; curl -fsSL --connect-timeout 15 --max-time 60 -o "$d/install.sh" "$base/install.sh"; curl -fsSL --connect-timeout 15 --max-time 60 -o "$d/install.sh.sha256" "$base/install.sh.sha256"; expected=$(awk 'NF {print tolower($1); exit}' "$d/install.sh.sha256"); case "$expected" in (*[!0-9a-f]*|'') echo 'Invalid installer checksum' >&2; exit 1;; esac; if [ ${#expected} -ne 64 ]; then echo 'Invalid installer checksum' >&2; exit 1; fi; if command -v sha256sum >/dev/null 2>&1; then actual=$(sha256sum "$d/install.sh" | awk '{print tolower($1)}'); else actual=$(shasum -a 256 "$d/install.sh" | awk '{print tolower($1)}'); fi; [ "$actual" = "$expected" ] || { echo 'Installer checksum mismatch' >&2; exit 1; }; CLAUDE_SKILLS_VERSION="$release_tag" bash "$d/install.sh""#
 }
 
 fn valid_repository_slug(repository: &str) -> bool {
@@ -978,6 +1063,78 @@ pub fn run_self_replace_command(arguments: &[String], standard_error: &mut dyn W
 #[cfg(test)]
 mod update_tests {
     use super::*;
+
+    #[test]
+    fn linked_worktree_gitfile_is_treated_as_source_checkout() {
+        let root = std::env::temp_dir().join(format!(
+            "keel-linked-worktree-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join(".git"), "gitdir: ../main/.git/worktrees/linked\n").unwrap();
+        assert!(is_git_checkout(&root));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cargo_artifact_parser_uses_reported_executable_path() {
+        let root = std::env::temp_dir().join(format!(
+            "keel-cargo-artifact-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let artifact = root.join(if cfg!(windows) { "keel.exe" } else { "keel" });
+        fs::write(&artifact, b"fresh cargo artifact").unwrap();
+        let event = serde_json::json!({
+            "reason": "compiler-artifact",
+            "target": {"kind": ["bin"], "name": "keel"},
+            "executable": artifact,
+        });
+        let stdout = serde_json::to_vec(&event).unwrap();
+        let result = crate::runtime::ProcessResult {
+            code: 0,
+            original_stdout_bytes: stdout.len(),
+            stdout,
+            stderr: Vec::new(),
+            original_stderr_bytes: 0,
+        };
+        assert_eq!(cargo_built_executable(&result, &root).unwrap(), artifact);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn packaged_update_scripts_pin_one_release_and_do_not_use_command_args() {
+        let windows = packaged_windows_update_script();
+        assert!(!windows.contains("$args[0]"));
+        assert!(windows.contains("$env:KEEL_UPDATE_RELEASE_API"));
+        assert!(windows.contains("$release.tag_name"));
+        assert!(windows.contains("$tag -notmatch"));
+        assert!(windows.contains("-Version $tag -Repository $repository"));
+
+        let unix = packaged_unix_update_script();
+        assert!(unix.contains("release_tag="));
+        assert!(unix.contains("releases/download/$release_tag"));
+        assert!(unix.contains("CLAUDE_SKILLS_VERSION=\"$release_tag\""));
+        assert!(!unix.contains("releases/latest/download"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn packaged_unix_update_script_has_valid_shell_syntax() {
+        let status = Command::new("bash")
+            .args(["-n", "-c", packaged_unix_update_script()])
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
 
     #[test]
     fn release_repository_slug_rejects_shell_metacharacters() {

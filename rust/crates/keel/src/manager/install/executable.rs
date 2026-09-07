@@ -15,6 +15,9 @@ pub fn publish_native_executable(
     repository_root: &Path,
     claude_home: &Path,
 ) -> Result<bool, String> {
+    if let Some(explicit_path) = update_build_artifact()? {
+        return publish_native_executable_from_path(&explicit_path, claude_home);
+    }
     let target = detect_current_target().map_err(|error| format!("detect target: {error}"))?;
     // Probe order matches restore: release first, then bundle root, debug last
     // so a developer workspace with only `cargo build` still refreshes PATH/MCP.
@@ -32,15 +35,48 @@ pub fn publish_native_executable(
             .join(executable_file_name()),
         target_dir.join("debug").join(executable_file_name()),
     ];
-    let target_path = installed_executable_path(claude_home);
     let Some(source_path) = probes.into_iter().find(|probe| probe.is_file()) else {
         return Ok(false);
     };
-    if executables_are_identical(&source_path, &target_path) {
+    publish_native_executable_from_path(&source_path, claude_home)
+}
+
+/// Publish the exact artifact reported by Cargo. This is kept separate from
+/// the compatibility probe path so update handoff cannot silently fall back to
+/// an older target directory or bundle-root executable.
+pub(crate) fn publish_native_executable_from_path(
+    source_path: &Path,
+    claude_home: &Path,
+) -> Result<bool, String> {
+    let target_path = installed_executable_path(claude_home);
+    if executables_are_identical(source_path, &target_path) {
         return Ok(false);
     }
-    atomic_copy_executable(&source_path, &target_path)?;
+    atomic_copy_executable(source_path, &target_path)?;
     Ok(true)
+}
+
+fn update_build_artifact() -> Result<Option<PathBuf>, String> {
+    let Some(raw_path) = std::env::var_os("KEEL_UPDATE_BUILD_ARTIFACT") else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(raw_path);
+    if !path.is_file() {
+        return Err(format!(
+            "KEEL_UPDATE_BUILD_ARTIFACT does not exist: {}",
+            display_path(&path)
+        ));
+    }
+    let expected_name = executable_file_name();
+    if path.file_name().and_then(|name| name.to_str()) != Some(expected_name.as_str()) {
+        return Err(format!(
+            "KEEL_UPDATE_BUILD_ARTIFACT is not a keel executable: {}",
+            display_path(&path)
+        ));
+    }
+    // Cargo may place the target directory outside the repository; validate
+    // the artifact by existence and executable name instead of root prefix.
+    Ok(Some(path))
 }
 
 /// Repair-facing executable publication: restores `<claude_home>/keel[.exe]`
@@ -402,19 +438,70 @@ fn cache_packaged_release_source(
         fs::remove_dir_all(&stage)
             .map_err(|error| format!("remove stale {}: {error}", display_path(&stage)))?;
     }
-    copy_release_tree(repository_root, &stage)?;
-    if target.exists() {
-        fs::remove_dir_all(&target)
-            .map_err(|error| format!("replace {}: {error}", display_path(&target)))?;
+    if let Err(error) = copy_release_tree(repository_root, &stage) {
+        let _ = fs::remove_dir_all(&stage);
+        return Err(error);
     }
-    fs::rename(&stage, &target).map_err(|error| {
-        format!(
-            "publish cached release {} -> {}: {error}",
-            display_path(&stage),
-            display_path(&target)
-        )
-    })?;
+    activate_cached_release_source(&stage, &target, &cache_parent)?;
     Ok(target)
+}
+
+/// Activate a fully copied release tree while keeping the previous generation
+/// available until the staged rename succeeds. If activation fails, restore
+/// the previous tree so a transient filesystem error cannot erase the source
+/// used by the next packaged update.
+pub(crate) fn activate_cached_release_source(
+    stage: &Path,
+    target: &Path,
+    cache_parent: &Path,
+) -> Result<(), String> {
+    let backup = cache_parent.join(format!(
+        "installed-source.previous-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default()
+    ));
+    if backup.exists() {
+        fs::remove_dir_all(&backup)
+            .map_err(|error| format!("remove stale {}: {error}", display_path(&backup)))?;
+    }
+    let had_target = target.exists();
+    if had_target {
+        fs::rename(target, &backup).map_err(|error| {
+            format!(
+                "stage existing cached release {} -> {}: {error}",
+                display_path(target),
+                display_path(&backup)
+            )
+        })?;
+    }
+
+    match fs::rename(stage, target) {
+        Ok(()) => {
+            if had_target {
+                let _ = fs::remove_dir_all(&backup);
+            }
+            Ok(())
+        }
+        Err(error) => {
+            let restore_error = if had_target {
+                fs::rename(&backup, target).err()
+            } else {
+                None
+            };
+            let _ = fs::remove_dir_all(stage);
+            let restore_detail = restore_error
+                .map(|restore| format!("; restore failed: {restore}"))
+                .unwrap_or_default();
+            Err(format!(
+                "publish cached release {} -> {}: {error}{restore_detail}",
+                display_path(stage),
+                display_path(target)
+            ))
+        }
+    }
 }
 
 fn copy_release_tree(source: &Path, target: &Path) -> Result<(), String> {

@@ -701,6 +701,69 @@ fn publish_native_executable_prefers_host_default_over_bundle_root() {
 }
 
 #[test]
+fn publish_native_executable_from_path_ignores_stale_probe_artifacts() {
+    let (repo, claude_home) = unique_paths("publish-explicit-artifact");
+    fs::create_dir_all(&claude_home).unwrap();
+    let stale_dir = repo.join("target").join("release");
+    let exact_dir = repo.join("cargo-target").join("release");
+    fs::create_dir_all(&stale_dir).unwrap();
+    fs::create_dir_all(&exact_dir).unwrap();
+    fs::write(
+        stale_dir.join(executable_file_name()),
+        b"stale-probe-artifact",
+    )
+    .unwrap();
+    let exact = exact_dir.join(executable_file_name());
+    fs::write(&exact, b"exact-cargo-artifact").unwrap();
+
+    let published =
+        super::executable::publish_native_executable_from_path(&exact, &claude_home).unwrap();
+    assert!(published);
+    assert_eq!(
+        fs::read(installed_executable_path(&claude_home)).unwrap(),
+        b"exact-cargo-artifact"
+    );
+
+    let _ = fs::remove_dir_all(&repo);
+    let _ = fs::remove_dir_all(&claude_home);
+}
+
+#[test]
+fn cached_release_activation_restores_previous_generation_on_failed_swap() {
+    let (cache_parent, _) = unique_paths("cached-release-rollback");
+    fs::create_dir_all(&cache_parent).unwrap();
+    let target = cache_parent.join("installed-source");
+    let stage = cache_parent.join("installed-source.new");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(target.join("generation.txt"), b"previous").unwrap();
+    // A missing stage forces failure after the old target has been moved aside.
+    let error = super::executable::activate_cached_release_source(&stage, &target, &cache_parent)
+        .unwrap_err();
+    assert!(error.contains("publish cached release"));
+    assert_eq!(
+        fs::read(target.join("generation.txt")).unwrap(),
+        b"previous",
+        "failed activation must restore the previous cached generation"
+    );
+    let backup_generations = fs::read_dir(&cache_parent)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("installed-source.previous-")
+        })
+        .count();
+    assert_eq!(
+        backup_generations, 0,
+        "backup generation must not be left as the active source"
+    );
+
+    let _ = fs::remove_dir_all(&cache_parent);
+}
+
+#[test]
 fn replace_executable_in_place_overwrites_existing_target() {
     // The core of the Windows re-install fix: replacing an existing
     let (dir, _) = unique_paths("replace-in-place");

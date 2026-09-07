@@ -7,6 +7,24 @@ Side Effects: None — this file is informational.
 -->
 # Skill Routing, Skill-Focused Execution, and Agent Profiles
 
+## Authority and scope
+
+This file owns skill selection, composition boundaries, and the meaning of the
+repo-managed profile artifacts. It does not redefine execution or delivery
+policy:
+
+- `AGENTS.md` is the top-level managed contract.
+- [30-execution-strategy.md](30-execution-strategy.md) owns alignment, research,
+  planning, fan-out, validation, and completion loops.
+- [WORKFLOW.md](../../WORKFLOW.md) owns Git, branch, CI, commit, push, and merge
+  policy.
+- [running-anvil/SKILL.md](../../running-anvil/SKILL.md) owns Anvil command
+  semantics.
+
+When another document repeats one of those policies, follow the owning
+document and treat the repeated text as a pointer, not a second mandatory
+workflow.
+
 ## Skill Routing
 
 ### Default Behavior
@@ -85,31 +103,28 @@ Load specialist skills when the task clearly requires domain expertise:
 
 ### Agent Profiles
 
-keel ships a managed profile per specialist under `~/.claude/skills/<name>/agents/claude.yaml`
-(`<name>/agents/claude.yaml` in the repo, synced to the install path by `keel
-install`). Each YAML wires the `keel` runtime to specific reasoning effort and
-tool policy. Supported fields: `agent` (default subagent type: `Explore`, `Plan`,
-`general-purpose`, etc.), `maxTurns` (maximum agentic turns per session), `effort`
-(default effort: `low`, `medium`, `high`, `xhigh`, `max`), `permissionMode` (tool
-permission mode: `default`, `acceptEdits`, `auto`, `dontAsk`, `bypassPermissions`,
-`plan`). The managed profile is **not** visible to the harness itself — it only
-configures how `keel` orchestrates work.
+The repo ships two distinct profile surfaces. `agents/claude.yaml` under each
+skill is **Keel input metadata**. During install, Keel parses the small subset it
+owns and renders `~/.claude/agent-profiles/<name>.toml` for Keel's inventory and
+internal configuration. The Keel runtime does not load those TOML files as host subagent definitions;
+presence and content parity are what `verify` and the
+provisioning tests can prove.
 
-When the harness spawns a managed subagent (via `Skill("<name>")` in the main thread),
-it reads the matching subagent definition from `.claude/agents/<name>.md` (repo path)
-or `~/.claude/agents/<name>.md` (install path). Subagent frontmatter supports:
-`name` (required), `description` (required), `tools` (bare tool names, no scoped
-patterns), `disallowedTools` (denylist applied before allowlist), `model`
-(supported values: `sonnet`/`opus`/`haiku`/`fable`/full ID/`inherit`, but
-repo-managed profiles must NOT set `model`; see 70-review-quality-gates-and-policies.md), `permissionMode`, `maxTurns`,
-`skills` (preload skill content at startup; skills with `disable-model-invocation:
-true` cannot be preloaded), `mcpServers` (inline or string-reference, scoped to this
-subagent), `hooks` (lifecycle hooks scoped to this subagent), `memory`
-(`user`/`project`/`local` for cross-session learning), `background` (run as
-background task), `effort`, `isolation` (`worktree` for isolated git checkout),
-`color` (`red`/`blue`/`green`/`yellow`/`purple`/`orange`/`pink`/`cyan`), and
-`initialPrompt` (auto-submitted as first user turn). Note: scoped tool patterns like
-`Bash(git diff:*)` work in SKILL.md `allowed-tools` but NOT in subagent `tools`.
+Claude Code's actual subagent contract is a Markdown file with YAML frontmatter
+under `.claude/agents/<name>.md` or `~/.claude/agents/<name>.md`. Its documented
+fields include `description`, `prompt`, `tools`, `model`, `permissionMode`,
+`maxTurns`, `skills`, `mcpServers`, `hooks`, `memory`, `background`, `effort`,
+`isolation`, `color`, and `initialPrompt`; see the [official Claude Code
+subagents contract](https://code.claude.com/docs/en/subagents). Other hosts have
+different contracts. Do not infer that a Claude YAML/TOML field is honored by
+Codex, Antigravity, ZCode, or another host.
+
+Therefore this repository can prove that managed metadata parses, installs, and
+stays in 1:1 parity with the specialist roster. It cannot claim that a host
+loaded a profile, applied its permission or turn limits, selected its model, or
+performed a `Skill()` invocation unless a host-native runtime test proves that
+specific behavior. Host adapter fixtures and install/provisioning tests are the
+authoritative coverage for those paths.
 
 The profiles mirror the specialist skills one-to-one:
 
@@ -142,32 +157,19 @@ The profiles mirror the specialist skills one-to-one:
 
 The old generic `default`, `explorer`, `worker`, `architect`, and `awaiter` TOMLs are not the repo-managed profile surface anymore. Runtime helper roles may still exist inside the harness, but the managed install should mirror these specialist skill profiles instead.
 
-## Universal 5-Role Multi-Agent Architecture
+## Optional role composition
 
-For cross-adapter multi-agent workflows (Codex, Antigravity, Claude Code, OpenCode, Pi, Cursor), non-trivial tasks decompose into five coordinated roles:
+Planner, explorer, implementer, reviewer, and pusher roles are available when
+the active host exposes them, but there is no universal five-role sequence and
+no requirement to instantiate every role. The orchestrator chooses the smallest
+set that fits the risk and dependency graph. Use parallel workers only for
+disjoint write sets, as specified by [30-execution-strategy.md](30-execution-strategy.md);
+use a single focused worker when the work is coupled.
 
-1. **`planner`** (Read-Only | High-Reasoning / Strategist Tier):
-   - Establishes project context, identifies existing behavior to preserve, and selects best-fit skills.
-   - For UI/UX work, executes the 6-step human design workflow (Idea -> User Flow -> Wireframe -> First Draft -> Iterations -> Final Design).
-   - Produces targeted exploration questions and files for `code_explorer`. Never implements or writes code.
-2. **`code_explorer`** (Read-Only | Fast / Medium-Reasoning Tier):
-   - Starts strictly after the Planner handoff.
-   - Performs targeted evidence gathering: traces routes, symbols, callers/callees, API schemas, state owners, and test commands.
-   - Refuses broad whole-repo scans; stays on the execution path.
-3. **Parent Implementation Contract & Orchestration**:
-   - The orchestrating parent validates Planner + Explorer handoffs.
-   - Formulates the authoritative `FINAL IMPLEMENTATION CONTRACT` before dispatching workers: goal, current/target behavior, regression boundaries, exact files, workstreams with disjoint ownership, dependencies, and validation commands.
-4. **`implementer`** (Workspace-Write | Fast / Low-Reasoning / Token-Saving Tier):
-   - One to four parallel instances assigned only when workstreams have disjoint file and symbol write sets.
-   - Operates with exclusive ownership of assigned files. Stops and returns `BLOCKED` if an ownership boundary or dependency conflict arises.
-   - Makes minimal defensible changes and executes local workstream tests.
-5. **`reviewer`** (Read-Only | High-Reasoning / AGI-Gate Tier):
-   - Starts only after all workers complete and parent records `INTEGRATION CHECK: PASS`.
-   - Freezes review target; investigates diff with causal defect chains (`trigger/state -> reachable execution path -> violated contract -> observable result`).
-   - Bounded fix loops: max 2 re-review rounds on `FIX REQUIRED`.
-6. **`pusher`** (Workspace-Write | Fast / Authorization-Only Tier):
-   - Permitted only after final Reviewer `PASS`, consolidated change summary, and an explicit affirmative reply to the standalone prompt `Commit and push? (yes/no)`.
-   - Verifies git status, branch, remotes, diff, and secret scans without altering feature logic.
+The parent remains responsible for the implementation contract, integration
+check, and final reconciliation. A pusher never commits or pushes on the basis
+of profile metadata: Git delivery remains governed by [WORKFLOW.md](../../WORKFLOW.md)
+and requires explicit user authorization.
 
 ## Provider-Aware Model Tiering Matrix
 

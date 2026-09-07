@@ -73,6 +73,11 @@ pub fn run_code_index_command(
                 if flags.bool_value("json") {
                     let payload = serde_json::json!({
                         "filesIndexed": report.files_indexed,
+                        "filesDiscovered": report.files_discovered,
+                        "filesSkippedLimit": report.files_skipped_limit,
+                        "filesSkippedTooLarge": report.files_skipped_too_large,
+                        "filesSkippedUnreadable": report.files_skipped_unreadable,
+                        "coverageComplete": report.coverage_complete,
                         "filesAdded": report.files_added,
                         "filesUpdated": report.files_updated,
                         "filesRemoved": report.files_removed,
@@ -86,8 +91,13 @@ pub fn run_code_index_command(
                 } else {
                     let _ = writeln!(
                         standard_output,
-                        "code-index refresh: files={} added={} updated={} removed={} symbols={} chunks={} edges={} generation={} commit={}",
+                        "code-index refresh: files={} discovered={} skipped(limit={},large={},unreadable={}) coverage={} added={} updated={} removed={} symbols={} chunks={} edges={} generation={} commit={}",
                         report.files_indexed,
+                        report.files_discovered,
+                        report.files_skipped_limit,
+                        report.files_skipped_too_large,
+                        report.files_skipped_unreadable,
+                        report.coverage_complete,
                         report.files_added,
                         report.files_updated,
                         report.files_removed,
@@ -261,16 +271,23 @@ fn run_code_search_siblings(
         }
     };
     let mut sibling_hits = Vec::new();
+    let mut retrieval_truncated = false;
+    let mut output_truncated = false;
     for query in &queries {
-        let hits =
-            match workspace_index::search(&root, flags.string_value("claude-home"), query, 80) {
-                Ok(hits) => hits,
-                Err(error) => {
-                    let _ = writeln!(standard_error, "code-search siblings: {error}");
-                    return 1;
-                }
-            };
-        for hit in hits {
+        let results = match workspace_index::search_with_metadata(
+            &root,
+            flags.string_value("claude-home"),
+            query,
+            80,
+        ) {
+            Ok(results) => results,
+            Err(error) => {
+                let _ = writeln!(standard_error, "code-search siblings: {error}");
+                return 1;
+            }
+        };
+        retrieval_truncated |= results.truncated;
+        for hit in results.hits {
             if changed.iter().any(|path| path == &hit.path) {
                 continue;
             }
@@ -279,6 +296,7 @@ fn run_code_search_siblings(
                 hit.path, hit.start_line, hit.end_line, hit.reason, hit.snippet
             ));
             if sibling_hits.len() >= 80 {
+                output_truncated = true;
                 break;
             }
         }
@@ -286,18 +304,23 @@ fn run_code_search_siblings(
             break;
         }
     }
-    crate::runner::hook_lifecycle::record_completeness_gate_clear_for(
-        &root,
-        &queries,
-        &changed,
-        sibling_hits.len(),
-    );
+    let complete = sibling_scan_complete(retrieval_truncated, output_truncated);
+    if complete {
+        crate::runner::hook_lifecycle::record_completeness_gate_clear_for(
+            &root,
+            &queries,
+            &changed,
+            sibling_hits.len(),
+        );
+    }
     if flags.bool_value("json") {
         let payload = serde_json::json!({
             "queries": queries,
             "changed": changed,
             "siblingCount": sibling_hits.len(),
             "siblings": sibling_hits,
+            "complete": complete,
+            "truncated": !complete,
         });
         let _ = writeln!(standard_output, "{payload}");
         return 0;
@@ -310,6 +333,12 @@ fn run_code_search_siblings(
         changed.join(", ")
     };
     let _ = writeln!(standard_output, "changed: {changed_display}");
+    if !complete {
+        let _ = writeln!(
+            standard_output,
+            "scan incomplete: result limits were reached; completeness marker was not written"
+        );
+    }
     if sibling_hits.is_empty() {
         let _ = writeln!(standard_output, "siblings: none outside the changed set.");
     } else {
@@ -323,6 +352,10 @@ fn run_code_search_siblings(
         }
     }
     0
+}
+
+fn sibling_scan_complete(retrieval_truncated: bool, output_truncated: bool) -> bool {
+    !retrieval_truncated && !output_truncated
 }
 
 fn resolve_root(
@@ -361,18 +394,28 @@ fn render_status(status: &IndexStatus, json: bool, output: &mut dyn Write) {
             "chunks": status.chunk_count,
             "edges": status.edge_count,
             "stale": status.stale,
+            "filesDiscovered": status.files_discovered,
+            "filesSkippedLimit": status.files_skipped_limit,
+            "filesSkippedTooLarge": status.files_skipped_too_large,
+            "filesSkippedUnreadable": status.files_skipped_unreadable,
+            "coverageComplete": status.coverage_complete,
         });
         let _ = writeln!(output, "{payload}");
     } else {
         let _ = writeln!(
             output,
-            "code-index status: files={} symbols={} chunks={} edges={} generation={} stale={} commit={} db={}",
+            "code-index status: files={} symbols={} chunks={} edges={} generation={} stale={} coverage={} discovered={} skipped(limit={},large={},unreadable={}) commit={} db={}",
             status.file_count,
             status.symbol_count,
             status.chunk_count,
             status.edge_count,
             status.generation,
             status.stale,
+            status.coverage_complete,
+            status.files_discovered,
+            status.files_skipped_limit,
+            status.files_skipped_too_large,
+            status.files_skipped_unreadable,
             status.indexed_commit,
             status.database_path.display()
         );
@@ -583,6 +626,13 @@ mod tests {
     fn parse_limit_is_bounded() {
         assert_eq!(parse_limit("100").expect("limit"), 50);
         assert!(parse_limit("0").is_err());
+    }
+
+    #[test]
+    fn sibling_scan_is_incomplete_when_any_result_cap_is_hit() {
+        assert!(sibling_scan_complete(false, false));
+        assert!(!sibling_scan_complete(true, false));
+        assert!(!sibling_scan_complete(false, true));
     }
 
     #[test]
