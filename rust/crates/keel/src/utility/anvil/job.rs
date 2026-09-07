@@ -138,6 +138,14 @@ impl JobPaths {
     pub fn gates_dir(&self) -> PathBuf {
         self.dir.join("gates")
     }
+
+    pub fn clarify_packet_path(&self) -> PathBuf {
+        crate::utility::anvil::clarify::clarify_packet_path(&self.dir)
+    }
+
+    pub fn clarify_required_path(&self) -> PathBuf {
+        crate::utility::anvil::clarify::clarify_required_path(&self.dir)
+    }
 }
 
 pub fn resolve_workspace_root(flag: &str) -> Result<PathBuf, String> {

@@ -40,6 +40,11 @@ Do NOT use for: final production-readiness verdict (use `reviewer`), multi-exper
    - Verify safe parallelism: disjoint file write sets, no conflicting shared state mutations, and valid output contracts.
    - Check the combined patch with `INTEGRATION CHECK: PASS` before handing off to the final Reviewer.
 
+### Provider Model Recommendations
+- **Google (Antigravity)**: `/boost for gemini`: Gemini Pro / Thinking (AGI / deep reasoning mode) or `gemini-3.8-flash` (high).
+- **OpenAI (Codex)**: `gpt-6-Astra` (low).
+- **Anthropic (Claude Code)**: `claude-sonnet-5` / `claude-opus-5` / `claude-fable-5-1` (see `docs/model-tiers.md`).
+
 ## The five failure modes (check each, with evidence)
 
 Walk these in order. For each, state **Pass** or **Finding** with a concrete pointer (`file:line`, command, or observation). A finding without evidence is not a finding — it is a hunch.

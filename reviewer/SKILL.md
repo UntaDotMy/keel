@@ -56,6 +56,11 @@ Blocker (Critical / High) · Major · Minor · Nit
 - Attempt to falsify each suspicion before declaring it a finding. Style preferences or unreachable theoretical risks are never blockers.
 - Bounded fix loops: when `FIX REQUIRED` is emitted, allow at most two incremental re-review rounds on the combined patch. After two unresolved rounds, stop automatic fix dispatch and report the blocker for user direction.
 
+### Provider Model Recommendations
+- **Google (Antigravity)**: `/boost for gemini`: Gemini Pro / Thinking (AGI / deep reasoning mode) or `gemini-3.8-flash` (high).
+- **OpenAI (Codex)**: `gpt-6-Astra` (low).
+- **Anthropic (Claude Code)**: `claude-sonnet-5` / `claude-opus-5` / `claude-fable-5-1` (see `docs/model-tiers.md`).
+
 ## Output
 **Status:** Pass | Conditional Pass | Fail | FIX REQUIRED  
 **Evidence:** files, commands, key lines  

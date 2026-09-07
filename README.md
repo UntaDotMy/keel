@@ -659,6 +659,24 @@ For non-trivial tasks across all supported adapters (Codex, Antigravity, Claude 
 ### Model Selection
 
 Model choice and reasoning effort belong to the active host and workspace defaults; shared documentation does not pin provider or model names.
+Keel does **not** route models at runtime. See [docs/model-tiers.md](./docs/model-tiers.md) for non-binding frontier/cheap/mid guidance and current provider IDs. Anvil lock keeps `frontier` / `cheap` / `mid`; host CLIs and workspace defaults choose concrete IDs. For multi-agent workflows, map roles to model tiers based on the active provider. In Google Antigravity, `/boost` triggers the multi-agent reasoning pipeline:
+
+| Provider | Light Tasks / Implementers / Explorers | Critics / Architecture / Planners |
+| --- | --- | --- |
+| Google (Antigravity `/boost`) | `gemini-3.7-flash` (high) | `gemini-pro-thinking` (AGI / deep reasoning mode) / `gemini-3.8-flash` (high) |
+| OpenAI (Codex) | `gpt-5.6-luna` (max) | `gpt-6-Astra` (low) |
+| Anthropic (Claude Code) | `claude-haiku-4-5` | `claude-sonnet-5` / `claude-opus-5` / `claude-fable-5-1` |
+| Z.ai | `glm-5.3-flash` | `glm-5.3` |
+
+
+### ClarifyPacket (SUPERHARNESS P1)
+
+When the gate is armed, Keel refuses to write `anvil.lock.json` until `clarify.packet.json` is present, valid, not `hard_block`, drift-clean, and `locked_brief.goal` matches the compile/run `--goal`. Status token: `CLARIFY_BLOCKED`.
+
+- Arm: `keel anvil compile --clarify-required …` (or `anvil run --clarify-required …`), or place `clarify.required` / an existing packet in the anvil bank.
+- AppSec: packet and sentinel must be regular files inside the anvil bank (symlink / out-of-bank refused). Answer text is untrusted; secret-shaped values are redacted on refuse Display paths. Prefer env names in `locked_brief`; do not paste keys/tokens/PEM.
+- Orchestrator owns AskUser adapters; subagents escalate only. Keel does not shell-interpolate answers.
+- Model tiers: [docs/model-tiers.md](./docs/model-tiers.md) (Keel does **not** route models). Skills audit: [docs/skills-audit-p1.md](./docs/skills-audit-p1.md).
 
 ### Human 6-Step Design Workflow & Appllama Native Intelligence
 
@@ -691,6 +709,9 @@ The native CLI is the primary surface. The unified `memory` family verbs (`resea
 | Workflow rules | [./WORKFLOW.md](./WORKFLOW.md) |
 | Agent rules | [./AGENTS.md](./AGENTS.md) |
 | Compatibility matrix | [./docs/compatibility-matrix.md](./docs/compatibility-matrix.md) |
+| Model tiers (provider-aware; no runtime routing) | [./docs/model-tiers.md](./docs/model-tiers.md) |
+| Skills audit (P1 keep/merge/retire) | [./docs/skills-audit-p1.md](./docs/skills-audit-p1.md) |
+| ClarifyPacket (gated anvil lock write) | `clarify.packet.json` under `<keel-home>/memories/workspaces/<slug>/anvil/`; enforced before **every** lock write (`anvil compile` and `anvil run` auto-compile). Arm with `--clarify-required`, `clarify.required`, or an existing packet. See `running-anvil`, [compatibility-matrix](./docs/compatibility-matrix.md), and [RUNBOOK](./docs/RUNBOOK.md) § ClarifyPacket |
 | Why `keel` over native harness, runtime-shell comparator, and workflow-teaching comparator | [./docs/why-keel.md](./docs/why-keel.md) |
 | Competitive gap closure (named comparators + remaining work) | [./docs/competitive-gap-closure.md](./docs/competitive-gap-closure.md) |
 | Release notes | [./docs/release-notes.md](./docs/release-notes.md) |

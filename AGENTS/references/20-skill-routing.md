@@ -169,6 +169,19 @@ For cross-adapter multi-agent workflows (Codex, Antigravity, Claude Code, OpenCo
    - Permitted only after final Reviewer `PASS`, consolidated change summary, and an explicit affirmative reply to the standalone prompt `Commit and push? (yes/no)`.
    - Verifies git status, branch, remotes, diff, and secret scans without altering feature logic.
 
+## Provider-Aware Model Tiering Matrix
+
+Keel does **not** route models at runtime. Use `docs/model-tiers.md` for non-binding provider guidance; host CLIs and workspace defaults choose concrete IDs. Keep shared routing rules host-neutral and do not add provider pins to runtime configuration.
+
+Canonical table: `docs/model-tiers.md`. Anvil keeps `frontier`/`cheap`/`mid`. Map roles to model tiers based on the active provider. In Google Antigravity, `/boost` activates the multi-agent reasoning pipeline:
+
+| Provider | Light Tasks / Implementers / Explorers (Token-Saving, Fast Iteration) | Critics / Architecture / Planners (Deep Reasoning, Spec Gate) |
+|---|---|---|
+| **Google** (Antigravity `/boost`) | `gemini-3.7-flash` (high) | Gemini Pro / Thinking (AGI / deep reasoning mode) / `gemini-3.8-flash` (high) |
+| **OpenAI** (Codex) | `gpt-5.6-luna` (max) | `gpt-6-Astra` (low) |
+| **Anthropic** (Claude Code) | `claude-haiku-4-5` | `claude-sonnet-5` / `claude-opus-5` / `claude-fable-5-1` |
+| **Z.ai** | `glm-5.3-flash` | `glm-5.3` |
+
 ## Host-Neutral Teamwork & Research Partner Doctrine
 
 Grounding multi-agent collaboration in research-partner principles:
