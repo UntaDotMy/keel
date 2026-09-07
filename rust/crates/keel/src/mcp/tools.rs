@@ -626,6 +626,12 @@ fn mcp_json_compact(payload: &Value) -> Result<String, String> {
     serde_json::to_string(payload).map_err(|error| format!("serialize: {error}"))
 }
 
+fn mcp_payload_exceeds_budget(payload: &Value) -> bool {
+    mcp_json_compact(payload)
+        .map(|text| text.chars().count() > max_mcp_text_chars())
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 pub(super) fn handle_tools_call(params: &Value) -> Result<Value, MethodError> {
     handle_tools_call_cancellable(params, None)
@@ -1433,6 +1439,7 @@ type ReaderState = Arc<(Mutex<usize>, Condvar)>;
 struct BackgroundCommand {
     label: String,
     started_at_millis: u128,
+    completed_at_millis: Arc<Mutex<Option<u128>>>,
     pid: Option<u32>,
     stdout: Arc<Mutex<String>>,
     stderr: Arc<Mutex<String>>,
@@ -1510,6 +1517,7 @@ fn spawn_background_command(mut child: Command, label: &str) -> Result<String, S
     let entry = Arc::new(BackgroundCommand {
         label: label.to_string(),
         started_at_millis: current_timestamp_millis(),
+        completed_at_millis: Arc::new(Mutex::new(None)),
         pid: Some(pid),
         stdout: Arc::new(Mutex::new(String::new())),
         stderr: Arc::new(Mutex::new(String::new())),
@@ -1573,6 +1581,11 @@ fn spawn_background_command(mut child: Command, label: &str) -> Result<String, S
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 *exit_guard = Some(code);
+                *reaper_entry
+                    .completed_at_millis
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                    Some(current_timestamp_millis());
                 break;
             }
             std::thread::sleep(Duration::from_millis(50));
@@ -1745,7 +1758,13 @@ fn tool_command_output(arguments: &Value) -> Result<String, String> {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .clone();
-    let elapsed_millis = current_timestamp_millis().saturating_sub(entry.started_at_millis);
+    let completed_at = *entry
+        .completed_at_millis
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let elapsed_millis = completed_at
+        .unwrap_or_else(current_timestamp_millis)
+        .saturating_sub(entry.started_at_millis);
 
     if let Some(code) = exit_code {
         // Finished: return the full result exactly once, then release the id.
@@ -1857,6 +1876,11 @@ fn tool_command_kill(arguments: &Value) -> Result<String, String> {
             if exit_guard.is_none() {
                 *exit_guard = Some(code);
             }
+            *entry
+                .completed_at_millis
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                Some(current_timestamp_millis());
             let payload = json!({
                 "command_id": command_id,
                 "label": entry.label,
@@ -2204,8 +2228,12 @@ fn tool_system_map_refresh(arguments: &Value) -> Result<String, String> {
 /// agent reaching the MCP surface with no skill auto-loaded can call this once
 /// and know what exists. Read-only; every section fails open to an empty/marker
 /// value rather than erroring the whole call, so partial state still informs.
-fn tool_context_brief(_arguments: &Value) -> Result<String, String> {
+fn tool_context_brief(arguments: &Value) -> Result<String, String> {
     let claude_home = tool_claude_home("context_brief")?;
+    let workspace_root = workspace_root_arg(arguments)
+        .or_else(|| env::current_dir().ok())
+        .map(|path| path.canonicalize().unwrap_or(path));
+    let workspace_display = workspace_root.as_deref().map(display_path);
 
     let catalog = skill_catalog(&claude_home);
     let skills: Vec<Value> = catalog
@@ -2217,6 +2245,7 @@ fn tool_context_brief(_arguments: &Value) -> Result<String, String> {
                 "whenToUse": when_to_use,
             })
         })
+        .take(64)
         .collect();
 
     // Memory health: reuse the recall-status snapshot, tolerate failure.
@@ -2233,18 +2262,54 @@ fn tool_context_brief(_arguments: &Value) -> Result<String, String> {
 
     // Newest working brief, if any. list_briefs is oldest-first → take the last.
     let newest_brief = match list_briefs(&claude_home) {
-        Ok(briefs) => briefs.last().map(brief_to_json).unwrap_or(Value::Null),
+        Ok(briefs) => briefs
+            .iter()
+            .filter(|brief| {
+                brief.workspace.is_empty()
+                    || workspace_display
+                        .as_deref()
+                        .is_some_and(|workspace| brief.workspace == workspace)
+            })
+            .max_by(|left, right| left.created_at.cmp(&right.created_at))
+            .map(brief_to_json)
+            .unwrap_or(Value::Null),
         Err(_) => Value::Null,
     };
 
-    let payload = json!({
+    let mut payload = json!({
         "ironLaw": IRON_LAW_SUMMARY,
         "skillCount": skills.len(),
+        "workspaceRoot": workspace_display.unwrap_or_default(),
         "skills": skills,
         "memory": memory,
         "newestBrief": newest_brief,
         "next": "For any code change call anvil (compile then run --dry-run). Use skill_route/skill_get for domain skills, recall for memory.",
     });
+    // Keep JSON valid under the MCP text budget by shedding least-specific entries before serialization.
+    let mut skills_truncated = false;
+    while mcp_payload_exceeds_budget(&payload) {
+        let Some(skills) = payload.get_mut("skills").and_then(Value::as_array_mut) else {
+            break;
+        };
+        if skills.pop().is_none() {
+            break;
+        }
+        skills_truncated = true;
+    }
+    if mcp_payload_exceeds_budget(&payload) {
+        payload["newestBrief"] = Value::Null;
+        payload["memory"] = json!({"unavailable": "omitted to fit MCP response budget"});
+    }
+    if mcp_payload_exceeds_budget(&payload) {
+        payload["ironLaw"] = Value::String(
+            "Read, research, route skills, and trace the root cause before editing.".into(),
+        );
+        payload["next"] =
+            Value::String("Use skill_route/skill_get and run focused verification.".into());
+    }
+    if skills_truncated {
+        payload["skillsTruncated"] = Value::Bool(true);
+    }
     // Compact JSON: pretty context_brief was multi-line and near frame limits.
     mcp_json_compact(&payload).map_err(|error| format!("context_brief: {error}"))
 }
@@ -3493,6 +3558,10 @@ fn run_inprocess_cli<F>(label: &str, work: F) -> Result<String, String>
 where
     F: FnOnce(&mut Vec<u8>, &mut Vec<u8>) -> u8,
 {
+    static INPROCESS_CLI_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+    let _guard = INPROCESS_CLI_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
     let code = i32::from(work(&mut stdout, &mut stderr));

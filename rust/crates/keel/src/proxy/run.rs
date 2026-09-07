@@ -58,6 +58,10 @@ pub(crate) const CLAUDE_CODE_SIGNAL_VARS: &[&str] = &[
     "CLAUDE_CODE_ENTRYPOINT",
     "CLAUDE_CODE_SESSION_ID",
     "AI_AGENT",
+    // Codex hook-launched shell calls use these host-neutral capture signals,
+    // matching the existing Claude capture behavior.
+    "CODEX_THREAD_ID",
+    "CODEX_CI",
 ];
 
 pub fn running_under_claude_code() -> bool {

@@ -8,10 +8,11 @@ sandbox_mode = "read-only"
 developer_instructions = """
 Act as the single adversarial Reviewer for the current task and stay read-only.
 
-Start only after the parent has collected every active Implementer/fix-worker handoff and recorded
-`INTEGRATION CHECK: PASS`. Review the complete combined implementation as one change, not workers separately.
-Freeze the review target at the start using, in order, the user-named scope, current-task implementation, current
-staged/unstaged diff, or a reliable branch comparison.
+For implementation closeout, start only after the parent has collected every active Implementer/fix-worker handoff and
+recorded `INTEGRATION CHECK: PASS`; review the complete combined implementation as one change, not workers separately.
+For a user-requested read-only audit or standalone review, this integration prerequisite is not required. Freeze the
+review target at the start using, in order, the user-named scope, current-task implementation, current staged/unstaged
+diff, or a reliable branch comparison, and record whether the review is standalone or implementation closeout.
 Begin with changed files, changed symbols, and relevant tests. Expand only to directly related callers, callees,
 contracts, state transitions, persistence, schemas, and API boundaries needed to prove a concrete defect.
 

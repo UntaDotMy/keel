@@ -810,6 +810,26 @@ fn work_intent_pointer_silent_for_questions_and_chitchat() {
 }
 
 #[test]
+fn work_intent_pointer_silent_for_read_only_audits_and_reviews() {
+    for prompt in [
+        "perform a read-only optimization review",
+        "audit the agent workflow for gaps",
+        "standalone review of the current diff",
+        "diagnose why the build is slow",
+    ] {
+        assert_eq!(
+            work_intent_pointer_for_prompt(prompt),
+            None,
+            "read-only audit/review must not imply a code change: {prompt:?}"
+        );
+    }
+    assert!(
+        work_intent_pointer_for_prompt("review the bug and fix the parser").is_some(),
+        "an explicit mutation request still needs the code-change reminder"
+    );
+}
+
+#[test]
 fn user_prompt_submit_injects_mcp_pointer_for_repo_question() {
     // End-to-end through the dispatcher: a repo-structure prompt on stdin
     // must surface the system_map pointer in the emitted additionalContext,

@@ -764,11 +764,7 @@ fn add_wiring_findings(repository_root: &Path, findings: &mut Vec<ReviewFinding>
     }
 }
 
-fn flow_refresh_arguments(
-    repository_root: &Path,
-    changed_paths: &[String],
-) -> (String, Vec<String>, Vec<String>) {
-    let root_display = display_path(repository_root);
+fn flow_refresh_arguments(changed_paths: &[String]) -> Result<(), String> {
     let source_targets: Vec<String> = changed_paths
         .iter()
         .filter(|path| {
@@ -779,63 +775,37 @@ fn flow_refresh_arguments(
         })
         .cloned()
         .collect();
-    let target = source_targets
-        .first()
-        .cloned()
-        .unwrap_or_else(|| "rust/crates/keel/src/review.rs".to_string());
-    let mut start = vec![
-        "flow".to_string(),
-        "start".to_string(),
-        "--target-file".to_string(),
-        target.clone(),
-    ];
-    if !source_targets.is_empty() {
-        start.extend(["--target-files".to_string(), source_targets.join(",")]);
+    if source_targets.is_empty() {
+        Err("no changed source file is available for flow ownership proof".to_string())
+    } else {
+        Err(format!(
+            "flow ownership proof is unavailable for changed source files: {}",
+            source_targets.join(", ")
+        ))
     }
-    start.extend([
-        "--target-function".to_string(),
-        "run_review_closeout_command".to_string(),
-        "--current-behavior".to_string(),
-        "Runs the persistent review closeout scan and reconciles its ledger".to_string(),
-        "--entry-point".to_string(),
-        "review closeout CLI command".to_string(),
-        "--producer".to_string(),
-        "review.rs dispatcher".to_string(),
-        "--source-of-truth".to_string(),
-        "closeout ledger and review gate collector".to_string(),
-        "--storage-state-queue-owner".to_string(),
-        "review closeout ledger and command registry".to_string(),
-        "--side-effect-owner".to_string(),
-        "review scans, flow refresh, and ledger writes".to_string(),
-        "--cleanup-recovery-path".to_string(),
-        "ledger history and command termination".to_string(),
-        "--consumers".to_string(),
-        "review command and closeout ledger".to_string(),
-        "--edit-boundary".to_string(),
-        "closeout evidence refresh and gate scan".to_string(),
-        "--validation-needed".to_string(),
-        "rerun review closeout after fixes".to_string(),
-        "--validation-evidence".to_string(),
-        "automatic closeout evidence refresh (self-attested)".to_string(),
-        "--repo-root".to_string(),
-        root_display.clone(),
-    ]);
-    let finish = vec![
-        "flow".to_string(),
-        "finish".to_string(),
-        "--repo-root".to_string(),
-        root_display,
-    ];
-    (target, start, finish)
 }
 
-fn sibling_refresh_arguments(repository_root: &Path, base_ref: &str) -> Vec<String> {
+fn sibling_refresh_arguments(
+    repository_root: &Path,
+    base_ref: &str,
+    changed_paths: &[String],
+) -> Vec<String> {
+    let query = changed_paths
+        .iter()
+        .filter(|path| !path.trim().is_empty())
+        .map(|path| format!("path:{path}"))
+        .collect::<Vec<_>>()
+        .join(" ");
     let mut arguments = vec![
         "siblings".to_string(),
         "--workspace-root".to_string(),
         display_path(repository_root),
         "--query".to_string(),
-        "review closeout sibling implementation".to_string(),
+        if query.is_empty() {
+            "review closeout".to_string()
+        } else {
+            query
+        },
     ];
     if !base_ref.trim().is_empty() {
         arguments.extend(["--base-ref".to_string(), base_ref.trim().to_string()]);
@@ -852,7 +822,7 @@ fn refresh_evidence(
     findings: &mut Vec<ReviewFinding>,
     snapshots: &mut Vec<ReviewGateSnapshot>,
 ) {
-    let sibling_arguments = sibling_refresh_arguments(repository_root, base_ref);
+    let sibling_arguments = sibling_refresh_arguments(repository_root, base_ref, changed_paths);
     let mut sibling_stdout = Vec::new();
     let mut sibling_stderr = Vec::new();
     let sibling_code = crate::utility::run_code_search_command(
@@ -889,54 +859,36 @@ fn refresh_evidence(
         });
     }
 
-    let (target, flow_arguments, flow_finish_arguments) =
-        flow_refresh_arguments(repository_root, changed_paths);
-    let mut flow_stdout = Vec::new();
-    let mut flow_stderr = Vec::new();
-    let flow_start_code = crate::commands::Application::new(env!("CARGO_PKG_VERSION")).run(
-        &flow_arguments,
-        &mut flow_stdout,
-        &mut flow_stderr,
-    );
-    let flow_code = if flow_start_code == 0 {
-        crate::commands::Application::new(env!("CARGO_PKG_VERSION")).run(
-            &flow_finish_arguments,
-            &mut flow_stdout,
-            &mut flow_stderr,
-        )
-    } else {
-        flow_start_code
-    };
-    let flow_output = String::from_utf8_lossy(&flow_stdout);
-    let flow_error = String::from_utf8_lossy(&flow_stderr);
-    if flow_code == 0 {
+    if !changed_paths.iter().any(|path| {
+        Path::new(path)
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| FLOW_SOURCE_EXTENSIONS.contains(&extension))
+    }) {
         snapshots.push(ReviewGateSnapshot {
             name: "evidence:flow".to_string(),
-            status: "pass".to_string(),
-            blocking: true,
-            details: Some(format!(
-                "target={target} stdout={flow_output} stderr={flow_error}"
-            )),
+            status: "not_applicable".to_string(),
+            blocking: false,
+            details: Some("no changed source files require an ownership flow proof".to_string()),
         });
-    } else {
-        let evidence =
-            format!("target={target} exit={flow_code} stdout={flow_output} stderr={flow_error}");
-        findings.push(finding(
-            "evidence:flow",
-            ReviewSeverity::Major,
-            "review/evidence",
-            None,
-            "flow evidence refresh failed",
-            evidence.clone(),
-            head,
-        ));
-        snapshots.push(ReviewGateSnapshot {
-            name: "evidence:flow".to_string(),
-            status: "blocked".to_string(),
-            blocking: true,
-            details: Some(evidence),
-        });
+        return;
     }
+    let error = flow_refresh_arguments(changed_paths).expect_err("source ownership is unproven");
+    findings.push(finding(
+        "evidence:flow",
+        ReviewSeverity::Major,
+        "review/evidence",
+        None,
+        "flow evidence refresh cannot prove changed-source ownership",
+        error.clone(),
+        head,
+    ));
+    snapshots.push(ReviewGateSnapshot {
+        name: "evidence:flow".to_string(),
+        status: "blocked".to_string(),
+        blocking: true,
+        details: Some(error),
+    });
 }
 
 fn render_closeout(
@@ -1800,27 +1752,24 @@ mod tests {
     }
 
     #[test]
-    fn flow_refresh_covers_all_changed_sources_and_finishes_evidence() {
-        let root = Path::new("D:/repo");
+    fn flow_refresh_fails_closed_without_proven_ownership() {
         let changed = vec![
             "rust/src/a.rs".to_string(),
             "docs/readme.md".to_string(),
             "web/app.ts".to_string(),
         ];
-        let (target, start, finish) = flow_refresh_arguments(root, &changed);
-        assert_eq!(target, "rust/src/a.rs");
-        let target_files = start
-            .windows(2)
-            .find(|pair| pair[0] == "--target-files")
-            .map(|pair| pair[1].as_str());
-        assert_eq!(target_files, Some("rust/src/a.rs,web/app.ts"));
-        assert_eq!(finish[0..2], ["flow", "finish"]);
-        assert!(finish.iter().any(|argument| argument == "--repo-root"));
+        let error = flow_refresh_arguments(&changed).expect_err("must fail closed");
+        assert!(error.contains("rust/src/a.rs"));
+        assert!(error.contains("web/app.ts"));
     }
 
     #[test]
-    fn sibling_refresh_carries_branch_base_ref() {
-        let arguments = sibling_refresh_arguments(Path::new("D:/repo"), "origin/main");
+    fn sibling_refresh_uses_changed_paths_and_branch_base_ref() {
+        let arguments = sibling_refresh_arguments(
+            Path::new("D:/repo"),
+            "origin/main",
+            &["rust/src/a.rs".to_string()],
+        );
         assert_eq!(
             arguments
                 .windows(2)
@@ -1828,6 +1777,12 @@ mod tests {
                 .map(|pair| pair[1].as_str()),
             Some("origin/main")
         );
+        assert!(arguments
+            .iter()
+            .any(|argument| argument == "path:rust/src/a.rs"));
+        assert!(!arguments
+            .iter()
+            .any(|argument| argument == "review closeout sibling implementation"));
     }
 
     #[test]

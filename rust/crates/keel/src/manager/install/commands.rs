@@ -200,29 +200,48 @@ pub(crate) fn uninstall_managed_files(claude_home: &Path) -> Result<usize, Strin
     let engagement_home = crate::runtime::claude_engagement_home(claude_home);
     let file_inventory = read_inventory_set(&managed_files_inventory_path(claude_home));
     for relative in &file_inventory {
-        let absolute = engagement_home.join(relative);
+        // README.md and AGENTS.md are user-owned guidance surfaces; never delete them from old inventories.
+        if relative.eq_ignore_ascii_case("README.md") || relative.eq_ignore_ascii_case("AGENTS.md")
+        {
+            continue;
+        }
+        let Some(absolute) = crate::manager::install::managed::resolve_managed_path_under_home(
+            &engagement_home,
+            relative,
+        ) else {
+            // Refuse stale, corrupt, traversing, or out-of-home inventory paths.
+            continue;
+        };
         if absolute.is_file() {
             removed_count += remove_path_if_exists_counted(&absolute)?;
         }
     }
-    let installed_skills = read_inventory_set(&managed_skills_inventory_path(claude_home));
-    for skill_name in &installed_skills {
-        let skill_path = skills_directory(claude_home).join(skill_name);
-        removed_count += remove_path_if_exists_counted(&skill_path)?;
-    }
-    let installed_shared_resources =
-        read_inventory_set(&managed_shared_resources_inventory_path(claude_home));
-    for shared_name in &installed_shared_resources {
-        let shared_path = skills_directory(claude_home).join(shared_name);
-        removed_count += remove_path_if_exists_counted(&shared_path)?;
-    }
     // `managed-agents.txt` stores bare agent names (no extension), one per
     let installed_agents = read_inventory_set(&managed_agents_inventory_path(claude_home));
     for agent_name in &installed_agents {
-        let agent_path = agents_directory(claude_home).join(agent_name);
-        removed_count += remove_path_if_exists_counted(&agent_path)?;
-        let profile_path = agent_profiles_directory(claude_home).join(format!("{agent_name}.toml"));
-        removed_count += remove_path_if_exists_counted(&profile_path)?;
+        let Some(agent_name) = crate::runtime::safe_path_segment(agent_name) else {
+            continue;
+        };
+        let agent_relative = format!("agents/{agent_name}");
+        if let Some(agent_path) = crate::manager::install::managed::resolve_managed_path_under_home(
+            &engagement_home,
+            &agent_relative,
+        ) {
+            if agent_path.is_file() {
+                removed_count += remove_path_if_exists_counted(&agent_path)?;
+            }
+        }
+        let profile_relative = format!("agent-profiles/{agent_name}.toml");
+        if let Some(profile_path) =
+            crate::manager::install::managed::resolve_managed_path_under_home(
+                claude_home,
+                &profile_relative,
+            )
+        {
+            if profile_path.is_file() {
+                removed_count += remove_path_if_exists_counted(&profile_path)?;
+            }
+        }
     }
     for inventory in [
         managed_files_inventory_path(claude_home),
@@ -236,7 +255,19 @@ pub(crate) fn uninstall_managed_files(claude_home: &Path) -> Result<usize, Strin
     }
     // Packaged installs need this owned cache after OS temp cleanup.
     // Uninstall removes the durable copy at the lifecycle boundary.
-    removed_count += remove_path_if_exists_counted(&update_cache_directory(claude_home))?;
+    // Remove only the manifest-marked installer bundle; preserve other cache data.
+    let installed_source = update_cache_directory(claude_home).join("installed-source");
+    let release_manifest = installed_source.join("keel-release-manifest.json");
+    if release_manifest.is_file() {
+        removed_count += remove_path_if_exists_counted(&installed_source)?;
+        let cache_directory = update_cache_directory(claude_home);
+        let cache_is_empty = fs::read_dir(&cache_directory)
+            .map(|mut entries| entries.next().is_none())
+            .unwrap_or(false);
+        if cache_is_empty {
+            removed_count += remove_path_if_exists_counted(&cache_directory)?;
+        }
+    }
     Ok(removed_count)
 }
 
@@ -834,12 +865,16 @@ pub fn run_uninstall_command(
             return 1;
         }
     }
-    for root_file_name in ["AGENTS.md", "README.md"] {
-        let path = engagement_home.join(root_file_name);
-        match remove_path_if_exists_counted(&path) {
+    // Preserve root guidance; remove AGENTS.md only when its Keel marker proves ownership.
+    let agents_path = engagement_home.join("AGENTS.md");
+    if read_text_if_exists(&agents_path)
+        .map(|text| text.contains("keel:begin (managed by keel install"))
+        .unwrap_or(false)
+    {
+        match remove_path_if_exists_counted(&agents_path) {
             Ok(count) => removed_count += count,
             Err(error) => {
-                let _ = writeln!(standard_error, "remove {root_file_name} failed: {error}");
+                let _ = writeln!(standard_error, "remove AGENTS.md failed: {error}");
                 return 1;
             }
         }

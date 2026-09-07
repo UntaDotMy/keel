@@ -60,6 +60,9 @@ jobs:
               - 'audit.toml'
               - 'build.rs'
               - '**/*.rs'
+              - 'tests/**'
+              - '**/tests/**'
+              - '**/fixtures/**'
               - '.github/workflows/**'
               - 'install.sh'
               - 'install.ps1'
@@ -113,6 +116,10 @@ jobs:
     steps:
       - name: Report scope
         run: |
+          if [ "${{ needs.changes.result }}" != "success" ]; then
+            echo "The changes classifier concluded ${{ needs.changes.result }}; refusing to classify the workflow as docs-only." >&2
+            exit 1
+          fi
           if [ "${{ needs.changes.outputs.code }}" = "true" ]; then
             for result in \
               "${{ needs.validate-adapters.result }}" \

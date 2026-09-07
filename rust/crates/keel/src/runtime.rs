@@ -12,6 +12,15 @@ use std::process::{Child, Command, Stdio};
 
 pub const ROOT_GUIDANCE_RELATIVE_PATHS: &[&str] = &[
     "AGENTS.md",
+    "AGENTS/references/00-knowledge-map.md",
+    "AGENTS/references/10-native-command-routing.md",
+    "AGENTS/references/20-skill-routing.md",
+    "AGENTS/references/30-execution-strategy.md",
+    "AGENTS/references/40-code-quality-and-testing.md",
+    "AGENTS/references/50-delivery-and-prohibited-shortcuts.md",
+    "AGENTS/references/60-environment-and-portability.md",
+    "AGENTS/references/70-review-quality-gates-and-policies.md",
+    "AGENTS/references/99-source-anchors.md",
     "00-skill-routing-and-escalation.md",
     "docs/runtime-guardrails-and-memory-protocols.md",
     "docs/open-source-memory-patterns.md",
@@ -119,8 +128,11 @@ pub fn discover_repository_layout(repository_root: &Path) -> Result<RepositoryLa
         fs::read_dir(repository_root).map_err(|error| format!("read repository root: {error}"))?;
     let mut layout = RepositoryLayout {
         root_path: repository_root.to_path_buf(),
+        // Keep reduced/fixture manifests tolerant while shipping every present
+        // guidance file; AGENTS.md links into AGENTS/references.
         root_files: ROOT_GUIDANCE_RELATIVE_PATHS
             .iter()
+            .filter(|value| repository_root.join(value).is_file())
             .map(|value| value.to_string())
             .collect(),
         skills: Vec::new(),

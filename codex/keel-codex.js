@@ -322,12 +322,19 @@ function extractCommand(toolInput) {
   }
   return "";
 }
+function rewriteToolName(toolName) {
+  return process.platform === "win32" && toolName.toLowerCase() === "bash"
+    ? "powershell"
+    : toolName;
+}
 function handlePreToolUse(input, isPre) {
   if (!isPre) {
     const { sessionID: sessionID2, cwd: cwd2 } = resolveSessionContext(input);
     const currentToolName2 = toolName(input);
-    const observation = input.tool_response ?? input.tool_input;
-    const stdin2 = observation != null ? JSON.stringify(observation) : "{}";
+    const stdin2 = JSON.stringify({
+      tool_input: input.tool_input ?? null,
+      tool_response: input.tool_response ?? null,
+    });
     const args = [
       "--session",
       sessionID2,
@@ -345,20 +352,6 @@ function handlePreToolUse(input, isPre) {
   }
   const { sessionID, cwd } = resolveSessionContext(input);
   const currentToolName = toolName(input);
-  const stdin = input.tool_input != null ? JSON.stringify(input.tool_input) : "{}";
-  const observeArgs = [
-    "--session",
-    sessionID,
-    "--cwd",
-    cwd,
-    "--tool",
-    currentToolName,
-    "--phase",
-    "pre"
-  ];
-  if (toolFailed(input))
-    observeArgs.push("--failed");
-  runBridgeWithStdin("observe", observeArgs, stdin);
   if (isEditClassTool(currentToolName)) {
     const pathArg = (input.tool_input && (input.tool_input.path || input.tool_input.file_path || input.tool_input.filePath)) || input.path || "";
     const gateArgs = ["--session", sessionID, "--cwd", cwd, "--tool", currentToolName];
@@ -394,7 +387,7 @@ function handlePreToolUse(input, isPre) {
       return denyOutput("keel Iron Law shell gate could not be evaluated. Retry after running `keel doctor`.");
     }
     if (command) {
-      const rewritten = parseRewriteResponse(runBridgeWithStdin("rewrite", ["--tool", currentToolName], command));
+      const rewritten = parseRewriteResponse(runBridgeWithStdin("rewrite", ["--tool", rewriteToolName(currentToolName)], command));
       if (rewritten) {
         return JSON.stringify({
           hookSpecificOutput: {

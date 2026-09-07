@@ -150,6 +150,12 @@ pub(super) fn mcp_tool_pointer_for_prompt(prompt: &str) -> Option<&'static str> 
 pub(super) fn work_intent_pointer_for_prompt(prompt: &str) -> Option<&'static str> {
     let lowered = prompt.to_ascii_lowercase();
 
+    // Read-only audits/reviews should not imply repository edits unless explicit
+    // mutation wording is present, preserving research-only routing.
+    if is_read_only_review_prompt(&lowered) && !has_explicit_mutation_intent(&lowered) {
+        return None;
+    }
+
     // Unambiguous change-intent cues ; safe to match as substrings because they
     const STRONG_CUES: &[&str] = &[
         "implement",
@@ -187,6 +193,48 @@ pub(super) fn work_intent_pointer_for_prompt(prompt: &str) -> Option<&'static st
     }
 
     None
+}
+
+fn is_read_only_review_prompt(lowered: &str) -> bool {
+    [
+        "read-only",
+        "read only",
+        "standalone review",
+        "audit",
+        "review",
+        "inspect",
+        "diagnose",
+        "analyze",
+        "analysis",
+    ]
+    .iter()
+    .any(|cue| lowered.contains(cue))
+}
+
+fn has_explicit_mutation_intent(lowered: &str) -> bool {
+    [
+        "implement",
+        "refactor",
+        "rework",
+        "rewrite",
+        "add ",
+        "change ",
+        "update ",
+        "modify",
+        "migrate",
+        "wire ",
+        "integrate",
+        "create ",
+        "delete ",
+        "remove ",
+        "rename",
+        "fix ",
+        "patch ",
+        "optimize ",
+        "extend ",
+    ]
+    .iter()
+    .any(|cue| lowered.contains(cue))
 }
 
 /// The read-map / recall / write-brief / preserve-flow reminder injected for

@@ -35,7 +35,9 @@ test("Codex fixtures use the official hook payload and output fields", () => {
   expect(codex).toContain("hookSpecificOutput");
   expect(codex).toContain("permissionDecision");
   expect(codex).toContain('"--phase", "post"');
-  expect(codex).toContain('"--phase", "pre"');
+  expect(codex).not.toContain('"--phase", "pre"');
+  expect(codex).toContain("rewriteToolName");
+  expect(codex).toContain("tool_input: input.tool_input");
 });
 
 test("Codex hooks execute the bundled Node runtime without npx", () => {

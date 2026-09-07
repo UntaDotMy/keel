@@ -86,6 +86,19 @@ pub fn record_observation_from_parts(
             Err(_) => JsonDocument::Null,
         }
     };
+    // Codex PostToolUse keeps input beside the outcome; normalize that envelope
+    // back to the raw tool input expected by derive_signature.
+    let tool_input = match &tool_input {
+        JsonDocument::Object(payload)
+            if payload.contains_key("tool_input") && payload.contains_key("tool_response") =>
+        {
+            payload
+                .get("tool_input")
+                .cloned()
+                .unwrap_or(JsonDocument::Null)
+        }
+        _ => tool_input,
+    };
 
     // Wrap the raw tool input in a { tool_input: ... } envelope so
     // derive_signature can resolve it the same way the native Claude hook
@@ -855,6 +868,28 @@ mod tests {
             assert_eq!(rows[0].tool_name, "Bash");
             assert_eq!(rows[0].cwd, "/repo");
             let _ = root;
+        });
+    }
+
+    #[test]
+    fn record_observation_from_parts_unwraps_codex_post_payload() {
+        with_isolated_claude_home("codex-post", |root| {
+            let payload = json!({
+                "tool_input": { "command": "cargo test --workspace" },
+                "tool_response": { "stdout": "ok" },
+            });
+            assert!(record_observation_from_parts(
+                root,
+                "Bash",
+                &payload.to_string(),
+                "/repo",
+                "s1",
+                false,
+            )
+            .expect("record"));
+            let rows = iter_recent_rows(1).expect("iter");
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].signature, "cargo test");
         });
     }
 

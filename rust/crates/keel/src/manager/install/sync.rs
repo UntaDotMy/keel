@@ -202,6 +202,10 @@ pub(crate) fn sync_root_files(
     for root_file_name in &layout.root_files {
         let source_path = layout.root_path.join(root_file_name);
         let target_path = claude_home.join(root_file_name);
+        // README.md is a user-owned fallback: do not overwrite an existing file.
+        if root_file_name.eq_ignore_ascii_case("README.md") && target_path.exists() {
+            continue;
+        }
         if copy_file_if_changed(&source_path, &target_path, tracker)? {
             synced_count += 1;
         }
