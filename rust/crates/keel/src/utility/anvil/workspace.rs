@@ -262,7 +262,7 @@ pub fn copy_tree(src: &Path, dst: &Path) -> Result<(), String> {
 }
 
 /// Public compatibility helper retained for host-side workspace readers.
-#[expect(dead_code)]
+#[allow(dead_code)]
 pub fn paginated_read(path: &Path, offset: usize, limit: usize) -> Result<String, String> {
     let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
     let lines: Vec<&str> = text.lines().collect();
