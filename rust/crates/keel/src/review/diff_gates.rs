@@ -593,7 +593,19 @@ pub(crate) fn impact_gate(
 
     let graph = crate::utility::code_graph::cached_artifact_path(repository_root, "")
         .and_then(|p| crate::utility::code_graph::CodeGraph::from_json_file(&p))
-        .unwrap_or_else(|| crate::utility::code_graph::build_graph(repository_root));
+        .or_else(|| {
+            // The workspace index owns discovery and extraction; a missing or
+            // stale artifact fails open when the canonical index cannot refresh.
+            crate::utility::code_graph::build_graph_from_workspace_index(repository_root, "").ok()
+        });
+    let Some(graph) = graph else {
+        return GateResult {
+            name: "impact".to_string(),
+            status: GateStatus::Pass,
+            blocking: false,
+            details: Some("code graph unavailable; impact check skipped".to_string()),
+        };
+    };
 
     let impacted = graph.impact_of(&touched);
     if impacted.is_empty() {

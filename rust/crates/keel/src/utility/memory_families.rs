@@ -228,7 +228,9 @@ fn run_research_cache(
                     // on the very next `recall` without a separate trigger.
                     // Best-effort: the file on disk is durable regardless, and a
                     // failed sync is reconciled by the next read-path sync.
-                    if let Err(error) = crate::utility::recall::reindex_after_write(&home) {
+                    if let Err(error) =
+                        crate::utility::recall::reindex_after_write_paths(&home, &[path.as_path()])
+                    {
                         let _ = writeln!(
                             standard_error,
                             "{label}: recall index sync skipped ({error})"
@@ -1874,10 +1876,28 @@ fn research_cache_record_is_stale(record: &Record, now: &str) -> bool {
             .to_ascii_lowercase()
             .as_str(),
         "stale" | "expired"
-    ) || field(record, "expiresAt")
+    ) || research_cache_record_expiry(record).is_some_and(|expires_at| expires_at.as_str() <= now)
+}
+
+/// Return the stored expiry, or derive one for records written before the
+/// `expiresAt` field was introduced. Keeping the derivation on lookup makes the
+/// freshness policy apply uniformly to legacy cache files without rewriting
+/// user data just to migrate metadata.
+fn research_cache_record_expiry(record: &Record) -> Option<String> {
+    if let Some(expires_at) = field(record, "expiresAt")
         .map(str::trim)
         .filter(|expires_at| !expires_at.is_empty())
-        .is_some_and(|expires_at| expires_at <= now)
+    {
+        return Some(expires_at.to_string());
+    }
+    let freshness = field(record, "freshness")?.trim();
+    let recorded_at = field(record, "recordedAt")?.trim();
+    let recorded_at_millis = chrono::DateTime::parse_from_rfc3339(recorded_at)
+        .ok()?
+        .timestamp_millis()
+        .try_into()
+        .ok()?;
+    freshness_expiry(freshness, recorded_at_millis)
 }
 
 /// Set the `state` field on one research-cache record (used by `stale --id` and `reward`).
@@ -2202,6 +2222,45 @@ mod tests {
         assert!(
             out.contains("\"includeStale\": true"),
             "flag not exposed: {out}"
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn research_cache_lookup_derives_expiry_for_legacy_records() {
+        let home = temp_home("rc-legacy-freshness");
+        let store = family_store(&home, "memory", "research-cache");
+        store
+            .write_record(
+                "legacy",
+                &vec![
+                    ("id".into(), "legacy".into()),
+                    ("question".into(), "legacy provider behavior".into()),
+                    ("answer".into(), "must be refreshed".into()),
+                    ("freshness".into(), "0s".into()),
+                    ("state".into(), "fresh".into()),
+                    ("recordedAt".into(), "1970-01-01T00:00:00Z".into()),
+                ],
+            )
+            .expect("write legacy record");
+        let home_arg = home.to_string_lossy().to_string();
+        let (code, out, err) = run(
+            "memory",
+            "research-cache",
+            &[
+                "lookup",
+                "--query",
+                "legacy provider",
+                "--json",
+                "--claude-home",
+                &home_arg,
+            ],
+        );
+        assert_eq!(code, 0, "legacy lookup must succeed; stderr: {err}");
+        assert!(out.contains("\"count\": 0"), "legacy expiry leaked: {out}");
+        assert!(
+            out.contains("must be refreshed"),
+            "omitted stale legacy match should remain inspectable: {out}"
         );
         let _ = std::fs::remove_dir_all(&home);
     }

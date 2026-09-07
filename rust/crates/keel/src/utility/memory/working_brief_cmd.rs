@@ -145,7 +145,9 @@ fn run_working_brief_write(
     // `recall` without a separate trigger. Best-effort: the brief on disk is
     // durable regardless, and a failed sync is reconciled by the next read-path
     // sync.
-    if let Err(error) = crate::utility::recall::reindex_after_write(&claude_home) {
+    if let Err(error) =
+        crate::utility::recall::reindex_after_write_paths(&claude_home, &[path.as_path()])
+    {
         let _ = writeln!(
             standard_error,
             "{command_group} working-brief write: recall index sync skipped ({error})"
