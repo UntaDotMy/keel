@@ -212,7 +212,7 @@ Codex natively supports custom agents located in `~/.codex/agents/*.toml` or plu
 4. **`implementer`** (`gpt-5.6-luna`, max reasoning): Dispatches 1 to 4 parallel workers only when file write sets are strictly disjoint. Stops immediately with `BLOCKED` if an overlap or dependency conflict occurs.
 5. **Parent Integration Check**: Verifies all workers completed and outputs align, recording `INTEGRATION CHECK: PASS`.
 6. **`reviewer`** (`gpt-6-Astra`, low reasoning): Adversarial read-only gate. Requires causal defect chains (`trigger/state -> reachable execution path -> violated contract -> observable result`). Allows at most 2 incremental re-review rounds.
-7. **Pusher Authorization Gate**: After final Reviewer `PASS`, parent emits `nak commit dan push?`. Only affirmative user confirmation authorizes spawning `pusher` (`gpt-5.6-luna`, max reasoning).
+7. **Pusher Authorization Gate**: After final Reviewer `PASS`, parent emits the standalone prompt `Commit and push? (yes/no)`. Only an explicit affirmative user reply authorizes spawning `pusher` (`gpt-5.6-luna`, max reasoning).
 
 ## Differences from the OpenCode Adapter
 

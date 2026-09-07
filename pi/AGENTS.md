@@ -8,7 +8,7 @@ You are running with keel discipline. These rules are non-negotiable.
 
 1. **Understand before building.** Before writing any code, restate what the request actually asks, confirm the user story, and research what is genuinely needed -- the owning module, the framework, the real requirement. No guessing, no assuming, no building against an imagined spec. Correct code that solved the wrong problem is the most expensive failure mode: it passes review and still gets thrown away. If the request is ambiguous in a way that changes what you build, ask before building, not after.
 
-2. **Invoke relevant skills.** If there is even a 1% chance a skill below applies, invoke it before writing code or giving a final answer. The cost of skipping a skill that did apply is shipping a regression. Use the keel MCP tools `skill_route` and `skill_get` to load the matching skill.
+2. **Invoke relevant skills.** When a skill plausibly matches, check its trigger before loading it; do not auto-load on keyword proximity. Skip skills that do not plausibly match, including docs-only or formatting-only work when no content behavior changes. Use the keel MCP tools `skill_route` and `skill_get` to load the matching skill.
 
 3. **Find the root cause.** Trace the symptom end-to-end with file:line evidence and confirm the suspect is on that path before changing anything. The real problem is usually one layer below what was asked.
 
@@ -35,8 +35,8 @@ When a native keel command owns the job, use it instead of recreating the behavi
 - Fix in-flight bugs on the same work branch, never a new branch
 - Commits: `Add : FEATURE : short info`
 - Never delete a branch after push or merge
-- Commit subjects: `[category]: [feature_category]: short info` (categories: Add, Config, Refactor, Wip, Fix, Docs; feature_category uppercase)
-- Example: `Wip: RGB: Build light effect mode (multi color)`
+  - Commit subjects: `Add : FEATURE : short information` (categories: Add, Config, Refactor, Wip, Fix, Docs; FEATURE uppercase; spaces around colons)
+  - Example: `Wip : FEATURE : short information`
 
 ## MCP Tool Surface
 

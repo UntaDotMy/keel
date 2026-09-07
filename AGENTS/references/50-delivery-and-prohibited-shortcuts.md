@@ -1,7 +1,7 @@
 <!--
 Purpose: Capture feature delivery rules, best practices, and prohibited shortcuts previously inline in AGENTS.md.
 Caller: AGENTS.md when shaping commits, PRs, or scope discipline.
-Dependencies: keel git-workflow, keel review, request_user_input.
+Dependencies: keel git-workflow, keel review, the host question tool.
 Main Functions: Define one-feature-per-branch discipline, do/don't rules, and the prohibited-shortcut taxonomy.
 Side Effects: None — this file is informational.
 -->
@@ -54,7 +54,7 @@ Git cannot store both `refs/heads/task/<task>` and `refs/heads/task/<task>/<subt
 - Test critical functionality
 - **Perform Deep Research** when encountering technical blockers, bug fixes, or how-to implementations. Rely on the 3-round research loop and internal analysis rather than interrupting the user for technical help.
 - When the user asks to compare against a repo, product, system, or familiar example, compare apples to apples: match the same surface, same feature class, same scope, and same evaluation criteria instead of blending unrelated strengths. For example, compare workflow versus workflow, memory versus memory, indexing versus indexing, proof surface versus proof surface, or homescreen versus homescreen.
-- **Clarify with runtime-safe controls**: If the business requirements, user stories, or product logic are ambiguous, ask the user directly in the normal turn, or use `request_user_input` when that control exists in the active runtime. For non-trivial implementation work, do this before coding whenever acceptance criteria, priorities, or tradeoffs are still unclear after repo inspection. It is critical that the agent and the user stay aligned to prevent "drifting" and building the wrong product. Do not guess the user's intent, and do not start implementation while the core product direction is still unclear.
+- **Clarify with runtime-safe controls**: If the business requirements, user stories, or product logic are ambiguous, ask the user directly in the normal turn, or use the host's native question tool (e.g. `AskUserQuestion`) when that control exists in the active runtime. For non-trivial implementation work, do this before coding whenever acceptance criteria, priorities, or tradeoffs are still unclear after repo inspection. It is critical that the agent and the user stay aligned to prevent "drifting" and building the wrong product. Do not guess the user's intent, and do not start implementation while the core product direction is still unclear.
 - Use appropriate skill profiles for task type
 
 ### Don't:

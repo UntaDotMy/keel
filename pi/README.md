@@ -116,7 +116,7 @@ On the first edit-class tool call in a fresh session, the Iron Law gate will blo
 
 0. **Read first.** Read the workspace SYSTEM_MAP and the owning file before claiming behavior; never propose changes against an imagined version.
 1. **Understand before building.** Restate what the request asks and research what is genuinely needed before writing code. No guessing, no building against an imagined spec.
-2. **Invoke relevant skills.** If there is even a 1% chance a skill applies, use the Skill tool before writing code or giving a final answer.
+2. **Invoke relevant skills.** When a skill plausibly matches, check its trigger before loading it; skip keyword-only matches that do not fit the task.
 3. **Find the root cause.** Trace the symptom end-to-end with file:line evidence and confirm the suspect is on that path before changing anything.
 
 ### Key Commands

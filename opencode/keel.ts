@@ -187,7 +187,7 @@ const KeelPlugin: Plugin = async ({ client, directory, $ }) => {
       // (Windows Defender scan on first run), so the gate call gets a larger
       // budget than the advisory calls.
       if (isEditClassTool(toolName)) {
-        const pathArg = toolPathFromPayload(input);
+        const pathArg = toolPathFromPayload(output.args);
         const gateArgs = ["--session", sessionID, "--cwd", cwd, "--tool", toolName];
         if (pathArg) gateArgs.push("--path", pathArg);
         const result = await runBridge(

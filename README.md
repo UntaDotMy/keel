@@ -17,7 +17,7 @@ Four rules are restated to the agent on every prompt. You cannot skip them.
 
 - **Read first.** Read SYSTEM_MAP, CLAUDE.md, the owning module, and the existing implementation. Do not propose changes against an imagined version of the file.
 - **Understand before building.** Restate what the request actually asks, confirm the user story, and research what is genuinely needed before writing code. No guessing, no assuming, no building against an imagined spec. Correct code that solved the wrong problem still gets thrown away — the research that prevents it is always cheaper than the rebuild.
-- **Invoke relevant skills.** If there is even a 1% chance a skill applies, use the Skill tool *before* writing code or giving a final answer. The cost of skipping a skill that did apply is shipping a regression.
+- **Invoke relevant skills.** When a skill plausibly matches, check its trigger before loading it; do not auto-load on keyword proximity. Docs-only or formatting-only changes generally need only a narrow proving check.
 - **Find the root cause.** Take the symptom as a starting point, not the spec. The real problem is usually one layer below what was asked. Trace the symptom end-to-end against the running code with file:line evidence before changing anything.
 
 ## Install in One Paste
@@ -654,17 +654,11 @@ For non-trivial tasks across all supported adapters (Codex, Antigravity, Claude 
 3. **Parent Implementation Contract**: The orchestrating parent validates handoffs and specifies goals, boundaries, exact files, disjoint workstreams, and validation commands before dispatching workers.
 4. **`implementer`** (workspace write, token-saving): Parallel instances with disjoint file ownership sets. Halts with `BLOCKED` if an ownership conflict arises.
 5. **`reviewer`** (read-only, deep reasoning gate): Evaluates the combined patch only after the parent integration check passes. Enforces causal defect proof chains (`trigger -> execution path -> violated contract -> observable result`).
-6. **`pusher`** (workspace write, authorization gate): Active only after final Reviewer pass, consolidated change summary, and explicit user confirmation (`nak commit dan push?`).
+6. **`pusher`** (workspace write, authorization gate): Active only after final Reviewer pass, consolidated change summary, and an explicit affirmative reply to the standalone prompt `Commit and push? (yes/no)`.
 
-### Provider-Aware Model Tiering
+### Model Selection
 
-For multi-agent workflows, Keel maps roles to model tiers based on the active provider. In Google Antigravity, `/boost` triggers the multi-agent reasoning pipeline:
-
-| Provider | Light Tasks / Implementers / Explorers | Critics / Architecture / Planners |
-| --- | --- | --- |
-| Google (Antigravity `/boost`) | `gemini-3.7-flash` (high) | `gemini-pro-thinking` (AGI / deep reasoning mode) / `gemini-3.8-flash` (high) |
-| OpenAI (Codex) | `gpt-5.6-luna` (max) | `gpt-6-Astra` (low) |
-| Anthropic (Claude Code) | `claude-3-5-haiku` | `claude-3-7-sonnet` (high effort) / `claude-3-opus` |
+Model choice and reasoning effort belong to the active host and workspace defaults; shared documentation does not pin provider or model names.
 
 ### Human 6-Step Design Workflow & Appllama Native Intelligence
 

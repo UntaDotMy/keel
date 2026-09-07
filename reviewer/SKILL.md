@@ -44,8 +44,8 @@ Also: Prompt Alignment First; Read Fresh Context; Re-Read Targeted Surface; One 
 4. Stateful bug ownership (SoT → effect, async/retry/cache).
 5–10. Quality / security / performance / release ladder / language gates / deps+hygiene — load matching files under `references/` for taxonomies.
 
-## Release Ladder (fail-closed)
-Smoke → Functional → Integration → UI → Load → Stress → Security. Each pass, justified N/A, or block. Reject happy-path-only, source-only when install path matters, local-only without hosted proof when applicable, workaround-only fixes, partial class fixes.
+## Release Ladder (fail-closed for non-trivial and release-facing work)
+For non-trivial and release-facing work, Smoke → Functional → Integration → UI → Load → Stress → Security. Each pass, justified N/A, or block. Reject happy-path-only, source-only when install path matters, local-only without hosted proof when applicable, workaround-only fixes, partial class fixes. Trivial docs-only, formatting-only, generated-only, single-line typo/comment, and explicitly throwaway work uses the narrowest proving check instead.
 
 ## Severity
 Blocker (Critical / High) · Major · Minor · Nit
@@ -56,11 +56,6 @@ Blocker (Critical / High) · Major · Minor · Nit
 - Attempt to falsify each suspicion before declaring it a finding. Style preferences or unreachable theoretical risks are never blockers.
 - Bounded fix loops: when `FIX REQUIRED` is emitted, allow at most two incremental re-review rounds on the combined patch. After two unresolved rounds, stop automatic fix dispatch and report the blocker for user direction.
 
-### Provider Model Recommendations
-- **Google (Antigravity)**: `/boost for gemini`: Gemini Pro / Thinking (AGI / deep reasoning mode) or `gemini-3.8-flash` (high).
-- **OpenAI (Codex)**: `gpt-6-Astra` (low).
-- **Anthropic (Claude Code)**: `claude-3-7-sonnet` (high effort).
-
 ## Output
 **Status:** Pass | Conditional Pass | Fail | FIX REQUIRED  
 **Evidence:** files, commands, key lines  
@@ -68,8 +63,8 @@ Blocker (Critical / High) · Major · Minor · Nit
 
 ## Pusher Gate & Authorization
 - Following a final `PASS` verdict, assemble the CONSOLIDATED FINAL CHANGE SUMMARY from the actual final diff.
-- The parent session ends with the explicit standalone prompt: `nak commit dan push?`
-- The Pusher agent is authorized to stage, commit, and push only after receiving clear affirmative user authorization in response to that exact prompt.
+- The parent session ends with the explicit standalone prompt: `Commit and push? (yes/no)`
+- Staging, committing, and pushing are authorized only after an explicit affirmative reply to that exact question.
 
 ## Fail-closed
 No Pass if critical applicable gate skipped/blocked. No Pass/Conditional if required ladder rung fail/blocked/unjustified skip. Missing unit tests → require lowest-layer regression + named uncovered edges.

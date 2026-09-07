@@ -502,6 +502,7 @@ jobs:
           BUILD_VERSION: ${{ needs.release-preflight.outputs.build_version }}
         run: |
           set -euo pipefail
+          markdown_tick='`'
           proof_root="release-proof"
           mkdir -p "$proof_root"
 
@@ -529,16 +530,16 @@ jobs:
           - Source commit: $SOURCE_SHA
           - Validate run: [$validate_run_id]($validate_url)
           - Release preflight required successful exact-head validation.
-          - Locked Rust validation and platform matrix are defined in \`.github/workflows/validate.yml\`.
+          - Locked Rust validation and platform matrix are defined in ${markdown_tick}.github/workflows/validate.yml${markdown_tick}.
           EOF
 
           cat > "$proof_root/review-summary.md" <<EOF
           # Review summary
 
           - Source commit: $SOURCE_SHA
-          - Review policy: native \`keel review pre-pr\` and strict closeout.
-          - Review contract: \`docs/review-closeout.md\`.
-          - Reviewed static baseline: \`review-closeout-baseline.json\`.
+            - Review policy: native ${markdown_tick}keel review pre-pr${markdown_tick} and strict closeout.
+            - Review contract: ${markdown_tick}docs/review-closeout.md${markdown_tick}.
+            - Reviewed static baseline: ${markdown_tick}review-closeout-baseline.json${markdown_tick}.
           - This file records the governing policy; it does not claim that a
             release job substituted for an independent review.
           EOF
@@ -558,7 +559,7 @@ jobs:
             echo "# Benchmark status snapshot"
             echo
             echo "- Source commit: $SOURCE_SHA"
-            echo "- Snapshot source: \`docs/benchmark-scorecard.json\`"
+            echo "- Snapshot source: ${markdown_tick}docs/benchmark-scorecard.json${markdown_tick}"
             echo
             echo '```json'
             cat docs/benchmark-scorecard.json

@@ -1,6 +1,6 @@
 ---
 name: preserve-existing-flow
-description: Traces ownership and current behavior in brownfield code before any edit, so new behavior layers through the existing owner instead of overwriting it. Use proactively before editing any existing source file — handlers, loops, state machines, transport flows, queues, or source-of-truth modules. Returns a working brief with current flow, preserved owner, drift risks, and the safe extension shape.
+description: Traces ownership and current behavior before brownfield source-behavior edits, so new behavior layers through the existing owner instead of overwriting it. Use for handlers, loops, state machines, transport flows, queues, or source-of-truth modules; skip docs-only, formatting-only, generated-only, and single-line typo or comment fixes unless they change behavior. Returns a working brief with current flow, preserved owner, drift risks, and the safe extension shape.
 when_to_use: Pre-edit ownership trace before changing existing behavior in a brownfield codebase.
 allowed-tools: Read, Grep, Glob, Bash(keel flow:*), Bash(keel memory:*), Bash(git diff:*), Bash(git log:*), Bash(git show:*)
 effort: high
@@ -12,7 +12,7 @@ effort: high
 Before editing brownfield code: trace ownership and current behavior, then **layer** new behavior through the existing owner — never overwrite the source of truth.
 
 ## When
-Any edit to existing handlers, loops, state machines, transport, queues, or SoT modules. **Proactive** before the first Write/Edit on existing source.
+Any edit to existing handlers, loops, state machines, transport, queues, or source-of-truth modules. **Proactive** before the first Write/Edit on existing source; skip docs-only, formatting-only, generated-only, and single-line typo or comment fixes unless they change behavior.
 
 ## Shared discipline
 `../_shared/common-discipline.md`. Surgical Changes applies: touch only the ownership path you traced.

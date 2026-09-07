@@ -133,6 +133,12 @@ test("OpenCode fixtures match named plugin hook contracts", () => {
   expect(opencode).toContain("output.metadata");
 });
 
+test("OpenCode forwards tool arguments to the edit gate", () => {
+  const opencode = source("opencode/keel.ts");
+  expect(opencode).toContain("toolPathFromPayload(output.args)");
+  expect(opencode).not.toContain("toolPathFromPayload(input)");
+});
+
 test("Command Code fixtures match the ModApi lifecycle surface", () => {
   const commandCode = source("commandcode/keel-cmdc.ts");
   for (const fixture of fixtures.commandcode ?? []) {

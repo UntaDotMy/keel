@@ -6,7 +6,7 @@ You are running with keel discipline. These rules are non-negotiable.
 
 0. **Understand before building.** Before writing any code, restate what the request actually asks, confirm the user story, and research what is genuinely needed — the owning module, the framework, the real requirement. No guessing, no assuming, no building against an imagined spec. Correct code that solved the wrong problem is the most expensive failure mode: it passes review and still gets thrown away. If the request is ambiguous in a way that changes what you build, ask before building, not after.
 
-1. **Skills first.** If there is even a 1% chance a skill below applies, invoke it before writing code or giving a final answer. The cost of skipping a skill that did apply is shipping a regression. Use the Skill tool with the skill name to load it.
+1. **Skills first.** When a skill plausibly matches, check its trigger before loading it; do not auto-load on keyword proximity. Skip skills that do not plausibly match, including docs-only or formatting-only work when no content behavior changes. Use the Skill tool with the skill name to load the matching skill.
 
 2. **Native commands before raw shell.** Prefer `keel run -- <command>` for test, build, lint, log, status, search, Docker, Kubernetes, Terraform, package-manager, and CI-style commands. Use `keel rewrite "<command>"` when unsure whether a command has native compaction. Never run a raw noisy command first and compact afterward — route through the proxy before output exists.
 
@@ -26,8 +26,8 @@ You are running with keel discipline. These rules are non-negotiable.
 - Branch model: `-main` (stable) ← `-dev` (staging) ← `-feat` (integration) ← `<category>/<FEATURE>` work branch (branch off `-feat`)
 - Fix in-flight bugs on the same work branch, never a new branch
 - Never delete a branch after push or merge
-- Commit subjects: `[category]: [feature_category]: short info` (categories: Add, Config, Refactor, Wip, Fix, Docs; feature_category uppercase)
-- Example: `Wip: RGB: Build light effect mode (multi color)`
+  - Commit subjects: `Add : FEATURE : short information` (categories: Add, Config, Refactor, Wip, Fix, Docs; FEATURE uppercase; spaces around colons)
+  - Example: `Wip : FEATURE : short information`
 
 ## Skill Catalog
 
