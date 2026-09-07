@@ -297,19 +297,29 @@ pub fn run_continuous_learning_if_due(claude_home: &Path, log: &mut dyn std::io:
                 return;
             }
         };
-    let current_count = observations.len();
-    if current_count == 0 {
+    let newest_observation_at_ms = observations
+        .iter()
+        .map(|observation| observation.recorded_at_ms)
+        .max()
+        .unwrap_or(0);
+    if newest_observation_at_ms == 0 {
         return;
     }
 
     let state_directory = claude_home.join("state").join("learning");
-    let marker_path = state_directory.join("last-observation-count");
+    // Use an event-time watermark; rolling counts decrease when old rows expire
+    // and otherwise delay the next cycle until the window fills again.
+    let marker_path = state_directory.join("last-observation-at-ms");
     let lock_path = state_directory.join("cycle.lock");
-    let previous_count = fs::read_to_string(&marker_path)
+    let previous_observation_at_ms = fs::read_to_string(&marker_path)
         .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok())
         .unwrap_or(0);
-    if current_count < previous_count.saturating_add(CONTINUOUS_LEARNING_INTERVAL) {
+    let new_observation_count = observations
+        .iter()
+        .filter(|observation| observation.recorded_at_ms > previous_observation_at_ms)
+        .count();
+    if new_observation_count < CONTINUOUS_LEARNING_INTERVAL {
         return;
     }
 
@@ -338,7 +348,7 @@ pub fn run_continuous_learning_if_due(claude_home: &Path, log: &mut dyn std::io:
     };
 
     let report = run_learning_cycle(claude_home, &CycleOptions::default(), log);
-    if let Err(error) = write_text(&marker_path, &current_count.to_string()) {
+    if let Err(error) = write_text(&marker_path, &newest_observation_at_ms.to_string()) {
         let _ = writeln!(log, "keel learn: continuous marker write failed: {error}");
     }
     drop(lock);
@@ -353,7 +363,7 @@ pub fn run_continuous_learning_if_due(claude_home: &Path, log: &mut dyn std::io:
         let _ = writeln!(
             log,
             "keel learn: continuous cycle observations={} instincts={} skills={} agents={} rolled_back={}",
-            current_count,
+            observations.len(),
             report.instincts_recorded,
             report.skills_generated,
             report.agents_generated,
@@ -1838,8 +1848,13 @@ mod tests {
             let marker = root
                 .join("state")
                 .join("learning")
-                .join("last-observation-count");
-            assert_eq!(fs::read_to_string(&marker).expect("continuous marker"), "3");
+                .join("last-observation-at-ms");
+            let first_marker = fs::read_to_string(&marker)
+                .expect("continuous marker")
+                .trim()
+                .parse::<u64>()
+                .expect("timestamp marker");
+            assert!(first_marker > 0);
             let store = RecordStore::new(root, INSTINCT_GROUP);
             assert!(
                 !store.list_records().expect("list instincts").is_empty(),
@@ -1849,8 +1864,42 @@ mod tests {
             run_continuous_learning_if_due(root, &mut log);
             assert_eq!(
                 fs::read_to_string(&marker).expect("stable continuous marker"),
-                "3"
+                first_marker.to_string()
             );
+        });
+    }
+
+    #[test]
+    fn continuous_cycle_uses_event_watermark_after_window_count_drops() {
+        isolated_home("continuous-watermark", |root| {
+            seed_bash("watermark-project", "cargo test", 3, 2);
+            let mut log = Vec::new();
+            run_continuous_learning_if_due(root, &mut log);
+            let marker = root
+                .join("state")
+                .join("learning")
+                .join("last-observation-at-ms");
+            let first_marker = fs::read_to_string(&marker)
+                .expect("first watermark")
+                .trim()
+                .parse::<u64>()
+                .expect("first timestamp");
+
+            // After old rows expire, the count checkpoint waits for six; the
+            // event watermark recognizes three new events and runs immediately.
+            let observations_dir = root.join("state").join("observations");
+            for entry in fs::read_dir(&observations_dir).expect("observations") {
+                fs::remove_file(entry.expect("observation entry").path()).expect("clear old rows");
+            }
+            seed_bash("watermark-project", "cargo test", 3, 2);
+            run_continuous_learning_if_due(root, &mut log);
+
+            let second_marker = fs::read_to_string(&marker)
+                .expect("second watermark")
+                .trim()
+                .parse::<u64>()
+                .expect("second timestamp");
+            assert!(second_marker > first_marker);
         });
     }
 

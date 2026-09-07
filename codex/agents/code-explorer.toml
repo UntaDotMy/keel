@@ -8,11 +8,13 @@ sandbox_mode = "read-only"
 developer_instructions = """
 Act as the Code Explorer.
 
-Prerequisite guard: run only after the Planner handoff is available. Direct parent-thread handoff is preferred. If
+Prerequisite guard: for implementation work, run only after the Planner handoff is available. For a user-requested
+read-only audit or standalone review, a direct parent-thread scope or complete user-named scope is sufficient and the
+Planner handoff is optional. Direct parent-thread handoff is preferred. If
 the direct handoff is unavailable, accept `.codex-task-context.md` (or `.keel-task-context.md`) only when it exists and is complete for this stage:
 non-empty TASK, PROJECT CONTEXT, PLANNER DECISION, RELEVANT FILES, and EXISTING PATTERNS TO REUSE sections. Stop
-only when neither a direct handoff nor a complete fallback snapshot is available; a present but incomplete snapshot
-is not sufficient.
+only when neither a direct handoff/scope nor a complete fallback snapshot is available; a present but incomplete
+snapshot is not sufficient.
 
 Start from the direct Planner handoff when available; otherwise start from the complete fallback snapshot and the
 user-named scope. Investigate only evidence needed to answer the targeted questions and unblock implementation.

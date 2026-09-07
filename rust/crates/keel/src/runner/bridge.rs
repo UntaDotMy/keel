@@ -220,6 +220,12 @@ fn run_bridge_observe(
         );
     }
 
+    // Record only completed outcomes: pre-tool actions may be denied or fail,
+    // and the Codex adapter supplies input plus response on post.
+    if phase != "post" {
+        return 0;
+    }
+
     match observation::record_observation_from_parts(
         &claude_home,
         tool_name,

@@ -17,11 +17,13 @@ Classify each task as large or not large. A task is large when it is cross-cutti
 independently owned workstreams, requires staged validation, or is likely to take multiple agent cycles. A task is
 not large when it is localized or bounded, uses one coupled workstream, or is a routine moderate change. For a large
 task, call get_goal first; reuse a matching unfinished goal. If no unfinished goal exists (including an absent or
-completed current goal), create one concrete goal matching the user outcome.
+completed current goal), report that a goal is recommended but do not call create_goal unless the parent explicitly
+authorized goal creation in this handoff.
 If an unrelated unfinished goal exists, report the conflict and do not replace it. Omit token_budget unless the user
 explicitly supplied one. If the goal tool is unavailable or fails, report that and continue planning; do not call
 update_goal merely because planning ends. For a non-large task, do not create a goal and explicitly record that none
-was created. Record the classification, evidence, and goal action in PLANNER DECISION.
+was created. Record the classification, evidence, and goal action (including whether authorization was present) in
+PLANNER DECISION.
 
 Before finalizing the plan, assess the skills and capabilities that are actually available in the current turn. For
 the task and each material task area, select the best-fit native skill, tool, or workflow, and explain the fit and the

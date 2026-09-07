@@ -29,7 +29,7 @@ impl CommandAdapter for SearchAdapter {
     ) -> CompactResult {
         let stdout_text = String::from_utf8_lossy(stdout);
         let stderr_text = String::from_utf8_lossy(stderr);
-        let grouped = compact_search_output(&stdout_text);
+        let grouped = compact_search_output(&stdout_text, &meta.args, &meta.cwd);
         let compacted = grouped != stdout_text || stdout_text.lines().count() > 40;
         make_result(
             self.name(),
@@ -43,15 +43,28 @@ impl CommandAdapter for SearchAdapter {
     }
 }
 
-fn compact_search_output(stdout: &str) -> String {
+fn compact_search_output(stdout: &str, args: &[String], cwd: &std::path::Path) -> String {
+    let count_mode = args
+        .iter()
+        .any(|arg| matches!(arg.as_str(), "--count" | "-c" | "--count-matches"));
+    let single_file = args
+        .iter()
+        .rev()
+        .find(|arg| !arg.starts_with('-') && !arg.contains('*'))
+        .cloned()
+        .unwrap_or_else(|| cwd.to_string_lossy().into_owned());
     let mut files = std::collections::BTreeMap::<String, Vec<String>>::new();
     let mut total = 0usize;
     for line in stdout.lines() {
-        if let Some((file, rest)) = split_match_line(line) {
-            total += 1;
+        if let Some((file, rest, count)) = split_match_line(line, count_mode, &single_file) {
+            total += count;
             let examples = files.entry(file.to_string()).or_default();
             if examples.len() < 3 {
-                examples.push(rest.to_string());
+                examples.push(if count_mode {
+                    format!("{rest} matches")
+                } else {
+                    rest.to_string()
+                });
             }
         }
     }
@@ -72,8 +85,17 @@ fn compact_search_output(stdout: &str) -> String {
     rendered
 }
 
-fn split_match_line(line: &str) -> Option<(&str, &str)> {
-    let search_start = if line.as_bytes().get(1) == Some(&b':') {
+fn split_match_line<'a>(
+    line: &'a str,
+    count_mode: bool,
+    single_file: &'a str,
+) -> Option<(&'a str, &'a str, usize)> {
+    let search_start = if line
+        .as_bytes()
+        .first()
+        .is_some_and(|byte| byte.is_ascii_alphabetic())
+        && line.as_bytes().get(1) == Some(&b':')
+    {
         2
     } else {
         0
@@ -84,7 +106,16 @@ fn split_match_line(line: &str) -> Option<(&str, &str)> {
     if file.is_empty() || rest.is_empty() {
         return None;
     }
-    Some((file, rest))
+    // `rg -n file` emits `line:text`, where the numeric prefix is not a file.
+    if file.bytes().all(|byte| byte.is_ascii_digit()) {
+        let _line_no = file.parse::<usize>().ok()?;
+        return Some((single_file, rest, 1));
+    }
+    if count_mode {
+        let count = rest.split(':').next()?.trim().parse::<usize>().ok()?;
+        return Some((file, rest.split(':').next()?.trim(), count));
+    }
+    Some((file, rest, 1))
 }
 
 #[cfg(test)]
@@ -107,6 +138,42 @@ mod tests {
         assert!(result.stdout.contains("40 matches in 2 files"));
         assert!(result.stdout.contains("src/lib.rs"));
         assert!(result.stdout.contains("omitted:"));
+    }
+
+    #[test]
+    fn single_file_line_output_does_not_treat_line_numbers_as_files() {
+        let result = SearchAdapter.compact(
+            b"1:first\n2:second\n",
+            b"",
+            0,
+            &RunMeta {
+                args: vec!["needle".into(), "src/lib.rs".into()],
+                ..meta(14)
+            },
+        );
+        assert!(result.stdout.contains("2 matches in 1 files"));
+        assert!(result.stdout.contains("src/lib.rs"));
+    }
+
+    #[test]
+    fn windows_paths_keep_drive_prefix() {
+        let result = SearchAdapter.compact(b"C:\\repo\\lib.rs:12:hit\n", b"", 0, &meta(22));
+        assert!(result.stdout.contains("C:\\repo\\lib.rs"));
+        assert!(result.stdout.contains("1 matches in 1 files"));
+    }
+
+    #[test]
+    fn count_output_uses_reported_count() {
+        let result = SearchAdapter.compact(
+            b"src/lib.rs:7\n",
+            b"",
+            0,
+            &RunMeta {
+                args: vec!["--count".into(), "needle".into()],
+                ..meta(14)
+            },
+        );
+        assert!(result.stdout.contains("7 matches in 1 files"));
     }
 
     fn meta(stdout_bytes: usize) -> RunMeta {

@@ -208,13 +208,23 @@ function extractCommand(toolInput: unknown): string {
   return "";
 }
 
+/** Map Codex's unified Bash name to the Windows parser used by the bridge. */
+function rewriteToolName(toolName: string): string {
+  return process.platform === "win32" && toolName.toLowerCase() === "bash"
+    ? "powershell"
+    : toolName;
+}
+
 function handlePreToolUse(input: CodexHookInput, isPre: boolean): string {
   // PostToolUse only records the official tool_response payload.
   if (!isPre) {
     const { sessionID, cwd } = resolveSessionContext(input);
     const currentToolName = toolName(input);
-    const observation = input.tool_response ?? input.tool_input;
-    const stdin = observation != null ? JSON.stringify(observation) : "{}";
+    // Preserve tool_input beside tool_response so learning keeps the action signature.
+    const stdin = JSON.stringify({
+      tool_input: input.tool_input ?? null,
+      tool_response: input.tool_response ?? null,
+    });
     const args = [
       "--session", sessionID, "--cwd", cwd, "--tool", currentToolName,
       "--phase", "post",
@@ -228,17 +238,6 @@ function handlePreToolUse(input: CodexHookInput, isPre: boolean): string {
   const { sessionID, cwd } = resolveSessionContext(input);
   const currentToolName = toolName(input);
 
-
-  // Fire-and-forget pre-tool observation; it cannot satisfy the post-tool marker.
-  const stdin = input.tool_input != null
-    ? JSON.stringify(input.tool_input)
-    : "{}";
-  const observeArgs = [
-    "--session", sessionID, "--cwd", cwd, "--tool", currentToolName,
-    "--phase", "pre",
-  ];
-  if (toolFailed(input)) observeArgs.push("--failed");
-  runBridgeWithStdin("observe", observeArgs, stdin);
 
   // Edit-class: Rust core is source of truth (evidence-based deny). This gate
   // is fail-CLOSED: an empty result means the bridge timed out or errored.
@@ -294,7 +293,7 @@ function handlePreToolUse(input: CodexHookInput, isPre: boolean): string {
     }
     if (command && !isAlreadyCompacted(command)) {
       const rewritten = parseRewriteResponse(
-        runBridgeWithStdin("rewrite", ["--tool", currentToolName], command),
+        runBridgeWithStdin("rewrite", ["--tool", rewriteToolName(currentToolName)], command),
       );
       if (rewritten) {
         return JSON.stringify({

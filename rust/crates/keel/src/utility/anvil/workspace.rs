@@ -132,9 +132,10 @@ fn is_owned_workspace_name(name: &str) -> bool {
 pub fn create_temporary_workspace(
     workspace_root: &Path,
     files: &[String],
-    _gates: &[String],
+    gates: &[String],
 ) -> Result<TemporaryWorkspace, String> {
     let root = canonical_workspace_root(workspace_root)?;
+    validate_gate_context(files, gates)?;
     let dir = loop {
         let candidate = std::env::temp_dir().join(format!(
             "anvil-ws-{}-{}",
@@ -148,6 +149,66 @@ pub fn create_temporary_workspace(
         }
     };
     populate_temporary_workspace(&root, TemporaryWorkspace { path: dir }, files)
+}
+
+/// Ensure a selected-file workspace contains the manifest/context required by
+/// its deterministic gates before a host builder is started. Anvil keeps the
+/// writable workspace intentionally narrow, so silently launching `cargo test`
+/// without a manifest only produces a late, misleading gate failure.
+fn validate_gate_context(files: &[String], gates: &[String]) -> Result<(), String> {
+    let selected = files
+        .iter()
+        .filter_map(|file| safe_relative_path(file).ok())
+        .map(|file| {
+            file.to_string_lossy()
+                .replace('\\', "/")
+                .to_ascii_lowercase()
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+
+    let mut required = Vec::new();
+    for gate in gates {
+        let command = gate.to_ascii_lowercase();
+        if command
+            .split_whitespace()
+            .any(|token| token == "cargo" || token.ends_with("/cargo"))
+        {
+            required.push("Cargo.toml");
+            if command.contains("--locked") || command.contains("--frozen") {
+                required.push("Cargo.lock");
+            }
+        }
+        if command
+            .split_whitespace()
+            .any(|token| token == "npm" || token.ends_with("/npm"))
+        {
+            required.push("package.json");
+        }
+        if command
+            .split_whitespace()
+            .any(|token| token == "go" || token.ends_with("/go"))
+        {
+            required.push("go.mod");
+        }
+        if command.split_whitespace().any(|token| token == "pytest")
+            && !selected.contains("pyproject.toml")
+            && !selected.contains("setup.cfg")
+            && !selected.contains("setup.py")
+        {
+            return Err(format!(
+                "anvil gate context is incomplete: `{gate}` needs pyproject.toml, setup.cfg, or setup.py in the selected files"
+            ));
+        }
+    }
+    for manifest in required {
+        if !selected.contains(&manifest.to_ascii_lowercase()) {
+            return Err(format!(
+                "anvil gate context is incomplete: gate `{}` requires {manifest} in the selected files",
+                gates.iter().find(|gate| gate.to_ascii_lowercase().contains(&manifest.to_ascii_lowercase())).map(String::as_str).unwrap_or("selected gates")
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn populate_temporary_workspace(
@@ -277,6 +338,45 @@ mod tests {
         let path = workspace.path().to_path_buf();
         drop(workspace);
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn rejects_build_gate_without_selected_manifest() {
+        let root = test_root();
+        std::fs::create_dir_all(root.path().join("src")).expect("src");
+        std::fs::write(root.path().join("src/main.rs"), "fn main() {}").expect("source");
+        let error = create_temporary_workspace(
+            root.path(),
+            &["src/main.rs".to_string()],
+            &["cargo test --workspace --locked".to_string()],
+        )
+        .expect_err("cargo gate must require selected manifests");
+        assert!(error.contains("Cargo.toml"), "actionable error: {error}");
+    }
+
+    #[test]
+    fn accepts_cargo_gate_when_selected_manifests_are_present() {
+        let root = test_root();
+        std::fs::create_dir_all(root.path().join("src")).expect("src");
+        std::fs::write(root.path().join("src/main.rs"), "fn main() {}").expect("source");
+        std::fs::write(
+            root.path().join("Cargo.toml"),
+            "[package]\nname='x'\nversion='0.1.0'\nedition='2021'\n",
+        )
+        .expect("manifest");
+        std::fs::write(root.path().join("Cargo.lock"), "# lockfile v4\n").expect("lockfile");
+        let workspace = create_temporary_workspace(
+            root.path(),
+            &[
+                "src/main.rs".to_string(),
+                "Cargo.toml".to_string(),
+                "Cargo.lock".to_string(),
+            ],
+            &["cargo test --workspace --locked".to_string()],
+        )
+        .expect("selected build context");
+        assert!(workspace.path().join("Cargo.toml").is_file());
+        assert!(workspace.path().join("Cargo.lock").is_file());
     }
 
     #[test]

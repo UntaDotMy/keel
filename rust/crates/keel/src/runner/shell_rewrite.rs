@@ -1858,6 +1858,21 @@ mod tests {
         assert!(bash.rewritten_command.contains("bash -lc"));
     }
 
+    #[test]
+    fn codex_unified_bash_name_can_be_routed_to_windows_powershell() {
+        assert_eq!(rewrite_shell_for_tool("Bash"), RewriteShell::Bash);
+        assert_eq!(
+            rewrite_shell_for_tool("powershell"),
+            RewriteShell::PowerShell
+        );
+
+        let decision =
+            rewrite_command_text_for_shell("git status --short", RewriteShell::PowerShell);
+        assert!(decision.supported);
+        assert!(decision.rewritten_command.contains("& "));
+        assert!(!decision.rewritten_command.contains("bash -lc"));
+    }
+
     /// The gate and the rewriter must read the same tool list. A name admitted by
     /// one and unknown to the other is how the PowerShell corruption shipped.
     #[test]

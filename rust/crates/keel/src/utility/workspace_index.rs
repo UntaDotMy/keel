@@ -153,8 +153,70 @@ pub fn refresh(
         return Ok(report);
     }
 
-    let sources = collect_sources_from_paths(&root, source_paths)?;
-    let active_paths: BTreeSet<String> = sources.iter().map(|source| source.path.clone()).collect();
+    // Parse only files whose metadata changed; timestamp-only editor touches
+    // otherwise made every refresh O(workspace).
+    let dirty_paths: Vec<PathBuf> = snapshots
+        .iter()
+        .filter(|snapshot| {
+            existing
+                .get(&snapshot.path)
+                .map(|stored| {
+                    stored.size != snapshot.size || stored.modified_at != snapshot.modified_at
+                })
+                .unwrap_or(true)
+        })
+        .map(|snapshot| root.join(&snapshot.path))
+        .collect();
+    let dirty_sources = collect_sources_from_paths(&root, dirty_paths)?;
+    let content_changed = dirty_sources.iter().any(|source| {
+        existing
+            .get(&source.path)
+            .map(|stored| stored.hash != source.hash || stored.size != source.size)
+            .unwrap_or(true)
+    });
+    let active_paths: BTreeSet<String> = snapshots
+        .iter()
+        .map(|snapshot| snapshot.path.clone())
+        .collect();
+    let has_stale_paths = existing.keys().any(|path| !active_paths.contains(path));
+
+    // With no content change or deletion, update metadata in place and preserve
+    // symbols/chunks/edges as the incremental fast path.
+    if !force && !commit_changed && !content_changed && !has_stale_paths {
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| format!("begin workspace index metadata refresh: {error}"))?;
+        for snapshot in &snapshots {
+            transaction
+                .execute(
+                    "UPDATE files SET modified_at = ?1, size = ?2 WHERE path = ?3",
+                    params![
+                        snapshot.modified_at.to_string(),
+                        snapshot.size as i64,
+                        snapshot.path
+                    ],
+                )
+                .map_err(|error| format!("update indexed metadata {}: {error}", snapshot.path))?;
+        }
+        transaction
+            .execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES ('updated_at_millis', ?1)",
+                params![now_millis().to_string()],
+            )
+            .map_err(|error| format!("stamp metadata refresh: {error}"))?;
+        transaction
+            .commit()
+            .map_err(|error| format!("commit workspace index metadata refresh: {error}"))?;
+        return Ok(report);
+    }
+
+    // Content changes require the complete source set for relationship rebuilds;
+    // unchanged files remain skipped by the record loop below.
+    let sources = if content_changed || force || commit_changed || has_stale_paths {
+        collect_sources_from_paths(&root, source_paths)?
+    } else {
+        dirty_sources
+    };
     let files_changed = sources.iter().any(|source| {
         existing
             .get(&source.path)
@@ -1582,6 +1644,38 @@ mod tests {
         assert_eq!(second.files_removed, 0);
         assert_eq!(second.edges_indexed, 0);
         assert_eq!(first_updated, second_updated);
+    }
+
+    #[test]
+    fn deleting_a_source_rebuilds_relationships_without_stale_edges() {
+        let (root, home) = temp_workspace("delete-source");
+        fs::write(
+            root.join("src/main.rs"),
+            "mod helper;\nfn main() { helper::helper(); }\n",
+        )
+        .expect("main");
+        fs::write(root.join("src/helper.rs"), "pub fn helper() {}\n").expect("helper");
+        refresh(&root, &home.to_string_lossy(), true).expect("initial refresh");
+        let index_path = database_path(&root, &home.to_string_lossy()).expect("index path");
+        let connection = open_connection(&index_path).expect("open index");
+        let edges_before: i64 = connection
+            .query_row("SELECT COUNT(*) FROM edges", [], |row| row.get(0))
+            .expect("edge count");
+        assert!(edges_before > 0);
+        drop(connection);
+
+        fs::remove_file(root.join("src/helper.rs")).expect("remove helper");
+        let report = refresh(&root, &home.to_string_lossy(), false).expect("delete refresh");
+        assert_eq!(report.files_removed, 1);
+        let connection = open_connection(&index_path).expect("reopen index");
+        let stale_edges: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM edges WHERE to_path = 'src/helper.rs'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("edge count after deletion");
+        assert_eq!(stale_edges, 0);
     }
 
     #[test]

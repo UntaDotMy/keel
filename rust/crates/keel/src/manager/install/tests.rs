@@ -2167,6 +2167,78 @@ fn uninstall_removes_dropped_first_party_surfaces_missing_from_inventory() {
 }
 
 #[test]
+fn uninstall_preserves_user_readme_custom_skill_files_and_rejects_inventory_escape() {
+    let (repo, home) = unique_paths("uninstall-ownership");
+    seed_repo(&repo);
+    write_skill_with_reference(&repo, "reviewer", "10-r.md");
+    install_from_paths("dev", &repo, &home, &InstallOverrides::default(), false).unwrap();
+
+    fs::write(home.join("README.md"), "my notes\n").unwrap();
+    let custom_file = home.join("skills/reviewer/custom.md");
+    fs::write(&custom_file, "user skill extension\n").unwrap();
+    let custom_skill = home.join("skills/my-custom/SKILL.md");
+    fs::create_dir_all(custom_skill.parent().unwrap()).unwrap();
+    fs::write(&custom_skill, "user skill\n").unwrap();
+
+    let inventory = managed_files_inventory_path(&home);
+    let mut lines = super::super::verify::read_inventory_lines(&inventory);
+    lines.push("../outside.txt".into());
+    lines.push("skills/../../outside.txt".into());
+    crate::runtime::write_lines(&inventory, &lines).unwrap();
+
+    let code = run_uninstall_command(
+        &["--claude-home".to_string(), home.display().to_string()],
+        &mut Vec::new(),
+        &mut Vec::new(),
+    );
+    assert_eq!(code, 0);
+    assert_eq!(
+        fs::read_to_string(home.join("README.md")).unwrap(),
+        "my notes\n"
+    );
+    assert_eq!(
+        fs::read_to_string(custom_file).unwrap(),
+        "user skill extension\n"
+    );
+    assert_eq!(fs::read_to_string(custom_skill).unwrap(), "user skill\n");
+    let _ = fs::remove_dir_all(&repo);
+    let _ = fs::remove_dir_all(&home);
+}
+
+#[test]
+fn install_delivers_agents_reference_guidance_and_preserves_existing_readme() {
+    let (repo, home) = unique_paths("guidance-links");
+    seed_repo(&repo);
+    write_skill_with_reference(&repo, "reviewer", "10-r.md");
+    let references = repo.join("AGENTS/references");
+    fs::create_dir_all(&references).unwrap();
+    fs::write(
+        repo.join("AGENTS.md"),
+        "See AGENTS/references/30-execution-strategy.md\n",
+    )
+    .unwrap();
+    fs::write(
+        references.join("30-execution-strategy.md"),
+        "execution guidance\n",
+    )
+    .unwrap();
+    fs::create_dir_all(&home).unwrap();
+    fs::write(home.join("README.md"), "user README\n").unwrap();
+
+    install_from_paths("dev", &repo, &home, &InstallOverrides::default(), false).unwrap();
+    assert_eq!(
+        fs::read_to_string(home.join("AGENTS/references/30-execution-strategy.md")).unwrap(),
+        "execution guidance\n"
+    );
+    assert_eq!(
+        fs::read_to_string(home.join("README.md")).unwrap(),
+        "user README\n"
+    );
+    let _ = fs::remove_dir_all(&repo);
+    let _ = fs::remove_dir_all(&home);
+}
+
+#[test]
 fn copy_path_preserving_keeps_source_and_destination() {
     let dir = unique_codex_test_dir("copypath");
     let src_file = dir.join("a.txt");
