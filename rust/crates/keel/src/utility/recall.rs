@@ -674,21 +674,57 @@ pub fn recall_database_path(claude_home: &Path) -> PathBuf {
 /// write`) land the file on disk synchronously, but historically the FTS index
 /// was only refreshed on a read-path call (`recall <query>` / `recall status`).
 /// That left a window where a freshly-written memory was durable but not yet
-/// searchable — the "I saved it but recall can't find it" gap. Calling this at
+/// searchable; the "saved memory is not searchable" gap. Calling this at
 /// the end of each write closes the window.
 ///
-/// Best-effort by contract: this opens the index and runs a forced
-/// `sync_recall_index` so a Keel-owned write invalidates every cached file hash
-/// immediately, but every failure is folded into the
-/// returned `Result` for the caller to log and ignore. A memory write must never
-/// fail because the index could not be opened or synced — the durable file on
-/// disk is the source of truth, and the next read-path sync will reconcile it
-/// anyway. The next-read-path-sync fallback is exactly why callers can treat an
-/// `Err` here as advisory.
+/// Best-effort by contract: this opens the index and runs the normal incremental
+/// sync. Callers that know the path they just wrote should use
+/// [`reindex_after_write_paths`] so a same-size/same-mtime replacement cannot be
+/// hidden by the integrity interval without forcing an unrelated corpus-wide
+/// reread. A memory write must never fail because the index could not be opened
+/// or synced. The durable file on disk is the source of truth, and the next
+/// read-path sync will reconcile it anyway. The next-read-path-sync fallback is
+/// exactly why callers can treat an `Err` here as advisory.
+#[allow(dead_code)]
 pub fn reindex_after_write(claude_home: &Path) -> Result<(), String> {
+    reindex_after_write_paths(claude_home, &[])
+}
+
+/// Synchronize the recall index after a durable write, invalidating only the
+/// known changed paths before the incremental scan. The public no-path wrapper
+/// above remains useful for embedders that do not retain the write result; the
+/// built-in memory writers pass their returned path here to avoid rereading all
+/// unchanged memory files.
+pub fn reindex_after_write_paths(
+    claude_home: &Path,
+    changed_paths: &[&Path],
+) -> Result<(), String> {
     let database_path = recall_database_path(claude_home);
     let mut connection = open_recall_connection(&database_path)?;
-    sync_recall_index(&mut connection, claude_home, true)?;
+    invalidate_recall_paths(&mut connection, changed_paths)?;
+    sync_recall_index(&mut connection, claude_home, false)?;
+    Ok(())
+}
+
+fn invalidate_recall_paths(connection: &mut Connection, paths: &[&Path]) -> Result<(), String> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let transaction = connection
+        .transaction()
+        .map_err(|database_error| format!("begin invalidation: {database_error}"))?;
+    for path in paths {
+        let path = path.to_string_lossy();
+        transaction
+            .execute(
+                "DELETE FROM file_state WHERE path = ?1",
+                params![path.as_ref()],
+            )
+            .map_err(|database_error| format!("invalidate {path}: {database_error}"))?;
+    }
+    transaction
+        .commit()
+        .map_err(|database_error| format!("commit invalidation: {database_error}"))?;
     Ok(())
 }
 
@@ -2114,6 +2150,73 @@ mod tests {
                     .any(|hit| hit.absolute_path.contains("rc-42.json")),
                 "reindex_after_write must index the new record so it is found with no read-path sync; hits: {:?}",
                 hits.iter().map(|h| &h.absolute_path).collect::<Vec<_>>()
+            );
+        });
+    }
+
+    #[test]
+    fn targeted_reindex_invalidates_only_the_written_file() {
+        run_with_home("keel-reindex-targeted", |claude_home| {
+            write_memory(
+                claude_home,
+                "memory/changed.json",
+                "{\"note\":\"before\"}\n",
+            );
+            write_memory(
+                claude_home,
+                "memory/unchanged.json",
+                "{\"note\":\"stable\"}\n",
+            );
+            let database_path = recall_database_path(claude_home);
+            let mut connection = open_recall_connection(&database_path).expect("open index");
+            sync_recall_index(&mut connection, claude_home, true).expect("initial sync");
+
+            let changed_path = claude_home.join("memory/changed.json");
+            fs::write(&changed_path, "{\"note\":\"after\"}\n").expect("replace content");
+            let metadata = fs::metadata(&changed_path).expect("changed metadata");
+            let modified_at = metadata
+                .modified()
+                .expect("changed mtime")
+                .duration_since(UNIX_EPOCH)
+                .expect("changed mtime epoch")
+                .as_millis() as i64;
+            let future = recall_now_millis().saturating_add(600_000);
+            let changed_path_text = changed_path.to_string_lossy().to_string();
+            connection
+                .execute(
+                    "UPDATE file_state SET modified_at = ?1, size = ?2, last_verified_at = ?3 WHERE path = ?4",
+                    params![modified_at, metadata.len() as i64, future, changed_path_text],
+                )
+                .expect("seed changed file metadata");
+            connection
+                .execute(
+                    "UPDATE file_state SET last_verified_at = ?1 WHERE path LIKE ?2",
+                    params![future, "%unchanged.json"],
+                )
+                .expect("seed unchanged verification timestamp");
+            drop(connection);
+
+            reindex_after_write_paths(claude_home, &[changed_path.as_path()])
+                .expect("targeted reindex");
+
+            let connection = open_recall_connection(&database_path).expect("reopen index");
+            let fts_query = build_fts_query("after").expect("changed query");
+            let hits = query_recall_index(&connection, &fts_query, 20, None).expect("query index");
+            assert!(
+                hits.iter()
+                    .any(|hit| hit.absolute_path.ends_with("changed.json")),
+                "targeted reindex must refresh the changed file"
+            );
+            let unchanged_verified: i64 = connection
+                .query_row(
+                    "SELECT last_verified_at FROM file_state WHERE path LIKE ?1",
+                    params!["%unchanged.json"],
+                    |row| row.get(0),
+                )
+                .expect("unchanged file state");
+            assert_eq!(
+                unchanged_verified, future,
+                "unchanged files must not be reread by a targeted write sync"
             );
         });
     }

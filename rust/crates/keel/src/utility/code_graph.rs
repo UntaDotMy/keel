@@ -22,6 +22,10 @@
 //! imports (bare module paths, external packages) are kept as node `imports`
 //! strings but never invented as edges. This keeps the impact closure honest.
 
+// Keep the direct filesystem builder as a compatibility/test surface; production
+// graph extraction comes from the canonical workspace index below.
+#![allow(dead_code)]
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write;
@@ -456,7 +460,7 @@ pub fn build_graph(root: &Path) -> CodeGraph {
 /// projects that durable data into its compact artifact shape. Refresh is
 /// incremental when metadata is unchanged and still performs the index's
 /// content/integrity checks before this read.
-fn build_graph_from_workspace_index(
+pub(crate) fn build_graph_from_workspace_index(
     root: &Path,
     claude_home_flag: &str,
 ) -> Result<CodeGraph, String> {
@@ -468,7 +472,11 @@ fn build_graph_from_workspace_index(
     let mut source_material = String::new();
     let mut nodes_by_path: BTreeMap<String, Node> = BTreeMap::new();
     let mut file_statement = connection
-        .prepare("SELECT path, language, hash, size, imports FROM files ORDER BY path")
+        .prepare(
+            "SELECT path, language, hash, size, imports FROM files \
+             WHERE language IN ('rust', 'javascript', 'typescript', 'python', 'go') \
+             ORDER BY path",
+        )
         .map_err(|error| format!("prepare indexed files: {error}"))?;
     let file_rows = file_statement
         .query_map([], |row| {
@@ -544,6 +552,9 @@ fn build_graph_from_workspace_index(
     for row in edge_rows {
         let (from, to, relation) =
             row.map_err(|error| format!("read indexed edge row: {error}"))?;
+        if !nodes_by_path.contains_key(&from) || !nodes_by_path.contains_key(&to) {
+            continue;
+        }
         edges.push(Edge {
             from,
             to,
@@ -670,7 +681,9 @@ impl CodeGraph {
             return None;
         }
         let source_fingerprint = value.get("sourceFingerprint")?.as_str()?.to_string();
-        if build_graph(&root).source_fingerprint != source_fingerprint {
+        let claude_home = artifact_claude_home(path);
+        let indexed_graph = build_graph_from_workspace_index(&root, &claude_home).ok()?;
+        if indexed_graph.source_fingerprint != source_fingerprint {
             return None;
         }
         let nodes: Vec<Node> = value
@@ -735,6 +748,37 @@ impl CodeGraph {
             edges,
         })
     }
+}
+
+/// Recover the harness home from a default-lane artifact path so validation
+/// reads the same workspace-index database that produced the artifact. Explicit
+/// in-repo/absolute output paths have no home metadata and use the default lane.
+fn artifact_claude_home(path: &Path) -> String {
+    let Some(code_graph_dir) = path.parent() else {
+        return String::new();
+    };
+    if code_graph_dir.file_name().and_then(|name| name.to_str()) != Some("code-graph") {
+        return String::new();
+    }
+    let Some(workspace_dir) = code_graph_dir.parent() else {
+        return String::new();
+    };
+    let Some(workspaces_dir) = workspace_dir.parent() else {
+        return String::new();
+    };
+    if workspaces_dir.file_name().and_then(|name| name.to_str()) != Some("workspaces") {
+        return String::new();
+    }
+    let Some(memories_dir) = workspaces_dir.parent() else {
+        return String::new();
+    };
+    if memories_dir.file_name().and_then(|name| name.to_str()) != Some("memories") {
+        return String::new();
+    }
+    memories_dir
+        .parent()
+        .map(|home| home.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 /// Resolve the default cached artifact path for a workspace root. Public so
@@ -1311,7 +1355,9 @@ mod tests {
         assert!(graph.edges.iter().any(|edge| {
             edge.from == "src/main.rs" && edge.to == "src/helper.rs" && edge.kind == "imports"
         }));
-        let artifact = root.join("code-graph.json");
+        let artifact = cached_artifact_path(&root, &home.to_string_lossy())
+            .expect("resolve indexed graph artifact");
+        fs::create_dir_all(artifact.parent().expect("artifact parent")).expect("artifact dir");
         fs::write(
             &artifact,
             serde_json::to_string_pretty(&graph.to_json()).expect("serialize indexed graph"),
