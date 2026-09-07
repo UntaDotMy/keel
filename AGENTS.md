@@ -34,18 +34,18 @@ This file is the entry point for the harness CLI on skill routing, native comman
 
 Model tier guidance (frontier/cheap/mid, provider-aware IDs): [`docs/model-tiers.md`](docs/model-tiers.md). Keel does **not** route models at runtime. Skills audit: [`docs/skills-audit-p1.md`](docs/skills-audit-p1.md).
 
-**ClarifyPacket (when gated):** artifact `clarify.packet.json` under `<keel-home>/memories/workspaces/<slug>/anvil/`. Arm with `keel anvil compile|run --clarify-required`, sentinel `clarify.required`, or an existing packet. Gate runs before **every** anvil lock write (`compile::write_lock`). Refuse on missing/malformed/`hard_block` (unanswered required)/`drift_check` failure/`locked_brief.goal` ≠ `--goal` — status `CLARIFY_BLOCKED`. AppSec: no symlink / out-of-bank packet or sentinel; secret-shaped answers redacted on Display — prefer env names in `locked_brief`. Orchestrator owns AskUser; **subagents escalate only** (see `running-anvil`, `subagent-driven-development`). Details: [`docs/compatibility-matrix.md`](docs/compatibility-matrix.md), [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
+**ClarifyPacket (when gated):** artifact `clarify.packet.json` under `<keel-home>/memories/workspaces/<slug>/anvil/`. Arm with `keel anvil compile|run --clarify-required`, sentinel `clarify.required`, or an existing packet. Gate runs before **every** anvil lock write (`compile::write_lock`). Refuse on missing/malformed/`hard_block` (unanswered required)/`drift_check` failure/`locked_brief.goal` ≠ `--goal`; status `CLARIFY_BLOCKED`. AppSec: no symlink / out-of-bank packet or sentinel; secret-shaped answers redacted on Display. Prefer env names in `locked_brief`. Orchestrator owns AskUser; **subagents escalate only** (see `running-anvil`, `subagent-driven-development`). Details: [`docs/compatibility-matrix.md`](docs/compatibility-matrix.md), [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
 
 ## Core Operating Contract
 
 These rules **must** be followed on every turn. They are short by design; the reference files carry the depth.
 
 0. **Understand before building.** Before writing any code, restate what the request actually asks, confirm the user story, and research what is genuinely needed: the owning module, the framework, and the real requirement. Never assume, never guess, never skip or shortcut a required research, test, review, sibling-scan, or official-contract check. No building against an imagined spec. Correct code that solved the wrong problem is the most expensive failure mode: it passes review and still gets thrown away. If the request is ambiguous in a way that changes what you build, ask before building, not after. This gates every rule below. There is no point routing a skill or refreshing memory for the wrong task. See [30-execution-strategy.md](AGENTS/references/30-execution-strategy.md) § 0 (ALIGN).
-1. **Skills first.** Route domain work through the installed `~/.claude/skills/<name>/SKILL.md` files. Run `preserve-existing-flow` before editing any existing source file. Run `reviewer` before closing non-trivial work.
+1. **Skills first.** Route domain work through the installed skills directory (`~/.claude/skills/<name>/SKILL.md` on Claude Code, `~/.zcode/skills/<name>/SKILL.md` on zcode). Run `preserve-existing-flow` before editing any existing source file. Run `reviewer` before closing non-trivial work; the trivial class (docs-only, formatting-only, generated-only, single-line typo or comment fixes, explicitly throw-away work) skips reviewer and relies on native or local validation.
 2. **Native commands before raw shell.** Prefer `keel anvil`, `keel run -- <command>`, `keel code-search search`, `keel code-search siblings` after a fix or implement, `keel flow ...`, and `keel review ...` when those surfaces own the job. See [10-native-command-routing.md](AGENTS/references/10-native-command-routing.md).
 3. **Memory before recommendations.** Resolve scoped memory and read `SYSTEM_MAP.md` before broad analysis: `keel memory scope resolve --create-missing --refresh-system-map`. See [30-execution-strategy.md](AGENTS/references/30-execution-strategy.md) for the full memory protocol.
 4. **Iterative loop.** ALIGN → RESEARCH → PLAN → IMPACT → IMPLEMENT → TEST → FIX → VERIFY → REVIEW → RECONCILE. For any code change, run `keel anvil` first (`compile` then `run --dry-run`; `running-anvil` skill). Do not hand-edit before Anvil. See [30-execution-strategy.md](AGENTS/references/30-execution-strategy.md).
-5. **Release ladder is fail-closed.** Smoke → Functional → Integration → UI → Load → Stress → Security. A required rung **must not** be skipped — mark not applicable only with explicit, evidence-backed reasoning. See [40-code-quality-and-testing.md](AGENTS/references/40-code-quality-and-testing.md).
+5. **Release ladder is fail-closed for non-trivial and release-facing work.** Smoke → Functional → Integration → UI → Load → Stress → Security. A required rung **must not** be skipped; mark not applicable only with explicit, evidence-backed reasoning. See [40-code-quality-and-testing.md](AGENTS/references/40-code-quality-and-testing.md).
 6. **Branch model + commit format.** `main` (stable) ← `dev` (staging) ← `feat` (integration) ← `task/<task>` work branches. Parallel subtask branches use flat sibling names such as `task/<task>-<subtask>`; Git cannot store `task/<task>` and `task/<task>/<subtask>` together. Do **not** use `feat/<task>` while bare `feat` exists for the same reason. Fixes stay on the same work branch. Never delete a branch after push or merge. Commit subjects: `Add : FEATURE : short information` (Category capitalized; FEATURE uppercase; spaces around colons). Legacy `add/` / `feature/` branches may continue with a preflight warning. See [50-delivery-and-prohibited-shortcuts.md](AGENTS/references/50-delivery-and-prohibited-shortcuts.md), [WORKFLOW.md](WORKFLOW.md), and [70-review-quality-gates-and-policies.md](AGENTS/references/70-review-quality-gates-and-policies.md).
 7. **Completion reconciliation.** Re-read the working brief and impacted surface before the final answer. Every explicit user requirement **must** map to evidence or a verified blocker. Do not present partial work as complete.
 8. **Writing Discipline.** All written output (docs, code comments, commit/PR text, review notes, chat) **must** follow: write less, be accurate not impressive, lead with the point, no filler or AI tells, stay on the asked scope. Full rule in `_shared/common-discipline.md` § Writing Discipline.
@@ -61,15 +61,11 @@ Git hooks are **mandatory** and must be installed before making any commits or p
 keel hook git-hooks install
 ```
 
-### What the Hooks Enforce
-
 | Hook | What It Checks | Consequence |
 |------|----------------|-------------|
 | **pre-commit** | Auto-detects project language (Rust/Go/Python/JS/C++) and runs format + lint | Commit is **blocked** if checks fail |
-| **pre-push** | Branch policy (blocks direct pushes to `main` or `dev`) | Push is **blocked**
-**Installation Note**: `keel hook git-hooks install` configures git hooks path but requires ` .githooks/` directory to exist in your repository. Copy from keel workspace or ensure the directory is present.
-
-### What the Hooks Enforce
+| **pre-push** | Branch policy (blocks direct pushes to `main` or `dev`) | Push is **blocked** if the branch policy check fails |
+**Installation Note**: `keel hook git-hooks install` configures the git hooks path but requires a `.githooks/` directory to exist in your repository. Copy from the keel workspace or ensure the directory is present.
 
 ### Bypassing Hooks
 

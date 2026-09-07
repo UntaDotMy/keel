@@ -40,7 +40,7 @@ Use this map to load only the references needed for the requested review target.
 | Pre-execution brainstorm/voting quality checks (parallel proposal quality, scoring rubric, no-surprise scope control) | 50-feedback-style-and-remediation.md + 10-requirements-traceability-and-prd-review.md + 40-testing-release-production-readiness-review.md |
 | Execution-strategy communication checks (clear ownership/steps, no confusing parallel claims) | 50-feedback-style-and-remediation.md + 40-testing-release-production-readiness-review.md |
 | Runtime feature-state gate checks (`claude features list`, `config.toml`, capability-dependent fallback decisions) | 40-testing-release-production-readiness-review.md + 99-source-anchors.md |
-| js_repl timeout/reset stability checks (Node compatibility, timeout pragmas, chunking, recovery evidence) | 40-testing-release-production-readiness-review.md + 99-source-anchors.md |
+| Host-native command-runner timeout/reset stability checks (runtime compatibility, timeout settings, chunking, recovery evidence) | 40-testing-release-production-readiness-review.md + 99-source-anchors.md |
 | RALPH loop compliance checks (Read, Assess, Lookup, Propose, Harden) | 10-requirements-traceability-and-prd-review.md + 50-feedback-style-and-remediation.md + 99-source-anchors.md |
 | Research reuse/freshness/refinement and memory-capture checks | 30-dependency-freshness-supply-chain-review.md + 50-feedback-style-and-remediation.md + 99-source-anchors.md |
 | Deliberate action/tooling checks (think-before-tool-use, failure fingerprinting, retry rationale) | 50-feedback-style-and-remediation.md + 40-testing-release-production-readiness-review.md |
@@ -48,7 +48,7 @@ Use this map to load only the references needed for the requested review target.
 | Low-reasoning exploration quorum checks (minimum two low-effort exploration streams plus synthesis consensus) | 50-feedback-style-and-remediation.md + 10-requirements-traceability-and-prd-review.md |
 | Medium-reasoning dual-stream synthesis checks (exactly two medium-effort streams, min 2 max 2, with synthesis output) | 50-feedback-style-and-remediation.md + 10-requirements-traceability-and-prd-review.md |
 | Final-reviewer role binding checks (final review must run in reviewer role, not default) | 50-feedback-style-and-remediation.md + 40-testing-release-production-readiness-review.md |
-| js_repl-tools-only compliance checks for agents (tool calls via js_repl + claude.tool flow) | 99-source-anchors.md + 40-testing-release-production-readiness-review.md |
+| Host-native-tools-only compliance checks for agents (tool calls through the active host's native tool flow) | 99-source-anchors.md + 40-testing-release-production-readiness-review.md |
 | Strict code-quality zero-tolerance checks (no small mistakes in readability/reuse/duplication/naming/maintainability) | 21-function-reuse-and-simplicity-review.md + 27-architecture-modularity-and-maintainability-review.md + 29-style-formatting-and-readability-review.md |
 | Anti-hallucination recovery harness checks (detect, re-read, reproduce, re-research, retry, re-validate) | 50-feedback-style-and-remediation.md + 99-source-anchors.md |
 | Summary-first handoff quality checks (compact packet, no raw full-prompt/history replay) | 50-feedback-style-and-remediation.md + 10-requirements-traceability-and-prd-review.md |
@@ -83,7 +83,7 @@ Use this map to load only the references needed for the requested review target.
 23. Validate low-reasoning exploration quorum evidence (minimum two low-effort streams plus synthesis consensus) when low exploration is used.
 24. Validate medium-reasoning dual-stream synthesis evidence (exactly two medium-effort streams, min 2 max 2, plus synthesized output) when medium analysis/context/review streams are used.
 25. Validate final-reviewer role binding evidence (reviewer role used for final review, not default).
-26. Validate js_repl-tools-only compliance for agents (tool calls via js_repl + claude.tool flow when applicable).
+  26. Validate host-native-tools-only compliance for agents (tool calls through the active host's native tool flow when applicable).
 27. Validate strict code-quality zero-tolerance handling (no unresolved small code-quality mistakes in strict categories).
 28. Validate anti-hallucination recovery harness evidence when uncertainty occurred (detect -> re-read -> reproduce -> re-research -> retry -> re-validate).
 29. Validate summary-first handoff quality (compact packet used and no raw full-prompt/history replay).
@@ -95,7 +95,7 @@ Use this map to load only the references needed for the requested review target.
 35. Validate execution strategy and session stability (sequential vs optional parallel, single-writer discipline, and checkpointed steps).
 36. Validate pre-execution brainstorm/voting loop quality when applicable (proposals, rubric scoring, tie handling, no-surprise scope check).
 37. Validate runtime feature-state gate handling (`claude features list`, `config.toml`, and capability-dependent fallback decisions).
-38. Validate js_repl timeout/reset stability handling when js_repl is used (Node compatibility, timeout_ms pragmas, chunking, and recovery evidence).
+  38. Validate host-native command-runner timeout/reset stability (runtime compatibility, timeout settings, chunking, and recovery evidence).
 39. Validate domain-first routing quality (clear specialist ownership + reviewer only when needed for audits or final validation).
 40. Validate flow-quality dimension alignment when process quality is in scope.
 41. Validate skill expertise depth and vague-prompt handling quality (for skill reviews).

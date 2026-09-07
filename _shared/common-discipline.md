@@ -63,8 +63,8 @@ Never remove or replace existing data, fields, columns, outputs, or records to f
 
 ## Windows Execution Guidance
 
-- Use the most direct supported tool surface in the active runtime; use `js_repl` with `claude.tool(...)` only when JavaScript-side orchestration is clearer or the runtime requires it.
-- Inside `claude.tool("exec_command", ...)`, prefer direct command invocation for ordinary commands instead of wrapping them in `powershell.exe -NoProfile -Command "..."`.
+- Use the most direct supported tool surface in the active runtime.
+- Prefer direct command invocation for ordinary commands instead of wrapping them in `powershell.exe -NoProfile -Command "..."`.
 - Use PowerShell only for PowerShell cmdlets/scripts or when PowerShell-specific semantics are required.
 - Use `cmd.exe /c` for `.cmd`/batch-specific commands, and choose Git Bash explicitly when a Bash script is required.
 - Use forward slashes in paths when possible. Git Bash is available but not assumed.
@@ -81,10 +81,7 @@ The block is split into two layers: four **behavioral pillars** that govern how 
 
 - **Understand before building.** Before writing any code, restate what the request actually asks and confirm the user story. Research what is genuinely needed: the language, framework, existing implementation, and the real requirement. Never assume, never guess, never skip or shortcut a required research, test, review, sibling-scan, or official-contract check. Do not build against an imagined spec. The most expensive mistake is not buggy code; it is correct code that solved the wrong problem, because it passes review and still has to be thrown away. The research that prevents it is always cheaper than the rebuild.
 - **Request fidelity (no invention).** Implement only what the user asked. Do not invent features, APIs, files, refactors, config knobs, or "while I'm here" improvements outside the request. Extra polish that the user did not name is scope creep, not quality.
-- **Ask when unclear (no silent drift).** If the request is unclear, conflicting, incomplete, or underspecified, **stop and ask the user** before coding. Never drift into guessing or inventing scope. Use the host's native question-asking mechanism:
-  - **Antigravity**: invoke `ask_question` with structured multiple-choice options, recommended defaults, and clear trade-off descriptions.
-  - **Claude Code**: invoke `AskFollowupQuestion` with structured selectable options.
-  - **Codex / OpenCode / CLI**: present an interactive prompt or concise multiple-choice question in the turn and stop before executing edits.
+- **Ask when unclear (no silent drift).** If the request is unclear, conflicting, incomplete, or underspecified, **stop and ask the user** before coding. Never drift into guessing or inventing scope. Use the host's native question-asking mechanism (`AskUserQuestion` on Claude Code and zcode; an interactive prompt or concise multiple-choice question in the turn on plain CLI hosts) and stop before executing edits.
 - **Package selection and maintainability (no reinventing the wheel).** Before implementing non-trivial functionality from scratch, research mature, battle-tested community packages:
   - Check authoritative registries: `pub.dev` (Dart/Flutter), `crates.io` (Rust), `npm` (TypeScript/JavaScript), `PyPI` (Python).
   - Vetting criteria: high popularity, active maintenance, strong pub/quality points (such as 140/140 on pub.dev), zero deprecated or discontinued markers, sound null-safety, and strict SDK version alignment.

@@ -68,12 +68,12 @@ Use `keel git-workflow await-ci --watch` (auto-detects `glab` then `gh`). It pol
 ```
 
 - **Category** (capitalized first letter): `Add`, `Config`, `Refactor`, `Wip`, `Fix`, `Docs`
-- **FEATURE_CATEGORY** (uppercase): e.g. `RGB`, `LED`, `ARGB`, `SENSOR`, `PROTOCOL`, `UI`, `HID`, `WATCHER`, `CATALOG`, `DEVICE`
+- **FEATURE_CATEGORY** (uppercase): use the concise feature name from the actual diff, such as `HOOK`, `MEMORY`, `REVIEW`, `CONFIG`, `CLI`, `DOCS`, `WORKFLOW`, or `TEST`
 - Spaces around all colons.
 - Examples:
-  - `Add : PROTOCOL : rgb sync ask and ack parse`
-  - `Wip : RGB : build light effect mode (multi color)`
-  - `Fix : UI : show rgb sync state on device card`
+    - `Add : HOOK : preserve native command routing`
+  - `Wip : MEMORY : refresh scoped recall index`
+  - `Fix : REVIEW : report blocked gate clearly`
 
 Keep commits small — one layer or concern per commit.
 
@@ -140,10 +140,10 @@ Never branch a subtask off `feat` directly.
 
 ```bash
 # Commit per layer, e.g.:
-#   Add : PROTOCOL : rgb sync ask and ack parse
-#   Add : UI : show rgb sync state on device card
+#   Add : HOOK : preserve native command routing
+#   Add : REVIEW : report blocked gate clearly
 git add <files>
-git commit -m "Add : PROTOCOL : rgb sync ask and ack parse"
+git commit -m "Add : HOOK : preserve native command routing"
 ```
 
 Verify locally first. Fix on the same branch. Only push and open a PR when explicitly requested.
@@ -307,9 +307,9 @@ Automation cannot prove semantic singlefeature scope perfectly. Human review and
 - If the task is tracked in phases or priorities such as P0, P1, and P2, do not advance to the next layer until the current layer is fully complete and re-audited.
 - If the audit still shows an open task, active plan item, unresolved requirement, non-terminal required lane, or missing proof, the work is not finished.
 - Do not trust the first green rerun after a fix as closure by itself; rerun the narrow proving checks and re-audit the broader impacted system before handoff.
-- Open a tracked working brief before stateful work begins: \`keel memory working-brief write --request "..." --constraints "..." --acceptance-criteria "..."\` (\`keel memory working-brief list\` to review open briefs). The brief keeps scope and acceptance evidence explicit.
-- Carry the delivery loop through Anvil: \`keel anvil compile --goal "..." --bar "..." --files "<owned files csv>"\` and \`keel anvil run\`; compile fails closed without an explicit candidate-file set. Use \`keel anvil sieve\` / \`keel anvil stamp\` when the delivery ran through Anvil.
-- Close out with proof: gate the branch with \`keel review pre-pr\`, then clear the honest-closeout gate with \`keel memory completion-gate check --brief-id <brief-id> --proof "..."\`.
+- Open a tracked working brief before stateful work begins: `keel memory working-brief write --request "..." --constraints "..." --acceptance-criteria "..."` (`keel memory working-brief list` to review open briefs). The brief keeps scope and acceptance evidence explicit.
+- Carry the delivery loop through Anvil: `keel anvil compile --goal "..." --bar "..." --files "<owned files csv>"` and `keel anvil run`; compile fails closed without an explicit candidate-file set. Use `keel anvil sieve` / `keel anvil stamp` when the delivery ran through Anvil.
+- Close out with proof: gate the branch with `keel review pre-pr`, then clear the honest-closeout gate with `keel memory completion-gate check --brief-id <brief-id> --proof "..."`.
 
 ## Spawned Agent Discipline
 
@@ -334,7 +334,7 @@ Automation cannot prove semantic singlefeature scope perfectly. Human review and
 ## Hosted PR Check Discipline
 
 - When a repository has CI or CD, do not treat local green as final proof by itself.
-- After opening or updating the PR, wait at least 20 seconds so the hosted lanes have time to appear, then inspect the real hosted checks with \`gh pr checks --watch\` or the equivalent hosted watcher.
+- After opening or updating the PR, wait at least 20 seconds so the hosted lanes have time to appear, then inspect the real hosted checks with `gh pr checks --watch` or the equivalent hosted watcher.
 - If a hosted lane fails, inspect the failing logs, identify the root cause, add or tighten the regression guard, push the fix to the same branch, and wait again.
 - Never rush a required spawned agent, required validation lane, or other required dependent lane. Careful review, debugging, and specialist work are slower by design, and waiting is better than self-certifying early.
 - When hosted lanes fail, capture the failing lane name, root cause, regression requirement, and rerun proof commands together in the working brief or PR notes so the repair path is explicit and reusable.

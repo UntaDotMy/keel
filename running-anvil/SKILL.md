@@ -16,14 +16,14 @@ No auto-git. Isolated workspaces. No web cockpit.
 
 ## Research before Anvil
 
-Anvil does not replace research enforcement — it sits atop it.
+Anvil does not replace research enforcement. It sits atop it.
 
 - **Reuse gate** → check `recall`/`memory research-cache` before any external search.
 - **R1 authoritative live web** (≥1 live pass for non-trivial external facts) → **R2 community/issues** → **R3 broad**; loop-back with refined terms until specific.
 - **Never trust stale memory or a generic answer**, never prompt the user for verifiable facts, websearch the exact error when stuck.
 - `research-enforcement` skill is the canonical reference for the above.
 
-Anvil's `sieve` validates gates deterministically; `stamp` selects probabilistically — but neither invents facts. If compile cannot name a fetchable bar, refuse and ask (or emit 2–3 named-bar options, then stop).
+Anvil's `sieve` validates gates deterministically; `stamp` selects probabilistically, but neither invents facts. If compile cannot name a fetchable bar, refuse and ask (or emit 2 to 3 named-bar options, then stop).
 
 ## The Loop
 
@@ -40,9 +40,9 @@ keel anvil compile --goal "CLI that pretty-prints JSON logs" --bar "jq 1.7" --fi
 - Splits into smallest independently testable pieces.
 - Prefer `critic:none` whenever a gate can decide; only `blind_ab` for taste/visual/UX. Lock `critic` is stamp strategy, not the `critic` technique skill.
 - Emits `anvil.lock.json` (schema: `version/bar/budget/models/criteria/pieces`), `prefix.md` + `prefix.sha256` (SHA256 of static part only, ≥2048 tokens), `gates/*` per piece.
-- Prefix forbids a one-site close. Isolated-cast `echo ok` is not completeness — after the change lands, run `keel code-search siblings` in the **real** workspace and handle every hit.
+- Prefix forbids a one-site close. Isolated-cast `echo ok` is not completeness. After the change lands, run `keel code-search siblings` in the **real** workspace and handle every hit.
 - `validate_lock`: named bar (not category word), `fetch` must be `cmd:|url:|file:|git:`, `allow_training_data:false` forbids `contributor/train/free-data` model ids.
-- If `--bar` missing, compile proposes ≤3 named fetchable bars and stops — do not invent one silently.
+- If `--bar` missing, compile proposes ≤3 named fetchable bars and stops. Do not invent one silently.
 - PrefixGuard renders twice; refusing if hash drifts.
 
 `--dry-run` always means validate/plan only (`writes=0 executes=0`); only live
@@ -55,15 +55,15 @@ absolute scoped lane, never a global `workspaces/anvil` lane.
 Vague or multi-path work must not reach a real compile without a completed ClarifyPacket.
 
 - Artifact ID: `clarify.packet.json` under `<keel-home>/memories/workspaces/<slug>/anvil/` (same bank as the lock).
-- Open the gate only for: `ambiguous_req` | `multi_path` | `irreversible_side_effect` | `missing_env_fact` | `conflicting_constraints`. Anti-spam: **1–4** questions, one packet, one pause.
+- Open the gate only for: `ambiguous_req` | `multi_path` | `irreversible_side_effect` | `missing_env_fact` | `conflicting_constraints`. Anti-spam: **1 to 4** questions, one packet, one pause.
 - Schema (min): `version`, `questions[]`, `answers[]` (UNTRUSTED), `locked_brief` (goal **immutable** after lock), `drift_check`, `hard_block`, `unanswered_policy: hard_block`.
-- Unanswered required questions ⇒ `hard_block` / status `CLARIFY_BLOCKED` — **no AFK continue**.
+- Unanswered required questions ⇒ `hard_block` / status `CLARIFY_BLOCKED`. **No AFK continue.**
 - `keel anvil compile --clarify-required …` and `keel anvil run --clarify-required …` refuse lock write when the packet is missing, malformed, hard-blocked, drifted, or goal-mismatched. An existing packet or `clarify.required` sentinel also arms the gate. Enforcement is inside lock write (`write_lock`), so run auto-compile cannot bypass it.
-- **Orchestrator** owns AskUser adapters (Claude AskUserQuestion, Cursor ask_user, Gemini AskQuestion / external pause). **Subagents escalate only** — never answer or skip.
+- **Orchestrator** owns AskUser adapters (Claude AskUserQuestion, Cursor ask_user, Gemini AskQuestion / external pause). **Subagents escalate only.** Never answer or skip.
 - Sanitize/size-bound answers; never shell-interpolate or eval user answers / AskUser payloads.
-- **Path jail:** `clarify.packet.json` and `clarify.required` must be regular files inside the anvil bank — symlinks and out-of-bank paths are refused (`CLARIFY_BLOCKED: refused`).
+- **Path jail:** `clarify.packet.json` and `clarify.required` must be regular files inside the anvil bank. Symlinks and out-of-bank paths are refused (`CLARIFY_BLOCKED: refused`).
 - **Secret redaction:** secret-shaped answer values are redacted on refuse Display paths; prefer env names in `locked_brief` (do not paste keys/tokens/PEM). Answers stay untrusted: sanitize/size-bound only; never shell-interpolate or eval.
-- Brainstorming remains Socratic design help — **not** a substitute for this gate.
+- Brainstorming remains Socratic design help. It is **not** a substitute for this gate.
 - Model tier guidance: `docs/model-tiers.md` (Keel does not route models at runtime).
 
 ### 2. Cast: N isolated builders (host-CLI builders, parallel)

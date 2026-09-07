@@ -91,7 +91,7 @@ Stderr includes status token `CLARIFY_BLOCKED` and one of:
 - missing `clarify.packet.json`
 - malformed packet
 - refused (symlink / non-file / resolves outside anvil bank)
-- `hard_block` — unanswered required questions (no AFK continue)
+- `hard_block`: unanswered required questions (no AFK continue)
 - `drift_check` failed (goal hash drift; goal is not an allowed delta)
 - `locked_brief.goal` immutable mismatch vs `--goal`
 

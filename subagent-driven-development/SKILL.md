@@ -70,7 +70,7 @@ Stay in the main thread when:
 
 ### ClarifyPacket (orchestrator-owned)
 
-Subagents **must not** answer, invent answers, or skip `clarify.packet.json`. Escalate to the main orchestrator. Unanswered required questions are `CLARIFY_BLOCKED` / hard_block — no AFK continue. See `running-anvil` and `docs/model-tiers.md`.
+Subagents **must not** answer, invent answers, or skip `clarify.packet.json`. Escalate to the main orchestrator. Unanswered required questions are `CLARIFY_BLOCKED` / hard_block. No AFK continue. See `running-anvil` and `docs/model-tiers.md`.
 
 ### 3. Integrate and re-verify in the main thread
 

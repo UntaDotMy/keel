@@ -17,10 +17,10 @@ Before anything that could touch code, config, or architecture:
 
 1. **Read first.** SYSTEM_MAP, CLAUDE.md, owning module, existing implementation — never propose against an imagined file.
 2. **Understand before building.** Restate the request, confirm the user story, research what is needed. No guessing, no invented scope. **If unclear or at drift risk — ask; never decide silently.** Never trust knowledge-base alone for this project's structure or stories.
-3. **Invoke relevant skills.** If there is even a 1% chance a skill applies, invoke it with the Skill tool **before** coding or a final answer.
+3. **Invoke relevant skills.** When a skill plausibly matches, check its trigger before loading it; do not auto-load on keyword proximity. Skip skills that do not plausibly match, including docs-only or formatting-only work when no content behavior changes.
 4. **Find the root cause.** Symptom ≠ specification. Trace end-to-end with file:line evidence; confirm the suspect is on that path before changing it. Persist the trace (working-brief / SYSTEM_MAP).
 
-Skipping a skill that applied ships a regression. Checking one that did not costs little.
+Load a skill when its trigger plausibly matches; skip keyword-only matches that do not fit the task.
 
 </EXTREMELY_IMPORTANT>
 

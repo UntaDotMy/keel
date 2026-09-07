@@ -58,7 +58,7 @@ Treat compaction as a normal lifecycle event, not as a surprise failure:
   - the scoped execution-trace artifact (for example `execution-trace.json` or `execution-trace-<agent-instance>.json`) for the latest admitted route plan and execution evidence
 - After compaction, resets, or continuity warnings, reload those scoped files before resuming implementation.
 - Reacquire the exact code surface with `keel code-search search` instead of replaying broad transcript history from memory.
-- If the reloaded artifacts and current repo state still leave business intent ambiguous, stop and use `request_user_input` or ask the user directly before continuing.
+- If the reloaded artifacts and current repo state still leave business intent ambiguous, stop and use the host's native question tool (e.g. `AskUserQuestion`) or ask the user directly before continuing.
 - Treat compaction recovery as complete only when the active task list, current requirement states, and next proving validation target are all reconstructed explicitly.
 
 ## Memory Layers

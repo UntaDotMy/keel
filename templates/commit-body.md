@@ -7,12 +7,12 @@ Side Effects: None.
 -->
 # Commit Body Template
 
-Subject line (strictly enforced): `<Category>: <FEATURE>: <short information>`
+Subject line (strictly enforced): `<Category> : <FEATURE> : <short information>`
 - `<Category>` (Title Case): Add | Config | Refactor | Wip | Fix | Docs
-- `<FEATURE>` (uppercase component): e.g. RGB, LED, ARGB, SENSOR
-- Example: `Wip: RGB: Build light effect mode (multi color)`
+- `<FEATURE>` (uppercase feature): use the concise feature name from the actual diff
+- Example: `Wip : FEATURE : short information`
 
-Note: the commit subject uses colons with spaces (`Add : RGB : sync all`); the branch name uses a slash (`task/rgb-sync`). Never mix the two.
+Note: the commit subject uses colons with spaces (`Add : HOOK : sync command routing`); the branch name uses a slash (`task/hook-routing`). Never mix the two.
 
 Problem
 <Only include when the diff fixes a concrete problem.>

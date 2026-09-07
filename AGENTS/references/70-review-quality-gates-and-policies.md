@@ -30,7 +30,7 @@ Side Effects: None — this file is informational.
    - Evaluates the combined change as one patch.
    - Reports only proven defects with causal chains: `trigger/state -> reachable execution path -> violated contract -> observable result`.
    - Limits fix cycles to at most 2 incremental re-review rounds.
-   - On final Reviewer `PASS`, provides a CONSOLIDATED FINAL CHANGE SUMMARY and ends with the standalone authorization prompt: `nak commit dan push?`.
+   - On final Reviewer `PASS`, provides a CONSOLIDATED FINAL CHANGE SUMMARY and ends with the standalone authorization prompt: `Commit and push? (yes/no)`. Stage, commit, or push only after an explicit affirmative reply to that exact question.
    - Pusher executes git shipping actions only upon explicit affirmative user authorization.
 
 **Security review required** for:
@@ -84,11 +84,11 @@ Before marking any task complete, verify:
 - Performance: `cargo bench` (Rust), `Lighthouse`, `WebPageTest` (web)
 ## Quality Gates
 
-Before completing any task, verify ALL of these:
+Before completing any **non-trivial or release-facing** task, verify ALL of these. Trivial work (docs-only, formatting-only, generated-only, single-line typo or comment fixes, explicitly throwaway work) needs only the narrowest proving check; the release ladder stays fail-closed for all non-trivial and release-facing work.
 1. Requirements met completely
 2. Code is clean and maintainable
 3. All linting/type errors resolved (not disabled)
-4. The mandatory release test ladder passed in order for every applicable rung: Smoke -> Functional -> Integration -> UI -> Load -> Stress -> Security
+4. For non-trivial and release-facing work, the mandatory release test ladder passed in order for every applicable rung: Smoke -> Functional -> Integration -> UI -> Load -> Stress -> Security
 5. No security issues or vulnerabilities
 6. No secrets or credentials committed
 7. No duplicate code
@@ -98,13 +98,7 @@ Before completing any task, verify ALL of these:
 
 ## Final Output
 
-For non-trivial tasks, append a compact **Learning Snapshot** when memory artifacts are available:
-1. What the harness learned today
-2. Mistakes encountered and whether they were resolved
-3. Tool-use mistakes that taught a reusable lesson
-4. Heuristic memory-health stats such as growth or momentum
-
-Treat this snapshot like a human progress check-in grounded in saved artifacts, not a claim of literal cognition.
+Capture learnings where they live, not in the chat reply: record mistakes, reusable findings, and rewarded/penalty patterns through `keel memory` (working briefs, research cache, instincts) as work lands. Surface a memory or learning recap in the final answer only when the user asks for a status or recap report.
 
 Before the final answer, perform a completion reconciliation pass. Do not describe work as finished until every explicit user requirement has been checked against current evidence. A progress, recap, audit, or "what is done or not done" request does not suspend that completion loop when fixable in-scope work remains, and do not default to optional follow-up offers when the user asked for completion.
 
@@ -121,7 +115,7 @@ Do not pin a model to achieve these settings. Preserve reasoning effort in repo-
 
 - Do not pin a specific model inside root the harness `agents/claude.yaml` files or generated agent-profile TOML. Let the workspace default model handle that choice.
 - Keep root the harness skill `reasoning_effort` at the repo-managed specialist baseline (`high`) for deeper review and verification passes.
-- Sync the 26 skill-owned agent profiles into `~/.claude/agent-profiles/*.toml` with their skill instructions attached, `model_reasoning_effort = "high"`, and no `model = ...` entry.
+  - Sync every skill-owned agent profile discovered from the repository manifest into `~/.claude/agent-profiles/*.toml` with its skill instructions attached, `model_reasoning_effort = "high"`, and no `model = ...` entry.
 - A local `memory-status-reporter` override from `~/.claude/.claude-skill-manager/local-home-agent-overrides.json` may narrow only that profile to `low` reasoning unless the user explicitly changes local policy.
 - When any the harness skill executes tools in this runtime, let the harness choose the best supported tool
   surface for the task.

@@ -277,7 +277,7 @@ pub(super) fn post_tool_batch_context() -> String {
 /// with the core operating contract instead of blind. Kept compact to avoid
 /// burning subagent context on a wall of text.
 pub(super) fn subagent_start_context() -> String {
-    "keel iron law for this subagent: (1) Read SYSTEM_MAP and the owning file before claiming behavior. (2) Understand before building — restate the request and research what is needed. (3) Invoke relevant skills if there is even a 1% chance one applies. (4) Find the root cause — trace with file:line evidence before changing anything. Trust the codebase, not your knowledge base. Native MCP tools available: system_map, recall, run_command.".to_string()
+    "keel iron law for this subagent: (1) Read SYSTEM_MAP and the owning file before claiming behavior. (2) Understand before building; restate the request and research what is needed. (3) Invoke relevant skills when a trigger plausibly matches; skip keyword-only matches. (4) Find the root cause; trace with file:line evidence before changing anything. Trust the codebase, not your knowledge base. Native MCP tools available: system_map, recall, run_command.".to_string()
 }
 
 // The PostToolBatch hook fires after a batch of tool calls resolves, just

@@ -458,11 +458,81 @@ pub(crate) fn iron_law_gate_decision(session_id: &str) -> Option<&'static str> {
     })
 }
 
-pub(crate) fn pre_tool_gate_decision(
+/// Canonical path fields emitted by the host adapters. Keep this list narrow:
+/// an unrecognized target shape must stay behind the Anvil gate.
+const EXPLICIT_TARGET_PATH_KEYS: &[&str] = &["path", "file_path", "filePath"];
+
+fn is_explicit_markdown_path(path: &str) -> bool {
+    let path = path.trim();
+    path.len() > ".md".len() && path.to_ascii_lowercase().ends_with(".md")
+}
+
+fn collect_explicit_target_paths<'a>(
+    value: &'a JsonDocument,
+    paths: &mut Vec<&'a str>,
+    saw_target_field: &mut bool,
+    saw_unknown_target: &mut bool,
+) {
+    match value {
+        JsonDocument::Object(object) => {
+            for (key, nested) in object {
+                if EXPLICIT_TARGET_PATH_KEYS.contains(&key.as_str()) {
+                    *saw_target_field = true;
+                    match nested {
+                        JsonDocument::String(path) if !path.trim().is_empty() => {
+                            paths.push(path);
+                        }
+                        _ => *saw_unknown_target = true,
+                    }
+                }
+                collect_explicit_target_paths(nested, paths, saw_target_field, saw_unknown_target);
+            }
+        }
+        JsonDocument::Array(values) => {
+            for nested in values {
+                collect_explicit_target_paths(nested, paths, saw_target_field, saw_unknown_target);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Full hook payloads can prove a docs-only edit without widening the bridge
+/// contract. Unknown or mixed target shapes deliberately return `false`.
+pub(super) fn markdown_only_edit_targets(input: &JsonDocument, tool_name: &str) -> bool {
+    if !is_edit_class_tool(tool_name) {
+        return false;
+    }
+
+    let mut paths = Vec::new();
+    let mut saw_target_field = false;
+    let mut saw_unknown_target = false;
+    collect_explicit_target_paths(
+        input,
+        &mut paths,
+        &mut saw_target_field,
+        &mut saw_unknown_target,
+    );
+
+    saw_target_field
+        && !saw_unknown_target
+        && !paths.is_empty()
+        && paths.iter().all(|path| is_explicit_markdown_path(path))
+}
+
+/// The bridge carries one explicit target path instead of the full hook JSON.
+/// Keep the same narrow markdown proof for that path; empty or unknown targets
+/// remain conservative and stay behind Anvil.
+pub(crate) fn markdown_only_edit_path(path: &str, tool_name: &str) -> bool {
+    is_edit_class_tool(tool_name) && is_explicit_markdown_path(path)
+}
+
+pub(crate) fn pre_tool_gate_decision_with_markdown_context(
     session_id: &str,
     tool_name: &str,
     command: Option<&str>,
     cwd: &str,
+    markdown_only_edit: bool,
 ) -> Option<&'static str> {
     if !tool_is_iron_law_gated(tool_name, command) {
         return None;
@@ -470,7 +540,7 @@ pub(crate) fn pre_tool_gate_decision(
     if let Some(reason) = iron_law_gate_decision(session_id) {
         return Some(reason);
     }
-    if anvil_gate_enabled() && is_edit_class_tool(tool_name) {
+    if anvil_gate_enabled() && is_edit_class_tool(tool_name) && !markdown_only_edit {
         let satisfied = resolve_claude_home("")
             .ok()
             .is_some_and(|home| anvil_satisfied_this_session(&home, session_id, cwd));
@@ -479,6 +549,17 @@ pub(crate) fn pre_tool_gate_decision(
         }
     }
     None
+}
+
+pub(crate) fn pre_tool_gate_decision(
+    session_id: &str,
+    tool_name: &str,
+    command: Option<&str>,
+    cwd: &str,
+) -> Option<&'static str> {
+    // Bridge callers do not pass the complete hook payload; keep them
+    // conservative and require Anvil for edit calls with unknown targets.
+    pre_tool_gate_decision_with_markdown_context(session_id, tool_name, command, cwd, false)
 }
 
 pub(super) fn run_hook_pre_tool_use(
@@ -512,6 +593,7 @@ pub(super) fn run_hook_pre_tool_use(
     };
 
     let tool_name = hook_tool_name(&input);
+    let markdown_only_edit = markdown_only_edit_targets(&input, tool_name);
 
     let command = tool_input_command(&input).unwrap_or("");
     let command_opt = if command.is_empty() {
@@ -532,7 +614,13 @@ pub(super) fn run_hook_pre_tool_use(
     } else {
         cwd
     };
-    if let Some(reason) = pre_tool_gate_decision(session_id, tool_name, command_opt, cwd) {
+    if let Some(reason) = pre_tool_gate_decision_with_markdown_context(
+        session_id,
+        tool_name,
+        command_opt,
+        cwd,
+        markdown_only_edit,
+    ) {
         emit_pretool_deny(reason, standard_output, standard_error);
         return 0;
     }

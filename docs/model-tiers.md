@@ -1,7 +1,7 @@
 # Model tiers (provider-aware guidance)
 
 **Date-stamped:** 2026-09-06  
-**Honesty bar:** Keel does **not** route models at runtime. Anvil lock placeholders stay `frontier` / `cheap` / `mid`. Host CLIs and agent profiles choose concrete IDs. This doc is guidance for humans and skills — not a live router.
+**Honesty bar:** Keel does **not** route models at runtime. Anvil lock placeholders stay `frontier` / `cheap` / `mid`. Host CLIs and agent profiles choose concrete IDs. This doc is guidance for humans and skills, not a live router.
 
 ## Anvil lock placeholders (unchanged)
 
@@ -25,7 +25,7 @@ Replace **Claude 3.x** recommendations. Prefer IDs that already appear in host c
 
 ### Notes
 
-- **Anthropic:** Do not document `claude-3-5-haiku`, `claude-3-7-sonnet`, or `claude-3-opus` as current. Haiku 4.5 retirement is not sooner than 2026-10-15 — plan a cheap-tier successor when that lands.
+- **Anthropic:** Do not document `claude-3-5-haiku`, `claude-3-7-sonnet`, or `claude-3-opus` as current. Haiku 4.5 retirement is not sooner than 2026-10-15. Plan a cheap-tier successor when that lands.
 - **OpenAI:** Existing Codex agent profiles pin `gpt-6-Astra` (planner/reviewer) and `gpt-5.6-luna` (implementer/explorer). Keep those pins; docs say Astra / 5.6.
 - **Google:** Flash class for light work; deep reasoning / Pro Thinking for critics. No eternal #1 benchmark claims.
 - **Z.ai:** `glm-5.3` / `glm-5.3-flash` for mid/cheap guidance when that host is in use.

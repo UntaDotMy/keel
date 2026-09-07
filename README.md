@@ -17,7 +17,7 @@ Four rules are restated to the agent on every prompt. You cannot skip them.
 
 - **Read first.** Read SYSTEM_MAP, CLAUDE.md, the owning module, and the existing implementation. Do not propose changes against an imagined version of the file.
 - **Understand before building.** Restate what the request actually asks, confirm the user story, and research what is genuinely needed before writing code. No guessing, no assuming, no building against an imagined spec. Correct code that solved the wrong problem still gets thrown away — the research that prevents it is always cheaper than the rebuild.
-- **Invoke relevant skills.** If there is even a 1% chance a skill applies, use the Skill tool *before* writing code or giving a final answer. The cost of skipping a skill that did apply is shipping a regression.
+- **Invoke relevant skills.** When a skill plausibly matches, check its trigger before loading it; do not auto-load on keyword proximity. Docs-only or formatting-only changes generally need only a narrow proving check.
 - **Find the root cause.** Take the symptom as a starting point, not the spec. The real problem is usually one layer below what was asked. Trace the symptom end-to-end against the running code with file:line evidence before changing anything.
 
 ## Install in One Paste
@@ -654,11 +654,12 @@ For non-trivial tasks across all supported adapters (Codex, Antigravity, Claude 
 3. **Parent Implementation Contract**: The orchestrating parent validates handoffs and specifies goals, boundaries, exact files, disjoint workstreams, and validation commands before dispatching workers.
 4. **`implementer`** (workspace write, token-saving): Parallel instances with disjoint file ownership sets. Halts with `BLOCKED` if an ownership conflict arises.
 5. **`reviewer`** (read-only, deep reasoning gate): Evaluates the combined patch only after the parent integration check passes. Enforces causal defect proof chains (`trigger -> execution path -> violated contract -> observable result`).
-6. **`pusher`** (workspace write, authorization gate): Active only after final Reviewer pass, consolidated change summary, and explicit user confirmation (`nak commit dan push?`).
+6. **`pusher`** (workspace write, authorization gate): Active only after final Reviewer pass, consolidated change summary, and an explicit affirmative reply to the standalone prompt `Commit and push? (yes/no)`.
 
-### Provider-Aware Model Tiering
+### Model Selection
 
-Keel does **not** route models at runtime. See [docs/model-tiers.md](./docs/model-tiers.md) for frontier/cheap/mid guidance and current provider IDs. Anvil lock keeps `frontier` / `cheap` / `mid`. For multi-agent workflows, map roles to model tiers based on the active provider. In Google Antigravity, `/boost` triggers the multi-agent reasoning pipeline:
+Model choice and reasoning effort belong to the active host and workspace defaults; shared documentation does not pin provider or model names.
+Keel does **not** route models at runtime. See [docs/model-tiers.md](./docs/model-tiers.md) for non-binding frontier/cheap/mid guidance and current provider IDs. Anvil lock keeps `frontier` / `cheap` / `mid`; host CLIs and workspace defaults choose concrete IDs. For multi-agent workflows, map roles to model tiers based on the active provider. In Google Antigravity, `/boost` triggers the multi-agent reasoning pipeline:
 
 | Provider | Light Tasks / Implementers / Explorers | Critics / Architecture / Planners |
 | --- | --- | --- |
@@ -673,7 +674,7 @@ Keel does **not** route models at runtime. See [docs/model-tiers.md](./docs/mode
 When the gate is armed, Keel refuses to write `anvil.lock.json` until `clarify.packet.json` is present, valid, not `hard_block`, drift-clean, and `locked_brief.goal` matches the compile/run `--goal`. Status token: `CLARIFY_BLOCKED`.
 
 - Arm: `keel anvil compile --clarify-required …` (or `anvil run --clarify-required …`), or place `clarify.required` / an existing packet in the anvil bank.
-- AppSec: packet and sentinel must be regular files inside the anvil bank (symlink / out-of-bank refused). Answer text is untrusted; secret-shaped values are redacted on refuse Display paths — prefer env names in `locked_brief`, do not paste keys/tokens/PEM.
+- AppSec: packet and sentinel must be regular files inside the anvil bank (symlink / out-of-bank refused). Answer text is untrusted; secret-shaped values are redacted on refuse Display paths. Prefer env names in `locked_brief`; do not paste keys/tokens/PEM.
 - Orchestrator owns AskUser adapters; subagents escalate only. Keel does not shell-interpolate answers.
 - Model tiers: [docs/model-tiers.md](./docs/model-tiers.md) (Keel does **not** route models). Skills audit: [docs/skills-audit-p1.md](./docs/skills-audit-p1.md).
 
@@ -710,7 +711,7 @@ The native CLI is the primary surface. The unified `memory` family verbs (`resea
 | Compatibility matrix | [./docs/compatibility-matrix.md](./docs/compatibility-matrix.md) |
 | Model tiers (provider-aware; no runtime routing) | [./docs/model-tiers.md](./docs/model-tiers.md) |
 | Skills audit (P1 keep/merge/retire) | [./docs/skills-audit-p1.md](./docs/skills-audit-p1.md) |
-| ClarifyPacket (gated anvil lock write) | `clarify.packet.json` under `<keel-home>/memories/workspaces/<slug>/anvil/` — enforced before **every** lock write (`anvil compile` and `anvil run` auto-compile). Arm with `--clarify-required`, `clarify.required`, or an existing packet. See `running-anvil`, [compatibility-matrix](./docs/compatibility-matrix.md), and [RUNBOOK](./docs/RUNBOOK.md) § ClarifyPacket |
+| ClarifyPacket (gated anvil lock write) | `clarify.packet.json` under `<keel-home>/memories/workspaces/<slug>/anvil/`; enforced before **every** lock write (`anvil compile` and `anvil run` auto-compile). Arm with `--clarify-required`, `clarify.required`, or an existing packet. See `running-anvil`, [compatibility-matrix](./docs/compatibility-matrix.md), and [RUNBOOK](./docs/RUNBOOK.md) § ClarifyPacket |
 | Why `keel` over native harness, runtime-shell comparator, and workflow-teaching comparator | [./docs/why-keel.md](./docs/why-keel.md) |
 | Competitive gap closure (named comparators + remaining work) | [./docs/competitive-gap-closure.md](./docs/competitive-gap-closure.md) |
 | Release notes | [./docs/release-notes.md](./docs/release-notes.md) |

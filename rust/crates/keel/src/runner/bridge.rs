@@ -400,8 +400,9 @@ fn run_bridge_pre_tool_use(
         return 2;
     }
     let (session, cwd) = resolve_bridge_args(&flags, standard_error);
-    let tool_name =
-        hook_lifecycle::effective_tool_name(flags.string_value("tool"), flags.string_value("path"));
+    let path = flags.string_value("path");
+    let tool_name = hook_lifecycle::effective_tool_name(flags.string_value("tool"), path);
+    let markdown_only_edit = hook_lifecycle::markdown_only_edit_path(path, tool_name);
     let command_flag = flags.string_value("command");
     // why: only a *shell* tool's gate decision reads the command, and an
     // inherited open stdin made this block until the adapter timed out.
@@ -433,7 +434,14 @@ fn run_bridge_pre_tool_use(
         return 0;
     }
     let session_id = session.trim();
-    match hook_lifecycle::pre_tool_gate_decision(session_id, tool_name, command, &cwd) {
+    let gate_decision = if markdown_only_edit {
+        hook_lifecycle::pre_tool_gate_decision_with_markdown_context(
+            session_id, tool_name, command, &cwd, true,
+        )
+    } else {
+        hook_lifecycle::pre_tool_gate_decision(session_id, tool_name, command, &cwd)
+    };
+    match gate_decision {
         Some(reason) => {
             let _ = writeln!(standard_output, "KEEL_GATE_DENY\n{reason}");
         }
@@ -740,6 +748,106 @@ mod tests {
             out.starts_with("KEEL_GATE_DENY"),
             "id-less session must deny: {out}"
         );
+    }
+
+    #[test]
+    fn bridge_markdown_path_skips_anvil_but_source_path_does_not() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let home = std::env::temp_dir().join(format!(
+            "keel-bridge-markdown-gate-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&home).expect("create test claude home");
+
+        let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
+        let previous_iron = std::env::var("KEEL_IRON_LAW_GATE").ok();
+        let previous_anvil = std::env::var("KEEL_ANVIL_GATE").ok();
+        std::env::set_var("CLAUDE_TARGET_OVERRIDE", &home);
+        std::env::set_var("KEEL_IRON_LAW_GATE", "off");
+        std::env::set_var("KEEL_ANVIL_GATE", "on");
+
+        let run_gate = |path: &str| {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let code = run_bridge_command(
+                &[
+                    "pre-tool-use".to_string(),
+                    "--session".to_string(),
+                    "bridge-markdown-session".to_string(),
+                    "--cwd".to_string(),
+                    "C:/repo".to_string(),
+                    "--tool".to_string(),
+                    "Edit".to_string(),
+                    "--path".to_string(),
+                    path.to_string(),
+                ],
+                &mut stdout,
+                &mut stderr,
+            );
+            (code, String::from_utf8_lossy(&stdout).into_owned(), stderr)
+        };
+
+        let (markdown_code, markdown_output, markdown_error) = run_gate("README.md");
+        assert_eq!(
+            markdown_code, 0,
+            "markdown bridge gate must exit 0: {markdown_error:?}"
+        );
+        assert_eq!(
+            markdown_output.trim(),
+            "KEEL_GATE_ALLOW",
+            "explicit markdown bridge edits should skip only Anvil: {markdown_output}"
+        );
+
+        let (source_code, source_output, source_error) = run_gate("src/lib.rs");
+        assert_eq!(
+            source_code, 0,
+            "source bridge gate must exit 0: {source_error:?}"
+        );
+        assert!(
+            source_output.contains("Anvil"),
+            "source bridge edits must remain Anvil-gated: {source_output}"
+        );
+
+        let (empty_code, empty_output, empty_error) = run_gate("");
+        assert_eq!(
+            empty_code, 0,
+            "empty-path bridge gate must exit 0: {empty_error:?}"
+        );
+        assert!(
+            empty_output.contains("Anvil"),
+            "empty-path bridge edits must remain conservatively Anvil-gated: {empty_output}"
+        );
+
+        std::env::set_var("KEEL_IRON_LAW_GATE", "strict");
+        let (iron_code, iron_output, iron_error) = run_gate("README.md");
+        assert_eq!(
+            iron_code, 0,
+            "Iron Law bridge gate must exit 0: {iron_error:?}"
+        );
+        assert!(
+            iron_output.contains("Iron Law"),
+            "markdown path must not bypass the Iron Law gate: {iron_output}"
+        );
+
+        match previous_home {
+            Some(value) => std::env::set_var("CLAUDE_TARGET_OVERRIDE", value),
+            None => std::env::remove_var("CLAUDE_TARGET_OVERRIDE"),
+        }
+        match previous_iron {
+            Some(value) => std::env::set_var("KEEL_IRON_LAW_GATE", value),
+            None => std::env::remove_var("KEEL_IRON_LAW_GATE"),
+        }
+        match previous_anvil {
+            Some(value) => std::env::set_var("KEEL_ANVIL_GATE", value),
+            None => std::env::remove_var("KEEL_ANVIL_GATE"),
+        }
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]

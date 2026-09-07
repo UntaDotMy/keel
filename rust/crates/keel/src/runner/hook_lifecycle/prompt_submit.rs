@@ -2,16 +2,6 @@
 
 use super::*;
 
-pub(super) fn user_prompt_submit_core() -> String {
-    "Understand before building: research what is needed and avoid building the wrong thing. \
-No assumptions: suspicion is a hypothesis, not a finding; trace the symptom and root cause before patching, never jump from \"this may be the case\".\n\
-Skill tool: invoke a relevant skill before responding; use Anvil for delivery.\n\
-Memory & learning: Recall first. Use Memory-first navigation, write a Working brief for non-trivial work, Save durable learnings, run the Learn loop, then completion-gate and reviewer before close.\n\
-Request fidelity: only the requested scope. Ask when unclear. Never trust knowledge-base alone. Preserve existing data. Code comments are contracts only.\n\
-Implementation discipline: Think Before Coding, Simplicity First, Surgical Changes, Goal-Driven Execution."
-        .to_string()
-}
-
 /// Per-prompt action strip: what is enforced this turn (not optional prose).
 pub(super) const USER_PROMPT_ENFORCEMENT_STRIP: &str = "\
 ENFORCED THIS TURN (mandatory on every turn): FOLLOW THE IRON LAW. USE KEEL.\n\
@@ -20,9 +10,9 @@ Never assume, never guess, never skip required tests, review, or sibling scans.\
 PreToolUse DENIES Edit/Write and shell work until a keel research tool runs. After edits, run code_search siblings.";
 
 pub(crate) fn user_prompt_submit_context(prompt_text: &str) -> String {
-    // Build optional mid-body pointers first, then force the enforcement strip
-    // as the absolute first lines of additionalContext so models cannot miss it.
-    let mut body = user_prompt_submit_core();
+    // Build optional pointers first, then put the enforcement strip first so models cannot miss it.
+    // The full operating contract stays in canonical workspace/SessionStart context; only the strip repeats per prompt.
+    let mut body = String::new();
     let claude_home = resolve_claude_home("").ok();
 
     // Name one matched skill; its body remains on-demand instead of becoming
@@ -51,7 +41,11 @@ pub(crate) fn user_prompt_submit_context(prompt_text: &str) -> String {
     }
 
     // Absolute lead: hard enforcement strip (must be first bytes of context).
-    format!("{USER_PROMPT_ENFORCEMENT_STRIP}\n\n{body}")
+    if body.is_empty() {
+        USER_PROMPT_ENFORCEMENT_STRIP.to_string()
+    } else {
+        format!("{USER_PROMPT_ENFORCEMENT_STRIP}\n\n{body}")
+    }
 }
 
 /// Fallback per-prompt skill pointer used when the matched skill's body cannot

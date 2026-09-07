@@ -1,7 +1,7 @@
 //! ClarifyPacket gate for every anvil lock write (SUPERHARNESS P1).
 //!
 //! Artifact path (product ID): `clarify.packet.json` under the workspace anvil
-//! bank — `<keel-home>/memories/workspaces/<slug>/anvil/clarify.packet.json`.
+//! bank at `<keel-home>/memories/workspaces/<slug>/anvil/clarify.packet.json`.
 //!
 //! Answers and AskUser payloads are untrusted: sanitize + size-bound only.
 //! Never shell-interpolate, eval, or treat answer text as code.
@@ -14,7 +14,7 @@ use serde_json::Value as JsonValue;
 
 use crate::utility::hashing::fnv1a64_hex;
 
-/// Product artifact file name (Designer / PRD contract — do not rename casually).
+/// Product artifact file name (Designer / PRD contract). Do not rename casually.
 pub const CLARIFY_PACKET_FILE: &str = "clarify.packet.json";
 /// Sentinel that marks the gate required before a packet is written.
 pub const CLARIFY_REQUIRED_SENTINEL: &str = "clarify.required";
@@ -245,9 +245,8 @@ fn ensure_bank_regular_file(
     let bank = anvil_dir
         .canonicalize()
         .map_err(|e| ClarifyGateError::Malformed(format!("canonicalize anvil bank: {e}")))?;
-    // Canonicalize the path itself only after rejecting symlinks so we never
-    // follow a jailbreak link via read/copy. Parent-first is unnecessary once
-    // the leaf is confirmed non-symlink, but still require under-bank.
+    // Canonicalize only after rejecting symlinks, so a jailbreak link is not
+    // followed via read/copy. Require the confirmed leaf to remain under-bank.
     let canonical = path.canonicalize().map_err(|e| {
         ClarifyGateError::Refuse(format!(
             "{label} could not be resolved inside anvil bank: {e}"

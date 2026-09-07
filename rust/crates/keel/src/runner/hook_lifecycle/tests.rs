@@ -513,11 +513,8 @@ fn system_map_refresh_does_not_fire_on_per_prompt_or_per_tool_events() {
 
 #[test]
 fn user_prompt_submit_emits_research_first_pointer() {
-    // UserPromptSubmit lands per-prompt, so the injected text must be
-    // short and pointer-shaped. The iron law (trust the codebase, invoke
-    // skills before responding, find root cause) restates the bootstrap
-    // skill that SessionStart already delivered, so it stays top-of-mind
-    // on each turn.
+    // UserPromptSubmit is per-prompt, so keep injected text short and pointer-shaped.
+    // The canonical contract arrives through workspace/SessionStart context; base path keeps only the enforcement strip.
     //
     // Production path: `run_hook_command` routes the slug to
     // `run_hook_user_prompt_submit`, which reads stdin for `session_id`
@@ -586,12 +583,14 @@ fn user_prompt_submit_emits_research_first_pointer() {
         "UserPromptSubmit must state the contract is mandatory, not optional"
     );
 
+    assert_eq!(
+        context, USER_PROMPT_ENFORCEMENT_STRIP,
+        "an empty prompt must not receive a duplicated operating-contract body"
+    );
+
     assert!(context.contains("Research-first"));
     assert!(context.contains("SYSTEM_MAP"));
     assert!(context.contains("trust the codebase"));
-    assert!(context.contains("Skill tool"));
-    assert!(context.contains("root cause"));
-    assert!(context.contains("No assumptions"));
 
     // MCP-tool advertisement — every per-prompt injection must name the
     // always-available keel MCP tools so the model reaches for
@@ -613,113 +612,6 @@ fn user_prompt_submit_emits_research_first_pointer() {
     assert!(
         context.contains("context_brief"),
         "UserPromptSubmit must advertise context_brief"
-    );
-
-    // Memory & learning loop — iron law is incomplete without durable memory.
-    assert!(
-        context.contains("Memory & learning"),
-        "UserPromptSubmit must name the Memory & learning section"
-    );
-    assert!(
-        context.contains("Recall first"),
-        "UserPromptSubmit must require recall before claiming memory"
-    );
-    assert!(
-        context.contains("Working brief"),
-        "UserPromptSubmit must require a working brief on non-trivial work"
-    );
-    assert!(
-        context.contains("Save durable learnings"),
-        "UserPromptSubmit must require saving durable learnings to disk"
-    );
-    assert!(
-        context.contains("Learn loop"),
-        "UserPromptSubmit must mention the learn loop"
-    );
-    assert!(
-        context.contains("completion-gate"),
-        "UserPromptSubmit must mention completion-gate before close"
-    );
-
-    // Understand-before-building — the per-prompt hook must require the
-    // model to understand the request and research what is needed before
-    // writing code, so it does not build the wrong thing. This is distinct
-    // from the root-cause/debugging cue below: it governs the front of the
-    // task (what to build), not the middle (where the bug is). It lands
-    // per prompt because the SessionStart bootstrap drops out of the
-    // working window after a few turns.
-    assert!(
-        context.contains("Understand before building"),
-        "UserPromptSubmit must name the understand-before-building rule"
-    );
-    assert!(
-        context.contains("building the wrong thing"),
-        "UserPromptSubmit must state that research prevents building the wrong thing"
-    );
-
-    // Deep-dive cues — the per-prompt pointer must keep the model from
-    // jumping from suspicion to fix. These two phrases name the failure
-    // mode ("this may be the case" → patch) and the required discipline
-    // (trace the symptom and confirm the suspect is on that path before
-    // changing it). They live here, not just in the bootstrap, because
-    // SessionStart context drops out of the working window after a few
-    // turns while UserPromptSubmit lands per prompt.
-    assert!(
-        context.contains("suspicion is a hypothesis"),
-        "UserPromptSubmit must restate that suspicion is a hypothesis, not a finding"
-    );
-    assert!(
-        context.contains("trace the symptom"),
-        "UserPromptSubmit must require tracing the symptom before naming a root cause"
-    );
-    assert!(
-        context.contains("this may be the case"),
-        "UserPromptSubmit must name the \"this may be the case\" jump as the failure mode"
-    );
-
-    // Implementation-discipline pillars — UserPromptSubmit lands per
-    // prompt, so naming the four pillars by name keeps them top-of-mind
-    // even after the SessionStart bootstrap drops out of the model's
-    // working window. The full text lives in the bootstrap and in
-    // _shared/common-discipline.md; this hook only restates the names.
-    assert!(
-        context.contains("Think Before Coding"),
-        "UserPromptSubmit must name the Think Before Coding pillar"
-    );
-    assert!(
-        context.contains("Simplicity First"),
-        "UserPromptSubmit must name the Simplicity First pillar"
-    );
-    assert!(
-        context.contains("Surgical Changes"),
-        "UserPromptSubmit must name the Surgical Changes pillar"
-    );
-    assert!(
-        context.contains("Goal-Driven Execution"),
-        "UserPromptSubmit must name the Goal-Driven Execution pillar"
-    );
-
-    // Vibecoding guards — request fidelity, ask-when-unclear, knowledge-base distrust,
-    // memory-first navigation, useful comments.
-    assert!(
-        context.contains("Request fidelity"),
-        "UserPromptSubmit must name request fidelity (no invented extras)"
-    );
-    assert!(
-        context.contains("Ask when unclear"),
-        "UserPromptSubmit must require asking the user when unclear or drift-risk"
-    );
-    assert!(
-        context.contains("Never trust knowledge-base alone"),
-        "UserPromptSubmit must forbid treating training data as this project's truth"
-    );
-    assert!(
-        context.contains("Memory-first navigation"),
-        "UserPromptSubmit must require memory-first navigation before blind scans"
-    );
-    assert!(
-        context.contains("Code comments"),
-        "UserPromptSubmit must require contract comments, not summaries"
     );
 
     let event_name = output
@@ -759,6 +651,16 @@ fn user_prompt_context_stays_within_per_turn_token_budget() {
     assert!(
         !context.contains("--- begin "),
         "per-prompt routing may name a skill but must not inline its body"
+    );
+    assert!(
+        context.contains(WORK_INTENT_REMINDER),
+        "code-change prompts must retain the targeted work-intent pointer"
+    );
+    assert!(
+        !context.contains("Understand before building")
+            && !context.contains("Memory & learning")
+            && !context.contains("Think Before Coding"),
+        "per-prompt context must not duplicate the canonical operating contract"
     );
 }
 
@@ -1503,6 +1405,91 @@ fn grok_camel_case_hook_input_is_normalized_for_lifecycle_consumers() {
     assert_eq!(normalized["duration_ms"], 42);
     assert_eq!(normalized["toolResult"]["ok"], true);
     assert!(normalized.get("tool_response").is_none());
+}
+
+#[test]
+fn markdown_only_edits_skip_anvil_but_keep_unknown_and_iron_law_gated() {
+    let _guard = crate::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let home = temp_brief_gate_home("anvil-markdown-exemption");
+    let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
+    let previous_iron = std::env::var(IRON_LAW_GATE_ENV_VAR).ok();
+    let previous_anvil = std::env::var("KEEL_ANVIL_GATE").ok();
+
+    std::env::set_var("CLAUDE_TARGET_OVERRIDE", &home);
+    std::env::set_var(IRON_LAW_GATE_ENV_VAR, "off");
+    std::env::set_var("KEEL_ANVIL_GATE", "on");
+
+    let markdown = serde_json::json!({
+        "tool_name": "Edit",
+        "tool_input": { "file_path": "docs/README.md" }
+    });
+    assert!(pre_tool::markdown_only_edit_targets(&markdown, "Edit"));
+    assert!(
+        pre_tool::pre_tool_gate_decision_with_markdown_context(
+            "markdown-session",
+            "Edit",
+            None,
+            "C:/repo",
+            true,
+        )
+        .is_none(),
+        "an explicitly markdown-only edit should not require Anvil"
+    );
+
+    let source = serde_json::json!({
+        "tool_name": "Edit",
+        "tool_input": { "file_path": "src/lib.rs" }
+    });
+    assert!(!pre_tool::markdown_only_edit_targets(&source, "Edit"));
+    assert!(
+        pre_tool::pre_tool_gate_decision_with_markdown_context(
+            "source-session",
+            "Edit",
+            None,
+            "C:/repo",
+            false,
+        )
+        .is_some_and(|reason| reason.contains("Anvil")),
+        "source edits must remain behind the Anvil gate"
+    );
+
+    let mixed = serde_json::json!({
+        "tool_name": "MultiEdit",
+        "tool_input": {
+            "file_path": "README.md",
+            "edits": [{ "filePath": "src/lib.rs" }]
+        }
+    });
+    assert!(!pre_tool::markdown_only_edit_targets(&mixed, "MultiEdit"));
+
+    std::env::set_var(IRON_LAW_GATE_ENV_VAR, "strict");
+    assert!(
+        pre_tool::pre_tool_gate_decision_with_markdown_context(
+            "iron-law-session",
+            "Edit",
+            None,
+            "C:/repo",
+            true,
+        )
+        .is_some_and(|reason| reason.contains("Iron Law")),
+        "the markdown exemption must not bypass the Iron Law gate"
+    );
+
+    match previous_home {
+        Some(value) => std::env::set_var("CLAUDE_TARGET_OVERRIDE", value),
+        None => std::env::remove_var("CLAUDE_TARGET_OVERRIDE"),
+    }
+    match previous_iron {
+        Some(value) => std::env::set_var(IRON_LAW_GATE_ENV_VAR, value),
+        None => std::env::remove_var(IRON_LAW_GATE_ENV_VAR),
+    }
+    match previous_anvil {
+        Some(value) => std::env::set_var("KEEL_ANVIL_GATE", value),
+        None => std::env::remove_var("KEEL_ANVIL_GATE"),
+    }
+    let _ = std::fs::remove_dir_all(&home);
 }
 
 #[test]

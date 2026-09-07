@@ -195,7 +195,7 @@ const COUNTER_LOCK_RELEASE_ATTEMPTS: usize = 40;
 /// Serialize same-process counter updates. Hook handlers are usually separate
 /// processes (covered by the mkdir lock below), but tests and any in-process
 /// callers can race threads; without this gate, a Windows `remove_dir_all`
-/// that fails in `Drop` leaves `counter.lock` owned by our still-alive PID and
+/// that fails in `Drop` leaves `counter.lock` owned by the still-alive process PID and
 /// every subsequent acquire times out with WouldBlock.
 fn counter_in_process_gate() -> std::sync::MutexGuard<'static, ()> {
     static GATE: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();

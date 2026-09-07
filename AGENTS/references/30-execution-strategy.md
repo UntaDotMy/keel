@@ -9,13 +9,15 @@ Side Effects: None — this file is informational.
 
 ## Iterative Development Loop (MANDATORY)
 
-**All tasks must follow this loop until production-ready:**
+**Non-trivial and release-facing work follows this loop until production-ready:**
 
 ```
 0. ALIGN → 1. RESEARCH → 2. PLAN → 3. IMPACT → 4. IMPLEMENT → 5. TEST → 6. FIX → 7. VERIFY → 8. REVIEW → 9. RECONCILE
    ↑                                                                                                                  ↓
    └──────────────────────────────────────── If issues found, loop back ─────────────────────────────────────────────┘
 ```
+
+**Trivial class (scales this loop down):** docs-only, formatting-only, generated-only, single-line typo or comment fixes, and explicitly throwaway work. For these, collapse the loop to: read the target, make the edit, run the narrowest check that proves it, and run the sibling scan when the change could repeat elsewhere. Planning, the completion ledger, the full release ladder, and reviewer are not required for the trivial class; the ladder below stays fail-closed for all non-trivial and release-facing work.
 
 **Loop continues until:**
 - All tests passing
@@ -43,10 +45,7 @@ Side Effects: None — this file is informational.
 - For workflow, release, build-entrypoint, or GitHub Actions edits, verify every referenced path is tracked by Git with `git ls-files --error-unmatch`, confirm new entrypoints are not masked by ignore rules with `git check-ignore -v --no-index`, rerun Rust validation with `cargo test --workspace` or an equivalent cache-busting proof when local green results are part of the evidence, and if GitHub auth is available inspect the real hosted run with `gh run view --job --log` or `gh pr checks --watch` before calling the change done.
 - For bug reproduction and validation, reproduce the user-facing failure first, then choose the inspection tool that can observe the real surface: browser automation such as Playwright for web flows, desktop-runtime inspection with screenshots or equivalent visual evidence for desktop flows, and the most direct runtime-native inspection tool for CLI, service, workflow, or device issues.
 - Strengthen vague prompts from repository evidence, runtime evidence, and prior memory before acting: expand the raw ask into a detailed technical specification, explicit boundaries, and non-goals.
-- If business logic, UX flow, or architecture is still ambiguous after that pass, clarify with the user instead of drifting into guesses. Use the host's native question-asking mechanism:
-  - **Antigravity**: invoke `ask_question` with structured multiple-choice options, clear explanations, and a recommended default.
-  - **Claude Code**: invoke `AskFollowupQuestion` with structured selectable options.
-  - **Codex / OpenCode / CLI**: present an interactive prompt or concise multiple-choice question in the turn and stop before executing edits.
+- If business logic, UX flow, or architecture is still ambiguous after that pass, clarify with the user instead of drifting into guesses. Use the host's native question-asking mechanism (`AskUserQuestion` on Claude Code and zcode; an interactive prompt or concise multiple-choice question in the turn on plain CLI hosts) and stop before executing edits.
 - Autonomy applies to reversible, low-stakes choices only (naming, formatting, equivalent implementations). It never covers removing or replacing existing data, changing a data contract, schema, or output shape, or any ambiguity whose two readings differ in what is kept versus discarded. When a request could mean "add" or "replace", ask "add alongside, or replace?" and wait — do not pick the destructive reading to keep moving.
 - For non-trivial product, workflow, or architecture work, add a front-loaded alignment checkpoint before implementation: if repo inspection still leaves multiple plausible interpretations, acceptance-criterion gaps, or non-obvious tradeoffs, use the native question tool when available or ask the user directly before coding.
 - When another skill contributes, include the working brief so the contribution stays aligned and specific.
@@ -144,7 +143,7 @@ If any of those fails, dispatch sequentially. The cost of one wasted agent run i
 
 **Knowledge Retention (Memory Schema & Pruning):**
 - **Do Not Bloat:** Never blindly append massive logs to memory files.
-- **Schema Enforcement:** When writing to `.claude_knowledge.md` or `.claude_lessons.md`, the agent MUST consolidate, deduplicate, and index the file. Use a strict Markdown schema:
+- **Schema Enforcement:** When recording durable lessons through `keel memory` (research-cache records, scoped workspace notes, instincts), the agent MUST consolidate, deduplicate, and index them. Use a strict schema:
   - `## [Topic/Error Name]`
   - `**Context:** Brief 1-sentence description.`
   - `**Resolution/Pattern:** The exact fix or architectural rule to apply.`
@@ -185,7 +184,8 @@ If any of those fails, dispatch sequentially. The cost of one wasted agent run i
 
 ## 2. Planning Loop
 
-**All tasks require planning** - no exceptions:
+**All non-trivial tasks require planning**:
+Trivial-class work follows the narrow loop above and does not require this planning loop, a completion ledger, the full release ladder, or reviewer unless it changes behavior or is release-facing.
 - What will be changed and why
 - Which explicit working brief or user story is being implemented
 - For multi-part requests, preserve one top-level plan item per explicit user task or deliverable instead of collapsing several asks into one vague step
@@ -295,8 +295,8 @@ If any answer is no or not sure, the analysis is not complete.
 
 ## 5. Testing Loop
 
-**Test the implementation:**
-- Run the mandatory release ladder in this order for every applicable surface:
+**Test non-trivial and release-facing implementations:**
+- For non-trivial and release-facing work, run the mandatory release ladder in this order for every applicable surface:
   Smoke testing -> Functional testing -> Integration testing -> UI testing -> Load testing -> Stress testing -> Security testing
 - Treat the ladder as fail-closed: if any required rung fails, remains blocked, or is skipped without a justified not-applicable reason, the work is no-go.
 - Write new tests if needed
@@ -304,7 +304,7 @@ If any answer is no or not sure, the analysis is not complete.
 - Test error scenarios
 
 **Exit criteria:**
-- Every applicable rung in the mandatory test ladder is passing in order
+- For non-trivial and release-facing work, every applicable rung in the mandatory test ladder is passing in order
 - New tests written for new features
 - Edge cases covered
 
@@ -323,7 +323,7 @@ REPEAT UNTIL CLEAN:
 ```
 
 **Mistake & Solution Memory (Crucial):**
-- If an error, bug, or mistake requires significant effort to resolve, you MUST record the mistake and its verified solution to `.claude_lessons.md`.
+- If an error, bug, or mistake requires significant effort to resolve, you MUST record the mistake and its verified solution through `keel memory` (research-cache record or the scoped workspace notes).
 - Tool-usage mistakes count here too: if the persistent `eval`, `bash`, `hub`, `edit`, or another harness tool was used incorrectly and the correction is reusable, record it as a mistake with the tool name and prevention note.
 - Follow the **Memory Schema & Pruning** rules above (Consolidate, Deduplicate, Index) to prevent file bloat. This ensures the system explicitly learns without exhausting the context window.
 

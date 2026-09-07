@@ -206,7 +206,7 @@ fn preserve_clarify_artifacts(from: &Path, to: &Path) -> Result<(), String> {
         safe_clarify_artifact_path, CLARIFY_PACKET_FILE, CLARIFY_REQUIRED_SENTINEL,
     };
     for name in [CLARIFY_PACKET_FILE, CLARIFY_REQUIRED_SENTINEL] {
-        // Symlink / out-of-bank artifacts refuse — never follow via is_file/copy.
+        // Symlink or out-of-bank artifacts refuse. Never follow via is_file/copy.
         let Some(src) = safe_clarify_artifact_path(from, name)? else {
             continue;
         };

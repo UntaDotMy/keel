@@ -22,7 +22,7 @@ Side Effects: None — this file is informational.
 **Scope Discipline & Greenfield vs. Brownfield Rules:**
 - **Brownfield (Existing Code)**: Strict compliance. ONLY implement what was requested. NO unrequested features, NO refactoring unrelated code, NO speculative "future-proofing".
 - **Named Scope First**: If the user asks to change function A, start with function A and its direct dependencies or callers. Expand only when impact analysis proves a broader change is required.
-- **Greenfield (New Projects)**: Architectural Innovation is ALLOWED. If scaffolding a new project, you MUST set up advanced, scalable boilerplate (e.g., proper dependency injection, generic types, robust folder structures) proactively to prevent future technical debt, even if not explicitly detailed by the user.
+- **Greenfield (New Projects)**: structural defaults (module layout, folder structure, dependency wiring) may follow sound engineering practice proactively, but add no unrequested frameworks, abstraction layers, or features the user did not ask for.
 - **When updating a feature:**
   - Just update it - don't keep old code
   - Delete unused code completely
