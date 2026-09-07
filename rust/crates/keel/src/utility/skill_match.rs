@@ -26,9 +26,14 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::runtime::{safe_path_segment, skills_directory};
+use crate::runtime::{safe_path_segment, skills_directory, state_directory};
+
+const SKILL_CATALOG_CACHE_VERSION: u32 = 1;
+const SKILL_CATALOG_CACHE_FILE: &str = "skill-catalog-v1.json";
+const SKILL_CATALOG_DEFAULT_INTEGRITY_INTERVAL_SECS: u64 = 300;
 
 /// Score floor as a fraction of `ln(corpus_size)`. The floor must scale with
 /// corpus size because IDF does: a token present in exactly one skill scores
@@ -76,7 +81,7 @@ const NAME_TOKEN_BOOST: f64 = 1.5;
 const INLINE_BRIEF_MAX_BYTES: usize = 2400;
 
 /// Tokenized term model for one installed skill.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SkillTerms {
     pub name: String,
     /// Every token drawn from name + description + when_to_use.
@@ -100,7 +105,7 @@ pub fn match_skill_for_prompt(claude_home: &Path, prompt: &str) -> Option<SkillM
     if prompt.trim().is_empty() {
         return None;
     }
-    let skills = load_skill_terms(&skills_directory(claude_home));
+    let skills = load_skill_terms_for_home(claude_home);
     if skills.is_empty() {
         return None;
     }
@@ -785,7 +790,7 @@ pub fn skill_full_body(
 /// One installed skill's catalog row: its directory name (the resolve key for
 /// `skill_get`/`skill_route`) plus the two frontmatter fields the harness
 /// matcher reads. Backs the MCP `skill_list` tool.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SkillCatalogEntry {
     pub name: String,
     pub description: String,
@@ -804,41 +809,12 @@ pub struct SkillCatalogEntry {
 /// same traversal `load_skill_terms` uses. Sorted by name for stable output.
 pub fn skill_catalog(claude_home: &Path) -> Vec<SkillCatalogEntry> {
     let skills_dir = skills_directory(claude_home);
-    let entries = match fs::read_dir(&skills_dir) {
-        Ok(entries) => entries,
-        Err(_) => return Vec::new(),
-    };
-    let mut catalog = Vec::new();
-    for entry in entries.flatten() {
-        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-            continue;
-        }
-        let dir_name = entry.file_name().to_string_lossy().to_string();
-        if dir_name.starts_with('.') || dir_name.starts_with('_') {
-            continue;
-        }
-        let skill_path = entry.path().join("SKILL.md");
-        let text = match fs::read_to_string(&skill_path) {
-            Ok(text) => text,
-            Err(_) => continue,
-        };
-        let Some(frontmatter) = split_frontmatter(&text) else {
-            continue;
-        };
-        let description = frontmatter_field(&frontmatter, "description").unwrap_or_default();
-        let when_to_use = frontmatter_field(&frontmatter, "when_to_use").unwrap_or_default();
-        let use_count = crate::utility::skill_usage::skill_use_count(claude_home, &dir_name);
-        let related_skills = related_skills_list(&frontmatter);
-        // `name` is the directory name — the key `skill_get`/`skill_route`
-        // resolve against — so a `skill_list` entry always round-trips back
-        // through `skill_get`. The frontmatter `name` is display metadata only.
-        catalog.push(SkillCatalogEntry {
-            name: dir_name,
-            description,
-            when_to_use,
-            use_count,
-            related_skills,
-        });
+    let mut catalog =
+        load_skill_corpus(&skills_dir, Some(&skill_catalog_cache_path(claude_home))).catalog;
+    // Read usage counters outside the parsed cache so telemetry is immediately
+    // visible without invalidating or rereading every SKILL.md.
+    for entry in &mut catalog {
+        entry.use_count = crate::utility::skill_usage::skill_use_count(claude_home, &entry.name);
     }
     catalog.sort_by(|left, right| left.name.cmp(&right.name));
     catalog
@@ -937,30 +913,254 @@ pub fn truncate_on_line_boundary(text: &str, max_bytes: usize, marker: &str) -> 
 /// or parse failure for one skill drops that skill silently rather than failing
 /// the whole match.
 pub fn load_skill_terms(skills_dir: &Path) -> Vec<SkillTerms> {
-    let entries = match fs::read_dir(skills_dir) {
-        Ok(entries) => entries,
-        Err(_) => return Vec::new(),
-    };
-    let mut models = Vec::new();
+    load_skill_corpus(
+        skills_dir,
+        Some(&skill_catalog_cache_path_for_dir(skills_dir)),
+    )
+    .terms
+}
+
+fn load_skill_terms_for_home(claude_home: &Path) -> Vec<SkillTerms> {
+    let skills_dir = skills_directory(claude_home);
+    load_skill_corpus(&skills_dir, Some(&skill_catalog_cache_path(claude_home))).terms
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct SkillCatalogCache {
+    version: u32,
+    generation: String,
+    last_integrity_check_secs: u64,
+    entries: Vec<SkillCatalogCacheEntry>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct SkillCatalogCacheEntry {
+    name: String,
+    size: u64,
+    modified_at_nanos: u128,
+    content_hash: String,
+    terms: SkillTerms,
+    catalog: SkillCatalogEntry,
+}
+
+#[derive(Debug, Clone)]
+struct SkillFileMetadata {
+    name: String,
+    path: PathBuf,
+    size: u64,
+    modified_at_nanos: u128,
+}
+
+#[derive(Debug, Default)]
+struct LoadedSkillCorpus {
+    terms: Vec<SkillTerms>,
+    catalog: Vec<SkillCatalogEntry>,
+}
+
+fn skill_catalog_cache_path(claude_home: &Path) -> PathBuf {
+    state_directory(claude_home).join(SKILL_CATALOG_CACHE_FILE)
+}
+
+fn skill_catalog_cache_path_for_dir(skills_dir: &Path) -> PathBuf {
+    skills_dir
+        .parent()
+        .unwrap_or(skills_dir)
+        .join("state")
+        .join(SKILL_CATALOG_CACHE_FILE)
+}
+
+fn skill_catalog_integrity_interval_secs() -> u64 {
+    std::env::var("KEEL_SKILL_CATALOG_INTEGRITY_INTERVAL_SECS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(SKILL_CATALOG_DEFAULT_INTEGRITY_INTERVAL_SECS)
+        .min(86_400)
+}
+
+fn now_unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+fn discover_skill_files(skills_dir: &Path) -> Option<Vec<SkillFileMetadata>> {
+    let entries = fs::read_dir(skills_dir).ok()?;
+    let mut files = Vec::new();
     for entry in entries.flatten() {
-        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+        if !entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
             continue;
         }
-        let dir_name = entry.file_name().to_string_lossy().to_string();
-        // `_shared` holds cross-skill resources, not a skill. Hidden dirs too.
-        if dir_name.starts_with('.') || dir_name.starts_with('_') {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') || name.starts_with('_') {
             continue;
         }
-        let skill_path = entry.path().join("SKILL.md");
-        let text = match fs::read_to_string(&skill_path) {
+        let path = entry.path().join("SKILL.md");
+        let metadata = match fs::metadata(&path) {
+            Ok(metadata) if metadata.is_file() => metadata,
+            _ => continue,
+        };
+        let modified_at_nanos = metadata
+            .modified()
+            .ok()
+            .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        files.push(SkillFileMetadata {
+            name,
+            path,
+            size: metadata.len(),
+            modified_at_nanos,
+        });
+    }
+    files.sort_by(|left, right| left.name.cmp(&right.name));
+    Some(files)
+}
+
+fn skill_catalog_generation(files: &[SkillFileMetadata]) -> String {
+    let mut material = String::new();
+    for file in files {
+        material.push_str(&file.name);
+        material.push('\0');
+        material.push_str(&file.size.to_string());
+        material.push('\0');
+        material.push_str(&file.modified_at_nanos.to_string());
+        material.push('\n');
+    }
+    crate::utility::hashing::fnv1a64_hex(&material)
+}
+
+fn load_skill_corpus(skills_dir: &Path, cache_path: Option<&Path>) -> LoadedSkillCorpus {
+    let Some(files) = discover_skill_files(skills_dir) else {
+        return LoadedSkillCorpus::default();
+    };
+    let generation = skill_catalog_generation(&files);
+    let now = now_unix_secs();
+    if let Some(path) = cache_path {
+        if let Some(mut cache) = read_skill_catalog_cache(path) {
+            if cache.version == SKILL_CATALOG_CACHE_VERSION && cache.generation == generation {
+                let interval = skill_catalog_integrity_interval_secs();
+                let age = now.saturating_sub(cache.last_integrity_check_secs);
+                if age < interval {
+                    return corpus_from_cache(cache.entries);
+                }
+                if cache_matches_files(&cache.entries, &files) {
+                    cache.last_integrity_check_secs = now;
+                    write_skill_catalog_cache(path, &cache);
+                    return corpus_from_cache(cache.entries);
+                }
+            }
+        }
+    }
+
+    let entries = parse_skill_catalog_entries(&files);
+    if let Some(path) = cache_path {
+        let cache = SkillCatalogCache {
+            version: SKILL_CATALOG_CACHE_VERSION,
+            generation,
+            last_integrity_check_secs: now,
+            entries: entries.clone(),
+        };
+        write_skill_catalog_cache(path, &cache);
+    }
+    corpus_from_cache(entries)
+}
+
+fn read_skill_catalog_cache(path: &Path) -> Option<SkillCatalogCache> {
+    let text = fs::read_to_string(path).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+fn cache_matches_files(cached: &[SkillCatalogCacheEntry], files: &[SkillFileMetadata]) -> bool {
+    if cached.len() != files.len() {
+        return false;
+    }
+    let by_name: HashMap<&str, &SkillCatalogCacheEntry> = cached
+        .iter()
+        .map(|entry| (entry.name.as_str(), entry))
+        .collect();
+    files.iter().all(|file| {
+        let Some(entry) = by_name.get(file.name.as_str()) else {
+            return false;
+        };
+        if entry.size != file.size || entry.modified_at_nanos != file.modified_at_nanos {
+            return false;
+        }
+        fs::read(&file.path)
+            .ok()
+            .map(|bytes| crate::utility::hashing::fnv1a64_hex(&String::from_utf8_lossy(&bytes)))
+            .is_some_and(|hash| hash == entry.content_hash)
+    })
+}
+
+fn parse_skill_catalog_entries(files: &[SkillFileMetadata]) -> Vec<SkillCatalogCacheEntry> {
+    let mut entries = Vec::new();
+    for file in files {
+        let text = match fs::read_to_string(&file.path) {
             Ok(text) => text,
             Err(_) => continue,
         };
-        if let Some(model) = skill_terms_from_source(&dir_name, &text) {
-            models.push(model);
-        }
+        let Some(terms) = skill_terms_from_source(&file.name, &text) else {
+            continue;
+        };
+        let Some(frontmatter) = split_frontmatter(&text) else {
+            continue;
+        };
+        let catalog = SkillCatalogEntry {
+            name: file.name.clone(),
+            description: frontmatter_field(&frontmatter, "description").unwrap_or_default(),
+            when_to_use: frontmatter_field(&frontmatter, "when_to_use").unwrap_or_default(),
+            use_count: 0,
+            related_skills: related_skills_list(&frontmatter),
+        };
+        entries.push(SkillCatalogCacheEntry {
+            name: file.name.clone(),
+            size: file.size,
+            modified_at_nanos: file.modified_at_nanos,
+            content_hash: crate::utility::hashing::fnv1a64_hex(&text),
+            terms,
+            catalog,
+        });
     }
-    models
+    entries
+}
+
+fn corpus_from_cache(entries: Vec<SkillCatalogCacheEntry>) -> LoadedSkillCorpus {
+    let mut corpus = LoadedSkillCorpus::default();
+    for entry in entries {
+        corpus.terms.push(entry.terms);
+        corpus.catalog.push(entry.catalog);
+    }
+    corpus
+}
+
+fn write_skill_catalog_cache(path: &Path, cache: &SkillCatalogCache) {
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    if fs::create_dir_all(parent).is_err() {
+        return;
+    }
+    let Ok(serialized) = serde_json::to_vec_pretty(cache) else {
+        return;
+    };
+    // The catalog is disposable derived state. Write a process-unique staging
+    // file first; a torn cache is harmless because the next caller rebuilds it.
+    let temp = parent.join(format!(
+        ".{SKILL_CATALOG_CACHE_FILE}.tmp-{}-{}",
+        std::process::id(),
+        now_unix_secs()
+    ));
+    if fs::write(&temp, serialized).is_err() {
+        let _ = fs::remove_file(&temp);
+        return;
+    }
+    if fs::rename(&temp, path).is_err() {
+        // Windows cannot rename over an existing file. The target is only cache
+        // state, so replacing it is safe; failures leave the old valid cache.
+        let _ = fs::remove_file(path);
+        let _ = fs::rename(&temp, path);
+    }
 }
 
 /// Build a [`SkillTerms`] from a directory name and raw SKILL.md text.

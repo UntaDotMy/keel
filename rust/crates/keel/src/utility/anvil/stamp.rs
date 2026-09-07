@@ -192,8 +192,13 @@ fn load_cast_evidence(
         })
 }
 fn evidence_strength(evidence: &CastEvidence) -> f64 {
-    let gate = if evidence.gate_ok { 1.0 } else { 0.0 };
-    gate + 1.0 / (1.0 + evidence.clipped_len as f64)
+    // Gate evidence is the only correctness signal available to stamp.  Log
+    // length is an operational diagnostic and must not be rewarded as quality.
+    if evidence.gate_ok {
+        1.0
+    } else {
+        0.0
+    }
 }
 
 fn bradley_terry_pref(left: f64, right: f64) -> f64 {
@@ -202,9 +207,7 @@ fn bradley_terry_pref(left: f64, right: f64) -> f64 {
 
 fn evidence_rank_better(candidate: &CastEvidence, incumbent: &CastEvidence) -> bool {
     (candidate.gate_ok && !incumbent.gate_ok)
-        || (candidate.gate_ok == incumbent.gate_ok
-            && (candidate.clipped_len < incumbent.clipped_len
-                || (candidate.clipped_len == incumbent.clipped_len && candidate.id < incumbent.id)))
+        || (candidate.gate_ok == incumbent.gate_ok && candidate.id < incumbent.id)
 }
 
 fn pick_evidence_winner(evidence: &[CastEvidence], strict: bool) -> Result<usize, String> {
@@ -414,7 +417,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn evidence_ranking_prefers_passing_small_output() {
+    fn evidence_ranking_prefers_passing_evidence_over_failure() {
         let evidence = vec![
             CastEvidence {
                 id: "cast_0".into(),
@@ -435,8 +438,27 @@ mod tests {
                 clipped_len: 20,
             },
         ];
-        assert_eq!(pick_evidence_winner(&evidence, false).expect("winner"), 2);
-        assert_eq!(pick_evidence_winner(&evidence, true).expect("winner"), 2);
+        assert_eq!(pick_evidence_winner(&evidence, false).expect("winner"), 1);
+        assert_eq!(pick_evidence_winner(&evidence, true).expect("winner"), 1);
+    }
+
+    #[test]
+    fn evidence_ranking_does_not_reward_shorter_logs() {
+        let evidence = vec![
+            CastEvidence {
+                id: "cast_0".into(),
+                piece: "main".into(),
+                gate_ok: true,
+                clipped_len: 500,
+            },
+            CastEvidence {
+                id: "cast_1".into(),
+                piece: "main".into(),
+                gate_ok: true,
+                clipped_len: 1,
+            },
+        ];
+        assert_eq!(pick_evidence_winner(&evidence, false).expect("winner"), 0);
     }
 
     #[test]

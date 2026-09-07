@@ -19,26 +19,13 @@ pub fn build_static_prefix(goal: &str, bar_dossier: &str) -> String {
     text.push_str(
         "Hard rules: no git, no extra files. A one-site change is unfinished — after writing, the supervisor runs `keel code-search siblings` in the real workspace and handles every hit (other hosts, CLIs, tests, install/update/uninstall) before stopping.\n",
     );
-    pad_to_tokens(text, 2048)
-}
-
-fn pad_to_tokens(mut text: String, min_tokens: usize) -> String {
-    let estimated = text.split_whitespace().count();
-    if estimated >= min_tokens {
-        return text;
-    }
-    let need = min_tokens - estimated;
-    text.push_str("\n--- bar dossier padding (stable) ---\n");
-    for _ in 0..need {
-        text.push_str("bar ");
-    }
     text
 }
 
 pub fn hash_static(prefix: &str) -> String {
     sha256_hex(prefix.as_bytes())
 }
-fn verify_prefix_hash(prefix: &str, expected: &str) -> Result<String, String> {
+pub(crate) fn verify_prefix_hash(prefix: &str, expected: &str) -> Result<String, String> {
     let actual = hash_static(prefix);
     if expected.trim() != actual {
         return Err(format!(
@@ -48,6 +35,22 @@ fn verify_prefix_hash(prefix: &str, expected: &str) -> Result<String, String> {
         ));
     }
     Ok(actual)
+}
+
+/// Read the compiled prefix and its persisted digest as one integrity-checked
+/// unit.  Casts must use this path so a missing or edited prefix cannot be
+/// silently replaced with a generic fallback.
+pub(crate) fn read_verified_prefix(paths: &job::JobPaths) -> Result<String, String> {
+    let prefix = std::fs::read_to_string(paths.prefix_path())
+        .map_err(|error| format!("anvil cast: read prefix.md: {error}"))?;
+    let expected = std::fs::read_to_string(paths.prefix_hash_path())
+        .map_err(|error| format!("anvil cast: read prefix.sha256: {error}"))?;
+    let actual =
+        verify_prefix_hash(&prefix, &expected).map_err(|error| format!("anvil cast: {error}"))?;
+    if actual != hash_static(&prefix) {
+        return Err("anvil cast: prefix hash drifted while reading".into());
+    }
+    Ok(prefix)
 }
 
 pub fn write_prefix_files(paths: &job::JobPaths, prefix: &str) -> Result<String, String> {
@@ -248,6 +251,13 @@ mod tests {
             text.contains("one-site"),
             "Anvil prefix must forbid a one-site close"
         );
+    }
+
+    #[test]
+    fn prefix_does_not_add_synthetic_padding() {
+        let text = build_static_prefix("goal", "bar");
+        assert!(!text.contains("bar dossier padding"));
+        assert!(text.split_whitespace().count() < 2_048);
     }
 
     #[test]

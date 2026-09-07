@@ -32,6 +32,7 @@ use crate::runtime::{
     display_path, resolve_claude_home, resolve_repository_root, safe_path_segment, write_text,
 };
 use crate::utility::hashing::fnv1a64_hex;
+use rusqlite::Connection;
 
 /// Schema version of the emitted artifact. Bump when the JSON shape changes so a
 /// reader can refuse an incompatible graph rather than misparse it.
@@ -86,6 +87,10 @@ fn workspace_slug(raw: &str) -> String {
 /// Upper bound on files scanned, matching `code-search`'s ceiling so a pathological
 /// tree cannot make the command run unbounded.
 const MAX_FILES: usize = 10_000;
+
+/// Keep the direct/test builder's discovery boundary aligned with the shared
+/// workspace index, which is the production extraction owner.
+const MAX_SOURCE_FILE_BYTES: u64 = 2_000_000;
 
 /// Cap on definitions recorded per file so one generated/vendored megafile cannot
 /// bloat the artifact. The structural signal is in the first symbols anyway.
@@ -199,7 +204,13 @@ fn run_build(
         return 1;
     };
 
-    let graph = build_graph(&root);
+    let graph = match build_graph_from_workspace_index(&root, flags.string_value("claude-home")) {
+        Ok(graph) => graph,
+        Err(error) => {
+            let _ = writeln!(standard_error, "code-graph build: workspace index: {error}");
+            return 1;
+        }
+    };
     let artifact = graph.to_json();
     let serialized = match serde_json::to_string_pretty(&artifact) {
         Ok(text) => text,
@@ -302,8 +313,18 @@ fn run_impact(
         return 1;
     };
 
-    // Build the graph fresh so impact never reports against a stale artifact.
-    let graph = build_graph(&root);
+    // Refresh the canonical workspace index and derive the graph view from it.
+    // This keeps code-graph from maintaining a second parser/relationship walk.
+    let graph = match build_graph_from_workspace_index(&root, flags.string_value("claude-home")) {
+        Ok(graph) => graph,
+        Err(error) => {
+            let _ = writeln!(
+                standard_error,
+                "code-graph impact: workspace index: {error}"
+            );
+            return 1;
+        }
+    };
     let changed: Vec<String> = changed_raw
         .split(',')
         .map(|item| normalize_relative(item.trim()))
@@ -371,7 +392,14 @@ pub fn build_graph(root: &Path) -> CodeGraph {
             Ok(text) => text,
             Err(_) => continue,
         };
-        source_material.push_str(&format!("{}:{}\n{}\n", relative, text.len(), text));
+        // Keep the fingerprint independent of line formatting while retaining
+        // the workspace index identity for `from_json_file` validation.
+        source_material.push_str(&format!(
+            "{}:{}:{}\n",
+            relative,
+            text.len(),
+            fnv1a64_hex(&text)
+        ));
         let mut defines = extract_definitions(lang, &text);
         defines.sort();
         defines.dedup();
@@ -420,6 +448,141 @@ pub fn build_graph(root: &Path) -> CodeGraph {
         source_fingerprint: fnv1a64_hex(&source_material),
         nodes,
         edges,
+    }
+}
+
+/// Build the graph view from the canonical workspace index. The index owns
+/// source discovery, parsing, and import-edge resolution; code-graph only
+/// projects that durable data into its compact artifact shape. Refresh is
+/// incremental when metadata is unchanged and still performs the index's
+/// content/integrity checks before this read.
+fn build_graph_from_workspace_index(
+    root: &Path,
+    claude_home_flag: &str,
+) -> Result<CodeGraph, String> {
+    crate::utility::workspace_index::refresh(root, claude_home_flag, false)?;
+    let database_path = crate::utility::workspace_index::database_path(root, claude_home_flag)?;
+    let connection = Connection::open(&database_path)
+        .map_err(|error| format!("open {}: {error}", display_path(&database_path)))?;
+
+    let mut source_material = String::new();
+    let mut nodes_by_path: BTreeMap<String, Node> = BTreeMap::new();
+    let mut file_statement = connection
+        .prepare("SELECT path, language, hash, size, imports FROM files ORDER BY path")
+        .map_err(|error| format!("prepare indexed files: {error}"))?;
+    let file_rows = file_statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })
+        .map_err(|error| format!("read indexed files: {error}"))?;
+    for row in file_rows {
+        let (path, language, hash, size, imports) =
+            row.map_err(|error| format!("read indexed file row: {error}"))?;
+        source_material.push_str(&format!("{path}:{size}:{hash}\n"));
+        let imports = imports
+            .lines()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(String::from)
+            .collect();
+        nodes_by_path.insert(
+            path.clone(),
+            Node {
+                id: path,
+                lang: language_for_index(&language),
+                defines: Vec::new(),
+                imports,
+            },
+        );
+    }
+    drop(file_statement);
+
+    let mut symbol_statement = connection
+        .prepare("SELECT path, kind, name FROM symbols ORDER BY path, start_line, name")
+        .map_err(|error| format!("prepare indexed symbols: {error}"))?;
+    let symbol_rows = symbol_statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(|error| format!("read indexed symbols: {error}"))?;
+    for row in symbol_rows {
+        let (path, kind, name) =
+            row.map_err(|error| format!("read indexed symbol row: {error}"))?;
+        if let Some(node) = nodes_by_path.get_mut(&path) {
+            node.defines
+                .push(format!("{} {name}", graph_definition_label(&kind)));
+        }
+    }
+    drop(symbol_statement);
+
+    let mut edge_statement = connection
+        .prepare(
+            "SELECT from_path, to_path, relation FROM edges \
+             WHERE relation = 'imports' ORDER BY from_path, to_path",
+        )
+        .map_err(|error| format!("prepare indexed edges: {error}"))?;
+    let edge_rows = edge_statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(|error| format!("read indexed edges: {error}"))?;
+    let mut edges = Vec::new();
+    for row in edge_rows {
+        let (from, to, relation) =
+            row.map_err(|error| format!("read indexed edge row: {error}"))?;
+        edges.push(Edge {
+            from,
+            to,
+            kind: if relation == "imports" {
+                "imports"
+            } else {
+                // The query is relation-filtered; this branch is defensive if
+                // a future index schema returns an unexpected value.
+                continue;
+            },
+        });
+    }
+    edges.sort();
+    let nodes = nodes_by_path.into_values().collect();
+    Ok(CodeGraph {
+        root: root.to_path_buf(),
+        source_fingerprint: fnv1a64_hex(&source_material),
+        nodes,
+        edges,
+    })
+}
+
+fn language_for_index(language: &str) -> &'static str {
+    match language {
+        "rust" => "rust",
+        "javascript" => "javascript",
+        "typescript" => "typescript",
+        "python" => "python",
+        "go" => "go",
+        _ => "unknown",
+    }
+}
+
+fn graph_definition_label(kind: &str) -> &str {
+    match kind {
+        "function" => "fn",
+        "constant" => "const",
+        "module" => "mod",
+        other => other,
     }
 }
 
@@ -905,7 +1068,12 @@ fn collect_source_files(root: &Path, files: &mut Vec<PathBuf>) {
             }
             if file_type.is_dir() {
                 stack.push(path);
-            } else if file_type.is_file() && language_for(&path).is_some() {
+            } else if file_type.is_file()
+                && language_for(&path).is_some()
+                && fs::metadata(&path)
+                    .map(|metadata| metadata.len() <= MAX_SOURCE_FILE_BYTES)
+                    .unwrap_or(false)
+            {
                 files.push(path);
             }
         }
@@ -938,7 +1106,10 @@ fn should_skip_entry(name: &str, path: &Path) -> bool {
                 | "target-test"
         )
     } else {
-        false
+        name.ends_with(".lock")
+            || name.ends_with(".min.js")
+            || name.ends_with(".map")
+            || name.ends_with(".log")
     }
 }
 
@@ -1125,6 +1296,44 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn indexed_graph_uses_workspace_index_as_extraction_owner() {
+        let root = tempdir("indexed-owner");
+        let home = tempdir("indexed-owner-home");
+        write(&root, "src/helper.rs", "pub fn helper() {}\n");
+        write(&root, "src/main.rs", "mod helper;\npub fn main() {}\n");
+
+        let graph = build_graph_from_workspace_index(&root, &home.to_string_lossy())
+            .expect("workspace index should back graph view");
+        assert!(graph.nodes.iter().any(|node| node.id == "src/main.rs"));
+        assert!(graph.edges.iter().any(|edge| {
+            edge.from == "src/main.rs" && edge.to == "src/helper.rs" && edge.kind == "imports"
+        }));
+        let artifact = root.join("code-graph.json");
+        fs::write(
+            &artifact,
+            serde_json::to_string_pretty(&graph.to_json()).expect("serialize indexed graph"),
+        )
+        .expect("write indexed graph artifact");
+        assert!(
+            CodeGraph::from_json_file(&artifact).is_some(),
+            "shared-index fingerprint must remain compatible with artifact validation"
+        );
+
+        // Refresh through the same owner after a source change. The removed
+        // import must not survive in the graph projection.
+        write(&root, "src/main.rs", "pub fn main() {}\n");
+        let refreshed = build_graph_from_workspace_index(&root, &home.to_string_lossy())
+            .expect("workspace index refresh should succeed");
+        assert!(!refreshed
+            .edges
+            .iter()
+            .any(|edge| edge.from == "src/main.rs" && edge.to == "src/helper.rs"));
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&home);
     }
 
     #[test]

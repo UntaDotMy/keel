@@ -21,6 +21,11 @@ const MAX_FILES: usize = 20_000;
 const MAX_FILE_BYTES: u64 = 2_000_000;
 const MAX_CHUNK_BYTES: usize = 32_000;
 const MAX_SEARCH_RESULTS: usize = 50;
+const MAP_FILE_LIMIT: usize = 200;
+const MAP_SYMBOL_LIMIT: usize = 1000;
+const MAP_EDGE_LIMIT: usize = 1000;
+const MAP_TEST_LIMIT: usize = 200;
+const MAP_OWNER_LIMIT: usize = 200;
 const RRF_K: f64 = 60.0;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -38,6 +43,11 @@ pub struct SearchHit {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RefreshReport {
     pub files_indexed: u64,
+    pub files_discovered: u64,
+    pub files_skipped_limit: u64,
+    pub files_skipped_too_large: u64,
+    pub files_skipped_unreadable: u64,
+    pub coverage_complete: bool,
     pub files_added: u64,
     pub files_updated: u64,
     pub files_removed: u64,
@@ -59,6 +69,17 @@ pub struct IndexStatus {
     pub chunk_count: u64,
     pub edge_count: u64,
     pub stale: bool,
+    pub files_discovered: u64,
+    pub files_skipped_limit: u64,
+    pub files_skipped_too_large: u64,
+    pub files_skipped_unreadable: u64,
+    pub coverage_complete: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SearchResults {
+    pub hits: Vec<SearchHit>,
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -85,6 +106,21 @@ struct SourceSnapshot {
     path: String,
     modified_at: u128,
     size: u64,
+}
+
+#[derive(Debug, Default)]
+struct SourcePathCollection {
+    paths: Vec<PathBuf>,
+    discovered: u64,
+    skipped_limit: u64,
+    skipped_unreadable: u64,
+}
+
+#[derive(Debug, Default)]
+struct SnapshotCollection {
+    snapshots: Vec<SourceSnapshot>,
+    skipped_too_large: u64,
+    skipped_unreadable: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -132,10 +168,27 @@ pub fn refresh(
     let previous_commit = meta(&connection, "indexed_commit");
     let indexed_commit = git_head(&root);
     let commit_changed = previous_commit.as_deref() != Some(indexed_commit.as_str());
-    let source_paths = collect_source_paths(&root)?;
-    let snapshots = collect_source_snapshots(&root, &source_paths);
+    let SourcePathCollection {
+        paths: source_paths,
+        discovered,
+        skipped_limit,
+        skipped_unreadable: path_unreadable,
+    } = collect_source_paths(&root)?;
+    let SnapshotCollection {
+        snapshots,
+        skipped_too_large,
+        skipped_unreadable,
+    } = collect_source_snapshots(&root, &source_paths);
     let mut report = RefreshReport {
         files_indexed: snapshots.len() as u64,
+        files_discovered: discovered,
+        files_skipped_limit: skipped_limit,
+        files_skipped_too_large: skipped_too_large,
+        files_skipped_unreadable: path_unreadable + skipped_unreadable,
+        coverage_complete: skipped_limit == 0
+            && skipped_too_large == 0
+            && path_unreadable == 0
+            && skipped_unreadable == 0,
         generation: meta(&connection, "generation")
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or(0),
@@ -167,7 +220,9 @@ pub fn refresh(
         })
         .map(|snapshot| root.join(&snapshot.path))
         .collect();
-    let dirty_sources = collect_sources_from_paths(&root, dirty_paths)?;
+    let (dirty_sources, dirty_unreadable) = collect_sources_from_paths(&root, dirty_paths)?;
+    report.files_skipped_unreadable += dirty_unreadable;
+    report.coverage_complete = report.coverage_complete && dirty_unreadable == 0;
     let content_changed = dirty_sources.iter().any(|source| {
         existing
             .get(&source.path)
@@ -200,8 +255,21 @@ pub fn refresh(
         }
         transaction
             .execute(
-                "INSERT OR REPLACE INTO meta(key, value) VALUES ('updated_at_millis', ?1)",
-                params![now_millis().to_string()],
+                "INSERT OR REPLACE INTO meta(key, value) VALUES
+                 ('updated_at_millis', ?1),
+                 ('files_discovered', ?2),
+                 ('files_skipped_limit', ?3),
+                 ('files_skipped_too_large', ?4),
+                 ('files_skipped_unreadable', ?5),
+                 ('coverage_complete', ?6)",
+                params![
+                    now_millis().to_string(),
+                    report.files_discovered.to_string(),
+                    report.files_skipped_limit.to_string(),
+                    report.files_skipped_too_large.to_string(),
+                    report.files_skipped_unreadable.to_string(),
+                    report.coverage_complete.to_string(),
+                ],
             )
             .map_err(|error| format!("stamp metadata refresh: {error}"))?;
         transaction
@@ -212,11 +280,20 @@ pub fn refresh(
 
     // Content changes require the complete source set for relationship rebuilds;
     // unchanged files remain skipped by the record loop below.
-    let sources = if content_changed || force || commit_changed || has_stale_paths {
-        collect_sources_from_paths(&root, source_paths)?
-    } else {
-        dirty_sources
-    };
+    let (sources, full_unreadable) =
+        if content_changed || force || commit_changed || has_stale_paths {
+            collect_sources_from_paths(
+                &root,
+                snapshots
+                    .iter()
+                    .map(|snapshot| root.join(&snapshot.path))
+                    .collect(),
+            )?
+        } else {
+            (dirty_sources, 0)
+        };
+    report.files_skipped_unreadable += full_unreadable;
+    report.coverage_complete = report.coverage_complete && full_unreadable == 0;
     let files_changed = sources.iter().any(|source| {
         existing
             .get(&source.path)
@@ -446,7 +523,7 @@ pub fn refresh(
                     }
                     transaction
                         .execute(
-                            "INSERT OR IGNORE INTO edges(from_path, from_symbol_id, to_path, to_symbol_id, relation, evidence) VALUES (?1, ?2, ?3, ?4, 'calls', ?5)",
+                            "INSERT OR IGNORE INTO edges(from_path, from_symbol_id, to_path, to_symbol_id, relation, evidence) VALUES (?1, ?2, ?3, ?4, 'calls-candidate', ?5)",
                             params![source.path, from_id, target_path, target_id, format!("{called_name}(")],
                         )
                         .map_err(|error| format!("insert call edge {}: {error}", source.path))?;
@@ -476,8 +553,27 @@ pub fn refresh(
     };
     transaction
         .execute(
-            "INSERT OR REPLACE INTO meta(key, value) VALUES ('generation', ?1), ('indexed_commit', ?2), ('workspace_root', ?3), ('updated_at_millis', ?4)",
-            params![generation.to_string(), indexed_commit, root.to_string_lossy().to_string(), now_millis().to_string()],
+            "INSERT OR REPLACE INTO meta(key, value) VALUES
+             ('generation', ?1),
+             ('indexed_commit', ?2),
+             ('workspace_root', ?3),
+             ('updated_at_millis', ?4),
+             ('files_discovered', ?5),
+             ('files_skipped_limit', ?6),
+             ('files_skipped_too_large', ?7),
+             ('files_skipped_unreadable', ?8),
+             ('coverage_complete', ?9)",
+            params![
+                generation.to_string(),
+                indexed_commit,
+                root.to_string_lossy().to_string(),
+                now_millis().to_string(),
+                report.files_discovered.to_string(),
+                report.files_skipped_limit.to_string(),
+                report.files_skipped_too_large.to_string(),
+                report.files_skipped_unreadable.to_string(),
+                report.coverage_complete.to_string(),
+            ],
         )
         .map_err(|error| format!("stamp workspace index: {error}"))?;
     transaction
@@ -489,6 +585,9 @@ pub fn refresh(
     Ok(report)
 }
 
+/// Compatibility search API retained for library callers while richer callers
+/// use `search_with_metadata`.
+#[allow(dead_code)]
 pub fn search(
     workspace_root: &Path,
     claude_home_flag: &str,
@@ -498,6 +597,15 @@ pub fn search(
     search_filtered(workspace_root, claude_home_flag, query, limit, None)
 }
 
+pub fn search_with_metadata(
+    workspace_root: &Path,
+    claude_home_flag: &str,
+    query: &str,
+    limit: usize,
+) -> Result<SearchResults, String> {
+    search_filtered_with_metadata(workspace_root, claude_home_flag, query, limit, None)
+}
+
 pub fn search_filtered(
     workspace_root: &Path,
     claude_home_flag: &str,
@@ -505,8 +613,24 @@ pub fn search_filtered(
     limit: usize,
     path_filter: Option<&str>,
 ) -> Result<Vec<SearchHit>, String> {
+    Ok(
+        search_filtered_with_metadata(workspace_root, claude_home_flag, query, limit, path_filter)?
+            .hits,
+    )
+}
+
+pub fn search_filtered_with_metadata(
+    workspace_root: &Path,
+    claude_home_flag: &str,
+    query: &str,
+    limit: usize,
+    path_filter: Option<&str>,
+) -> Result<SearchResults, String> {
     if query.trim().is_empty() {
-        return Ok(Vec::new());
+        return Ok(SearchResults {
+            hits: Vec::new(),
+            truncated: false,
+        });
     }
     refresh(workspace_root, claude_home_flag, false)?;
     let root = canonical_workspace_root(workspace_root)?;
@@ -514,7 +638,10 @@ pub fn search_filtered(
     let connection = open_connection(&path)?;
     let terms = query_terms(query);
     if terms.is_empty() {
-        return Ok(Vec::new());
+        return Ok(SearchResults {
+            hits: Vec::new(),
+            truncated: false,
+        });
     }
     let normalized_filter = path_filter
         .map(|value| value.replace('\\', "/").to_ascii_lowercase())
@@ -550,7 +677,8 @@ pub fn search_filtered(
         });
     }
     let channels = vec![exact, fts, paths, graph];
-    Ok(fuse_candidates(channels, limit))
+    let (hits, truncated) = fuse_candidates_with_status(channels, limit);
+    Ok(SearchResults { hits, truncated })
 }
 
 pub fn status(workspace_root: &Path, claude_home_flag: &str) -> Result<IndexStatus, String> {
@@ -565,6 +693,9 @@ pub fn status(workspace_root: &Path, claude_home_flag: &str) -> Result<IndexStat
     let generation = meta(&connection, "generation")
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(0);
+    let coverage_complete = meta(&connection, "coverage_complete")
+        .map(|value| value == "true")
+        .unwrap_or(false);
     Ok(IndexStatus {
         database_path: path,
         workspace_root: root.clone(),
@@ -575,6 +706,19 @@ pub fn status(workspace_root: &Path, claude_home_flag: &str) -> Result<IndexStat
         chunk_count: count(&connection, "chunks")?,
         edge_count: count(&connection, "edges")?,
         stale: !indexed_commit.is_empty() && indexed_commit != git_head(&root),
+        files_discovered: meta(&connection, "files_discovered")
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0),
+        files_skipped_limit: meta(&connection, "files_skipped_limit")
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0),
+        files_skipped_too_large: meta(&connection, "files_skipped_too_large")
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0),
+        files_skipped_unreadable: meta(&connection, "files_skipped_unreadable")
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0),
+        coverage_complete,
     })
 }
 
@@ -583,6 +727,24 @@ pub fn render_map(workspace_root: &Path, claude_home_flag: &str) -> Result<Strin
     let root = canonical_workspace_root(workspace_root)?;
     let path = database_path(&root, claude_home_flag)?;
     let connection = open_connection(&path)?;
+    let file_count = count(&connection, "files")?;
+    let symbol_count = count(&connection, "symbols")?;
+    let edge_count = count(&connection, "edges")?;
+    let files_discovered = meta(&connection, "files_discovered")
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(file_count);
+    let files_skipped_limit = meta(&connection, "files_skipped_limit")
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(0);
+    let files_skipped_too_large = meta(&connection, "files_skipped_too_large")
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(0);
+    let files_skipped_unreadable = meta(&connection, "files_skipped_unreadable")
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(0);
+    let coverage_complete = meta(&connection, "coverage_complete")
+        .map(|value| value == "true")
+        .unwrap_or(false);
     let mut lines = vec![
         "# SYSTEM_MAP".to_string(),
         String::new(),
@@ -597,27 +759,59 @@ pub fn render_map(workspace_root: &Path, claude_home_flag: &str) -> Result<Strin
             meta(&connection, "generation").unwrap_or_default()
         ),
         String::new(),
-        "## Indexed Files".to_string(),
+        "## Index Coverage".to_string(),
+        format!(
+            "- coverage_complete: {} (discovered={}, indexed={}, skipped_limit={}, skipped_too_large={}, skipped_unreadable={})",
+            coverage_complete,
+            files_discovered,
+            file_count,
+            files_skipped_limit,
+            files_skipped_too_large,
+            files_skipped_unreadable,
+        ),
+        "- symbol extraction: Rust, JavaScript/TypeScript, Python, and Go (heuristic); Markdown, TOML, JSON, and YAML are indexed as file/chunk content only".to_string(),
+        "- call relationships: candidate name matches only; verify source before treating an edge as a resolved call".to_string(),
+        String::new(),
+        "## Architecture and Ownership".to_string(),
+        format!("- indexed symbols: {symbol_count}"),
+        format!("- indexed relationships: {edge_count}"),
     ];
-    let mut statement = connection
-        .prepare("SELECT path, language FROM files ORDER BY path LIMIT 500")
+
+    let mut entry_points = connection
+        .prepare("SELECT path FROM files WHERE lower(path) LIKE '%/main.%' OR lower(path) LIKE 'main.%' OR lower(path) LIKE '%/lib.%' OR lower(path) LIKE 'lib.%' OR lower(path) LIKE '%/index.%' OR lower(path) LIKE 'index.%' ORDER BY path LIMIT ?1")
         .map_err(|error| format!("prepare map files: {error}"))?;
-    let rows = statement
-        .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    let rows = entry_points
+        .query_map(params![MAP_OWNER_LIMIT as i64], |row| {
+            row.get::<_, String>(0)
         })
-        .map_err(|error| format!("read map files: {error}"))?;
+        .map_err(|error| format!("read map entry points: {error}"))?;
     for row in rows {
-        let (path, language) = row.map_err(|error| format!("read map file row: {error}"))?;
-        lines.push(format!("- `{path}` ({language})"));
+        lines.push(format!(
+            "- entry point: `{}`",
+            row.map_err(|error| format!("read map entry point row: {error}"))?
+        ));
+    }
+    let mut owners = connection
+        .prepare("SELECT path FROM files WHERE lower(path) LIKE '%agents.md' OR lower(path) LIKE '%claude.md' OR lower(path) LIKE '%codeowners' OR lower(path) LIKE '%contributing.md' ORDER BY path LIMIT ?1")
+        .map_err(|error| format!("prepare map ownership: {error}"))?;
+    let owner_rows = owners
+        .query_map(params![MAP_OWNER_LIMIT as i64], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(|error| format!("read map ownership: {error}"))?;
+    for row in owner_rows {
+        lines.push(format!(
+            "- owner/instruction: `{}`",
+            row.map_err(|error| format!("read map ownership row: {error}"))?
+        ));
     }
     lines.push(String::new());
     lines.push("## Indexed Symbols".to_string());
     let mut symbols = connection
-        .prepare("SELECT path, kind, qualified_name, start_line, end_line FROM symbols ORDER BY path, start_line LIMIT 1000")
+        .prepare("SELECT path, kind, qualified_name, start_line, end_line FROM symbols ORDER BY path, start_line LIMIT ?1")
         .map_err(|error| format!("prepare map symbols: {error}"))?;
     let rows = symbols
-        .query_map([], |row| {
+        .query_map(params![MAP_SYMBOL_LIMIT as i64], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -635,10 +829,10 @@ pub fn render_map(workspace_root: &Path, claude_home_flag: &str) -> Result<Strin
     lines.push(String::new());
     lines.push("## Indexed Relationships".to_string());
     let mut edges = connection
-        .prepare("SELECT from_path, to_path, relation, evidence FROM edges ORDER BY from_path, to_path LIMIT 1000")
+        .prepare("SELECT from_path, to_path, relation, evidence FROM edges ORDER BY from_path, to_path LIMIT ?1")
         .map_err(|error| format!("prepare map edges: {error}"))?;
     let rows = edges
-        .query_map([], |row| {
+        .query_map(params![MAP_EDGE_LIMIT as i64], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -655,10 +849,12 @@ pub fn render_map(workspace_root: &Path, claude_home_flag: &str) -> Result<Strin
     lines.push(String::new());
     lines.push("## Indexed Tests".to_string());
     let mut tests = connection
-        .prepare("SELECT DISTINCT path FROM files WHERE lower(path) LIKE '%test%' OR lower(path) LIKE '%spec%' ORDER BY path LIMIT 200")
+        .prepare("SELECT DISTINCT path FROM files WHERE lower(path) LIKE '%test%' OR lower(path) LIKE '%spec%' ORDER BY path LIMIT ?1")
         .map_err(|error| format!("prepare map tests: {error}"))?;
     let test_rows = tests
-        .query_map([], |row| row.get::<_, String>(0))
+        .query_map(params![MAP_TEST_LIMIT as i64], |row| {
+            row.get::<_, String>(0)
+        })
         .map_err(|error| format!("read map tests: {error}"))?;
     for row in test_rows {
         lines.push(format!(
@@ -667,18 +863,20 @@ pub fn render_map(workspace_root: &Path, claude_home_flag: &str) -> Result<Strin
         ));
     }
     lines.push(String::new());
-    lines.push("## Ownership Sources".to_string());
-    let mut owners = connection
-        .prepare("SELECT path FROM files WHERE lower(path) LIKE '%agents.md' OR lower(path) LIKE '%claude.md' OR lower(path) LIKE '%codeowners' OR lower(path) LIKE '%contributing.md' ORDER BY path LIMIT 200")
-        .map_err(|error| format!("prepare map ownership: {error}"))?;
-    let owner_rows = owners
-        .query_map([], |row| row.get::<_, String>(0))
-        .map_err(|error| format!("read map ownership: {error}"))?;
-    for row in owner_rows {
-        lines.push(format!(
-            "- `{}`",
-            row.map_err(|error| format!("read map ownership row: {error}"))?
-        ));
+    lines.push(format!(
+        "## Indexed Files (first {MAP_FILE_LIMIT} of {file_count})"
+    ));
+    let mut files = connection
+        .prepare("SELECT path, language FROM files ORDER BY path LIMIT ?1")
+        .map_err(|error| format!("prepare map files: {error}"))?;
+    let file_rows = files
+        .query_map(params![MAP_FILE_LIMIT as i64], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|error| format!("read map files: {error}"))?;
+    for row in file_rows {
+        let (path, language) = row.map_err(|error| format!("read map file row: {error}"))?;
+        lines.push(format!("- `{path}` ({language})"));
     }
     lines.push(String::new());
     lines.push("## Maintenance".to_string());
@@ -756,6 +954,30 @@ fn ensure_schema(connection: &Connection) -> Result<(), String> {
     if version != SCHEMA_VERSION {
         return Err(format!("unsupported workspace index schema {version:?}"));
     }
+    // Older indexes used `calls` for unresolved name matches. Preserve those
+    // derived edges but make their uncertainty explicit after upgrading.
+    connection
+        .execute(
+            "DELETE FROM edges
+             WHERE relation = 'calls'
+               AND EXISTS (
+                   SELECT 1 FROM edges candidate
+                   WHERE candidate.from_path = edges.from_path
+                     AND candidate.from_symbol_id IS edges.from_symbol_id
+                     AND candidate.to_path = edges.to_path
+                     AND candidate.to_symbol_id IS edges.to_symbol_id
+                     AND candidate.evidence = edges.evidence
+                     AND candidate.relation = 'calls-candidate'
+               )",
+            [],
+        )
+        .map_err(|error| format!("migrate duplicate candidate edges: {error}"))?;
+    connection
+        .execute(
+            "UPDATE edges SET relation = 'calls-candidate' WHERE relation = 'calls'",
+            [],
+        )
+        .map_err(|error| format!("migrate candidate edge labels: {error}"))?;
     Ok(())
 }
 
@@ -1053,7 +1275,10 @@ fn graph_candidates(
     Ok(candidates)
 }
 
-fn fuse_candidates(channels: Vec<Vec<Candidate>>, limit: usize) -> Vec<SearchHit> {
+fn fuse_candidates_with_status(
+    channels: Vec<Vec<Candidate>>,
+    limit: usize,
+) -> (Vec<SearchHit>, bool) {
     // Exact symbols are authoritative; graph expansion supplies context but
     // must not outrank a direct definition because one file can have many edges.
     let weights = [8.0, 2.0, 1.0, 0.4];
@@ -1099,81 +1324,112 @@ fn fuse_candidates(channels: Vec<Vec<Candidate>>, limit: usize) -> Vec<SearchHit
             .then(left.path.cmp(&right.path))
             .then(left.start_line.cmp(&right.start_line))
     });
-    hits.truncate(limit.min(MAX_SEARCH_RESULTS));
-    hits
+    let cap = limit.min(MAX_SEARCH_RESULTS);
+    let truncated = hits.len() > cap;
+    hits.truncate(cap);
+    (hits, truncated)
 }
 
-fn collect_source_paths(root: &Path) -> Result<Vec<PathBuf>, String> {
-    let mut paths = Vec::new();
+fn collect_source_paths(root: &Path) -> Result<SourcePathCollection, String> {
+    let mut collection = SourcePathCollection::default();
     let mut stack = vec![root.to_path_buf()];
     while let Some(directory) = stack.pop() {
         let entries = fs::read_dir(&directory)
             .map_err(|error| format!("read {}: {error}", display_path(&directory)))?;
-        for entry in entries.flatten() {
-            if paths.len() >= MAX_FILES {
-                break;
-            }
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(_) => {
+                    collection.skipped_unreadable += 1;
+                    continue;
+                }
+            };
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().to_string();
             if should_skip(&name, &path) {
                 continue;
             }
-            let file_type = entry
-                .file_type()
-                .map_err(|error| format!("read file type {}: {error}", display_path(&path)))?;
+            let file_type = match entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(_) => {
+                    collection.skipped_unreadable += 1;
+                    continue;
+                }
+            };
             if file_type.is_symlink() {
                 continue;
             }
             if file_type.is_dir() {
                 stack.push(path);
             } else if file_type.is_file() && is_indexable_file(&path) {
-                paths.push(path);
+                collection.discovered += 1;
+                if collection.paths.len() >= MAX_FILES {
+                    collection.skipped_limit += 1;
+                } else {
+                    collection.paths.push(path);
+                }
             }
         }
     }
-    paths.sort();
-    Ok(paths)
+    collection.paths.sort();
+    Ok(collection)
 }
 
-fn collect_source_snapshots(root: &Path, paths: &[PathBuf]) -> Vec<SourceSnapshot> {
-    paths
-        .iter()
-        .filter_map(|absolute_path| {
-            let metadata = fs::metadata(absolute_path).ok()?;
-            if metadata.len() > MAX_FILE_BYTES {
-                return None;
+fn collect_source_snapshots(root: &Path, paths: &[PathBuf]) -> SnapshotCollection {
+    let mut collection = SnapshotCollection::default();
+    for absolute_path in paths {
+        let metadata = match fs::metadata(absolute_path) {
+            Ok(metadata) => metadata,
+            Err(_) => {
+                collection.skipped_unreadable += 1;
+                continue;
             }
-            Some(SourceSnapshot {
-                path: absolute_path
-                    .strip_prefix(root)
-                    .unwrap_or(absolute_path)
-                    .to_string_lossy()
-                    .replace('\\', "/"),
-                modified_at: metadata
-                    .modified()
-                    .ok()
-                    .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
-                    .map(|value| value.as_millis())
-                    .unwrap_or(0),
-                size: metadata.len(),
-            })
-        })
-        .collect()
+        };
+        if metadata.len() > MAX_FILE_BYTES {
+            collection.skipped_too_large += 1;
+            continue;
+        }
+        collection.snapshots.push(SourceSnapshot {
+            path: absolute_path
+                .strip_prefix(root)
+                .unwrap_or(absolute_path)
+                .to_string_lossy()
+                .replace('\\', "/"),
+            modified_at: metadata
+                .modified()
+                .ok()
+                .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+                .map(|value| value.as_millis())
+                .unwrap_or(0),
+            size: metadata.len(),
+        });
+    }
+    collection
 }
 
-fn collect_sources_from_paths(root: &Path, paths: Vec<PathBuf>) -> Result<Vec<SourceFile>, String> {
+fn collect_sources_from_paths(
+    root: &Path,
+    paths: Vec<PathBuf>,
+) -> Result<(Vec<SourceFile>, u64), String> {
     let mut sources = Vec::new();
+    let mut skipped_unreadable = 0;
     for absolute_path in paths {
         let metadata = match fs::metadata(&absolute_path) {
             Ok(meta) => meta,
-            Err(_) => continue,
+            Err(_) => {
+                skipped_unreadable += 1;
+                continue;
+            }
         };
         if metadata.len() > MAX_FILE_BYTES {
             continue;
         }
         let content = match fs::read_to_string(&absolute_path) {
             Ok(c) => c,
-            Err(_) => continue,
+            Err(_) => {
+                skipped_unreadable += 1;
+                continue;
+            }
         };
         let relative = absolute_path
             .strip_prefix(root)
@@ -1199,7 +1455,7 @@ fn collect_sources_from_paths(root: &Path, paths: Vec<PathBuf>) -> Result<Vec<So
             symbols,
         });
     }
-    Ok(sources)
+    Ok((sources, skipped_unreadable))
 }
 
 fn extract_symbols(language: &str, content: &str) -> Vec<ParsedSymbol> {
@@ -1226,26 +1482,39 @@ fn extract_symbols(language: &str, content: &str) -> Vec<ParsedSymbol> {
 }
 
 fn symbol_prefix(language: &str, line: &str) -> Option<(&'static str, String)> {
+    if language == "rust" {
+        return rust_symbol_prefix(line);
+    }
+    if language == "go" {
+        if let Some(rest) = line.strip_prefix("func ") {
+            let rest = if rest.starts_with('(') {
+                rest.find(')')
+                    .and_then(|end| rest.get(end + 1..))
+                    .unwrap_or("")
+                    .trim_start()
+            } else {
+                rest
+            };
+            if let Some(name) = symbol_name(rest) {
+                return Some(("function", name));
+            }
+        }
+        if let Some(rest) = line.strip_prefix("type ") {
+            if let Some(name) = symbol_name(rest) {
+                return Some(("type", name));
+            }
+        }
+        return None;
+    }
     let prefixes: &[(&str, &str)] = match language {
-        "rust" => &[
-            ("pub async fn ", "function"),
-            ("async fn ", "function"),
-            ("pub fn ", "function"),
-            ("fn ", "function"),
-            ("pub struct ", "struct"),
-            ("struct ", "struct"),
-            ("pub enum ", "enum"),
-            ("enum ", "enum"),
-            ("pub trait ", "trait"),
-            ("trait ", "trait"),
-            ("pub mod ", "module"),
-            ("mod ", "module"),
-        ],
         "javascript" | "typescript" => &[
+            ("export default async function ", "function"),
+            ("export default function ", "function"),
             ("export async function ", "function"),
             ("async function ", "function"),
             ("export function ", "function"),
             ("function ", "function"),
+            ("export default class ", "class"),
             ("export class ", "class"),
             ("class ", "class"),
             ("export const ", "constant"),
@@ -1256,17 +1525,47 @@ fn symbol_prefix(language: &str, line: &str) -> Option<(&'static str, String)> {
             ("def ", "function"),
             ("class ", "class"),
         ],
-        "go" => &[("func ", "function"), ("type ", "type")],
         _ => &[],
     };
-    for (prefix, kind) in prefixes {
+    prefixes.iter().find_map(|(prefix, kind)| {
+        line.strip_prefix(prefix)
+            .and_then(symbol_name)
+            .map(|name| (*kind, name))
+    })
+}
+
+fn rust_symbol_prefix(mut line: &str) -> Option<(&'static str, String)> {
+    if let Some(rest) = line.strip_prefix("pub(") {
+        line = rest.get(rest.find(')')? + 1..)?.trim_start();
+    } else if let Some(rest) = line.strip_prefix("pub ") {
+        line = rest;
+    }
+    loop {
+        let next = if let Some(rest) = line.strip_prefix("async ") {
+            Some(rest)
+        } else if let Some(rest) = line.strip_prefix("unsafe ") {
+            Some(rest)
+        } else if let Some(rest) = line.strip_prefix("const ") {
+            Some(rest)
+        } else if let Some(rest) = line.strip_prefix("extern ") {
+            let quote = rest.find('"')?;
+            let closing = rest.get(quote + 1..)?.find('"')? + quote + 2;
+            Some(rest.get(closing..)?.trim_start())
+        } else {
+            None
+        };
+        let Some(next) = next else { break };
+        line = next;
+    }
+    for (prefix, kind) in [
+        ("fn ", "function"),
+        ("struct ", "struct"),
+        ("enum ", "enum"),
+        ("trait ", "trait"),
+        ("mod ", "module"),
+    ] {
         if let Some(rest) = line.strip_prefix(prefix) {
-            let name = rest
-                .trim_start()
-                .chars()
-                .take_while(|character| character.is_alphanumeric() || *character == '_')
-                .collect::<String>();
-            if !name.is_empty() {
+            if let Some(name) = symbol_name(rest) {
                 return Some((kind, name));
             }
         }
@@ -1274,21 +1573,83 @@ fn symbol_prefix(language: &str, line: &str) -> Option<(&'static str, String)> {
     None
 }
 
+fn symbol_name(rest: &str) -> Option<String> {
+    let name = rest
+        .trim_start()
+        .chars()
+        .take_while(|character| character.is_alphanumeric() || *character == '_')
+        .collect::<String>();
+    (!name.is_empty()).then_some(name)
+}
+
 fn extract_call_names(content: &str) -> Vec<String> {
     let mut calls = BTreeSet::new();
-    let mut identifier = String::new();
-    let chars = content.chars();
-    for character in chars {
-        if character.is_alphanumeric() || character == '_' {
-            identifier.push(character);
+    let chars: Vec<char> = content.chars().collect();
+    let mut index = 0;
+    while index < chars.len() {
+        if chars[index] == '/' && chars.get(index + 1) == Some(&'/') {
+            index += 2;
+            while index < chars.len() && chars[index] != '\n' {
+                index += 1;
+            }
             continue;
         }
-        if character == '(' && !identifier.is_empty() && !is_call_keyword(&identifier) {
-            calls.insert(identifier.clone());
+        if chars[index] == '/' && chars.get(index + 1) == Some(&'*') {
+            index += 2;
+            while index + 1 < chars.len() && !(chars[index] == '*' && chars[index + 1] == '/') {
+                index += 1;
+            }
+            index = (index + 2).min(chars.len());
+            continue;
         }
-        identifier.clear();
+        if matches!(chars[index], '\'' | '"' | '`') {
+            index = skip_quoted(&chars, index);
+            continue;
+        }
+        if chars[index].is_alphanumeric() || chars[index] == '_' {
+            let start = index;
+            index += 1;
+            while index < chars.len() && (chars[index].is_alphanumeric() || chars[index] == '_') {
+                index += 1;
+            }
+            let identifier: String = chars[start..index].iter().collect();
+            let mut next = index;
+            while next < chars.len() && chars[next].is_whitespace() {
+                next += 1;
+            }
+            if chars.get(next) == Some(&'(') && !is_call_keyword(&identifier) {
+                calls.insert(identifier);
+            }
+            continue;
+        }
+        // Python comments and Rust attributes are not executable calls.
+        if chars[index] == '#' {
+            while index < chars.len() && chars[index] != '\n' {
+                index += 1;
+            }
+            continue;
+        }
+        index += 1;
     }
     calls.into_iter().collect()
+}
+
+fn skip_quoted(chars: &[char], mut index: usize) -> usize {
+    let quote = chars[index];
+    index += 1;
+    let mut escaped = false;
+    while index < chars.len() {
+        let character = chars[index];
+        index += 1;
+        if escaped {
+            escaped = false;
+        } else if character == '\\' {
+            escaped = true;
+        } else if character == quote {
+            break;
+        }
+    }
+    index
 }
 
 fn is_call_keyword(value: &str) -> bool {
@@ -1298,26 +1659,103 @@ fn is_call_keyword(value: &str) -> bool {
     )
 }
 
-fn symbol_end_line(lines: &[&str], start: usize, language: &str) -> usize {
-    let start_line = lines[start];
-    let balance = start_line
-        .chars()
-        .filter(|character| *character == '{')
-        .count() as i32
-        - start_line
-            .chars()
-            .filter(|character| *character == '}')
-            .count() as i32;
-    if balance > 0 {
-        let mut current = balance;
-        for (offset, line) in lines.iter().enumerate().skip(start + 1) {
-            current += line.chars().filter(|character| *character == '{').count() as i32;
-            current -= line.chars().filter(|character| *character == '}').count() as i32;
-            if current <= 0 {
-                return offset + 1;
+#[derive(Default)]
+struct BraceScanState {
+    depth: i32,
+    saw_open: bool,
+    block_comment: bool,
+    quote: Option<char>,
+    raw_hashes: Option<usize>,
+    escaped: bool,
+}
+
+fn raw_string_hashes(chars: &[char], index: usize) -> Option<usize> {
+    if chars.get(index) != Some(&'r') {
+        return None;
+    }
+    let mut cursor = index + 1;
+    let mut hashes = 0;
+    while chars.get(cursor) == Some(&'#') {
+        hashes += 1;
+        cursor += 1;
+    }
+    (chars.get(cursor) == Some(&'"')).then_some(hashes)
+}
+
+fn scan_braces(line: &str, language: &str, state: &mut BraceScanState) {
+    let chars: Vec<char> = line.chars().collect();
+    let mut index = 0;
+    while index < chars.len() {
+        if let Some(hashes) = state.raw_hashes {
+            if chars[index] == '"'
+                && (0..hashes).all(|offset| chars.get(index + 1 + offset) == Some(&'#'))
+            {
+                state.raw_hashes = None;
+                index += hashes + 1;
+            } else {
+                index += 1;
+            }
+            continue;
+        }
+        if let Some(quote) = state.quote {
+            let character = chars[index];
+            index += 1;
+            if state.escaped {
+                state.escaped = false;
+            } else if character == '\\' {
+                state.escaped = true;
+            } else if character == quote {
+                state.quote = None;
+            }
+            continue;
+        }
+        if state.block_comment {
+            if chars[index] == '*' && chars.get(index + 1) == Some(&'/') {
+                state.block_comment = false;
+                index += 2;
+            } else {
+                index += 1;
+            }
+            continue;
+        }
+        if chars[index] == '/' && chars.get(index + 1) == Some(&'/') {
+            break;
+        }
+        if chars[index] == '/' && chars.get(index + 1) == Some(&'*') {
+            state.block_comment = true;
+            index += 2;
+            continue;
+        }
+        if language == "python" && chars[index] == '#' {
+            break;
+        }
+        if language == "rust" {
+            if let Some(hashes) = raw_string_hashes(&chars, index) {
+                state.raw_hashes = Some(hashes);
+                index += hashes + 2;
+                continue;
             }
         }
+        if matches!(chars[index], '\'' | '"' | '`') {
+            state.quote = Some(chars[index]);
+            state.escaped = false;
+            index += 1;
+            continue;
+        }
+        match chars[index] {
+            '{' => {
+                state.depth += 1;
+                state.saw_open = true;
+            }
+            '}' if state.saw_open => state.depth -= 1,
+            _ => {}
+        }
+        index += 1;
     }
+}
+
+fn symbol_end_line(lines: &[&str], start: usize, language: &str) -> usize {
+    let start_line = lines[start];
     if language == "python" {
         let indent = start_line.len() - start_line.trim_start().len();
         for (offset, line) in lines.iter().enumerate().skip(start + 1) {
@@ -1328,8 +1766,27 @@ fn symbol_end_line(lines: &[&str], start: usize, language: &str) -> usize {
                 }
             }
         }
+        return lines.len();
     }
-    (start + 1).min(lines.len())
+
+    let mut state = BraceScanState::default();
+    for (offset, line) in lines.iter().enumerate().skip(start) {
+        scan_braces(line, language, &mut state);
+        if state.saw_open && state.depth <= 0 {
+            return offset + 1;
+        }
+        if !state.saw_open && offset > start && symbol_prefix(language, line.trim_start()).is_some()
+        {
+            // A body-less declaration is one line; do not absorb later symbols
+            // while searching for a brace that will never arrive.
+            return offset;
+        }
+    }
+    if state.saw_open {
+        lines.len()
+    } else {
+        (start + 1).min(lines.len())
+    }
 }
 
 fn preceding_documentation(lines: &[&str], start: usize) -> String {
@@ -1795,5 +2252,126 @@ mod tests {
         assert!(map.contains("src/main.rs"));
         assert!(map.contains("main"));
         assert!(map.contains("generation:"));
+    }
+
+    #[test]
+    fn multiline_symbol_ranges_include_body_but_ignore_braces_in_text_and_comments() {
+        let content = "pub(crate) fn multi(\n    value: usize,\n) {\n    let text = \"} {\";\n    let raw = r#\"} {\"#;\n    // } {\n}\n\npub fn next() {}\n";
+        let symbols = extract_symbols("rust", content);
+
+        let multi = symbols
+            .iter()
+            .find(|symbol| symbol.name == "multi")
+            .expect("multiline function indexed");
+        assert_eq!(multi.start_line, 1);
+        assert_eq!(multi.end_line, 7);
+        assert_eq!(
+            symbols
+                .iter()
+                .find(|symbol| symbol.name == "next")
+                .unwrap()
+                .start_line,
+            9
+        );
+    }
+
+    #[test]
+    fn symbol_prefix_covers_visibility_qualifiers_and_go_methods() {
+        assert_eq!(
+            symbol_prefix("rust", "pub(crate) async fn load_data()"),
+            Some(("function", "load_data".to_string()))
+        );
+        assert_eq!(
+            symbol_prefix("rust", "pub(in crate::api) fn endpoint()"),
+            Some(("function", "endpoint".to_string()))
+        );
+        assert_eq!(
+            symbol_prefix("go", "func (s *Server) Serve() error"),
+            Some(("function", "Serve".to_string()))
+        );
+    }
+
+    #[test]
+    fn call_name_extraction_ignores_comments_and_string_literals() {
+        let calls = extract_call_names(
+            "helper(); // fake_call()\nlet text = \"other_call()\"; /* hidden_call() */\n",
+        );
+
+        assert_eq!(calls, vec!["helper".to_string()]);
+    }
+
+    #[test]
+    fn call_edges_are_labeled_as_candidates() {
+        let (root, home) = temp_workspace("candidate-edges");
+        fs::write(
+            root.join("src/main.rs"),
+            "pub fn main() { helper(); let _ = \"helper()\"; }\n",
+        )
+        .expect("main");
+        fs::write(root.join("src/helper.rs"), "pub fn helper() {}\n").expect("helper");
+        refresh(&root, &home.to_string_lossy(), true).expect("refresh");
+        let index_path = database_path(&root, &home.to_string_lossy()).expect("index path");
+        let connection = open_connection(&index_path).expect("open index");
+        let relation: String = connection
+            .query_row(
+                "SELECT relation FROM edges WHERE relation LIKE 'calls-%' LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("candidate call edge");
+        assert_eq!(relation, "calls-candidate");
+    }
+
+    #[test]
+    fn search_metadata_reports_result_truncation() {
+        let candidates = (0..(MAX_SEARCH_RESULTS + 1))
+            .map(|index| Candidate {
+                key: format!("key-{index}"),
+                hit: SearchHit {
+                    path: format!("src/{index}.rs"),
+                    symbol: String::new(),
+                    kind: "file".to_string(),
+                    start_line: 1,
+                    end_line: 1,
+                    score: 0.0,
+                    reason: "test".to_string(),
+                    snippet: String::new(),
+                },
+            })
+            .collect::<Vec<_>>();
+        let result = fuse_candidates_with_status(vec![candidates], 80);
+
+        assert!(result.1, "capped results must report truncation");
+        assert_eq!(result.0.len(), MAX_SEARCH_RESULTS);
+    }
+
+    #[test]
+    fn refresh_reports_oversized_files_incomplete() {
+        let (root, home) = temp_workspace("coverage");
+        fs::write(root.join("src/ok.rs"), "pub fn ok() {}\n").expect("ok source");
+        fs::write(
+            root.join("src/oversized.rs"),
+            vec![b'x'; (MAX_FILE_BYTES + 1) as usize],
+        )
+        .expect("oversized source");
+
+        let report = refresh(&root, &home.to_string_lossy(), true).expect("refresh");
+
+        assert_eq!(report.files_discovered, 2);
+        assert_eq!(report.files_skipped_too_large, 1);
+        assert!(!report.coverage_complete);
+    }
+
+    #[test]
+    fn map_places_architecture_before_large_file_inventory() {
+        let (root, home) = temp_workspace("map-order");
+        fs::write(root.join("src/main.rs"), "pub fn main() {}\n").expect("source");
+        let map = render_map(&root, &home.to_string_lossy()).expect("map");
+
+        assert!(
+            map.find("## Indexed Symbols").expect("symbols section")
+                < map.find("## Indexed Files").expect("files section")
+        );
+        assert!(map.contains("## Index Coverage"));
     }
 }

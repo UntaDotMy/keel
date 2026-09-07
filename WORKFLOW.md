@@ -1,5 +1,11 @@
 # Workflow
 
+This file is the canonical Git/branch/CI/commit/push workflow. Skill routing and
+profile semantics live in `AGENTS/references/20-skill-routing.md`; execution,
+research, fan-out, and completion loops live in
+`AGENTS/references/30-execution-strategy.md`. Those documents may point here,
+but must not introduce a second Git-delivery sequence or approval rule.
+
 ## Native Command Routing — Must Follow First
 
 Before running raw shell, broad search, or patching existing source, route through the native `keel` surface:

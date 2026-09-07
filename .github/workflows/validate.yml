@@ -299,6 +299,10 @@ jobs:
         run: bun test tests/host-adapter-contracts.test.ts
       - name: Run skill routing eval fixtures
         run: cargo run --locked -p keel -- skill-eval
+      - name: Run install and guidance integration contracts
+        # Exercise temporary-home provisioning and docs/profile/host parity.
+        # Keep this highest-risk cross-host coverage visible beside fixtures.
+        run: cargo test --locked -p keel --test manager_provision_test --test doc_parity_test
 
   security-audit:
     needs: changes

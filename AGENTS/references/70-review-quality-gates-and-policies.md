@@ -30,8 +30,7 @@ Side Effects: None — this file is informational.
    - Evaluates the combined change as one patch.
    - Reports only proven defects with causal chains: `trigger/state -> reachable execution path -> violated contract -> observable result`.
    - Limits fix cycles to at most 2 incremental re-review rounds.
-   - On final Reviewer `PASS`, provides a CONSOLIDATED FINAL CHANGE SUMMARY and ends with the standalone authorization prompt: `Commit and push? (yes/no)`. Stage, commit, or push only after an explicit affirmative reply to that exact question.
-   - Pusher executes git shipping actions only upon explicit affirmative user authorization.
+   - On final Reviewer `PASS`, provides a CONSOLIDATED FINAL CHANGE SUMMARY. Git delivery authorization and shipping actions follow the canonical [WORKFLOW.md](../../WORKFLOW.md); this reference does not define a second approval prompt or delivery sequence.
 
 **Security review required** for:
 - User input handling

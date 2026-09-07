@@ -30,6 +30,12 @@ const RAW_AUTO_PRUNE_DEFAULT_RETENTION_DAYS: u64 = 14;
 /// nothing; a stamp file under the store root throttles repeat runs.
 const RAW_AUTO_PRUNE_INTERVAL_SECS: u64 = 6 * 60 * 60;
 
+/// Minimum wall-clock gap between scans for interrupted staging directories.
+/// Saving a run is a hot path; an old staging directory can safely wait for the
+/// next bounded maintenance sweep instead of forcing every save to enumerate all
+/// historical date directories.
+const RAW_STAGING_CLEANUP_INTERVAL_SECS: u64 = 6 * 60 * 60;
+
 /// Resolve the raw-output retention in days using the same precedence as the
 /// SessionEnd prune: plugin userConfig env, then the operator env var, then the
 /// default. `0` disables pruning. Kept local so the proxy hot path does not
@@ -382,6 +388,18 @@ impl RawStore {
 }
 
 fn cleanup_stale_raw_staging(root: &std::path::Path) {
+    let stamp = root.join(".last-staging-cleanup");
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    if let Ok(contents) = fs::read_to_string(&stamp) {
+        if let Ok(previous) = contents.trim().parse::<u64>() {
+            if now.saturating_sub(previous) < RAW_STAGING_CLEANUP_INTERVAL_SECS {
+                return;
+            }
+        }
+    }
     let Ok(day_directories) = fs::read_dir(root) else {
         return;
     };
@@ -418,6 +436,9 @@ fn cleanup_stale_raw_staging(root: &std::path::Path) {
             }
         }
     }
+    // The sweep is best-effort; a fresh stamp is written only after the walk,
+    // so concurrent disappearance retries on the next save.
+    let _ = write_private(&stamp, now.to_string().as_bytes());
 }
 
 /// Resolve an age signal for a raw entry path: parent `YYYY-MM-DD` folder midnight
@@ -595,6 +616,60 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(root);
     }
+
+    #[test]
+    fn raw_store_staging_cleanup_is_throttled_by_stamp() {
+        let root =
+            std::env::temp_dir().join(format!("keel-raw-staging-throttle-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let day = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let missing_pid = i32::MAX as u32;
+        let stale = root
+            .join(&day)
+            .join(format!(".tmp-old-{missing_pid}-throttle"));
+        std::fs::create_dir_all(&stale).expect("stale staging");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0);
+        std::fs::write(root.join(".last-staging-cleanup"), now.to_string())
+            .expect("fresh cleanup stamp");
+
+        let store = RawStore::with_root(root.clone());
+        let mut meta = sample_meta("staging-throttle");
+        store
+            .save(
+                &mut meta,
+                &RawRun {
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                    exit_code: 0,
+                },
+            )
+            .expect("save with fresh cleanup stamp");
+        assert!(
+            stale.exists(),
+            "a fresh staging stamp must avoid another historical scan"
+        );
+
+        let old = now.saturating_sub(super::RAW_STAGING_CLEANUP_INTERVAL_SECS + 60);
+        std::fs::write(root.join(".last-staging-cleanup"), old.to_string())
+            .expect("expired cleanup stamp");
+        let mut second_meta = sample_meta("staging-throttle-second");
+        store
+            .save(
+                &mut second_meta,
+                &RawRun {
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                    exit_code: 0,
+                },
+            )
+            .expect("save after cleanup interval");
+        assert!(!stale.exists(), "an expired stamp must permit cleanup");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[cfg(unix)]
     #[test]
     fn raw_store_artifacts_are_private_at_rest() {

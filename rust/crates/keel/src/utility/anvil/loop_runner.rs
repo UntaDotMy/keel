@@ -2,10 +2,13 @@ use std::io::Write;
 use std::time::{Duration, Instant};
 
 use crate::args::FlagSet;
+use crate::utility::anvil::cache;
 use crate::utility::anvil::cast;
 use crate::utility::anvil::job;
+use crate::utility::anvil::prefix;
 use crate::utility::anvil::report;
 use crate::utility::anvil::sieve;
+use crate::utility::anvil::supervisor;
 
 fn fail_with_error(standard_error: &mut dyn Write, error: &str) -> u8 {
     let _ = writeln!(standard_error, "anvil loop: {error}");
@@ -150,6 +153,12 @@ pub fn run_loop(
     }
     let final_pass;
     let mut last_score = 0.0;
+    let final_feedback;
+    let mut loop_output_bytes = 0u64;
+    let mut loop_output_token_estimate = 0u64;
+    let mut loop_usage = cache::ProviderUsage::default();
+    let mut loop_usage_measured = false;
+    let mut loop_usage_source: Option<String> = None;
     let (iters, delta) = if paths.lock_path().is_file() {
         let workspace = match crate::utility::anvil::stamp::ensure_winner_workspace(&paths, strict)
         {
@@ -171,24 +180,67 @@ pub fn run_loop(
         } else {
             piece.clone()
         };
+        let prefix_text = match prefix::read_verified_prefix(&paths) {
+            Ok(text) => text,
+            Err(error) => {
+                let _ = writeln!(standard_error, "{error}");
+                return 1;
+            }
+        };
         let mut pass_state = false;
         let mut builder_error = None;
+        let mut failure_feedback: Option<String> = None;
+        let mut attempt = 0u64;
         let deadline = Instant::now() + cfg.wall_timeout;
         let result = run_bounded_loop(&cfg, || {
+            attempt = attempt.saturating_add(1);
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 builder_error = Some("anvil loop: wall-clock budget exhausted".to_string());
+                failure_feedback = Some(refinement_feedback(
+                    attempt,
+                    last_score,
+                    "",
+                    builder_error.as_deref(),
+                ));
                 return (false, last_score);
             }
-            match cast::run_builder_with_budget(
+            if let Err(error) = cast::write_builder_brief(
+                &workspace,
+                &builder_piece,
+                &gates,
+                &prefix_text,
+                failure_feedback.as_deref(),
+            ) {
+                builder_error = Some(error.clone());
+                failure_feedback = Some(refinement_feedback(
+                    attempt,
+                    last_score,
+                    "",
+                    builder_error.as_deref(),
+                ));
+                return (false, last_score);
+            }
+            let run_result = cast::run_builder_with_budget(
                 &workspace,
                 &builder_piece,
                 &gates,
                 remaining,
                 budget.max_tool_chars,
                 budget.max_tokens_loop,
-            ) {
-                Ok(_) => {
+            );
+            let _ = std::fs::remove_file(workspace.join("BUILDER.md"));
+            match run_result {
+                Ok(run) => {
+                    loop_output_bytes = loop_output_bytes.saturating_add(run.output_bytes);
+                    loop_output_token_estimate =
+                        loop_output_token_estimate.saturating_add(run.output_token_estimate);
+                    if let Some(usage) = run.model_usage {
+                        loop_usage.merge(&usage);
+                        loop_usage_measured = true;
+                        let source = format!("{}:json", run.provider);
+                        report::merge_usage_source(&mut loop_usage_source, &source);
+                    }
                     builder_error = None;
                     let scored = sieve::run_gates_scored_bounded(
                         &gates,
@@ -198,12 +250,23 @@ pub fn run_loop(
                     );
                     pass_state = scored.ok;
                     last_score = scored.rate();
+                    failure_feedback = if scored.ok {
+                        None
+                    } else {
+                        Some(refinement_feedback(
+                            attempt,
+                            scored.rate(),
+                            &scored.logs,
+                            None,
+                        ))
+                    };
                     (scored.ok, scored.rate())
                 }
                 Err(error) => {
-                    builder_error = Some(error);
+                    builder_error = Some(error.clone());
                     pass_state = false;
-                    (false, 0.0)
+                    failure_feedback = Some(refinement_feedback(attempt, 0.0, "", Some(&error)));
+                    (false, last_score)
                 }
             }
         });
@@ -211,6 +274,7 @@ pub fn run_loop(
             let _ = writeln!(standard_error, "{error}");
         }
         final_pass = pass_state;
+        final_feedback = failure_feedback;
         result
     } else {
         let _ = writeln!(
@@ -224,6 +288,27 @@ pub fn run_loop(
     built.loop_iterations = iters as u64;
     built.improvement_delta = delta;
     built.gate_pass_rate = if final_pass { 1.0 } else { last_score };
+    built.refinement_feedback = final_feedback;
+    match report::read_cast_metrics(&paths) {
+        Ok(mut metrics) => {
+            metrics.output_bytes = metrics.output_bytes.saturating_add(loop_output_bytes);
+            metrics.output_token_estimate = metrics
+                .output_token_estimate
+                .saturating_add(loop_output_token_estimate);
+            if loop_usage_measured {
+                metrics.usage.merge(&loop_usage);
+                metrics.measured_usage = true;
+                if let Some(source) = loop_usage_source.as_deref() {
+                    report::merge_usage_source(&mut metrics.usage_source, source);
+                }
+            }
+            built.apply_cast_metrics(&metrics);
+        }
+        Err(error) => {
+            let _ = writeln!(standard_error, "{error}");
+            return 1;
+        }
+    }
     if !final_pass {
         match crate::utility::memory_families::bump_loop_guard(&paths.home, &guard_signature, 2) {
             Ok((_, true)) => {
@@ -256,6 +341,21 @@ pub fn run_loop(
     } else {
         1
     }
+}
+
+fn refinement_feedback(
+    attempt: u64,
+    gate_pass_rate: f64,
+    gate_output: &str,
+    builder_error: Option<&str>,
+) -> String {
+    serde_json::json!({
+        "attempt": attempt,
+        "gate_pass_rate": gate_pass_rate,
+        "gate_output": supervisor::clip_output(gate_output, 2_000),
+        "builder_error": builder_error.map(|error| supervisor::clip_output(error, 2_000)),
+    })
+    .to_string()
 }
 
 #[cfg(test)]

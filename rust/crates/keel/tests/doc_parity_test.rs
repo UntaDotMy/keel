@@ -1257,3 +1257,82 @@ fn critic_routing_is_pinned_across_guidance() {
         "receiving-code-review must reciprocate the critic handoff"
     );
 }
+
+/// The operational guidance is part of the product contract: it must describe
+/// the current Anvil/installer/profile behavior and must name the deterministic
+/// integration checks that prove the host-facing paths. This prevents prose
+/// from silently restoring unsupported parallel/prewarm claims or treating
+/// Keel's internal profile metadata as a Claude runtime contract.
+#[test]
+fn operational_guidance_matches_runtime_and_ci_contracts() {
+    let repo_root = repository_root();
+
+    let anvil = fs::read_to_string(repo_root.join("running-anvil/SKILL.md"))
+        .expect("read running-anvil guidance");
+    assert!(
+        anvil.contains("deterministic order")
+            && anvil.contains("runs builders sequentially")
+            && anvil.contains("does not schedule parallel host calls")
+            && anvil.contains("does not prewarm a provider cache"),
+        "running-anvil must describe the current sequential host-CLI cast path"
+    );
+    assert!(
+        !anvil.contains("host-CLI builders, parallel")
+            && !anvil.contains("prewarms one 1-token completion"),
+        "running-anvil must not promise unsupported parallel or prewarm behavior"
+    );
+
+    let routing = fs::read_to_string(repo_root.join("AGENTS/references/20-skill-routing.md"))
+        .expect("read skill routing guidance");
+    assert!(
+        routing.contains("Keel input metadata")
+            && routing.contains("does not load those TOML files as host subagent definitions")
+            && routing.contains("no universal five-role sequence"),
+        "skill routing must distinguish internal profiles from host runtime contracts"
+    );
+    assert!(
+        !routing.contains("wires the `keel` runtime")
+            && !routing.contains("Universal 5-Role Multi-Agent Architecture"),
+        "skill routing must not carry the old runtime/profile or mandatory-role claims"
+    );
+
+    let execution =
+        fs::read_to_string(repo_root.join("AGENTS/references/30-execution-strategy.md"))
+            .expect("read execution strategy");
+    assert!(
+        execution.contains("persists the native binary directory on the user's PATH")
+            && !execution.contains("does not make bare `keel ...` globally available by default"),
+        "execution guidance must match the installer's PATH wiring"
+    );
+
+    let workflow =
+        fs::read_to_string(repo_root.join("WORKFLOW.md")).expect("read workflow guidance");
+    assert!(
+        workflow.contains("canonical Git/branch/CI/commit/push workflow")
+            && workflow.contains("Only on explicit user request"),
+        "Git delivery and push authorization must have one canonical home"
+    );
+
+    let review_policies = fs::read_to_string(
+        repo_root.join("AGENTS/references/70-review-quality-gates-and-policies.md"),
+    )
+    .expect("read review policy guidance");
+    assert!(
+        review_policies.contains("canonical [WORKFLOW.md]")
+            && !review_policies.contains("Commit and push? (yes/no)"),
+        "review guidance must defer Git delivery authorization to WORKFLOW.md"
+    );
+
+    let validate = fs::read_to_string(repo_root.join(".github/workflows/validate.yml"))
+        .expect("read validation workflow");
+    for contract in [
+        "bun test tests/host-adapter-contracts.test.ts",
+        "cargo run --locked -p keel -- skill-eval",
+        "cargo test --locked -p keel --test manager_provision_test --test doc_parity_test",
+    ] {
+        assert!(
+            validate.contains(contract),
+            "validation workflow must keep deterministic contract coverage: {contract}"
+        );
+    }
+}

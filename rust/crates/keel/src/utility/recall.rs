@@ -34,7 +34,7 @@ use crate::runtime::{display_path, resolve_claude_home};
 
 // The recall schema is shared by every build. FTS5 remains the deterministic
 // source-of-truth index; structured workspace indexing lives in its own lane.
-const SCHEMA_VERSION: &str = "4";
+const SCHEMA_VERSION: &str = "5";
 
 /// Top-level subdirectories under `<claude-home>` that recall indexes by default.
 /// Listed explicitly so the indexer never wanders into binaries, hooks, or release
@@ -56,6 +56,12 @@ const DEFAULT_RECALL_ROOTS: &[&str] = &["memory", "memories", "working-briefs", 
 
 /// Maximum number of FTS5 hits returned when `--limit` is not supplied.
 const DEFAULT_RECALL_LIMIT: usize = 20;
+
+/// Maximum age of a file-content verification before recall re-hashes an
+/// otherwise unchanged file. Metadata changes are still detected immediately;
+/// this bounded pass covers editors or external tools that preserve both mtime
+/// and size without making every recall read the whole memory corpus.
+const RECALL_DEFAULT_INTEGRITY_INTERVAL_SECS: u64 = 300;
 
 /// Snippet window is short enough to fit into a terminal line on either side of
 /// a match. Tuning here also affects the `snippet()` call below — keep in sync.
@@ -671,8 +677,9 @@ pub fn recall_database_path(claude_home: &Path) -> PathBuf {
 /// searchable — the "I saved it but recall can't find it" gap. Calling this at
 /// the end of each write closes the window.
 ///
-/// Best-effort by contract: this opens the index and runs the same non-forced
-/// `sync_recall_index` the read path uses, but every failure is folded into the
+/// Best-effort by contract: this opens the index and runs a forced
+/// `sync_recall_index` so a Keel-owned write invalidates every cached file hash
+/// immediately, but every failure is folded into the
 /// returned `Result` for the caller to log and ignore. A memory write must never
 /// fail because the index could not be opened or synced — the durable file on
 /// disk is the source of truth, and the next read-path sync will reconcile it
@@ -681,7 +688,7 @@ pub fn recall_database_path(claude_home: &Path) -> PathBuf {
 pub fn reindex_after_write(claude_home: &Path) -> Result<(), String> {
     let database_path = recall_database_path(claude_home);
     let mut connection = open_recall_connection(&database_path)?;
-    sync_recall_index(&mut connection, claude_home, false)?;
+    sync_recall_index(&mut connection, claude_home, true)?;
     Ok(())
 }
 
@@ -794,6 +801,22 @@ fn default_search_roots(claude_home: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+fn recall_integrity_interval_millis() -> i64 {
+    std::env::var("KEEL_RECALL_INTEGRITY_INTERVAL_SECS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(RECALL_DEFAULT_INTEGRITY_INTERVAL_SECS)
+        .min(86_400)
+        .saturating_mul(1_000) as i64
+}
+
+fn recall_now_millis() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 fn open_recall_connection(database_path: &Path) -> Result<Connection, String> {
     crate::utility::sqlite::create_parent_directory(database_path).map_err(|io_error| {
         format!(
@@ -891,6 +914,13 @@ fn ensure_recall_schema(connection: &Connection) -> Result<(), String> {
                  scope TEXT NOT NULL,
                  branch TEXT NOT NULL,
                  content_hash TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS file_state(
+                  path TEXT PRIMARY KEY,
+                  modified_at INTEGER NOT NULL,
+                  size INTEGER NOT NULL,
+                  content_hash TEXT NOT NULL,
+                  last_verified_at INTEGER NOT NULL
              );",
         )
         .map_err(|database_error| format!("ensure schema: {database_error}"))?;
@@ -910,6 +940,7 @@ fn ensure_recall_schema(connection: &Connection) -> Result<(), String> {
             connection
                 .execute_batch(
                     "DROP TABLE IF EXISTS vec_items;
+                      DROP TABLE IF EXISTS file_state;
                      DROP TABLE IF EXISTS document_meta;
                      DROP TABLE IF EXISTS documents;
                      CREATE VIRTUAL TABLE documents USING fts5(
@@ -929,7 +960,14 @@ fn ensure_recall_schema(connection: &Connection) -> Result<(), String> {
                          scope TEXT NOT NULL,
                          branch TEXT NOT NULL,
                          content_hash TEXT NOT NULL
-                     );",
+                      );
+                      CREATE TABLE file_state(
+                          path TEXT PRIMARY KEY,
+                          modified_at INTEGER NOT NULL,
+                          size INTEGER NOT NULL,
+                          content_hash TEXT NOT NULL,
+                          last_verified_at INTEGER NOT NULL
+                      );",
                 )
                 .map_err(|database_error| format!("rebuild documents: {database_error}"))?;
             connection
@@ -974,26 +1012,28 @@ pub fn sync_recall_index(
     force_full_rescan: bool,
 ) -> Result<SyncReport, String> {
     let mut report = SyncReport::default();
-    let mut existing_rows: std::collections::HashMap<String, (i64, i64, String)> =
+    let now_millis = recall_now_millis();
+    let integrity_interval_millis = recall_integrity_interval_millis();
+    let mut existing_rows: std::collections::HashMap<String, (i64, i64, String, i64)> =
         std::collections::HashMap::new();
     {
         let mut select_statement = connection
             .prepare(
-                "SELECT d.path, d.modified_at, d.size, \
-                 COALESCE(MAX(m.content_hash), '') \
-                 FROM documents d LEFT JOIN document_meta m ON m.path = d.path \
-                 GROUP BY d.path, d.modified_at, d.size",
+                "SELECT path, modified_at, size, content_hash, last_verified_at \
+                 FROM file_state",
             )
             .map_err(|database_error| format!("prepare select: {database_error}"))?;
         let row_iterator = select_statement
             .query_map([], |row| {
                 let path: String = row.get(0)?;
-                let modified_at_text: String = row.get(1)?;
-                let size_text: String = row.get(2)?;
+                let modified_at: i64 = row.get(1)?;
+                let size_bytes: i64 = row.get(2)?;
                 let content_hash: String = row.get(3)?;
-                let modified_at = modified_at_text.parse::<i64>().unwrap_or(0);
-                let size_bytes = size_text.parse::<i64>().unwrap_or(0);
-                Ok((path, (modified_at, size_bytes, content_hash)))
+                let last_verified_at: i64 = row.get(4)?;
+                Ok((
+                    path,
+                    (modified_at, size_bytes, content_hash, last_verified_at),
+                ))
             })
             .map_err(|database_error| format!("query existing: {database_error}"))?;
         for row_result in row_iterator {
@@ -1022,28 +1062,19 @@ pub fn sync_recall_index(
         was_existing: bool,
     }
     let mut pending: Vec<PendingDocument> = Vec::new();
+    let mut verified_paths: Vec<String> = Vec::new();
     for document in &on_disk {
         on_disk_paths.insert(document.absolute_path.clone());
-        let needs_write = match existing_rows.get(&document.absolute_path) {
-            Some((stored_modified_at, stored_size, stored_hash)) => {
-                if force_full_rescan
+        let should_verify = match existing_rows.get(&document.absolute_path) {
+            Some((stored_modified_at, stored_size, _stored_hash, last_verified_at)) => {
+                force_full_rescan
                     || *stored_modified_at != document.modified_at_millis
                     || *stored_size != document.size_bytes
-                {
-                    true
-                } else {
-                    match fs::read_to_string(&document.absolute_path) {
-                        Ok(content) => stable_fingerprint(&content) != stored_hash.as_str(),
-                        Err(_) => {
-                            report.skipped += 1;
-                            false
-                        }
-                    }
-                }
+                    || now_millis.saturating_sub(*last_verified_at) >= integrity_interval_millis
             }
             None => true,
         };
-        if !needs_write {
+        if !should_verify {
             continue;
         }
         let content = match fs::read_to_string(&document.absolute_path) {
@@ -1058,11 +1089,24 @@ pub fn sync_recall_index(
                 continue;
             }
         };
+        let content_hash = stable_fingerprint(&content);
+        let content_is_unchanged = existing_rows.get(&document.absolute_path).is_some_and(
+            |(stored_modified_at, stored_size, stored_hash, _)| {
+                !force_full_rescan
+                    && *stored_modified_at == document.modified_at_millis
+                    && *stored_size == document.size_bytes
+                    && stored_hash == &content_hash
+            },
+        );
+        if content_is_unchanged {
+            verified_paths.push(document.absolute_path.clone());
+            continue;
+        }
         pending.push(PendingDocument {
             path: document.absolute_path.clone(),
             modified_at: document.modified_at_millis.to_string(),
             size: document.size_bytes.to_string(),
-            content_hash: stable_fingerprint(&content),
+            content_hash,
             chunks: split_memory_chunks(&content),
             was_existing: existing_rows.contains_key(&document.absolute_path),
         });
@@ -1110,11 +1154,32 @@ pub fn sync_recall_index(
                 )
                 .map_err(|database_error| format!("insert memory metadata: {database_error}"))?;
         }
+        transaction
+            .execute(
+                "INSERT OR REPLACE INTO file_state(path, modified_at, size, content_hash, last_verified_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    &document.path,
+                    document.modified_at.parse::<i64>().unwrap_or(0),
+                    document.size.parse::<i64>().unwrap_or(0),
+                    &document.content_hash,
+                    now_millis,
+                ],
+            )
+            .map_err(|database_error| format!("insert file state: {database_error}"))?;
         if document.was_existing {
             report.updated += 1;
         } else {
             report.added += 1;
         }
+    }
+
+    for path in &verified_paths {
+        transaction
+            .execute(
+                "UPDATE file_state SET last_verified_at = ?1 WHERE path = ?2",
+                params![now_millis, path],
+            )
+            .map_err(|database_error| format!("update file verification: {database_error}"))?;
     }
 
     let mut paths_to_remove: Vec<String> = Vec::new();
@@ -1130,13 +1195,12 @@ pub fn sync_recall_index(
         transaction
             .execute("DELETE FROM documents WHERE path = ?1", params![path])
             .map_err(|database_error| format!("delete vanished rows: {database_error}"))?;
+        transaction
+            .execute("DELETE FROM file_state WHERE path = ?1", params![path])
+            .map_err(|database_error| format!("delete vanished file state: {database_error}"))?;
         report.removed += 1;
     }
 
-    let now_millis = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis())
-        .unwrap_or(0);
     transaction
         .execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES ('last_indexed_at_millis', ?1)",
@@ -1148,7 +1212,7 @@ pub fn sync_recall_index(
         .map_err(|database_error| format!("commit transaction: {database_error}"))?;
 
     report.indexed_total = on_disk.len() as u64;
-    report.last_indexed_at_millis = now_millis;
+    report.last_indexed_at_millis = now_millis.max(0) as u128;
     Ok(report)
 }
 

@@ -35,6 +35,17 @@ function Get-AssetVersion {
     return $ReleaseTag
 }
 
+function Validate-ReleaseTag {
+    param([string]$ReleaseTag)
+    # The release workflow publishes tags made only of URL-safe characters.
+    # Keep one resolved tag as the immutable identity for the archive and its
+    # checksum; do not let a malformed API response change either URL.
+    if ([string]::IsNullOrWhiteSpace($ReleaseTag) -or $ReleaseTag -notmatch "^[A-Za-z0-9][A-Za-z0-9._-]*$") {
+        throw "Invalid keel release tag: $ReleaseTag"
+    }
+    return $ReleaseTag
+}
+
 function Get-NormalizedArchitecture {
     $architecture = $env:PROCESSOR_ARCHITECTURE
     if ([string]::IsNullOrWhiteSpace($architecture)) {
@@ -65,6 +76,7 @@ if ($Version -eq "latest") {
 } else {
     $ReleaseTag = Normalize-ReleaseTag -RawVersion $Version
 }
+$ReleaseTag = Validate-ReleaseTag -ReleaseTag $ReleaseTag
 
 $AssetVersion = Get-AssetVersion -ReleaseTag $ReleaseTag
 $Architecture = Get-NormalizedArchitecture

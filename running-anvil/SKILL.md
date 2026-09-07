@@ -66,14 +66,14 @@ Vague or multi-path work must not reach a real compile without a completed Clari
 - Brainstorming remains Socratic design help. It is **not** a substitute for this gate.
 - Model tier guidance: `docs/model-tiers.md` (Keel does not route models at runtime).
 
-### 2. Cast: N isolated builders (host-CLI builders, parallel)
+### 2. Cast: N isolated builders (host-CLI builders, deterministic order)
 
 ```bash
 keel anvil cast --piece parse              # one piece
 keel anvil cast --dry-run                  # validate/plan only; writes=0 executes=0
 ```
 
-- Creates `tempfile.mkdtemp` per cast (copies only listed `files+gates`), prewarms one 1-token completion on the prefix (`cache_write_tokens`), frozen tool set entire job (mutating tools breaks cache), dynamic only after breakpoint.
+- Creates `tempfile.mkdtemp` per candidate (copies only the listed `files+gates`) and processes candidates in nested piece/cast order. The current implementation runs builders sequentially; it does not schedule parallel host calls and does not prewarm a provider cache. `cache_headers_for` only selects optional provider metadata, and the host CLI owns any prompt-cache behavior and measurements.
 - Per builder: the **current host CLI** does the LLM work (Read/Write/run on the isolated workspace). Anvil does not call an external model API. Write `BUILDER.md` in each workspace with the frozen prefix and tool rules. Supervisor/filter wrap `run` — deny-list `git commit/push/rebase/branch`, clip >4000 chars (head 1500 + tail 2000), never rewrite compiler errors.
 - Stop when a gate goes green / retries/tokens exhausted / supervisor kills. Anvil re-runs gates (do not trust model's "passed").
 - Writes `cast_i/result.json`; no shared transcript between casts.
@@ -116,7 +116,7 @@ keel anvil run --dry-run              # validate/plan only; writes=0 executes=0
 keel anvil run                        # compile→cast→sieve→stamp/loop as needed; host CLI is the LLM
 ```
 
-Metrics per job: `cache_hit_ratio tokens_uncached/cached critic_calls gate_pass_rate stamp_used winner_id loop_iterations improvement_delta`.
+Metrics per job: `cache_hit_ratio tokens_uncached/cached critic_calls gate_pass_rate stamp_used winner_id loop_iterations improvement_delta`. Cache fields are currently report-schema placeholders unless the active host integration supplies measurements; zero means unavailable in the current path, not a measured zero hit rate. Do not infer provider cache activation from a stable prefix or from `headers` metadata alone.
 
 ## Error path — research, not guessing
 
