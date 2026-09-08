@@ -1331,7 +1331,7 @@ pub(crate) fn run_review_closeout_command(
         true,
         true,
         true,
-        super::diff_gates::ResearchPlanRef {
+        super::diff_gates::PlanEvidenceRef {
             plan_id: flags.string_value("plan"),
             claude_home: flags.string_value("claude-home"),
         },

@@ -182,6 +182,66 @@ fn research_gate_lists_untraced_claims_from_the_named_plan() {
     let _ = std::fs::remove_dir_all(keel_home);
 }
 
+#[test]
+fn architecture_gate_blocks_incomplete_design_and_passes_complete_design() {
+    let repository = init_research_gate_repo("architecture-design");
+    let keel_home = crate::test_support::unique_temp_dir("keel-architecture-gate-home");
+    let (plan_id, research_path) = create_researched_plan(&repository, &keel_home);
+    let architecture_path = research_path
+        .parent()
+        .expect("research artifact has a plan directory")
+        .join("architecture.md");
+    let complete = complete_review_architecture(&plan_id);
+    std::fs::write(
+        &architecture_path,
+        complete.replacen("Rollback: Revert", "Rollback-missing: Revert", 1),
+    )
+    .expect("write incomplete architecture");
+    let blocked = architecture_design_gate(
+        &repository,
+        "main",
+        "pre-pr",
+        &plan_id,
+        keel_home.to_str().expect("UTF-8 Keel home"),
+    );
+    assert_eq!(blocked.name, "architecture_design");
+    assert_eq!(blocked.status, GateStatus::Fail);
+    assert!(blocked
+        .details
+        .as_deref()
+        .unwrap_or_default()
+        .contains("Rollback"));
+
+    std::fs::write(&architecture_path, complete).expect("write complete architecture");
+    let design = [
+        "design".to_string(),
+        "--plan".to_string(),
+        plan_id.clone(),
+        "--workspace-root".to_string(),
+        repository.to_string_lossy().into_owned(),
+        "--claude-home".to_string(),
+        keel_home.to_string_lossy().into_owned(),
+    ];
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    assert_eq!(
+        crate::utility::plan::run_plan_command(&design, &mut stdout, &mut stderr),
+        0,
+        "design failed: {}",
+        String::from_utf8_lossy(&stderr)
+    );
+    let passing = architecture_design_gate(
+        &repository,
+        "main",
+        "pre-pr",
+        &plan_id,
+        keel_home.to_str().expect("UTF-8 Keel home"),
+    );
+    assert_eq!(passing.status, GateStatus::Pass);
+    let _ = std::fs::remove_dir_all(repository);
+    let _ = std::fs::remove_dir_all(keel_home);
+}
+
 fn init_research_gate_repo(label: &str) -> crate::test_support::TestTempDir {
     let repository = crate::test_support::unique_temp_dir(&format!("keel-research-{label}"));
     std::fs::create_dir_all(repository.join("src")).expect("create source directory");
@@ -261,6 +321,12 @@ fn create_researched_plan(
         String::from_utf8_lossy(&stderr)
     );
     (plan_id, plan_path.join("research.json"))
+}
+
+fn complete_review_architecture(plan_id: &str) -> String {
+    format!(
+        "---\nschema_version: 1\nartifact: architecture\nplan_id: {plan_id}\n---\n\nStatus: complete\n\n# Architecture Note\n\n## 1. Current architecture relevant to scope\n\n[verified: CLM-001] The established source owner was read.\n\n## 2. Proposed architecture\n\n[derived: CLM-002] Change only the existing owner path.\n\nInput bound: One bounded plan artifact.\n\nPolicy owner: The existing planner remains the lifecycle owner.\n\n## 3. Components/files/interfaces changed\n\n- Component: established source owner | Requirements: REQ-001 | Acceptance: AC-001\n\n## 4. Data/control flow\n\nThe command updates the established owner and existing callers observe the result.\n\n## 5. Alternatives considered\n\nAlternative: Add a second owner.\n\nTradeoff: A second owner duplicates existing policy.\n\n## 6. Why the chosen option fits requirements\n\nChosen option: Extend the established owner.\n\nInfrastructure reuse: Reuse the planner and review gate infrastructure.\n\nConstraint fit: The design maps only REQ-001 and AC-001.\n\n## 7. Risks and mitigations\n\nRisk: A stale design could reach review.\n\nMitigation: Pre-PR review validates the named plan architecture.\n\n## 8. Backward compatibility\n\nCompatibility: Existing fields and behavior remain available.\n\nHost impact: none; host contracts remain unchanged.\n\n## 9. Error handling and fallback semantics\n\nFailure status: Invalid architecture blocks pre-PR review.\n\nFallback: none; repair the canonical architecture note.\n\nVisibility: reviewer output lists the design defect.\n\n## 10. Security/privacy implications\n\nSecurity/privacy: The gate reads one local artifact and no credentials.\n\n## 11. Performance/token impact\n\nToken impact: Architecture input stays bounded.\n\nMeasurement plan: Run the fixed-context budget test.\n\n## 12. Test strategy\n\nVerification: Run review unit tests and planner integration tests.\n\nAcceptance references: AC-001\n\n## 13. Rollback strategy\n\nRollback: Revert the implementation commit.\n\n## 14. Requirement and research references\n\nRequirement references: REQ-001\n\nAcceptance references: AC-001\n\nClaim references: CLM-001, CLM-002\n"
+    )
 }
 
 /// Renaming while editing still changes established behavior. Verified against

@@ -4,7 +4,7 @@ use crate::runtime::resolve_repository_root;
 use std::fs;
 
 #[derive(Clone, Copy)]
-pub(crate) struct ResearchPlanRef<'a> {
+pub(crate) struct PlanEvidenceRef<'a> {
     pub plan_id: &'a str,
     pub claude_home: &'a str,
 }
@@ -16,7 +16,7 @@ pub(crate) fn collect_review_gate_results(
     scan_all: bool,
     include_tests: bool,
     include_impact: bool,
-    research_plan: ResearchPlanRef<'_>,
+    plan_evidence: PlanEvidenceRef<'_>,
 ) -> Vec<GateResult> {
     // Auto language gates (.githooks markers). Missing tools = non-blocking Blocked.
     let mut gate_results = run_rust_surface_gates(repository_root, include_tests);
@@ -48,8 +48,15 @@ pub(crate) fn collect_review_gate_results(
             repository_root,
             base_ref,
             surface_name,
-            research_plan.plan_id,
-            research_plan.claude_home,
+            plan_evidence.plan_id,
+            plan_evidence.claude_home,
+        ));
+        gate_results.push(architecture_design_gate(
+            repository_root,
+            base_ref,
+            surface_name,
+            plan_evidence.plan_id,
+            plan_evidence.claude_home,
         ));
     }
     if include_impact {
@@ -96,7 +103,7 @@ pub(crate) fn run_review_surface_command(
         scan_all,
         surface_name == "pre-pr",
         flag_set.bool_value("impact"),
-        ResearchPlanRef {
+        PlanEvidenceRef {
             plan_id: flag_set.string_value("plan"),
             claude_home: flag_set.string_value("claude-home"),
         },
@@ -260,25 +267,12 @@ pub(crate) fn research_traceability_gate(
             "pre-PR research gate not requested",
         );
     }
-    let base = match base_ref.trim() {
-        "" => "origin/main",
-        value => value,
+    let touched = match reviewed_existing_sources(repository_root, base_ref) {
+        Ok(touched) => touched,
+        Err(error) => {
+            return blocking_failure(&format!("{error}; research evidence cannot be checked"))
+        }
     };
-    let committed_range = vec![format!("{base}...HEAD")];
-    let working_range = vec!["HEAD".to_string()];
-    let Some(mut touched) = modified_existing_sources(repository_root, &committed_range) else {
-        return blocking_failure(&format!(
-            "could not resolve {base}...HEAD; research evidence cannot be checked"
-        ));
-    };
-    let Some(working_touched) = modified_existing_sources(repository_root, &working_range) else {
-        return blocking_failure(
-            "could not inspect working changes; research evidence cannot be checked",
-        );
-    };
-    touched.extend(working_touched);
-    touched.sort();
-    touched.dedup();
     if touched.is_empty() {
         return research_gate_result(
             GateStatus::Pass,
@@ -309,6 +303,96 @@ pub(crate) fn research_traceability_gate(
             )),
         Err(error) => blocking_failure(&error),
     }
+}
+
+pub(crate) fn architecture_design_gate(
+    repository_root: &Path,
+    base_ref: &str,
+    surface_name: &str,
+    plan_id: &str,
+    claude_home: &str,
+) -> GateResult {
+    let result = |status, blocking, details: &str| GateResult {
+        name: "architecture_design".to_string(),
+        status,
+        blocking,
+        details: Some(details.to_string()),
+    };
+    let blocking_failure = |details: &str| result(GateStatus::Fail, true, details);
+    if surface_name != "pre-pr" {
+        return result(
+            GateStatus::Pass,
+            false,
+            "pre-PR architecture gate not requested",
+        );
+    }
+    let touched = match reviewed_existing_sources(repository_root, base_ref) {
+        Ok(touched) => touched,
+        Err(error) => {
+            return blocking_failure(&format!("{error}; architecture evidence cannot be checked"))
+        }
+    };
+    if touched.is_empty() {
+        return result(
+            GateStatus::Pass,
+            true,
+            "no existing source modified; architecture gate not applicable",
+        );
+    }
+    if plan_id.trim().is_empty() {
+        return blocking_failure(
+            "non-greenfield pre-PR review requires --plan <id> with a complete architecture design",
+        );
+    }
+    match crate::utility::plan::review_architecture_issues(
+        repository_root,
+        claude_home,
+        plan_id.trim(),
+    ) {
+        Ok(issues) if issues.is_empty() => result(
+            GateStatus::Pass,
+            true,
+            &format!(
+                "plan {} has a complete mapped architecture for {} existing source file(s)",
+                plan_id.trim(),
+                touched.len()
+            ),
+        ),
+        Ok(issues) => blocking_failure(&format!(
+            "plan {} has {} architecture design finding(s): {}",
+            plan_id.trim(),
+            issues.len(),
+            issues
+                .iter()
+                .take(5)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("; ")
+        )),
+        Err(error) => blocking_failure(&error),
+    }
+}
+
+fn reviewed_existing_sources(
+    repository_root: &Path,
+    base_ref: &str,
+) -> Result<Vec<String>, String> {
+    let base = match base_ref.trim() {
+        "" => "origin/main",
+        value => value,
+    };
+    let committed_range = vec![format!("{base}...HEAD")];
+    let working_range = vec!["HEAD".to_string()];
+    let Some(mut touched) = modified_existing_sources(repository_root, &committed_range) else {
+        return Err(format!("could not resolve {base}...HEAD"));
+    };
+    let Some(working_touched) = modified_existing_sources(repository_root, &working_range) else {
+        return Err("could not inspect working changes".to_string());
+    };
+    touched.extend(working_touched);
+    touched.sort();
+    touched.dedup();
+    Ok(touched)
 }
 
 fn research_gate_result(status: GateStatus, blocking: bool, details: &str) -> GateResult {

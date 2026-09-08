@@ -6,7 +6,7 @@
 
 use std::collections::BTreeSet;
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use chrono::{SecondsFormat, Utc};
@@ -79,6 +79,7 @@ macro_rules! parsed_or_return {
 enum PlanAction {
     Specify,
     Research,
+    Design,
     Tasks,
     Check,
 }
@@ -88,6 +89,7 @@ impl PlanAction {
         match self {
             Self::Specify => "plan specify",
             Self::Research => "plan research",
+            Self::Design => "plan design",
             Self::Tasks => "plan tasks",
             Self::Check => "plan check",
         }
@@ -195,6 +197,7 @@ pub fn run_plan_command(
     let action = match subcommand {
         "specify" => PlanAction::Specify,
         "research" => PlanAction::Research,
+        "design" => PlanAction::Design,
         "tasks" => PlanAction::Tasks,
         "check" => PlanAction::Check,
         other => {
@@ -210,6 +213,7 @@ pub fn run_plan_command(
     match action {
         PlanAction::Specify => run_specify(flags, &mut streams),
         PlanAction::Research => run_research(flags, &mut streams),
+        PlanAction::Design => run_design(flags, &mut streams),
         PlanAction::Tasks => run_tasks(flags, &mut streams),
         PlanAction::Check => run_check(flags, &mut streams),
     }
@@ -218,7 +222,7 @@ pub fn run_plan_command(
 fn usage(standard_error: Output<'_>) -> u8 {
     let _ = writeln!(
         standard_error,
-        "Usage: plan specify --request <text> | research --plan <id> [--claim <text> --source-url <url> --source-type <type> --retrieved-at <rfc3339> --support <text> --freshness <class> --used-by <ids>] | tasks --plan <id> | check [--rtm] --plan <id>"
+        "Usage: plan specify --request <text> | research --plan <id> [--claim <text> --source-url <url> --source-type <type> --retrieved-at <rfc3339> --support <text> --freshness <class> --used-by <ids>] | design --plan <id> | tasks --plan <id> | check [--rtm] --plan <id>"
     );
     1
 }
@@ -241,7 +245,7 @@ fn action_flags(action: PlanAction) -> FlagSet {
             flags.string_flag("freshness", "");
             flags.string_flag("used-by", "");
         }
-        PlanAction::Tasks => flags.string_flag("plan", ""),
+        PlanAction::Design | PlanAction::Tasks => flags.string_flag("plan", ""),
         PlanAction::Check => {
             flags.string_flag("plan", "");
             flags.bool_flag("rtm", false);
@@ -408,7 +412,6 @@ fn run_research(flags: FlagSet, streams: &mut CommandStreams<'_>) -> u8 {
             .and_then(|_| write_text(&paths.architecture, &architecture)),
         streams.error
     );
-    let tasks_status = status_string(&status, "tasksStatus", "pending");
     let spec = command_or_return!(read_text(&paths.spec, SPEC_FILE), streams.error);
     let (parsed, mut research_issues) = validate_specification(&spec, &plan_id);
     validate_research(
@@ -433,7 +436,8 @@ fn run_research(flags: FlagSet, streams: &mut CommandStreams<'_>) -> u8 {
         &mut status,
         stage,
         recorded_status,
-        tasks_status,
+        "pending".to_string(),
+        "pending".to_string(),
         "pending",
         research_issues.clone(),
     );
@@ -463,12 +467,89 @@ fn run_research(flags: FlagSet, streams: &mut CommandStreams<'_>) -> u8 {
     )
 }
 
+fn run_design(flags: FlagSet, streams: &mut CommandStreams<'_>) -> u8 {
+    let (context, plan_id, paths) = parsed_or_return!(existing_plan(&flags, streams.error));
+    let mut status = command_or_return!(load_status(&paths, &plan_id), streams.error);
+    let spec = command_or_return!(read_text(&paths.spec, SPEC_FILE), streams.error);
+    let (parsed, mut issues) = validate_specification(&spec, &plan_id);
+    let research = load_json_artifact(&paths.research, RESEARCH_FILE, &plan_id, &mut issues);
+    validate_research(research.as_ref(), &parsed, context.workspace(), &mut issues);
+    if string_field(&status, "researchStatus") != Some("complete") {
+        issues.push("status.json researchStatus is not complete".to_string());
+    }
+    let architecture = read_bounded_text_for_validation(
+        &paths.architecture,
+        ARCHITECTURE_FILE,
+        crate::utility::architecture::MAX_ARCHITECTURE_BYTES,
+        &mut issues,
+    );
+    if let Some(body) = architecture.as_deref() {
+        validate_markdown_header(
+            body,
+            ARCHITECTURE_FILE,
+            "architecture",
+            &plan_id,
+            &mut issues,
+        );
+        validate_architecture(body, &parsed, research.as_ref(), &mut issues);
+    }
+
+    let research_status = status_string(&status, "researchStatus", "pending");
+    let (stage, architecture_status) = if issues.is_empty() {
+        ("designed", "complete")
+    } else if research_status == "complete" {
+        ("researched", "invalid")
+    } else {
+        ("specified", "invalid")
+    };
+    update_status(
+        &mut status,
+        stage,
+        research_status,
+        architecture_status.to_string(),
+        "pending".to_string(),
+        "pending",
+        issues.clone(),
+    );
+    command_or_return!(write_status(&paths, &status, "design"), streams.error);
+    if !issues.is_empty() {
+        return validation_errors("plan design", &issues, streams.error);
+    }
+    let payload = stage_payload(&plan_id, &paths, "designed");
+    emit_success(
+        &flags,
+        streams,
+        &payload,
+        &format!("plan design: id={plan_id} status=designed"),
+    )
+}
+
 fn run_tasks(flags: FlagSet, streams: &mut CommandStreams<'_>) -> u8 {
     let (context, plan_id, paths) = parsed_or_return!(existing_plan(&flags, streams.error));
     let spec = command_or_return!(read_text(&paths.spec, SPEC_FILE), streams.error);
     let (parsed, mut issues) = validate_specification(&spec, &plan_id);
     let research = load_json_artifact(&paths.research, RESEARCH_FILE, &plan_id, &mut issues);
     validate_research(research.as_ref(), &parsed, context.workspace(), &mut issues);
+    let architecture = read_bounded_text_for_validation(
+        &paths.architecture,
+        ARCHITECTURE_FILE,
+        crate::utility::architecture::MAX_ARCHITECTURE_BYTES,
+        &mut issues,
+    );
+    if let Some(body) = architecture.as_deref() {
+        validate_markdown_header(
+            body,
+            ARCHITECTURE_FILE,
+            "architecture",
+            &plan_id,
+            &mut issues,
+        );
+        validate_architecture(body, &parsed, research.as_ref(), &mut issues);
+    }
+    let mut status = command_or_return!(load_status(&paths, &plan_id), streams.error);
+    if string_field(&status, "architectureStatus") != Some("complete") {
+        issues.push("status.json architectureStatus is not complete".to_string());
+    }
     if !issues.is_empty() {
         return validation_errors("plan tasks", &issues, streams.error);
     }
@@ -483,7 +564,6 @@ fn run_tasks(flags: FlagSet, streams: &mut CommandStreams<'_>) -> u8 {
         );
     }
 
-    let mut status = command_or_return!(load_status(&paths, &plan_id), streams.error);
     let (tasks, rtm) = build_tasks_and_rtm(&plan_id, &parsed);
     command_or_return!(
         write_json(&paths.tasks, &tasks).and_then(|_| write_json(&paths.rtm, &rtm)),
@@ -496,6 +576,7 @@ fn run_tasks(flags: FlagSet, streams: &mut CommandStreams<'_>) -> u8 {
     update_status(
         &mut status,
         "tasked",
+        "complete".to_string(),
         "complete".to_string(),
         "ready".to_string(),
         "pending",
@@ -524,8 +605,12 @@ fn run_check(flags: FlagSet, streams: &mut CommandStreams<'_>) -> u8 {
         .map(|body| validate_specification(body, &plan_id))
         .unwrap_or_default();
     check_issues.extend(spec_issues);
-    let architecture =
-        read_text_for_validation(&paths.architecture, ARCHITECTURE_FILE, &mut check_issues);
+    let architecture = read_bounded_text_for_validation(
+        &paths.architecture,
+        ARCHITECTURE_FILE,
+        crate::utility::architecture::MAX_ARCHITECTURE_BYTES,
+        &mut check_issues,
+    );
     if let Some(body) = architecture.as_deref() {
         validate_markdown_header(
             body,
@@ -540,7 +625,7 @@ fn run_check(flags: FlagSet, streams: &mut CommandStreams<'_>) -> u8 {
     let rtm = load_json_artifact(&paths.rtm, RTM_FILE, &plan_id, &mut check_issues);
     let status = load_json_artifact(&paths.status, STATUS_FILE, &plan_id, &mut check_issues);
     if let Some(body) = architecture.as_deref() {
-        validate_architecture_claims(body, research.as_ref(), &mut check_issues);
+        validate_architecture(body, &parsed, research.as_ref(), &mut check_issues);
     }
     validate_research(
         research.as_ref(),
@@ -565,11 +650,13 @@ fn run_check(flags: FlagSet, streams: &mut CommandStreams<'_>) -> u8 {
                 "invalid"
             };
             let research_status = status_string(&status, "researchStatus", "pending");
+            let architecture_status = status_string(&status, "architectureStatus", "pending");
             let tasks_status = status_string(&status, "tasksStatus", "pending");
             update_status(
                 &mut status,
                 &stage,
                 research_status,
+                architecture_status,
                 tasks_status,
                 check_status,
                 check_issues.clone(),
@@ -1040,6 +1127,7 @@ fn initial_artifacts(
             "stage": "specified",
             "clarificationRequired": clarification_required,
             "researchStatus": "pending",
+            "architectureStatus": "pending",
             "tasksStatus": "pending",
             "checkStatus": "pending",
             "errors": [],
@@ -1150,7 +1238,7 @@ fn render_architecture(
     };
     let outcome = request.split_whitespace().collect::<Vec<_>>().join(" ");
     format!(
-        "---\nschema_version: 1\nartifact: architecture\nplan_id: {plan_id}\n---\n\n# Architecture Note\n\n## 1. Current architecture relevant to scope\n\n{current}\n\n## 2. Proposed architecture\n\n[derived: CLM-002] Implement only the smallest owner path needed for: {outcome}\n\n## 3. Components/files/interfaces changed\n\nPending implementer source trace.\n\n## 4. Data/control flow\n\nPending implementer source trace.\n\n## 5. Alternatives considered\n\nNo implementation alternative is selected until source research completes.\n\n## 6. Why the chosen option fits requirements\n\nThe chosen option must map to REQ-001 and AC-001.\n\n## 7. Risks and mitigations\n\nRisk: scope drift. Mitigation: validate the RTM before implementation.\n\n## 8. Backward compatibility\n\nPreserve behavior outside REQ-001.\n\n## 9. Error handling and fallback semantics\n\nMaterial failures are explicit; no silent fallback is authorized.\n\n## 10. Security/privacy implications\n\nDo not persist credentials or unrelated user data.\n\n## 11. Performance/token impact\n\nUse bounded artifacts and the ratified planner pointer.\n\n## 12. Test strategy\n\nExecute the AC-001 verification method and the repository release ladder.\n\n## 13. Rollback strategy\n\nRevert the implementation while retaining planning evidence.\n\n## 14. Requirement and research references\n\nRequirement references: REQ-001\n\nClaim references: CLM-001, CLM-002\n"
+        "---\nschema_version: 1\nartifact: architecture\nplan_id: {plan_id}\n---\n\nStatus: pending\n\n# Architecture Note\n\n## 1. Current architecture relevant to scope\n\n{current}\n\n## 2. Proposed architecture\n\n[derived: CLM-002] Implement only the smallest owner path needed for: {outcome}\n\nInput bound: pending\n\nPolicy owner: pending\n\n## 3. Components/files/interfaces changed\n\n- Component: pending | Requirements: REQ-001 | Acceptance: AC-001\n\n## 4. Data/control flow\n\nPending implementer source trace.\n\n## 5. Alternatives considered\n\nAlternative: pending\n\nTradeoff: pending\n\n## 6. Why the chosen option fits requirements\n\nChosen option: pending\n\nInfrastructure reuse: pending\n\nConstraint fit: pending\n\n## 7. Risks and mitigations\n\nRisk: pending\n\nMitigation: pending\n\n## 8. Backward compatibility\n\nCompatibility: pending\n\nHost impact: pending\n\n## 9. Error handling and fallback semantics\n\nFailure status: pending\n\nFallback: pending\n\nVisibility: pending\n\n## 10. Security/privacy implications\n\nSecurity/privacy: pending\n\n## 11. Performance/token impact\n\nToken impact: pending\n\nMeasurement plan: pending\n\n## 12. Test strategy\n\nVerification: pending\n\nAcceptance references: AC-001\n\n## 13. Rollback strategy\n\nRollback: pending\n\n## 14. Requirement and research references\n\nRequirement references: REQ-001\n\nAcceptance references: AC-001\n\nClaim references: CLM-001, CLM-002\n"
     )
 }
 
@@ -1471,11 +1559,11 @@ fn validate_research(
     ));
 }
 
-pub(crate) fn review_research_issues(
+fn review_plan_paths(
     workspace_root: &Path,
     claude_home: &str,
     plan_id: &str,
-) -> Result<Vec<String>, String> {
+) -> Result<PlanPaths, String> {
     let safe_id = safe_path_segment(plan_id).ok_or_else(|| {
         format!("invalid plan id {plan_id:?}: must be a single safe path segment")
     })?;
@@ -1491,7 +1579,15 @@ pub(crate) fn review_research_issues(
     if !plan_directory.is_dir() {
         return Err(format!("plan not found: {plan_id}"));
     }
-    let paths = PlanPaths::new(plan_directory);
+    Ok(PlanPaths::new(plan_directory))
+}
+
+pub(crate) fn review_research_issues(
+    workspace_root: &Path,
+    claude_home: &str,
+    plan_id: &str,
+) -> Result<Vec<String>, String> {
+    let paths = review_plan_paths(workspace_root, claude_home, plan_id)?;
     let spec = read_text(&paths.spec, SPEC_FILE)?;
     let (parsed, mut issues) = validate_specification(&spec, plan_id);
     let research = load_json_artifact(&paths.research, RESEARCH_FILE, plan_id, &mut issues);
@@ -1499,41 +1595,64 @@ pub(crate) fn review_research_issues(
     Ok(issues)
 }
 
-fn validate_architecture_claims(architecture: &str, research: Option<&Value>, issues: &mut Issues) {
-    let references = architecture
-        .lines()
-        .find_map(|line| line.trim().strip_prefix("Claim references:"))
-        .map(|value| {
-            value
-                .split([',', ' '])
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    if references.is_empty() {
-        issues.push("architecture.md has no claim references".to_string());
-        return;
+pub(crate) fn review_architecture_issues(
+    workspace_root: &Path,
+    claude_home: &str,
+    plan_id: &str,
+) -> Result<Vec<String>, String> {
+    let paths = review_plan_paths(workspace_root, claude_home, plan_id)?;
+    let spec = read_text(&paths.spec, SPEC_FILE)?;
+    let (parsed, mut issues) = validate_specification(&spec, plan_id);
+    let research = load_json_artifact(&paths.research, RESEARCH_FILE, plan_id, &mut issues);
+    let architecture = read_bounded_text_for_validation(
+        &paths.architecture,
+        ARCHITECTURE_FILE,
+        crate::utility::architecture::MAX_ARCHITECTURE_BYTES,
+        &mut issues,
+    );
+    if let Some(body) = architecture.as_deref() {
+        validate_markdown_header(
+            body,
+            ARCHITECTURE_FILE,
+            "architecture",
+            plan_id,
+            &mut issues,
+        );
+        validate_architecture(body, &parsed, research.as_ref(), &mut issues);
     }
-    let research_ids: BTreeSet<&str> = research
-        .and_then(|value| value_array(value, "claims"))
-        .into_iter()
-        .flatten()
-        .filter_map(|claim| string_field(claim, "claimId"))
+    let status = load_json_artifact(&paths.status, STATUS_FILE, plan_id, &mut issues);
+    if status
+        .as_ref()
+        .and_then(|value| string_field(value, "architectureStatus"))
+        != Some("complete")
+    {
+        issues.push("status.json architectureStatus is not complete".to_string());
+    }
+    Ok(issues)
+}
+
+fn validate_architecture(
+    architecture: &str,
+    parsed: &ParsedSpecification,
+    research: Option<&Value>,
+    issues: &mut Issues,
+) {
+    let requirements = parsed
+        .requirements
+        .iter()
+        .map(|requirement| requirement.id.as_str())
         .collect();
-    for claim_id in references {
-        if !["verified", "assumption", "derived"]
-            .iter()
-            .any(|classification| architecture.contains(&format!("[{classification}: {claim_id}]")))
-        {
-            issues.push(format!("architecture.md claim {claim_id} is unclassified"));
-        }
-        if !research_ids.contains(claim_id) {
-            issues.push(format!(
-                "architecture.md references unknown research claim {claim_id}"
-            ));
-        }
-    }
+    let acceptance = parsed
+        .acceptance_criteria
+        .iter()
+        .map(|criterion| criterion.id.as_str())
+        .collect();
+    issues.extend(crate::utility::architecture::validate_architecture_note(
+        architecture,
+        &requirements,
+        &acceptance,
+        research,
+    ));
 }
 
 fn validate_tasks(tasks: Option<&Value>, parsed: &ParsedSpecification, issues: &mut Issues) {
@@ -1622,6 +1741,9 @@ fn validate_status(status: Option<&Value>, spec: Option<&str>, issues: &mut Issu
     if string_field(status, "researchStatus") != Some("complete") {
         issues.push("status.json researchStatus is not complete".to_string());
     }
+    if string_field(status, "architectureStatus") != Some("complete") {
+        issues.push("status.json architectureStatus is not complete".to_string());
+    }
     if string_field(status, "tasksStatus") != Some("ready") {
         issues.push("status.json tasksStatus is not ready".to_string());
     }
@@ -1697,6 +1819,39 @@ fn read_text_for_validation(path: &Path, file_name: &str, issues: &mut Issues) -
     }
 }
 
+fn read_bounded_text_for_validation(
+    path: &Path,
+    file_name: &str,
+    maximum_bytes: u64,
+    issues: &mut Issues,
+) -> Option<String> {
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) => {
+            issues.push(format!("read {file_name}: {error}"));
+            return None;
+        }
+    };
+    let mut bytes = Vec::new();
+    if let Err(error) = file.take(maximum_bytes + 1).read_to_end(&mut bytes) {
+        issues.push(format!("read {file_name}: {error}"));
+        return None;
+    }
+    if bytes.len() as u64 > maximum_bytes {
+        issues.push(format!(
+            "{file_name} exceeds the {maximum_bytes}-byte input bound"
+        ));
+        return None;
+    }
+    match String::from_utf8(bytes) {
+        Ok(body) => Some(body),
+        Err(error) => {
+            issues.push(format!("read {file_name}: invalid UTF-8: {error}"));
+            None
+        }
+    }
+}
+
 fn string_array(value: &Value, field_name: &str) -> Vec<String> {
     value_array(value, field_name)
         .into_iter()
@@ -1718,6 +1873,7 @@ fn update_status(
     status: &mut Value,
     stage: &str,
     research_status: String,
+    architecture_status: String,
     tasks_status: String,
     check_status: &str,
     errors: Vec<String>,
@@ -1727,6 +1883,10 @@ fn update_status(
         .expect("validated status artifact is an object");
     object.insert("stage".to_string(), Value::String(stage.to_string()));
     object.insert("researchStatus".to_string(), Value::String(research_status));
+    object.insert(
+        "architectureStatus".to_string(),
+        Value::String(architecture_status),
+    );
     object.insert("tasksStatus".to_string(), Value::String(tasks_status));
     object.insert(
         "checkStatus".to_string(),

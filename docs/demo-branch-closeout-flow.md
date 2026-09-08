@@ -43,6 +43,8 @@ Current Anvil-first equivalent:
 keel memory working-brief write --request "comparison and release docs"
 keel plan specify --request "comparison and release docs"
 keel plan research --plan <plan-id>
+# Complete the generated architecture.md note.
+keel plan design --plan <plan-id>
 keel plan tasks --plan <plan-id>
 keel plan check --rtm --plan <plan-id>
 keel anvil compile --goal "comparison and release docs" --bar "cargo test --workspace --locked" --files "README.md,docs/demo-branch-closeout-flow.md" --workspace-root .

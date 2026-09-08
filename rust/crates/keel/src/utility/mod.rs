@@ -4,6 +4,7 @@
 //! Side Effects: None — pure module organization.
 
 pub mod anvil;
+pub mod architecture;
 pub mod code_graph;
 pub mod code_search;
 pub mod config_audit;

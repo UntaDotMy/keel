@@ -62,7 +62,7 @@ keel code-search search --query "run_recall_search"
 | Brownfield gate (unique) | `preserve-existing-flow` forces owner-path evidence before editing established source. Review gates block edits when the flow-check artifact is missing. No other harness has this. |
 | Iron-law hooks | SessionStart loads the bootstrap skill, UserPromptSubmit restates the four rules, PostToolBatch nudges a reviewer pass, PreCompact refreshes SYSTEM_MAP. |
 | Delivery loop | `keel anvil compile|cast|sieve|stamp|loop|run` — the only delivery loop. |
-| Compiled planner | `keel plan specify|research|tasks|check` turns a request into versioned requirements, current source-traceable research, architecture, tasks, and a checked requirement traceability matrix before implementation. Brownfield pre-PR review requires the researched plan. |
+| Compiled planner | `keel plan specify|research|design|tasks|check` turns a request into versioned requirements, current source-traceable research, a validated architecture, tasks, and a checked requirement traceability matrix before implementation. Brownfield pre-PR review requires the researched and designed plan. |
 | Review gates | `review pre-pr` / `review pre-commit`, review strictness via plugin `userConfig.review_strictness`, and CI-ready artifacts so non-trivial code never self-reviews. |
 | Memory | Working briefs, completion ledgers, scoped `SYSTEM_MAP.md`, and durable recovery state under `~/.keel/memories/` (with `~/.claude/memories/` legacy fallback). |
 | Command compaction | `keel run -- <cmd>` produces compact output for noisy test/build/lint/log/search commands without dropping diagnostic signal. |
@@ -324,7 +324,7 @@ Empty stdout means the hook is intentionally silent for that event.
 | Validate/plan the delivery loop | `keel anvil run --dry-run` (`writes=0 executes=0`) |
 | Run the delivery loop and create evidence | `keel anvil run` |
 | Inspect deterministic gates | `keel anvil sieve` |
-| Compile and check a delivery plan | `keel plan specify --request "..."`, `keel plan research --plan <id> [source flags]`, `keel plan tasks --plan <id>`, `keel plan check --rtm --plan <id>`; see [Compiled Planner](docs/planner.md) |
+| Compile and check a delivery plan | `keel plan specify --request "..."`, `keel plan research --plan <id> [source flags]`, complete `architecture.md`, `keel plan design --plan <id>`, `keel plan tasks --plan <id>`, `keel plan check --rtm --plan <id>`; see [Compiled Planner](docs/planner.md) |
 | Re-run bounded refinement | `keel anvil loop` |
 | Review locally | `keel review pre-commit`, `keel review pre-pr`, `keel review gates check` |
 | Preserve existing flow | `keel flow start`, `keel flow check`, `keel flow finish` |

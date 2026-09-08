@@ -105,10 +105,24 @@ fn advance_to_tasks(tree: &TempTree, request: &str) -> (String, PathBuf) {
     let research = plan_command(tree, &["research", "--plan", &plan_id]);
     assert_success(&research, "plan research");
     assert_eq!(json_output(&research)["stage"], "researched");
+    fs::write(
+        plan_path.join("architecture.md"),
+        complete_architecture(&plan_id),
+    )
+    .expect("complete architecture note");
+    let design = plan_command(tree, &["design", "--plan", &plan_id]);
+    assert_success(&design, "plan design");
+    assert_eq!(json_output(&design)["stage"], "designed");
     let tasks = plan_command(tree, &["tasks", "--plan", &plan_id]);
     assert_success(&tasks, "plan tasks");
     assert_eq!(json_output(&tasks)["stage"], "tasked");
     (plan_id, plan_path)
+}
+
+fn complete_architecture(plan_id: &str) -> String {
+    format!(
+        "---\nschema_version: 1\nartifact: architecture\nplan_id: {plan_id}\n---\n\nStatus: complete\n\n# Architecture Note\n\n## 1. Current architecture relevant to scope\n\n[verified: CLM-001] The current owner path was read.\n\n## 2. Proposed architecture\n\n[derived: CLM-002] Implement the specified outcome through the existing owner.\n\nInput bound: One bounded plan artifact.\n\nPolicy owner: The existing planner remains the lifecycle owner.\n\n## 3. Components/files/interfaces changed\n\n- Component: existing planner owner | Requirements: REQ-001 | Acceptance: AC-001\n\n## 4. Data/control flow\n\nThe existing command receives input, the owner applies it, and verification observes the result.\n\n## 5. Alternatives considered\n\nAlternative: Add a second planning owner.\n\nTradeoff: A second owner would duplicate lifecycle policy.\n\n## 6. Why the chosen option fits requirements\n\nChosen option: Extend the existing owner.\n\nInfrastructure reuse: Reuse the existing planner artifacts and status output.\n\nConstraint fit: The change stays within REQ-001 and AC-001.\n\n## 7. Risks and mitigations\n\nRisk: The implementation could drift outside the request.\n\nMitigation: Validate the requirement and acceptance mappings before tasks.\n\n## 8. Backward compatibility\n\nCompatibility: Existing behavior and artifact fields remain available.\n\nHost impact: none; existing host contracts remain unchanged.\n\n## 9. Error handling and fallback semantics\n\nFailure status: Invalid planning evidence exits non-zero.\n\nFallback: none; repair the canonical artifact.\n\nVisibility: operator and reviewer output lists the failure.\n\n## 10. Security/privacy implications\n\nSecurity/privacy: Do not record credentials or unrelated user data.\n\n## 11. Performance/token impact\n\nToken impact: Planning input remains bounded.\n\nMeasurement plan: Run the planner and fixed-context budget tests.\n\n## 12. Test strategy\n\nVerification: Run the generated acceptance command and planner integration tests.\n\nAcceptance references: AC-001\n\n## 13. Rollback strategy\n\nRollback: Revert the implementation commit and retain plan evidence.\n\n## 14. Requirement and research references\n\nRequirement references: REQ-001\n\nAcceptance references: AC-001\n\nClaim references: CLM-001, CLM-002\n"
+    )
 }
 
 fn check_failure(tree: &TempTree, plan_id: &str, expected: &str) {

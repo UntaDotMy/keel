@@ -38,6 +38,8 @@ Hold onto the brief id; the completion gate at closeout checks against it.
 ```bash
 keel plan specify --request "Compare the current repo, fix the biggest gap, and carry the branch to closure"
 keel plan research --plan <plan-id> <current-source-flags>
+# Complete the generated architecture.md note.
+keel plan design --plan <plan-id>
 keel plan tasks --plan <plan-id>
 keel plan check --rtm --plan <plan-id>
 keel anvil compile --goal "deliver the scoped change" --bar "cargo test --workspace --locked" --files "<owned files csv>"

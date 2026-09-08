@@ -16,9 +16,10 @@ because CI cannot prove uncommitted files. The default base ref is `origin/main`
 the default output format is `json`.
 
 When the branch modifies established source, `--plan` names the compiled plan
-whose research artifact must be complete, current, and linked to REQ/AC IDs.
-The blocking `research_traceability` gate lists missing, stale, malformed, and
-untraced records. A greenfield-only or non-source diff does not require a plan.
+whose research must be current and whose architecture must be complete and
+linked to REQ/AC IDs. The blocking `research_traceability` and
+`architecture_design` gates list stale research and incomplete design evidence
+separately. A greenfield-only or non-source diff does not require a plan.
 Use `--claude-home <path>` only when the plan is stored outside the configured
 Keel home.
 

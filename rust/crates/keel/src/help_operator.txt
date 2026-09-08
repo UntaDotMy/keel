@@ -47,6 +47,7 @@
   design-intelligence recommend [request...]
   plan specify --request <text> [--workspace-root <path>] [--claude-home <path>] [--json]
   plan research --plan <plan-id> [--claim <text> --source-url <url> --source-type <type> --retrieved-at <rfc3339> --support <text> --freshness fresh|historical --used-by <ids>] [--workspace-root <path>] [--claude-home <path>] [--json]
+  plan design --plan <plan-id> [--workspace-root <path>] [--claude-home <path>] [--json]
   plan tasks --plan <plan-id> [--workspace-root <path>] [--claude-home <path>] [--json]
   plan check [--rtm] --plan <plan-id> [--workspace-root <path>] [--claude-home <path>] [--json]
   memory scope resolve [--claude-home <path>] [--workspace-root <path>] [--create-missing] [--refresh-system-map] [--format json|compact]

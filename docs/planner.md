@@ -15,6 +15,8 @@ keel plan research --plan <plan-id> \
   --support "Brief original paraphrase of the supporting passage" \
   --freshness fresh \
   --used-by REQ-001,AC-001
+# Complete the generated architecture.md design note.
+keel plan design --plan <plan-id>
 keel plan tasks --plan <plan-id>
 keel plan check --plan <plan-id>
 keel plan check --rtm --plan <plan-id>
@@ -27,11 +29,12 @@ root. `--json` returns a machine-readable result.
 The state sequence is:
 
 ```text
-specified -> researched -> tasked -> valid
+specified -> researched -> designed -> tasked -> valid
 ```
 
-`plan check` is the implementation gate. A non-zero exit means the delivery
-contract is incomplete or internally inconsistent.
+`plan design` validates the architecture before task compilation. `plan check`
+is the implementation gate. A non-zero exit from either command means the
+delivery contract is incomplete or internally inconsistent.
 
 ## Storage
 
@@ -47,10 +50,10 @@ The directory contains:
 | --- | --- |
 | `spec.md` | The verbatim request, 22 required specification sections, REQ records, and structured AC records. |
 | `research.json` | Classified factual claims and source links used by requirements and criteria. |
-| `architecture.md` | The grounded design note and requirement/claim references. |
+| `architecture.md` | The grounded, bounded design note with component-to-REQ/AC mappings, alternatives, failure and fallback semantics, measurement, rollback, and research references. |
 | `tasks.json` | Implementation tasks linked to requirements, criteria, verification methods, and evidence types. |
 | `rtm.json` | The requirement traceability matrix from each REQ to AC, task, verification, and evidence. |
-| `status.json` | Current stage, research/task/check status, clarification state, and validation errors. |
+| `status.json` | Current stage, research/architecture/task/check status, clarification state, and validation errors. |
 
 Every JSON artifact has `schemaVersion: 1`. Markdown artifacts start with a
 strict `schema_version: 1` header. Unsupported or malformed versions fail
@@ -58,6 +61,25 @@ validation rather than being rewritten.
 
 `plan specify` publishes a new six-file bundle by directory rename. Later stage
 updates use Keel's atomic text writer and publish `status.json` last.
+
+## Architecture gate
+
+`plan research` writes a pending `architecture.md` scaffold. Complete that
+canonical file, set `Status: complete`, then run `plan design`. The command
+reads at most 65,536 bytes and requires all 14 numbered sections. The design
+must map every component to existing REQ and AC IDs and record:
+
+- a bounded input and one policy owner;
+- alternatives, tradeoffs, the chosen option, infrastructure reuse, and fit;
+- risks, compatibility, and host impact;
+- explicit failure status, fallback, and operator/user/reviewer/status visibility;
+- security/privacy and token impact with a measurement plan;
+- verification, rollback, and complete REQ, AC, and classified claim references.
+
+Host-impacting designs must state that all 11 adapter contracts remain
+preserved. Running `plan research` again rewrites the design scaffold and resets
+architecture and task readiness to `pending`; `plan design` and `plan tasks`
+then fail closed until the note is completed again.
 
 ## Specification and ambiguity rules
 
@@ -90,6 +112,7 @@ resolve to an existing REQ or AC.
 - every REQ has an AC;
 - every AC maps to an existing REQ and has verification/evidence fields;
 - research is complete and every claim is classified;
+- architecture design is complete, bounded, fully mapped, and internally consistent;
 - every REQ and AC maps to an implementation task;
 - every RTM row maps REQ to AC, task, verification, and evidence;
 - status and artifact identities agree with the requested plan ID.
@@ -142,7 +165,7 @@ falling back silently to local code. Even a cache record whose TTL is still
 active must pass the project retrieval-age policy before tasks can be compiled.
 
 For a branch that modifies established source, pre-PR and closeout review also
-require the researched plan:
+require the researched and designed plan:
 
 ```bash
 keel review pre-pr --base-ref origin/main --plan <plan-id>
@@ -150,5 +173,7 @@ keel review closeout --base-ref origin/main --plan <plan-id> --brief-id <brief-i
 ```
 
 The blocking `research_traceability` gate reports missing, stale, malformed, or
-unlinked source and claim records. A branch that adds only new source or changes
-non-source files remains greenfield for this gate.
+unlinked source and claim records. The separate `architecture_design` gate
+reports incomplete mappings, decisions, fallbacks, measurement, or rollback.
+A branch that adds only new source or changes non-source files remains
+greenfield for both gates.
