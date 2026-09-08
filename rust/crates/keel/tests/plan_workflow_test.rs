@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+const VENDOR_JSON_DOC_URL: &str = "https://vendor.example/docs/json";
+
 struct TempTree {
     root: PathBuf,
     home: PathBuf,
@@ -51,6 +53,19 @@ fn plan_command(tree: &TempTree, arguments: &[&str]) -> Output {
         "--json",
     ]);
     command.output().expect("run keel plan command")
+}
+
+fn research_cache_command(tree: &TempTree, arguments: &[&str]) -> Output {
+    let mut command = keel_command();
+    command
+        .args(["memory", "research-cache"])
+        .args(arguments)
+        .args([
+            "--claude-home",
+            tree.home.to_str().expect("UTF-8 fixture home"),
+            "--json",
+        ]);
+    command.output().expect("run research-cache command")
 }
 
 fn assert_success(output: &Output, step: &str) {
@@ -217,6 +232,301 @@ fn plan_round_trip_writes_versioned_grounded_traceable_artifacts() {
         "REQ-001"
     );
     assert_eq!(read_json(&plan_path.join("status.json"))["stage"], "valid");
+}
+
+#[test]
+fn empty_research_blocks_non_greenfield_task_progression() {
+    let tree = isolated_tree("empty-research");
+    let (empty_id, _) = specify(&tree, SPECIFIC_REQUEST);
+    let tasks = plan_command(&tree, &["tasks", "--plan", &empty_id]);
+    assert!(!tasks.status.success());
+    assert!(String::from_utf8_lossy(&tasks.stderr).contains("research.json status is not complete"));
+}
+
+#[test]
+fn fresh_official_and_historical_paper_sources_pass() {
+    let tree = isolated_tree("external-freshness");
+    let retrieved_at = chrono::Utc::now().to_rfc3339();
+
+    let (official_id, official_path) = specify(&tree, SPECIFIC_REQUEST);
+    let official = plan_command(
+        &tree,
+        &[
+            "research",
+            "--plan",
+            &official_id,
+            "--claim",
+            "Chrono 0.4.45 parses RFC3339 timestamps.",
+            "--source-url",
+            "https://docs.rs/chrono/0.4.45/chrono/struct.DateTime.html",
+            "--source-type",
+            "official-doc",
+            "--retrieved-at",
+            &retrieved_at,
+            "--support",
+            "The current crate documentation exposes DateTime::parse_from_rfc3339.",
+            "--freshness",
+            "fresh",
+            "--used-by",
+            "REQ-001,AC-001",
+        ],
+    );
+    assert_success(&official, "fresh official research");
+    assert_eq!(json_output(&official)["grounding"], "fresh");
+    assert_eq!(
+        read_json(&official_path.join("research.json"))["sources"][0]["sourceType"],
+        "official-doc"
+    );
+
+    let (paper_id, paper_path) = specify(&tree, SPECIFIC_REQUEST);
+    let paper = plan_command(
+        &tree,
+        &[
+            "research",
+            "--plan",
+            &paper_id,
+            "--claim",
+            "ReWOO separates planning from observations.",
+            "--source-url",
+            "https://arxiv.org/abs/2305.18323",
+            "--source-type",
+            "paper",
+            "--publication-date",
+            "2023-05-23",
+            "--retrieved-at",
+            &retrieved_at,
+            "--support",
+            "The historical paper describes decoupled planning and observations.",
+            "--freshness",
+            "historical",
+            "--used-by",
+            "REQ-001,AC-001",
+        ],
+    );
+    assert_success(&paper, "historical paper research");
+    assert_eq!(json_output(&paper)["grounding"], "historical");
+    assert_eq!(
+        read_json(&paper_path.join("research.json"))["sources"][0]["publicationDate"],
+        "2023-05-23"
+    );
+}
+
+#[test]
+fn historical_standard_is_accepted_and_labeled() {
+    let tree = isolated_tree("historical-standard");
+    let standard_retrieved_at = chrono::Utc::now().to_rfc3339();
+    let (standard_id, standard_path) = specify(&tree, SPECIFIC_REQUEST);
+    let standard = plan_command(
+        &tree,
+        &[
+            "research",
+            "--plan",
+            &standard_id,
+            "--claim",
+            "RFC 3339 defines a timestamp representation.",
+            "--source-url",
+            "https://www.rfc-editor.org/rfc/rfc3339",
+            "--source-type",
+            "standard",
+            "--publication-date",
+            "2002-07-01",
+            "--retrieved-at",
+            &standard_retrieved_at,
+            "--support",
+            "The historical standard defines the Internet date and time format.",
+            "--freshness",
+            "historical",
+            "--used-by",
+            "REQ-001,AC-001",
+        ],
+    );
+    assert_success(&standard, "historical standard research");
+    assert_eq!(json_output(&standard)["grounding"], "historical");
+    assert_eq!(
+        read_json(&standard_path.join("research.json"))["sources"][0]["sourceType"],
+        "standard"
+    );
+}
+
+#[test]
+fn stale_product_source_requires_research_refresh() {
+    let tree = isolated_tree("stale-external");
+    let (stale_id, _) = specify(&tree, SPECIFIC_REQUEST);
+    let stale = plan_command(
+        &tree,
+        &[
+            "research",
+            "--plan",
+            &stale_id,
+            "--claim",
+            "A product API behaves as documented.",
+            "--source-url",
+            "https://vendor.example/docs/api",
+            "--source-type",
+            "official-doc",
+            "--retrieved-at",
+            "2025-01-01T00:00:00Z",
+            "--support",
+            "The vendor documentation states the API behavior.",
+            "--freshness",
+            "fresh",
+            "--used-by",
+            "REQ-001,AC-001",
+        ],
+    );
+    assert!(!stale.status.success());
+    assert!(String::from_utf8_lossy(&stale.stderr).contains("re-search required"));
+}
+
+#[test]
+fn local_research_is_visibly_local_only() {
+    let tree = isolated_tree("local-only");
+    let (local_id, local_path) = specify(&tree, SPECIFIC_REQUEST);
+    let local = plan_command(&tree, &["research", "--plan", &local_id]);
+    assert_success(&local, "local-only research");
+    assert_eq!(json_output(&local)["grounding"], "local-only");
+    let research = read_json(&local_path.join("research.json"));
+    assert_eq!(research["sources"][0]["freshness"], "local-only");
+    assert_eq!(research["sources"][0]["usedBy"][0], "REQ-001");
+}
+
+#[test]
+fn fresh_research_cache_preserves_citation_metadata_and_is_reused() {
+    let tree = isolated_tree("research-cache");
+    let cache_retrieved_at = chrono::Utc::now().to_rfc3339();
+    let cached = research_cache_command(
+        &tree,
+        &[
+            "record",
+            "--question",
+            SPECIFIC_REQUEST,
+            "--answer",
+            "Current official documentation supports the requested JSON behavior.",
+            "--source",
+            VENDOR_JSON_DOC_URL,
+            "--source-type",
+            "official-doc",
+            "--publication-date",
+            "2026-09-01",
+            "--retrieved-at",
+            &cache_retrieved_at,
+            "--freshness-class",
+            "fresh",
+            "--used-by",
+            "REQ-001,AC-001",
+            "--freshness",
+            "90d",
+        ],
+    );
+    assert_success(&cached, "research-cache record");
+    let cache_payload = json_output(&cached);
+    assert_eq!(cache_payload["record"]["sourceType"], "official-doc");
+    assert_eq!(cache_payload["record"]["retrievedAt"], cache_retrieved_at);
+    assert_eq!(cache_payload["record"]["freshnessClass"], "fresh");
+    assert!(cache_payload["record"]["expiresAt"].is_string());
+
+    let (cached_id, cached_path) = specify(&tree, SPECIFIC_REQUEST);
+    let cached_research = plan_command(&tree, &["research", "--plan", &cached_id]);
+    assert_success(&cached_research, "cached plan research");
+    assert_eq!(json_output(&cached_research)["researchSource"], "cache");
+    let artifact = read_json(&cached_path.join("research.json"));
+    assert_eq!(artifact["sources"][0]["sourceType"], "official-doc");
+    assert!(artifact["sources"][0]["cacheId"].is_string());
+}
+
+#[test]
+fn research_cache_prefers_current_official_documentation() {
+    let tree = isolated_tree("research-cache-precedence");
+    let precedence_retrieved_at = chrono::Utc::now().to_rfc3339();
+    for record in [
+        [
+            "record",
+            "--question",
+            SPECIFIC_REQUEST,
+            "--answer",
+            "An older paper offers background rather than current product behavior.",
+            "--source",
+            "https://arxiv.org/abs/2305.18323",
+            "--source-type",
+            "paper",
+            "--publication-date",
+            "2023-05-23",
+            "--retrieved-at",
+            &precedence_retrieved_at,
+            "--freshness-class",
+            "historical",
+            "--used-by",
+            "REQ-001,AC-001",
+            "--freshness",
+            "3650d",
+        ],
+        [
+            "record",
+            "--question",
+            SPECIFIC_REQUEST,
+            "--answer",
+            "Current official documentation defines the product behavior.",
+            "--source",
+            VENDOR_JSON_DOC_URL,
+            "--source-type",
+            "official-doc",
+            "--publication-date",
+            "2026-09-01",
+            "--retrieved-at",
+            &precedence_retrieved_at,
+            "--freshness-class",
+            "fresh",
+            "--used-by",
+            "REQ-001,AC-001",
+            "--freshness",
+            "90d",
+        ],
+    ] {
+        assert_success(
+            &research_cache_command(&tree, &record),
+            "research-cache precedence fixture",
+        );
+    }
+
+    let (preferred_id, preferred_path) = specify(&tree, SPECIFIC_REQUEST);
+    let preferred_research = plan_command(&tree, &["research", "--plan", &preferred_id]);
+    assert_success(&preferred_research, "preferred cached research");
+    let artifact = read_json(&preferred_path.join("research.json"));
+    assert_eq!(artifact["researchSource"], "cache");
+    assert_eq!(artifact["sources"][0]["sourceType"], "official-doc");
+}
+
+#[test]
+fn stale_matching_cache_requires_refresh_instead_of_local_fallback() {
+    let tree = isolated_tree("stale-cache");
+    let expired_retrieved_at = chrono::Utc::now().to_rfc3339();
+    let cached = research_cache_command(
+        &tree,
+        &[
+            "record",
+            "--question",
+            SPECIFIC_REQUEST,
+            "--answer",
+            "Expired product behavior must not be reused.",
+            "--source",
+            VENDOR_JSON_DOC_URL,
+            "--source-type",
+            "official-doc",
+            "--retrieved-at",
+            &expired_retrieved_at,
+            "--freshness-class",
+            "fresh",
+            "--used-by",
+            "REQ-001,AC-001",
+            "--freshness",
+            "0s",
+        ],
+    );
+    assert_success(&cached, "stale research-cache record");
+    let (expired_id, _) = specify(&tree, SPECIFIC_REQUEST);
+    let expired_research = plan_command(&tree, &["research", "--plan", &expired_id]);
+    assert!(!expired_research.status.success());
+    assert!(String::from_utf8_lossy(&expired_research.stderr).contains("re-search required"));
 }
 
 #[test]

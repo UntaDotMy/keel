@@ -18,6 +18,7 @@ pub mod observe;
 pub mod plan;
 pub mod recall;
 pub mod record_store;
+pub mod research_policy;
 pub mod session;
 pub mod skill_eval;
 pub mod skill_lint;

@@ -3,6 +3,12 @@ use crate::runner::hook_lifecycle::completeness_marker_record_for_workspace;
 use crate::runtime::resolve_repository_root;
 use std::fs;
 
+#[derive(Clone, Copy)]
+pub(crate) struct ResearchPlanRef<'a> {
+    pub plan_id: &'a str,
+    pub claude_home: &'a str,
+}
+
 pub(crate) fn collect_review_gate_results(
     repository_root: &Path,
     base_ref: &str,
@@ -10,6 +16,7 @@ pub(crate) fn collect_review_gate_results(
     scan_all: bool,
     include_tests: bool,
     include_impact: bool,
+    research_plan: ResearchPlanRef<'_>,
 ) -> Vec<GateResult> {
     // Auto language gates (.githooks markers). Missing tools = non-blocking Blocked.
     let mut gate_results = run_rust_surface_gates(repository_root, include_tests);
@@ -36,6 +43,15 @@ pub(crate) fn collect_review_gate_results(
         base_ref,
         surface_name,
     ));
+    if surface_name == "pre-pr" {
+        gate_results.push(research_traceability_gate(
+            repository_root,
+            base_ref,
+            surface_name,
+            research_plan.plan_id,
+            research_plan.claude_home,
+        ));
+    }
     if include_impact {
         gate_results.push(impact_gate(repository_root, base_ref, surface_name));
     }
@@ -80,6 +96,10 @@ pub(crate) fn run_review_surface_command(
         scan_all,
         surface_name == "pre-pr",
         flag_set.bool_value("impact"),
+        ResearchPlanRef {
+            plan_id: flag_set.string_value("plan"),
+            claude_home: flag_set.string_value("claude-home"),
+        },
     );
     let (blocking_findings, warnings) = tally_gate_results(&gate_results);
 
@@ -223,6 +243,81 @@ pub(crate) fn brownfield_source_from_name_status(line: &str) -> Option<String> {
         return None;
     }
     Some(normalized)
+}
+
+pub(crate) fn research_traceability_gate(
+    repository_root: &Path,
+    base_ref: &str,
+    surface_name: &str,
+    plan_id: &str,
+    claude_home: &str,
+) -> GateResult {
+    let blocking_failure = |details: &str| research_gate_result(GateStatus::Fail, true, details);
+    if surface_name != "pre-pr" {
+        return research_gate_result(
+            GateStatus::Pass,
+            false,
+            "pre-PR research gate not requested",
+        );
+    }
+    let base = match base_ref.trim() {
+        "" => "origin/main",
+        value => value,
+    };
+    let committed_range = vec![format!("{base}...HEAD")];
+    let working_range = vec!["HEAD".to_string()];
+    let Some(mut touched) = modified_existing_sources(repository_root, &committed_range) else {
+        return blocking_failure(&format!(
+            "could not resolve {base}...HEAD; research evidence cannot be checked"
+        ));
+    };
+    let Some(working_touched) = modified_existing_sources(repository_root, &working_range) else {
+        return blocking_failure(
+            "could not inspect working changes; research evidence cannot be checked",
+        );
+    };
+    touched.extend(working_touched);
+    touched.sort();
+    touched.dedup();
+    if touched.is_empty() {
+        return research_gate_result(
+            GateStatus::Pass,
+            true,
+            "no existing source modified; research gate not applicable",
+        );
+    }
+    if plan_id.trim().is_empty() {
+        return blocking_failure(
+            "non-greenfield pre-PR review requires --plan <id> with passing research evidence",
+        );
+    }
+    match crate::utility::plan::review_research_issues(repository_root, claude_home, plan_id.trim()) {
+        Ok(issues) if issues.is_empty() => research_gate_result(
+            GateStatus::Pass,
+            true,
+            &format!(
+                "plan {} has current source and requirement traceability for {} existing source file(s)",
+                plan_id.trim(),
+                touched.len()
+            ),
+        ),
+        Ok(issues) => blocking_failure(&format!(
+                "plan {} has {} untraced or stale research finding(s): {}",
+                plan_id.trim(),
+                issues.len(),
+                issues.iter().take(5).cloned().collect::<Vec<_>>().join("; ")
+            )),
+        Err(error) => blocking_failure(&error),
+    }
+}
+
+fn research_gate_result(status: GateStatus, blocking: bool, details: &str) -> GateResult {
+    GateResult {
+        name: "research_traceability".to_string(),
+        status,
+        blocking,
+        details: Some(details.to_string()),
+    }
 }
 
 /// Blocking brownfield gate: modifying established source requires a complete

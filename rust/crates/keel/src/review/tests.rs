@@ -124,6 +124,145 @@ fn brownfield_gate_exempts_added_docs_and_generated_paths() {
     }
 }
 
+#[test]
+fn research_gate_requires_a_named_plan_for_uncommitted_brownfield_work() {
+    let repository = init_research_gate_repo("missing-plan");
+    let gate = research_traceability_gate(&repository, "main", "pre-pr", "", "");
+    assert!(gate.blocking);
+    assert_eq!(gate.status, GateStatus::Fail);
+    assert!(gate
+        .details
+        .as_deref()
+        .unwrap_or_default()
+        .contains("--plan"));
+    let _ = std::fs::remove_dir_all(repository);
+}
+
+#[test]
+fn research_gate_lists_untraced_claims_from_the_named_plan() {
+    let repository = init_research_gate_repo("untraced-claim");
+    let keel_home = crate::test_support::unique_temp_dir("keel-research-gate-home");
+    let (plan_id, research_path) = create_researched_plan(&repository, &keel_home);
+    let passing = research_traceability_gate(
+        &repository,
+        "main",
+        "pre-pr",
+        &plan_id,
+        keel_home.to_str().expect("UTF-8 Keel home"),
+    );
+    assert_eq!(passing.status, GateStatus::Pass);
+    let mut research: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&research_path).expect("read research artifact"),
+    )
+    .expect("parse research artifact");
+    research["claims"][0]["usedBy"] = serde_json::json!([]);
+    std::fs::write(
+        &research_path,
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&research).expect("render research artifact")
+        ),
+    )
+    .expect("write untraced research artifact");
+
+    let gate = research_traceability_gate(
+        &repository,
+        "main",
+        "pre-pr",
+        &plan_id,
+        keel_home.to_str().expect("UTF-8 Keel home"),
+    );
+    assert_eq!(gate.status, GateStatus::Fail);
+    assert!(gate
+        .details
+        .as_deref()
+        .unwrap_or_default()
+        .contains("CLM-001 has no usedBy IDs"));
+    let _ = std::fs::remove_dir_all(repository);
+    let _ = std::fs::remove_dir_all(keel_home);
+}
+
+fn init_research_gate_repo(label: &str) -> crate::test_support::TestTempDir {
+    let repository = crate::test_support::unique_temp_dir(&format!("keel-research-{label}"));
+    std::fs::create_dir_all(repository.join("src")).expect("create source directory");
+    git_in(&repository, &["init", "-q"]);
+    git_in(&repository, &["config", "user.email", "test@example.com"]);
+    git_in(&repository, &["config", "user.name", "Test"]);
+    git_in(&repository, &["checkout", "-q", "-B", "main"]);
+    std::fs::write(
+        repository.join("src/lib.rs"),
+        "pub fn value() -> u8 { 1 }\n",
+    )
+    .expect("write baseline source");
+    git_in(&repository, &["add", "."]);
+    git_in(&repository, &["commit", "-q", "-m", "base"]);
+    std::fs::write(
+        repository.join("src/lib.rs"),
+        "pub fn value() -> u8 { 2 }\n",
+    )
+    .expect("modify established source");
+    repository
+}
+
+fn create_researched_plan(
+    repository: &std::path::Path,
+    keel_home: &std::path::Path,
+) -> (String, std::path::PathBuf) {
+    let common = [
+        "--workspace-root".to_string(),
+        repository.to_string_lossy().into_owned(),
+        "--claude-home".to_string(),
+        keel_home.to_string_lossy().into_owned(),
+        "--json".to_string(),
+    ];
+    let mut specify = vec![
+        "specify".to_string(),
+        "--request".to_string(),
+        "Change the established value function while preserving its callers.".to_string(),
+    ];
+    specify.extend(common.clone());
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    assert_eq!(
+        crate::utility::plan::run_plan_command(&specify, &mut stdout, &mut stderr),
+        0,
+        "specify failed: {}",
+        String::from_utf8_lossy(&stderr)
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&stdout).expect("parse specify JSON");
+    let plan_id = payload["planId"].as_str().expect("plan id").to_string();
+    let plan_path = std::path::PathBuf::from(payload["planPath"].as_str().expect("plan path"));
+    let mut research = vec![
+        "research".to_string(),
+        "--plan".to_string(),
+        plan_id.clone(),
+        "--claim".to_string(),
+        "Chrono parses RFC3339 timestamps.".to_string(),
+        "--source-url".to_string(),
+        "https://docs.rs/chrono/0.4.45/chrono/struct.DateTime.html".to_string(),
+        "--source-type".to_string(),
+        "official-doc".to_string(),
+        "--retrieved-at".to_string(),
+        chrono::Utc::now().to_rfc3339(),
+        "--support".to_string(),
+        "The current crate documentation exposes DateTime::parse_from_rfc3339.".to_string(),
+        "--freshness".to_string(),
+        "fresh".to_string(),
+        "--used-by".to_string(),
+        "REQ-001,AC-001".to_string(),
+    ];
+    research.extend(common);
+    stdout.clear();
+    stderr.clear();
+    assert_eq!(
+        crate::utility::plan::run_plan_command(&research, &mut stdout, &mut stderr),
+        0,
+        "research failed: {}",
+        String::from_utf8_lossy(&stderr)
+    );
+    (plan_id, plan_path.join("research.json"))
+}
+
 /// Renaming while editing still changes established behavior. Verified against
 /// git: `git mv old.rs new.rs` plus an edit reports `R050\told.rs\tnew.rs`, so
 /// matching only `M` let a rename slip past the gate entirely.

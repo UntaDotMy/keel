@@ -82,6 +82,48 @@ fn family_store(claude_home: &Path, command_group: &str, family: &str) -> Record
     RecordStore::new(claude_home, &format!("{command_group}/{family}"))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResearchCacheHit {
+    pub id: String,
+    pub answer: String,
+    pub source_url: String,
+    pub source_type: String,
+    pub publication_date: Option<String>,
+    pub retrieved_at: String,
+    pub freshness_class: String,
+    pub used_by: Vec<String>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct ResearchCacheLookup {
+    pub fresh: Vec<ResearchCacheHit>,
+    pub stale_matches: usize,
+}
+
+pub(crate) fn lookup_fresh_research_cache(
+    claude_home: &Path,
+    query: &str,
+) -> Result<ResearchCacheLookup, String> {
+    let store = family_store(claude_home, "memory", "research-cache");
+    let records = store.list_records().map_err(|error| error.to_string())?;
+    let now = format_timestamp_iso8601(current_timestamp_millis());
+    let mut lookup = ResearchCacheLookup::default();
+    for (_, record) in &records {
+        if !research_cache_record_matches(record, query) {
+            continue;
+        }
+        let Some(hit) = complete_research_cache_hit(record) else {
+            continue;
+        };
+        if research_cache_record_is_stale(record, &now) {
+            lookup.stale_matches += 1;
+        } else {
+            lookup.fresh.push(hit);
+        }
+    }
+    Ok(lookup)
+}
+
 /// Increment a loop-guard signature and return `(count, exhausted)` for `budget`.
 pub fn bump_loop_guard(
     claude_home: &Path,
@@ -150,7 +192,9 @@ fn run_research_cache(
             standard_output,
             "Usage: keel {command_group} research-cache <subcommand> [flags]\n\
              \n\
-             record   --question \"...\" --answer \"...\" [--source ...] [--freshness ...]\n\
+             record   --question \"...\" --answer \"...\" [--source ...] [--source-type ...]\n\
+                      [--publication-date ...] [--retrieved-at ...] [--freshness-class ...]\n\
+                      [--used-by REQ-001,AC-001] [--freshness <ttl>]\n\
                       aliases: --query = --question, --result = --answer\n\
              lookup   --query \"...\" [--include-stale]\n\
              stale    [--days N]\n\
@@ -168,6 +212,11 @@ fn run_research_cache(
             flags.string_flag("query", "");
             flags.string_flag("result", "");
             flags.string_flag("source", "");
+            flags.string_flag("source-type", "");
+            flags.string_flag("publication-date", "");
+            flags.string_flag("retrieved-at", "");
+            flags.string_flag("freshness-class", "");
+            flags.string_flag("used-by", "");
             flags.string_flag("freshness", "");
             flags.string_flag("claude-home", "");
             flags.bool_flag("json", false);
@@ -206,6 +255,10 @@ fn run_research_cache(
             };
             let (id, at) = now_id("rc");
             let freshness = flags.string_value("freshness").trim().to_string();
+            let retrieved_at = match flags.string_value("retrieved-at").trim() {
+                "" => at.clone(),
+                value => value.to_string(),
+            };
             let mut record: Record = vec![
                 ("id".into(), id.clone()),
                 ("question".into(), question),
@@ -213,6 +266,23 @@ fn run_research_cache(
                 (
                     "source".into(),
                     flags.string_value("source").trim().to_string(),
+                ),
+                (
+                    "sourceType".into(),
+                    flags.string_value("source-type").trim().to_string(),
+                ),
+                (
+                    "publicationDate".into(),
+                    flags.string_value("publication-date").trim().to_string(),
+                ),
+                ("retrievedAt".into(), retrieved_at),
+                (
+                    "freshnessClass".into(),
+                    flags.string_value("freshness-class").trim().to_string(),
+                ),
+                (
+                    "usedBy".into(),
+                    flags.string_value("used-by").trim().to_string(),
                 ),
                 ("freshness".into(), freshness.clone()),
                 ("state".into(), "fresh".into()),
@@ -288,13 +358,7 @@ fn run_research_cache(
             let mut stale_matches = Vec::new();
             let mut matches = Vec::new();
             for (_, record) in &records {
-                let haystack = format!(
-                    "{} {}",
-                    field(record, "question").unwrap_or(""),
-                    field(record, "answer").unwrap_or("")
-                )
-                .to_lowercase();
-                if !query.split_whitespace().all(|term| haystack.contains(term)) {
+                if !research_cache_record_matches(record, &query) {
                     continue;
                 }
                 if research_cache_record_is_stale(record, &now) {
@@ -1866,6 +1930,42 @@ fn parse_freshness_ttl_millis(freshness: &str) -> Option<u128> {
         _ => return None,
     };
     amount.checked_mul(unit_millis)
+}
+
+fn research_cache_record_matches(record: &Record, query: &str) -> bool {
+    let haystack = format!(
+        "{} {}",
+        field(record, "question").unwrap_or(""),
+        field(record, "answer").unwrap_or("")
+    )
+    .to_lowercase();
+    query
+        .to_lowercase()
+        .split_whitespace()
+        .all(|term| haystack.contains(term))
+}
+
+fn complete_research_cache_hit(record: &Record) -> Option<ResearchCacheHit> {
+    let non_empty = |name| {
+        field(record, name)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    };
+    Some(ResearchCacheHit {
+        id: non_empty("id")?.to_string(),
+        answer: non_empty("answer")?.to_string(),
+        source_url: non_empty("source")?.to_string(),
+        source_type: non_empty("sourceType")?.to_string(),
+        publication_date: non_empty("publicationDate").map(str::to_string),
+        retrieved_at: non_empty("retrievedAt")?.to_string(),
+        freshness_class: non_empty("freshnessClass")?.to_string(),
+        used_by: non_empty("usedBy")?
+            .split([',', ' '])
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .collect(),
+    })
 }
 
 fn research_cache_record_is_stale(record: &Record, now: &str) -> bool {

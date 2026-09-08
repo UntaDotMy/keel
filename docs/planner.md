@@ -7,7 +7,14 @@ implementation.
 
 ```bash
 keel plan specify --request "Add an observable behavior with a named verification command."
-keel plan research --plan <plan-id>
+keel plan research --plan <plan-id> \
+  --claim "Exact external fact used by the plan" \
+  --source-url "https://vendor.example/current-doc" \
+  --source-type official-doc \
+  --retrieved-at "2026-09-09T00:00:00Z" \
+  --support "Brief original paraphrase of the supporting passage" \
+  --freshness fresh \
+  --used-by REQ-001,AC-001
 keel plan tasks --plan <plan-id>
 keel plan check --plan <plan-id>
 keel plan check --rtm --plan <plan-id>
@@ -90,3 +97,58 @@ resolve to an existing REQ or AC.
 `plan check --rtm` returns the validated RTM alongside the check result. Plan
 IDs are restricted to one safe path segment and cannot escape the workspace
 plan lane.
+
+## Research provenance and freshness
+
+`plan research` accepts one host-supplied external source record or, when no
+source flags are supplied, checks the research cache before using the local
+workspace index. Supplying any source flag makes `--claim`, `--source-url`,
+`--source-type`, `--retrieved-at`, `--support`, `--freshness`, and `--used-by`
+mandatory. `--publication-date` is also mandatory in effect for historical
+papers and standards because validation rejects either without it.
+
+Each source in `research.json` records `sourceId`, `sourceUrl`, `sourceType`,
+`publicationDate`, `retrievedAt`, `support`, `freshness`, and `usedBy`. Each
+claim records its classification, source IDs, and REQ/AC consumers. Supported
+source types are `official-doc`, `repository`, `issue`, `paper`, `standard`,
+`local-code`, and the planner-owned `user-request` record.
+
+The freshness classes have distinct meanings:
+
+- `fresh`: current external product, API, tool, or version evidence. Retrieval
+  is limited to 90 days by default.
+- `historical`: a paper or standard with a publication date. It can be older
+  than the product-evidence window.
+- `local-only`: a local-code or submitted-request source. This is the visible
+  fallback for a host without web research.
+
+Project configuration can narrow or widen the product-evidence window in the
+root `keel.filters.toml` file:
+
+```toml
+[research]
+max_age_days = 30
+```
+
+The value must be greater than zero; a missing section uses 90 days and zero or
+negative values fail closed. When several complete cache records match, current
+official documentation has priority, followed by repository and issue evidence;
+papers and standards remain background evidence. The newest retrieval wins
+within the same source type. Unsupported secondary-source types do not pass the
+research validator.
+
+A matching cache record past its TTL returns `re-search required` rather than
+falling back silently to local code. Even a cache record whose TTL is still
+active must pass the project retrieval-age policy before tasks can be compiled.
+
+For a branch that modifies established source, pre-PR and closeout review also
+require the researched plan:
+
+```bash
+keel review pre-pr --base-ref origin/main --plan <plan-id>
+keel review closeout --base-ref origin/main --plan <plan-id> --brief-id <brief-id>
+```
+
+The blocking `research_traceability` gate reports missing, stale, malformed, or
+unlinked source and claim records. A branch that adds only new source or changes
+non-source files remains greenfield for this gate.

@@ -7,13 +7,20 @@
 Start with the repository and brief that define the work:
 
 ```text
-keel review closeout --repo-root <path> --base-ref origin/main --brief-id <id> --proof "targeted checks passed" --format markdown
+keel review closeout --repo-root <path> --base-ref origin/main --plan <plan-id> --brief-id <id> --proof "targeted checks passed" --format markdown
 ```
 
 Use `--strict` when a working brief is required, and `--require-ci` when exact-head
 CI proof is required before a pass. `--require-ci` also rejects a dirty worktree,
 because CI cannot prove uncommitted files. The default base ref is `origin/main`;
 the default output format is `json`.
+
+When the branch modifies established source, `--plan` names the compiled plan
+whose research artifact must be complete, current, and linked to REQ/AC IDs.
+The blocking `research_traceability` gate lists missing, stale, malformed, and
+untraced records. A greenfield-only or non-source diff does not require a plan.
+Use `--claude-home <path>` only when the plan is stored outside the configured
+Keel home.
 
 Each run writes a ledger under `<claude-home>/state/review-closeout/<review-id>.json`. Without an explicit review id, the id is derived from the current `HEAD` (for example, `review-<12-char-sha>`). The JSON result includes the ledger path, status, findings, requirements, and gate snapshots.
 

@@ -162,6 +162,8 @@ pub(super) fn review_flag_set(name: &str) -> FlagSet {
     flag_set.string_flag("workspace-root", "");
     flag_set.string_flag("surface", "diff");
     flag_set.string_flag("base-ref", "");
+    flag_set.string_flag("plan", "");
+    flag_set.string_flag("claude-home", "");
     flag_set.string_flag("format", "compact");
     flag_set.bool_flag("all", false);
     flag_set.bool_flag("impact", false);

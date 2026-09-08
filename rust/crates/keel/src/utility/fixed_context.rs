@@ -85,7 +85,7 @@ fn ratified_budget(surface: &str) -> usize {
     // Ratified from the first hermetic Phase 1 runtime measurement as
     // ceil(actual_tokens * 1.10). Actual values remain runtime-computed.
     match surface {
-        "mcp.tools_list.catalog" => 3_174,
+        "mcp.tools_list.catalog" => 3_193,
         "hook.session_start.bootstrap" => 503,
         "hook.user_prompt_submit.simple" => 113,
         "hook.user_prompt_submit.code_change" => 169,

@@ -331,6 +331,8 @@ fn tools_list_catalog() -> Value {
                         "repo_test_policy": { "type": "string", "enum": ["run", "skip"], "description": "MCP gates must use skip to stay inside the host deadline; full tests belong to CLI pre-pr." },
                         "repo_root": { "type": "string", "description": "Repository root path. Defaults to cwd." },
                         "base_ref": { "type": "string", "description": "Base Git ref for closeout scope and review surfaces. Defaults to origin/main for closeout." },
+                        "plan_id": { "type": "string", "description": "Planner id whose research evidence must pass for non-greenfield pre-PR or closeout review." },
+                        "claude_home": { "type": "string", "description": "Explicit Keel storage home containing the named plan. Defaults to the configured home." },
                         "brief_id": { "type": "string", "description": "Working-brief id whose acceptance criteria closeout checks." },
                         "proof": { "type": "string", "description": "Evidence text attached to closeout acceptance criteria." },
                         "strict": { "type": "boolean", "description": "Require a brief and treat missing closeout evidence as a blocking finding." },
@@ -3160,6 +3162,12 @@ fn review_args(action: &str, arguments: &Value) -> Vec<String> {
     if let Some(root) = optional_string_arg(arguments, "repo_root") {
         all_args.push(format!("--repo-root={root}"));
     }
+    if let Some(plan_id) = optional_string_arg(arguments, "plan_id") {
+        all_args.push(format!("--plan={plan_id}"));
+    }
+    if let Some(home) = optional_string_arg(arguments, "claude_home") {
+        all_args.push(format!("--claude-home={home}"));
+    }
     all_args
 }
 /// Build the direct-exec argv used by the asynchronous MCP closeout path.
@@ -3173,6 +3181,8 @@ fn review_closeout_args(executable: &Path, arguments: &Value) -> Vec<String> {
     for (key, flag) in [
         ("repo_root", "--repo-root"),
         ("base_ref", "--base-ref"),
+        ("plan_id", "--plan"),
+        ("claude_home", "--claude-home"),
         ("brief_id", "--brief-id"),
         ("proof", "--proof"),
         ("format", "--format"),
@@ -4438,6 +4448,18 @@ mod tests {
     }
 
     #[test]
+    fn review_pre_pr_maps_research_plan_options() {
+        let args = review_args(
+            "pre-pr",
+            &json!({ "plan_id": "plan-123", "claude_home": "/tmp/keel-home" }),
+        );
+        assert_eq!(
+            args,
+            vec!["pre-pr", "--plan=plan-123", "--claude-home=/tmp/keel-home"]
+        );
+    }
+
+    #[test]
     fn review_schema_advertises_closeout_contract() {
         let listed = handle_tools_list();
         let review = listed["tools"]
@@ -4460,6 +4482,8 @@ mod tests {
             "wait",
             "repo_root",
             "base_ref",
+            "plan_id",
+            "claude_home",
             "brief_id",
             "proof",
             "strict",
@@ -4485,6 +4509,8 @@ mod tests {
             &json!({
                 "repo_root": "/tmp/repo",
                 "base_ref": "origin/main",
+                "plan_id": "plan-123",
+                "claude_home": "/tmp/keel-home",
                 "brief_id": "wb-123",
                 "proof": "$(echo pwned); & not-a-command",
                 "format": "compact",
@@ -4505,6 +4531,8 @@ mod tests {
                 "closeout",
                 "--repo-root=/tmp/repo",
                 "--base-ref=origin/main",
+                "--plan=plan-123",
+                "--claude-home=/tmp/keel-home",
                 "--brief-id=wb-123",
                 "--proof=$(echo pwned); & not-a-command",
                 "--format=compact",

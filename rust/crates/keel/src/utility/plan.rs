@@ -101,6 +101,12 @@ struct PlannerContext {
     plans_root: PathBuf,
 }
 
+impl PlannerContext {
+    fn workspace(&self) -> &Path {
+        &self.workspace_root
+    }
+}
+
 #[derive(Debug, Clone)]
 struct PlanPaths {
     directory: PathBuf,
@@ -156,6 +162,28 @@ struct CommandStreams<'a> {
     error: Output<'a>,
 }
 
+#[derive(Debug)]
+struct SubmittedResearch {
+    claim: String,
+    source_url: String,
+    source_type: String,
+    publication_date: Option<String>,
+    retrieved_at: String,
+    support: String,
+    freshness: String,
+    used_by: Vec<String>,
+}
+
+#[derive(Debug)]
+struct ResearchBundle {
+    sources: Vec<Value>,
+    claims: Vec<Value>,
+    grounding: String,
+    research_source: String,
+    primary_source: Option<String>,
+    truncated: bool,
+}
+
 pub fn run_plan_command(
     arguments: &[String],
     standard_output: Output<'_>,
@@ -190,7 +218,7 @@ pub fn run_plan_command(
 fn usage(standard_error: Output<'_>) -> u8 {
     let _ = writeln!(
         standard_error,
-        "Usage: plan specify --request <text> | research --plan <id> | tasks --plan <id> | check [--rtm] --plan <id>"
+        "Usage: plan specify --request <text> | research --plan <id> [--claim <text> --source-url <url> --source-type <type> --retrieved-at <rfc3339> --support <text> --freshness <class> --used-by <ids>] | tasks --plan <id> | check [--rtm] --plan <id>"
     );
     1
 }
@@ -202,7 +230,18 @@ fn action_flags(action: PlanAction) -> FlagSet {
     flags.bool_flag("json", false);
     match action {
         PlanAction::Specify => flags.string_flag("request", ""),
-        PlanAction::Research | PlanAction::Tasks => flags.string_flag("plan", ""),
+        PlanAction::Research => {
+            flags.string_flag("plan", "");
+            flags.string_flag("claim", "");
+            flags.string_flag("source-url", "");
+            flags.string_flag("source-type", "");
+            flags.string_flag("publication-date", "");
+            flags.string_flag("retrieved-at", "");
+            flags.string_flag("support", "");
+            flags.string_flag("freshness", "");
+            flags.string_flag("used-by", "");
+        }
+        PlanAction::Tasks => flags.string_flag("plan", ""),
         PlanAction::Check => {
             flags.string_flag("plan", "");
             flags.bool_flag("rtm", false);
@@ -285,7 +324,7 @@ fn run_specify(flags: FlagSet, streams: &mut CommandStreams<'_>) -> u8 {
     let artifacts = initial_artifacts(
         &plan_id,
         request,
-        &context.workspace_root,
+        context.workspace(),
         &vague_terms,
         &created_at,
     );
@@ -326,106 +365,110 @@ fn run_research(flags: FlagSet, streams: &mut CommandStreams<'_>) -> u8 {
     if request.trim().is_empty() {
         return command_error(streams.error, "status.json has no request");
     }
-    let retrieved_at = timestamp();
-    let search = command_or_return!(
-        crate::utility::workspace_index::search_with_metadata(
-            &context.workspace_root,
-            &context.home.to_string_lossy(),
-            request,
-            5,
-        )
-        .map_err(|error| format!("plan research: {error}")),
+    let submitted = command_or_return!(submitted_research(&flags), streams.error);
+    let bundle = command_or_return!(
+        resolve_research_bundle(&context, request, submitted),
         streams.error
     );
-    let sources: Vec<Value> = search
-        .hits
-        .iter()
-        .enumerate()
-        .map(|(index, hit)| local_source_record(index, hit, &retrieved_at))
-        .collect();
-    let source_ids: Vec<String> = (1..=sources.len())
-        .map(|index| format!("SRC-{index:03}"))
-        .collect();
-    let research_status = if sources.is_empty() {
+    let research_status = if bundle.sources.is_empty() {
         "insufficient"
     } else {
         "complete"
     };
+    let request_retrieved_at = timestamp();
+    let mut claims = bundle.claims;
+    claims.push(claim_record(
+        "CLM-002",
+        "The desired outcome is derived from the submitted user request.",
+        "derived",
+        vec!["SRC-REQUEST-001".to_string()],
+    ));
     let research = versioned_value(
         &plan_id,
         Some("research"),
         json!({
             "status": research_status,
             "query": request,
-            "truncated": search.truncated,
-            "sources": sources,
-            "requestSource": request_source_record(&retrieved_at),
-            "claims": [
-                claim_record(
-                    "CLM-001",
-                    if source_ids.is_empty() {
-                    "No indexed local evidence matched the submitted request.".to_string()
-                    } else {
-                        "The workspace contains indexed local evidence relevant to the submitted request.".to_string()
-                    },
-                    if source_ids.is_empty() { "assumption" } else { "verified" },
-                    source_ids,
-                ),
-                claim_record(
-                    "CLM-002",
-                    "The desired outcome is derived from the submitted user request.",
-                    "derived",
-                    vec!["SRC-REQUEST-001".to_string()],
-                ),
-            ]
+            "truncated": bundle.truncated,
+            "grounding": bundle.grounding,
+            "researchSource": bundle.research_source,
+            "sources": bundle.sources,
+            "requestSource": request_source_record(&request_retrieved_at),
+            "claims": claims
         }),
     );
-    let primary_source = search.hits.first().map(|hit| hit.path.as_str());
-    let architecture = render_architecture(&plan_id, request, primary_source);
+    let architecture = render_architecture(
+        &plan_id,
+        request,
+        bundle.primary_source.as_deref(),
+        &bundle.grounding,
+    );
     command_or_return!(
         write_json(&paths.research, &research)
             .and_then(|_| write_text(&paths.architecture, &architecture)),
         streams.error
     );
     let tasks_status = status_string(&status, "tasksStatus", "pending");
-    let stage = if research_status == "complete" {
+    let spec = command_or_return!(read_text(&paths.spec, SPEC_FILE), streams.error);
+    let (parsed, mut research_issues) = validate_specification(&spec, &plan_id);
+    validate_research(
+        Some(&research),
+        &parsed,
+        context.workspace(),
+        &mut research_issues,
+    );
+    let stage = if research_issues.is_empty() {
         "researched"
     } else {
         "specified"
     };
+    let recorded_status = if research_issues.is_empty() {
+        research_status.to_string()
+    } else if research_status == "insufficient" {
+        "insufficient".to_string()
+    } else {
+        "invalid".to_string()
+    };
     update_status(
         &mut status,
         stage,
-        research_status.to_string(),
+        recorded_status,
         tasks_status,
         "pending",
-        Vec::new(),
+        research_issues.clone(),
     );
     command_or_return!(write_status(&paths, &status, "research"), streams.error);
-    if research_status != "complete" {
+    if research_status == "insufficient" {
         return command_error(
             streams.error,
             "plan research: no indexed local evidence matched the request; add grounded research before tasks",
         );
     }
-    let payload = stage_payload(&plan_id, &paths, "researched");
+    if !research_issues.is_empty() {
+        return validation_errors("plan research", &research_issues, streams.error);
+    }
+    let mut payload = stage_payload(&plan_id, &paths, "researched");
+    insert_string(&mut payload, "grounding", &bundle.grounding);
+    insert_string(&mut payload, "researchSource", &bundle.research_source);
     emit_success(
         &flags,
         streams,
         &payload,
         &format!(
-            "plan research: id={plan_id} status=researched sources={}",
-            search.hits.len()
+            "plan research: id={plan_id} status=researched sources={} grounding={} source={}",
+            value_array(&research, "sources").map_or(0, <[Value]>::len),
+            bundle.grounding,
+            bundle.research_source
         ),
     )
 }
 
 fn run_tasks(flags: FlagSet, streams: &mut CommandStreams<'_>) -> u8 {
-    let (_context, plan_id, paths) = parsed_or_return!(existing_plan(&flags, streams.error));
+    let (context, plan_id, paths) = parsed_or_return!(existing_plan(&flags, streams.error));
     let spec = command_or_return!(read_text(&paths.spec, SPEC_FILE), streams.error);
     let (parsed, mut issues) = validate_specification(&spec, &plan_id);
     let research = load_json_artifact(&paths.research, RESEARCH_FILE, &plan_id, &mut issues);
-    validate_research(research.as_ref(), &parsed, &mut issues);
+    validate_research(research.as_ref(), &parsed, context.workspace(), &mut issues);
     if !issues.is_empty() {
         return validation_errors("plan tasks", &issues, streams.error);
     }
@@ -472,7 +515,7 @@ fn run_tasks(flags: FlagSet, streams: &mut CommandStreams<'_>) -> u8 {
 }
 
 fn run_check(flags: FlagSet, streams: &mut CommandStreams<'_>) -> u8 {
-    let (_context, plan_id, paths) = parsed_or_return!(existing_plan(&flags, streams.error));
+    let (context, plan_id, paths) = parsed_or_return!(existing_plan(&flags, streams.error));
 
     let mut check_issues = Vec::new();
     let spec = read_text_for_validation(&paths.spec, SPEC_FILE, &mut check_issues);
@@ -499,7 +542,12 @@ fn run_check(flags: FlagSet, streams: &mut CommandStreams<'_>) -> u8 {
     if let Some(body) = architecture.as_deref() {
         validate_architecture_claims(body, research.as_ref(), &mut check_issues);
     }
-    validate_research(research.as_ref(), &parsed, &mut check_issues);
+    validate_research(
+        research.as_ref(),
+        &parsed,
+        context.workspace(),
+        &mut check_issues,
+    );
     validate_tasks(tasks.as_ref(), &parsed, &mut check_issues);
     validate_rtm(rtm.as_ref(), &parsed, &mut check_issues);
     validate_status(status.as_ref(), spec.as_deref(), &mut check_issues);
@@ -590,6 +638,221 @@ fn new_plan_id(request: &str) -> String {
     )
 }
 
+fn submitted_research(flags: &FlagSet) -> Result<Option<SubmittedResearch>, String> {
+    let names = [
+        "claim",
+        "source-url",
+        "source-type",
+        "publication-date",
+        "retrieved-at",
+        "support",
+        "freshness",
+        "used-by",
+    ];
+    if names
+        .iter()
+        .all(|name| flags.string_value(name).trim().is_empty())
+    {
+        return Ok(None);
+    }
+    let claim = flags.string_value("claim").trim();
+    let source_url = flags.string_value("source-url").trim();
+    let source_type = flags.string_value("source-type").trim();
+    let retrieved_at = flags.string_value("retrieved-at").trim();
+    let support = flags.string_value("support").trim();
+    let freshness = flags.string_value("freshness").trim();
+    let used_by_value = flags.string_value("used-by").trim();
+    let required = |name: &str, value: &str| {
+        if value.is_empty() {
+            Err(format!("plan research external source requires --{name}"))
+        } else {
+            Ok(value.to_string())
+        }
+    };
+    let publication_date = match flags.string_value("publication-date").trim() {
+        "" => None,
+        value => Some(value.to_string()),
+    };
+    let used_by = split_ids(&required("used-by", used_by_value)?);
+    if used_by.is_empty() {
+        return Err("plan research external source requires non-empty --used-by IDs".to_string());
+    }
+    Ok(Some(SubmittedResearch {
+        claim: required("claim", claim)?,
+        source_url: required("source-url", source_url)?,
+        source_type: required("source-type", source_type)?,
+        publication_date,
+        retrieved_at: required("retrieved-at", retrieved_at)?,
+        support: required("support", support)?,
+        freshness: required("freshness", freshness)?,
+        used_by,
+    }))
+}
+
+fn resolve_research_bundle(
+    context: &PlannerContext,
+    request: &str,
+    submitted: Option<SubmittedResearch>,
+) -> Result<ResearchBundle, String> {
+    if let Some(submitted) = submitted {
+        return Ok(submitted_research_bundle(submitted));
+    }
+    let cached =
+        crate::utility::memory_families::lookup_fresh_research_cache(&context.home, request)
+            .map_err(|error| format!("plan research cache lookup: {error}"))?;
+    if let Some(hit) = cached
+        .fresh
+        .into_iter()
+        .min_by_key(research_cache_precedence)
+    {
+        return Ok(cached_research_bundle(hit));
+    }
+    if cached.stale_matches > 0 {
+        return Err(format!(
+            "plan research: {count} matching cache record(s) are stale; re-search required",
+            count = cached.stale_matches
+        ));
+    }
+    local_research_bundle(context, request)
+}
+
+fn research_cache_precedence(
+    hit: &crate::utility::memory_families::ResearchCacheHit,
+) -> (u8, std::cmp::Reverse<i64>) {
+    let source_priority = match hit.source_type.as_str() {
+        "official-doc" => 0,
+        "repository" => 1,
+        "issue" => 2,
+        "standard" => 3,
+        "paper" => 4,
+        "local-code" => 5,
+        "user-request" => 6,
+        _ => 7,
+    };
+    let retrieved_at = chrono::DateTime::parse_from_rfc3339(&hit.retrieved_at)
+        .map(|timestamp| timestamp.timestamp())
+        .unwrap_or(i64::MIN);
+    (source_priority, std::cmp::Reverse(retrieved_at))
+}
+
+fn submitted_research_bundle(submitted: SubmittedResearch) -> ResearchBundle {
+    let source_id = "SRC-001".to_string();
+    let publication_date = submitted
+        .publication_date
+        .map(Value::String)
+        .unwrap_or(Value::Null);
+    let source = json!({
+        "sourceId": source_id,
+        "sourceUrl": submitted.source_url,
+        "sourceType": submitted.source_type,
+        "publicationDate": publication_date,
+        "retrievedAt": submitted.retrieved_at,
+        "support": submitted.support,
+        "freshness": submitted.freshness,
+        "usedBy": submitted.used_by,
+    });
+    let claim = traceable_claim_record(
+        "CLM-001",
+        submitted.claim,
+        "verified",
+        vec![source_id],
+        submitted.used_by,
+    );
+    ResearchBundle {
+        primary_source: string_field(&source, "sourceUrl").map(str::to_string),
+        grounding: string_field(&source, "freshness")
+            .unwrap_or_default()
+            .to_string(),
+        research_source: "host".to_string(),
+        sources: vec![source],
+        claims: vec![claim],
+        truncated: false,
+    }
+}
+
+fn cached_research_bundle(
+    hit: crate::utility::memory_families::ResearchCacheHit,
+) -> ResearchBundle {
+    let source_id = "SRC-CACHE-001".to_string();
+    let publication_date = hit
+        .publication_date
+        .map(Value::String)
+        .unwrap_or(Value::Null);
+    let source = json!({
+        "sourceId": source_id,
+        "sourceUrl": hit.source_url,
+        "sourceType": hit.source_type,
+        "publicationDate": publication_date,
+        "retrievedAt": hit.retrieved_at,
+        "support": hit.answer,
+        "freshness": hit.freshness_class,
+        "usedBy": hit.used_by,
+        "cacheId": hit.id,
+    });
+    let claim = traceable_claim_record(
+        "CLM-001",
+        string_field(&source, "support").unwrap_or_default(),
+        "verified",
+        vec![source_id],
+        hit.used_by,
+    );
+    ResearchBundle {
+        primary_source: string_field(&source, "sourceUrl").map(str::to_string),
+        grounding: string_field(&source, "freshness")
+            .unwrap_or_default()
+            .to_string(),
+        research_source: "cache".to_string(),
+        sources: vec![source],
+        claims: vec![claim],
+        truncated: false,
+    }
+}
+
+fn local_research_bundle(
+    context: &PlannerContext,
+    request: &str,
+) -> Result<ResearchBundle, String> {
+    let retrieved_at = timestamp();
+    let search = crate::utility::workspace_index::search_with_metadata(
+        context.workspace(),
+        &context.home.to_string_lossy(),
+        request,
+        5,
+    )
+    .map_err(|error| format!("plan research: {error}"))?;
+    let sources: Vec<Value> = search
+        .hits
+        .iter()
+        .enumerate()
+        .map(|(index, hit)| local_source_record(index, hit, &retrieved_at))
+        .collect();
+    let source_ids: Vec<String> = (1..=sources.len())
+        .map(|index| format!("SRC-{index:03}"))
+        .collect();
+    let claim = claim_record(
+        "CLM-001",
+        if source_ids.is_empty() {
+            "No indexed local evidence matched the submitted request."
+        } else {
+            "The workspace contains indexed local evidence relevant to the submitted request."
+        },
+        if source_ids.is_empty() {
+            "assumption"
+        } else {
+            "verified"
+        },
+        source_ids,
+    );
+    Ok(ResearchBundle {
+        primary_source: search.hits.first().map(|hit| hit.path.clone()),
+        grounding: "local-only".to_string(),
+        research_source: "local-index".to_string(),
+        sources,
+        claims: vec![claim],
+        truncated: search.truncated,
+    })
+}
+
 fn local_source_record(
     index: usize,
     hit: &crate::utility::workspace_index::SearchHit,
@@ -604,7 +867,8 @@ fn local_source_record(
         "support": hit.snippet,
         "freshness": "local-only",
         "searchReason": hit.reason,
-        "score": hit.score
+        "score": hit.score,
+        "usedBy": ["REQ-001", "AC-001"]
     })
 }
 
@@ -616,7 +880,8 @@ fn request_source_record(retrieved_at: &str) -> Value {
         "publicationDate": Value::Null,
         "retrievedAt": retrieved_at,
         "support": "The submitted request is preserved verbatim in spec.md.",
-        "freshness": "local-only"
+        "freshness": "local-only",
+        "usedBy": ["REQ-001", "AC-001"]
     })
 }
 
@@ -626,12 +891,28 @@ fn claim_record(
     classification: &str,
     source_ids: Vec<String>,
 ) -> Value {
+    traceable_claim_record(
+        claim_id,
+        claim,
+        classification,
+        source_ids,
+        vec!["REQ-001".to_string(), "AC-001".to_string()],
+    )
+}
+
+fn traceable_claim_record(
+    claim_id: &str,
+    claim: impl Into<String>,
+    classification: &str,
+    source_ids: Vec<String>,
+    used_by: Vec<String>,
+) -> Value {
     json!({
         "claimId": claim_id,
         "claim": claim.into(),
         "classification": classification,
         "sourceIds": source_ids,
-        "usedBy": ["REQ-001", "AC-001"]
+        "usedBy": used_by
     })
 }
 
@@ -660,6 +941,25 @@ fn plan_payload(plan_id: &str, paths: &PlanPaths, body: Value) -> Value {
             Value::String(display_path(&paths.directory)),
         );
     payload
+}
+
+fn insert_string(value: &mut Value, field_name: &str, field_value: &str) {
+    value
+        .as_object_mut()
+        .expect("planner value is an object")
+        .insert(
+            field_name.to_string(),
+            Value::String(field_value.to_string()),
+        );
+}
+
+fn split_ids(value: &str) -> Vec<String> {
+    value
+        .split([',', ' '])
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 fn timestamp() -> String {
@@ -754,7 +1054,7 @@ fn initial_artifacts(
         ),
         (
             ARCHITECTURE_FILE,
-            render_architecture(plan_id, request, None),
+            render_architecture(plan_id, request, None, "pending"),
         ),
         (
             TASKS_FILE,
@@ -836,10 +1136,17 @@ fn render_specification(plan_id: &str, request: &str, vague_terms: &[&str]) -> S
     )
 }
 
-fn render_architecture(plan_id: &str, request: &str, source: Option<&str>) -> String {
+fn render_architecture(
+    plan_id: &str,
+    request: &str,
+    source: Option<&str>,
+    grounding: &str,
+) -> String {
     let current = match source {
-        Some(source) => format!("[verified: CLM-001] Local source anchor `{source}` was read."),
-        None => "[assumption: CLM-001] Local source research is pending.".to_string(),
+        Some(source) => {
+            format!("[verified: CLM-001] Primary {grounding} source anchor `{source}` was read.")
+        }
+        None => "[assumption: CLM-001] Source research is pending.".to_string(),
     };
     let outcome = request.split_whitespace().collect::<Vec<_>>().join(" ");
     format!(
@@ -1129,20 +1436,15 @@ fn validate_markdown_header(
     }
 }
 
-fn validate_research(research: Option<&Value>, parsed: &ParsedSpecification, issues: &mut Issues) {
+fn validate_research(
+    research: Option<&Value>,
+    parsed: &ParsedSpecification,
+    workspace_root: &Path,
+    issues: &mut Issues,
+) {
     let Some(research) = research else {
         return;
     };
-    if string_field(research, "status") != Some("complete") {
-        issues.push("research.json status is not complete".to_string());
-    }
-    let Some(claims) = value_array(research, "claims") else {
-        issues.push("research.json has no claims array".to_string());
-        return;
-    };
-    if claims.is_empty() {
-        issues.push("research.json has no factual claims".to_string());
-    }
     let valid_uses: BTreeSet<&str> = parsed
         .requirements
         .iter()
@@ -1154,24 +1456,47 @@ fn validate_research(research: Option<&Value>, parsed: &ParsedSpecification, iss
                 .map(|criterion| criterion.id.as_str()),
         )
         .collect();
-    for claim in claims {
-        let id = string_field(claim, "claimId").unwrap_or("claim without id");
-        let classification = string_field(claim, "classification").unwrap_or_default();
-        if !matches!(classification, "verified" | "assumption" | "derived") {
-            issues.push(format!(
-                "{id} is unclassified; expected verified, assumption, or derived"
-            ));
+    let policy = match crate::utility::research_policy::ResearchPolicy::load(workspace_root) {
+        Ok(policy) => policy,
+        Err(error) => {
+            issues.push(error);
+            return;
         }
-        let source_ids = string_array(claim, "sourceIds");
-        if classification == "verified" && source_ids.is_empty() {
-            issues.push(format!("{id} is verified but has no source IDs"));
-        }
-        for used_by in string_array(claim, "usedBy") {
-            if !valid_uses.contains(used_by.as_str()) {
-                issues.push(format!("{id} references unknown usedBy ID {used_by}"));
-            }
-        }
+    };
+    issues.extend(crate::utility::research_policy::validate_research_artifact(
+        research,
+        &valid_uses,
+        policy,
+        Utc::now(),
+    ));
+}
+
+pub(crate) fn review_research_issues(
+    workspace_root: &Path,
+    claude_home: &str,
+    plan_id: &str,
+) -> Result<Vec<String>, String> {
+    let safe_id = safe_path_segment(plan_id).ok_or_else(|| {
+        format!("invalid plan id {plan_id:?}: must be a single safe path segment")
+    })?;
+    let home = resolve_claude_home(claude_home)?;
+    let workspace_key =
+        crate::utility::system_map::workspace_key(&workspace_root.to_string_lossy());
+    let plan_directory = home
+        .join("memories")
+        .join("workspaces")
+        .join(workspace_key)
+        .join("plans")
+        .join(safe_id);
+    if !plan_directory.is_dir() {
+        return Err(format!("plan not found: {plan_id}"));
     }
+    let paths = PlanPaths::new(plan_directory);
+    let spec = read_text(&paths.spec, SPEC_FILE)?;
+    let (parsed, mut issues) = validate_specification(&spec, plan_id);
+    let research = load_json_artifact(&paths.research, RESEARCH_FILE, plan_id, &mut issues);
+    validate_research(research.as_ref(), &parsed, workspace_root, &mut issues);
+    Ok(issues)
 }
 
 fn validate_architecture_claims(architecture: &str, research: Option<&Value>, issues: &mut Issues) {
