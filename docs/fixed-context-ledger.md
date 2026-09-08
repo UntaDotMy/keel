@@ -61,8 +61,9 @@ catalog-profile change. The skill baseline covers 51 parseable first-party
 - The inline skill row places parsed frontmatter content between canonical
   fences in stable skill-name order. The full-body row uses the complete
   matching files in that same order without writing the skill cache.
-- Pointer strings are canonical constants reserved for later phases. The
-  warning-status pointer also has a hard limit below 30 tokens.
+- Pointer strings are canonical constants. Implemented phases point to their
+  live check surface; the warning-status pointer also has a hard limit below 30
+  tokens.
 
 ## CI and accounting
 

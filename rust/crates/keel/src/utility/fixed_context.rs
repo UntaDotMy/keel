@@ -13,7 +13,7 @@ pub(crate) const SURFACE_COUNT: usize = 19;
 pub(crate) const SIMPLE_PROMPT_FIXTURE: &str = "hello";
 pub(crate) const CODE_CHANGE_PROMPT_FIXTURE: &str = "fix the bug";
 
-pub(crate) const PLANNER_POINTER: &str = "Planner: read plan.packet.json before implementation.";
+pub(crate) const PLANNER_POINTER: &str = "Planner: run keel plan check before implementation.";
 pub(crate) const RESEARCH_POINTER: &str =
     "Research: read research.packet.json and verify freshness before claims.";
 pub(crate) const TICKET_CHECKLIST_POINTER: &str =

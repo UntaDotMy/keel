@@ -67,6 +67,7 @@ pub(crate) const TOP_LEVEL_COMMANDS: &[&str] = &[
     "skill-eval",
     "config-audit",
     "design-intelligence",
+    "plan",
     "memory",
     "gain",
     "session",
@@ -255,6 +256,7 @@ impl Application {
                 standard_output,
                 standard_error,
             ),
+            "plan" => utility::run_plan_command(command_arguments, standard_output, standard_error),
             "memory" => utility::run_memory_command(
                 "memory",
                 command_arguments,
