@@ -1,0 +1,68 @@
+{
+  "sessions": [
+    {
+      "sessionStart": 1788800274,
+      "sessionEnd": 1788809842,
+      "commands": 224,
+      "compacted": 88,
+      "failed": 45,
+      "tokensBefore": 501402,
+      "tokensAfter": 129880,
+      "tokensSaved": 371918,
+      "grossTokensSaved": 371918,
+      "tokensOverhead": 396,
+      "netTokensSaved": 371522
+    },
+    {
+      "sessionStart": 1788812802,
+      "sessionEnd": 1788823674,
+      "commands": 177,
+      "compacted": 79,
+      "failed": 12,
+      "tokensBefore": 221914,
+      "tokensAfter": 48956,
+      "tokensSaved": 173036,
+      "grossTokensSaved": 173036,
+      "tokensOverhead": 78,
+      "netTokensSaved": 172958
+    },
+    {
+      "sessionStart": 1788864456,
+      "sessionEnd": 1788868711,
+      "commands": 56,
+      "compacted": 33,
+      "failed": 3,
+      "tokensBefore": 262081,
+      "tokensAfter": 23172,
+      "tokensSaved": 238909,
+      "grossTokensSaved": 238909,
+      "tokensOverhead": 0,
+      "netTokensSaved": 238909
+    },
+    {
+      "sessionStart": 1788885331,
+      "sessionEnd": 1788886572,
+      "commands": 28,
+      "compacted": 7,
+      "failed": 8,
+      "tokensBefore": 13436,
+      "tokensAfter": 5361,
+      "tokensSaved": 8156,
+      "grossTokensSaved": 8156,
+      "tokensOverhead": 81,
+      "netTokensSaved": 8075
+    }
+  ],
+  "totalSessions": 4,
+  "totalCommands": 485,
+  "totalCompacted": 207,
+  "totalFailed": 68,
+  "totalTokensBefore": 998833,
+  "totalTokensAfter": 207369,
+  "totalTokensSaved": 792019,
+  "totalGrossTokensSaved": 792019,
+  "totalTokensOverhead": 555,
+  "totalNetTokensSaved": 791464,
+  "savingsPercent": 79.3,
+  "netSavingsPercent": 79.2
+}

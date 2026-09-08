@@ -1,0 +1,9 @@
+{
+  "buildVersion": "dev",
+  "foundation": "phase-1-foundation",
+  "target": {
+    "operatingSystem": "windows",
+    "architecture": "amd64"
+  },
+  "featureSet": "standard"
+}

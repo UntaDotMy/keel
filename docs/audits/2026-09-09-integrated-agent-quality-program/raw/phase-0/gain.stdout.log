@@ -1,0 +1,32 @@
+Token Savings Analytics
+Commands observed: 500
+Commands compacted: 220
+Tokens before: 1675416
+Tokens after: 216306
+Tokens saved (gross): 1459612
+Wrapper overhead: 502
+Tokens saved (net): 1459110
+Gross savings: 87.12%
+Net savings: 87.09%
+
+Top Commands by Savings:
+  1. rg -n -C 3 'PATH|path|install.*PATH|global.*PATH|bare keel|keel\.exe|install does|source checkout|cargo run --bin keel' rust/crates/keel/src rust/crates/keel/tests install.ps1 WORKFLOW.md AGENTS/references/10-native-command-routing.md AGENTS/references/30-execution-strategy.md README.md - 551430 tokens saved (1 runs)
+  2. cargo test --workspace --locked --no-fail-fast - 167523 tokens saved (7 runs)
+  3. git diff --unified=30 -- flutter/lib/screens/gamehub_play_screen.dart flutter/test/gamehub_screen_test.dart flutter/lib/app_preferences.dart flutter/lib/screens/settings_screen.dart flutter/lib/screens/profile_hub_screen.dart flutter/test/settings_screen_test.dart flutter/test/learning_journey_test.dart - 54749 tokens saved (1 runs)
+  4. [redacted possible secret; see raw output locally] - 54431 tokens saved (21 runs)
+  5. git diff -- flutter/lib/screens/gamehub_play_screen.dart - 33077 tokens saved (1 runs)
+  6. rg -n -C 8 'path_wiring|PATH wiring|prepend.*PATH|append.*PATH|PATH.*prepend|PATH.*append|ensure.*path' rust/crates/keel/src/manager/install rust/crates/keel/src - 28346 tokens saved (1 runs)
+  7. rg -n -C 4 'parallel|prewarm|cache|profile|agents/claude|Claude|routing|delegat|push|approval|install|host|integration|fixture|eval|workflow' running-anvil/SKILL.md AGENTS/references/20-skill-routing.md AGENTS/references/30-execution-strategy.md WORKFLOW.md .github/workflows/validate.yml - 27325 tokens saved (1 runs)
+  8. keel validate --repo-root C:\Users\Administrator\Desktop\dev\studytime\keel\keel --profile smoke - 26777 tokens saved (1 runs)
+  9. rg -n -C 3 '^\s*(#|//)' .github/workflows/validate.yml rust/crates/keel/src/manager/install/commands.rs rust/crates/keel/src/manager/install/executable.rs rust/crates/keel/src/proxy/raw_store.rs rust/crates/keel/src/utility/anvil/cache.rs - 22346 tokens saved (1 runs)
+  10. rg -n --hidden --glob !target '(refresh|ensure|index|workspace|code_graph|load_skill_terms|raw_store|cleanup|research|fresh|stale|memory)' rust/crates/keel/src/utility/recall.rs rust/crates/keel/src/utility/skill_match.rs rust/crates/keel/src/utility/memory_families.rs rust/crates/keel/src/proxy/raw_store.rs rust/crates/keel/src/utility/code_graph.rs rust/crates/keel/src/utility/workspace_index.rs rust/crates/keel/src/utility/*.rs - 19192 tokens saved (1 runs)
+
+Top Reducers by Savings:
+  1. search - 1001261 tokens saved (180 runs)
+  2. project-filter - 201918 tokens saved (58 runs)
+  3. git - 191891 tokens saved (144 runs)
+  4. generic - 60606 tokens saved (76 runs)
+  5. build - 2480 tokens saved (12 runs)
+  6. lint - 1096 tokens saved (7 runs)
+  7. tests - 360 tokens saved (2 runs)
+  8. files - 0 tokens saved (21 runs)

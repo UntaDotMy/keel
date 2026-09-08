@@ -1,0 +1,20 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.43s
+     Running unittests src\lib.rs (target\debug\deps\keel-c7d5d9b889dcbe6e.exe)
+warning: in the working copy of 'README.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/main.rs', LF will be replaced by CRLF the next time Git touches it
+     Running unittests src\main.rs (target\debug\deps\keel-a965a5d92f3f2dc8.exe)
+     Running tests\cli_integration.rs (target\debug\deps\cli_integration-643ada4018ccdffe.exe)
+     Running tests\competitor_doc_parity_test.rs (target\debug\deps\competitor_doc_parity_test-cccab87e6d30148a.exe)
+     Running tests\doc_parity_test.rs (target\debug\deps\doc_parity_test-17c937b057b9584d.exe)
+     Running tests\manager_provision_test.rs (target\debug\deps\manager_provision_test-f0f4c77c9fb26394.exe)
+     Running tests\mcp_protocol.rs (target\debug\deps\mcp_protocol-5e6405ed67587480.exe)
+     Running tests\platform_detect.rs (target\debug\deps\platform_detect-3c845f13543e12c9.exe)
+     Running unittests src\lib.rs (target\debug\deps\keel_flow-03df81e4467547b2.exe)
+     Running unittests src\lib.rs (target\debug\deps\keel_platform-7e99fd07fa62b9c6.exe)
+     Running unittests src\lib.rs (target\debug\deps\keel_professionaltext-3640d083535af368.exe)
+     Running unittests src\lib.rs (target\debug\deps\keel_releaseassets-19b17524136b8d99.exe)
+   Doc-tests keel
+   Doc-tests keel_flow
+   Doc-tests keel_platform
+   Doc-tests keel_professionaltext
+   Doc-tests keel_releaseassets

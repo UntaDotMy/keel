@@ -1,0 +1,419 @@
+{
+  "schema_version": 1,
+  "captured_at": "2026-09-08T16:57:37.9534807+00:00",
+  "repository_root": "C:\\Users\\Administrator\\Desktop\\dev\\studytime\\keel\\keel",
+  "operating_system": "Microsoft Windows 10.0.26200",
+  "process_architecture": "X64",
+  "powershell_version": "7.6.5",
+  "commands": [
+    {
+      "id": "git-head",
+      "group": "environment",
+      "command": [
+        "git",
+        "rev-parse",
+        "HEAD"
+      ],
+      "started_at": "2026-09-08T16:52:06.4699220+00:00",
+      "duration_ms": 88,
+      "exit_code": 0,
+      "stdout_path": "docs/audits/2026-09-09-integrated-agent-quality-program/raw/phase-0/git-head.stdout.log",
+      "stdout_sha256": "2f8367777a5fcc304a21c6050c2cfbbb0639b4f96f099d49f9a5178a8974941a",
+      "stderr_path": "docs/audits/2026-09-09-integrated-agent-quality-program/raw/phase-0/git-head.stderr.log",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "id": "git-status",
+      "group": "environment",
+      "command": [
+        "git",
+        "status",
+        "--short",
+        "--branch"
+      ],
+      "started_at": "2026-09-08T16:52:06.6074639+00:00",
+      "duration_ms": 97,
+      "exit_code": 0,
+      "stdout_path": "docs/audits/2026-09-09-integrated-agent-quality-program/raw/phase-0/git-status.stdout.log",
+      "stdout_sha256": "55453407ddeef35895e85e4793da18c8120cd49e67052b665ee8f58960dac017",
+      "stderr_path": "docs/audits/2026-09-09-integrated-agent-quality-program/raw/phase-0/git-status.stderr.log",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "id": "git-version",
+      "group": "environment",
+      "command": [
+        "git",
+        "--version"
+      ],
+      "started_at": "2026-09-08T16:52:06.7146906+00:00",
+      "duration_ms": 65,
+      "exit_code": 0,
+      "stdout_path": "docs/audits/2026-09-09-integrated-agent-quality-program/raw/phase-0/git-version.stdout.log",
+      "stdout_sha256": "b9b2d0f043a4a56a9604fe4923c39281be494739b205014186b390d85172860f",
+      "stderr_path": "docs/audits/2026-09-09-integrated-agent-quality-program/raw/phase-0/git-version.stderr.log",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "id": "rustc-version",
+      "group": "environment",
+      "command": [
+        "rustc",
+        "-Vv"
+      ],
+      "started_at": "2026-09-08T16:52:06.7904150+00:00",
+      "duration_ms": 1744,
+      "exit_code": 0,
+      "stdout_path": "docs/audits/2026-09-09-integrated-agent-quality-program/raw/phase-0/rustc-version.stdout.log",
+      "stdout_sha256": "1fb10dcd2dd67ff767f95bad0b2d205e34c03d0a346f60593f2cbc35abf4bf52",
+      "stderr_path": "docs/audits/2026-09-09-integrated-agent-quality-program/raw/phase-0/rustc-version.stderr.log",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "id": "cargo-version",
+      "group": "environment",
+      "command": [
+        "cargo",
+        "-V"
+      ],
+      "started_at": "2026-09-08T16:52:08.5464638+00:00",
+      "duration_ms": 281,
+      "exit_code": 0,
+      "stdout_path": "docs/audits/2026-09-09-integrated-agent-quality-program/raw/phase-0/cargo-version.stdout.log",
+      "stdout_sha256": "fb3f25aefd6d5441842d285f5a9b125b3f0f0b0bf2013d9a32677f9e99c6c854",
+      "stderr_path": "docs/audits/2026-09-09-integrated-agent-quality-program/raw/phase-0/cargo-version.stderr.log",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "id": "bun-version",
+      "group": "environment",
+      "command": [
+        "bun",
+        "--version"
+      ],
+      "started_at": "2026-09-08T16:52:08.8389426+00:00",
+      "duration_ms": 106,
+      "exit_code": 0,
+      "stdout_path": "docs/audits/2026-09-09-integrated-agent-quality-program/raw/phase-0/bun-version.stdout.log",
+      "stdout_sha256": "78b591400c56b7b67b8cb3b2b8a8e65e9093897f02ce0878e6b5405c68620fa7",
+      "stderr_path": "docs/audits/2026-09-09-integrated-agent-quality-program/raw/phase-0/bun-version.stderr.log",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "id": "keel-version",
+      "group": "environment",
+      "command": [
+        "keel",
+        "version",
+        "--json"
+      ],
+      "started_at": "2026-09-08T16:52:08.9533918+00:00",
+      "duration_ms": 39,
+      "exit_code": 0,
+      "stdout_path": "docs/audits/2026-09-09-integrated-agent-quality-program/raw/phase-0/keel-version.stdout.log",
+      "stdout_sha256": "6f7cfb5d1308e3f0f336b4502d5bedcf54fa3e5b4ee886e9f9eb95e33c98569b",
+      "stderr_path": "docs/audits/2026-09-09-integrated-agent-quality-program/raw/phase-0/keel-version.stderr.log",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "id": "cargo-fmt",
+      "group": "required",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "started_at": "2026-09-08T16:52:09.0036114+00:00",
+      "duration_ms": 2266,
+      "exit_code": 0,
+      "stdout_path": "docs/audits/2026-09-09-integrated-agent-quality-program/raw/phase-0/cargo-fmt.stdout.log",
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_path": "docs/audits/2026-09-09-integrated-agent-quality-program/raw/phase-0/cargo-fmt.stderr.log",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "id": "cargo-clippy",
+      "group": "required",
+      "command": [
+        "cargo",
+        "clippy",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "started_at": "2026-09-08T16:52:11.2729692+00:00",
+      "duration_ms": 11895,
+      "exit_code": 0,
+      "stdout_path": "docs/audits/2026-09-09-integrated-agent-quality-program/raw/phase-0/cargo-clippy.stdout.log",
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_path": "docs/audits/2026-09-09-integrated-agent-quality-program/raw/phase-0/cargo-clippy.stderr.log",
+      "stderr_sha256": "6e4f6b41d970fa2482a6e8f487632cbb4c125594615addba785433e55a839b1b"
+    },
+    {
+      "id": "cargo-build",
+      "group": "required",
+      "command": [
+        "cargo",
+        "build",
+        "--workspace"
+      ],
+      "started_at": "2026-09-08T16:52:23.1770981+00:00",
+      "duration_ms": 3183,
+      "exit_code": 0,
+      "stdout_path": "docs/audits/2026-09-09-integrated-agent-quality-program/raw/phase-0/cargo-build.stdout.log",
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_path": "docs/audits/2026-09-09-integrated-agent-quality-program/raw/phase-0/cargo-build.stderr.log",
+      "stderr_sha256": "c503f25d34399a7b4c23686d3b4232cff16a3297a5d7cf1a87552e41c2ed905f"
+    },
+    {
+      "id": "cargo-test",
+      "group": "required",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--locked",
+        "--no-fail-fast"
+      ],
+      "started_at": "2026-09-08T16:52:26.3707053+00:00",
+      "duration_ms": 102987,
+      "exit_code": 0,
+      "stdout_path": "docs/audits/2026-09-09-integrated-agent-quality-program/raw/phase-0/cargo-test.stdout.log",
+      "stdout_sha256": "0f306c727ab2999f38719d220e7321675a98713aa304135f75db1f8a27c32516",
+      "stderr_path": "docs/audits/2026-09-09-integrated-agent-quality-program/raw/phase-0/cargo-test.stderr.log",
+      "stderr_sha256": "eb1a683e001a358163547f4a0d0f40a060172817c53b0f7a978856d41fdcf18a"
+    },
+    {
+      "id": "skill-lint",
+      "group": "required",
+      "command": [
+        "cargo",
+        "run",
+        "--locked",
+        "-p",
+        "keel",
+        "--",
+        "skill-lint"
+      ],
+      "started_at": "2026-09-08T16:54:09.3717070+00:00",
+      "duration_ms": 420,
+      "exit_code": 0,
+      "stdout_path": "docs/audits/2026-09-09-integrated-agent-quality-program/raw/phase-0/skill-lint.stdout.log",
+      "stdout_sha256": "dc67f0ef0620cf769f9480d8e1d2ceed73535d36ec0d0439e0ede006679fd38f",
+      "stderr_path": "docs/audits/2026-09-09-integrated-agent-quality-program/raw/phase-0/skill-lint.stderr.log",
+      "stderr_sha256": "7c56fbdf77a2082ae7e5499b6712826444c9541931c096ed0c87c5d7ce9acaef"
+    },
+    {
+      "id": "skill-eval",
+      "group": "required",
+      "command": [
+        "cargo",
+        "run",
+        "--locked",
+        "-p",
+        "keel",
+        "--",
+        "skill-eval"
+      ],
+      "started_at": "2026-09-08T16:54:09.8037888+00:00",
+      "duration_ms": 447,
+      "exit_code": 0,
+      "stdout_path": "docs/audits/2026-09-09-integrated-agent-quality-program/raw/phase-0/skill-eval.stdout.log",
+      "stdout_sha256": "ef072fd2203dc8cb845d67e4044dde99bff66e52ac411a90e484b958be1f1d3a",
+      "stderr_path": "docs/audits/2026-09-09-integrated-agent-quality-program/raw/phase-0/skill-eval.stderr.log",
+      "stderr_sha256": "ccc6419a4a52d26ae744e22b79015e8ce76c7cd96ccd49c23dcf7cf48b044ba9"
+    },
+    {
+      "id": "reducer-eval",
+      "group": "required",
+      "command": [
+        "cargo",
+        "run",
+        "--locked",
+        "-p",
+        "keel",
+        "--",
+        "eval"
+      ],
+      "started_at": "2026-09-08T16:54:10.2635084+00:00",
+      "duration_ms": 1735,
+      "exit_code": 0,
+      "stdout_path": "docs/audits/2026-09-09-integrated-agent-quality-program/raw/phase-0/reducer-eval.stdout.log",
+      "stdout_sha256": "b22fdda80ffdd14731fc33b74498d4efaba83a1f9588171a63134fc2892d224e",
+      "stderr_path": "docs/audits/2026-09-09-integrated-agent-quality-program/raw/phase-0/reducer-eval.stderr.log",
+      "stderr_sha256": "89c4f6e39866018b5385c0ecb756bf7c5cfaa75afdb798e9f76c7b2b30aa15f1"
+    },
+    {
+      "id": "gain",
+      "group": "required",
+      "command": [
+        "cargo",
+        "run",
+        "--locked",
+        "-p",
+        "keel",
+        "--",
+        "gain"
+      ],
+      "started_at": "2026-09-08T16:54:12.0096732+00:00",
+      "duration_ms": 570,
+      "exit_code": 0,
+      "stdout_path": "docs/audits/2026-09-09-integrated-agent-quality-program/raw/phase-0/gain.stdout.log",
+      "stdout_sha256": "d35f3dbc38c03f674893d431a390273e09ec4480a38f189489bd801f52fbcf48",
+      "stderr_path": "docs/audits/2026-09-09-integrated-agent-quality-program/raw/phase-0/gain.stderr.log",
+      "stderr_sha256": "71afa80783ae33bf0bcc0e6e9401f8020f9b48e4e35031571494969e5b3fa895"
+    },
+    {
+      "id": "config-audit",
+      "group": "required",
+      "command": [
+        "cargo",
+        "run",
+        "--locked",
+        "-p",
+        "keel",
+        "--",
+        "config-audit"
+      ],
+      "started_at": "2026-09-08T16:54:12.5915795+00:00",
+      "duration_ms": 339,
+      "exit_code": 0,
+      "stdout_path": "docs/audits/2026-09-09-integrated-agent-quality-program/raw/phase-0/config-audit.stdout.log",
+      "stdout_sha256": "802c1353c21aba47e8b60e98b4017f61c22bb6b0f61babb3d9921c3154a5b5cf",
+      "stderr_path": "docs/audits/2026-09-09-integrated-agent-quality-program/raw/phase-0/config-audit.stderr.log",
+      "stderr_sha256": "93143b31097044b9fb66ac1f5cc5e9f4f8355e15c9714f1bbd0bb6f7005d1bd0"
+    },
+    {
+      "id": "review-pre-commit",
+      "group": "required",
+      "command": [
+        "keel",
+        "review",
+        "pre-commit"
+      ],
+      "started_at": "2026-09-08T16:54:12.9388666+00:00",
+      "duration_ms": 3230,
+      "exit_code": 0,
+      "stdout_path": "docs/audits/2026-09-09-integrated-agent-quality-program/raw/phase-0/review-pre-commit.stdout.log",
+      "stdout_sha256": "fb320689ef6ed55b49d6bda56a49234bb36864f2c4de972ef8cbb36f2896b3ea",
+      "stderr_path": "docs/audits/2026-09-09-integrated-agent-quality-program/raw/phase-0/review-pre-commit.stderr.log",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "id": "review-pre-pr",
+      "group": "required",
+      "command": [
+        "keel",
+        "review",
+        "pre-pr"
+      ],
+      "started_at": "2026-09-08T16:54:16.1804786+00:00",
+      "duration_ms": 99778,
+      "exit_code": 0,
+      "stdout_path": "docs/audits/2026-09-09-integrated-agent-quality-program/raw/phase-0/review-pre-pr.stdout.log",
+      "stdout_sha256": "7285f1073732a026680f06e9724b3647ca1cc9c1be618266d9d74a5192c6a554",
+      "stderr_path": "docs/audits/2026-09-09-integrated-agent-quality-program/raw/phase-0/review-pre-pr.stderr.log",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "id": "review-gates",
+      "group": "required",
+      "command": [
+        "keel",
+        "review",
+        "gates",
+        "check"
+      ],
+      "started_at": "2026-09-08T16:55:55.9702993+00:00",
+      "duration_ms": 98196,
+      "exit_code": 0,
+      "stdout_path": "docs/audits/2026-09-09-integrated-agent-quality-program/raw/phase-0/review-gates.stdout.log",
+      "stdout_sha256": "31245906a0bf95b5af2cc276d184c96e5d8682e75ed92d55a5bb4c6e21dd1dfc",
+      "stderr_path": "docs/audits/2026-09-09-integrated-agent-quality-program/raw/phase-0/review-gates.stderr.log",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "id": "completion-gate",
+      "group": "required",
+      "command": [
+        "keel",
+        "memory",
+        "completion-gate",
+        "check"
+      ],
+      "started_at": "2026-09-08T16:57:34.1770929+00:00",
+      "duration_ms": 55,
+      "exit_code": 1,
+      "stdout_path": "docs/audits/2026-09-09-integrated-agent-quality-program/raw/phase-0/completion-gate.stdout.log",
+      "stdout_sha256": "bfa97e5c694c1ab99cd58747c25240c8a67903e6db59e45cab358726d2bc7665",
+      "stderr_path": "docs/audits/2026-09-09-integrated-agent-quality-program/raw/phase-0/completion-gate.stderr.log",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "id": "host-contracts",
+      "group": "required",
+      "command": [
+        "bun",
+        "test",
+        "tests/host-adapter-contracts.test.ts"
+      ],
+      "started_at": "2026-09-08T16:57:34.2416966+00:00",
+      "duration_ms": 950,
+      "exit_code": 0,
+      "stdout_path": "docs/audits/2026-09-09-integrated-agent-quality-program/raw/phase-0/host-contracts.stdout.log",
+      "stdout_sha256": "335ab4d3d0d98d4c3b3478fa50c807da6d2740deb186a27fa4aed967dcd71e94",
+      "stderr_path": "docs/audits/2026-09-09-integrated-agent-quality-program/raw/phase-0/host-contracts.stderr.log",
+      "stderr_sha256": "f8305943d965b7440a4e2b99c5e2c41edf70430f4f49ceeab082ab0d7967f93c"
+    },
+    {
+      "id": "stats-json",
+      "group": "measurement",
+      "command": [
+        "keel",
+        "stats",
+        "--json"
+      ],
+      "started_at": "2026-09-08T16:57:35.2021283+00:00",
+      "duration_ms": 996,
+      "exit_code": 0,
+      "stdout_path": "docs/audits/2026-09-09-integrated-agent-quality-program/raw/phase-0/stats-json.stdout.log",
+      "stdout_sha256": "2a5d6e0cb7330bfef68d8341d37c54466750163c142c529c6dcde980075519c3",
+      "stderr_path": "docs/audits/2026-09-09-integrated-agent-quality-program/raw/phase-0/stats-json.stderr.log",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "id": "session-json",
+      "group": "measurement",
+      "command": [
+        "keel",
+        "session",
+        "--json"
+      ],
+      "started_at": "2026-09-08T16:57:36.2182606+00:00",
+      "duration_ms": 104,
+      "exit_code": 0,
+      "stdout_path": "docs/audits/2026-09-09-integrated-agent-quality-program/raw/phase-0/session-json.stdout.log",
+      "stdout_sha256": "99d6f21c767c91fb862028c913656f1895452b8d280708ae2d99f2ad374dda07",
+      "stderr_path": "docs/audits/2026-09-09-integrated-agent-quality-program/raw/phase-0/session-json.stderr.log",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "id": "doctor",
+      "group": "measurement",
+      "command": [
+        "keel",
+        "doctor"
+      ],
+      "started_at": "2026-09-08T16:57:36.3392274+00:00",
+      "duration_ms": 1539,
+      "exit_code": 0,
+      "stdout_path": "docs/audits/2026-09-09-integrated-agent-quality-program/raw/phase-0/doctor.stdout.log",
+      "stdout_sha256": "b39a17c328a938748282a55126fdac0dd6e4182813488424ac1759fff18b6144",
+      "stderr_path": "docs/audits/2026-09-09-integrated-agent-quality-program/raw/phase-0/doctor.stderr.log",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ]
+}

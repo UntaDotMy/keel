@@ -1424,6 +1424,7 @@ mod tests {
     #[test]
     fn from_json_file_round_trips_and_impact_works() {
         let root = tempdir("roundtrip");
+        let home = tempdir("roundtrip-home");
         write(&root, "c.ts", "export const c = 1;\n");
         write(
             &root,
@@ -1438,7 +1439,10 @@ mod tests {
 
         let graph = build_graph(&root);
         let json = graph.to_json();
-        let artifact = root.join("code-graph.json");
+        let artifact = cached_artifact_path(&root, &home.to_string_lossy())
+            .expect("resolve round-trip artifact");
+        fs::create_dir_all(artifact.parent().expect("artifact parent"))
+            .expect("create artifact directory");
         fs::write(&artifact, serde_json::to_string_pretty(&json).unwrap()).unwrap();
 
         let loaded = CodeGraph::from_json_file(&artifact).expect("round-trip");
@@ -1446,30 +1450,42 @@ mod tests {
         assert_eq!(impacted, vec!["a.ts".to_string(), "b.ts".to_string()]);
 
         let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(home);
     }
+
     #[test]
     fn from_json_file_rejects_stale_source_fingerprint() {
         let root = tempdir("stale");
+        let home = tempdir("stale-home");
         write(&root, "main.rs", "fn main() {}\n");
         let graph = build_graph(&root);
-        let artifact = root.join("code-graph.json");
+        let artifact =
+            cached_artifact_path(&root, &home.to_string_lossy()).expect("resolve stale artifact");
+        fs::create_dir_all(artifact.parent().expect("artifact parent"))
+            .expect("create artifact directory");
         fs::write(&artifact, serde_json::to_string(&graph.to_json()).unwrap()).unwrap();
         write(&root, "main.rs", "fn main() { println!(\"changed\"); }\n");
         assert!(CodeGraph::from_json_file(&artifact).is_none());
         let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(home);
     }
 
     #[test]
     fn from_json_file_rejects_malformed_nodes() {
         let root = tempdir("malformed-node");
+        let home = tempdir("malformed-node-home");
         let graph = build_graph(&root);
         let mut value = graph.to_json();
         value["nodes"] = serde_json::json!([{"id": "bad"}]);
         value["fileCount"] = serde_json::json!(1);
-        let artifact = root.join("code-graph.json");
+        let artifact = cached_artifact_path(&root, &home.to_string_lossy())
+            .expect("resolve malformed artifact");
+        fs::create_dir_all(artifact.parent().expect("artifact parent"))
+            .expect("create artifact directory");
         fs::write(&artifact, serde_json::to_string(&value).unwrap()).unwrap();
         assert!(CodeGraph::from_json_file(&artifact).is_none());
         let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(home);
     }
 
     #[test]

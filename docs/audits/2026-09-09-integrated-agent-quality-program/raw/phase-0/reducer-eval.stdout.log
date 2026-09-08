@@ -1,0 +1,2 @@
+keel eval: real compaction measurement (o200k_base, end-to-end)
+fixtures=7 tokens_raw=2218 tokens_compact=1613 tokens_saved=605 savings=27.28%

@@ -1,0 +1,76 @@
+{
+  "days": 7,
+  "tokensSaved": 15238813,
+  "grossTokensSaved": 15238813,
+  "tokensOverhead": 4388,
+  "netTokensSaved": 15234428,
+  "tokensBefore": 15947341,
+  "savingsPercent": 95.56,
+  "grossSavingsPercent": 95.56,
+  "netSavingsPercent": 95.53,
+  "sessionStartContextTokensNow": 1095,
+  "userPromptBaseContextTokensNow": 102,
+  "userPromptCodeChangeContextTokensNow": 153,
+  "mcpCatalogTokensNow": 2885,
+  "mcpToolCount": 37,
+  "measurementScope": "command-output net excludes hook and MCP catalog context; current context costs are reported separately",
+  "commandsObserved": 2147,
+  "commandsCompacted": 873,
+  "topCommands": [
+    {
+      "command": "rg -n -S 'draw-shape-match|drawPad|correctAnswer|questionType|answer|options' flutter/lib src content/question-bank",
+      "tokensSaved": 6092563
+    },
+    {
+      "command": "rg -n [—–] --glob *.md --glob *.txt --glob *.rs --glob *.ts .codex-review.json .github 00-skill-routing-and-escalation.md AGENTS.md AGENTS/references CLAUDE.md README.md WORKFLOW.md _shared backend-and-data-architecture codex cowork critic cursor docs opencode pi preserve-existing-flow reviewer rust software-development-life-cycle subagent-driven-development templates tests using-keel writing-plans",
+      "tokensSaved": 1899746
+    },
+    {
+      "command": "rg --files -g * C:\\Users\\Administrator\\AppData\\Local\\Temp",
+      "tokensSaved": 1721557
+    },
+    {
+      "command": "rg -n -C 3 'PATH|path|install.*PATH|global.*PATH|bare keel|keel\\.exe|install does|source checkout|cargo run --bin keel' rust/crates/keel/src rust/crates/keel/tests install.ps1 WORKFLOW.md AGENTS/references/10-native-command-routing.md AGENTS/references/30-execution-strategy.md README.md",
+      "tokensSaved": 551430
+    },
+    {
+      "command": "rg -n -S 'class InteractiveQuiz|GestureDetector|onPan|CustomPaint|Semak|Padam|lukis|draw' flutter/lib src content/question-bank",
+      "tokensSaved": 498953
+    }
+  ],
+  "topTools": [],
+  "gates": [
+    {
+      "gate": "review",
+      "count": 0
+    },
+    {
+      "gate": "working-brief",
+      "count": 0
+    },
+    {
+      "gate": "memory",
+      "count": 0
+    },
+    {
+      "gate": "learned-skill",
+      "count": 0
+    },
+    {
+      "gate": "research",
+      "count": 0
+    },
+    {
+      "gate": "completeness",
+      "count": 0
+    }
+  ],
+  "recallDocuments": 234,
+  "recallLastIndexedMs": 1788886655814,
+  "anvilJobs": [
+    {
+      "id": "c-users-administrator-desktop-dev-studytime-keel-keel-811612c5",
+      "state": "active"
+    }
+  ]
+}
