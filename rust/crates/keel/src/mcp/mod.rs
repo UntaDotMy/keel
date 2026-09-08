@@ -26,7 +26,15 @@ use crate::utility::workspace_index;
 mod http;
 mod tools;
 
-pub(crate) fn tools_list_context_snapshot() -> (usize, usize) {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ToolsListContextSnapshot {
+    pub tool_count: usize,
+    pub eager_tool_count: usize,
+    pub deferred_tool_count: usize,
+    pub catalog_tokens: usize,
+}
+
+pub(crate) fn tools_list_context_snapshot() -> ToolsListContextSnapshot {
     let list = tools::handle_tools_list();
     let tool_count = list
         .get("tools")
@@ -34,10 +42,13 @@ pub(crate) fn tools_list_context_snapshot() -> (usize, usize) {
         .map(Vec::len)
         .unwrap_or(0);
     let serialized = serde_json::to_string(&list).unwrap_or_default();
-    (
+    ToolsListContextSnapshot {
         tool_count,
-        crate::proxy::token_meter::TokenMeter::count_text(&serialized),
-    )
+        // why: Phase 1 has no deferred profile; every advertised tool is eager.
+        eager_tool_count: tool_count,
+        deferred_tool_count: 0,
+        catalog_tokens: crate::proxy::token_meter::TokenMeter::count_text(&serialized),
+    }
 }
 
 /// Maximum bytes accepted for a single newline-delimited JSON-RPC frame. A peer

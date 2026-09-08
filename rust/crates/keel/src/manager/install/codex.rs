@@ -341,12 +341,14 @@ Installed by keel into `~/.codex/AGENTS.md` and loaded into every Codex session 
 7. **Find the root cause.** Trace the symptom end-to-end with file:line evidence and confirm the suspect is on that path before changing anything.
 8. **Preserve existing data.** Never remove or replace an existing field, column, output, or record to fit a new format — ADD alongside, and ASK before dropping anything the user did not name."#;
 
+pub(crate) fn managed_codex_agents_block() -> String {
+    format!("{MANAGED_CODEX_AGENTS_BEGIN}\n{MANAGED_CODEX_AGENTS_BODY}\n{MANAGED_CODEX_AGENTS_END}")
+}
+
 /// Write (or refresh) the keel managed block inside `~/.codex/AGENTS.md`,
 /// preserving any user content outside it. Creates the file when absent.
 pub(crate) fn sync_codex_agents_md(path: &Path) -> Result<String, String> {
-    let block = format!(
-        "{MANAGED_CODEX_AGENTS_BEGIN}\n{MANAGED_CODEX_AGENTS_BODY}\n{MANAGED_CODEX_AGENTS_END}"
-    );
+    let block = managed_codex_agents_block();
     let existing = crate::runtime::read_text_if_exists(path).unwrap_or_default();
     let stripped = existing.strip_prefix('\u{feff}').unwrap_or(&existing);
     let merged = merge_managed_region(

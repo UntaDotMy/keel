@@ -200,6 +200,11 @@ Use `preserve-existing-flow` before editing existing code and `reviewer` before 
 ## The one thing to remember
 **Research first, use the owner, keep context narrow, and prove the result.**"#;
 
+/// Fixed SessionStart text, excluding dynamic workspace and learning digests.
+pub(crate) fn session_start_bootstrap() -> &'static str {
+    COMPACT_BOOTSTRAP
+}
+
 pub(crate) fn session_start_context() -> String {
     // SessionStart fires once per session and is the documented entry point
     let mut context = format!("{COMPACT_BOOTSTRAP}\n\n{}", memory_scope_summary());

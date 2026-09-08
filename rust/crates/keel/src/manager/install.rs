@@ -28,6 +28,7 @@ pub use flags::InstallOverrides;
 pub(crate) use flags::PlatformName;
 #[cfg(all(test, windows))]
 pub(crate) use hosts::grok_hooks_are_current;
+pub(crate) use hosts::managed_host_agents_block;
 #[cfg(test)]
 pub(crate) use hosts::{antigravity_hooks_payload, grok_hooks_payload};
 pub(crate) use hosts::{
@@ -38,6 +39,7 @@ pub(crate) use hosts::{
 pub use path::ensure_keel_home_on_path;
 pub(crate) use sync::backup_file_before_managed_overwrite;
 
+pub(crate) use codex::managed_codex_agents_block;
 pub(crate) use codex::{
     codex_plugin_installation, ensure_codex_agents_enabled, ensure_codex_native_mcp,
     ensure_codex_plugin_enabled, install_codex_plugin, merge_codex_marketplace,
@@ -64,14 +66,15 @@ pub(crate) use hosts::{
 #[cfg(test)]
 pub(crate) use managed::is_allowed_managed_orphan_relative;
 pub(crate) use managed::{
-    install_purge_stale_enabled, managed_agents_inventory_path, managed_files_inventory_path,
-    managed_shared_resources_inventory_path, managed_skills_inventory_path,
-    maybe_sync_user_claude_md, remove_managed_user_claude_md, remove_orphans,
+    install_purge_stale_enabled, managed_agents_inventory_path, managed_claude_md_block,
+    managed_files_inventory_path, managed_shared_resources_inventory_path,
+    managed_skills_inventory_path, maybe_sync_user_claude_md, remove_managed_user_claude_md,
+    remove_orphans,
 };
 #[cfg(test)]
 pub(crate) use managed::{
-    managed_claude_md_block, merge_managed_claude_md, strip_managed_claude_md,
-    MANAGED_CLAUDE_MD_BEGIN, MANAGED_CLAUDE_MD_END,
+    merge_managed_claude_md, strip_managed_claude_md, MANAGED_CLAUDE_MD_BEGIN,
+    MANAGED_CLAUDE_MD_END,
 };
 pub(crate) use mcp::{
     merge_json_mcp, remove_json_mcp_entry, rewrite_codex_mcp_command, rewrite_mcp_entry_command,

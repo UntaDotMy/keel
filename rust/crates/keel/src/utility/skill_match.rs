@@ -820,6 +820,42 @@ pub fn skill_catalog(claude_home: &Path) -> Vec<SkillCatalogEntry> {
     catalog
 }
 
+/// Cache-free fixed-context projections over one stable, parseable skill set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SkillContextSnapshot {
+    pub skill_count: usize,
+    pub inline_catalog: String,
+    pub full_bodies: String,
+}
+
+pub(crate) fn skill_context_snapshot(skills_dir: &Path) -> Option<SkillContextSnapshot> {
+    let files = discover_skill_files(skills_dir)?;
+    let mut skill_count = 0usize;
+    let mut inline_catalog = String::new();
+    let mut full_bodies = String::new();
+
+    for file in files {
+        let text = fs::read_to_string(&file.path).ok()?;
+        let Some(frontmatter) = split_frontmatter(&text) else {
+            continue;
+        };
+        skill_count += 1;
+        inline_catalog.push_str("---\n");
+        inline_catalog.push_str(frontmatter.trim());
+        inline_catalog.push_str("\n---\n");
+        full_bodies.push_str(&text);
+        if !text.ends_with('\n') {
+            full_bodies.push('\n');
+        }
+    }
+
+    Some(SkillContextSnapshot {
+        skill_count,
+        inline_catalog,
+        full_bodies,
+    })
+}
+
 /// Pure brief builder (no IO) so truncation behavior is unit-testable. Takes raw
 /// SKILL.md text, pulls the frontmatter `description`, drops the frontmatter
 /// block, and appends the opening body up to the byte cap on a line boundary.

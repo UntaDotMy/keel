@@ -9,6 +9,7 @@ pub mod code_search;
 pub mod config_audit;
 pub mod design_intelligence;
 pub mod eval;
+pub(crate) mod fixed_context;
 pub mod gain;
 pub mod hashing;
 pub mod memory;

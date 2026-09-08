@@ -71,7 +71,7 @@ use session_start::{
     subagent_start_context,
 };
 pub(crate) use session_start::{
-    post_compact_context, render_lifecycle_payload, session_start_context,
+    post_compact_context, render_lifecycle_payload, session_start_bootstrap, session_start_context,
 };
 pub use settings::{build_hooks_payload, remove_managed_hook_payload_for_home};
 use settings::{

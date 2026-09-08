@@ -155,11 +155,15 @@ const MANAGED_HOST_AGENTS_BEGIN: &str =
     "<!-- keel:begin (managed by keel install — edits inside this block are overwritten; edit outside it freely) -->";
 const MANAGED_HOST_AGENTS_END: &str = "<!-- keel:end -->";
 
-fn sync_host_agents_md(path: &Path, host: &str) -> Result<String, String> {
+pub(crate) fn managed_host_agents_block(host: &str) -> String {
     let body = format!(
         "# keel operating contract (always-on)\n\nInstalled by keel for {host}. Before changing code, config, or architecture: read SYSTEM_MAP and the owning file; restate and research the request; use the keel MCP tools (`context_brief`, `system_map`, `recall`, `skill_route`, `skill_get`, `anvil`, `run_command`); trace the root cause; preserve user data; run affected tests and review before finishing. Do not trust training knowledge over current repository or official documentation."
     );
-    let block = format!("{MANAGED_HOST_AGENTS_BEGIN}\n{body}\n{MANAGED_HOST_AGENTS_END}");
+    format!("{MANAGED_HOST_AGENTS_BEGIN}\n{body}\n{MANAGED_HOST_AGENTS_END}")
+}
+
+fn sync_host_agents_md(path: &Path, host: &str) -> Result<String, String> {
+    let block = managed_host_agents_block(host);
     let existing = crate::runtime::read_text_if_exists(path).unwrap_or_default();
     let stripped = existing.strip_prefix('\u{feff}').unwrap_or(&existing);
     let merged = super::super::install::codex::merge_managed_region(
