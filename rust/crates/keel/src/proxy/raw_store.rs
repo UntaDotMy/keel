@@ -212,6 +212,75 @@ impl RawStore {
         Ok(())
     }
 
+    pub fn save_screenshot(
+        &self,
+        raw_id: &str,
+        command: &str,
+        stdout: &[u8],
+        stderr: &[u8],
+        screenshot_png: &[u8],
+        exit_code: i32,
+    ) -> std::io::Result<PathBuf> {
+        let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let day_dir = self.root.join(date);
+        let dir = day_dir.join(raw_id);
+        fs::create_dir_all(&day_dir)?;
+        restrict_directory(&self.root)?;
+        restrict_directory(&day_dir)?;
+        cleanup_stale_raw_staging(&self.root);
+        let staging_dir = day_dir.join(format!(
+            ".tmp-{}-{}-{:08x}",
+            raw_id,
+            std::process::id(),
+            rand::random::<u32>()
+        ));
+        fs::create_dir(&staging_dir)?;
+        restrict_directory(&staging_dir)?;
+
+        let now = chrono::Local::now().timestamp_millis() as u64;
+        let meta = RunMeta {
+            raw_id: raw_id.to_string(),
+            command: command.to_string(),
+            program: "verify".to_string(),
+            args: vec!["ui".to_string()],
+            cwd: PathBuf::from("."),
+            started_at: now,
+            duration_ms: 0,
+            exit_code,
+            adapter_name: "verify-ui".to_string(),
+            raw_path: dir.clone(),
+            compact_path: PathBuf::new(),
+            agent: "keel".to_string(),
+            workspace: PathBuf::from("."),
+            stdout_bytes: stdout.len(),
+            stderr_bytes: stderr.len(),
+            compact_stdout_bytes: 0,
+            compact_stderr_bytes: 0,
+            estimated_tokens_before: (stdout.len() + stderr.len()) / 4,
+            estimated_tokens_after: 0,
+            estimated_tokens_saved: 0,
+            savings_pct: 0.0,
+            compacted: false,
+        };
+
+        let staged = (|| -> std::io::Result<()> {
+            write_private(&staging_dir.join("stdout.log"), stdout)?;
+            write_private(&staging_dir.join("stderr.log"), stderr)?;
+            write_private(&staging_dir.join("command.txt"), command.as_bytes())?;
+            if !screenshot_png.is_empty() {
+                write_private(&staging_dir.join("screenshot.png"), screenshot_png)?;
+            }
+            let meta_json = serde_json::to_string_pretty(&meta)?;
+            write_private(&staging_dir.join("meta.json"), meta_json.as_bytes())?;
+            fs::rename(&staging_dir, &dir)
+        })();
+        if let Err(error) = staged {
+            let _ = fs::remove_dir_all(&staging_dir);
+            return Err(error);
+        }
+        Ok(dir)
+    }
+
     pub fn generate_id() -> String {
         let now = chrono::Local::now().format("%Y%m%d-%H%M%S");
         let random: u32 = rand::random();

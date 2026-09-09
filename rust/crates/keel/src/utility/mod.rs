@@ -29,6 +29,7 @@ pub(crate) mod sqlite;
 pub mod stats;
 pub mod system_map;
 pub(crate) mod task_ticket;
+pub mod ui_verify;
 pub mod working_brief;
 pub mod workspace_index;
 
@@ -47,3 +48,4 @@ pub use session::run_session_command;
 pub use skill_eval::run_skill_eval_command;
 pub use skill_lint::run_skill_lint_command;
 pub use stats::run_stats_command;
+pub use ui_verify::run_verify_ui_command;

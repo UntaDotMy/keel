@@ -10,6 +10,7 @@
   repair [--repo-root <path>] [--claude-home <path>]
   validate [--repo-root <path>] [--profile full|smoke]
   verify [--repo-root <path>] [--claude-home <path>] [<skill-name>]
+  verify ui [--task <task-id>] [--fixture <path>] [--plan <id>] [--adapter <name>] [--json]
   uninstall [--repo-root <path>] [--claude-home <path>]
   menu
   review init|diff|pre-commit|pre-pr [--repo-root <path>] [--plan <id>] [--claude-home <path>] [--format json|markdown|compact]

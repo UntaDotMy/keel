@@ -21,6 +21,13 @@ pub fn run_verify_command(
     standard_output: &mut dyn Write,
     standard_error: &mut dyn Write,
 ) -> u8 {
+    if arguments.first().map(String::as_str) == Some("ui") {
+        return crate::utility::run_verify_ui_command(
+            &arguments[1..],
+            standard_output,
+            standard_error,
+        );
+    }
     if arguments.first().map(String::as_str) == Some("config") {
         let mut flag_set = FlagSet::new("verify config");
         flag_set.string_flag("repo-root", "");
