@@ -84,6 +84,19 @@ impl CommandAst {
                 Some("build" | "check") => CommandKind::Build,
                 _ => CommandKind::Unknown,
             },
+            "rustc" => CommandKind::Build,
+            "flutter" => match self.first_subcommand() {
+                Some("analyze") => CommandKind::Lint,
+                Some("test") => CommandKind::Test,
+                Some("build") => CommandKind::Build,
+                _ => CommandKind::Unknown,
+            },
+            "dart" => match self.first_subcommand() {
+                Some("analyze") => CommandKind::Lint,
+                Some("test") => CommandKind::Test,
+                Some("compile") => CommandKind::Build,
+                _ => CommandKind::Unknown,
+            },
             "pytest" | "jest" | "vitest" | "playwright" => CommandKind::Test,
             // Additional test runners across ecosystems (route to the tests
             // adapter: pass/fail summary + failure signal + rerun hint).
@@ -325,6 +338,33 @@ impl CommandAst {
             "pg_dump" | "pg_dumpall" | "pg_restore" | "mysqldump" => CommandKind::Logs,
             _ => CommandKind::Unknown,
         };
+    }
+
+    /// Verification family for warning parsing and relevant-rerun resolution.
+    ///
+    /// This stays beside the authoritative command classifier so warning state
+    /// does not grow a second matcher that can drift from proxy routing.
+    pub(crate) fn verification_family(&self) -> Option<&'static str> {
+        let program = self.program_base_name();
+        match program.as_str() {
+            "flutter" | "dart" => Some("dart"),
+            "cargo" | "rustc" | "clippy-driver" => Some("rust"),
+            "tsc" => Some("typescript"),
+            "gcc" | "g++" | "clang" | "clang++" | "cc" | "c++" => Some("cpp"),
+            "pytest" | "tox" | "nox" => Some("python"),
+            "python"
+                if self.args.first().map(String::as_str) == Some("-m")
+                    && self.args.get(1).map(String::as_str) == Some("pytest") =>
+            {
+                Some("python")
+            }
+            "npx" | "pnpx" | "dlx" if self.args.iter().any(|arg| arg == "tsc") => {
+                Some("typescript")
+            }
+            "npm" | "pnpm" | "yarn" | "bun" => Some("package"),
+            "dotnet" | "msbuild" => Some("dotnet"),
+            _ => None,
+        }
     }
 
     fn program_base_name(&self) -> String {

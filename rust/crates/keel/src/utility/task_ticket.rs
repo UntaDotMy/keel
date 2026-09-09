@@ -1,7 +1,7 @@
 //! Purpose: Build and validate evidence-bound planner task tickets and RTM links.
 //! Caller: utility::plan task compilation, plan checks, and named-plan review.
 //! Dependencies: serde_json, chrono, stable hashing, and bounded filesystem reads.
-//! Main Functions: prepare_task_artifacts, validate_task_artifacts.
+//! Main Functions: prepare_task_artifacts, validate_task_artifacts, link_open_warning_subtasks.
 //! Side Effects: None; the planner owner performs all writes.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -107,6 +107,219 @@ pub(crate) struct ValidationContext<'a> {
     pub specification: &'a str,
     pub architecture: &'a str,
     pub seeds: &'a [TaskSeed],
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct WarningTicketLink {
+    pub fingerprint: String,
+    pub description: String,
+}
+
+pub(crate) fn link_open_warning_subtasks(
+    keel_home: &Path,
+    workspace_root: &Path,
+    warnings: &[WarningTicketLink],
+) -> Result<(), String> {
+    if warnings.is_empty() {
+        return Ok(());
+    }
+    let plans = keel_home
+        .join("memories")
+        .join("workspaces")
+        .join(crate::utility::system_map::workspace_key(
+            &workspace_root.to_string_lossy(),
+        ))
+        .join("plans");
+    let Ok(entries) = fs::read_dir(&plans) else {
+        return Ok(());
+    };
+    for entry in entries.flatten() {
+        let plan_directory = entry.path();
+        if plan_directory.is_dir() {
+            link_plan_warning_subtasks(&plan_directory, warnings)?;
+        }
+    }
+    Ok(())
+}
+
+fn link_plan_warning_subtasks(
+    plan_directory: &Path,
+    warnings: &[WarningTicketLink],
+) -> Result<(), String> {
+    let mut added = Vec::new();
+    let Ok(entries) = fs::read_dir(plan_directory) else {
+        return Ok(());
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        if !file_name.starts_with("task-")
+            || path.extension().and_then(|ext| ext.to_str()) != Some("json")
+        {
+            continue;
+        }
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(mut ticket) = serde_json::from_str::<Value>(&text) else {
+            continue;
+        };
+        let Some(new_ids) = append_warning_subtasks(&mut ticket, warnings) else {
+            continue;
+        };
+        if new_ids.is_empty() {
+            continue;
+        }
+        crate::runtime::write_text(
+            &path,
+            &format!(
+                "{}\n",
+                serde_json::to_string_pretty(&ticket)
+                    .map_err(|error| format!("serialize {}: {error}", path.display()))?
+            ),
+        )?;
+        added.extend(new_ids);
+    }
+    if !added.is_empty() {
+        update_rtm_for_warning_subtasks(plan_directory, &added)?;
+    }
+    Ok(())
+}
+
+fn append_warning_subtasks(
+    ticket: &mut Value,
+    warnings: &[WarningTicketLink],
+) -> Option<Vec<AddedWarningSubtask>> {
+    let ticket_id = string_field(ticket, "id")?.to_string();
+    let requirement_refs = ticket.get("requirement_refs")?.clone();
+    let acceptance_refs = ticket.get("acceptance_refs")?.clone();
+    let acceptance_ids = string_array(ticket, "acceptance_refs");
+    let requirement_id = string_array(ticket, "requirement_refs")
+        .into_iter()
+        .next()
+        .unwrap_or_default();
+    let layers = ticket.get_mut("layers")?.as_object_mut()?;
+    let lint_warnings = layers
+        .entry("lint_warnings".to_string())
+        .or_insert_with(|| Value::Array(Vec::new()));
+    let subtasks = lint_warnings.as_array_mut()?;
+    let existing: BTreeSet<String> = subtasks
+        .iter()
+        .flat_map(|subtask| {
+            let mut keys = Vec::new();
+            if let Some(id) = string_field(subtask, "id") {
+                keys.push(id.to_string());
+            }
+            if let Some(description) = string_field(subtask, "description") {
+                keys.push(description.to_string());
+            }
+            keys
+        })
+        .collect();
+    let mut added = Vec::new();
+    for warning in warnings {
+        let subtask_id = format!("{ticket_id}-LINT-WARNINGS-{}", warning.fingerprint);
+        if existing
+            .iter()
+            .any(|value| value.contains(&warning.fingerprint))
+        {
+            continue;
+        }
+        subtasks.push(json!({
+            "id": subtask_id,
+            "description": warning.description,
+            "requirement_refs": requirement_refs,
+            "acceptance_refs": acceptance_refs,
+            "status": "open",
+            "expected_evidence_type": "lint_diagnostic",
+            "evidence_ref": Value::Null,
+            "reason": Value::Null,
+            "owner_role": "verifier",
+            "verification_timestamp": Value::Null,
+            "derived": true
+        }));
+        added.push(AddedWarningSubtask {
+            task_id: ticket_id.clone(),
+            subtask_id,
+            requirement_id: requirement_id.clone(),
+            acceptance_ids: acceptance_ids.clone(),
+        });
+    }
+    Some(added)
+}
+
+struct AddedWarningSubtask {
+    task_id: String,
+    subtask_id: String,
+    requirement_id: String,
+    acceptance_ids: Vec<String>,
+}
+
+fn update_rtm_for_warning_subtasks(
+    plan_directory: &Path,
+    added: &[AddedWarningSubtask],
+) -> Result<(), String> {
+    let path = plan_directory.join("rtm.json");
+    let Ok(text) = fs::read_to_string(&path) else {
+        return Ok(());
+    };
+    let Ok(mut rtm) = serde_json::from_str::<Value>(&text) else {
+        return Ok(());
+    };
+    if let Some(entries) = rtm.get_mut("entries").and_then(Value::as_array_mut) {
+        for entry in entries {
+            let task_ids = string_array(entry, "taskIds");
+            let Some(ids) = entry
+                .get_mut("checklistSubtaskIds")
+                .and_then(Value::as_array_mut)
+            else {
+                continue;
+            };
+            for item in added {
+                if task_ids.contains(&item.task_id)
+                    && !ids
+                        .iter()
+                        .any(|value| value.as_str() == Some(&item.subtask_id))
+                {
+                    ids.push(Value::String(item.subtask_id.clone()));
+                }
+            }
+        }
+    }
+    if let Some(traces) = rtm.get_mut("traces").and_then(Value::as_array_mut) {
+        for item in added {
+            for criterion_id in &item.acceptance_ids {
+                let already = traces.iter().any(|trace| {
+                    string_field(trace, "subtaskId") == Some(item.subtask_id.as_str())
+                        && string_field(trace, "acceptanceCriterionId")
+                            == Some(criterion_id.as_str())
+                });
+                if already {
+                    continue;
+                }
+                traces.push(json!({
+                    "userRequestRef": "request://submitted",
+                    "requirementId": item.requirement_id,
+                    "acceptanceCriterionId": criterion_id,
+                    "taskId": item.task_id,
+                    "subtaskId": item.subtask_id,
+                    "expectedEvidenceType": "lint_diagnostic",
+                    "evidenceRef": Value::Null
+                }));
+            }
+        }
+    }
+    crate::runtime::write_text(
+        &path,
+        &format!(
+            "{}\n",
+            serde_json::to_string_pretty(&rtm)
+                .map_err(|error| format!("serialize {}: {error}", path.display()))?
+        ),
+    )
 }
 
 pub(crate) fn prepare_task_artifacts(

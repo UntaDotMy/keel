@@ -106,6 +106,18 @@ pub fn run_doctor_command(
         "[ok] adapters: {}",
         crate::proxy::adapters::adapter_names()
     );
+    match crate::runtime::resolve_repository_root(repo_root).and_then(|root| {
+        crate::manager::verify::write_verification_config_report(&root, standard_output)
+            .map(|_| root)
+    }) {
+        Ok(_) => {}
+        Err(error) => {
+            let _ = writeln!(
+                standard_output,
+                "[warn] verification config inspection failed: {error}"
+            );
+        }
+    }
     let rewrite_probe = crate::runner::rewrite_for_doctor("cargo test");
     write_doctor_check(
         standard_output,

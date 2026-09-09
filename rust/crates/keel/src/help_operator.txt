@@ -25,6 +25,7 @@
   git-workflow pr-body --from-diff [--repo-root <path>] [--base-ref <ref>] [--test-result <text>] [--format json|markdown|compact]
   git-workflow lint-message <file>
   run [--recovery-dir <path>] [--json] [--stream] -- <command...>
+  warn list|waive [--repo-root <path>] [--claude-home <path>]
   rewrite "<command>"
   raw [--path] <raw-id>
   raw list

@@ -53,6 +53,7 @@ pub(crate) const TOP_LEVEL_COMMANDS: &[&str] = &[
     "review",
     "git-workflow",
     "run",
+    "warn",
     "rewrite",
     "raw",
     "replay",
@@ -214,6 +215,11 @@ impl Application {
                 review::run_git_workflow_command(command_arguments, standard_output, standard_error)
             }
             "run" => runner::run_run_command(command_arguments, standard_output, standard_error),
+            "warn" => crate::proxy::warnings::run_warn_command(
+                command_arguments,
+                standard_output,
+                standard_error,
+            ),
             "rewrite" => {
                 runner::run_rewrite_command(command_arguments, standard_output, standard_error)
             }

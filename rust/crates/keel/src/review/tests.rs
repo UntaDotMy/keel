@@ -70,6 +70,54 @@ fn review_pass_clears_gate_only_on_passing_real_surface() {
     assert!(!review_pass_clears_gate("init", 0));
 }
 
+#[test]
+fn warnings_gate_blocks_open_diagnostics_but_not_baseline() {
+    let root = crate::test_support::unique_temp_dir("keel-review-warnings");
+    let home = root.join("home");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let ast = crate::proxy::CommandAst::new(
+        "dart".to_string(),
+        vec!["analyze".to_string(), "--format=machine".to_string()],
+        workspace.clone(),
+    );
+    crate::proxy::warnings::reconcile_capture(
+        &home,
+        &workspace,
+        &ast,
+        b"INFO|LINT|AVOID_PRINT|lib/old.dart|4|3|5|Old warning.\n",
+        &[],
+        0,
+        "dart analyze --format=machine",
+        "2026-09-09T00:00:00Z",
+        "raw-1",
+    )
+    .unwrap();
+    let home_text = home.to_string_lossy();
+    let baseline = warnings_gate(&workspace, &home_text);
+    assert_eq!(baseline.status, GateStatus::Warn);
+    assert!(!baseline.blocking);
+    assert!(baseline.details.unwrap().contains("baseline=1"));
+
+    crate::proxy::warnings::reconcile_capture(
+        &home,
+        &workspace,
+        &ast,
+        b"INFO|LINT|AVOID_PRINT|lib/old.dart|4|3|5|Old warning.\nINFO|LINT|DEAD_CODE|lib/new.dart|8|2|4|Dead code.\n",
+        &[],
+        0,
+        "dart analyze --format=machine",
+        "2026-09-09T00:01:00Z",
+        "raw-2",
+    )
+    .unwrap();
+    let open = warnings_gate(&workspace, &home_text);
+    assert_eq!(open.status, GateStatus::Fail);
+    assert!(open.blocking);
+    assert!(open.details.unwrap().contains("open=1"));
+    let _ = std::fs::remove_dir_all(root);
+}
+
 // ---- brownfield flow gate classification (offline; no git invocation) ----
 
 /// Modifying established source is what the gate exists to catch.

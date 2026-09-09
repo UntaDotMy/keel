@@ -21,6 +21,36 @@ pub fn run_verify_command(
     standard_output: &mut dyn Write,
     standard_error: &mut dyn Write,
 ) -> u8 {
+    if arguments.first().map(String::as_str) == Some("config") {
+        let mut flag_set = FlagSet::new("verify config");
+        flag_set.string_flag("repo-root", "");
+        flag_set.string_flag("claude-home", "");
+        if let Err(parse_error) = flag_set.parse(&arguments[1..]) {
+            let _ = writeln!(standard_error, "{}", parse_error.message);
+            return 1;
+        }
+        if !flag_set.positional.is_empty() {
+            let _ = writeln!(
+                standard_error,
+                "verify config accepts no positional arguments"
+            );
+            return 1;
+        }
+        let repository_root = match resolve_repository_root(flag_set.string_value("repo-root")) {
+            Ok(root) => root,
+            Err(error) => {
+                let _ = writeln!(standard_error, "verify config: {error}");
+                return 1;
+            }
+        };
+        return match write_verification_config_report(&repository_root, standard_output) {
+            Ok(_) => 0,
+            Err(error) => {
+                let _ = writeln!(standard_error, "verify config: {error}");
+                1
+            }
+        };
+    }
     let mut flag_set = FlagSet::new("verify");
     flag_set.string_flag("repo-root", "");
     flag_set.string_flag("claude-home", "");
@@ -47,6 +77,30 @@ pub fn run_verify_command(
             1
         }
     }
+}
+
+pub(crate) fn write_verification_config_report(
+    repository_root: &Path,
+    standard_output: &mut dyn Write,
+) -> Result<usize, String> {
+    let report = crate::proxy::filters::verification_report(repository_root)?;
+    if report.projects == 0 {
+        let _ = writeln!(
+            standard_output,
+            "[ok] verification config: no Flutter/Dart project detected"
+        );
+    } else if report.warnings.is_empty() {
+        let _ = writeln!(
+            standard_output,
+            "[ok] verification config: {} Flutter/Dart project(s), strict analyzer policy declared",
+            report.projects
+        );
+    } else {
+        for warning in &report.warnings {
+            let _ = writeln!(standard_output, "[warn] verification config: {warning}");
+        }
+    }
+    Ok(report.warnings.len())
 }
 
 fn verify_install(
@@ -703,5 +757,45 @@ mod tests {
     fn grok_verification_skips_nonstandard_explicit_home() {
         let home = crate::test_support::unique_temp_dir("keel-verify-hermetic-home");
         assert_eq!(verify_grok_wiring(&home), Ok(false));
+    }
+
+    #[test]
+    fn verify_config_reports_actionable_flutter_policy_without_failing_or_writing() {
+        let root = crate::test_support::unique_temp_dir("keel-verify-config");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("pubspec.yaml"),
+            "name: app\ndependencies:\n  flutter:\n    sdk: flutter\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("keel.filters.toml"),
+            "[verification]\ncommands = [\"flutter test\"]\n",
+        )
+        .unwrap();
+        let before = fs::read_to_string(root.join("keel.filters.toml")).unwrap();
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = run_verify_command(
+            &[
+                "config".to_string(),
+                "--repo-root".to_string(),
+                root.to_string_lossy().to_string(),
+            ],
+            &mut out,
+            &mut err,
+        );
+        let output = String::from_utf8(out).unwrap();
+        assert_eq!(code, 0, "stderr: {}", String::from_utf8_lossy(&err));
+        assert!(output.contains("[warn]"), "stdout: {output}");
+        assert!(
+            output.contains("flutter analyze --fatal-infos --fatal-warnings"),
+            "stdout: {output}"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("keel.filters.toml")).unwrap(),
+            before
+        );
+        let _ = fs::remove_dir_all(root);
     }
 }

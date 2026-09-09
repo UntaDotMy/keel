@@ -629,6 +629,80 @@ fn completion_gate_check_passes_on_fresh_install_and_persists_proof() {
 }
 
 #[test]
+fn completion_gate_blocks_when_workspace_has_open_warning() {
+    let temporary_directory = tempdir_under("keel-cg-warning-open");
+    let claude_home = temporary_directory.join("claude-home");
+    let workspace = temporary_directory.join("workspace");
+    fs::create_dir_all(&workspace).expect("create workspace");
+    write_brief(
+        &claude_home,
+        &create_brief(
+            "wb-warning".to_string(),
+            "resolve analyzer warnings".to_string(),
+            Vec::new(),
+            vec!["warning ledger is clean".to_string()],
+            Vec::new(),
+            workspace.to_string_lossy().to_string(),
+            "2026-09-09T00:00:00Z".to_string(),
+        ),
+    )
+    .unwrap();
+    let ast = crate::proxy::CommandAst::new(
+        "dart".to_string(),
+        vec!["analyze".to_string(), "--format=machine".to_string()],
+        workspace.clone(),
+    );
+    crate::proxy::warnings::reconcile_capture(
+        &claude_home,
+        &workspace,
+        &ast,
+        &[],
+        &[],
+        0,
+        "dart analyze --format=machine",
+        "2026-09-09T00:00:00Z",
+        "raw-1",
+    )
+    .unwrap();
+    crate::proxy::warnings::reconcile_capture(
+        &claude_home,
+        &workspace,
+        &ast,
+        b"INFO|LINT|AVOID_PRINT|lib/main.dart|7|3|5|Avoid print.\n",
+        &[],
+        0,
+        "dart analyze --format=machine",
+        "2026-09-09T00:01:00Z",
+        "raw-2",
+    )
+    .unwrap();
+
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let exit = run_memory_command(
+        "memory",
+        &[
+            "completion-gate".to_string(),
+            "check".to_string(),
+            "--brief-id".to_string(),
+            "wb-warning".to_string(),
+            "--proof".to_string(),
+            "all requested tests pass".to_string(),
+            "--claude-home".to_string(),
+            claude_home.to_string_lossy().to_string(),
+        ],
+        &mut stdout,
+        &mut stderr,
+    );
+    let output = String::from_utf8(stdout).unwrap();
+    assert_eq!(exit, 1, "stderr: {}", String::from_utf8_lossy(&stderr));
+    assert!(output.contains("warnings: fail"), "stdout: {output}");
+    assert!(output.contains("open=1"), "stdout: {output}");
+    assert!(!output.contains("closure-ready"), "stdout: {output}");
+    let _ = fs::remove_dir_all(temporary_directory);
+}
+
+#[test]
 fn completion_gate_check_fails_when_brief_missing() {
     let temporary_directory = tempdir_under("keel-cg-brief-missing");
     let claude_home = temporary_directory.join("claude-home");

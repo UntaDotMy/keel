@@ -16,6 +16,7 @@ pub mod registry;
 pub mod render;
 pub mod run;
 pub mod token_meter;
+pub mod warnings;
 
 pub use adapter::{CommandAdapter, CompactResult};
 pub use command_ast::{CommandAst, CommandKind};

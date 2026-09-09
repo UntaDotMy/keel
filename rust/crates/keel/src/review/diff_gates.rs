@@ -44,6 +44,7 @@ pub(crate) fn collect_review_gate_results(
         surface_name,
     ));
     if surface_name == "pre-pr" {
+        gate_results.push(warnings_gate(repository_root, plan_evidence.claude_home));
         gate_results.push(research_traceability_gate(
             repository_root,
             base_ref,
@@ -73,6 +74,41 @@ pub(crate) fn collect_review_gate_results(
         gate_results.push(e2e_result);
     }
     gate_results
+}
+
+pub(crate) fn warnings_gate(repository_root: &Path, claude_home: &str) -> GateResult {
+    let home = match crate::runtime::resolve_claude_home(claude_home) {
+        Ok(home) => home,
+        Err(error) => {
+            return GateResult {
+                name: "warnings_gate".to_string(),
+                status: GateStatus::Blocked,
+                blocking: true,
+                details: Some(format!("warning home unavailable: {error}")),
+            };
+        }
+    };
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    match crate::proxy::warnings::warning_gate(&home, repository_root, &now) {
+        Ok(summary) => GateResult {
+            name: "warnings_gate".to_string(),
+            status: if summary.blocking {
+                GateStatus::Fail
+            } else if summary.baseline > 0 || summary.waived > 0 {
+                GateStatus::Warn
+            } else {
+                GateStatus::Pass
+            },
+            blocking: summary.blocking,
+            details: Some(summary.details),
+        },
+        Err(error) => GateResult {
+            name: "warnings_gate".to_string(),
+            status: GateStatus::Blocked,
+            blocking: true,
+            details: Some(format!("warning ledger unavailable: {error}")),
+        },
+    }
 }
 
 pub(crate) fn run_review_surface_command(

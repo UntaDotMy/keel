@@ -35,6 +35,9 @@ coverage.out
 /target/
 # Scratch build/test dir used for isolated verification runs (cargo output + logs).
 /target-test/
+# Local state cache directory generated during tests or runs
+state/
+**/state/
 # Generated code-graph artifacts (keel code-graph build output).
 /.understand/
 .understand/
