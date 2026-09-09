@@ -497,12 +497,7 @@ fn now_rfc3339() -> String {
 }
 
 fn gate_status(status: GateStatus) -> &'static str {
-    match status {
-        GateStatus::Pass => "pass",
-        GateStatus::Fail => "fail",
-        GateStatus::Warn => "warn",
-        GateStatus::Blocked => "blocked",
-    }
+    status.as_str()
 }
 
 fn severity_for_text(severity: &str) -> ReviewSeverity {
@@ -580,10 +575,10 @@ fn add_gate_findings(
             blocking: gate.blocking,
             details: Some(details.clone()),
         });
-        if gate.status != GateStatus::Pass {
+        if !gate.status.is_pass() && gate.status != GateStatus::NotApplicable {
             findings.push(finding(
                 format!("gate:{}", gate.name),
-                if gate.blocking && gate.status == GateStatus::Fail {
+                if gate.blocking && gate.status.is_blocking() {
                     ReviewSeverity::Major
                 } else {
                     ReviewSeverity::Minor

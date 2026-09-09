@@ -1676,6 +1676,196 @@ pub(crate) fn review_task_issues(
     Ok(issues)
 }
 
+/// Evaluate plan acceptance criteria evidence and produce explicit review status lines.
+pub(crate) fn evaluate_acceptance_criteria(
+    workspace_root: &Path,
+    claude_home: &str,
+    plan_id: &str,
+) -> Result<(crate::review::GateStatus, String), String> {
+    let paths = review_plan_paths(workspace_root, claude_home, plan_id)?;
+    let spec = read_text(&paths.spec, SPEC_FILE)?;
+    let (parsed, _) = validate_specification(&spec, plan_id);
+    let mut issues = Vec::new();
+    let rtm = load_json_artifact(&paths.rtm, RTM_FILE, plan_id, &mut issues);
+    let Some(rtm) = rtm else {
+        return Ok((crate::review::GateStatus::Fail, String::new()));
+    };
+    let traces = rtm
+        .get("traces")
+        .and_then(Value::as_array)
+        .map_or(&[][..], Vec::as_slice);
+
+    let mut ac_lines = Vec::new();
+    let mut overall_status = crate::review::GateStatus::Pass;
+
+    let record_trace_failure =
+        |lines: &mut Vec<String>, status: &mut crate::review::GateStatus, id: &str| {
+            lines.push(format!(
+                "  {id}: fail | missing traceability to implementation evidence"
+            ));
+            *status = crate::review::GateStatus::Fail;
+        };
+
+    for criterion in &parsed.acceptance_criteria {
+        let criterion_traces: Vec<&Value> = traces
+            .iter()
+            .filter(|t| {
+                t.get("acceptanceCriterionId").and_then(Value::as_str) == Some(&criterion.id)
+            })
+            .collect();
+
+        if criterion_traces.is_empty() {
+            record_trace_failure(&mut ac_lines, &mut overall_status, &criterion.id);
+            continue;
+        }
+
+        let mut cr_status = crate::review::GateStatus::Pass;
+        let mut evidence_ids: Vec<String> = Vec::new();
+        let mut reasons: Vec<String> = Vec::new();
+        let mut screenshots: Vec<String> = Vec::new();
+        let mut has_evidence = false;
+
+        for trace in &criterion_traces {
+            let evidence_ref = trace.get("evidenceRef");
+            if evidence_ref.is_none() || evidence_ref == Some(&Value::Null) {
+                continue;
+            }
+            let evidence_ref = evidence_ref.unwrap();
+            has_evidence = true;
+
+            let loaded_evidence: Option<Value> =
+                if let Some(rel_path) = evidence_ref.get("path").and_then(Value::as_str) {
+                    let ev_file = paths.directory.join(rel_path);
+                    if ev_file.is_file() {
+                        read_text(&ev_file, rel_path)
+                            .ok()
+                            .and_then(|t| serde_json::from_str(&t).ok())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+            let ev_data = loaded_evidence.as_ref().unwrap_or(evidence_ref);
+
+            let status = ev_data
+                .get("result")
+                .and_then(Value::as_str)
+                .or_else(|| ev_data.get("status").and_then(Value::as_str))
+                .unwrap_or("pass");
+
+            if let Some(r) = ev_data.get("reason").and_then(Value::as_str) {
+                reasons.push(r.to_string());
+            }
+
+            match status {
+                "needs_human" => {
+                    cr_status = crate::review::GateStatus::NeedsHuman;
+                    if let Some(s) = ev_data
+                        .get("screenshot")
+                        .and_then(Value::as_str)
+                        .or_else(|| ev_data.get("path").and_then(Value::as_str))
+                    {
+                        screenshots.push(s.to_string());
+                    }
+                }
+                "unclear" => {
+                    if cr_status != crate::review::GateStatus::Fail {
+                        cr_status = crate::review::GateStatus::Unclear;
+                    }
+                }
+                "skipped" => {
+                    if cr_status != crate::review::GateStatus::Fail {
+                        cr_status = crate::review::GateStatus::Skipped;
+                    }
+                }
+                "not_applicable" => {
+                    if cr_status == crate::review::GateStatus::Pass {
+                        cr_status = crate::review::GateStatus::NotApplicable;
+                    }
+                }
+                "fail" => {
+                    cr_status = crate::review::GateStatus::Fail;
+                }
+                _ => {
+                    if let Some(id) = ev_data.get("raw_store_id").and_then(Value::as_str) {
+                        evidence_ids.push(id.to_string());
+                    } else if let Some(hash) = ev_data.get("output_hash").and_then(Value::as_str) {
+                        evidence_ids.push(hash.to_string());
+                    } else if let Some(test_name) = ev_data.get("test_name").and_then(Value::as_str)
+                    {
+                        evidence_ids.push(test_name.to_string());
+                    } else if let Some(path) = ev_data.get("path").and_then(Value::as_str) {
+                        evidence_ids.push(path.to_string());
+                    }
+                }
+            }
+        }
+
+        if !has_evidence {
+            record_trace_failure(&mut ac_lines, &mut overall_status, &criterion.id);
+            continue;
+        }
+
+        match cr_status {
+            crate::review::GateStatus::Pass => {
+                let ev_str = if evidence_ids.is_empty() {
+                    "verified".to_string()
+                } else {
+                    evidence_ids.join(", ")
+                };
+                let check_str = if criterion.verification_method.is_empty() {
+                    "automated tests"
+                } else {
+                    &criterion.verification_method
+                };
+                ac_lines.push(format!(
+                    "  {}: pass | evidence: {} | verified by: {}",
+                    criterion.id, ev_str, check_str
+                ));
+            }
+            crate::review::GateStatus::NeedsHuman => {
+                let reason = reasons
+                    .first()
+                    .map(|s| s.as_str())
+                    .unwrap_or("visual verdict unclear");
+                let screenshot = screenshots.first().map(|s| s.as_str()).unwrap_or("pending");
+                ac_lines.push(format!(
+                    "  {}: needs_human | reason: {} | screenshot: {}",
+                    criterion.id, reason, screenshot
+                ));
+                if overall_status != crate::review::GateStatus::Fail {
+                    overall_status = crate::review::GateStatus::NeedsHuman;
+                }
+            }
+            crate::review::GateStatus::Unclear => {
+                let reason = reasons
+                    .first()
+                    .map(|s| s.as_str())
+                    .unwrap_or("unclear verification outcome");
+                ac_lines.push(format!("  {}: unclear | reason: {}", criterion.id, reason));
+                if overall_status != crate::review::GateStatus::Fail {
+                    overall_status = crate::review::GateStatus::Unclear;
+                }
+            }
+            crate::review::GateStatus::Skipped => {
+                let reason = reasons.first().map(|s| s.as_str()).unwrap_or("skipped");
+                ac_lines.push(format!("  {}: skipped | reason: {}", criterion.id, reason));
+            }
+            crate::review::GateStatus::NotApplicable => {
+                ac_lines.push(format!(
+                    "  {}: not_applicable | reason: not applicable to change",
+                    criterion.id
+                ));
+            }
+            _ => {
+                record_trace_failure(&mut ac_lines, &mut overall_status, &criterion.id);
+            }
+        }
+    }
+    Ok((overall_status, ac_lines.join("\n")))
+}
+
 fn validate_architecture(
     architecture: &str,
     parsed: &ParsedSpecification,

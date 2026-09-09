@@ -1,5 +1,6 @@
 use super::*;
 use crate::runtime::resolve_repository_root;
+use serde::{Deserialize, Serialize};
 use std::fs;
 
 pub(crate) fn run_review_gates_command(
@@ -146,26 +147,73 @@ pub(crate) fn run_review_gates_command(
 }
 
 /// Tally blocking failures and non-blocking warnings from a slice of gate results.
-/// Each gate is counted at most once — blocking failures take precedence over warning status.
+/// Blocking failures, blocked, needs_human, unclear, and skipped gates take precedence.
 pub(crate) fn tally_gate_results(gate_results: &[GateResult]) -> (i32, i32) {
     let mut blocking_findings = 0;
     let mut warnings = 0;
     for result in gate_results {
-        if result.blocking && result.status == GateStatus::Fail {
+        if result.blocking && result.status.is_blocking() {
             blocking_findings += 1;
-        } else if result.status == GateStatus::Warn {
+        } else if result.status == GateStatus::Warn
+            || (!result.blocking
+                && matches!(result.status, GateStatus::NeedsHuman | GateStatus::Unclear))
+        {
             warnings += 1;
         }
     }
     (blocking_findings, warnings)
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum GateStatus {
     Pass,
     Fail,
     Warn,
+    Skipped,
+    NotApplicable,
+    NeedsHuman,
+    Unclear,
     Blocked,
+}
+
+impl GateStatus {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Pass => "pass",
+            Self::Fail => "fail",
+            Self::Warn => "warn",
+            Self::Skipped => "skipped",
+            Self::NotApplicable => "not_applicable",
+            Self::NeedsHuman => "needs_human",
+            Self::Unclear => "unclear",
+            Self::Blocked => "blocked",
+        }
+    }
+
+    pub(crate) fn icon(self) -> &'static str {
+        match self {
+            Self::Pass => "[PASS]",
+            Self::Fail => "[FAIL]",
+            Self::Warn => "[WARN]",
+            Self::Skipped => "[SKIP]",
+            Self::NotApplicable => "[N/A]",
+            Self::NeedsHuman => "[HUMAN]",
+            Self::Unclear => "[UNCLEAR]",
+            Self::Blocked => "[BLK]",
+        }
+    }
+
+    pub(crate) fn is_pass(self) -> bool {
+        matches!(self, Self::Pass)
+    }
+
+    pub(crate) fn is_blocking(self) -> bool {
+        matches!(
+            self,
+            Self::Fail | Self::Blocked | Self::NeedsHuman | Self::Unclear | Self::Skipped
+        )
+    }
 }
 
 pub(crate) struct GateResult {
@@ -638,7 +686,7 @@ pub(crate) fn check_prettier(repository_root: &Path) -> GateResult {
             },
         },
     );
-    if npx_result.status == GateStatus::Pass {
+    if npx_result.status.is_pass() {
         return npx_result;
     }
     let direct_args = &["--check".to_string(), ".".to_string()];
@@ -692,18 +740,7 @@ pub(crate) fn render_gate_results(
                             .map(|r| {
                                 Value::Object(vec![
                                     ("name".into(), Value::String(r.name.clone())),
-                                    (
-                                        "status".into(),
-                                        Value::String(
-                                            match r.status {
-                                                GateStatus::Pass => "pass",
-                                                GateStatus::Fail => "fail",
-                                                GateStatus::Warn => "warn",
-                                                GateStatus::Blocked => "blocked",
-                                            }
-                                            .into(),
-                                        ),
-                                    ),
+                                    ("status".into(), Value::String(r.status.as_str().into())),
                                     ("blocking".into(), Value::Bool(r.blocking)),
                                     (
                                         "details".into(),
@@ -735,12 +772,7 @@ pub(crate) fn render_gate_results(
             let _ = writeln!(standard_output);
             let _ = writeln!(standard_output, "## Gate Results");
             for result in results {
-                let status_icon = match result.status {
-                    GateStatus::Pass => "[PASS]",
-                    GateStatus::Fail => "[FAIL]",
-                    GateStatus::Warn => "[WARN]",
-                    GateStatus::Blocked => "[BLK]",
-                };
+                let status_icon = result.status.icon();
                 let _ = writeln!(
                     standard_output,
                     "- {} {}: {}",
@@ -757,12 +789,7 @@ pub(crate) fn render_gate_results(
                 if blocking > 0 { "fail" } else { "pass" }
             );
             for result in results {
-                let status_str = match result.status {
-                    GateStatus::Pass => "pass",
-                    GateStatus::Fail => "fail",
-                    GateStatus::Warn => "warn",
-                    GateStatus::Blocked => "blocked",
-                };
+                let status_str = result.status.as_str();
                 let _ = writeln!(
                     standard_output,
                     "  {}={} blocking={} details={}",

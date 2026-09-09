@@ -1810,3 +1810,347 @@ fn compact_gate_output_includes_actionable_details() {
     assert!(rendered.contains("cargo test failed"));
     assert!(rendered.contains("rerun cargo test"));
 }
+
+#[test]
+fn gate_status_honest_semantics_and_serialization() {
+    let variants = [
+        (GateStatus::Pass, "pass", "[PASS]", true, false),
+        (GateStatus::Fail, "fail", "[FAIL]", false, true),
+        (GateStatus::Warn, "warn", "[WARN]", false, false),
+        (GateStatus::Skipped, "skipped", "[SKIP]", false, true),
+        (
+            GateStatus::NotApplicable,
+            "not_applicable",
+            "[N/A]",
+            false,
+            false,
+        ),
+        (
+            GateStatus::NeedsHuman,
+            "needs_human",
+            "[HUMAN]",
+            false,
+            true,
+        ),
+        (GateStatus::Unclear, "unclear", "[UNCLEAR]", false, true),
+        (GateStatus::Blocked, "blocked", "[BLK]", false, true),
+    ];
+    for (status, name, icon, is_pass, is_blocking) in variants {
+        assert_eq!(status.as_str(), name);
+        assert_eq!(status.icon(), icon);
+        assert_eq!(status.is_pass(), is_pass);
+        assert_eq!(status.is_blocking(), is_blocking);
+        let json = serde_json::to_string(&status).expect("serialize status");
+        assert_eq!(json, format!("\"{name}\""));
+        let deserialized: GateStatus = serde_json::from_str(&json).expect("deserialize status");
+        assert_eq!(deserialized, status);
+    }
+}
+
+#[test]
+fn tally_gate_results_honest_counts() {
+    let results = vec![
+        GateResult {
+            name: "pass_gate".to_string(),
+            status: GateStatus::Pass,
+            blocking: false,
+            details: None,
+        },
+        GateResult {
+            name: "fail_gate".to_string(),
+            status: GateStatus::Fail,
+            blocking: true,
+            details: None,
+        },
+        GateResult {
+            name: "warn_gate".to_string(),
+            status: GateStatus::Warn,
+            blocking: false,
+            details: None,
+        },
+        GateResult {
+            name: "human_gate".to_string(),
+            status: GateStatus::NeedsHuman,
+            blocking: true,
+            details: None,
+        },
+        GateResult {
+            name: "unclear_gate".to_string(),
+            status: GateStatus::Unclear,
+            blocking: true,
+            details: None,
+        },
+        GateResult {
+            name: "skipped_gate".to_string(),
+            status: GateStatus::Skipped,
+            blocking: true,
+            details: None,
+        },
+        GateResult {
+            name: "na_gate".to_string(),
+            status: GateStatus::NotApplicable,
+            blocking: false,
+            details: None,
+        },
+        GateResult {
+            name: "blocked_gate".to_string(),
+            status: GateStatus::Blocked,
+            blocking: true,
+            details: None,
+        },
+    ];
+    let (blocking, warnings) = tally_gate_results(&results);
+    assert_eq!(blocking, 5);
+    assert_eq!(warnings, 1);
+}
+
+#[test]
+fn gate_status_rendering_all_formats() {
+    let results = vec![
+        GateResult {
+            name: "gate_human".to_string(),
+            status: GateStatus::NeedsHuman,
+            blocking: true,
+            details: Some("visual check needed".to_string()),
+        },
+        GateResult {
+            name: "gate_na".to_string(),
+            status: GateStatus::NotApplicable,
+            blocking: false,
+            details: Some("not applicable".to_string()),
+        },
+        GateResult {
+            name: "gate_unclear".to_string(),
+            status: GateStatus::Unclear,
+            blocking: true,
+            details: Some("ambiguous result".to_string()),
+        },
+    ];
+
+    let mut json_out = Vec::new();
+    render_gate_results(&results, 2, 0, "json", &mut json_out);
+    let json_str = String::from_utf8(json_out).expect("utf8 json");
+    assert!(json_str.contains("\"needs_human\""));
+    assert!(json_str.contains("\"not_applicable\""));
+    assert!(json_str.contains("\"unclear\""));
+
+    let mut md_out = Vec::new();
+    render_gate_results(&results, 2, 0, "markdown", &mut md_out);
+    let md_str = String::from_utf8(md_out).expect("utf8 md");
+    assert!(md_str.contains("[HUMAN]"));
+    assert!(md_str.contains("[N/A]"));
+    assert!(md_str.contains("[UNCLEAR]"));
+
+    let mut compact_out = Vec::new();
+    render_gate_results(&results, 2, 0, "compact", &mut compact_out);
+    let compact_str = String::from_utf8(compact_out).expect("utf8 compact");
+    assert!(compact_str.contains("gate_human=needs_human"));
+    assert!(compact_str.contains("gate_na=not_applicable"));
+    assert!(compact_str.contains("gate_unclear=unclear"));
+}
+
+fn check_precommit_impact(repo: &Path) -> GateResult {
+    impact_gate(repo, "main", "pre-commit")
+}
+
+fn assert_non_blocking_gate(result: &GateResult, expected: GateStatus) {
+    assert_eq!(result.status, expected);
+    assert!(!result.blocking);
+}
+
+#[test]
+fn impact_gate_unresolvable_diff_returns_warn() {
+    let temp = crate::test_support::unique_temp_dir("keel-impact-unresolvable");
+    let result = impact_gate(&temp, "HEAD~1", "pre-commit");
+    assert_non_blocking_gate(&result, GateStatus::Warn);
+    assert!(result
+        .details
+        .unwrap_or_default()
+        .contains("could not resolve diff range"));
+}
+
+#[test]
+fn impact_gate_empty_touched_returns_not_applicable() {
+    let repository = crate::test_support::unique_temp_dir("keel-impact-empty");
+    git_in(&repository, &["init", "-q"]);
+    git_in(&repository, &["config", "user.email", "test@example.com"]);
+    git_in(&repository, &["config", "user.name", "Test"]);
+    git_in(&repository, &["checkout", "-q", "-B", "main"]);
+    std::fs::write(repository.join("README.md"), "# Clean\n").expect("write readme");
+    git_in(&repository, &["add", "."]);
+    git_in(&repository, &["commit", "-q", "-m", "init"]);
+
+    let clean_result = check_precommit_impact(&repository);
+    assert_non_blocking_gate(&clean_result, GateStatus::NotApplicable);
+    assert!(clean_result
+        .details
+        .unwrap_or_default()
+        .contains("no existing source modified"));
+}
+
+#[test]
+fn impact_gate_missing_graph_without_flow_blocks() {
+    let repository = init_research_gate_repo("impact-missing-flow");
+    let result = check_precommit_impact(&repository);
+    assert_eq!(result.status, GateStatus::Fail);
+    assert!(result.blocking);
+    let details = result.details.unwrap_or_default();
+    assert!(details.contains("code graph unavailable and flow evidence is missing"));
+    assert!(details.contains("keel code-graph build"));
+}
+
+#[test]
+fn impact_gate_missing_graph_with_valid_flow_warns() {
+    let repository = init_research_gate_repo("impact-valid-flow");
+    let (head, diff_fingerprint) = keel_flow::repository_state(&repository).expect("repo state");
+    let check = keel_flow::Check {
+        version: keel_flow::SCHEMA_VERSION,
+        target_file: "src/lib.rs".to_string(),
+        target_files: vec!["src/lib.rs".to_string()],
+        current_behavior: "Existing behavior remains unchanged.".to_string(),
+        entry_point: "value".to_string(),
+        producer: "value producer".to_string(),
+        source_of_truth: "value owner".to_string(),
+        storage_state_queue_owner: "Not found".to_string(),
+        side_effect_owner: "none".to_string(),
+        consumers: vec!["caller".to_string()],
+        cleanup_recovery_path: "none".to_string(),
+        edit_boundary: "src/lib.rs only".to_string(),
+        validation_needed: vec!["cargo test".to_string()],
+        validation_evidence: vec!["cargo test passed".to_string()],
+        repository_head: head,
+        diff_fingerprint,
+        finalized_at: "2026-09-09T00:00:00Z".to_string(),
+        ..keel_flow::Check::default()
+    };
+    keel_flow::write_check(&repository, keel_flow::DEFAULT_ARTIFACT_PATH, check)
+        .expect("write flow check");
+
+    let valid_result = check_precommit_impact(&repository);
+    assert_non_blocking_gate(&valid_result, GateStatus::Warn);
+    let details = valid_result.details.unwrap_or_default();
+    assert!(details.contains("code graph unavailable; impact check skipped"));
+    assert!(details.contains("keel code-graph build"));
+}
+
+#[test]
+fn acceptance_criteria_evaluation_honest_format() {
+    let repository = init_research_gate_repo("ac-eval-test");
+    let keel_home = crate::test_support::unique_temp_dir("keel-ac-eval-home");
+    let (plan_id, research_path) = create_researched_plan(&repository, &keel_home);
+    let plan_path = research_path.parent().expect("plan directory");
+    std::fs::write(
+        plan_path.join("architecture.md"),
+        complete_review_architecture(&plan_id),
+    )
+    .expect("write complete architecture");
+    for action in ["design", "tasks"] {
+        let arguments = [
+            action.to_string(),
+            "--plan".to_string(),
+            plan_id.clone(),
+            "--workspace-root".to_string(),
+            repository.to_string_lossy().into_owned(),
+            "--claude-home".to_string(),
+            keel_home.to_string_lossy().into_owned(),
+        ];
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        assert_eq!(
+            crate::utility::plan::run_plan_command(&arguments, &mut stdout, &mut stderr),
+            0
+        );
+    }
+    let keel_home_text = keel_home.to_str().expect("UTF-8 Keel home");
+    let eval_ac = || {
+        crate::utility::plan::evaluate_acceptance_criteria(&repository, keel_home_text, &plan_id)
+            .expect("evaluate ac")
+    };
+
+    let (status, summary) = eval_ac();
+    assert_eq!(status, GateStatus::Fail);
+    assert!(summary.contains("AC-001: fail | missing traceability to implementation evidence"));
+
+    let ticket_path = plan_path.join("task-001.json");
+    let mut ticket: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&ticket_path).expect("read ticket"))
+            .expect("parse ticket");
+    let subtask_id = ticket["layers"]["tests"][0]["id"]
+        .as_str()
+        .expect("tests subtask id")
+        .to_string();
+    let evidence = serde_json::json!({
+        "schema_version": 1,
+        "artifact": "task_evidence",
+        "plan_id": plan_id,
+        "task_id": "TASK-001",
+        "subtask_id": subtask_id,
+        "evidence_type": "named_test",
+        "recorded_at": "2026-09-09T00:00:00Z",
+        "test_name": "review task evidence",
+        "result": "pass",
+        "output_hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "raw_store_id": "RAW-12345"
+    });
+    let evidence_body = format!("{}\n", serde_json::to_string_pretty(&evidence).unwrap());
+    std::fs::create_dir_all(plan_path.join("evidence")).unwrap();
+    std::fs::write(plan_path.join("evidence/tests.json"), &evidence_body).unwrap();
+    ticket["layers"]["tests"][0]["status"] = serde_json::Value::String("done".to_string());
+    ticket["layers"]["tests"][0]["verification_timestamp"] =
+        serde_json::Value::String("2026-09-09T00:00:00Z".to_string());
+    ticket["layers"]["tests"][0]["evidence_ref"] = serde_json::json!({
+        "path": "evidence/tests.json",
+        "content_hash": format!("fnv1a64:{}", crate::utility::hashing::fnv1a64_hex(&evidence_body))
+    });
+    std::fs::write(
+        &ticket_path,
+        format!("{}\n", serde_json::to_string_pretty(&ticket).unwrap()),
+    )
+    .unwrap();
+
+    let task_refresh = [
+        "tasks".to_string(),
+        "--plan".to_string(),
+        plan_id.clone(),
+        "--workspace-root".to_string(),
+        repository.to_string_lossy().into_owned(),
+        "--claude-home".to_string(),
+        keel_home.to_string_lossy().into_owned(),
+    ];
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    assert_eq!(
+        crate::utility::plan::run_plan_command(&task_refresh, &mut stdout, &mut stderr),
+        0,
+        "pass task refresh: {}",
+        String::from_utf8_lossy(&stderr)
+    );
+
+    let (pass_status, pass_summary) = eval_ac();
+    assert_eq!(pass_status, GateStatus::Pass);
+    assert!(pass_summary.contains("AC-001: pass | evidence: RAW-12345 | verified by:"));
+
+    let human_evidence = serde_json::json!({
+        "schema_version": 1,
+        "artifact": "task_evidence",
+        "plan_id": plan_id,
+        "task_id": "TASK-001",
+        "subtask_id": subtask_id,
+        "evidence_type": "named_test",
+        "recorded_at": "2026-09-09T00:00:00Z",
+        "test_name": "review ui check",
+        "result": "needs_human",
+        "output_hash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "reason": "layout verification requires visual check",
+        "screenshot": "artifacts/screen.png"
+    });
+    let human_body = format!(
+        "{}\n",
+        serde_json::to_string_pretty(&human_evidence).unwrap()
+    );
+    std::fs::write(plan_path.join("evidence/tests.json"), &human_body).unwrap();
+
+    let (human_status, human_summary) = eval_ac();
+    assert_eq!(human_status, GateStatus::NeedsHuman);
+    assert!(human_summary.contains("AC-001: needs_human | reason: layout verification requires visual check | screenshot: artifacts/screen.png"));
+}

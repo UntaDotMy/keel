@@ -66,8 +66,8 @@ pub(crate) fn collect_review_gate_results(
             plan_evidence.plan_id,
             plan_evidence.claude_home,
         ));
-    }
-    if include_impact {
+        gate_results.push(impact_gate(repository_root, base_ref, surface_name));
+    } else if include_impact {
         gate_results.push(impact_gate(repository_root, base_ref, surface_name));
     }
     if let Some(e2e_result) = check_e2e_config(repository_root) {
@@ -455,25 +455,40 @@ pub(crate) fn task_evidence_gate(
             "non-greenfield pre-PR review requires --plan <id> with valid task evidence",
         );
     }
-    match crate::utility::plan::review_task_issues(
-        repository_root,
-        claude_home,
-        plan_id.trim(),
-    ) {
-        Ok(issues) if issues.is_empty() => result(
-            GateStatus::Pass,
-            true,
-            &format!(
-                "plan {} has valid task tickets, RTM links, and evidence for {} existing source file(s)",
+    match crate::utility::plan::review_task_issues(repository_root, claude_home, plan_id.trim()) {
+        Ok(issues) if issues.is_empty() => {
+            let (ac_status, ac_summary) = crate::utility::plan::evaluate_acceptance_criteria(
+                repository_root,
+                claude_home,
                 plan_id.trim(),
-                touched.len()
-            ),
-        ),
+            )
+            .unwrap_or((GateStatus::Pass, String::new()));
+            let details = if ac_summary.is_empty() {
+                format!(
+                    "plan {} has valid task tickets, RTM links, and evidence for {} existing source file(s)",
+                    plan_id.trim(),
+                    touched.len()
+                )
+            } else {
+                format!(
+                    "plan {} has valid task tickets, RTM links, and evidence for {} existing source file(s)\n{}",
+                    plan_id.trim(),
+                    touched.len(),
+                    ac_summary
+                )
+            };
+            result(ac_status, true, &details)
+        }
         Ok(issues) => blocking_failure(&format!(
             "plan {} has {} task evidence finding(s): {}",
             plan_id.trim(),
             issues.len(),
-            issues.iter().take(5).cloned().collect::<Vec<_>>().join("; ")
+            issues
+                .iter()
+                .take(5)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("; ")
         )),
         Err(error) => blocking_failure(&error),
     }
@@ -843,9 +858,38 @@ pub(crate) fn preview_touched_paths(paths: &[String]) -> String {
         .join(", ")
 }
 
-/// Advisory blast-radius gate: reports which in-repo files transitively import
-/// the changed files. Non-blocking and fail-open; a missing or unreadable graph
-/// silently skips. Uses the cached artifact when present, builds fresh otherwise.
+/// Validate whether the current flow-check artifact covers all touched files and is current.
+pub(crate) fn is_flow_evidence_valid(repository_root: &Path, touched: &[String]) -> bool {
+    let (errors, check) =
+        match keel_flow::load_check(repository_root, keel_flow::DEFAULT_ARTIFACT_PATH) {
+            Ok(check) => (
+                keel_flow::validate_finished_check(check.clone()),
+                Some(check),
+            ),
+            Err(_) => return false,
+        };
+    if !errors.is_empty() {
+        return false;
+    }
+    let Some(check) = check else {
+        return false;
+    };
+    if check.docs_only || check.formatting_only || check.generated_only || check.greenfield {
+        return false;
+    }
+    if !artifact_targets_all_touched_files(&check.target_files, touched) {
+        return false;
+    }
+    match keel_flow::repository_state(repository_root) {
+        Ok((head, fingerprint)) => {
+            head == check.repository_head && fingerprint == check.diff_fingerprint
+        }
+        Err(_) => false,
+    }
+}
+
+/// Blast-radius gate: reports in-repo files transitively importing changed files.
+/// Graph missing on protected change without flow evidence blocks; otherwise warns.
 pub(crate) fn impact_gate(
     repository_root: &Path,
     base_ref: &str,
@@ -862,33 +906,43 @@ pub(crate) fn impact_gate(
     let Some(touched) = modified_existing_sources(repository_root, &range) else {
         return GateResult {
             name: "impact".to_string(),
-            status: GateStatus::Blocked,
+            status: GateStatus::Warn,
             blocking: false,
-            details: Some("could not resolve diff range".to_string()),
+            details: Some("could not resolve diff range; impact check skipped".to_string()),
         };
     };
     if touched.is_empty() {
         return GateResult {
             name: "impact".to_string(),
-            status: GateStatus::Pass,
+            status: GateStatus::NotApplicable,
             blocking: false,
-            details: Some("no existing source modified".to_string()),
+            details: Some("no existing source modified; impact check not applicable".to_string()),
         };
     }
 
     let graph = crate::utility::code_graph::cached_artifact_path(repository_root, "")
-        .and_then(|p| crate::utility::code_graph::CodeGraph::from_json_file(&p))
-        .or_else(|| {
-            // The workspace index owns discovery and extraction; a missing or
-            // stale artifact fails open when the canonical index cannot refresh.
-            crate::utility::code_graph::build_graph_from_workspace_index(repository_root, "").ok()
-        });
+        .and_then(|p| crate::utility::code_graph::CodeGraph::from_json_file(&p));
     let Some(graph) = graph else {
+        let flow_valid = is_flow_evidence_valid(repository_root, &touched);
+        if !flow_valid {
+            return GateResult {
+                name: "impact".to_string(),
+                status: GateStatus::Fail,
+                blocking: true,
+                details: Some(format!(
+                    "code graph unavailable and flow evidence is missing or incomplete for {} protected source file(s) ({}). Run `keel code-graph build` to restore graph or `keel flow start`/`keel flow finish` to record flow evidence.",
+                    touched.len(),
+                    preview_touched_paths(&touched)
+                )),
+            };
+        }
         return GateResult {
             name: "impact".to_string(),
-            status: GateStatus::Pass,
+            status: GateStatus::Warn,
             blocking: false,
-            details: Some("code graph unavailable; impact check skipped".to_string()),
+            details: Some(
+                "code graph unavailable; impact check skipped (run `keel code-graph build` to generate graph)".to_string(),
+            ),
         };
     };
 
