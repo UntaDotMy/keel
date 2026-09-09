@@ -263,9 +263,9 @@ fn every_mcp_tool_is_listed_in_readme() {
 }
 
 /// Tool names from `mcp/tools.rs`, derived by pairing each `"inputSchema":` key
-/// with the nearest preceding `"name":`, the shape every definition in
-/// `handle_tools_list` uses. Scoping to `inputSchema` keeps unrelated `"name":`
-/// literals elsewhere in the file out of the set.
+/// with the nearest preceding `"name":` in the canonical catalog literal.
+/// Scoping to `tools_list_catalog` keeps representation helpers (which also
+/// contain MCP-shaped JSON) out of the documentation source-of-truth set.
 fn mcp_tool_names(repo_root: &Path) -> BTreeSet<String> {
     let source = fs::read_to_string(
         repo_root
@@ -280,13 +280,13 @@ fn mcp_tool_names(repo_root: &Path) -> BTreeSet<String> {
 
     let mut names = BTreeSet::new();
     let mut pending: Option<String> = None;
-    // Scope to `handle_tools_list`: an earlier `#[cfg(test)]` module and later
-    // test fixtures both use `"name":`/`"inputSchema":` shapes without being tools.
+    // Scope to `tools_list_catalog`: representation helpers and test fixtures
+    // also use `"name":`/`"inputSchema":` shapes without being tools.
     let mut inside = false;
     for line in source.lines() {
         let trimmed = line.trim();
         if !inside {
-            inside = trimmed.starts_with("pub(super) fn handle_tools_list");
+            inside = trimmed.starts_with("fn tools_list_catalog()");
             continue;
         }
         if trimmed.starts_with("#[cfg(test)]") {

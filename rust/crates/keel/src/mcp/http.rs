@@ -6,7 +6,7 @@
 //! Side Effects: Binds a TCP listener (default 127.0.0.1:3920), accepts bounded
 //!   concurrent clients, writes responses, and tracks sessions/cancellation.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::env;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -171,8 +171,70 @@ fn remote_http_authorized(header: Option<&str>) -> bool {
 
 #[derive(Default)]
 struct HttpState {
-    sessions: Mutex<HashSet<String>>,
+    sessions: Mutex<HashMap<String, Instant>>,
     cancellations: Mutex<HashMap<String, Arc<AtomicBool>>>,
+}
+
+const MAX_HTTP_SESSIONS: usize = 1_000;
+
+fn http_session_ttl() -> Duration {
+    env::var("KEEL_MCP_SESSION_TTL_SECONDS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(|value| Duration::from_secs(value.clamp(1, 86_400)))
+        .unwrap_or_else(|| Duration::from_secs(900))
+}
+
+impl HttpState {
+    fn with_live_sessions<T>(
+        &self,
+        operation: impl FnOnce(&mut HashMap<String, Instant>, Instant) -> T,
+    ) -> T {
+        let now = Instant::now();
+        let ttl = http_session_ttl();
+        let mut sessions = self
+            .sessions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        sessions.retain(|_, last_seen| now.saturating_duration_since(*last_seen) < ttl);
+        operation(&mut sessions, now)
+    }
+
+    fn purge_expired_sessions(&self) {
+        self.with_live_sessions(|_, _| ());
+    }
+
+    fn touch_session(&self, id: &str) -> bool {
+        self.with_live_sessions(|sessions, now| {
+            if let Some(last_seen) = sessions.get_mut(id) {
+                *last_seen = now;
+                true
+            } else {
+                false
+            }
+        })
+    }
+
+    fn register_session(&self, id: String) {
+        self.with_live_sessions(|sessions, now| {
+            if sessions.len() >= MAX_HTTP_SESSIONS {
+                if let Some(oldest) = sessions
+                    .iter()
+                    .min_by_key(|(_, last_seen)| *last_seen)
+                    .map(|(id, _)| id.clone())
+                {
+                    sessions.remove(&oldest);
+                }
+            }
+            sessions.insert(id, now);
+        });
+    }
+
+    fn remove_session(&self, id: &str) {
+        if let Ok(mut sessions) = self.sessions.lock() {
+            sessions.remove(id);
+        }
+    }
 }
 
 fn handle_connection(
@@ -563,6 +625,7 @@ fn respond(
     body: &[u8],
     state: &Arc<HttpState>,
 ) -> std::io::Result<()> {
+    state.purge_expired_sessions();
     if allow_remote_bind() && !remote_http_authorized(headers.authorization.as_deref()) {
         return write_http(
             stream,
@@ -610,9 +673,7 @@ fn respond(
         }
         "DELETE" => {
             if let Some(id) = headers.session_id.as_ref() {
-                if let Ok(mut guard) = state.sessions.lock() {
-                    guard.remove(id);
-                }
+                state.remove_session(id);
             }
             write_http(stream, 200, "text/plain; charset=utf-8", None, b"")
         }
@@ -668,12 +729,7 @@ fn handle_post(
         }
     }
     if let Some(id) = headers.session_id.as_ref() {
-        let known = state
-            .sessions
-            .lock()
-            .map(|guard| guard.contains(id))
-            .unwrap_or(false);
-        if !known {
+        if !state.touch_session(id) {
             return write_http(
                 stream,
                 404,
@@ -743,15 +799,7 @@ fn handle_post(
     let mut new_session: Option<String> = None;
     if is_initialize {
         let session = format!("keel-{}", generate_session_token());
-        if let Ok(mut guard) = state.sessions.lock() {
-            const MAX_SESSIONS: usize = 1000;
-            if guard.len() >= MAX_SESSIONS {
-                if let Some(old) = guard.iter().next().cloned() {
-                    guard.remove(&old);
-                }
-            }
-            guard.insert(session.clone());
-        }
+        state.register_session(session.clone());
         new_session = Some(session);
     }
 
@@ -1269,6 +1317,24 @@ mod tests {
         let _held = guard.try_acquire().expect("first permit");
         assert!(guard.try_acquire().is_none());
         assert_eq!(guard.in_flight(), 1);
+    }
+
+    #[test]
+    fn http_sessions_expire_and_refresh_on_use() {
+        let state = HttpState::default();
+        {
+            let mut sessions = state.sessions.lock().expect("session lock");
+            sessions.insert(
+                "expired".to_string(),
+                Instant::now() - Duration::from_secs(901),
+            );
+        }
+        state.purge_expired_sessions();
+        assert!(!state.touch_session("expired"));
+
+        state.register_session("live".to_string());
+        assert!(state.touch_session("live"));
+        assert_eq!(state.sessions.lock().expect("session lock").len(), 1);
     }
 
     #[test]

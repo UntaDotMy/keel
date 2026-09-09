@@ -21,12 +21,12 @@ returns an explicit blocked state; it never falls back to raw output.
 
 MCP `tools/call` results use the same firewall. `tools/list` supports `core` and
 `full` profiles, deterministic ordering, opaque pagination cursors, and
-progressive levels (capability index, metadata, full schema). Spec-default
-`tools/list` (`params` omitted or `{}`) returns the compatibility catalog;
-keel's `level` and `cursor` fields are opt-in. `keel/discover` returns ranked
-compact metadata and `keel/activate` writes a session/workspace activation
-receipt. The default profile is `core`; `full` remains an explicit
-compatibility/debug choice.
+progressive levels (capability index, metadata, full schema). The no-cursor MCP
+request (`params` omitted or `{}`) always returns a bounded first page; when more
+tools remain it includes `nextCursor`, so an oversized catalog is never returned
+as one unbounded response. `keel/discover` returns ranked compact metadata and
+`keel/activate` writes a session/workspace activation receipt. The default profile
+is `core`; `full` remains an explicit compatibility/debug choice.
 
 The current ratified `core` profile advertises 17 stable tools and defers 20
 specialized tools. The live catalog count and exact `o200k_base` footprint are
@@ -43,9 +43,10 @@ cannot claim interception.
 
 RawStore entries are atomic, capped, namespace-capable, and contain a versioned
 integrity manifest. Reads reject traversal and symlink artifacts and verify the
-manifest before returning bytes. Integrity uses the repository's deterministic
-FNV-1a detector; it is not an authenticity signature. Retention and stale
-staging cleanup remain bounded and recoverable.
+manifest before returning bytes. New manifests use SHA-256 for persistent
+integrity; legacy FNV-1a manifests remain readable for recovery but are not
+treated as authenticity proofs. Retention and stale staging cleanup remain
+bounded and recoverable.
 
 Memory recall is pull-based: results contain a bounded excerpt, stable memory
 and provenance ids, a dedupe key, and a retrieval reference. Full durable memory

@@ -33,14 +33,14 @@ The native entity, hook-capture, lineage, and demo surfaces shipped on `2026-04-
 | Lightweight setup for users who want a thinner layer | `workflow-teaching comparator`  | Its current install story is lighter for users who mainly want process overlays without the same manager packaging posture.                        |
 | First-run conversational shell friendliness          | `runtime-shell comparator`  | Its onboarding and runtime presentation still feel friendlier than the stricter operator posture in this repository.                               |
 | Hosted PR rescue and closeout proof                  | `keel` | The tracked PR-fix, branch-closeout, closure-proof, and validation-recovery scenarios are now source-backed and tied to real green outcomes.       |
-| Token economy and compaction efficiency              | `keel` | Real runtime compaction (`keel eval`) saves 27.28% across genuine toolchain fixtures (79.26% on test pass) with break-even guards; tiered MCP catalog saves 58.7% (1,198 vs 2,902 tokens). |
+| Token economy and compaction efficiency              | `keel` | Real runtime compaction (`keel eval`) saves 27.28% across genuine toolchain fixtures (79.26% on test pass) with break-even guards; tiered MCP catalog saves 58.18% (1,225 vs 2,929 tokens). |
 
 ## What `keel` now proves better than before
 
 - The benchmark suite is no longer based on only two demos.
 - The tracked scorecard now covers eight scenario families from real merged work in this repository.
 - Compaction token savings are verified by real test executions (`keel eval`) with a 27.28% overall reduction and 79.26% on test passes.
-- Tiered MCP catalog profile saves 1,704 tokens (58.72%) on session initialization while maintaining full tool dispatchability.
+- Tiered MCP catalog profile saves 1,704 tokens (58.18%) on session initialization while maintaining full tool dispatchability.
 - The shared harness now keeps one scorecard shape and one evidence format for `keel`, `runtime-shell comparator`, `workflow-teaching comparator`, and the public swarm-automation comparator.
 - The comparison framing is tied to real commands, proof artifacts, and final outcomes instead of broad score claims.
 

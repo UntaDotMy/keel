@@ -13,6 +13,7 @@ keel-platform = { workspace = true }
 keel-releaseassets = { workspace = true }
 keel-professionaltext = { workspace = true }
 rusqlite = { workspace = true }
+sha2 = { workspace = true }
 serde_json = { workspace = true }
 serde = { workspace = true }
 tiktoken-rs = { workspace = true }

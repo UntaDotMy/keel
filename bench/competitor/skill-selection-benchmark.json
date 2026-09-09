@@ -1,0 +1,93 @@
+{
+  "schemaVersion": 1,
+  "benchmark": "skill-selection-progressive-disclosure",
+  "tokenizer": "o200k_base",
+  "corpus": "repository root direct skill directories",
+  "runsPerTask": 3,
+  "taskCount": 38,
+  "policy": {
+    "activationBudgetTokens": 5000,
+    "taskSuccess": "accepted skill is activated; negative fixtures remain silent",
+    "defaultDecisionRule": "cost-aware profile requires material token reduction, no unacceptable task-success or selection regression, and acceptable turn/latency overhead",
+    "cachedInputTokens": "unavailable for local deterministic fixtures"
+  },
+  "profiles": [
+    {
+      "profile": "all-skills-eager",
+      "metrics": {
+        "taskSuccessRate": 81.58,
+        "selectionAccuracy": 0.00,
+        "activationPrecision": 1.65,
+        "activationRecall": 100.00,
+        "inputTokens": 9549666,
+        "cachedInputTokens": "unavailable",
+        "turns": 114,
+        "firstToolErrors": 0,
+        "discoveryOverheadTokens": 676476,
+        "latencyMs": 1072.717,
+        "peakContextTokens": 83769,
+        "recoveryRate": 81.58,
+        "wrongSkillActivations": 5718,
+        "conflictRate": 100.00
+      }
+    },
+    {
+      "profile": "metadata-only",
+      "metrics": {
+        "taskSuccessRate": 18.42,
+        "selectionAccuracy": 18.42,
+        "activationPrecision": 0.00,
+        "activationRecall": 0.00,
+        "inputTokens": 676476,
+        "cachedInputTokens": "unavailable",
+        "turns": 114,
+        "firstToolErrors": 0,
+        "discoveryOverheadTokens": 676476,
+        "latencyMs": 26.532,
+        "peakContextTokens": 5934,
+        "recoveryRate": 18.42,
+        "wrongSkillActivations": 0,
+        "conflictRate": 0.00
+      }
+    },
+    {
+      "profile": "metadata+selective-activation",
+      "metrics": {
+        "taskSuccessRate": 94.74,
+        "selectionAccuracy": 94.74,
+        "activationPrecision": 93.55,
+        "activationRecall": 93.55,
+        "inputTokens": 837810,
+        "cachedInputTokens": "unavailable",
+        "turns": 207,
+        "firstToolErrors": 0,
+        "discoveryOverheadTokens": 676476,
+        "latencyMs": 245.662,
+        "peakContextTokens": 8655,
+        "recoveryRate": 94.74,
+        "wrongSkillActivations": 6,
+        "conflictRate": 0.00
+      }
+    },
+    {
+      "profile": "metadata+cost-aware-selection",
+      "metrics": {
+        "taskSuccessRate": 100.00,
+        "selectionAccuracy": 100.00,
+        "activationPrecision": 100.00,
+        "activationRecall": 100.00,
+        "inputTokens": 835965,
+        "cachedInputTokens": "unavailable",
+        "turns": 207,
+        "firstToolErrors": 0,
+        "discoveryOverheadTokens": 676476,
+        "latencyMs": 990.435,
+        "peakContextTokens": 8655,
+        "recoveryRate": 100.00,
+        "wrongSkillActivations": 0,
+        "conflictRate": 0.00
+      }
+    }
+  ],
+  "reproduction": "cargo run --locked -p keel -- skill-eval --benchmark --json"
+}

@@ -6,6 +6,7 @@
 
 use crate::proxy::execution::ExecutionIdentity;
 use crate::runtime::resolve_claude_home;
+use crate::utility::hashing::{fnv1a64_bytes_hex, sha256_hex};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
@@ -20,6 +21,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 /// caller could construct a RawRun directly — this ensures save() never writes
 /// an unbounded stream to disk. Matches the capture cap.
 const MAX_RAW_WRITE_BYTES: usize = 64 * 1024 * 1024;
+/// Raw ids become directory names and recovery pointers; bound them before
+/// path construction so a caller cannot create oversized path components.
+const MAX_RAW_ID_BYTES: usize = 256;
 
 /// Default raw-output retention when neither the plugin userConfig knob nor the
 /// operator env var is set. Mirrors RAW_OUTPUT_DEFAULT_RETENTION_DAYS used by
@@ -600,8 +604,11 @@ impl RawStore {
                     format!("raw artifact file is not regular: {file_name}"),
                 ));
             }
-            let actual = integrity_hash(&fs::read(path)?);
-            if actual != expected {
+            let bytes = fs::read(path)?;
+            let actual = integrity_hash(&bytes);
+            let matches_legacy =
+                expected.starts_with("fnv1a64:") && legacy_integrity_hash(&bytes) == expected;
+            if actual != expected && !matches_legacy {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!("raw artifact integrity mismatch: {file_name}"),
@@ -995,6 +1002,12 @@ fn validate_raw_id(raw_id: &str) -> io::Result<()> {
             "invalid raw id",
         ));
     }
+    if trimmed.len() > MAX_RAW_ID_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "raw id exceeds maximum length",
+        ));
+    }
     Ok(())
 }
 
@@ -1064,14 +1077,13 @@ fn reject_symlink_if_exists(path: &std::path::Path) -> io::Result<()> {
 }
 
 fn integrity_hash(bytes: &[u8]) -> String {
-    // Use the repository's stable FNV-1a helper without a new dependency; the
-    // manifest detects tampering/corruption, not cryptographic authenticity.
-    let mut hash: u64 = 14695981039346656037;
-    for byte in bytes {
-        hash ^= *byte as u64;
-        hash = hash.wrapping_mul(1099511628211);
-    }
-    format!("fnv1a64:{hash:016x}")
+    format!("sha256:{}", sha256_hex(bytes))
+}
+
+/// Read-only compatibility for manifests written before persistent integrity
+/// moved to SHA-256. New manifests never emit this non-cryptographic digest.
+fn legacy_integrity_hash(bytes: &[u8]) -> String {
+    format!("fnv1a64:{}", fnv1a64_bytes_hex(bytes))
 }
 
 fn write_integrity_manifest(
@@ -1934,6 +1946,13 @@ mod tests {
             assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
         }
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn raw_ids_are_bounded_before_path_construction() {
+        let error = super::validate_raw_id(&"r".repeat(super::MAX_RAW_ID_BYTES + 1))
+            .expect_err("oversized raw ids must fail closed");
+        assert!(error.to_string().contains("maximum length"));
     }
 
     #[cfg(unix)]

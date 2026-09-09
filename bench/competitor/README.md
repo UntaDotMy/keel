@@ -10,6 +10,7 @@ Measurements cover:
 1. End-to-end command output compaction (`keel eval --json`).
 2. Break-even guarantee verification (zero negative savings / zero token inflation).
 3. MCP catalog wire payload profile efficiency (Tiered vs Full profile).
+4. Progressive skill loading and cost-aware selection (`keel skill-eval --benchmark --json`).
 
 ## 1. Command Compaction Benchmark (`keel eval`)
 
@@ -43,9 +44,9 @@ cargo run --locked --bin keel -- eval --json
 
 Keel provides 37 Model Context Protocol tools. To prevent large initial discovery payloads from exhausting host context windows and triggering transport timeouts, Keel implements a tiered catalog profile:
 
-- **Tiered Profile (Default)**: Advertises 17 core eager tools in `tools/list`. Consumes **1,198 tokens** (ratified budget: 1,318 tokens).
-- **Full Profile (`KEEL_MCP_CATALOG_PROFILE=full`)**: Advertises all 37 tools in `tools/list`. Consumes **2,902 tokens** (ratified budget: 3,193 tokens).
-- **Token Reduction**: **1,704 tokens saved per session start (58.72% reduction)**.
+- **Tiered Profile (Default)**: Advertises 17 core eager tools in `tools/list`. Consumes **1,225 tokens** (ratified budget: 1,348 tokens).
+- **Full Profile (`KEEL_MCP_CATALOG_PROFILE=full`)**: Advertises all 37 tools in `tools/list`. Consumes **2,929 tokens** (ratified budget: 3,222 tokens).
+- **Token Reduction**: **1,704 tokens saved per session start (58.18% reduction)**.
 - **Execution Parity**: All 37 tools remain registered, valid, and directly dispatchable through `tools/call` in both profiles.
 
 Reproduction command:
@@ -57,3 +58,4 @@ cargo run --locked --bin keel -- stats --json --workspace-root .
 
 - Detailed fixture run output: [`eval-compaction-report.json`](./eval-compaction-report.json)
 - Comparative analysis metrics: [`comparative-compaction.json`](./comparative-compaction.json)
+- Skill selection profile benchmark: [`skill-selection-benchmark.json`](./skill-selection-benchmark.json)

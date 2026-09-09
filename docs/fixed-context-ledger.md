@@ -24,7 +24,7 @@ measurement. Actual values are recomputed on every invocation and in CI.
 
 | Surface | Actual | Budget |
 |---|---:|---:|
-| `mcp.tools_list.catalog` | 1,198 | 1,318 |
+| `mcp.tools_list.catalog` | 1,225 | 1,348 |
 | `hook.session_start.bootstrap` | 457 | 503 |
 | `hook.user_prompt_submit.simple` | 102 | 113 |
 | `hook.user_prompt_submit.code_change` | 153 | 169 |

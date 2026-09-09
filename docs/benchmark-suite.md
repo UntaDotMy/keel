@@ -76,7 +76,7 @@ In addition to workflow scenarios, the repository measures token efficiency at r
 - Compaction benchmark report: [`bench/competitor/eval-compaction-report.json`](../bench/competitor/eval-compaction-report.json)
 - Comparative analysis metrics: [`bench/competitor/comparative-compaction.json`](../bench/competitor/comparative-compaction.json)
 - Measured compaction savings across 7 genuine toolchain fixtures: **27.28% overall** (with `cargo test` pass achieving **79.26%** savings).
-- Tiered MCP catalog profile: reduces discovery footprint from 2,902 tokens down to **1,198 tokens** (**58.72% reduction**), while retaining direct dispatchability for all 37 tools.
+- Tiered MCP catalog profile: reduces discovery footprint from 2,929 tokens down to **1,225 tokens** (**58.18% reduction**), while retaining direct dispatchability for all 37 tools.
 
 The current gateway baseline is archived in
 [`docs/benchmarks/context-gateway-baseline.json`](./benchmarks/context-gateway-baseline.json).
@@ -85,6 +85,15 @@ Reproduce the context and catalog measurements with `keel stats context --json` 
 turn-count, and provider-cache gates that must be ratified before changing the
 catalog profile. A catalog footprint alone is not evidence of a successful
 profile transition.
+
+The skill gateway has a separate benchmark because skill activation and reference
+budgets are independent surfaces. `keel skill-eval --benchmark --json` runs three
+times per deterministic task and compares `all-skills-eager`, `metadata-only`,
+`metadata+selective-activation`, and `metadata+cost-aware-selection`. It reports
+selection accuracy, activation precision/recall, measured tokenizer input, turns,
+latency, peak context, recovery, wrong-skill activations, and conflict rate. The
+latest committed local snapshot is [`bench/competitor/skill-selection-benchmark.json`](../bench/competitor/skill-selection-benchmark.json);
+provider cached-input values remain explicitly unavailable for these local fixtures.
 
 ## What this suite does not claim
 

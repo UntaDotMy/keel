@@ -9,6 +9,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -95,6 +96,20 @@ pub enum CacheClass {
     Session,
     Dynamic,
     Volatile,
+}
+
+/// Bounded lifecycle state for a dynamic context object. The projection path
+/// emits `visible`, `compressed`, or `masked`; archived/expired are reserved
+/// for durable/reaper owners and are never used as a raw-content fallback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextLifecycleState {
+    Fresh,
+    Visible,
+    Compressed,
+    Masked,
+    Archived,
+    Expired,
 }
 
 /// Policy applied by one firewall instance. The existing fixed-context ledger
@@ -216,6 +231,23 @@ pub struct ContextProjection {
     pub source: ContextSource,
     pub summary: String,
     pub token_count: u32,
+    /// Exact tokenizer count of the cleaned producer payload before reduction.
+    #[serde(rename = "raw_tokens")]
+    pub raw_tokens: u32,
+    /// Exact tokenizer count of the model-visible projection.
+    #[serde(rename = "visible_tokens")]
+    pub visible_tokens: u32,
+    /// Hard budget applied to this projection.
+    #[serde(rename = "budget")]
+    pub budget: u32,
+    /// Deterministic reducer selected for this projection.
+    pub reducer: String,
+    pub policy_version: String,
+    pub state: ContextLifecycleState,
+    /// Creation timestamp is evidence metadata, not part of the stable
+    /// model-visible metadata projection.
+    #[serde(skip)]
+    pub created_at: u64,
     pub raw_artifact_id: Option<String>,
     pub provenance_id: String,
     pub truncated: bool,
@@ -231,6 +263,15 @@ pub struct ContextProjectionMetadata {
     pub id: String,
     pub source: ContextSource,
     pub token_count: u32,
+    #[serde(rename = "raw_tokens")]
+    pub raw_tokens: u32,
+    #[serde(rename = "visible_tokens")]
+    pub visible_tokens: u32,
+    #[serde(rename = "budget")]
+    pub budget: u32,
+    pub reducer: String,
+    pub policy_version: String,
+    pub state: ContextLifecycleState,
     pub raw_artifact_id: Option<String>,
     pub provenance_id: String,
     pub truncated: bool,
@@ -268,6 +309,11 @@ pub struct ContextMeasurement {
     pub cache_hit_rate: Option<f64>,
     pub cache_class: CacheClass,
     pub budget_tokens: usize,
+    pub soft_budget_tokens: Option<usize>,
+    pub hard_budget_tokens: usize,
+    pub tokenizer: String,
+    pub measurement_timestamp: u64,
+    pub implementation_version: String,
     pub status: String,
 }
 
@@ -280,12 +326,33 @@ pub struct ContextLedger {
     pub provider_usage: Vec<ProviderUsage>,
 }
 
+/// In-memory accounting is transient operator state. Keep a bounded tail so a
+/// long-lived session cannot turn observability into an unbounded allocation.
+const MAX_LEDGER_MEASUREMENTS: usize = 4_096;
+const MAX_PROVIDER_USAGE: usize = 512;
+
 impl ContextLedger {
     pub fn record(&mut self, measurement: ContextMeasurement) {
+        if self.measurements.len() >= MAX_LEDGER_MEASUREMENTS {
+            let excess = self
+                .measurements
+                .len()
+                .saturating_sub(MAX_LEDGER_MEASUREMENTS)
+                .saturating_add(1);
+            self.measurements.drain(..excess);
+        }
         self.measurements.push(measurement);
     }
 
     pub fn record_provider_usage(&mut self, usage: ProviderUsage) {
+        if self.provider_usage.len() >= MAX_PROVIDER_USAGE {
+            let excess = self
+                .provider_usage
+                .len()
+                .saturating_sub(MAX_PROVIDER_USAGE)
+                .saturating_add(1);
+            self.provider_usage.drain(..excess);
+        }
         self.provider_usage.push(usage);
     }
 
@@ -335,6 +402,12 @@ impl ContextProjection {
             id: self.id.clone(),
             source: self.source.clone(),
             token_count: self.token_count,
+            raw_tokens: self.raw_tokens,
+            visible_tokens: self.visible_tokens,
+            budget: self.budget,
+            reducer: self.reducer.clone(),
+            policy_version: self.policy_version.clone(),
+            state: self.state,
             raw_artifact_id: self.raw_artifact_id.clone(),
             provenance_id: self.provenance_id.clone(),
             truncated: self.truncated,
@@ -365,6 +438,11 @@ pub enum ContextFirewallError {
     MissingSessionIdentity,
     #[error("context projection contains an invalid raw artifact id")]
     InvalidArtifactId,
+    #[error("context projection {field} identity exceeds the {max_bytes}-byte bound")]
+    IdentityTooLarge {
+        field: &'static str,
+        max_bytes: usize,
+    },
     #[error("context payload exceeds the {max_input_bytes}-byte input bound")]
     InputTooLarge { max_input_bytes: usize },
     #[error(
@@ -402,10 +480,33 @@ pub type ContextGateway = ContextFirewall;
 /// owned by their durable stores.
 const MAX_SESSION_GATEWAYS: usize = 256;
 const MAX_DEDUPE_ENTRIES: usize = 4_096;
+const MAX_CONTEXT_ID_BYTES: usize = 512;
+const MAX_ARTIFACT_ID_BYTES: usize = 256;
+const DEFAULT_CONTEXT_GATEWAY_TTL_SECONDS: u64 = 900;
+
+fn context_gateway_ttl() -> Duration {
+    std::env::var("KEEL_CONTEXT_GATEWAY_TTL_SECONDS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(|value| Duration::from_secs(value.clamp(1, 86_400)))
+        .unwrap_or_else(|| Duration::from_secs(DEFAULT_CONTEXT_GATEWAY_TTL_SECONDS))
+}
+
+fn current_unix_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+struct SessionGatewayEntry {
+    gateway: ContextFirewall,
+    last_seen: Instant,
+}
 
 #[derive(Default)]
 struct SessionGateways {
-    entries: HashMap<String, ContextFirewall>,
+    entries: HashMap<String, SessionGatewayEntry>,
     order: VecDeque<String>,
 }
 
@@ -420,35 +521,55 @@ pub fn project_scoped(
     policy: ContextPolicy,
     input: ProjectionInput,
 ) -> Result<ContextProjection, ContextFirewallError> {
-    let key = format!("{}\0{}", input.workspace_id.trim(), input.session_id.trim());
+    let workspace_id = input.workspace_id.trim();
+    let session_id = input.session_id.trim();
+    validate_identity_component(workspace_id, "workspace")?;
+    validate_identity_component(session_id, "session")?;
+    let key = format!("{}\0{}", workspace_id, session_id);
     let mut gateways = SESSION_GATEWAYS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let now = Instant::now();
+    let ttl = context_gateway_ttl();
+    gateways
+        .entries
+        .retain(|_, entry| now.saturating_duration_since(entry.last_seen) < ttl);
+    let live_keys = gateways.entries.keys().cloned().collect::<HashSet<_>>();
+    gateways
+        .order
+        .retain(|existing| live_keys.contains(existing));
     if !gateways.entries.contains_key(&key) {
         while gateways.entries.len() >= MAX_SESSION_GATEWAYS {
-            let Some(evicted) = gateways.order.pop_front() else {
-                break;
-            };
+            let evicted = gateways
+                .order
+                .pop_front()
+                .or_else(|| gateways.entries.keys().next().cloned());
+            let Some(evicted) = evicted else { break };
             gateways.entries.remove(&evicted);
         }
         gateways.order.push_back(key.clone());
-        gateways
-            .entries
-            .insert(key.clone(), ContextFirewall::new(policy.clone()));
+        gateways.entries.insert(
+            key.clone(),
+            SessionGatewayEntry {
+                gateway: ContextFirewall::new(policy.clone()),
+                last_seen: now,
+            },
+        );
     } else {
         // Keep eviction order deterministic and approximate LRU behavior. The
         // bounded map is a memory safeguard, not a source of authorization.
         gateways.order.retain(|existing| existing != &key);
         gateways.order.push_back(key.clone());
     }
-    let gateway = gateways
+    let entry = gateways
         .entries
         .get_mut(&key)
         .expect("session gateway inserted or already present");
+    entry.last_seen = now;
     // The session gateway owns dedupe and measurement; callers own policy.
     // Refresh policy per projection so a narrow budget cannot leak across calls.
-    gateway.policy = policy;
-    gateway.project(input)
+    entry.gateway.policy = policy;
+    entry.gateway.project(input)
 }
 
 impl ContextFirewall {
@@ -503,8 +624,13 @@ impl ContextFirewall {
         if session_id.is_empty() {
             return Err(ContextFirewallError::MissingSessionIdentity);
         }
+        validate_identity_component(workspace_id, "workspace")?;
+        validate_identity_component(session_id, "session")?;
         if let Some(raw_id) = input.raw_artifact_id.as_deref() {
             validate_artifact_id(raw_id)?;
+        }
+        if let Some(request_id) = input.request_id.as_deref() {
+            validate_identity_component(request_id.trim(), "request")?;
         }
         if input.content.len() > self.policy.max_input_bytes {
             return Err(ContextFirewallError::InputTooLarge {
@@ -512,21 +638,24 @@ impl ContextFirewall {
             });
         }
 
-        let cleaned_content = if self.policy.neutralize_injection {
+        let (cleaned_content, masked) = if self.policy.neutralize_injection {
             let raw_id = input.raw_artifact_id.as_deref().unwrap_or("unavailable");
-            let (cleaned, _findings) = neutralize_injection(&input.content, raw_id);
+            let (cleaned, findings) = neutralize_injection(&input.content, raw_id);
             if input.raw_artifact_id.is_some() {
-                cleaned
+                (cleaned, !findings.is_empty())
             } else {
                 // Preserve the injection guard marker and state when no raw-store
                 // owner exists, so the missing recovery path stays explicit.
-                cleaned.replace(
-                    "raw available via keel raw unavailable",
-                    "raw artifact unavailable",
+                (
+                    cleaned.replace(
+                        "raw available via keel raw unavailable",
+                        "raw artifact unavailable",
+                    ),
+                    !findings.is_empty(),
                 )
             }
         } else {
-            input.content.clone()
+            (input.content.clone(), false)
         };
         let content = cleaned_content.trim().to_string();
         let normalized = normalize_for_identity(&content);
@@ -543,8 +672,13 @@ impl ContextFirewall {
 
         let raw_tokens = TokenMeter::count_text(&content);
         let budget_tokens = self.policy.max_tokens;
-        let (summary, truncated, omitted_items) = if raw_tokens <= self.policy.max_tokens {
-            (content, false, input.omitted_items)
+        let (summary, truncated, omitted_items, reducer) = if raw_tokens <= self.policy.max_tokens {
+            (
+                content,
+                false,
+                input.omitted_items,
+                "identity-v1".to_string(),
+            )
         } else {
             let pointer = recovery_pointer(input.raw_artifact_id.as_deref());
             let pointer_tokens = TokenMeter::count_text(&pointer);
@@ -555,7 +689,7 @@ impl ContextFirewall {
                 });
             }
             let prefix_budget = self.policy.max_tokens - pointer_tokens;
-            let prefix = truncate_to_tokens(&content, prefix_budget);
+            let prefix = semantic_reduce_to_tokens(&content, prefix_budget);
             let summary = format!("{}{}", prefix.trim_end(), pointer);
             let summary_tokens = TokenMeter::count_text(&summary);
             if summary_tokens > self.policy.max_tokens {
@@ -570,7 +704,7 @@ impl ContextFirewall {
                 .saturating_sub(kept_lines)
                 .saturating_add(input.omitted_items as usize)
                 .min(u32::MAX as usize) as u32;
-            (summary, true, omitted)
+            (summary, true, omitted, "semantic-bounded-v1".to_string())
         };
 
         let request_id = input
@@ -629,6 +763,11 @@ impl ContextFirewall {
             cache_hit_rate: None,
             cache_class: input.cache_class,
             budget_tokens,
+            soft_budget_tokens: None,
+            hard_budget_tokens: budget_tokens,
+            tokenizer: "o200k_base".to_string(),
+            measurement_timestamp: current_unix_seconds(),
+            implementation_version: "context-firewall-v1".to_string(),
             status: if model_visible_tokens <= budget_tokens {
                 "within_budget".to_string()
             } else {
@@ -640,6 +779,19 @@ impl ContextFirewall {
             source: input.source,
             summary,
             token_count,
+            raw_tokens: raw_tokens.min(u32::MAX as usize) as u32,
+            visible_tokens: model_visible_tokens.min(u32::MAX as usize) as u32,
+            budget: budget_tokens.min(u32::MAX as usize) as u32,
+            reducer,
+            policy_version: "context-firewall-v1".to_string(),
+            state: if masked {
+                ContextLifecycleState::Masked
+            } else if truncated {
+                ContextLifecycleState::Compressed
+            } else {
+                ContextLifecycleState::Visible
+            },
+            created_at: current_unix_seconds(),
             raw_artifact_id: input.raw_artifact_id,
             provenance_id,
             truncated,
@@ -699,6 +851,25 @@ fn validate_artifact_id(raw_id: &str) -> Result<(), ContextFirewallError> {
     {
         return Err(ContextFirewallError::InvalidArtifactId);
     }
+    if trimmed.len() > MAX_ARTIFACT_ID_BYTES {
+        return Err(ContextFirewallError::IdentityTooLarge {
+            field: "artifact",
+            max_bytes: MAX_ARTIFACT_ID_BYTES,
+        });
+    }
+    Ok(())
+}
+
+fn validate_identity_component(
+    value: &str,
+    field: &'static str,
+) -> Result<(), ContextFirewallError> {
+    if value.len() > MAX_CONTEXT_ID_BYTES {
+        return Err(ContextFirewallError::IdentityTooLarge {
+            field,
+            max_bytes: MAX_CONTEXT_ID_BYTES,
+        });
+    }
     Ok(())
 }
 
@@ -718,6 +889,80 @@ fn recovery_pointer(raw_artifact_id: Option<&str>) -> String {
         }
         None => "\n[keel] context truncated; raw artifact unavailable".to_string(),
     }
+}
+
+/// Deterministic semantic reducer used before generic truncation. It keeps
+/// status/error/policy lines and a small tail of summary lines, then fills any
+/// remaining space in source order. A single unstructured line falls back to
+/// the exact UTF-8-safe tokenizer cut below.
+fn semantic_reduce_to_tokens(text: &str, max_tokens: usize) -> String {
+    if max_tokens == 0 || text.is_empty() {
+        return String::new();
+    }
+    if TokenMeter::count_text(text) <= max_tokens {
+        return text.to_string();
+    }
+    let lines = text.lines().collect::<Vec<_>>();
+    if lines.len() <= 1 {
+        return truncate_to_tokens(text, max_tokens);
+    }
+
+    let mut priority = Vec::new();
+    priority.extend(0..lines.len().min(2));
+    priority.extend(
+        lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| is_high_signal_line(line))
+            .map(|(index, _)| index),
+    );
+    priority.extend(lines.len().saturating_sub(2)..lines.len());
+    priority.extend(0..lines.len());
+
+    let mut selected = std::collections::BTreeSet::new();
+    for index in priority {
+        if !selected.insert(index) {
+            continue;
+        }
+        let candidate = selected
+            .iter()
+            .map(|selected_index| lines[*selected_index])
+            .collect::<Vec<_>>()
+            .join("\n");
+        if TokenMeter::count_text(&candidate) > max_tokens {
+            selected.remove(&index);
+        }
+    }
+    let reduced = selected
+        .iter()
+        .map(|index| lines[*index])
+        .collect::<Vec<_>>()
+        .join("\n");
+    if reduced.is_empty() {
+        truncate_to_tokens(text, max_tokens)
+    } else {
+        reduced
+    }
+}
+
+fn is_high_signal_line(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    [
+        "error",
+        "fail",
+        "panic",
+        "fatal",
+        "exception",
+        "denied",
+        "timeout",
+        "exit",
+        "status",
+        "policy",
+        "security",
+        "blocked",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
 }
 
 /// Return the longest UTF-8-safe prefix whose exact tokenizer count is within
@@ -775,5 +1020,132 @@ mod tests {
         let right = second.project(input).expect("second projection");
         assert_eq!(left.id, right.id);
         assert_eq!(left.provenance_id, right.provenance_id);
+    }
+
+    #[test]
+    fn semantic_reducer_keeps_failure_and_tail_evidence() {
+        let mut firewall = ContextFirewall::new(ContextPolicy::with_max_tokens(60));
+        let content = (0..80)
+            .map(|index| {
+                if index == 40 {
+                    "error: failed test at src/lib.rs:40".to_string()
+                } else if index == 79 {
+                    "exit status: 1".to_string()
+                } else {
+                    format!("noise line {index}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let projection = firewall
+            .project(ProjectionInput::new(
+                ContextSource::Error,
+                content,
+                Some("raw-error"),
+                "workspace",
+                "session",
+            ))
+            .expect("failure projection remains bounded");
+        assert!(projection.summary.contains("failed test"));
+        assert!(projection.summary.contains("exit status"));
+        assert_eq!(projection.reducer, "semantic-bounded-v1");
+        assert!(projection.raw_tokens > projection.visible_tokens);
+        assert_eq!(projection.budget, 60);
+    }
+
+    #[test]
+    fn transient_ledger_state_keeps_a_bounded_tail() {
+        let mut ledger = ContextLedger::default();
+        for index in 0..(MAX_LEDGER_MEASUREMENTS + 17) {
+            ledger.record(ContextMeasurement {
+                surface: format!("surface-{index}"),
+                raw_input_tokens: index,
+                model_visible_input_tokens: index,
+                cached_input_tokens: None,
+                uncached_input_tokens: Some(index),
+                output_tokens: 0,
+                context_peak_tokens: index,
+                reduced_tokens: index,
+                saved_tokens: 0,
+                reduction_ratio: 0.0,
+                turn_count: index as u64,
+                tool_count: 0,
+                cache_hit_rate: None,
+                cache_class: CacheClass::Dynamic,
+                budget_tokens: 1_000,
+                soft_budget_tokens: None,
+                hard_budget_tokens: 1_000,
+                tokenizer: "o200k_base".to_string(),
+                measurement_timestamp: 0,
+                implementation_version: "test".to_string(),
+                status: "within_budget".to_string(),
+            });
+        }
+        for index in 0..(MAX_PROVIDER_USAGE + 17) {
+            ledger.record_provider_usage(ProviderUsage {
+                provider: format!("provider-{index}"),
+                cached_input_tokens: None,
+                uncached_input_tokens: Some(index),
+                output_tokens: Some(0),
+            });
+        }
+        assert_eq!(ledger.measurements.len(), MAX_LEDGER_MEASUREMENTS);
+        assert_eq!(ledger.provider_usage.len(), MAX_PROVIDER_USAGE);
+        assert_eq!(ledger.measurements[0].surface, "surface-17");
+        assert_eq!(ledger.provider_usage[0].provider, "provider-17");
+    }
+
+    #[test]
+    fn expired_scoped_gateway_is_replaced_instead_of_reusing_dedupe_state() {
+        let key = format!(
+            "context-expiry-workspace-{}\0context-expiry-session-{}",
+            std::process::id(),
+            std::process::id()
+        );
+        let workspace = format!("context-expiry-workspace-{}", std::process::id());
+        let session = format!("context-expiry-session-{}", std::process::id());
+        let input = ProjectionInput::new(
+            ContextSource::CommandOutput,
+            "expired gateway evidence",
+            None::<String>,
+            &workspace,
+            &session,
+        );
+        let mut expired = ContextFirewall::default();
+        expired.project(input.clone()).expect("seed dedupe state");
+        {
+            let mut gateways = SESSION_GATEWAYS.lock().expect("session gateway lock");
+            gateways.entries.insert(
+                key.clone(),
+                SessionGatewayEntry {
+                    gateway: expired,
+                    last_seen: Instant::now() - context_gateway_ttl() - Duration::from_secs(1),
+                },
+            );
+            gateways.order.push_back(key.clone());
+        }
+        assert!(project_scoped(ContextPolicy::default(), input).is_ok());
+        let mut gateways = SESSION_GATEWAYS.lock().expect("session gateway lock");
+        gateways.entries.remove(&key);
+        gateways.order.retain(|existing| existing != &key);
+    }
+
+    #[test]
+    fn oversized_context_identity_is_rejected_before_projection() {
+        let mut firewall = ContextFirewall::default();
+        let result = firewall.project(ProjectionInput::new(
+            ContextSource::Memory,
+            "bounded",
+            Some("a".repeat(MAX_ARTIFACT_ID_BYTES + 1)),
+            "workspace",
+            "session",
+        ));
+        assert!(matches!(
+            result,
+            Err(ContextFirewallError::IdentityTooLarge {
+                field: "artifact",
+                ..
+            })
+        ));
     }
 }

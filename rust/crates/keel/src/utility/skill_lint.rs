@@ -13,17 +13,36 @@
 //! the superpowers-style "test that skills trigger" gate, expressed as the
 //! checks we can verify deterministically without invoking the live model.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::args::FlagSet;
 use crate::json::{write_indented, Value};
+use crate::proxy::token_meter::TokenMeter;
 use crate::runtime::{display_path, resolve_repository_root};
+use crate::utility::hashing::fnv1a64_bytes_hex;
+use crate::utility::skill_match::{
+    SKILL_RESOURCE_MAX_BYTES, SKILL_S1_HARD_TOKENS, SKILL_S1_TARGET_TOKENS, SKILL_S2_HARD_TOKENS,
+};
 
 /// Official cap: combined `description` + `when_to_use` text the matcher reads.
 /// Source: code.claude.com/docs/en/skills (documented 1,536-char limit).
 const DESCRIPTION_BUDGET_CHARS: usize = 1536;
+
+/// Skill budgets are deliberately separate from MCP/context budgets. S0 is the
+/// metadata used for routing, S1 is the activated SKILL.md core, and S2 is a
+/// specifically requested reference/resource. All limits use the authoritative
+/// o200k tokenizer rather than line or byte counts alone.
+const DEFAULT_S0_HARD_TOKENS: usize = 768;
+const DEFAULT_S1_WARNING_TOKENS: usize = 3_500;
+const DEFAULT_S2_WARNING_TOKENS: usize = 3_500;
+// Keep the package cap large enough for reviewed image assets while bounding
+// vendored trees; operators can lower it with `KEEL_SKILL_PACKAGE_MAX_BYTES`.
+const DEFAULT_SKILL_PACKAGE_MAX_BYTES: u64 = 2 * 1024 * 1024;
+
+const RESOURCE_DIRECTORY_NAMES: &[&str] = &["references", "scripts", "assets", "examples"];
 
 #[derive(Debug, Default)]
 struct SkillReport {
@@ -40,6 +59,15 @@ struct SkillReport {
     /// structure — so the score surfaces quality the binary pass/fail cannot.
     score: u32,
     score_breakdown: Vec<(String, u32, u32)>,
+    /// Exact tokenizer measurements for the three progressive skill levels.
+    s0_tokens: usize,
+    s1_tokens: usize,
+    s2_tokens: usize,
+    package_bytes: u64,
+    resource_count: usize,
+    /// Stable, non-cryptographic fingerprint used only for duplicate-content
+    /// detection. Persistent integrity claims use SHA-256 elsewhere.
+    instruction_fingerprint: String,
 }
 
 impl SkillReport {
@@ -141,7 +169,34 @@ pub fn run_skill_lint_command(
         return 1;
     }
 
-    let all_reports: Vec<SkillReport> = skill_files.iter().map(|path| lint_skill(path)).collect();
+    let mut all_reports: Vec<SkillReport> =
+        skill_files.iter().map(|path| lint_skill(path)).collect();
+    // Treat exact normalized-body duplicates as warnings for deliberate
+    // consolidation; near-duplicate prose remains a human-review concern.
+    let mut duplicate_groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    for (index, report) in all_reports.iter().enumerate() {
+        if !report.instruction_fingerprint.is_empty() {
+            duplicate_groups
+                .entry(report.instruction_fingerprint.clone())
+                .or_default()
+                .push(index);
+        }
+    }
+    for indices in duplicate_groups
+        .values()
+        .filter(|indices| indices.len() > 1)
+    {
+        let names = indices
+            .iter()
+            .map(|index| all_reports[*index].name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        for index in indices {
+            all_reports[*index].warnings.push(format!(
+                "duplicate normalized skill body; review overlap with {names}"
+            ));
+        }
+    }
     let reports: Vec<SkillReport> = if flag_set.bool_value("core") {
         all_reports
             .into_iter()
@@ -167,6 +222,7 @@ pub fn run_skill_lint_command(
     } else {
         reports.iter().map(|r| r.score).sum::<u32>() / reports.len() as u32
     };
+    let limits = skill_limits();
 
     if flag_set.bool_value("json") {
         let payload = Value::Object(vec![
@@ -181,6 +237,39 @@ pub fn run_skill_lint_command(
             (
                 "averageScore".into(),
                 Value::Number(average_score.to_string()),
+            ),
+            (
+                "policy".into(),
+                Value::Object(vec![
+                    (
+                        "s0HardTokens".into(),
+                        Value::Number(limits.s0_hard_tokens.to_string()),
+                    ),
+                    (
+                        "s1TargetTokens".into(),
+                        Value::Number(limits.s1_target_tokens.to_string()),
+                    ),
+                    (
+                        "s1WarningTokens".into(),
+                        Value::Number(limits.s1_warning_tokens.to_string()),
+                    ),
+                    (
+                        "s1HardTokens".into(),
+                        Value::Number(limits.s1_hard_tokens.to_string()),
+                    ),
+                    (
+                        "s2WarningTokens".into(),
+                        Value::Number(limits.s2_warning_tokens.to_string()),
+                    ),
+                    (
+                        "s2HardTokens".into(),
+                        Value::Number(limits.s2_hard_tokens.to_string()),
+                    ),
+                    (
+                        "packageMaxBytes".into(),
+                        Value::Number(limits.package_max_bytes.to_string()),
+                    ),
+                ]),
             ),
             (
                 "skills".into(),
@@ -249,6 +338,30 @@ fn report_to_value(report: &SkillReport) -> Value {
         ("ok".into(), Value::Bool(report.ok())),
         ("score".into(), Value::Number(report.score.to_string())),
         (
+            "s0Tokens".into(),
+            Value::Number(report.s0_tokens.to_string()),
+        ),
+        (
+            "s1Tokens".into(),
+            Value::Number(report.s1_tokens.to_string()),
+        ),
+        (
+            "s2Tokens".into(),
+            Value::Number(report.s2_tokens.to_string()),
+        ),
+        (
+            "packageBytes".into(),
+            Value::Number(report.package_bytes.to_string()),
+        ),
+        (
+            "resourceCount".into(),
+            Value::Number(report.resource_count.to_string()),
+        ),
+        (
+            "instructionFingerprint".into(),
+            Value::String(report.instruction_fingerprint.clone()),
+        ),
+        (
             "scoreBreakdown".into(),
             Value::Array(
                 report
@@ -300,6 +413,260 @@ fn discover_skill_files(repository_root: &Path) -> Result<Vec<PathBuf>, String> 
     Ok(skill_files)
 }
 
+#[derive(Debug, Clone, Copy)]
+struct SkillLimits {
+    s0_hard_tokens: usize,
+    s1_target_tokens: usize,
+    s1_warning_tokens: usize,
+    s1_hard_tokens: usize,
+    s2_warning_tokens: usize,
+    s2_hard_tokens: usize,
+    package_max_bytes: u64,
+}
+
+fn configured_usize(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .map(|value| value.min(1_000_000))
+        .unwrap_or(default)
+}
+
+fn configured_u64(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(|value| value.min(64 * 1024 * 1024))
+        .unwrap_or(default)
+}
+
+fn skill_limits() -> SkillLimits {
+    let s1_target_tokens = configured_usize("KEEL_SKILL_S1_TARGET_TOKENS", SKILL_S1_TARGET_TOKENS);
+    let s1_warning_tokens = configured_usize(
+        "KEEL_SKILL_S1_WARNING_TOKENS",
+        DEFAULT_S1_WARNING_TOKENS.max(s1_target_tokens),
+    );
+    let s1_hard_tokens = configured_usize(
+        "KEEL_SKILL_S1_HARD_TOKENS",
+        SKILL_S1_HARD_TOKENS.max(s1_warning_tokens),
+    );
+    SkillLimits {
+        s0_hard_tokens: configured_usize("KEEL_SKILL_S0_HARD_TOKENS", DEFAULT_S0_HARD_TOKENS),
+        s1_target_tokens,
+        s1_warning_tokens,
+        s1_hard_tokens,
+        s2_warning_tokens: configured_usize(
+            "KEEL_SKILL_S2_WARNING_TOKENS",
+            DEFAULT_S2_WARNING_TOKENS,
+        ),
+        s2_hard_tokens: configured_usize("KEEL_SKILL_S2_HARD_TOKENS", SKILL_S2_HARD_TOKENS),
+        package_max_bytes: configured_u64(
+            "KEEL_SKILL_PACKAGE_MAX_BYTES",
+            DEFAULT_SKILL_PACKAGE_MAX_BYTES,
+        ),
+    }
+}
+
+#[derive(Debug)]
+struct SkillResource {
+    relative_path: String,
+    bytes: u64,
+    tokens: Option<usize>,
+}
+
+/// Walk a skill without following symlinks. The package byte cap is a resource
+/// bound, not a reason to load arbitrary files into memory. Only the standard
+/// S2 directories are counted as references/resources; unrelated metadata such
+/// as an agent profile remains part of the package byte total.
+fn inspect_skill_package(skill_root: &Path) -> (u64, Vec<SkillResource>) {
+    let mut package_bytes = 0u64;
+    let mut resources = Vec::new();
+    walk_skill_package(
+        skill_root,
+        skill_root,
+        false,
+        &mut package_bytes,
+        &mut resources,
+    );
+    resources.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    (package_bytes, resources)
+}
+
+fn walk_skill_package(
+    skill_root: &Path,
+    path: &Path,
+    in_resource_dir: bool,
+    package_bytes: &mut u64,
+    resources: &mut Vec<SkillResource>,
+) {
+    let Ok(entries) = fs::read_dir(path) else {
+        return;
+    };
+    let mut entries = entries.flatten().collect::<Vec<_>>();
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let entry_path = entry.path();
+        let Ok(metadata) = fs::symlink_metadata(&entry_path) else {
+            continue;
+        };
+        let file_type = metadata.file_type();
+        if file_type.is_symlink() {
+            // A symlink is never followed into a package or reference tree.
+            continue;
+        }
+        if file_type.is_dir() {
+            let is_resource_dir = path == skill_root
+                && entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| RESOURCE_DIRECTORY_NAMES.contains(&name));
+            walk_skill_package(
+                skill_root,
+                &entry_path,
+                in_resource_dir || is_resource_dir,
+                package_bytes,
+                resources,
+            );
+            continue;
+        }
+        if !file_type.is_file() {
+            continue;
+        }
+        *package_bytes = package_bytes.saturating_add(metadata.len());
+        if !in_resource_dir {
+            continue;
+        }
+        let relative_path = entry_path
+            .strip_prefix(skill_root)
+            .unwrap_or(&entry_path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let tokens = fs::read(&entry_path)
+            .ok()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .map(|text| TokenMeter::count_text(&text));
+        resources.push(SkillResource {
+            relative_path,
+            bytes: metadata.len(),
+            tokens,
+        });
+    }
+}
+
+fn resource_reference_tokens(body: &str) -> Vec<String> {
+    let mut found = BTreeSet::new();
+    for token in body.split(|character: char| {
+        character.is_whitespace()
+            || matches!(
+                character,
+                '`' | '(' | ')' | '[' | ']' | '{' | '}' | '"' | '\''
+            )
+    }) {
+        let cleaned = token
+            .trim_start_matches("./")
+            .trim_matches(|character: char| matches!(character, ',' | '.' | ':' | ';' | '!' | '?'))
+            .trim();
+        let has_resource_file = RESOURCE_DIRECTORY_NAMES.iter().any(|prefix| {
+            cleaned
+                .strip_prefix(&format!("{prefix}/"))
+                .is_some_and(|rest| !rest.is_empty())
+        });
+        let has_shared_file = cleaned
+            .strip_prefix("../_shared/")
+            .is_some_and(|rest| !rest.is_empty());
+        if has_resource_file || has_shared_file {
+            found.insert(cleaned.to_string());
+        }
+    }
+    found.into_iter().collect()
+}
+
+/// Resolve only bounded, relative references. A simple `*`/`?` glob is
+/// accepted for the repository's reference-index prose; it must match at least
+/// one regular file. Parent traversal is allowed only for the installed shared
+/// resource directory (`../_shared/…`).
+fn resource_reference_exists(skill_root: &Path, reference: &str) -> bool {
+    let normalized = reference.replace('\\', "/");
+    let (base, relative) = if let Some(shared) = normalized.strip_prefix("../_shared/") {
+        let Some(parent) = skill_root.parent() else {
+            return false;
+        };
+        (parent.join("_shared"), shared)
+    } else {
+        if normalized.starts_with('/')
+            || normalized.contains(":/")
+            || normalized.split('/').any(|part| part == "..")
+        {
+            return false;
+        }
+        (skill_root.to_path_buf(), normalized.as_str())
+    };
+    if relative.is_empty() || relative.contains('\0') {
+        return false;
+    }
+    let path = base.join(relative);
+    if !relative.contains('*') && !relative.contains('?') {
+        return fs::symlink_metadata(path)
+            .map(|metadata| metadata.file_type().is_file())
+            .unwrap_or(false);
+    }
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    let Some(pattern) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    fs::read_dir(parent)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .any(|entry| {
+            entry
+                .file_type()
+                .map(|kind| kind.is_file())
+                .unwrap_or(false)
+                && wildcard_matches(pattern, &entry.file_name().to_string_lossy())
+        })
+}
+
+fn wildcard_matches(pattern: &str, candidate: &str) -> bool {
+    fn matches(pattern: &[u8], candidate: &[u8]) -> bool {
+        match pattern.first() {
+            None => candidate.is_empty(),
+            Some(b'*') => {
+                matches(&pattern[1..], candidate)
+                    || (!candidate.is_empty() && matches(pattern, &candidate[1..]))
+            }
+            Some(b'?') => !candidate.is_empty() && matches(&pattern[1..], &candidate[1..]),
+            Some(character) => {
+                candidate.first() == Some(character) && matches(&pattern[1..], &candidate[1..])
+            }
+        }
+    }
+    matches(pattern.as_bytes(), candidate.as_bytes())
+}
+
+fn normalized_instruction_fingerprint(body: &str) -> String {
+    let normalized = body
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            line.split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .to_ascii_lowercase()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    if normalized.is_empty() {
+        String::new()
+    } else {
+        format!("fnv1a64:{}", fnv1a64_bytes_hex(normalized.as_bytes()))
+    }
+}
+
 fn lint_skill(skill_path: &Path) -> SkillReport {
     let directory_name = skill_path
         .parent()
@@ -328,8 +695,20 @@ fn lint_skill(skill_path: &Path) -> SkillReport {
     };
     let fields = parse_frontmatter(&frontmatter);
 
+    let limits = skill_limits();
+    let skill_root = skill_path.parent().unwrap_or(skill_path);
+    let (package_bytes, resources) = inspect_skill_package(skill_root);
+    report.package_bytes = package_bytes;
+    report.resource_count = resources.len();
+    report.instruction_fingerprint = normalized_instruction_fingerprint(&body);
+
     // name: recommended, and must match the directory so the installed path and
     // the matcher agree on the invocation name.
+    if !valid_skill_name(&directory_name) {
+        report.errors.push(format!(
+            "invalid skill name `{directory_name}` (expected lowercase letters, digits, and hyphens)"
+        ));
+    }
     match field(&fields, "name") {
         None => report
             .warnings
@@ -356,6 +735,68 @@ fn lint_skill(skill_path: &Path) -> SkillReport {
     if combined > DESCRIPTION_BUDGET_CHARS {
         report.errors.push(format!(
             "description + when_to_use is {combined} chars, over the {DESCRIPTION_BUDGET_CHARS}-char matcher budget"
+        ));
+    }
+
+    // Measure S0 separately from the legacy character cap because tokenizer
+    // density varies across prose, identifiers, and Unicode.
+    report.s0_tokens = TokenMeter::count_text(&format!(
+        "name: {directory_name}\ndescription: {description}\nwhen_to_use: {when_to_use}"
+    ));
+    if report.s0_tokens > limits.s0_hard_tokens {
+        report.errors.push(format!(
+            "S0 metadata is {} tokens, over the {}-token hard limit",
+            report.s0_tokens, limits.s0_hard_tokens
+        ));
+    }
+
+    // S1 targets are advisory; explicit warning/hard thresholds tune density
+    // without silently changing the normal MCP page budget.
+    report.s1_tokens = TokenMeter::count_text(&body);
+    if report.s1_tokens > limits.s1_warning_tokens {
+        report.warnings.push(format!(
+            "S1 body is {} tokens (target {}); exceeds the {}-token warning threshold",
+            report.s1_tokens, limits.s1_target_tokens, limits.s1_warning_tokens
+        ));
+    }
+    if report.s1_tokens > limits.s1_hard_tokens {
+        report.errors.push(format!(
+            "S1 body is {} tokens, over the {}-token hard limit",
+            report.s1_tokens, limits.s1_hard_tokens
+        ));
+    }
+
+    report.s2_tokens = 0;
+    for resource in &resources {
+        if resource.bytes > SKILL_RESOURCE_MAX_BYTES as u64 {
+            report.errors.push(format!(
+                "S2 resource `{}` is {} bytes, over the {}-byte resource limit",
+                resource.relative_path, resource.bytes, SKILL_RESOURCE_MAX_BYTES
+            ));
+        }
+        let Some(tokens) = resource.tokens else {
+            // Binary assets count toward package bytes but lack text tokens; their
+            // path remains available as an on-demand S2 resource.
+            continue;
+        };
+        report.s2_tokens = report.s2_tokens.saturating_add(tokens);
+        if tokens > limits.s2_warning_tokens {
+            report.warnings.push(format!(
+                "S2 resource `{}` is {} tokens; exceeds the {}-token warning threshold",
+                resource.relative_path, tokens, limits.s2_warning_tokens
+            ));
+        }
+        if tokens > limits.s2_hard_tokens {
+            report.errors.push(format!(
+                "S2 resource `{}` is {} tokens, over the {}-token hard limit",
+                resource.relative_path, tokens, limits.s2_hard_tokens
+            ));
+        }
+    }
+    if report.package_bytes > limits.package_max_bytes {
+        report.errors.push(format!(
+            "skill package is {} bytes, over the {}-byte storage limit",
+            report.package_bytes, limits.package_max_bytes
         ));
     }
 
@@ -390,16 +831,13 @@ fn lint_skill(skill_path: &Path) -> SkillReport {
         );
     }
 
-    // Dangling references: every `references/<file>` mentioned in the body must
-    // exist on disk, or progressive disclosure loads a broken path.
-    if let Some(parent) = skill_path.parent() {
-        for referenced in referenced_files(&body) {
-            let candidate = parent.join(&referenced);
-            if !candidate.is_file() {
-                report
-                    .errors
-                    .push(format!("references missing file `{referenced}`"));
-            }
+    // Every bounded resource reference must resolve before progressive disclosure;
+    // shared resources intentionally resolve one level above the skill root.
+    for referenced in resource_reference_tokens(&body) {
+        if !resource_reference_exists(skill_root, &referenced) {
+            report
+                .errors
+                .push(format!("references missing file `{referenced}`"));
         }
     }
 
@@ -424,6 +862,16 @@ fn lint_skill(skill_path: &Path) -> SkillReport {
     );
 
     report
+}
+
+fn valid_skill_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name.bytes().enumerate().all(|(index, byte)| match byte {
+            b'a'..=b'z' | b'0'..=b'9' => true,
+            b'-' => index > 0 && index + 1 < name.len(),
+            _ => false,
+        })
 }
 
 /// Compute the 0–100 quality score and its per-dimension breakdown, recording
@@ -713,27 +1161,6 @@ fn has_trigger_language(description: &str, when_to_use: &str) -> bool {
         "always",
     ];
     TRIGGERS.iter().any(|phrase| text.contains(phrase))
-}
-
-/// Extract `references/<file>` paths mentioned in the skill body. Matches the
-/// `references/...md` token wherever it appears (backticked or bare) so the
-/// dangling-link check covers the on-demand reference files.
-fn referenced_files(body: &str) -> Vec<String> {
-    let mut found = Vec::new();
-    for token in
-        body.split(|c: char| c.is_whitespace() || matches!(c, '`' | '(' | ')' | '"' | '\''))
-    {
-        let cleaned = token
-            .trim_matches(|c: char| matches!(c, ',' | '.' | ':' | ';'))
-            .trim();
-        if cleaned.starts_with("references/")
-            && cleaned.ends_with(".md")
-            && !found.contains(&cleaned.to_string())
-        {
-            found.push(cleaned.to_string());
-        }
-    }
-    found
 }
 
 /// True when the body has the densify-corruption typo `eferences/` (missing
