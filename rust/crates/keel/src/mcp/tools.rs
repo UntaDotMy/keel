@@ -112,15 +112,32 @@ const DEFAULT_MEMORY_GROUP: &str = "memory";
 /// slimmed before return so the framed JSON-RPC line stays under the stdio
 /// frame ceiling with headroom for future tools (see [`slim_tools_list_for_wire`]).
 pub(super) fn handle_tools_list() -> Value {
-    let list = slim_tools_list_for_wire(tools_list_catalog());
-    // Keep catalog ↔ MCP_TOOL_NAMES length honest (handler table checked in unit tests).
+    handle_tools_list_for_profile(super::McpCatalogProfile::from_env())
+}
+
+pub(crate) fn handle_tools_list_for_profile(profile: super::McpCatalogProfile) -> Value {
+    let mut catalog = tools_list_catalog();
+    if profile == super::McpCatalogProfile::Tiered {
+        if let Some(tools) = catalog.get_mut("tools").and_then(Value::as_array_mut) {
+            tools.retain(|tool| {
+                tool.get("name")
+                    .and_then(Value::as_str)
+                    .is_some_and(|name| EAGER_MCP_TOOL_NAMES.contains(&name))
+            });
+        }
+    }
+    let list = slim_tools_list_for_wire(catalog);
+    let expected = match profile {
+        super::McpCatalogProfile::Tiered => EAGER_MCP_TOOL_NAMES.len(),
+        super::McpCatalogProfile::Full => MCP_TOOL_NAMES.len(),
+    };
     debug_assert_eq!(
         list.get("tools")
             .and_then(Value::as_array)
             .map(std::vec::Vec::len)
             .unwrap_or(0),
-        MCP_TOOL_NAMES.len(),
-        "tools/list count must match MCP_TOOL_NAMES"
+        expected,
+        "tools/list count must match active profile"
     );
     list
 }
@@ -693,10 +710,51 @@ pub(super) fn handle_tools_call_cancellable(
     }
 }
 
-/// Canonical MCP tool name set. `tools_list_catalog`, [`is_known_mcp_tool`], and
-/// [`dispatch_mcp_tool`] must agree with this list — the unit test
-/// `mcp_tool_list_known_and_dispatch_are_one_set` fails if they drift.
-const MCP_TOOL_NAMES: &[&str] = &[
+pub(crate) const EAGER_MCP_TOOL_NAMES: &[&str] = &[
+    "recall",
+    "system_map",
+    "run_command",
+    "command_output",
+    "command_kill",
+    "recall_status",
+    "skill_route",
+    "skill_get",
+    "skill_list",
+    "memory_status",
+    "brief_list",
+    "brief_get",
+    "brief_create",
+    "system_map_refresh",
+    "context_brief",
+    "cli",
+    "anvil",
+];
+
+pub(crate) const DEFERRED_MCP_TOOL_NAMES: &[&str] = &[
+    "review",
+    "git_workflow",
+    "memory",
+    "gain",
+    "raw",
+    "config_audit",
+    "skill_lint",
+    "telemetry",
+    "session",
+    "doctor",
+    "code_search",
+    "code_index",
+    "flow",
+    "code_graph",
+    "learn",
+    "observe",
+    "rewrite",
+    "skill_eval",
+    "design_intelligence",
+    "stats",
+];
+
+// Canonical MCP tool name set matching the full tool catalog.
+pub(crate) const MCP_TOOL_NAMES: &[&str] = &[
     "recall",
     "system_map",
     "run_command",
@@ -3743,8 +3801,8 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn tools_list_advertises_all_tools() {
-        let listed = handle_tools_list();
+    fn tools_list_advertises_all_tools_in_full_profile() {
+        let listed = handle_tools_list_for_profile(crate::mcp::McpCatalogProfile::Full);
         let tools = listed["tools"].as_array().expect("tools array");
         let names: Vec<&str> = tools
             .iter()
@@ -3773,10 +3831,67 @@ mod tests {
     }
 
     #[test]
+    fn tools_list_tiered_advertises_eager_tools_only() {
+        let listed = handle_tools_list_for_profile(crate::mcp::McpCatalogProfile::Tiered);
+        let tools = listed["tools"].as_array().expect("tools array");
+        let names: Vec<&str> = tools
+            .iter()
+            .filter_map(|entry| entry.get("name").and_then(Value::as_str))
+            .collect();
+        assert_eq!(
+            names.len(),
+            EAGER_MCP_TOOL_NAMES.len(),
+            "tiered list must contain only eager tools"
+        );
+        for expected in EAGER_MCP_TOOL_NAMES {
+            assert!(
+                names.contains(expected),
+                "missing eager {expected} from tiered tools/list: {names:?}"
+            );
+        }
+        for deferred in DEFERRED_MCP_TOOL_NAMES {
+            assert!(
+                !names.contains(deferred),
+                "deferred {deferred} must not be in tiered tools/list"
+            );
+        }
+    }
+
+    #[test]
+    fn eager_and_deferred_tool_counts_sum_to_all_tools() {
+        assert_eq!(
+            EAGER_MCP_TOOL_NAMES.len() + DEFERRED_MCP_TOOL_NAMES.len(),
+            MCP_TOOL_NAMES.len()
+        );
+        let mut combined = Vec::new();
+        combined.extend_from_slice(EAGER_MCP_TOOL_NAMES);
+        combined.extend_from_slice(DEFERRED_MCP_TOOL_NAMES);
+        assert_eq!(combined.len(), MCP_TOOL_NAMES.len());
+        for name in MCP_TOOL_NAMES {
+            assert!(combined.contains(name));
+            assert!(is_known_mcp_tool(name));
+        }
+    }
+
+    #[test]
+    fn deferred_tools_are_directly_dispatchable() {
+        for deferred in DEFERRED_MCP_TOOL_NAMES {
+            assert!(
+                is_known_mcp_tool(deferred),
+                "{deferred} must be known for dispatch"
+            );
+            assert!(
+                mcp_tool_handler(deferred).is_some(),
+                "{deferred} must have a registered handler"
+            );
+        }
+    }
+
+    #[test]
     fn mcp_tool_list_known_and_dispatch_are_one_set() {
         // Mechanical parity without invoking handlers (handlers may re-exec CLI).
         // list names == MCP_TOOL_NAMES == handler table.
-        let listed = handle_tools_list();
+        let listed = handle_tools_list_for_profile(crate::mcp::McpCatalogProfile::Full);
         let tools = listed["tools"].as_array().expect("tools array");
         let mut list_names: Vec<String> = tools
             .iter()
@@ -4392,7 +4507,7 @@ mod tests {
     fn tools_list_includes_every_mcp_tool_name() {
         // Driven by MCP_TOOL_NAMES (includes observe/rewrite/skill_eval/dispatch/
         // design_intelligence). Replaces the stale hand-maintained subset list.
-        let response = handle_tools_list();
+        let response = handle_tools_list_for_profile(crate::mcp::McpCatalogProfile::Full);
         let tools = response["tools"].as_array().expect("tools array");
         let tool_names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
         for name in MCP_TOOL_NAMES {
@@ -4461,7 +4576,7 @@ mod tests {
 
     #[test]
     fn review_schema_advertises_closeout_contract() {
-        let listed = handle_tools_list();
+        let listed = handle_tools_list_for_profile(crate::mcp::McpCatalogProfile::Full);
         let review = listed["tools"]
             .as_array()
             .expect("tools")
@@ -4614,7 +4729,7 @@ mod tests {
 
     #[test]
     fn code_search_schema_advertises_siblings() {
-        let listed = handle_tools_list();
+        let listed = handle_tools_list_for_profile(crate::mcp::McpCatalogProfile::Full);
         let tools = listed["tools"].as_array().expect("tools array");
         let search = tools
             .iter()
@@ -4634,7 +4749,7 @@ mod tests {
 
     #[test]
     fn all_new_tools_have_schemas() {
-        let listed = handle_tools_list();
+        let listed = handle_tools_list_for_profile(crate::mcp::McpCatalogProfile::Full);
         let tools = listed["tools"].as_array().expect("tools array");
         // Every advertised tool must declare an inputSchema. The count itself
         // is pinned by doc_parity_test.rs, so this asserts structure, not a number.

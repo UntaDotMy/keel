@@ -68,6 +68,16 @@ The tracked suite covers these scenario families in the published scorecard and 
 - Success metrics are tracked as proof counts and closure outcomes, not as vague "felt faster" language.
 - The comparison framing is now explicit about where `keel`, `runtime-shell comparator`, `workflow-teaching comparator`, and the swarm-automation comparator each currently win.
 
+## Compaction and Catalog Footprint Benchmarking
+
+In addition to workflow scenarios, the repository measures token efficiency at runtime via `keel eval` and the fixed context ledger:
+
+- Compaction evaluation suite: [`bench/competitor/README.md`](../bench/competitor/README.md)
+- Compaction benchmark report: [`bench/competitor/eval-compaction-report.json`](../bench/competitor/eval-compaction-report.json)
+- Comparative analysis metrics: [`bench/competitor/comparative-compaction.json`](../bench/competitor/comparative-compaction.json)
+- Measured compaction savings across 7 genuine toolchain fixtures: **27.28% overall** (with `cargo test` pass achieving **79.26%** savings).
+- Tiered MCP catalog profile: reduces discovery footprint from 2,902 tokens down to **1,198 tokens** (**58.72% reduction**), while retaining direct dispatchability for all 37 tools.
+
 ## What this suite does not claim
 
 - no broad market-speed claim against every harness workflow layer

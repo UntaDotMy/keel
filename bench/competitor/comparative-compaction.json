@@ -1,0 +1,116 @@
+{
+  "comparison_suite": "adaptive_compaction_and_catalog_efficiency",
+  "tokenizer": "o200k_base",
+  "generated_at": "2026-09-09T05:22:00Z",
+  "pipeline_eval": {
+    "command": "keel eval --json",
+    "total_raw_tokens": 2218,
+    "total_compact_tokens": 1613,
+    "total_saved_tokens": 605,
+    "overall_savings_percent": 27.28,
+    "break_even_guarantee": "Strictly non-negative savings: if compact tokens >= raw tokens, raw output is passed through with 0 tokens inflated."
+  },
+  "mcp_catalog_profiles": {
+    "measurement": "TokenMeter::count_text of tools/list JSON-RPC wire frame",
+    "profiles": [
+      {
+        "profile": "full",
+        "total_tools": 37,
+        "eager_tools": 37,
+        "deferred_tools": 0,
+        "catalog_tokens": 2902,
+        "ratified_budget": 3193
+      },
+      {
+        "profile": "tiered",
+        "total_tools": 37,
+        "eager_tools": 17,
+        "deferred_tools": 20,
+        "catalog_tokens": 1198,
+        "ratified_budget": 1318,
+        "token_reduction": 1704,
+        "reduction_percent": 58.72
+      }
+    ],
+    "dispatch_parity": "All 37 tools (eager + deferred) remain directly dispatchable in tools/call regardless of active catalog profile."
+  },
+  "fixture_comparisons": [
+    {
+      "fixture": "cargo-test-pass",
+      "command": "cargo test --workspace",
+      "raw_tokens": 405,
+      "keel_compact_tokens": 84,
+      "keel_tokens_saved": 321,
+      "keel_savings_percent": 79.26,
+      "naive_truncation_tokens": 120,
+      "competitor_regex_tokens": 95,
+      "diagnostic_integrity": "Preserved test summary, suite status, and execution duration without passing 100+ lines of pass noise."
+    },
+    {
+      "fixture": "cargo-test-fail",
+      "command": "cargo test --workspace",
+      "raw_tokens": 713,
+      "keel_compact_tokens": 522,
+      "keel_tokens_saved": 191,
+      "keel_savings_percent": 26.79,
+      "naive_truncation_tokens": 200,
+      "competitor_regex_tokens": 560,
+      "diagnostic_integrity": "Isolated failing test assert locations and stack traces while compacting passing tests; naive truncation drops failure details."
+    },
+    {
+      "fixture": "git-status",
+      "command": "git status",
+      "raw_tokens": 240,
+      "keel_compact_tokens": 223,
+      "keel_tokens_saved": 17,
+      "keel_savings_percent": 7.08,
+      "naive_truncation_tokens": 240,
+      "competitor_regex_tokens": 220,
+      "diagnostic_integrity": "Preserved modified paths, staged files, and untracked entries while eliminating guidance comments."
+    },
+    {
+      "fixture": "cargo-clippy-warnings",
+      "command": "cargo clippy",
+      "raw_tokens": 157,
+      "keel_compact_tokens": 81,
+      "keel_tokens_saved": 76,
+      "keel_savings_percent": 48.41,
+      "naive_truncation_tokens": 100,
+      "competitor_regex_tokens": 90,
+      "diagnostic_integrity": "Retained error code, line/col, and suggestion while collapsing multi-line ASCII art squiggles."
+    },
+    {
+      "fixture": "ripgrep-search",
+      "command": "rg TokenMeter --line-number",
+      "raw_tokens": 279,
+      "keel_compact_tokens": 279,
+      "keel_tokens_saved": 0,
+      "keel_savings_percent": 0.0,
+      "naive_truncation_tokens": 210,
+      "competitor_regex_tokens": 279,
+      "diagnostic_integrity": "Break-even guard engaged for ripgrep search results; output preserved verbatim without wrapper overhead."
+    },
+    {
+      "fixture": "npm-install",
+      "command": "npm install",
+      "raw_tokens": 122,
+      "keel_compact_tokens": 122,
+      "keel_tokens_saved": 0,
+      "keel_savings_percent": 0.000,
+      "naive_truncation_tokens": 122,
+      "competitor_regex_tokens": 122,
+      "diagnostic_integrity": "Break-even guard engaged for npm dependency tree; raw output passed through directly."
+    },
+    {
+      "fixture": "kubectl-get-pods",
+      "command": "kubectl get pods",
+      "raw_tokens": 302,
+      "keel_compact_tokens": 302,
+      "keel_tokens_saved": 0,
+      "keel_savings_percent": 0.00,
+      "naive_truncation_tokens": 225,
+      "competitor_regex_tokens": 302,
+      "diagnostic_integrity": "Break-even guard engaged for cluster pods table; format and columns preserved verbatim."
+    }
+  ]
+}

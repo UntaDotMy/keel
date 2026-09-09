@@ -238,11 +238,12 @@ fn fixed_context_ledger_recomputes_every_ratified_surface() {
     let deferred = required_u64(mcp, "deferredToolCount");
     assert!(tool_count > 0, "MCP catalog must expose real tools");
     assert_eq!(eager + deferred, tool_count);
+    assert_eq!(eager, 17, "Tiered MCP catalog advertises 17 eager tools");
     assert_eq!(
-        eager, tool_count,
-        "Phase 1 default MCP catalog is all eager"
+        deferred, 20,
+        "Tiered MCP catalog defers 20 specialist tools"
     );
-    assert_eq!(deferred, 0, "Phase 1 has no deferred catalog profile yet");
+    assert_eq!(tool_count, 37, "Total MCP catalog tools count is 37");
 
     let warning = by_surface["pointer.warning_status"];
     assert!(

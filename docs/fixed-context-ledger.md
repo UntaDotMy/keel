@@ -24,7 +24,7 @@ measurement. Actual values are recomputed on every invocation and in CI.
 
 | Surface | Actual | Budget |
 |---|---:|---:|
-| `mcp.tools_list.catalog` | 2,902 | 3,193 |
+| `mcp.tools_list.catalog` | 1,198 | 1,318 |
 | `hook.session_start.bootstrap` | 457 | 503 |
 | `hook.user_prompt_submit.simple` | 102 | 113 |
 | `hook.user_prompt_submit.code_change` | 153 | 169 |
@@ -44,8 +44,8 @@ measurement. Actual values are recomputed on every invocation and in CI.
 | `pointer.warning_status` | 9 | 10 |
 | `pointer.ui_verification` | 15 | 17 |
 
-The MCP baseline is 37 total tools: 37 eager and 0 deferred. Phase 12 owns any
-catalog-profile change. The skill baseline covers 51 parseable first-party
+The MCP baseline is 37 total tools: 17 eager and 20 deferred. Phase 12 implements the
+tiered catalog profile. The skill baseline covers 51 parseable first-party
 `SKILL.md` files.
 
 ## Measurement boundaries
