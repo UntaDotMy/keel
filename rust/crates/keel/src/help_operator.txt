@@ -52,6 +52,8 @@
   plan design --plan <plan-id> [--workspace-root <path>] [--claude-home <path>] [--json]
   plan tasks --plan <plan-id> [--workspace-root <path>] [--claude-home <path>] [--json]
   plan check [--rtm] --plan <plan-id> [--workspace-root <path>] [--claude-home <path>] [--json]
+  plan ready --plan <plan-id> [--workspace-root <path>] [--claude-home <path>] [--json]
+  plan done --plan <plan-id> [--workspace-root <path>] [--claude-home <path>] [--json]
   memory scope resolve [--claude-home <path>] [--workspace-root <path>] [--create-missing] [--refresh-system-map] [--format json|compact]
   memory system-map refresh [--claude-home <path>] [--workspace-root <path>] [--format json|compact]
   memory system-map show [--claude-home <path>] [--workspace-root <path>]

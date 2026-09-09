@@ -9,6 +9,8 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
+use serde::Serialize;
+
 use chrono::{SecondsFormat, Utc};
 use serde_json::{json, Value};
 
@@ -82,6 +84,8 @@ enum PlanAction {
     Design,
     Tasks,
     Check,
+    Ready,
+    Done,
 }
 
 impl PlanAction {
@@ -92,6 +96,8 @@ impl PlanAction {
             Self::Design => "plan design",
             Self::Tasks => "plan tasks",
             Self::Check => "plan check",
+            Self::Ready => "plan ready",
+            Self::Done => "plan done",
         }
     }
 }
@@ -200,6 +206,8 @@ pub fn run_plan_command(
         "design" => PlanAction::Design,
         "tasks" => PlanAction::Tasks,
         "check" => PlanAction::Check,
+        "ready" => PlanAction::Ready,
+        "done" => PlanAction::Done,
         other => {
             let _ = writeln!(standard_error, "Unknown plan command: {other}");
             return usage(standard_error);
@@ -216,13 +224,15 @@ pub fn run_plan_command(
         PlanAction::Design => run_design(flags, &mut streams),
         PlanAction::Tasks => run_tasks(flags, &mut streams),
         PlanAction::Check => run_check(flags, &mut streams),
+        PlanAction::Ready => run_ready(flags, &mut streams),
+        PlanAction::Done => run_done(flags, &mut streams),
     }
 }
 
 fn usage(standard_error: Output<'_>) -> u8 {
     let _ = writeln!(
         standard_error,
-        "Usage: plan specify --request <text> | research --plan <id> [--claim <text> --source-url <url> --source-type <type> --retrieved-at <rfc3339> --support <text> --freshness <class> --used-by <ids>] | design --plan <id> | tasks --plan <id> | check [--rtm] --plan <id>"
+        "Usage: plan specify --request <text> | research --plan <id> [--claim <text> --source-url <url> --source-type <type> --retrieved-at <rfc3339> --support <text> --freshness <class> --used-by <ids>] | design --plan <id> | tasks --plan <id> | check [--rtm] --plan <id> | ready --plan <id> | done --plan <id>"
     );
     1
 }
@@ -245,7 +255,9 @@ fn action_flags(action: PlanAction) -> FlagSet {
             flags.string_flag("freshness", "");
             flags.string_flag("used-by", "");
         }
-        PlanAction::Design | PlanAction::Tasks => flags.string_flag("plan", ""),
+        PlanAction::Design | PlanAction::Tasks | PlanAction::Ready | PlanAction::Done => {
+            flags.string_flag("plan", "");
+        }
         PlanAction::Check => {
             flags.string_flag("plan", "");
             flags.bool_flag("rtm", false);
@@ -732,6 +744,152 @@ fn run_check(flags: FlagSet, streams: &mut CommandStreams<'_>) -> u8 {
             parsed.acceptance_criteria.len()
         ),
     )
+}
+
+fn run_ready(flags: FlagSet, streams: &mut CommandStreams<'_>) -> u8 {
+    let (context, plan_id, paths) = parsed_or_return!(existing_plan(&flags, streams.error));
+    let eval = command_or_return!(
+        evaluate_definition_of_ready(
+            context.workspace(),
+            &context.home.to_string_lossy(),
+            &plan_id
+        ),
+        streams.error
+    );
+    let mut status = command_or_return!(load_status(&paths, &plan_id), streams.error);
+    if schema_is_current(&status) {
+        let object = status
+            .as_object_mut()
+            .expect("validated status artifact is an object");
+        object.insert(
+            "definitionOfReady".to_string(),
+            Value::String(if eval.satisfied {
+                "satisfied".to_string()
+            } else {
+                "unsatisfied".to_string()
+            }),
+        );
+        if eval.satisfied {
+            let current_stage = object
+                .get("stage")
+                .and_then(Value::as_str)
+                .unwrap_or("specified");
+            if current_stage == "tasked" {
+                object.insert("stage".to_string(), Value::String("ready".to_string()));
+            }
+        }
+        object.insert("dorEvaluatedAt".to_string(), Value::String(timestamp()));
+        command_or_return!(write_status(&paths, &status, "ready"), streams.error);
+    }
+    if flags.bool_value("json") {
+        let payload = json!({
+            "schemaVersion": SCHEMA_VERSION,
+            "planId": eval.plan_id,
+            "satisfied": eval.satisfied,
+            "stage": if eval.satisfied { "ready" } else { "tasked" },
+            "passedCount": eval.passed_count,
+            "totalCount": eval.total_count,
+            "items": eval.items,
+        });
+        let rendered = command_or_return!(render_json(&payload), streams.error);
+        let _ = writeln!(streams.output, "{rendered}");
+        return if eval.satisfied { 0 } else { 1 };
+    }
+    let _ = writeln!(
+        streams.output,
+        "plan ready: id={} status={} ({}/{} items passed)",
+        eval.plan_id,
+        if eval.satisfied {
+            "satisfied"
+        } else {
+            "unsatisfied"
+        },
+        eval.passed_count,
+        eval.total_count
+    );
+    for item in &eval.items {
+        let mark = if item.status == "pass" { "[x]" } else { "[ ]" };
+        let _ = writeln!(
+            streams.output,
+            "  {mark} {}: {} -> {}",
+            item.id, item.name, item.details
+        );
+    }
+    if eval.satisfied {
+        0
+    } else {
+        1
+    }
+}
+
+fn run_done(flags: FlagSet, streams: &mut CommandStreams<'_>) -> u8 {
+    let (context, plan_id, paths) = parsed_or_return!(existing_plan(&flags, streams.error));
+    let eval = command_or_return!(
+        evaluate_plan_definition_of_done(
+            context.workspace(),
+            &context.home.to_string_lossy(),
+            &plan_id
+        ),
+        streams.error
+    );
+    let mut status = command_or_return!(load_status(&paths, &plan_id), streams.error);
+    if schema_is_current(&status) {
+        let object = status
+            .as_object_mut()
+            .expect("validated status artifact is an object");
+        object.insert(
+            "definitionOfDone".to_string(),
+            Value::String(if eval.satisfied {
+                "satisfied".to_string()
+            } else {
+                "unsatisfied".to_string()
+            }),
+        );
+        if eval.satisfied {
+            object.insert("stage".to_string(), Value::String("done".to_string()));
+        }
+        object.insert("dodEvaluatedAt".to_string(), Value::String(timestamp()));
+        command_or_return!(write_status(&paths, &status, "done"), streams.error);
+    }
+    if flags.bool_value("json") {
+        let payload = json!({
+            "schemaVersion": SCHEMA_VERSION,
+            "planId": eval.plan_id,
+            "satisfied": eval.satisfied,
+            "stage": if eval.satisfied { "done" } else { "tasked" },
+            "passedCount": eval.passed_count,
+            "totalCount": eval.total_count,
+            "items": eval.items,
+        });
+        let rendered = command_or_return!(render_json(&payload), streams.error);
+        let _ = writeln!(streams.output, "{rendered}");
+        return if eval.satisfied { 0 } else { 1 };
+    }
+    let _ = writeln!(
+        streams.output,
+        "plan done: id={} status={} ({}/{} items passed)",
+        eval.plan_id,
+        if eval.satisfied {
+            "satisfied"
+        } else {
+            "unsatisfied"
+        },
+        eval.passed_count,
+        eval.total_count
+    );
+    for item in &eval.items {
+        let mark = if item.status == "pass" { "[x]" } else { "[ ]" };
+        let _ = writeln!(
+            streams.output,
+            "  {mark} {}: {} -> {}",
+            item.id, item.name, item.details
+        );
+    }
+    if eval.satisfied {
+        0
+    } else {
+        1
+    }
 }
 
 fn existing_plan(
@@ -1864,6 +2022,729 @@ pub(crate) fn evaluate_acceptance_criteria(
         }
     }
     Ok((overall_status, ac_lines.join("\n")))
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DorItem {
+    pub id: String,
+    pub name: String,
+    pub status: String,
+    pub details: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct DorEvaluation {
+    pub satisfied: bool,
+    #[serde(rename = "planId")]
+    pub plan_id: String,
+    #[serde(rename = "passedCount")]
+    pub passed_count: usize,
+    #[serde(rename = "totalCount")]
+    pub total_count: usize,
+    pub items: Vec<DorItem>,
+}
+
+#[derive(Serialize, Debug, Clone)]
+pub struct DodItem {
+    pub id: String,
+    pub name: String,
+    pub status: String,
+    pub details: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct DodEvaluation {
+    pub satisfied: bool,
+    #[serde(rename = "planId")]
+    pub plan_id: String,
+    #[serde(rename = "passedCount")]
+    pub passed_count: usize,
+    #[serde(rename = "totalCount")]
+    pub total_count: usize,
+    pub items: Vec<DodItem>,
+}
+
+fn json_field_str<'a>(val: &'a Value, key: &str) -> Option<&'a str> {
+    val.get(key).and_then(Value::as_str)
+}
+
+fn is_meaningful_content(text: &str) -> bool {
+    let trimmed = text.trim();
+    !trimmed.is_empty()
+        && trimmed != "TODO"
+        && trimmed != "TBD"
+        && trimmed != "unspecified"
+        && trimmed != "none"
+        && trimmed.len() >= 5
+}
+
+fn spec_section_body<'a>(spec: &'a str, section_title: &str) -> Option<&'a str> {
+    let index = SPEC_SECTIONS.iter().position(|&s| s == section_title)?;
+    let heading = format!("## {}. {section_title}", index + 1);
+    let start_pos = spec.find(&heading)? + heading.len();
+    let remainder = &spec[start_pos..];
+    let end_pos = remainder.find("\n## ").unwrap_or(remainder.len());
+    Some(remainder[..end_pos].trim())
+}
+
+pub fn evaluate_definition_of_ready(
+    workspace_root: &Path,
+    claude_home: &str,
+    plan_id: &str,
+) -> Result<DorEvaluation, String> {
+    let paths = review_plan_paths(workspace_root, claude_home, plan_id)?;
+    let mut check_issues = Vec::new();
+    let spec = read_text(&paths.spec, SPEC_FILE)?;
+    let (parsed, spec_issues) = validate_specification(&spec, plan_id);
+    let status = load_json_artifact(&paths.status, STATUS_FILE, plan_id, &mut check_issues);
+    let research = load_json_artifact(&paths.research, RESEARCH_FILE, plan_id, &mut check_issues);
+    let architecture = read_bounded_text_for_validation(
+        &paths.architecture,
+        ARCHITECTURE_FILE,
+        crate::utility::architecture::MAX_ARCHITECTURE_BYTES,
+        &mut check_issues,
+    );
+
+    let mut items = Vec::new();
+
+    let restated_outcome = spec_section_body(&spec, "Restated user outcome").unwrap_or_default();
+    let dor_1_pass = is_meaningful_content(restated_outcome);
+    items.push(DorItem {
+        id: "dor-1".to_string(),
+        name: "user_outcome_understood".to_string(),
+        status: if dor_1_pass {
+            "pass".to_string()
+        } else {
+            "fail".to_string()
+        },
+        details: if dor_1_pass {
+            "restated user outcome present and bounded".to_string()
+        } else {
+            "spec.md missing meaningful restated user outcome".to_string()
+        },
+    });
+
+    let scope = spec_section_body(&spec, "Scope").unwrap_or_default();
+    let non_goals = spec_section_body(&spec, "Non-goals").unwrap_or_default();
+    let dor_2_pass = is_meaningful_content(scope) && is_meaningful_content(non_goals);
+    items.push(DorItem {
+        id: "dor-2".to_string(),
+        name: "scope_and_non_goals".to_string(),
+        status: if dor_2_pass {
+            "pass".to_string()
+        } else {
+            "fail".to_string()
+        },
+        details: if dor_2_pass {
+            "scope and non-goals sections defined".to_string()
+        } else {
+            "spec.md missing meaningful scope or non-goals section".to_string()
+        },
+    });
+
+    let has_reqs = !parsed.requirements.is_empty();
+    let all_classified = has_reqs
+        && parsed.requirements.iter().all(|req| {
+            matches!(
+                req.classification.as_str(),
+                "verified" | "assumption" | "derived"
+            )
+        });
+    let dor_3_pass = has_reqs && all_classified;
+    items.push(DorItem {
+        id: "dor-3".to_string(),
+        name: "requirements_identified".to_string(),
+        status: if dor_3_pass {
+            "pass".to_string()
+        } else {
+            "fail".to_string()
+        },
+        details: if dor_3_pass {
+            format!("{} requirement(s) classified", parsed.requirements.len())
+        } else {
+            "missing requirements or unclassified claims".to_string()
+        },
+    });
+
+    let has_ac = !parsed.acceptance_criteria.is_empty();
+    let mut ac_issues = Vec::new();
+    for criterion in &parsed.acceptance_criteria {
+        if criterion.precondition.trim().is_empty()
+            || criterion.action.trim().is_empty()
+            || criterion.expected_outcome.trim().is_empty()
+            || criterion.negative_outcome.trim().is_empty()
+            || criterion.verification_method.trim().is_empty()
+            || criterion.owner_role.trim().is_empty()
+        {
+            ac_issues.push(format!("{}: missing required fields", criterion.id));
+        }
+        if (contains_vague_predicate(&criterion.expected_outcome)
+            || contains_vague_predicate(&criterion.action))
+            && !has_observable_threshold(&criterion.expected_outcome)
+        {
+            ac_issues.push(format!(
+                "{}: ungrounded vague predicate without threshold",
+                criterion.id
+            ));
+        }
+    }
+    let dor_4_pass = has_ac && ac_issues.is_empty();
+    items.push(DorItem {
+        id: "dor-4".to_string(),
+        name: "acceptance_criteria_observable".to_string(),
+        status: if dor_4_pass {
+            "pass".to_string()
+        } else {
+            "fail".to_string()
+        },
+        details: if dor_4_pass {
+            format!(
+                "{} criterion/criteria testable without vague predicates",
+                parsed.acceptance_criteria.len()
+            )
+        } else if !has_ac {
+            "spec.md has no acceptance criteria".to_string()
+        } else {
+            ac_issues.join("; ")
+        },
+    });
+
+    let amb_section =
+        spec_section_body(&spec, "Ambiguities and clarification decisions").unwrap_or_default();
+    let dor_5_pass = !spec.contains("Decision: unresolved_material_ambiguity")
+        && is_meaningful_content(amb_section);
+    items.push(DorItem {
+        id: "dor-5".to_string(),
+        name: "ambiguity_resolved".to_string(),
+        status: if dor_5_pass {
+            "pass".to_string()
+        } else {
+            "fail".to_string()
+        },
+        details: if dor_5_pass {
+            "no unresolved material ambiguity".to_string()
+        } else {
+            "unresolved material ambiguity requires recorded decision".to_string()
+        },
+    });
+
+    let mut research_issues = Vec::new();
+    let research_status_complete =
+        research.as_ref().and_then(|r| string_field(r, "status")) == Some("complete");
+    if !research_status_complete {
+        research_issues.push("research status is not complete".to_string());
+    }
+    if let Some(ref res) = research {
+        validate_research(Some(res), &parsed, workspace_root, &mut research_issues);
+    } else {
+        research_issues.push("research.json missing".to_string());
+    }
+    let dor_6_pass = research_issues.is_empty();
+    items.push(DorItem {
+        id: "dor-6".to_string(),
+        name: "research_grounded_and_fresh".to_string(),
+        status: if dor_6_pass {
+            "pass".to_string()
+        } else {
+            "fail".to_string()
+        },
+        details: if dor_6_pass {
+            "research complete and grounded".to_string()
+        } else {
+            research_issues.join("; ")
+        },
+    });
+
+    let mut arch_issues = Vec::new();
+    if let Some(body) = architecture.as_deref() {
+        validate_markdown_header(
+            body,
+            ARCHITECTURE_FILE,
+            "architecture",
+            plan_id,
+            &mut arch_issues,
+        );
+        validate_architecture(body, &parsed, research.as_ref(), &mut arch_issues);
+    } else {
+        arch_issues.push("architecture.md missing or unreadable".to_string());
+    }
+    let status_arch = status
+        .as_ref()
+        .and_then(|s| string_field(s, "architectureStatus"))
+        == Some("complete");
+    if !status_arch {
+        arch_issues.push("status.json architectureStatus is not complete".to_string());
+    }
+    let dor_7_pass = arch_issues.is_empty();
+    items.push(DorItem {
+        id: "dor-7".to_string(),
+        name: "architecture_complete".to_string(),
+        status: if dor_7_pass {
+            "pass".to_string()
+        } else {
+            "fail".to_string()
+        },
+        details: if dor_7_pass {
+            "14/14 sections verified and complete".to_string()
+        } else {
+            arch_issues.join("; ")
+        },
+    });
+
+    let rollout = spec_section_body(&spec, "Rollout and rollback requirements").unwrap_or_default();
+    let failure = spec_section_body(&spec, "Failure behavior").unwrap_or_default();
+    let has_arch_rollback = architecture
+        .as_deref()
+        .map(|body| body.contains("## 7.") && body.contains("## 13."))
+        .unwrap_or(false);
+    let dor_8_pass =
+        is_meaningful_content(rollout) && is_meaningful_content(failure) && has_arch_rollback;
+    items.push(DorItem {
+        id: "dor-8".to_string(),
+        name: "risks_and_rollback_considered".to_string(),
+        status: if dor_8_pass {
+            "pass".to_string()
+        } else {
+            "fail".to_string()
+        },
+        details: if dor_8_pass {
+            "rollout, rollback, and failure behavior defined".to_string()
+        } else {
+            "missing rollout/rollback requirements, failure behavior, or architecture rollback strategy".to_string()
+        },
+    });
+
+    let mut task_issues = Vec::new();
+    let tasks = load_json_artifact(&paths.tasks, TASKS_FILE, plan_id, &mut task_issues);
+    let rtm = load_json_artifact(&paths.rtm, RTM_FILE, plan_id, &mut task_issues);
+    validate_tasks(tasks.as_ref(), &parsed, &mut task_issues);
+    validate_rtm(rtm.as_ref(), &parsed, &mut task_issues);
+    if let (Some(specification), Some(arch_body)) = (Some(spec.as_str()), architecture.as_deref()) {
+        let seeds = task_seeds(&parsed);
+        let home = resolve_claude_home(claude_home).unwrap_or_else(|_| PathBuf::from("."));
+        crate::utility::task_ticket::validate_task_artifacts(
+            &crate::utility::task_ticket::ValidationContext {
+                plan_id,
+                plan_directory: &paths.directory,
+                keel_home: &home,
+                workspace_root,
+                specification,
+                architecture: arch_body,
+                seeds: &seeds,
+            },
+            tasks.as_ref(),
+            rtm.as_ref(),
+            &mut task_issues,
+        );
+    }
+    let dor_9_pass = task_issues.is_empty();
+    items.push(DorItem {
+        id: "dor-9".to_string(),
+        name: "tasks_trace_to_requirements".to_string(),
+        status: if dor_9_pass {
+            "pass".to_string()
+        } else {
+            "fail".to_string()
+        },
+        details: if dor_9_pass {
+            "RTM traces and task tickets valid".to_string()
+        } else {
+            task_issues.join("; ")
+        },
+    });
+
+    let ver_strategy = spec_section_body(&spec, "Verification strategy").unwrap_or_default();
+    let dor_10_pass = is_meaningful_content(ver_strategy);
+    items.push(DorItem {
+        id: "dor-10".to_string(),
+        name: "verification_approach_defined".to_string(),
+        status: if dor_10_pass {
+            "pass".to_string()
+        } else {
+            "fail".to_string()
+        },
+        details: if dor_10_pass {
+            "verification strategy specified".to_string()
+        } else {
+            "spec.md missing verification strategy section".to_string()
+        },
+    });
+
+    let perf_tokens =
+        spec_section_body(&spec, "Performance and token constraints").unwrap_or_default();
+    let dor_11_pass = is_meaningful_content(perf_tokens);
+    items.push(DorItem {
+        id: "dor-11".to_string(),
+        name: "token_performance_planned".to_string(),
+        status: if dor_11_pass {
+            "pass".to_string()
+        } else {
+            "fail".to_string()
+        },
+        details: if dor_11_pass {
+            "token and performance constraints defined".to_string()
+        } else {
+            "spec.md missing performance and token constraints section".to_string()
+        },
+    });
+
+    let passed_count = items.iter().filter(|it| it.status == "pass").count();
+    let total_count = items.len();
+    let satisfied =
+        passed_count == total_count && spec_issues.is_empty() && check_issues.is_empty();
+
+    Ok(DorEvaluation {
+        satisfied,
+        plan_id: plan_id.to_string(),
+        passed_count,
+        total_count,
+        items,
+    })
+}
+
+pub fn evaluate_plan_definition_of_done(
+    workspace_root: &Path,
+    claude_home: &str,
+    plan_id: &str,
+) -> Result<DodEvaluation, String> {
+    let paths = review_plan_paths(workspace_root, claude_home, plan_id)?;
+    let spec = read_text(&paths.spec, SPEC_FILE)?;
+    let (parsed, _) = validate_specification(&spec, plan_id);
+    let mut check_issues = Vec::new();
+    let architecture = read_bounded_text_for_validation(
+        &paths.architecture,
+        ARCHITECTURE_FILE,
+        crate::utility::architecture::MAX_ARCHITECTURE_BYTES,
+        &mut check_issues,
+    );
+
+    let home_path = resolve_claude_home(claude_home).unwrap_or_else(|_| PathBuf::from("."));
+    let now = timestamp();
+    let warn_summary = crate::proxy::warnings::warning_gate(&home_path, workspace_root, &now);
+
+    let ac_eval = evaluate_acceptance_criteria(workspace_root, claude_home, plan_id);
+
+    let mut items = Vec::new();
+
+    let (dod_1_pass, dod_1_details) = match &ac_eval {
+        Ok((crate::review::GateStatus::Pass, _)) => (
+            true,
+            "all acceptance criteria have passing evidence".to_string(),
+        ),
+        Ok((status, summary)) => (
+            false,
+            format!("acceptance criteria status is {status:?}: {summary}"),
+        ),
+        Err(err) => (
+            false,
+            format!("failed evaluating acceptance criteria: {err}"),
+        ),
+    };
+    items.push(DodItem {
+        id: "dod-1".to_string(),
+        name: "requirements_and_ac_evidence".to_string(),
+        status: if dod_1_pass {
+            "pass".to_string()
+        } else {
+            "fail".to_string()
+        },
+        details: dod_1_details,
+    });
+
+    let mut task_issues = Vec::new();
+    let tasks = load_json_artifact(&paths.tasks, TASKS_FILE, plan_id, &mut task_issues);
+    if let Some(tasks_val) = tasks {
+        if let Some(task_list) = tasks_val.get("tasks").and_then(Value::as_array) {
+            for t in task_list {
+                let task_id = t.get("taskId").and_then(Value::as_str).unwrap_or("unknown");
+                let t_status = t.get("status").and_then(Value::as_str).unwrap_or("pending");
+                if t_status != "complete" && t_status != "done" && t_status != "not_applicable" {
+                    task_issues.push(format!("task {task_id} status is {t_status}"));
+                }
+                if let Some(ticket_rel) = t.get("ticketFile").and_then(Value::as_str) {
+                    let ticket_path = paths.directory.join(ticket_rel);
+                    if let Ok(ticket_text) = read_text(&ticket_path, ticket_rel) {
+                        if let Ok(ticket_val) = serde_json::from_str::<Value>(&ticket_text) {
+                            if let Some(layers) =
+                                ticket_val.get("layers").and_then(Value::as_object)
+                            {
+                                for (layer_name, subtasks) in layers {
+                                    if let Some(sub_arr) = subtasks.as_array() {
+                                        for st in sub_arr {
+                                            let st_id =
+                                                json_field_str(st, "id").unwrap_or("subtask");
+                                            let st_status =
+                                                json_field_str(st, "status").unwrap_or("open");
+                                            if st_status != "complete"
+                                                && st_status != "done"
+                                                && st_status != "not_applicable"
+                                            {
+                                                task_issues.push(format!(
+                                                    "{st_id} in {layer_name} is {st_status}"
+                                                ));
+                                            }
+                                            if st_status == "not_applicable" {
+                                                let has_reason = json_field_str(st, "reason")
+                                                    .map(|r| !r.trim().is_empty())
+                                                    .unwrap_or(false);
+                                                if !has_reason {
+                                                    task_issues.push(format!(
+                                                        "{st_id} marked not_applicable without reason"
+                                                    ));
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        task_issues.push("tasks.json missing".to_string());
+    }
+    let dod_2_pass = task_issues.is_empty();
+    items.push(DodItem {
+        id: "dod-2".to_string(),
+        name: "task_layers_complete".to_string(),
+        status: if dod_2_pass {
+            "pass".to_string()
+        } else {
+            "fail".to_string()
+        },
+        details: if dod_2_pass {
+            "all task layers complete or justified not applicable".to_string()
+        } else {
+            task_issues.join("; ")
+        },
+    });
+
+    let dod_3_pass = warn_summary.as_ref().map(|s| !s.blocking).unwrap_or(true);
+    items.push(DodItem {
+        id: "dod-3".to_string(),
+        name: "build_warning_free".to_string(),
+        status: if dod_3_pass {
+            "pass".to_string()
+        } else {
+            "fail".to_string()
+        },
+        details: if dod_3_pass {
+            "0 blocking build warnings".to_string()
+        } else {
+            "blocking build warnings detected".to_string()
+        },
+    });
+
+    let dod_4_pass = dod_3_pass;
+    items.push(DodItem {
+        id: "dod-4".to_string(),
+        name: "linter_warning_free".to_string(),
+        status: if dod_4_pass {
+            "pass".to_string()
+        } else {
+            "fail".to_string()
+        },
+        details: if dod_4_pass {
+            "0 blocking linter warnings".to_string()
+        } else {
+            "blocking linter warnings detected".to_string()
+        },
+    });
+
+    let dod_5_pass = matches!(&ac_eval, Ok((crate::review::GateStatus::Pass, _)));
+    items.push(DodItem {
+        id: "dod-5".to_string(),
+        name: "tests_pass".to_string(),
+        status: if dod_5_pass {
+            "pass".to_string()
+        } else {
+            "fail".to_string()
+        },
+        details: if dod_5_pass {
+            "all automated tests pass with verified evidence".to_string()
+        } else {
+            "test evidence not fully verified or passing".to_string()
+        },
+    });
+
+    let dod_6_pass = warn_summary.as_ref().map(|s| !s.blocking).unwrap_or(true);
+    items.push(DodItem {
+        id: "dod-6".to_string(),
+        name: "warnings_resolved_or_waived".to_string(),
+        status: if dod_6_pass {
+            "pass".to_string()
+        } else {
+            "fail".to_string()
+        },
+        details: if dod_6_pass {
+            "warning ledger resolved or validly waived".to_string()
+        } else {
+            "blocking un-waived warnings in ledger".to_string()
+        },
+    });
+
+    let sec_body = spec_section_body(&spec, "Security/privacy concerns").unwrap_or_default();
+    let dod_7_pass = is_meaningful_content(sec_body);
+    items.push(DodItem {
+        id: "dod-7".to_string(),
+        name: "security_verification_complete".to_string(),
+        status: if dod_7_pass {
+            "pass".to_string()
+        } else {
+            "fail".to_string()
+        },
+        details: if dod_7_pass {
+            "security and privacy verification complete".to_string()
+        } else {
+            "spec.md missing security and privacy concerns definition".to_string()
+        },
+    });
+
+    let has_ui = parsed.acceptance_criteria.iter().any(|ac| {
+        ac.evidence_type.to_lowercase().contains("visual")
+            || ac.verification_method.to_lowercase().contains("ui")
+            || ac.verification_method.to_lowercase().contains("playwright")
+            || ac
+                .verification_method
+                .to_lowercase()
+                .contains("computer-use")
+    });
+    let (dod_8_pass, dod_8_details) = if !has_ui {
+        (
+            true,
+            "not applicable to change (no UI/UX criteria)".to_string(),
+        )
+    } else {
+        let has_visual_ev = match &ac_eval {
+            Ok((crate::review::GateStatus::Pass, summary)) => {
+                summary.contains("verified") || summary.contains("pass")
+            }
+            _ => false,
+        };
+        if has_visual_ev {
+            (
+                true,
+                "visual evidence verified in RawStore / evidence file".to_string(),
+            )
+        } else {
+            (
+                false,
+                "visual evidence missing or unverified for UI criteria".to_string(),
+            )
+        }
+    };
+    items.push(DodItem {
+        id: "dod-8".to_string(),
+        name: "ui_ux_visual_evidence".to_string(),
+        status: if dod_8_pass {
+            "pass".to_string()
+        } else {
+            "fail".to_string()
+        },
+        details: dod_8_details,
+    });
+
+    let dod_9_pass = matches!(&ac_eval, Ok((crate::review::GateStatus::Pass, _)));
+    items.push(DodItem {
+        id: "dod-9".to_string(),
+        name: "review_revalidates_evidence".to_string(),
+        status: if dod_9_pass {
+            "pass".to_string()
+        } else {
+            "fail".to_string()
+        },
+        details: if dod_9_pass {
+            "all trace evidence verified against files and hashes".to_string()
+        } else {
+            "evidence traces failed re-validation".to_string()
+        },
+    });
+
+    let dod_10_pass = match &ac_eval {
+        Ok((status, _)) => {
+            *status != crate::review::GateStatus::Skipped
+                && *status != crate::review::GateStatus::Unclear
+        }
+        _ => false,
+    };
+    items.push(DodItem {
+        id: "dod-10".to_string(),
+        name: "honest_status_enforced".to_string(),
+        status: if dod_10_pass {
+            "pass".to_string()
+        } else {
+            "fail".to_string()
+        },
+        details: if dod_10_pass {
+            "honest status semantics enforced throughout".to_string()
+        } else {
+            "skipped or unclear status reported as complete".to_string()
+        },
+    });
+
+    let dod_11_pass = !spec.is_empty() && architecture.is_some() && check_issues.is_empty();
+    items.push(DodItem {
+        id: "dod-11".to_string(),
+        name: "documentation_updated".to_string(),
+        status: if dod_11_pass {
+            "pass".to_string()
+        } else {
+            "fail".to_string()
+        },
+        details: if dod_11_pass {
+            "specification and architecture documentation current".to_string()
+        } else {
+            "documentation incomplete".to_string()
+        },
+    });
+
+    let rollout_body =
+        spec_section_body(&spec, "Rollout and rollback requirements").unwrap_or_default();
+    let dod_12_pass = is_meaningful_content(rollout_body);
+    items.push(DodItem {
+        id: "dod-12".to_string(),
+        name: "rollback_notes_complete".to_string(),
+        status: if dod_12_pass {
+            "pass".to_string()
+        } else {
+            "fail".to_string()
+        },
+        details: if dod_12_pass {
+            "rollout and rollback procedures documented".to_string()
+        } else {
+            "spec.md missing rollout and rollback requirements".to_string()
+        },
+    });
+
+    let dod_13_pass = dod_1_pass && dod_2_pass && dod_3_pass;
+    items.push(DodItem {
+        id: "dod-13".to_string(),
+        name: "completion_gate_ready".to_string(),
+        status: if dod_13_pass {
+            "pass".to_string()
+        } else {
+            "fail".to_string()
+        },
+        details: if dod_13_pass {
+            "completion gate criteria satisfied".to_string()
+        } else {
+            "completion gate checks failing".to_string()
+        },
+    });
+
+    let passed_count = items.iter().filter(|it| it.status == "pass").count();
+    let total_count = items.len();
+    let satisfied = passed_count == total_count;
+
+    Ok(DodEvaluation {
+        satisfied,
+        plan_id: plan_id.to_string(),
+        passed_count,
+        total_count,
+        items,
+    })
 }
 
 fn validate_architecture(

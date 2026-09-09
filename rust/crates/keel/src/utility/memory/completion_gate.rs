@@ -14,7 +14,7 @@ use std::path::PathBuf;
 
 use crate::args::FlagSet;
 use crate::json::Value;
-use crate::runtime::resolve_claude_home;
+use crate::runtime::{resolve_claude_home, resolve_repository_root};
 use crate::utility::working_brief::{list_briefs, read_brief, write_brief};
 
 use super::shared::{is_help_argument, probe_marker, probe_value, render_workflow_json};
@@ -28,7 +28,7 @@ pub(super) fn run_completion_gate_command(
     if arguments.is_empty() || is_help_argument(&arguments[0]) {
         let _ = writeln!(
             standard_output,
-            "Usage: keel {command_group} completion-gate check [--brief-id <id>] [--proof <text>] [--claude-home <path>] [--json]"
+            "Usage: keel {command_group} completion-gate check [--brief-id <id>] [--plan <id>] [--proof <text>] [--claude-home <path>] [--json]"
         );
         let _ = writeln!(
             standard_output,
@@ -61,6 +61,7 @@ fn run_completion_gate_check(
 ) -> u8 {
     let mut flag_set = FlagSet::new("completion-gate check");
     flag_set.string_flag("brief-id", "");
+    flag_set.string_flag("plan", "");
     flag_set.string_flag("proof", "");
     flag_set.string_flag("claude-home", "");
     flag_set.bool_flag("json", false);
@@ -175,6 +176,47 @@ fn run_completion_gate_check(
         .as_ref()
         .map_or_else(Clone::clone, Clone::clone);
 
+    let plan_id_input = flag_set.string_value("plan").trim().to_string();
+    let plan_probe: Option<Result<String, String>> = if !plan_id_input.is_empty() {
+        let workspace = match &brief_probe {
+            Ok(brief) if !brief.workspace.trim().is_empty() => {
+                PathBuf::from(brief.workspace.trim())
+            }
+            _ => resolve_repository_root("").unwrap_or_else(|_| PathBuf::from(".")),
+        };
+        Some(
+            match crate::utility::plan::evaluate_plan_definition_of_done(
+                &workspace,
+                &claude_home.to_string_lossy(),
+                &plan_id_input,
+            ) {
+                Ok(eval) if eval.satisfied => Ok(format!(
+                    "plan {plan_id_input} Definition of Done satisfied ({}/{} items passed)",
+                    eval.passed_count, eval.total_count
+                )),
+                Ok(eval) => {
+                    let failed: Vec<String> = eval
+                        .items
+                        .iter()
+                        .filter(|item| item.status == "fail")
+                        .map(|item| format!("{}: {}", item.name, item.details))
+                        .collect();
+                    Err(format!(
+                        "plan {plan_id_input} DoD unsatisfied: {}",
+                        failed.join("; ")
+                    ))
+                }
+                Err(error) => Err(format!("plan DoD evaluation failed: {error}")),
+            },
+        )
+    } else {
+        None
+    };
+    let plan_status = plan_probe.as_ref().map(|probe| match probe {
+        Ok(detail) => detail.clone(),
+        Err(error) => error.clone(),
+    });
+
     // Persist the proof on the brief; failure fails the check.
     // A claimed proof must never be silently dropped.
     let persisted_probe: Option<Result<String, String>> = match (&brief_probe, &proof_probe) {
@@ -197,6 +239,7 @@ fn run_completion_gate_check(
         && acceptance_probe.is_ok()
         && proof_probe.is_ok()
         && warnings_probe.is_ok()
+        && plan_probe.as_ref().map(Result::is_ok).unwrap_or(true)
         && persisted_probe.as_ref().map(Result::is_ok).unwrap_or(true);
 
     if flag_set.bool_value("json") {
@@ -217,6 +260,9 @@ fn run_completion_gate_check(
             ),
             ("closureReady".into(), Value::Bool(all_ok)),
         ];
+        if let (Some(probe), Some(status)) = (&plan_probe, &plan_status) {
+            fields.push(("planDefinitionOfDone".into(), probe_value(probe, status)));
+        }
         if let (Some(probe), Some(status)) = (&persisted_probe, &persisted_status) {
             fields.push(("proofPersisted".into(), probe_value(probe, status)));
         }
@@ -249,6 +295,13 @@ fn run_completion_gate_check(
         "  warnings: {} -> {warnings_status}",
         probe_marker(&warnings_probe)
     );
+    if let (Some(probe), Some(status)) = (&plan_probe, &plan_status) {
+        let _ = writeln!(
+            standard_output,
+            "  plan-definition-of-done: {} -> {status}",
+            probe_marker(probe)
+        );
+    }
     if let (Some(probe), Some(status)) = (&persisted_probe, &persisted_status) {
         let _ = writeln!(
             standard_output,
