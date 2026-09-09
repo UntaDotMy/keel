@@ -1,0 +1,24 @@
+# cargo-mutants configuration for Keel.
+# Tests high-risk paths: proxy, MCP, planner, research, tickets, warnings, gates.
+
+timeout = 60
+test_tool = "cargo"
+additional_cargo_args = ["--locked"]
+
+examine_globs = [
+    "rust/crates/keel/src/proxy/**/*.rs",
+    "rust/crates/keel/src/mcp/**/*.rs",
+    "rust/crates/keel/src/plan.rs",
+    "rust/crates/keel/src/research.rs",
+    "rust/crates/keel/src/ticket.rs",
+    "rust/crates/keel/src/warning_engine.rs",
+    "rust/crates/keel/src/review.rs",
+    "rust/crates/keel/src/review/**/*.rs",
+    "rust/crates/keel/src/review_gates.rs",
+]
+
+exclude_globs = [
+    "**/tests/**",
+    "**/test_*.rs",
+    "**/fixtures/**",
+]

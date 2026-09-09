@@ -1,0 +1,50 @@
+name: Mutation Testing
+
+# Scheduled mutation test runs for high-risk subsystems:
+# proxy, MCP, planner, research, tickets, warnings, and review gates.
+
+permissions:
+  contents: read
+
+on:
+  schedule:
+    # Run weekly on Mondays at 03:00 UTC
+    - cron: '0 3 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: mutation-test-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  mutants:
+    name: Mutation Testing (High-Risk Paths)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          cache-on-failure: true
+          key: mutants-cache
+      - name: Install cargo-mutants
+        uses: taiki-e/install-action@1ed6d7be6168f6c9046541087ff549b6bc581fdf # v2.87.2
+        with:
+          tool: cargo-mutants
+      - name: Run mutation testing on high-risk paths
+        run: |
+          cargo mutants --file .cargo/mutants.toml --in-place --no-shuffle
+      - name: Verify mutation baseline regression
+        run: |
+          node -e "
+            const fs = require('fs');
+            const baseline = JSON.parse(fs.readFileSync('docs/quality/mutation-baseline.json', 'utf8'));
+            console.log('Baseline mutation score:', baseline.summary.mutationScore);
+          "

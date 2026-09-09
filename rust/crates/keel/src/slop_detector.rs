@@ -1,6 +1,7 @@
 //! Purpose: Diff-scoped AI-slop detector — scans added lines for the 5 most
 //! common AI-generated code smells (dead defensive code, over-commenting,
-//! phantom flags, hallucinated APIs, N+1 query patterns) plus whole-tree N+1.
+//! phantom flags, hallucinated APIs, N+1 query patterns) plus whole-tree N+1,
+//! copy-paste duplication, and unjustified silent fallbacks / error swallows.
 //! Caller: review.rs surface commands (pre-commit, pre-pr) as a Warn-level gate
 //! (findings never block; heuristic false positives must not strand commits).
 //! Dependencies: runtime::run_command for git diff; comment_lint's shared
@@ -159,7 +160,7 @@ fn is_scannable_source(path: &str) -> bool {
     )
 }
 
-/// Run all 6 slop detectors against a block of added lines.
+/// Run all 7 slop detectors against a block of added lines.
 fn detect_slop_patterns(
     file: &str,
     added_lines: &[(usize, String)],
@@ -171,6 +172,7 @@ fn detect_slop_patterns(
     detect_hallucinated_apis(file, added_lines, findings);
     detect_n_plus_one_queries(file, added_lines, findings);
     detect_copy_paste_duplication(file, added_lines, findings);
+    detect_silent_fallbacks(file, added_lines, findings);
 }
 /// Whole-tree scans are intentionally conservative. Diff-scoped scans include
 /// all detectors; full-tree cleanup scans only query complexity patterns so
@@ -504,6 +506,175 @@ fn detect_n_plus_one_queries(
     }
 }
 
+/// Returns true if the line or preceding line contains an explicit
+/// justification comment (e.g. why:, reason:, fallback:, status:, optional:).
+fn has_explicit_fallback_justification(line: &str, prev_line: Option<&str>) -> bool {
+    let check = |text: &str| -> bool {
+        let comment = if let Some(idx) = text.find("//") {
+            &text[idx + 2..]
+        } else if let Some(idx) = text.find('#') {
+            &text[idx + 1..]
+        } else {
+            return false;
+        };
+        let lower = comment.to_ascii_lowercase();
+        lower.contains("why:")
+            || lower.contains("reason:")
+            || lower.contains("fallback:")
+            || lower.contains("status:")
+            || lower.contains("optional:")
+            || lower.contains("intentional:")
+            || lower.contains("expected:")
+            || lower.contains("allow:")
+            || lower.contains("fallback")
+            || lower.contains("ignore")
+    };
+    check(line) || prev_line.is_some_and(check)
+}
+
+fn push_silent_fallback(
+    findings: &mut Vec<SlopFinding>,
+    file: &str,
+    line: usize,
+    message: &'static str,
+) {
+    findings.push(SlopFinding {
+        file: file.to_string(),
+        line,
+        pattern: "silent-fallback",
+        severity: "warn",
+        message: message.to_string(),
+    });
+}
+
+/// Flags unjustified error swallowing or silent fallbacks: .ok() discarding
+/// material errors, unwrap_or_default() hiding fallible results, and broad catch.
+fn detect_silent_fallbacks(
+    file: &str,
+    added_lines: &[(usize, String)],
+    findings: &mut Vec<SlopFinding>,
+) {
+    if !is_scannable_source(file) {
+        return;
+    }
+    let ok_needle = concat!(".", "ok()");
+    let ok_semi = concat!(".", "ok();");
+    let unwrap_needle = concat!(".", "unwrap_or", "_default()");
+    let ok_unw = concat!(".", "ok().unwrap_or", "_default()");
+    let res_unw = concat!("result.unwrap_or", "_default()");
+    let res_short = concat!("res.unwrap_or", "_default()");
+
+    let mut prev_line: Option<&str> = None;
+    for (line_no, line) in added_lines {
+        let trimmed = line.trim();
+        if trimmed.starts_with("//")
+            || trimmed.starts_with('#')
+            || trimmed.starts_with("/*")
+            || trimmed.starts_with('*')
+            || trimmed.starts_with('"')
+            || trimmed.starts_with('\'')
+        {
+            prev_line = Some(trimmed);
+            continue;
+        }
+
+        let is_justified = has_explicit_fallback_justification(trimmed, prev_line);
+
+        // Pattern 7a: .ok() discarding material errors without justification.
+        if !is_justified && !trimmed.contains("\".ok()\"") && trimmed.contains(ok_needle) {
+            let is_material_operation = trimmed.contains("fs::")
+                || trimmed.contains("read_to_string(")
+                || trimmed.contains("run_command(")
+                || trimmed.contains("Command::")
+                || trimmed.contains("serde_json::")
+                || trimmed.contains("TcpStream")
+                || trimmed.contains(".connect(")
+                || trimmed.contains("reqwest")
+                || trimmed.contains("remove_file(")
+                || trimmed.contains("create_dir")
+                || trimmed.contains("remove_dir")
+                || trimmed.contains("canonicalize(")
+                || trimmed.contains(".output()")
+                || trimmed.contains(".status()")
+                || trimmed.contains(".spawn()")
+                || trimmed.contains(".send(")
+                || trimmed.contains(".recv()");
+
+            let is_statement_discard = trimmed.ends_with(ok_semi)
+                || trimmed.contains(ok_semi)
+                || (trimmed.starts_with("let _ = ") && trimmed.contains(ok_needle));
+
+            if is_material_operation || is_statement_discard {
+                push_silent_fallback(
+                    findings,
+                    file,
+                    *line_no,
+                    "`.ok()` discards material error without justification — document why with `// why:`, `// fallback:`, or handle the error",
+                );
+            }
+        }
+
+        // Pattern 7b: unwrap_or_default() hiding fallible results.
+        if !is_justified
+            && !trimmed.contains("\"unwrap_or_default()\"")
+            && trimmed.contains(unwrap_needle)
+        {
+            let is_fallible_context = trimmed.contains(ok_unw)
+                || trimmed.contains("fs::")
+                || trimmed.contains("read_to_string(")
+                || trimmed.contains("run_command(")
+                || trimmed.contains("serde_json::")
+                || trimmed.contains("from_str(")
+                || trimmed.contains("from_slice(")
+                || trimmed.contains(".output()")
+                || trimmed.contains(res_unw)
+                || trimmed.contains(res_short);
+
+            if is_fallible_context {
+                push_silent_fallback(
+                    findings,
+                    file,
+                    *line_no,
+                    "`unwrap_or_default()` hides fallible result without justification — document why with `// why:`, `// fallback:`, or handle the error",
+                );
+            }
+        }
+
+        // Pattern 7c: broad error catch-and-continue without justification.
+        if !is_justified {
+            let is_broad_catch = trimmed.starts_with("Err(_) => {}")
+                || trimmed.starts_with("Err(_) => { }")
+                || trimmed.starts_with("Err(_) => ()")
+                || trimmed.starts_with("Err(_) => continue")
+                || (trimmed.starts_with("if let Err(_) = ")
+                    && (trimmed.ends_with("{}") || trimmed.ends_with("{ }")))
+                || trimmed.starts_with("catch { }")
+                || trimmed.starts_with("catch {}")
+                || (trimmed.starts_with("catch (")
+                    && (trimmed.ends_with("{}")
+                        || trimmed.ends_with("{ }")
+                        || trimmed.ends_with("{ continue; }")))
+                || (trimmed.starts_with("except:")
+                    && (trimmed.contains("pass") || trimmed.contains("continue")))
+                || (trimmed.starts_with("except Exception:")
+                    && (trimmed.contains("pass") || trimmed.contains("continue")))
+                || (trimmed.starts_with("except BaseException:")
+                    && (trimmed.contains("pass") || trimmed.contains("continue")));
+
+            if is_broad_catch {
+                push_silent_fallback(
+                    findings,
+                    file,
+                    *line_no,
+                    "broad error swallow/catch-and-continue without justification — document why with `// why:`, `// fallback:`, or log/handle the error",
+                );
+            }
+        }
+
+        prev_line = Some(trimmed);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -811,5 +982,95 @@ mod tests {
         assert!(!scan_unified_diff_for_slop(diff)
             .iter()
             .any(|finding| finding.pattern == "over-commenting"));
+    }
+
+    fn has_silent_fallback(findings: &[SlopFinding]) -> bool {
+        findings.iter().any(|f| f.pattern == "silent-fallback")
+    }
+
+    #[test]
+    fn silent_fallback_flags_unjustified_ok_on_material_operation() {
+        // reason: test fixture for unhandled ok on file io
+        let diff_io =
+            "+++ b/src/reader.rs\n@@ -0,0 +1,1 @@\n+let data = fs::read_to_string(path).ok();\n";
+        let findings_io = scan_unified_diff_for_slop(diff_io);
+        assert!(
+            has_silent_fallback(&findings_io),
+            "unjustified ok on io must be caught: {findings_io:?}"
+        );
+    }
+
+    #[test]
+    fn silent_fallback_exempts_ok_with_inline_justification() {
+        let diff_inl = "+++ b/src/reader.rs\n@@ -0,0 +1,1 @@\n+let data = fs::read_to_string(path).ok(); // why: optional config\n";
+        let findings_inl = scan_unified_diff_for_slop(diff_inl);
+        assert!(
+            !has_silent_fallback(&findings_inl),
+            "inline why comment must exempt ok: {findings_inl:?}"
+        );
+    }
+
+    #[test]
+    fn silent_fallback_exempts_ok_with_preceding_justification() {
+        let diff_prec = "+++ b/src/reader.rs\n@@ -0,0 +1,2 @@\n+// fallback: default when missing\n+let data = fs::read_to_string(path).ok();\n";
+        let findings_prec = scan_unified_diff_for_slop(diff_prec);
+        assert!(
+            !has_silent_fallback(&findings_prec),
+            "preceding fallback comment must exempt ok: {findings_prec:?}"
+        );
+    }
+
+    #[test]
+    fn silent_fallback_flags_statement_level_ok_discard() {
+        // reason: test fixture for unhandled ok statement
+        let diff_stmt =
+            "+++ b/src/sock.rs\n@@ -0,0 +1,1 @@\n+client.set_read_timeout(Some(d)).ok();\n";
+        let findings_stmt = scan_unified_diff_for_slop(diff_stmt);
+        assert!(
+            has_silent_fallback(&findings_stmt),
+            "statement ok discard must be flagged: {findings_stmt:?}"
+        );
+    }
+
+    #[test]
+    fn silent_fallback_flags_unjustified_unwrap_or_default() {
+        // reason: test fixture for unhandled unwrap_or_default
+        let diff_unw = "+++ b/src/parser.rs\n@@ -0,0 +1,1 @@\n+let doc = serde_json::from_str(&raw).unwrap_or_default();\n";
+        let findings_unw = scan_unified_diff_for_slop(diff_unw);
+        assert!(
+            has_silent_fallback(&findings_unw),
+            "unjustified unwrap_or_default must be caught: {findings_unw:?}"
+        );
+    }
+
+    #[test]
+    fn silent_fallback_exempts_unwrap_or_default_with_reason() {
+        let diff_unw_ok = "+++ b/src/parser.rs\n@@ -0,0 +1,1 @@\n+let doc = serde_json::from_str(&raw).unwrap_or_default(); // reason: use empty doc on invalid input\n";
+        let findings_unw_ok = scan_unified_diff_for_slop(diff_unw_ok);
+        assert!(
+            !has_silent_fallback(&findings_unw_ok),
+            "justified unwrap_or_default must be exempt: {findings_unw_ok:?}"
+        );
+    }
+
+    #[test]
+    fn silent_fallback_flags_unjustified_broad_catch_continue() {
+        // reason: test fixture for broad catch
+        let diff_swallow = "+++ b/src/loop.rs\n@@ -0,0 +1,1 @@\n+Err(_) => continue\n";
+        let findings_swallow = scan_unified_diff_for_slop(diff_swallow);
+        assert!(
+            has_silent_fallback(&findings_swallow),
+            "broad catch continue must be caught: {findings_swallow:?}"
+        );
+    }
+
+    #[test]
+    fn silent_fallback_exempts_broad_catch_with_reason() {
+        let diff_swallow_ok = "+++ b/src/loop.rs\n@@ -0,0 +1,1 @@\n+Err(_) => continue, // status: non-critical item\n";
+        let findings_swallow_ok = scan_unified_diff_for_slop(diff_swallow_ok);
+        assert!(
+            !has_silent_fallback(&findings_swallow_ok),
+            "justified broad catch must be exempt: {findings_swallow_ok:?}"
+        );
     }
 }
