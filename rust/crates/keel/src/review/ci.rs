@@ -183,13 +183,20 @@ pub(crate) fn parse_gh_checks(stdout: &str) -> Option<Vec<CiCheck>> {
         if cleaned_header(line) {
             continue;
         }
-        // gh pr checks columns: NAME STATUS ... (whitespace/tab separated).
-        let mut columns = line.split_whitespace();
-        let name = match columns.next() {
-            Some(value) if !value.is_empty() => value,
-            _ => continue,
+        // gh pr checks columns: NAME STATUS ... (tab-delimited or whitespace fallback).
+        let (name, status) = if line.contains('\t') {
+            let mut columns = line.split('\t');
+            (
+                columns.next().unwrap_or("").trim(),
+                columns.next().unwrap_or("").trim(),
+            )
+        } else {
+            let mut columns = line.split_whitespace();
+            (columns.next().unwrap_or(""), columns.next().unwrap_or(""))
         };
-        let status = columns.next().unwrap_or("");
+        if name.is_empty() {
+            continue;
+        }
         checks.push(CiCheck {
             name: name.to_string(),
             state: classify_check_state(status),

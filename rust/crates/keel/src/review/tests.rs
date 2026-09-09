@@ -1990,6 +1990,9 @@ fn impact_gate_empty_touched_returns_not_applicable() {
 
 #[test]
 fn impact_gate_missing_graph_without_flow_blocks() {
+    let _guard = crate::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let repository = init_research_gate_repo("impact-missing-flow");
     let result = check_precommit_impact(&repository);
     assert_eq!(result.status, GateStatus::Fail);
@@ -2001,6 +2004,9 @@ fn impact_gate_missing_graph_without_flow_blocks() {
 
 #[test]
 fn impact_gate_missing_graph_with_valid_flow_warns() {
+    let _guard = crate::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let repository = init_research_gate_repo("impact-valid-flow");
     let (head, diff_fingerprint) = keel_flow::repository_state(&repository).expect("repo state");
     let check = keel_flow::Check {
@@ -2153,4 +2159,15 @@ fn acceptance_criteria_evaluation_honest_format() {
     let (human_status, human_summary) = eval_ac();
     assert_eq!(human_status, GateStatus::NeedsHuman);
     assert!(human_summary.contains("AC-001: needs_human | reason: layout verification requires visual check | screenshot: artifacts/screen.png"));
+}
+
+#[test]
+fn parse_gh_checks_handles_tab_delimited_names_with_spaces() {
+    let output = "CI gate\tpass\t3s\thttps://example.com/job/1\nvalidate-linux\tpass\t1m\thttps://example.com/job/2\n";
+    let checks = super::ci::parse_gh_checks(output).expect("parsed checks");
+    assert_eq!(checks.len(), 2);
+    assert_eq!(checks[0].name, "CI gate");
+    assert_eq!(checks[0].state, super::ci::CheckState::Green);
+    assert_eq!(checks[1].name, "validate-linux");
+    assert_eq!(checks[1].state, super::ci::CheckState::Green);
 }

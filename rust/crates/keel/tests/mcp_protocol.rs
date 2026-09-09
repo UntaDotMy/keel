@@ -47,12 +47,19 @@ struct McpServerProcess {
 
 impl McpServerProcess {
     fn spawn(claude_home: &Path) -> Self {
+        Self::spawn_with_profile(claude_home, None)
+    }
+
+    fn spawn_with_profile(claude_home: &Path, profile: Option<&str>) -> Self {
         let binary_path = keel_binary_path();
         let mut command = Command::new(binary_path);
         command.arg("mcp").arg("serve");
         command.env("CLAUDE_TARGET_OVERRIDE", claude_home);
         command.env("HOME", claude_home);
         command.env("USERPROFILE", claude_home);
+        if let Some(profile) = profile {
+            command.env("KEEL_MCP_CATALOG_PROFILE", profile);
+        }
         command.stdin(Stdio::piped());
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
@@ -219,14 +226,13 @@ fn mcp_serve_initialize_then_tools_list_round_trip() {
     assert!(tool_names.contains(&"system_map".to_string()));
     assert!(tool_names.contains(&"run_command".to_string()));
     assert!(tool_names.contains(&"recall_status".to_string()));
-    assert!(tool_names.contains(&"observe".to_string()));
-    assert!(tool_names.contains(&"rewrite".to_string()));
-    assert!(tool_names.contains(&"skill_eval".to_string()));
     assert!(tool_names.contains(&"anvil".to_string()));
-    assert!(tool_names.contains(&"design_intelligence".to_string()));
-    assert!(
-        tools.len() >= 30,
-        "expected full MCP catalog (>=30 tools), got {}: {tool_names:?}",
+    assert!(tool_names.contains(&"cli".to_string()));
+    assert!(tool_names.contains(&"context_brief".to_string()));
+    assert_eq!(
+        tools.len(),
+        17,
+        "expected default tiered MCP catalog (17 tools), got {}: {tool_names:?}",
         tools.len()
     );
     for tool in tools {
@@ -240,6 +246,49 @@ fn mcp_serve_initialize_then_tools_list_round_trip() {
 
     server.close();
     let _ = std::fs::remove_dir_all(&claude_home);
+
+    let claude_home_full = unique_temp_directory("init-tools-full");
+    let mut server_full = McpServerProcess::spawn_with_profile(&claude_home_full, Some("full"));
+    server_full.send(&json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {}
+    }));
+    let init_full = server_full.recv();
+    assert_eq!(init_full["jsonrpc"], "2.0");
+
+    server_full.send(&json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/list"
+    }));
+    let full_response = server_full.recv();
+    let full_tools = full_response["result"]["tools"]
+        .as_array()
+        .expect("full tools array");
+    let full_names: Vec<String> = full_tools
+        .iter()
+        .filter_map(|entry| {
+            entry
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .collect();
+    assert!(full_names.contains(&"observe".to_string()));
+    assert!(full_names.contains(&"rewrite".to_string()));
+    assert!(full_names.contains(&"skill_eval".to_string()));
+    assert!(full_names.contains(&"design_intelligence".to_string()));
+    assert_eq!(
+        full_tools.len(),
+        37,
+        "expected full MCP catalog (37 tools), got {}: {full_names:?}",
+        full_tools.len()
+    );
+
+    server_full.close();
+    let _ = std::fs::remove_dir_all(&claude_home_full);
 }
 
 #[test]
