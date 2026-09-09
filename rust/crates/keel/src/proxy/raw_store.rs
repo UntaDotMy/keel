@@ -927,30 +927,41 @@ fn reject_symlink(path: &std::path::Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Validate every existing component before a create/write operation. Calling
-/// `create_dir_all` first would follow a symlinked raw-output root or date
-/// directory before the later point check gets a chance to reject it.
+/// Validate the target and, when it does not exist yet, the nearest existing
+/// ancestor before a create/write operation. Calling `create_dir_all` first
+/// would follow a symlinked raw-output root or date directory before the later
+/// point check gets a chance to reject it. Do not walk beyond that ancestor:
+/// macOS exposes `/var` as a symlink to `/private/var`, and benign system
+/// aliases outside the configured raw-store boundary must remain usable.
 fn reject_path_components(path: &std::path::Path) -> io::Result<()> {
-    let mut current = Some(path);
-    while let Some(candidate) = current {
-        match fs::symlink_metadata(candidate) {
+    let mut current = path;
+    loop {
+        match fs::symlink_metadata(current) {
             Ok(metadata) => {
                 if metadata.file_type().is_symlink() {
                     return Err(io::Error::new(
                         io::ErrorKind::PermissionDenied,
                         format!(
                             "raw store path must not be a symlink: {}",
-                            candidate.display()
+                            current.display()
                         ),
                     ));
                 }
+                return Ok(());
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error),
         }
-        current = candidate.parent();
+        current = current.parent().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "raw store path has no existing ancestor: {}",
+                    path.display()
+                ),
+            )
+        })?;
     }
-    Ok(())
 }
 
 fn validate_file_name(file_name: &str) -> io::Result<()> {
