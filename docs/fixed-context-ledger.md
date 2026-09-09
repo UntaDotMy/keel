@@ -28,8 +28,8 @@ measurement. Actual values are recomputed on every invocation and in CI.
 | `hook.session_start.bootstrap` | 457 | 503 |
 | `hook.user_prompt_submit.simple` | 102 | 113 |
 | `hook.user_prompt_submit.code_change` | 153 | 169 |
-| `repo.CLAUDE.md` | 9,906 | 10,897 |
-| `repo.AGENTS.md` | 2,348 | 2,583 |
+| `repo.CLAUDE.md` | 1,245 | 1,370 |
+| `repo.AGENTS.md` | 2,462 | 2,709 |
 | `repo.WORKFLOW.md` | 4,884 | 5,373 |
 | `generated.claude.CLAUDE.md` | 964 | 1,061 |
 | `generated.codex.AGENTS.md` | 364 | 401 |

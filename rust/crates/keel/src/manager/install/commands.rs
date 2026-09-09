@@ -478,7 +478,7 @@ pub(crate) fn remove_wired_adapters(claude_home: &Path) -> usize {
     let agents_md = home.join(".pi").join("agent").join("AGENTS.md");
     if agents_md.is_file() {
         if let Ok(content) = std::fs::read_to_string(&agents_md) {
-            if content.starts_with("# keel Iron Law for Pi Agent") {
+            if content.contains("# keel Iron Law for Pi Agent") {
                 removed += remove_path_if_exists_counted(&agents_md).unwrap_or(0);
             }
         }
