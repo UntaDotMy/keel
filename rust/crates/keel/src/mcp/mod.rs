@@ -1800,6 +1800,32 @@ mod tests {
     }
 
     #[test]
+    fn tools_list_empty_params_object_matches_omitted_params() {
+        let omitted = dispatch(&json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/list"
+        }))
+        .expect("omitted params response");
+        let empty = dispatch(&json!({
+            "jsonrpc": "2.0",
+            "id": 8,
+            "method": "tools/list",
+            "params": {}
+        }))
+        .expect("empty params response");
+        assert!(empty.get("error").is_none(), "{empty}");
+        assert_eq!(empty["result"]["tools"], omitted["result"]["tools"]);
+        let serialized = serde_json::to_string(&empty["result"]).expect("serialize");
+        let tokens = crate::proxy::token_meter::TokenMeter::count_text(&serialized);
+        assert!(
+            tokens <= crate::proxy::context::DEFAULT_MAX_TOOL_CATALOG_TOKENS,
+            "empty-params catalog {tokens} exceeds {}",
+            crate::proxy::context::DEFAULT_MAX_TOOL_CATALOG_TOKENS
+        );
+    }
+
+    #[test]
     fn resources_list_advertises_system_map_and_recall_status() {
         let request = json!({
             "jsonrpc": "2.0",
