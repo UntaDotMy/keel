@@ -1,3 +1,4 @@
+use super::diff_gates::{context_policy_gate, execution_evidence_gate};
 use super::*;
 use crate::runtime::resolve_repository_root;
 use serde::{Deserialize, Serialize};
@@ -119,6 +120,12 @@ pub(crate) fn run_review_gates_command(
         flag_set.string_value("surface"),
     ));
     gate_results.push(completeness_check_gate(
+        &repository_root,
+        flag_set.string_value("base-ref"),
+        flag_set.string_value("surface"),
+    ));
+    gate_results.push(context_policy_gate(&repository_root));
+    gate_results.push(execution_evidence_gate(
         &repository_root,
         flag_set.string_value("base-ref"),
         flag_set.string_value("surface"),

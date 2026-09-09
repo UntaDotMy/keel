@@ -77,6 +77,8 @@ fn ui_verify_pass_and_rawstore_retrieval() {
             "ui",
             "--fixture",
             "fixture_pass.json",
+            "--task",
+            "checkout-review",
             "--adapter",
             "playwright",
             "--json",
@@ -111,6 +113,27 @@ fn ui_verify_pass_and_rawstore_retrieval() {
     assert!(raw_dir.join("screenshot.png").is_file());
     assert!(raw_dir.join("meta.json").is_file());
     assert!(raw_dir.join("stdout.log").is_file());
+
+    let workspace_entries = fs::read_dir(tree.home.join("memories/workspaces"))
+        .expect("workspace verification lane")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("workspace entries");
+    assert_eq!(workspace_entries.len(), 1);
+    let verification_dir = workspace_entries[0]
+        .path()
+        .join("ui-verification/checkout-review");
+    let manifest: Value = serde_json::from_str(
+        &fs::read_to_string(verification_dir.join("manifest.json")).expect("manifest"),
+    )
+    .expect("manifest json");
+    assert_eq!(manifest["schemaVersion"], 1);
+    assert_eq!(manifest["status"], "pass");
+    let verdicts: Value = serde_json::from_str(
+        &fs::read_to_string(verification_dir.join("verdicts.json")).expect("verdicts"),
+    )
+    .expect("verdicts json");
+    assert_eq!(verdicts[0]["schemaVersion"], 1);
+    assert_eq!(verdicts[0]["screenshotId"], raw_id);
 }
 
 #[test]
@@ -281,4 +304,40 @@ fn ui_verify_missing_fixture_fails() {
         .assert()
         .failure()
         .code(1);
+}
+
+#[test]
+fn ui_verify_rejects_fixture_outside_workspace_boundary() {
+    let tree = create_test_tree("outside");
+    let outside = tree
+        .root
+        .parent()
+        .expect("fixture parent")
+        .join("outside.json");
+    fs::write(
+        &outside,
+        serde_json::to_string(&serde_json::json!({
+            "text": "must not be read outside the workspace"
+        }))
+        .expect("serialize outside fixture"),
+    )
+    .expect("write outside fixture");
+
+    let assert_res = keel_cmd(&tree)
+        .args([
+            "verify",
+            "ui",
+            "--fixture",
+            outside.to_str().expect("outside path"),
+            "--adapter",
+            "playwright",
+        ])
+        .assert()
+        .failure()
+        .code(1);
+    let stderr = String::from_utf8(assert_res.get_output().stderr.clone()).unwrap();
+    assert!(
+        stderr.contains("escapes workspace boundary"),
+        "stderr: {stderr}"
+    );
 }

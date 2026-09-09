@@ -716,13 +716,17 @@ fn handle_post(
     }
 
     let method = value.get("method").and_then(Value::as_str);
-    if method == Some("tools/call") && headers.session_id.is_none() {
+    if matches!(
+        method,
+        Some("tools/call" | "resources/read" | "keel/discover" | "keel/activate")
+    ) && headers.session_id.is_none()
+    {
         return write_http(
             stream,
             400,
             "application/json",
             None,
-            br#"{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"MCP-Session-Id required for tools/call"}}"#,
+            br#"{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"MCP-Session-Id required for dynamic MCP requests"}}"#,
         );
     }
 
@@ -828,7 +832,8 @@ fn dispatch_http_value_with_cancellation(
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(key.clone(), Arc::clone(&cancellation));
     }
-    let response = super::dispatch_cancellable(value, &cancellation);
+    let request_context = super::McpRequestContext::authoritative(session_id);
+    let response = super::dispatch_cancellable_with_context(value, &cancellation, &request_context);
     if let Some(key) = key.as_ref() {
         let mut registrations = state
             .cancellations

@@ -510,7 +510,8 @@ fn every_help_advertised_flag_is_read_by_the_code() {
         advertised.len()
     );
 
-    // Every `*_value("name")` read anywhere in the crate.
+    // Count `*_value("name")` reads and direct parser arms such as
+    // `mcp discover --level`; both are real flag consumers for parity.
     let mut read: BTreeSet<String> = BTreeSet::new();
     for path in rust_source_files(&src) {
         let Ok(text) = fs::read_to_string(&path) else {
@@ -525,6 +526,25 @@ fn every_help_advertised_flag_is_read_by_the_code() {
             } else {
                 break;
             }
+        }
+
+        let mut from = 0usize;
+        while let Some(found) = text[from..].find("\"--") {
+            let start = from + found + 3;
+            let Some(end) = text[start..].find('"') else {
+                break;
+            };
+            let name = &text[start..start + end];
+            let after = start + end + 1;
+            if !name.is_empty()
+                && name
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric() || character == '-')
+                && text[after..].trim_start().starts_with("=>")
+            {
+                read.insert(name.to_string());
+            }
+            from = after;
         }
     }
 

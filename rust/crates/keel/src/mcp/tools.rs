@@ -26,16 +26,18 @@
 //! a dependable pull channel, so mirroring the capabilities here routes around
 //! the hook layer without rewriting it.
 
+use std::collections::HashSet;
 use std::env;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Condvar, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
+use crate::proxy::context::{ContextPolicy, ContextSource, ProjectionInput};
 use crate::runtime::{display_path, resolve_claude_home, safe_path_segment};
 use crate::utility::memory::refresh_system_map_with_status;
 use crate::utility::memory_families::family_counts;
@@ -92,6 +94,27 @@ const MAX_SKILL_LIST_FIELD_CHARS: usize = 240;
 /// Full prose stays in source; hosts only need a short trigger line.
 const MAX_TOOLS_LIST_DESCRIPTION_CHARS: usize = 160;
 
+static DISCOVERY_CALLS: AtomicU64 = AtomicU64::new(0);
+static ACTIVATION_CALLS: AtomicU64 = AtomicU64::new(0);
+#[cfg(test)]
+static TEST_REQUEST_IDS: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn tools_page_size() -> usize {
+    env::var("KEEL_MCP_PAGE_SIZE")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .map(|value| value.clamp(1, 64))
+        .unwrap_or(20)
+}
+
+pub(crate) fn discovery_snapshot() -> Value {
+    json!({
+        "calls": DISCOVERY_CALLS.load(Ordering::Relaxed),
+        "activations": ACTIVATION_CALLS.load(Ordering::Relaxed),
+        "ranking": "relevance+intent+usage+schema_cost+policy+error_rate",
+    })
+}
+
 /// Default cap for `recall` matches when the caller does not supply one. The
 /// CLI uses the same default (see `utility::recall::DEFAULT_RECALL_LIMIT`).
 const DEFAULT_RECALL_LIMIT: usize = 20;
@@ -126,20 +149,178 @@ pub(crate) fn handle_tools_list_for_profile(profile: super::McpCatalogProfile) -
             });
         }
     }
-    let list = slim_tools_list_for_wire(catalog);
-    let expected = match profile {
-        super::McpCatalogProfile::Tiered => EAGER_MCP_TOOL_NAMES.len(),
-        super::McpCatalogProfile::Full => MCP_TOOL_NAMES.len(),
+    sort_tools_catalog(&mut catalog);
+    slim_tools_list_for_wire(catalog)
+}
+
+/// Apply MCP's opaque-cursor pagination and progressive disclosure levels to
+/// the canonical catalog. Invalid cursors fail closed; they never trigger a
+/// full-catalog fallback that could violate the context budget.
+pub(crate) fn handle_tools_list_for_profile_params(
+    profile: super::McpCatalogProfile,
+    params: &Value,
+) -> Result<Value, String> {
+    let catalog = handle_tools_list_for_profile(profile);
+    // Preserve the no-params compatibility response; an explicit object opts
+    // into paginated, progressive-disclosure semantics.
+    if params.is_null() {
+        ensure_catalog_budget(profile, &catalog)?;
+        return Ok(catalog);
+    }
+    let level = params.get("level").and_then(Value::as_u64).unwrap_or(2);
+    if level > 2 {
+        return Err("tools/list level must be 0, 1, or 2".to_string());
+    }
+    let expected = catalog
+        .get("tools")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    let fingerprint = catalog_fingerprint(profile, level, expected);
+    let cursor = params.get("cursor").and_then(Value::as_str);
+    let start = match cursor {
+        Some(value) => decode_catalog_cursor(value, &fingerprint)?,
+        None => 0,
     };
+    if start > expected {
+        return Err("tools/list cursor is outside the active catalog".to_string());
+    }
+    let page_size = tools_page_size();
+    let end = start.saturating_add(page_size).min(expected);
+    let mut page = catalog;
+    if let Some(tools) = page.get_mut("tools").and_then(Value::as_array_mut) {
+        let selected = tools.drain(start..end).collect::<Vec<_>>();
+        *tools = selected;
+    }
+    let mut list = slim_tools_list_for_wire(page);
+    apply_disclosure_level(&mut list, level);
+    ensure_catalog_budget(profile, &list)?;
+    if end < expected {
+        list["nextCursor"] = Value::String(encode_catalog_cursor(end, &fingerprint));
+    }
     debug_assert_eq!(
         list.get("tools")
             .and_then(Value::as_array)
             .map(std::vec::Vec::len)
             .unwrap_or(0),
-        expected,
-        "tools/list count must match active profile"
+        end.saturating_sub(start),
+        "tools/list count must match requested page"
     );
-    list
+    Ok(list)
+}
+
+fn ensure_catalog_budget(profile: super::McpCatalogProfile, payload: &Value) -> Result<(), String> {
+    let budget = match profile {
+        // Core is the fixed-context default; full is explicit opt-in with the
+        // generic dynamic ceiling for compatibility clients.
+        super::McpCatalogProfile::Tiered => crate::proxy::context::DEFAULT_MAX_TOOL_CATALOG_TOKENS,
+        super::McpCatalogProfile::Full => crate::proxy::context::DEFAULT_MAX_DYNAMIC_TOKENS,
+    };
+    let serialized = serde_json::to_string(payload)
+        .map_err(|error| format!("tools/list: serialize for budget: {error}"))?;
+    let tokens = crate::proxy::token_meter::TokenMeter::count_text(&serialized);
+    if tokens > budget {
+        return Err(format!(
+            "tools/list catalog exceeds the {budget}-token profile budget ({tokens}); use pagination or level 0/1"
+        ));
+    }
+    Ok(())
+}
+
+fn sort_tools_catalog(catalog: &mut Value) {
+    if let Some(tools) = catalog.get_mut("tools").and_then(Value::as_array_mut) {
+        tools.sort_by(|left, right| {
+            left.get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .cmp(
+                    right
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
+                )
+        });
+    }
+}
+
+fn catalog_fingerprint(profile: super::McpCatalogProfile, level: u64, expected: usize) -> String {
+    let names = match profile {
+        super::McpCatalogProfile::Tiered => EAGER_MCP_TOOL_NAMES,
+        super::McpCatalogProfile::Full => MCP_TOOL_NAMES,
+    };
+    crate::utility::hashing::fnv1a64_hex(&format!(
+        "{}\0{}\0{}",
+        profile.as_str(),
+        level,
+        names.join("\0")
+    )) + &format!("-{expected}")
+}
+
+fn encode_catalog_cursor(offset: usize, fingerprint: &str) -> String {
+    format!("keel1:{offset}:{fingerprint}")
+}
+
+fn decode_catalog_cursor(cursor: &str, fingerprint: &str) -> Result<usize, String> {
+    let mut parts = cursor.split(':');
+    if parts.next() != Some("keel1") {
+        return Err("tools/list cursor is invalid".to_string());
+    }
+    let offset = parts
+        .next()
+        .ok_or_else(|| "tools/list cursor is invalid".to_string())?
+        .parse::<usize>()
+        .map_err(|_| "tools/list cursor is invalid".to_string())?;
+    if parts.next() != Some(fingerprint) || parts.next().is_some() {
+        return Err("tools/list cursor is stale or invalid for this catalog".to_string());
+    }
+    Ok(offset)
+}
+
+fn apply_disclosure_level(list: &mut Value, level: u64) {
+    let Some(tools) = list.get_mut("tools").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for tool in tools {
+        if let Some(object) = tool.as_object_mut() {
+            object.insert(
+                "category".to_string(),
+                Value::String(
+                    tool_category(
+                        object
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default(),
+                    )
+                    .to_string(),
+                ),
+            );
+            object.insert("schemaVersion".to_string(), json!(1));
+            if level == 0 {
+                object.remove("inputSchema");
+                object.remove("description");
+            } else if level == 1 {
+                if let Some(schema) = object.get_mut("inputSchema") {
+                    if let Some(schema_object) = schema.as_object_mut() {
+                        schema_object.remove("required");
+                        schema_object.remove("properties");
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn tool_category(name: &str) -> &'static str {
+    match name {
+        "recall" | "recall_status" | "memory" | "memory_status" => "memory",
+        "run_command" | "command_output" | "command_kill" | "raw" => "execution",
+        "review" | "git_workflow" | "flow" | "anvil" => "governance",
+        "code_search" | "code_index" | "code_graph" => "repository",
+        "skill_route" | "skill_get" | "skill_list" | "context_brief" => "guidance",
+        "stats" | "gain" | "telemetry" | "observe" => "observability",
+        "design_intelligence" => "ui",
+        _ => "keel",
+    }
 }
 
 /// Raw tool catalog (full descriptions + property descriptions). Not sent on
@@ -656,9 +837,23 @@ pub(super) fn handle_tools_call(params: &Value) -> Result<Value, MethodError> {
     handle_tools_call_cancellable(params, None)
 }
 
+#[cfg(test)]
 pub(super) fn handle_tools_call_cancellable(
     params: &Value,
     cancellation: Option<Arc<AtomicBool>>,
+) -> Result<Value, MethodError> {
+    let mut context = super::McpRequestContext::authoritative(None);
+    context.request_id = Some(format!(
+        "test-request-{}",
+        TEST_REQUEST_IDS.fetch_add(1, Ordering::Relaxed)
+    ));
+    handle_tools_call_cancellable_with_context(params, cancellation, context)
+}
+
+pub(super) fn handle_tools_call_cancellable_with_context(
+    params: &Value,
+    cancellation: Option<Arc<AtomicBool>>,
+    request_context: super::McpRequestContext,
 ) -> Result<Value, MethodError> {
     let object = params.as_object().ok_or_else(|| MethodError {
         code: JSON_RPC_INVALID_PARAMS,
@@ -695,19 +890,89 @@ pub(super) fn handle_tools_call_cancellable(
     );
 
     match outcome {
-        Ok(text) => Ok(json!({
-            "content": [
-                { "type": "text", "text": truncate_mcp_text(&text) }
-            ],
-            "isError": false,
-        })),
-        Err(message) => Ok(json!({
-            "content": [
-                { "type": "text", "text": truncate_mcp_text(&message) }
-            ],
-            "isError": true,
-        })),
+        Ok(text) => {
+            match project_mcp_context(&name, &text, ContextSource::McpTool, &request_context) {
+                Ok(projection) => Ok(json!({
+                    "content": [
+                        { "type": "text", "text": truncate_mcp_text(&projection.summary) }
+                    ],
+                    "isError": false,
+                    "context": projection.metadata(),
+                })),
+                Err(message) => Ok(json!({
+                    "content": [
+                        { "type": "text", "text": message }
+                    ],
+                    "isError": true,
+                })),
+            }
+        }
+        Err(message) => {
+            match project_mcp_context(&name, &message, ContextSource::Error, &request_context) {
+                Ok(projection) => Ok(json!({
+                    "content": [
+                        { "type": "text", "text": truncate_mcp_text(&projection.summary) }
+                    ],
+                    "isError": true,
+                    "context": projection.metadata(),
+                })),
+                Err(firewall_error) => Ok(json!({
+                    "content": [
+                        { "type": "text", "text": firewall_error }
+                    ],
+                    "isError": true,
+                })),
+            }
+        }
     }
+}
+
+/// Apply the same model-boundary policy to every MCP text result, including
+/// errors. MCP has no raw artifact owner for arbitrary tool text, so an
+/// overflow is an explicit error rather than a full-catalog/raw fallback.
+pub(crate) fn project_mcp_context(
+    tool_name: &str,
+    text: &str,
+    source: ContextSource,
+    request_context: &super::McpRequestContext,
+) -> Result<crate::proxy::context::ContextProjection, String> {
+    let max_tokens = match (source.clone(), tool_name) {
+        (ContextSource::Memory, _) => crate::proxy::context::DEFAULT_MAX_MEMORY_PROJECTION_TOKENS,
+        (ContextSource::Warning, _) => crate::proxy::context::DEFAULT_MAX_WARNING_POINTER_TOKENS,
+        (ContextSource::Recovery, _) => crate::proxy::context::DEFAULT_MAX_DISCOVERY_RESULT_TOKENS,
+        (ContextSource::McpTool, "recall" | "memory" | "memory_status") => {
+            crate::proxy::context::DEFAULT_MAX_MEMORY_PROJECTION_TOKENS
+        }
+        (ContextSource::McpTool, "tools/list") => {
+            crate::proxy::context::DEFAULT_MAX_TOOL_CATALOG_TOKENS
+        }
+        (ContextSource::McpTool, "keel/discover" | "discover") => {
+            crate::proxy::context::DEFAULT_MAX_DISCOVERY_RESULT_TOKENS
+        }
+        _ => crate::proxy::context::DEFAULT_MAX_SINGLE_RESULT_TOKENS,
+    };
+    let policy = ContextPolicy::for_surface(max_tokens);
+    let input = ProjectionInput::new(
+        source.clone(),
+        text,
+        None::<String>,
+        request_context.workspace_id.clone(),
+        request_context.session_id.clone(),
+    )
+    .with_request_id(
+        request_context
+            .request_id
+            .clone()
+            .unwrap_or_else(|| tool_name.to_string()),
+    );
+    // Repeated failures remain actionable diagnostics while still passing
+    // through the same measurement and bounding policy.
+    let result = if source == ContextSource::Error {
+        crate::proxy::context::ContextFirewall::new(policy).project(input)
+    } else {
+        crate::proxy::context::project_scoped(policy, input)
+    };
+    result.map_err(|error| format!("keel context firewall rejected MCP {tool_name}: {error}"))
 }
 
 pub(crate) const EAGER_MCP_TOOL_NAMES: &[&str] = &[
@@ -793,6 +1058,244 @@ pub(crate) const MCP_TOOL_NAMES: &[&str] = &[
     "design_intelligence",
     "stats",
 ];
+
+/// Rank installed capabilities without exposing the full catalog. Historical
+/// counts are intentionally only one input; semantic overlap, policy metadata,
+/// and schema cost remain the authority for deterministic ranking.
+pub(crate) fn discover_capabilities(
+    query: &str,
+    limit: usize,
+    level: u64,
+) -> Result<Value, String> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Err("mcp discover requires a non-empty capability query".to_string());
+    }
+    if level > 2 {
+        return Err("mcp discover level must be 0, 1, or 2".to_string());
+    }
+    DISCOVERY_CALLS.fetch_add(1, Ordering::Relaxed);
+    let query_terms = query
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|term| !term.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>();
+    let catalog = tools_list_catalog();
+    let mut ranked = catalog
+        .get("tools")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|tool| {
+            let name = tool.get("name").and_then(Value::as_str)?;
+            let description = tool
+                .get("description")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let category = tool_category(name);
+            let haystack = format!("{name} {description} {category}").to_ascii_lowercase();
+            let matched = query_terms
+                .iter()
+                .filter(|term| haystack.contains(term.as_str()))
+                .count();
+            if matched == 0 {
+                return None;
+            }
+            let score = matched as f64 / query_terms.len().max(1) as f64;
+            let (description, _) = truncate_chars(description, MAX_TOOLS_LIST_DESCRIPTION_CHARS);
+            let mut entry = json!({
+                "name": name,
+                "category": category,
+                "score": format!("{score:.4}"),
+                "description": description,
+                "schemaVersion": 1,
+                "riskClass": capability_risk_class(name),
+                "costEstimateTokens": tool_schema_cost(tool),
+                "availability": "installed",
+            });
+            if level >= 1 {
+                entry["parameterSummary"] = tool
+                    .pointer("/inputSchema/properties")
+                    .and_then(Value::as_object)
+                    .map(|properties| {
+                        Value::Array(
+                            properties
+                                .keys()
+                                .map(|key| Value::String(key.clone()))
+                                .collect(),
+                        )
+                    })
+                    .unwrap_or_else(|| Value::Array(Vec::new()));
+            }
+            if level >= 2 {
+                if let Some(schema) = tool.get("inputSchema") {
+                    entry["inputSchema"] = schema.clone();
+                }
+            }
+            Some((score, name.to_string(), entry))
+        })
+        .collect::<Vec<_>>();
+    ranked.sort_by(|left, right| {
+        right
+            .0
+            .partial_cmp(&left.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.1.cmp(&right.1))
+    });
+    ranked.truncate(limit.clamp(1, 20));
+    let requested_count = ranked.len();
+    while ranked.len() > 1 {
+        let candidate = json!({
+            "query": query,
+            "level": level,
+            "count": ranked.len(),
+            "capabilities": ranked.iter().map(|(_, _, entry)| entry.clone()).collect::<Vec<_>>(),
+            "activation": "keel/activate",
+        });
+        let serialized = serde_json::to_string(&candidate)
+            .map_err(|error| format!("mcp discover: serialize for budget: {error}"))?;
+        if crate::proxy::token_meter::TokenMeter::count_text(&serialized)
+            <= crate::proxy::context::DEFAULT_MAX_DISCOVERY_RESULT_TOKENS
+        {
+            break;
+        }
+        ranked.pop();
+    }
+    let kept_count = ranked.len();
+    let payload = json!({
+        "query": query,
+        "level": level,
+        "count": kept_count,
+        "capabilities": ranked.into_iter().map(|(_, _, entry)| entry).collect::<Vec<_>>(),
+        "activation": "keel/activate",
+        "omitted": requested_count.saturating_sub(kept_count),
+    });
+    let serialized = serde_json::to_string(&payload)
+        .map_err(|error| format!("mcp discover: serialize for budget: {error}"))?;
+    let tokens = crate::proxy::token_meter::TokenMeter::count_text(&serialized);
+    if tokens > crate::proxy::context::DEFAULT_MAX_DISCOVERY_RESULT_TOKENS {
+        return Err(format!(
+            "mcp discover result exceeds the {}-token budget ({tokens}); request level 0/1 or a narrower query",
+            crate::proxy::context::DEFAULT_MAX_DISCOVERY_RESULT_TOKENS
+        ));
+    }
+    Ok(payload)
+}
+
+pub(crate) fn activate_capability_with_context(
+    arguments: &Value,
+    context: &super::McpRequestContext,
+) -> Result<Value, String> {
+    let capability = arguments
+        .get("capability")
+        .or_else(|| arguments.get("capabilityId"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "mcp activate requires capability".to_string())?;
+    if !MCP_TOOL_NAMES.contains(&capability) {
+        return Err(format!("unknown capability: {capability}"));
+    }
+    let reason = arguments
+        .get("reason")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "mcp activate requires a non-empty reason".to_string())?;
+    let requester = arguments
+        .get("requester")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("model");
+    let requested_session = arguments
+        .get("session")
+        .or_else(|| arguments.get("sessionId"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    if let Some(requested) = requested_session.as_deref() {
+        if requested != context.session_id {
+            return Err(
+                "mcp activate session does not match the authoritative MCP session".to_string(),
+            );
+        }
+    }
+    let requested_workspace = arguments
+        .get("workspace")
+        .or_else(|| arguments.get("workspaceId"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    if let Some(requested) = requested_workspace.as_deref() {
+        if !workspace_id_matches(requested, &context.workspace_id) {
+            return Err(
+                "mcp activate workspace does not match the authoritative MCP workspace".to_string(),
+            );
+        }
+    }
+    let session = context.session_id.clone();
+    let workspace = context.workspace_id.clone();
+    let timestamp = format_timestamp_iso8601(current_timestamp_millis());
+    let id_material = format!("{capability}\0{session}\0{workspace}\0{timestamp}");
+    let activation_id = format!(
+        "activation-fnv1a:{}",
+        crate::utility::hashing::fnv1a64_hex(&id_material)
+    );
+    let home = tool_claude_home("mcp activate")?;
+    let directory = home.join("state").join("mcp-activations");
+    let path = directory.join(format!("{activation_id}.json"));
+    let record = json!({
+        "schemaVersion": 1,
+        "activationId": activation_id,
+        "capabilityId": capability,
+        "reason": reason,
+        "requester": requester,
+        "sessionId": session,
+        "workspaceId": workspace,
+        "timestamp": timestamp,
+        "policyResult": "allowed",
+        "schemaVersionRequested": arguments.get("schemaVersion").cloned().unwrap_or(json!(1)),
+    });
+    let serialized = serde_json::to_string_pretty(&record)
+        .map_err(|error| format!("serialize activation: {error}"))?;
+    crate::runtime::write_text(&path, &serialized)?;
+    ACTIVATION_CALLS.fetch_add(1, Ordering::Relaxed);
+    Ok(record)
+}
+
+fn workspace_id_matches(requested: &str, authoritative: &str) -> bool {
+    let normalize = |value: &str| {
+        let path = PathBuf::from(value);
+        let path = path.canonicalize().unwrap_or(path);
+        let mut normalized = path.to_string_lossy().replace('\\', "/");
+        while normalized.ends_with('/') && normalized.len() > 1 {
+            normalized.pop();
+        }
+        if cfg!(windows) {
+            normalized.make_ascii_lowercase();
+        }
+        normalized
+    };
+    normalize(requested) == normalize(authoritative)
+}
+
+fn capability_risk_class(name: &str) -> &'static str {
+    match name {
+        "run_command" | "command_kill" | "cli" | "raw" | "memory" => "high",
+        "review" | "git_workflow" | "anvil" | "flow" | "system_map_refresh" => "medium",
+        _ => "low",
+    }
+}
+
+fn tool_schema_cost(tool: &Value) -> usize {
+    tool.get("inputSchema")
+        .and_then(|schema| serde_json::to_string(schema).ok())
+        .map(|text| crate::proxy::token_meter::TokenMeter::count_text(&text))
+        .unwrap_or(0)
+}
 
 type McpToolHandler = fn(&Value) -> Result<String, String>;
 
@@ -1069,17 +1572,47 @@ fn render_recall_payload(
         ),
         None => (String::new(), "exact", Vec::new()),
     };
+    // Recall stays pull-based: return one bounded excerpt per identity/content
+    // key; the complete document remains recoverable through the recall CLI.
+    let mut seen = HashSet::new();
     let matches: Vec<Value> = hits
         .iter()
-        .map(|hit| {
+        .filter_map(|hit| {
             let relative = relative_to_home(claude_home, Path::new(&hit.absolute_path));
-            json!({
+            let excerpt = bounded_memory_excerpt(&hit.snippet);
+            let dedupe_material = format!(
+                "{}\0{}",
+                relative.to_ascii_lowercase(),
+                excerpt
+                    .to_ascii_lowercase()
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
+            let dedupe_key = crate::utility::hashing::fnv1a64_hex(&dedupe_material);
+            if !seen.insert(dedupe_key.clone()) {
+                return None;
+            }
+            let memory_id = crate::utility::hashing::fnv1a64_hex(&format!(
+                "{}\0{}\0{}",
+                hit.absolute_path, hit.line, hit.snippet
+            ));
+            let provenance_id = crate::utility::hashing::fnv1a64_hex(&format!(
+                "recall\0{}\0{}\0{}",
+                query, hit.absolute_path, hit.line
+            ));
+            Some(json!({
                 "path": relative,
                 "absolutePath": hit.absolute_path,
                 "score": format!("{:.4}", hit.score),
                 "line": hit.line,
-                "snippet": hit.snippet,
-            })
+                "snippet": excerpt,
+                "excerpt": bounded_memory_excerpt(&hit.snippet),
+                "memoryId": format!("memory-{memory_id}"),
+                "provenanceId": format!("prov-{provenance_id}"),
+                "dedupeKey": format!("memory-{dedupe_key}"),
+                "retrievalRef": format!("keel recall --query {:?} --limit 1", query),
+            }))
         })
         .collect();
     json!({
@@ -1091,6 +1624,17 @@ fn render_recall_payload(
         "count": matches.len(),
         "matches": matches,
     })
+}
+
+fn bounded_memory_excerpt(text: &str) -> String {
+    const MAX_EXCERPT_CHARS: usize = 600;
+    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.chars().count() <= MAX_EXCERPT_CHARS {
+        return compact;
+    }
+    let mut excerpt = compact.chars().take(MAX_EXCERPT_CHARS).collect::<String>();
+    excerpt.push_str("… [truncated]");
+    excerpt
 }
 
 fn relative_to_home(claude_home: &Path, absolute_path: &Path) -> String {
@@ -3858,6 +4402,54 @@ mod tests {
     }
 
     #[test]
+    fn paginated_tools_list_uses_an_opaque_cursor_without_catalog_fallback() {
+        let first = handle_tools_list_for_profile_params(
+            crate::mcp::McpCatalogProfile::Full,
+            &json!({ "level": 1 }),
+        )
+        .expect("first page");
+        let first_tools = first["tools"].as_array().expect("first tools");
+        assert!(!first_tools.is_empty());
+        let cursor = first["nextCursor"].as_str().expect("next cursor");
+        assert!(cursor.starts_with("keel1:"));
+
+        let second = handle_tools_list_for_profile_params(
+            crate::mcp::McpCatalogProfile::Full,
+            &json!({ "cursor": cursor, "level": 1 }),
+        )
+        .expect("second page");
+        let second_tools = second["tools"].as_array().expect("second tools");
+        let first_names = first_tools
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(second_tools
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .all(|name| !first_names.contains(name)));
+
+        let error = handle_tools_list_for_profile_params(
+            crate::mcp::McpCatalogProfile::Full,
+            &json!({ "cursor": "not-a-keel-cursor", "level": 1 }),
+        )
+        .expect_err("invalid cursor must fail closed");
+        assert!(error.contains("cursor"), "{error}");
+    }
+
+    #[test]
+    fn discovery_is_deterministic_and_budgeted() {
+        let payload = discover_capabilities("run", 20, 1).expect("discovery");
+        let serialized = serde_json::to_string(&payload).expect("json");
+        assert!(
+            crate::proxy::token_meter::TokenMeter::count_text(&serialized)
+                <= crate::proxy::context::DEFAULT_MAX_DISCOVERY_RESULT_TOKENS
+        );
+        assert!(payload["count"].as_u64().unwrap_or(0) <= 20);
+        assert!(payload["omitted"].is_number());
+        assert_eq!(payload["capabilities"][0]["name"].as_str(), Some("anvil"));
+    }
+
+    #[test]
     fn eager_and_deferred_tool_counts_sum_to_all_tools() {
         assert_eq!(
             EAGER_MCP_TOOL_NAMES.len() + DEFERRED_MCP_TOOL_NAMES.len(),
@@ -4768,6 +5360,55 @@ mod tests {
             );
         }
         assert!(!tools.is_empty(), "tools list must not be empty");
+    }
+
+    #[test]
+    fn mcp_projection_uses_the_authoritative_request_identity() {
+        let workspace = std::env::current_dir()
+            .expect("cwd")
+            .canonicalize()
+            .expect("canonical cwd")
+            .to_string_lossy()
+            .to_string();
+        let context = super::super::McpRequestContext {
+            session_id: "http-session-42".to_string(),
+            workspace_id: workspace,
+            request_id: Some("request-42".to_string()),
+        };
+        let projection =
+            project_mcp_context("stats", "bounded result", ContextSource::McpTool, &context)
+                .expect("projection");
+        assert_eq!(projection.raw_artifact_id, None);
+        assert!(projection.provenance_id.starts_with("prov-fnv1a:"));
+    }
+
+    #[test]
+    fn activation_rejects_client_identity_overrides() {
+        let context = super::super::McpRequestContext {
+            session_id: "authoritative-session".to_string(),
+            workspace_id: std::env::current_dir()
+                .expect("cwd")
+                .to_string_lossy()
+                .to_string(),
+            request_id: None,
+        };
+        let wrong_session = json!({
+            "capability": "stats",
+            "reason": "inspect metrics",
+            "sessionId": "caller-selected-session"
+        });
+        let error = activate_capability_with_context(&wrong_session, &context)
+            .expect_err("client session must not establish identity");
+        assert!(error.contains("authoritative MCP session"), "{error}");
+
+        let wrong_workspace = json!({
+            "capability": "stats",
+            "reason": "inspect metrics",
+            "workspaceId": "C:/caller-selected-workspace"
+        });
+        let error = activate_capability_with_context(&wrong_workspace, &context)
+            .expect_err("client workspace must not establish identity");
+        assert!(error.contains("authoritative MCP workspace"), "{error}");
     }
 
     // Regression guards for the double-prefix bug: every `run_keel_subcommand`

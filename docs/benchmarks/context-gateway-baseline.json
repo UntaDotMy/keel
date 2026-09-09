@@ -1,0 +1,79 @@
+{
+  "schemaVersion": 1,
+  "artifact": "context-gateway-baseline",
+  "generatedAt": "2026-09-09T08:08:14Z",
+  "status": "baseline_contract",
+  "tokenizer": "o200k_base",
+  "profile": "core",
+  "source": "repository fixed-context ledger and native MCP catalog",
+  "measurements": {
+    "mcp_tool_count": 37,
+    "mcp_eager_tool_count": 17,
+    "mcp_deferred_tool_count": 20,
+    "mcp_catalog_tokens": 1198,
+    "mcp_catalog_budget_tokens": 1200
+  },
+  "quality_gates": {
+    "task_success_threshold": "ratify before changing default profile",
+    "tool_selection_error_threshold": "ratify before changing default profile",
+    "latency_and_turns_required": true,
+    "cached_input_required_when_provider_reports": true
+  },
+  "host_capabilities": {
+    "claude-code": {
+      "pre_tool_intercept": true,
+      "post_tool_reduce": true,
+      "permission_gate": true,
+      "dynamic_tool_exposure": false,
+      "context_injection_control": true,
+      "session_identity": true,
+      "execution_receipt": true
+    },
+    "codex": {
+      "pre_tool_intercept": true,
+      "post_tool_reduce": true,
+      "permission_gate": true,
+      "dynamic_tool_exposure": false,
+      "context_injection_control": true,
+      "session_identity": true,
+      "execution_receipt": true
+    },
+    "zcode": {
+      "pre_tool_intercept": true,
+      "post_tool_reduce": true,
+      "permission_gate": false,
+      "dynamic_tool_exposure": false,
+      "context_injection_control": false,
+      "session_identity": true,
+      "execution_receipt": true
+    },
+    "unregistered": {
+      "pre_tool_intercept": false,
+      "post_tool_reduce": false,
+      "permission_gate": false,
+      "dynamic_tool_exposure": false,
+      "context_injection_control": false,
+      "session_identity": false,
+      "execution_receipt": false
+    }
+  },
+  "bypass_paths": [
+    {
+      "surface": "unregistered host adapter",
+      "status": "not_intercepted",
+      "evidence": "HostCapabilities::for_agent returns all capabilities false"
+    },
+    {
+      "surface": "context firewall budget or reducer failure",
+      "status": "blocked",
+      "evidence": "ContextFirewall returns an explicit error and never raw-falls back"
+    }
+  ],
+  "reproduction": [
+    "cargo run --locked -p keel -- stats context --json",
+    "cargo run --locked -p keel -- stats tools --json",
+    "cargo test --locked -p keel --lib mcp::tools::tests",
+    "cargo test --locked -p keel --test context_gateway_test"
+  ],
+  "claim_boundary": "This artifact records the current repository baseline and policy contract. It is not a hosted provider token bill or a claim that core is the default for every host."
+}

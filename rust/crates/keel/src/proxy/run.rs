@@ -12,9 +12,13 @@ use std::thread;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::args::FlagSet;
+use crate::proxy::context::{
+    project_scoped, CacheClass, ContextPolicy, ContextProjection, ContextSource, ProjectionInput,
+};
 use crate::proxy::event_log::record_compaction_event;
+use crate::proxy::execution::{now_millis, ExecutionIdentity, ExecutionStatus};
 use crate::proxy::injection_guard::{neutralize_injection, InjectionFinding};
-use crate::proxy::raw_store::{RawRun, RawStore, RunMeta};
+use crate::proxy::raw_store::{RawNamespace, RawRun, RawStore, RunMeta};
 use crate::proxy::token_meter::TokenMeter;
 use crate::runtime::{display_path, run_command, ProcessResult, MAX_CAPTURED_OUTPUT_BYTES};
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -170,6 +174,10 @@ pub fn run_proxy(
                     .join(", ")
             );
         }
+        let _ = writeln!(
+            standard_error,
+            "[keel] execution not intercepted: host session signal is absent"
+        );
         return run_proxy_passthrough(&command_arguments, standard_error);
     }
 
@@ -268,16 +276,38 @@ pub fn run_proxy(
                 exit_code: result.code,
             };
 
+            let session_id = ["CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID"]
+                .iter()
+                .find_map(|name| {
+                    std::env::var(name)
+                        .ok()
+                        .map(|value| value.trim().to_string())
+                        .filter(|value| !value.is_empty())
+                })
+                .unwrap_or_else(|| "default".to_string());
             let store = if flag_set.string_value("recovery-dir").trim().is_empty() {
-                RawStore::new()
+                let base = RawStore::new();
+                RawStore::with_namespace(
+                    base.root().clone(),
+                    RawNamespace {
+                        workspace_id: meta.workspace.to_string_lossy().to_string(),
+                        session_id: session_id.clone(),
+                    },
+                )
             } else {
-                RawStore::with_root(std::path::PathBuf::from(
-                    flag_set.string_value("recovery-dir"),
-                ))
+                RawStore::with_namespace(
+                    std::path::PathBuf::from(flag_set.string_value("recovery-dir")),
+                    RawNamespace {
+                        workspace_id: meta.workspace.to_string_lossy().to_string(),
+                        session_id: session_id.clone(),
+                    },
+                )
             };
-            if !flag_set.bool_value("no-raw") {
-                let _ = store.save(&mut meta, &raw_run);
-            }
+            let raw_saved = if flag_set.bool_value("no-raw") {
+                false
+            } else {
+                store.save(&mut meta, &raw_run).is_ok()
+            };
 
             // Warning state consumes exact captured streams before compaction.
             // CommandAst supplies classification; observer never rewrites args.
@@ -318,6 +348,45 @@ pub fn run_proxy(
                 max_lines
             };
             let rendered = cap_lines(&rendered_base, effective_max_lines);
+            let raw_tokens =
+                TokenMeter::count_bytes(&result.stdout) + TokenMeter::count_bytes(&result.stderr);
+            // Prepare neutralized streams before the context decision so an
+            // adapter with `compacted = false` uses the same firewall path.
+            let (clean_stdout, mut raw_findings) =
+                neutralize_injection(&String::from_utf8_lossy(&result.stdout), &meta.raw_id);
+            let (clean_stderr, stderr_findings) =
+                neutralize_injection(&String::from_utf8_lossy(&result.stderr), &meta.raw_id);
+            raw_findings.extend(stderr_findings);
+            let neutralized_raw_output = format!("{clean_stdout}{clean_stderr}");
+            // Enforce the final model boundary after adapter reduction; a
+            // firewall failure is explicit and never falls back to raw output.
+            let mut context_projection: Option<ContextProjection> = None;
+            let mut context_blocked = false;
+            let context_bypass = flag_set.bool_value("full") || flag_set.bool_value("no-compact");
+            let context_candidate = if compact_result.compacted {
+                rendered.clone()
+            } else {
+                neutralized_raw_output.clone()
+            };
+            let rendered = if context_bypass {
+                rendered
+            } else {
+                match project_command_context(&context_candidate, &meta, raw_saved) {
+                    Ok(projection) => {
+                        let summary = projection.summary.clone();
+                        context_projection = Some(projection);
+                        summary
+                    }
+                    Err(error) => {
+                        context_blocked = true;
+                        let _ = writeln!(
+                            standard_error,
+                            "keel context firewall blocked compact output: {error}"
+                        );
+                        format!("[keel] context blocked: {error}")
+                    }
+                }
+            };
             // Break-even guard: never emit compacted output that is larger than
             // the raw it replaces. On small or already-terse command output the
             // fixed wrapper overhead (the PASS/FAIL prefix + the raw-recovery
@@ -328,35 +397,73 @@ pub fn run_proxy(
             // they grew by up to 30%. When compaction does not actually shrink
             // the exact o200k_base token count, fall through to the neutralized
             // raw passthrough so a command that did not benefit pays no penalty.
-            let raw_tokens =
-                TokenMeter::count_bytes(&result.stdout) + TokenMeter::count_bytes(&result.stderr);
             let rendered_tokens = TokenMeter::count_text(&rendered);
             let compaction_reduces_tokens = rendered_tokens < raw_tokens;
-            let use_compact_output = !flag_set.bool_value("full")
-                && !flag_set.bool_value("no-compact")
+            let use_compact_output = !context_blocked
+                && !context_bypass
                 && compact_result.compacted
                 && compaction_reduces_tokens;
+
+            let execution_status = if !raw_saved {
+                // Without a persisted raw artifact there is no recovery proof;
+                // keep the result visible but mark governance unknown.
+                ExecutionStatus::Unknown
+            } else if context_bypass {
+                // Full/no-compact are explicit compatibility/debug opt-outs;
+                // their model-visible result bypasses the context firewall.
+                ExecutionStatus::Bypassed
+            } else if context_blocked {
+                ExecutionStatus::Blocked
+            } else if result.code != 0 {
+                ExecutionStatus::Failed
+            } else if use_compact_output {
+                ExecutionStatus::Reduced
+            } else {
+                ExecutionStatus::Executed
+            };
+            let request_id = std::env::var("KEEL_REQUEST_ID")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| meta.raw_id.clone());
+            let execution = ExecutionIdentity::new(
+                meta.workspace.to_string_lossy().to_string(),
+                session_id,
+                request_id,
+                meta.agent.clone(),
+                "keel.run",
+                meta.command.clone(),
+                if context_blocked {
+                    "blocked"
+                } else {
+                    "allowed"
+                },
+                true,
+                started_at as u128 * 1000,
+                now_millis(),
+                raw_saved.then(|| meta.raw_id.clone()),
+                context_projection
+                    .as_ref()
+                    .map(|projection| projection.id.clone()),
+                execution_status,
+            );
 
             meta.adapter_name = compact_result.adapter_name.clone();
             meta.compacted = use_compact_output;
             meta.compact_path = meta.raw_path.join("compact.txt");
 
-            // On the non-compact path we still neutralize prompt-injection in the
-            // command output before the agent sees it — the raw bytes are the
-            // exact attack surface the guard exists for. Each stream is cleaned
-            // separately so the stdout/stderr split is preserved when written
-            // below; `agent_output` (the merged form) backs the on-disk compact
-            // copy and the token measurement.
-            let (agent_output, clean_stdout, clean_stderr, raw_findings) = if use_compact_output {
-                (rendered.clone(), String::new(), String::new(), Vec::new())
+            // Store exactly the bounded projection received by the model; full
+            // and no-compact retain neutralized streams and record a bypass.
+            let (agent_output, output_streams) = if context_bypass && !context_blocked {
+                (
+                    neutralized_raw_output.clone(),
+                    Some((clean_stdout.as_str(), clean_stderr.as_str())),
+                )
             } else {
-                let (cleaned_stdout, mut findings) =
-                    neutralize_injection(&String::from_utf8_lossy(&result.stdout), &meta.raw_id);
-                let (cleaned_stderr, stderr_findings) =
-                    neutralize_injection(&String::from_utf8_lossy(&result.stderr), &meta.raw_id);
-                findings.extend(stderr_findings);
-                let merged = format!("{cleaned_stdout}{cleaned_stderr}");
-                (merged, cleaned_stdout, cleaned_stderr, findings)
+                if compact_result.compacted || context_blocked {
+                    raw_findings.clear();
+                }
+                (rendered.clone(), None)
             };
             let mut all_findings = raw_findings;
             all_findings.extend(compact_findings);
@@ -371,6 +478,9 @@ pub fn run_proxy(
             meta.savings_pct = measurement.savings_pct;
             if !flag_set.bool_value("no-raw") {
                 let _ = store.save_compact(&meta, &agent_output);
+                if raw_saved {
+                    let _ = store.save_execution_receipt(&meta.raw_id, &execution);
+                }
             }
             record_compaction_event(&meta, &compact_result, &all_findings);
             // Housekeeping after the capture completes. Throttled and fail-open
@@ -378,11 +488,25 @@ pub fn run_proxy(
             store.auto_prune();
 
             if flag_set.bool_value("json") {
+                // Preserve legacy JSON fields without re-exposing unbounded
+                // adapter payloads; recovery stays behind `raw_id`.
+                let json_is_governed = context_projection.is_some() || context_blocked;
+                let json_summary = context_projection
+                    .as_ref()
+                    .map(|projection| projection.summary.clone())
+                    .or_else(|| context_blocked.then(|| rendered.clone()))
+                    .unwrap_or_else(|| compact_result.summary.clone());
+                let (json_stdout, json_stderr) = if json_is_governed {
+                    (String::new(), String::new())
+                } else {
+                    (compact_result.stdout.clone(), compact_result.stderr.clone())
+                };
                 let json_result = serde_json::json!({
                     "command": meta.command,
                     "exit_code": meta.exit_code,
                     "adapter_name": compact_result.adapter_name,
                     "compacted": use_compact_output,
+                    "context_blocked": context_blocked,
                     "raw_id": meta.raw_id,
                     "raw_path": display_path(&meta.raw_path),
                     "compact_path": display_path(&meta.compact_path),
@@ -395,9 +519,14 @@ pub fn run_proxy(
                     "tokenizer": "o200k_base",
                     "token_counting": "exact",
                     "savings_pct": meta.savings_pct,
-                    "summary": compact_result.summary,
-                    "stdout": compact_result.stdout,
-                    "stderr": compact_result.stderr,
+                    "summary": json_summary,
+                    "stdout": json_stdout,
+                    "stderr": json_stderr,
+                    "context": context_projection.as_ref().map(ContextProjection::metadata),
+                    "execution_id": execution.execution_id,
+                    "execution_status": execution.result_state.as_str(),
+                    "intercepted": execution.intercepted,
+                    "host_capabilities": execution.capabilities().as_json(),
                 });
                 let _ = writeln!(
                     standard_output,
@@ -405,7 +534,7 @@ pub fn run_proxy(
                     serde_json::to_string_pretty(&json_result).unwrap()
                 );
             } else {
-                if !use_compact_output {
+                if let Some((clean_stdout, clean_stderr)) = output_streams {
                     // Write the NEUTRALIZED streams, never the raw bytes: this is
                     // the agent-visible output path the injection guard protects.
                     let _ = standard_output.write_all(clean_stdout.as_bytes());
@@ -437,6 +566,36 @@ pub fn run_proxy(
             1
         }
     }
+}
+
+fn project_command_context(
+    rendered: &str,
+    meta: &RunMeta,
+    raw_available: bool,
+) -> Result<ContextProjection, crate::proxy::context::ContextFirewallError> {
+    let session_id = ["CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID"]
+        .iter()
+        .find_map(|name| {
+            std::env::var(name)
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        })
+        .unwrap_or_else(|| "default".to_string());
+    let workspace_id = meta.workspace.to_string_lossy().to_string();
+    let raw_artifact_id = raw_available.then(|| meta.raw_id.clone());
+    project_scoped(
+        ContextPolicy::from_env(),
+        ProjectionInput::new(
+            ContextSource::CommandOutput,
+            rendered,
+            raw_artifact_id,
+            workspace_id,
+            session_id,
+        )
+        .with_request_id(meta.raw_id.clone())
+        .with_cache_class(CacheClass::Dynamic),
+    )
 }
 
 fn warning_workspace_root(cwd: &std::path::Path) -> std::path::PathBuf {

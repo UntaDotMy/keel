@@ -78,6 +78,14 @@ In addition to workflow scenarios, the repository measures token efficiency at r
 - Measured compaction savings across 7 genuine toolchain fixtures: **27.28% overall** (with `cargo test` pass achieving **79.26%** savings).
 - Tiered MCP catalog profile: reduces discovery footprint from 2,902 tokens down to **1,198 tokens** (**58.72% reduction**), while retaining direct dispatchability for all 37 tools.
 
+The current gateway baseline is archived in
+[`docs/benchmarks/context-gateway-baseline.json`](./benchmarks/context-gateway-baseline.json).
+Reproduce the context and catalog measurements with `keel stats context --json` and
+`keel stats tools --json`; the artifact deliberately records quality, latency,
+turn-count, and provider-cache gates that must be ratified before changing the
+catalog profile. A catalog footprint alone is not evidence of a successful
+profile transition.
+
 ## What this suite does not claim
 
 - no broad market-speed claim against every harness workflow layer

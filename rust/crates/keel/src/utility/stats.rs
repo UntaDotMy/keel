@@ -14,6 +14,8 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 
+use serde_json::json;
+
 use std::path::PathBuf;
 
 use crate::args::FlagSet;
@@ -35,6 +37,24 @@ pub fn run_stats_command(
     standard_output: &mut dyn Write,
     standard_error: &mut dyn Write,
 ) -> u8 {
+    // Diagnostic subcommands are intentionally routed here, keeping one
+    // operator surface while preserving the legacy flag-only dashboard.
+    if let Some(subcommand) = arguments.first().map(String::as_str) {
+        match subcommand {
+            "context" => {
+                return run_context_stats(&arguments[1..], standard_output, standard_error)
+            }
+            "tools" => return run_tools_stats(&arguments[1..], standard_output, standard_error),
+            "gain" => {
+                return crate::utility::gain::run_gain_command(
+                    &arguments[1..],
+                    standard_output,
+                    standard_error,
+                )
+            }
+            _ => {}
+        }
+    }
     let mut flag_set = FlagSet::new("stats");
     flag_set.bool_flag("json", false);
     flag_set.string_flag("days", "");
@@ -93,6 +113,171 @@ pub fn run_stats_command(
     }
     snapshot.render_text(standard_output, days);
     0
+}
+
+fn stats_workspace_root(flag_set: &FlagSet) -> String {
+    let flag = flag_set.string_value("workspace-root").trim().to_string();
+    if flag.is_empty() {
+        std::env::current_dir()
+            .map(|path| display_path(&path))
+            .unwrap_or_default()
+    } else {
+        flag
+    }
+}
+
+fn run_context_stats(
+    arguments: &[String],
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let mut flags = FlagSet::new("stats context");
+    flags.bool_flag("json", false);
+    flags.string_flag("workspace-root", "");
+    if let Err(error) = flags.parse(arguments) {
+        let _ = writeln!(standard_error, "{}", error.message);
+        return 1;
+    }
+    let workspace_root = stats_workspace_root(&flags);
+    let ledger = fixed_context::collect(Path::new(&workspace_root));
+    let entries = ledger
+        .entries
+        .iter()
+        .map(|entry| {
+            let cache_class = if entry.surface.starts_with("repo.")
+                || entry.surface.starts_with("generated.")
+                || entry.surface.starts_with("skills.")
+            {
+                "stable"
+            } else {
+                "dynamic"
+            };
+            let headroom = entry.budget_tokens.saturating_sub(entry.actual_tokens);
+            json!({
+                "surface": entry.surface,
+                "rawTokens": entry.actual_tokens,
+                "visibleTokens": entry.actual_tokens,
+                "budgetTokens": entry.budget_tokens,
+                "headroomTokens": headroom,
+                "cacheClass": cache_class,
+                "sourceAvailable": entry.source_available,
+                "status": entry.status(),
+                "reproductionCommand": fixed_context::REPRODUCTION_COMMAND,
+            })
+        })
+        .collect::<Vec<_>>();
+    let payload = json!({
+        "schemaVersion": 1,
+        "tokenizer": fixed_context::TOKENIZER,
+        "workspaceRoot": workspace_root,
+        "status": ledger.status(),
+        "mcp": {
+            "toolCount": ledger.mcp.tool_count,
+            "eagerToolCount": ledger.mcp.eager_tool_count,
+            "deferredToolCount": ledger.mcp.deferred_tool_count,
+        },
+        "skills": {"skillCount": ledger.skills.skill_count},
+        "surfaces": entries,
+        "policy": {
+            "maxDynamicTokens": crate::proxy::context::DEFAULT_MAX_DYNAMIC_TOKENS,
+            "maxToolCatalogTokens": crate::proxy::context::DEFAULT_MAX_TOOL_CATALOG_TOKENS,
+            "maxMemoryProjectionTokens": crate::proxy::context::DEFAULT_MAX_MEMORY_PROJECTION_TOKENS,
+            "maxWarningPointerTokens": crate::proxy::context::DEFAULT_MAX_WARNING_POINTER_TOKENS,
+            "maxDiscoveryResultTokens": crate::proxy::context::DEFAULT_MAX_DISCOVERY_RESULT_TOKENS,
+            "maxSingleResultTokens": crate::proxy::context::DEFAULT_MAX_SINGLE_RESULT_TOKENS,
+        },
+        "reproductionCommand": fixed_context::REPRODUCTION_COMMAND,
+    });
+    if flags.bool_value("json") {
+        return write_serde_json(standard_output, standard_error, "stats context", &payload);
+    }
+    let _ = writeln!(
+        standard_output,
+        "keel stats context ({}) status={} workspace={}",
+        fixed_context::TOKENIZER,
+        ledger.status(),
+        workspace_root
+    );
+    for entry in &ledger.entries {
+        let cache_class = if entry.surface.starts_with("repo.")
+            || entry.surface.starts_with("generated.")
+            || entry.surface.starts_with("skills.")
+        {
+            "stable"
+        } else {
+            "dynamic"
+        };
+        let headroom = entry.budget_tokens.saturating_sub(entry.actual_tokens);
+        let _ = writeln!(
+            standard_output,
+            "  {} raw={} visible={} budget={} headroom={} cache={} status={}",
+            entry.surface,
+            entry.actual_tokens,
+            entry.actual_tokens,
+            entry.budget_tokens,
+            headroom,
+            cache_class,
+            entry.status()
+        );
+    }
+    0
+}
+
+fn run_tools_stats(
+    arguments: &[String],
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let mut flags = FlagSet::new("stats tools");
+    flags.bool_flag("json", false);
+    if let Err(error) = flags.parse(arguments) {
+        let _ = writeln!(standard_error, "{}", error.message);
+        return 1;
+    }
+    let snapshot = crate::mcp::tools_list_context_snapshot();
+    let payload = json!({
+        "schemaVersion": 1,
+        "profile": crate::mcp::McpCatalogProfile::from_env().as_str(),
+        "toolCount": snapshot.tool_count,
+        "eagerToolCount": snapshot.eager_tool_count,
+        "deferredToolCount": snapshot.deferred_tool_count,
+        "catalogTokens": snapshot.catalog_tokens,
+        "pagination": {"supported": true, "pageSize": crate::mcp::tools_page_size()},
+        "discovery": crate::mcp::tools_discovery_snapshot(),
+        "reproductionCommand": "keel stats tools --json",
+    });
+    if flags.bool_value("json") {
+        return write_serde_json(standard_output, standard_error, "stats tools", &payload);
+    }
+    let _ = writeln!(
+        standard_output,
+        "keel stats tools profile={} total={} eager={} deferred={} catalog_tokens={} discovery_calls={}",
+        payload["profile"].as_str().unwrap_or("unknown"),
+        snapshot.tool_count,
+        snapshot.eager_tool_count,
+        snapshot.deferred_tool_count,
+        snapshot.catalog_tokens,
+        payload["discovery"]["calls"].as_u64().unwrap_or(0)
+    );
+    0
+}
+
+fn write_serde_json(
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+    label: &str,
+    payload: &serde_json::Value,
+) -> u8 {
+    match serde_json::to_string_pretty(payload) {
+        Ok(text) => {
+            let _ = writeln!(standard_output, "{text}");
+            0
+        }
+        Err(error) => {
+            let _ = writeln!(standard_error, "{label}: {error}");
+            1
+        }
+    }
 }
 
 /// One aggregated read over every axis. Fields are already-computed values from
