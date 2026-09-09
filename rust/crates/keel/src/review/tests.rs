@@ -242,6 +242,145 @@ fn architecture_gate_blocks_incomplete_design_and_passes_complete_design() {
     let _ = std::fs::remove_dir_all(keel_home);
 }
 
+#[test]
+fn task_evidence_gate_rejects_unjustified_status_and_tampered_evidence() {
+    let repository = init_research_gate_repo("task-evidence");
+    let keel_home = crate::test_support::unique_temp_dir("keel-task-evidence-gate-home");
+    let (plan_id, research_path) = create_researched_plan(&repository, &keel_home);
+    let plan_path = research_path.parent().expect("plan directory");
+    std::fs::write(
+        plan_path.join("architecture.md"),
+        complete_review_architecture(&plan_id),
+    )
+    .expect("write complete architecture");
+    for action in ["design", "tasks"] {
+        let arguments = [
+            action.to_string(),
+            "--plan".to_string(),
+            plan_id.clone(),
+            "--workspace-root".to_string(),
+            repository.to_string_lossy().into_owned(),
+            "--claude-home".to_string(),
+            keel_home.to_string_lossy().into_owned(),
+        ];
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        assert_eq!(
+            crate::utility::plan::run_plan_command(&arguments, &mut stdout, &mut stderr),
+            0,
+            "{action} failed: {}",
+            String::from_utf8_lossy(&stderr)
+        );
+    }
+
+    let ticket_path = plan_path.join("task-001.json");
+    let mut ticket: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&ticket_path).expect("read task ticket"))
+            .expect("parse task ticket");
+    let original = ticket.clone();
+    ticket["layers"]["docs"][0]["status"] = serde_json::Value::String("not_applicable".to_string());
+    std::fs::write(
+        &ticket_path,
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&ticket).expect("render task ticket")
+        ),
+    )
+    .expect("write unjustified ticket");
+    let keel_home_text = keel_home.to_str().expect("UTF-8 Keel home");
+    let unjustified = task_evidence_gate(&repository, "main", "pre-pr", &plan_id, keel_home_text);
+    assert_eq!(unjustified.status, GateStatus::Fail);
+    assert!(unjustified
+        .details
+        .as_deref()
+        .unwrap_or_default()
+        .contains("requires a non-empty reason"));
+
+    ticket = original;
+    let subtask_id = ticket["layers"]["tests"][0]["id"]
+        .as_str()
+        .expect("tests subtask id")
+        .to_string();
+    let recorded_at = "2026-09-09T00:00:00Z";
+    let evidence = serde_json::json!({
+        "schema_version": 1,
+        "artifact": "task_evidence",
+        "plan_id": plan_id,
+        "task_id": "TASK-001",
+        "subtask_id": subtask_id,
+        "evidence_type": "named_test",
+        "recorded_at": recorded_at,
+        "test_name": "review task evidence",
+        "result": "pass",
+        "output_hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    });
+    let evidence_body = format!(
+        "{}\n",
+        serde_json::to_string_pretty(&evidence).expect("render evidence")
+    );
+    std::fs::create_dir_all(plan_path.join("evidence")).expect("create evidence directory");
+    std::fs::write(plan_path.join("evidence/tests.json"), &evidence_body).expect("write evidence");
+    ticket["layers"]["tests"][0]["status"] = serde_json::Value::String("done".to_string());
+    ticket["layers"]["tests"][0]["verification_timestamp"] =
+        serde_json::Value::String(recorded_at.to_string());
+    ticket["layers"]["tests"][0]["evidence_ref"] = serde_json::json!({
+        "path": "evidence/tests.json",
+        "content_hash": format!(
+            "fnv1a64:{}",
+            crate::utility::hashing::fnv1a64_hex(&evidence_body)
+        )
+    });
+    std::fs::write(
+        &ticket_path,
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&ticket).expect("render evidence ticket")
+        ),
+    )
+    .expect("write evidence ticket");
+    let task_refresh = [
+        "tasks".to_string(),
+        "--plan".to_string(),
+        plan_id.clone(),
+        "--workspace-root".to_string(),
+        repository.to_string_lossy().into_owned(),
+        "--claude-home".to_string(),
+        keel_home.to_string_lossy().into_owned(),
+    ];
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    assert_eq!(
+        crate::utility::plan::run_plan_command(&task_refresh, &mut stdout, &mut stderr),
+        0,
+        "task refresh failed: {}",
+        String::from_utf8_lossy(&stderr)
+    );
+    assert_eq!(
+        task_evidence_gate(&repository, "main", "pre-pr", &plan_id, keel_home_text,).status,
+        GateStatus::Pass
+    );
+
+    let mut tampered = evidence;
+    tampered["result"] = serde_json::Value::String("fail".to_string());
+    std::fs::write(
+        plan_path.join("evidence/tests.json"),
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&tampered).expect("render tampered evidence")
+        ),
+    )
+    .expect("tamper evidence");
+    let tampered_gate = task_evidence_gate(&repository, "main", "pre-pr", &plan_id, keel_home_text);
+    assert_eq!(tampered_gate.status, GateStatus::Fail);
+    assert!(tampered_gate
+        .details
+        .as_deref()
+        .unwrap_or_default()
+        .contains("content_hash does not match evidence artifact"));
+    let _ = std::fs::remove_dir_all(repository);
+    let _ = std::fs::remove_dir_all(keel_home);
+}
+
 fn init_research_gate_repo(label: &str) -> crate::test_support::TestTempDir {
     let repository = crate::test_support::unique_temp_dir(&format!("keel-research-{label}"));
     std::fs::create_dir_all(repository.join("src")).expect("create source directory");
@@ -278,7 +417,8 @@ fn create_researched_plan(
     let mut specify = vec![
         "specify".to_string(),
         "--request".to_string(),
-        "Change the established value function while preserving its callers.".to_string(),
+        "Change the established src/lib.rs value function while preserving its callers."
+            .to_string(),
     ];
     specify.extend(common.clone());
     let mut stdout = Vec::new();

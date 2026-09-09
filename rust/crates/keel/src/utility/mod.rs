@@ -28,6 +28,7 @@ pub mod skill_usage;
 pub(crate) mod sqlite;
 pub mod stats;
 pub mod system_map;
+pub(crate) mod task_ticket;
 pub mod working_brief;
 pub mod workspace_index;
 

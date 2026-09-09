@@ -564,9 +564,31 @@ fn run_tasks(flags: FlagSet, streams: &mut CommandStreams<'_>) -> u8 {
         );
     }
 
-    let (tasks, rtm) = build_tasks_and_rtm(&plan_id, &parsed);
+    let seeds = task_seeds(&parsed);
+    let ticket_context = crate::utility::task_ticket::ValidationContext {
+        plan_id: &plan_id,
+        plan_directory: &paths.directory,
+        keel_home: &context.home,
+        workspace_root: context.workspace(),
+        specification: &spec,
+        architecture: architecture.as_deref().unwrap_or_default(),
+        seeds: &seeds,
+    };
+    let prepared = match crate::utility::task_ticket::prepare_task_artifacts(&ticket_context) {
+        Ok(prepared) => prepared,
+        Err(issues) => return validation_errors("plan tasks", &issues, streams.error),
+    };
+    for ticket in &prepared.tickets {
+        if ticket.write_required {
+            command_or_return!(
+                write_json(&paths.directory.join(&ticket.file_name), &ticket.value),
+                streams.error
+            );
+        }
+    }
     command_or_return!(
-        write_json(&paths.tasks, &tasks).and_then(|_| write_json(&paths.rtm, &rtm)),
+        write_json(&paths.tasks, &prepared.tasks)
+            .and_then(|_| write_json(&paths.rtm, &prepared.rtm)),
         streams.error
     );
     status
@@ -635,6 +657,23 @@ fn run_check(flags: FlagSet, streams: &mut CommandStreams<'_>) -> u8 {
     );
     validate_tasks(tasks.as_ref(), &parsed, &mut check_issues);
     validate_rtm(rtm.as_ref(), &parsed, &mut check_issues);
+    if let (Some(specification), Some(architecture)) = (spec.as_deref(), architecture.as_deref()) {
+        let seeds = task_seeds(&parsed);
+        crate::utility::task_ticket::validate_task_artifacts(
+            &crate::utility::task_ticket::ValidationContext {
+                plan_id: &plan_id,
+                plan_directory: &paths.directory,
+                keel_home: &context.home,
+                workspace_root: context.workspace(),
+                specification,
+                architecture,
+                seeds: &seeds,
+            },
+            tasks.as_ref(),
+            rtm.as_ref(),
+            &mut check_issues,
+        );
+    }
     validate_status(status.as_ref(), spec.as_deref(), &mut check_issues);
 
     if let Some(mut status) = status {
@@ -1242,9 +1281,8 @@ fn render_architecture(
     )
 }
 
-fn build_tasks_and_rtm(plan_id: &str, parsed: &ParsedSpecification) -> (Value, Value) {
-    let mut task_entries = Vec::new();
-    let mut rtm_entries = Vec::new();
+fn task_seeds(parsed: &ParsedSpecification) -> Vec<crate::utility::task_ticket::TaskSeed> {
+    let mut seeds = Vec::new();
     for (index, requirement) in parsed.requirements.iter().enumerate() {
         let mapped: Vec<&AcceptanceCriterion> = parsed
             .acceptance_criteria
@@ -1252,54 +1290,22 @@ fn build_tasks_and_rtm(plan_id: &str, parsed: &ParsedSpecification) -> (Value, V
             .filter(|criterion| criterion.requirement_ids.contains(&requirement.id))
             .collect();
         let task_id = format!("TASK-{:03}", index + 1);
-        let criterion_ids: Vec<&str> = mapped
+        let acceptance = mapped
             .iter()
-            .map(|criterion| criterion.id.as_str())
+            .map(|criterion| crate::utility::task_ticket::AcceptanceSeed {
+                id: criterion.id.clone(),
+                verification_method: criterion.verification_method.clone(),
+                expected_evidence_type: criterion.evidence_type.clone(),
+            })
             .collect();
-        let verification_methods: Vec<&str> = mapped
-            .iter()
-            .map(|criterion| criterion.verification_method.as_str())
-            .collect();
-        let evidence_types: Vec<&str> = mapped
-            .iter()
-            .map(|criterion| criterion.evidence_type.as_str())
-            .collect();
-        task_entries.push(json!({
-            "taskId": task_id,
-            "title": format!("Implement {}", requirement.id),
-            "requirementIds": [requirement.id],
-            "acceptanceCriterionIds": criterion_ids,
-            "verificationMethod": verification_methods.first().copied().unwrap_or_default(),
-            "expectedEvidenceType": evidence_types.first().copied().unwrap_or_default(),
-            "ownerRole": "implementer",
-            "status": "pending"
-        }));
-        rtm_entries.push(json!({
-            "requirementId": requirement.id,
-            "acceptanceCriterionIds": criterion_ids,
-            "taskIds": [task_id],
-            "verificationMethods": verification_methods,
-            "expectedEvidenceTypes": evidence_types
-        }));
+        seeds.push(crate::utility::task_ticket::TaskSeed {
+            id: task_id,
+            title: format!("Implement {}", requirement.id),
+            requirement_refs: vec![requirement.id.clone()],
+            acceptance,
+        });
     }
-    (
-        versioned_value(
-            plan_id,
-            Some("tasks"),
-            json!({
-                "status": "ready",
-                "tasks": task_entries
-            }),
-        ),
-        versioned_value(
-            plan_id,
-            Some("rtm"),
-            json!({
-                "status": "complete",
-                "entries": rtm_entries
-            }),
-        ),
-    )
+    seeds
 }
 
 fn validate_specification(spec: &str, plan_id: &str) -> (ParsedSpecification, Vec<String>) {
@@ -1627,6 +1633,45 @@ pub(crate) fn review_architecture_issues(
         != Some("complete")
     {
         issues.push("status.json architectureStatus is not complete".to_string());
+    }
+    Ok(issues)
+}
+
+pub(crate) fn review_task_issues(
+    workspace_root: &Path,
+    claude_home: &str,
+    plan_id: &str,
+) -> Result<Vec<String>, String> {
+    let paths = review_plan_paths(workspace_root, claude_home, plan_id)?;
+    let home = resolve_claude_home(claude_home)?;
+    let spec = read_text(&paths.spec, SPEC_FILE)?;
+    let (parsed, mut issues) = validate_specification(&spec, plan_id);
+    let architecture = read_bounded_text_for_validation(
+        &paths.architecture,
+        ARCHITECTURE_FILE,
+        crate::utility::architecture::MAX_ARCHITECTURE_BYTES,
+        &mut issues,
+    );
+    let tasks = load_json_artifact(&paths.tasks, TASKS_FILE, plan_id, &mut issues);
+    let rtm = load_json_artifact(&paths.rtm, RTM_FILE, plan_id, &mut issues);
+    validate_tasks(tasks.as_ref(), &parsed, &mut issues);
+    validate_rtm(rtm.as_ref(), &parsed, &mut issues);
+    if let Some(architecture) = architecture.as_deref() {
+        let seeds = task_seeds(&parsed);
+        crate::utility::task_ticket::validate_task_artifacts(
+            &crate::utility::task_ticket::ValidationContext {
+                plan_id,
+                plan_directory: &paths.directory,
+                keel_home: &home,
+                workspace_root,
+                specification: &spec,
+                architecture,
+                seeds: &seeds,
+            },
+            tasks.as_ref(),
+            rtm.as_ref(),
+            &mut issues,
+        );
     }
     Ok(issues)
 }

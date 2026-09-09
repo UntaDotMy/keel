@@ -51,16 +51,63 @@ The directory contains:
 | `spec.md` | The verbatim request, 22 required specification sections, REQ records, and structured AC records. |
 | `research.json` | Classified factual claims and source links used by requirements and criteria. |
 | `architecture.md` | The grounded, bounded design note with component-to-REQ/AC mappings, alternatives, failure and fallback semantics, measurement, rollback, and research references. |
-| `tasks.json` | Implementation tasks linked to requirements, criteria, verification methods, and evidence types. |
-| `rtm.json` | The requirement traceability matrix from each REQ to AC, task, verification, and evidence. |
+| `tasks.json` | Backward-compatible task summary plus the indexed `ticketFiles` list and each task's `ticketFile` link. |
+| `task-<n>.json` | Evidence-bound task ticket with REQ/AC references and scope-derived checklist layers. Written by `plan tasks`. |
+| `rtm.json` | The requirement traceability matrix from the submitted request through REQ, AC, task, checklist subtask, and evidence reference. |
 | `status.json` | Current stage, research/architecture/task/check status, clarification state, and validation errors. |
 
 Every JSON artifact has `schemaVersion: 1`. Markdown artifacts start with a
 strict `schema_version: 1` header. Unsupported or malformed versions fail
 validation rather than being rewritten.
 
-`plan specify` publishes a new six-file bundle by directory rename. Later stage
-updates use Keel's atomic text writer and publish `status.json` last.
+`plan specify` publishes the initial six-file bundle by directory rename.
+`plan tasks` adds one task ticket per requirement. Later stage updates use
+Keel's atomic text writer and publish `status.json` last.
+
+## Task tickets and evidence
+
+Each `task-<n>.json` retains the aggregate task's `id`, title, requirement and
+acceptance references, then organizes subtasks under these base layers:
+`design`, `implementation`, `build`, `tests`, `lint_warnings`, `security`,
+`performance_tokens`, `docs`, `ui`, `ux_accessibility`, and
+`release_rollback`. Keel derives mandatory, non-empty layers from the request
+and the architecture component list:
+
+| Detected scope | Required layers |
+| --- | --- |
+| Source code | `implementation`, `build`, `tests`, `lint_warnings`, `docs` |
+| Public behavior or API | `compatibility`, `docs`, `security`, `release_rollback` |
+| UI behavior | `ui`, `ux_accessibility`, `screenshots`, `test_fixtures` |
+| Dependency | `security`, `license_audit`, `reproducibility`, `bloat_analysis` |
+| Token or performance | `benchmark`, `performance_tokens`, `fixed_context_runtime` |
+| Data or memory | `migration`, `privacy`, `integrity`, `rollback` |
+| Host integration | `host_adapter_contracts`, `install_provision_parity` |
+
+Every generated subtask carries its own ID, description, REQ/AC links, status,
+expected evidence type, evidence reference, reason, owner role, and verification
+timestamp. Derived layers and generated subtasks cannot be removed. A subtask
+may be `skipped`, `not_applicable`, or `needs_human` only with a non-empty
+reason visible to the reviewer.
+
+A `done` subtask requires an RFC3339 verification timestamp and an
+`evidence_ref` to a bounded regular JSON file inside the plan directory. The
+reference records the file's content fingerprint. Evidence supports command,
+named-test, lint diagnostic, source-hash, RawStore, screenshot, and benchmark
+records. Keel resolves the referenced source or RawStore record where that
+evidence type requires it and rejects traversal, symlinks, failed results,
+malformed payloads, changed content, or a ticket/evidence identity mismatch.
+
+Running `plan tasks` again preserves existing tickets, validates them, and
+regenerates only the aggregate summary and RTM. `plan check --rtm` validates the
+complete chain:
+
+```text
+User request -> Requirement -> Acceptance criterion -> Task -> Checklist subtask -> Evidence
+```
+
+It rejects deleted derived layers, missing or duplicate ticket links, dangling
+RTM links, criteria without evidence-producing subtasks, unjustified statuses,
+and `done` subtasks without resolvable evidence.
 
 ## Architecture gate
 
@@ -114,7 +161,9 @@ resolve to an existing REQ or AC.
 - research is complete and every claim is classified;
 - architecture design is complete, bounded, fully mapped, and internally consistent;
 - every REQ and AC maps to an implementation task;
-- every RTM row maps REQ to AC, task, verification, and evidence;
+- every task ticket retains its required layers, subtask fields, and REQ/AC links;
+- every RTM row and trace maps request to REQ, AC, task, checklist subtask, and evidence;
+- every completed subtask has valid, unchanged, machine-resolvable evidence;
 - status and artifact identities agree with the requested plan ID.
 
 `plan check --rtm` returns the validated RTM alongside the check result. Plan
@@ -175,5 +224,7 @@ keel review closeout --base-ref origin/main --plan <plan-id> --brief-id <brief-i
 The blocking `research_traceability` gate reports missing, stale, malformed, or
 unlinked source and claim records. The separate `architecture_design` gate
 reports incomplete mappings, decisions, fallbacks, measurement, or rollback.
+A separate `task_evidence` gate validates ticket schemas, required layers, RTM
+links, completion evidence, and evidence content fingerprints.
 A branch that adds only new source or changes non-source files remains
-greenfield for both gates.
+greenfield for all three gates.

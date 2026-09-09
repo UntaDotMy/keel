@@ -58,6 +58,13 @@ pub(crate) fn collect_review_gate_results(
             plan_evidence.plan_id,
             plan_evidence.claude_home,
         ));
+        gate_results.push(task_evidence_gate(
+            repository_root,
+            base_ref,
+            surface_name,
+            plan_evidence.plan_id,
+            plan_evidence.claude_home,
+        ));
     }
     if include_impact {
         gate_results.push(impact_gate(repository_root, base_ref, surface_name));
@@ -368,6 +375,69 @@ pub(crate) fn architecture_design_gate(
                 .cloned()
                 .collect::<Vec<_>>()
                 .join("; ")
+        )),
+        Err(error) => blocking_failure(&error),
+    }
+}
+
+pub(crate) fn task_evidence_gate(
+    repository_root: &Path,
+    base_ref: &str,
+    surface_name: &str,
+    plan_id: &str,
+    claude_home: &str,
+) -> GateResult {
+    let result = |status, blocking, details: &str| GateResult {
+        name: "task_evidence".to_string(),
+        status,
+        blocking,
+        details: Some(details.to_string()),
+    };
+    let blocking_failure = |details: &str| result(GateStatus::Fail, true, details);
+    if surface_name != "pre-pr" {
+        return result(
+            GateStatus::Pass,
+            false,
+            "pre-PR task evidence gate not requested",
+        );
+    }
+    let touched = match reviewed_existing_sources(repository_root, base_ref) {
+        Ok(touched) => touched,
+        Err(error) => {
+            return blocking_failure(&format!("{error}; task evidence cannot be checked"))
+        }
+    };
+    if touched.is_empty() {
+        return result(
+            GateStatus::Pass,
+            true,
+            "no existing source modified; task evidence gate not applicable",
+        );
+    }
+    if plan_id.trim().is_empty() {
+        return blocking_failure(
+            "non-greenfield pre-PR review requires --plan <id> with valid task evidence",
+        );
+    }
+    match crate::utility::plan::review_task_issues(
+        repository_root,
+        claude_home,
+        plan_id.trim(),
+    ) {
+        Ok(issues) if issues.is_empty() => result(
+            GateStatus::Pass,
+            true,
+            &format!(
+                "plan {} has valid task tickets, RTM links, and evidence for {} existing source file(s)",
+                plan_id.trim(),
+                touched.len()
+            ),
+        ),
+        Ok(issues) => blocking_failure(&format!(
+            "plan {} has {} task evidence finding(s): {}",
+            plan_id.trim(),
+            issues.len(),
+            issues.iter().take(5).cloned().collect::<Vec<_>>().join("; ")
         )),
         Err(error) => blocking_failure(&error),
     }
