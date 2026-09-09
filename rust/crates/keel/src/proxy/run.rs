@@ -17,6 +17,7 @@ use crate::proxy::injection_guard::{neutralize_injection, InjectionFinding};
 use crate::proxy::raw_store::{RawRun, RawStore, RunMeta};
 use crate::proxy::token_meter::TokenMeter;
 use crate::runtime::{display_path, run_command, ProcessResult, MAX_CAPTURED_OUTPUT_BYTES};
+use chrono::{DateTime, SecondsFormat, Utc};
 
 /// Decide whether the proxy should run in capture mode (with compaction, raw
 /// recovery, gain analytics) or fall back to a transparent passthrough.
@@ -278,6 +279,26 @@ pub fn run_proxy(
                 let _ = store.save(&mut meta, &raw_run);
             }
 
+            // Warning state consumes exact captured streams before compaction.
+            // CommandAst supplies classification; observer never rewrites args.
+            let warning_workspace = warning_workspace_root(&cwd);
+            let warning_captured_at = DateTime::<Utc>::from_timestamp(started_at as i64, 0)
+                .unwrap_or_else(Utc::now)
+                .to_rfc3339_opts(SecondsFormat::Secs, true);
+            let warning_result = crate::runtime::resolve_claude_home("").and_then(|home| {
+                crate::proxy::warnings::reconcile_capture(
+                    &home,
+                    &warning_workspace,
+                    &ast,
+                    &raw_run.stdout,
+                    &raw_run.stderr,
+                    raw_run.exit_code,
+                    &meta.command,
+                    &warning_captured_at,
+                    &meta.raw_id,
+                )
+            });
+
             let compact_result = if flag_set.bool_value("errors-only") {
                 errors_only_compact(&raw_run, &meta)
             } else {
@@ -394,13 +415,40 @@ pub fn run_proxy(
                 }
             }
 
-            result.code.clamp(0, 255) as u8
+            match &warning_result {
+                Ok(summary) => {
+                    if let Some(pointer) = crate::proxy::warnings::warning_pointer(summary) {
+                        let _ = writeln!(standard_error, "{pointer}");
+                    }
+                }
+                Err(error) => {
+                    let _ = writeln!(standard_error, "keel run: warning ledger failed: {error}");
+                }
+            }
+
+            if warning_result.is_err() {
+                1
+            } else {
+                result.code.clamp(0, 255) as u8
+            }
         }
         Err(error) => {
             let _ = writeln!(standard_error, "Unable to execute command: {error}");
             1
         }
     }
+}
+
+fn warning_workspace_root(cwd: &std::path::Path) -> std::path::PathBuf {
+    let arguments = ["rev-parse".to_string(), "--show-toplevel".to_string()];
+    crate::runtime::run_command("git", &arguments, Some(cwd))
+        .ok()
+        .filter(|result| result.code == 0)
+        .and_then(|result| {
+            let path = String::from_utf8_lossy(&result.stdout).trim().to_string();
+            (!path.is_empty()).then(|| std::path::PathBuf::from(path))
+        })
+        .unwrap_or_else(|| cwd.to_path_buf())
 }
 
 /// Transparent passthrough used when the proxy is invoked outside the harness.
@@ -1146,5 +1194,94 @@ mod tests {
             None => std::env::remove_var("CLAUDE_TARGET_OVERRIDE"),
         }
         restore_signals(&snapshot);
+    }
+
+    #[test]
+    fn capture_path_records_dart_warning_and_emits_only_bounded_pointer() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let snapshot = snapshot_signals();
+        clear_signals();
+        std::env::set_var("CLAUDE_SKILLS_HOOK", "test");
+        let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
+        let previous_cwd = std::env::current_dir().unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "keel-run-warning-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let home = root.join("home");
+        let workspace = root.join("workspace");
+        let recovery = root.join("raw");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::env::set_var("CLAUDE_TARGET_OVERRIDE", &home);
+        std::env::set_current_dir(&workspace).unwrap();
+
+        #[cfg(windows)]
+        let dart = workspace.join("dart.cmd");
+        #[cfg(not(windows))]
+        let dart = workspace.join("dart");
+        #[cfg(windows)]
+        std::fs::write(&dart, "@echo off\r\n").unwrap();
+        #[cfg(not(windows))]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::write(&dart, "#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::set_permissions(&dart, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let arguments = vec![
+            "--no-compact".to_string(),
+            "--recovery-dir".to_string(),
+            recovery.to_string_lossy().to_string(),
+            "--".to_string(),
+            dart.to_string_lossy().to_string(),
+            "analyze".to_string(),
+            "--format=machine".to_string(),
+        ];
+        assert_eq!(run_proxy(&arguments, &mut Vec::new(), &mut Vec::new()), 0);
+
+        #[cfg(windows)]
+        std::fs::write(
+            &dart,
+            "@echo off\r\necho INFO^|LINT^|AVOID_PRINT^|lib/main.dart^|7^|3^|5^|Avoid print.\r\n",
+        )
+        .unwrap();
+        #[cfg(not(windows))]
+        std::fs::write(
+            &dart,
+            "#!/bin/sh\nprintf '%s\\n' 'INFO|LINT|AVOID_PRINT|lib/main.dart|7|3|5|Avoid print.'\n",
+        )
+        .unwrap();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        assert_eq!(run_proxy(&arguments, &mut stdout, &mut stderr), 0);
+        let pointer = String::from_utf8_lossy(&stderr);
+        assert!(
+            pointer.contains("warnings: 1 open (1 new) — run `keel warn list`"),
+            "stderr: {pointer}; stdout: {}",
+            String::from_utf8_lossy(&stdout)
+        );
+        assert!(!pointer.contains("Avoid print."), "stderr: {pointer}");
+        let warnings =
+            crate::proxy::warnings::current_warnings(&home, &workspace, "2026-09-09T00:00:00Z")
+                .unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(
+            warnings[0].status,
+            crate::proxy::warnings::WarningStatus::Open
+        );
+
+        std::env::set_current_dir(previous_cwd).unwrap();
+        match previous_home {
+            Some(value) => std::env::set_var("CLAUDE_TARGET_OVERRIDE", value),
+            None => std::env::remove_var("CLAUDE_TARGET_OVERRIDE"),
+        }
+        restore_signals(&snapshot);
+        let _ = std::fs::remove_dir_all(root);
     }
 }

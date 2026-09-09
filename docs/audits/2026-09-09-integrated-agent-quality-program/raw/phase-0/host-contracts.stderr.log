@@ -1,0 +1,19 @@
+
+tests\host-adapter-contracts.test.ts:
+(pass) Codex fixtures use the official hook payload and output fields [0.58ms]
+(pass) Codex hooks execute the bundled Node runtime without npx [0.79ms]
+(pass) Codex bundled adapter handles PreToolUse end to end [147.79ms]
+(pass) Cursor fixtures match the shipped hooks JSON parser [0.41ms]
+(pass) OpenCode fixtures match named plugin hook contracts [0.31ms]
+(pass) OpenCode forwards tool arguments to the edit gate [0.19ms]
+(pass) Command Code fixtures match the ModApi lifecycle surface [0.29ms]
+(pass) Pi and OMP inject Keel context through the current before_agent_start seam [0.27ms]
+(pass) Antigravity adapter translates the documented camelCase hook contract [0.29ms]
+(pass) Antigravity MCP research call satisfies the edit gate end to end [519.20ms]
+(pass) Session keys match the Rust sanitizer contract [0.56ms]
+(pass) Adapters never share one literal default session key [1.12ms]
+
+ 12 pass
+ 0 fail
+ 175 expect() calls
+Ran 12 tests across 1 file. [899.00ms]

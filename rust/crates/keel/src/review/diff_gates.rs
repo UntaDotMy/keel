@@ -3,6 +3,12 @@ use crate::runner::hook_lifecycle::completeness_marker_record_for_workspace;
 use crate::runtime::resolve_repository_root;
 use std::fs;
 
+#[derive(Clone, Copy)]
+pub(crate) struct PlanEvidenceRef<'a> {
+    pub plan_id: &'a str,
+    pub claude_home: &'a str,
+}
+
 pub(crate) fn collect_review_gate_results(
     repository_root: &Path,
     base_ref: &str,
@@ -10,6 +16,7 @@ pub(crate) fn collect_review_gate_results(
     scan_all: bool,
     include_tests: bool,
     include_impact: bool,
+    plan_evidence: PlanEvidenceRef<'_>,
 ) -> Vec<GateResult> {
     // Auto language gates (.githooks markers). Missing tools = non-blocking Blocked.
     let mut gate_results = run_rust_surface_gates(repository_root, include_tests);
@@ -36,13 +43,72 @@ pub(crate) fn collect_review_gate_results(
         base_ref,
         surface_name,
     ));
-    if include_impact {
+    if surface_name == "pre-pr" {
+        gate_results.push(warnings_gate(repository_root, plan_evidence.claude_home));
+        gate_results.push(research_traceability_gate(
+            repository_root,
+            base_ref,
+            surface_name,
+            plan_evidence.plan_id,
+            plan_evidence.claude_home,
+        ));
+        gate_results.push(architecture_design_gate(
+            repository_root,
+            base_ref,
+            surface_name,
+            plan_evidence.plan_id,
+            plan_evidence.claude_home,
+        ));
+        gate_results.push(task_evidence_gate(
+            repository_root,
+            base_ref,
+            surface_name,
+            plan_evidence.plan_id,
+            plan_evidence.claude_home,
+        ));
+        gate_results.push(impact_gate(repository_root, base_ref, surface_name));
+    } else if include_impact {
         gate_results.push(impact_gate(repository_root, base_ref, surface_name));
     }
     if let Some(e2e_result) = check_e2e_config(repository_root) {
         gate_results.push(e2e_result);
     }
     gate_results
+}
+
+pub(crate) fn warnings_gate(repository_root: &Path, claude_home: &str) -> GateResult {
+    let home = match crate::runtime::resolve_claude_home(claude_home) {
+        Ok(home) => home,
+        Err(error) => {
+            return GateResult {
+                name: "warnings_gate".to_string(),
+                status: GateStatus::Blocked,
+                blocking: true,
+                details: Some(format!("warning home unavailable: {error}")),
+            };
+        }
+    };
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    match crate::proxy::warnings::warning_gate(&home, repository_root, &now) {
+        Ok(summary) => GateResult {
+            name: "warnings_gate".to_string(),
+            status: if summary.blocking {
+                GateStatus::Fail
+            } else if summary.baseline > 0 || summary.waived > 0 {
+                GateStatus::Warn
+            } else {
+                GateStatus::Pass
+            },
+            blocking: summary.blocking,
+            details: Some(summary.details),
+        },
+        Err(error) => GateResult {
+            name: "warnings_gate".to_string(),
+            status: GateStatus::Blocked,
+            blocking: true,
+            details: Some(format!("warning ledger unavailable: {error}")),
+        },
+    }
 }
 
 pub(crate) fn run_review_surface_command(
@@ -80,6 +146,10 @@ pub(crate) fn run_review_surface_command(
         scan_all,
         surface_name == "pre-pr",
         flag_set.bool_value("impact"),
+        PlanEvidenceRef {
+            plan_id: flag_set.string_value("plan"),
+            claude_home: flag_set.string_value("claude-home"),
+        },
     );
     let (blocking_findings, warnings) = tally_gate_results(&gate_results);
 
@@ -223,6 +293,236 @@ pub(crate) fn brownfield_source_from_name_status(line: &str) -> Option<String> {
         return None;
     }
     Some(normalized)
+}
+
+pub(crate) fn research_traceability_gate(
+    repository_root: &Path,
+    base_ref: &str,
+    surface_name: &str,
+    plan_id: &str,
+    claude_home: &str,
+) -> GateResult {
+    let blocking_failure = |details: &str| research_gate_result(GateStatus::Fail, true, details);
+    if surface_name != "pre-pr" {
+        return research_gate_result(
+            GateStatus::Pass,
+            false,
+            "pre-PR research gate not requested",
+        );
+    }
+    let touched = match reviewed_existing_sources(repository_root, base_ref) {
+        Ok(touched) => touched,
+        Err(error) => {
+            return blocking_failure(&format!("{error}; research evidence cannot be checked"))
+        }
+    };
+    if touched.is_empty() {
+        return research_gate_result(
+            GateStatus::Pass,
+            true,
+            "no existing source modified; research gate not applicable",
+        );
+    }
+    if plan_id.trim().is_empty() {
+        return blocking_failure(
+            "non-greenfield pre-PR review requires --plan <id> with passing research evidence",
+        );
+    }
+    match crate::utility::plan::review_research_issues(repository_root, claude_home, plan_id.trim()) {
+        Ok(issues) if issues.is_empty() => research_gate_result(
+            GateStatus::Pass,
+            true,
+            &format!(
+                "plan {} has current source and requirement traceability for {} existing source file(s)",
+                plan_id.trim(),
+                touched.len()
+            ),
+        ),
+        Ok(issues) => blocking_failure(&format!(
+                "plan {} has {} untraced or stale research finding(s): {}",
+                plan_id.trim(),
+                issues.len(),
+                issues.iter().take(5).cloned().collect::<Vec<_>>().join("; ")
+            )),
+        Err(error) => blocking_failure(&error),
+    }
+}
+
+pub(crate) fn architecture_design_gate(
+    repository_root: &Path,
+    base_ref: &str,
+    surface_name: &str,
+    plan_id: &str,
+    claude_home: &str,
+) -> GateResult {
+    let result = |status, blocking, details: &str| GateResult {
+        name: "architecture_design".to_string(),
+        status,
+        blocking,
+        details: Some(details.to_string()),
+    };
+    let blocking_failure = |details: &str| result(GateStatus::Fail, true, details);
+    if surface_name != "pre-pr" {
+        return result(
+            GateStatus::Pass,
+            false,
+            "pre-PR architecture gate not requested",
+        );
+    }
+    let touched = match reviewed_existing_sources(repository_root, base_ref) {
+        Ok(touched) => touched,
+        Err(error) => {
+            return blocking_failure(&format!("{error}; architecture evidence cannot be checked"))
+        }
+    };
+    if touched.is_empty() {
+        return result(
+            GateStatus::Pass,
+            true,
+            "no existing source modified; architecture gate not applicable",
+        );
+    }
+    if plan_id.trim().is_empty() {
+        return blocking_failure(
+            "non-greenfield pre-PR review requires --plan <id> with a complete architecture design",
+        );
+    }
+    match crate::utility::plan::review_architecture_issues(
+        repository_root,
+        claude_home,
+        plan_id.trim(),
+    ) {
+        Ok(issues) if issues.is_empty() => result(
+            GateStatus::Pass,
+            true,
+            &format!(
+                "plan {} has a complete mapped architecture for {} existing source file(s)",
+                plan_id.trim(),
+                touched.len()
+            ),
+        ),
+        Ok(issues) => blocking_failure(&format!(
+            "plan {} has {} architecture design finding(s): {}",
+            plan_id.trim(),
+            issues.len(),
+            issues
+                .iter()
+                .take(5)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("; ")
+        )),
+        Err(error) => blocking_failure(&error),
+    }
+}
+
+pub(crate) fn task_evidence_gate(
+    repository_root: &Path,
+    base_ref: &str,
+    surface_name: &str,
+    plan_id: &str,
+    claude_home: &str,
+) -> GateResult {
+    let result = |status, blocking, details: &str| GateResult {
+        name: "task_evidence".to_string(),
+        status,
+        blocking,
+        details: Some(details.to_string()),
+    };
+    let blocking_failure = |details: &str| result(GateStatus::Fail, true, details);
+    if surface_name != "pre-pr" {
+        return result(
+            GateStatus::Pass,
+            false,
+            "pre-PR task evidence gate not requested",
+        );
+    }
+    let touched = match reviewed_existing_sources(repository_root, base_ref) {
+        Ok(touched) => touched,
+        Err(error) => {
+            return blocking_failure(&format!("{error}; task evidence cannot be checked"))
+        }
+    };
+    if touched.is_empty() {
+        return result(
+            GateStatus::Pass,
+            true,
+            "no existing source modified; task evidence gate not applicable",
+        );
+    }
+    if plan_id.trim().is_empty() {
+        return blocking_failure(
+            "non-greenfield pre-PR review requires --plan <id> with valid task evidence",
+        );
+    }
+    match crate::utility::plan::review_task_issues(repository_root, claude_home, plan_id.trim()) {
+        Ok(issues) if issues.is_empty() => {
+            let (ac_status, ac_summary) = crate::utility::plan::evaluate_acceptance_criteria(
+                repository_root,
+                claude_home,
+                plan_id.trim(),
+            )
+            .unwrap_or((GateStatus::Pass, String::new()));
+            let details = if ac_summary.is_empty() {
+                format!(
+                    "plan {} has valid task tickets, RTM links, and evidence for {} existing source file(s)",
+                    plan_id.trim(),
+                    touched.len()
+                )
+            } else {
+                format!(
+                    "plan {} has valid task tickets, RTM links, and evidence for {} existing source file(s)\n{}",
+                    plan_id.trim(),
+                    touched.len(),
+                    ac_summary
+                )
+            };
+            result(ac_status, true, &details)
+        }
+        Ok(issues) => blocking_failure(&format!(
+            "plan {} has {} task evidence finding(s): {}",
+            plan_id.trim(),
+            issues.len(),
+            issues
+                .iter()
+                .take(5)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("; ")
+        )),
+        Err(error) => blocking_failure(&error),
+    }
+}
+
+fn reviewed_existing_sources(
+    repository_root: &Path,
+    base_ref: &str,
+) -> Result<Vec<String>, String> {
+    let base = match base_ref.trim() {
+        "" => "origin/main",
+        value => value,
+    };
+    let committed_range = vec![format!("{base}...HEAD")];
+    let working_range = vec!["HEAD".to_string()];
+    let Some(mut touched) = modified_existing_sources(repository_root, &committed_range) else {
+        return Err(format!("could not resolve {base}...HEAD"));
+    };
+    let Some(working_touched) = modified_existing_sources(repository_root, &working_range) else {
+        return Err("could not inspect working changes".to_string());
+    };
+    touched.extend(working_touched);
+    touched.sort();
+    touched.dedup();
+    Ok(touched)
+}
+
+fn research_gate_result(status: GateStatus, blocking: bool, details: &str) -> GateResult {
+    GateResult {
+        name: "research_traceability".to_string(),
+        status,
+        blocking,
+        details: Some(details.to_string()),
+    }
 }
 
 /// Blocking brownfield gate: modifying established source requires a complete
@@ -558,9 +858,38 @@ pub(crate) fn preview_touched_paths(paths: &[String]) -> String {
         .join(", ")
 }
 
-/// Advisory blast-radius gate: reports which in-repo files transitively import
-/// the changed files. Non-blocking and fail-open; a missing or unreadable graph
-/// silently skips. Uses the cached artifact when present, builds fresh otherwise.
+/// Validate whether the current flow-check artifact covers all touched files and is current.
+pub(crate) fn is_flow_evidence_valid(repository_root: &Path, touched: &[String]) -> bool {
+    let (errors, check) =
+        match keel_flow::load_check(repository_root, keel_flow::DEFAULT_ARTIFACT_PATH) {
+            Ok(check) => (
+                keel_flow::validate_finished_check(check.clone()),
+                Some(check),
+            ),
+            Err(_) => return false,
+        };
+    if !errors.is_empty() {
+        return false;
+    }
+    let Some(check) = check else {
+        return false;
+    };
+    if check.docs_only || check.formatting_only || check.generated_only || check.greenfield {
+        return false;
+    }
+    if !artifact_targets_all_touched_files(&check.target_files, touched) {
+        return false;
+    }
+    match keel_flow::repository_state(repository_root) {
+        Ok((head, fingerprint)) => {
+            head == check.repository_head && fingerprint == check.diff_fingerprint
+        }
+        Err(_) => false,
+    }
+}
+
+/// Blast-radius gate: reports in-repo files transitively importing changed files.
+/// Graph missing on protected change without flow evidence blocks; otherwise warns.
 pub(crate) fn impact_gate(
     repository_root: &Path,
     base_ref: &str,
@@ -577,33 +906,43 @@ pub(crate) fn impact_gate(
     let Some(touched) = modified_existing_sources(repository_root, &range) else {
         return GateResult {
             name: "impact".to_string(),
-            status: GateStatus::Blocked,
+            status: GateStatus::Warn,
             blocking: false,
-            details: Some("could not resolve diff range".to_string()),
+            details: Some("could not resolve diff range; impact check skipped".to_string()),
         };
     };
     if touched.is_empty() {
         return GateResult {
             name: "impact".to_string(),
-            status: GateStatus::Pass,
+            status: GateStatus::NotApplicable,
             blocking: false,
-            details: Some("no existing source modified".to_string()),
+            details: Some("no existing source modified; impact check not applicable".to_string()),
         };
     }
 
     let graph = crate::utility::code_graph::cached_artifact_path(repository_root, "")
-        .and_then(|p| crate::utility::code_graph::CodeGraph::from_json_file(&p))
-        .or_else(|| {
-            // The workspace index owns discovery and extraction; a missing or
-            // stale artifact fails open when the canonical index cannot refresh.
-            crate::utility::code_graph::build_graph_from_workspace_index(repository_root, "").ok()
-        });
+        .and_then(|p| crate::utility::code_graph::CodeGraph::from_json_file(&p));
     let Some(graph) = graph else {
+        let flow_valid = is_flow_evidence_valid(repository_root, &touched);
+        if !flow_valid {
+            return GateResult {
+                name: "impact".to_string(),
+                status: GateStatus::Fail,
+                blocking: true,
+                details: Some(format!(
+                    "code graph unavailable and flow evidence is missing or incomplete for {} protected source file(s) ({}). Run `keel code-graph build` to restore graph or `keel flow start`/`keel flow finish` to record flow evidence.",
+                    touched.len(),
+                    preview_touched_paths(&touched)
+                )),
+            };
+        }
         return GateResult {
             name: "impact".to_string(),
-            status: GateStatus::Pass,
+            status: GateStatus::Warn,
             blocking: false,
-            details: Some("code graph unavailable; impact check skipped".to_string()),
+            details: Some(
+                "code graph unavailable; impact check skipped (run `keel code-graph build` to generate graph)".to_string(),
+            ),
         };
     };
 

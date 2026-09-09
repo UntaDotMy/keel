@@ -20,3 +20,32 @@ MCP: `memory` tool / `memory_status`). Implementation: `utility/memory_families.
 **Policy:** Do not delete scaffold families as "dead code". They are intentional
 CLI/MCP surfaces. Prefer wiring a real writer when a feature needs them.
 Zero records in `memory_status` is healthy for a fresh or single-agent workspace.
+
+## Research cache contract
+
+The research cache keeps two separate freshness concepts:
+
+- `freshness` is cache lifetime guidance such as `90d`; recognized TTL values
+  produce `expiresAt` and control whether lookup may reuse the record.
+- `freshnessClass` is citation meaning: `fresh`, `historical`, or `local-only`.
+
+Planner-reusable records also preserve `source`, `sourceType`, optional
+`publicationDate`, `retrievedAt`, and comma-separated `usedBy` REQ/AC IDs:
+
+```bash
+keel memory research-cache record \
+  --question "Exact request or research query" \
+  --answer "Brief original supporting paraphrase" \
+  --source "https://vendor.example/current-doc" \
+  --source-type official-doc \
+  --retrieved-at "2026-09-09T00:00:00Z" \
+  --freshness-class fresh \
+  --used-by REQ-001,AC-001 \
+  --freshness 90d
+```
+
+Legacy records are preserved and remain visible through cache commands, but the
+planner reuses only complete citation records. A matching complete stale record
+blocks local fallback and asks for a new search. `plan research` then validates
+the selected record against the project's retrieval-age policy as a separate
+fail-closed check.

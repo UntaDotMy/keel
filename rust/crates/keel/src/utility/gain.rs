@@ -137,6 +137,27 @@ pub fn run_gain_command(
             ("topCommands".into(), Value::Array(top_commands)),
             ("topReducers".into(), Value::Array(top_reducers)),
             ("topFamilies".into(), Value::Array(top_families)),
+            (
+                "fixedContextAccounting".into(),
+                Value::Object(vec![
+                    (
+                        "includedInCommandCompactionSavings".into(),
+                        Value::Bool(false),
+                    ),
+                    (
+                        "source".into(),
+                        Value::String(crate::utility::fixed_context::REPRODUCTION_COMMAND.into()),
+                    ),
+                    (
+                        "tokenizer".into(),
+                        Value::String(crate::utility::fixed_context::TOKENIZER.into()),
+                    ),
+                    (
+                        "surfaceCount".into(),
+                        Value::Number(crate::utility::fixed_context::SURFACE_COUNT.to_string()),
+                    ),
+                ]),
+            ),
         ]);
         return write_indented(standard_output, &payload).map_or(1, |_| 0);
     }
@@ -177,6 +198,13 @@ pub fn run_gain_command(
         standard_output,
         "Net savings: {:.2}%",
         summary.net_savings_percent()
+    );
+    let _ = writeln!(
+        standard_output,
+        "Fixed context: excluded from command-compaction savings; inspect {} ({} surfaces, {})",
+        crate::utility::fixed_context::REPRODUCTION_COMMAND,
+        crate::utility::fixed_context::SURFACE_COUNT,
+        crate::utility::fixed_context::TOKENIZER
     );
     if !summary.top_commands.is_empty() {
         let _ = writeln!(standard_output, "\nTop Commands by Savings:");

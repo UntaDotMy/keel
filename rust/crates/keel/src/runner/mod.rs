@@ -140,6 +140,14 @@ pub fn run_raw_command(
     let stderr = fs::read(raw_dir.join("stderr.log")).unwrap_or_default();
     let _ = writeln!(standard_output, "raw_id: {raw_id}");
     let _ = writeln!(standard_output, "path: {}", display_path(&raw_dir));
+    let screenshot_path = raw_dir.join("screenshot.png");
+    if screenshot_path.is_file() {
+        let _ = writeln!(
+            standard_output,
+            "screenshot: {}",
+            display_path(&screenshot_path)
+        );
+    }
     let _ = writeln!(standard_output, "command: {}", command.trim());
     let _ = writeln!(standard_output, "\n[stdout]");
     let stdout_text = String::from_utf8_lossy(&stdout);

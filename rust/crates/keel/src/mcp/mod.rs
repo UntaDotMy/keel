@@ -26,18 +26,53 @@ use crate::utility::workspace_index;
 mod http;
 mod tools;
 
-pub(crate) fn tools_list_context_snapshot() -> (usize, usize) {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum McpCatalogProfile {
+    #[default]
+    Tiered,
+    Full,
+}
+
+impl McpCatalogProfile {
+    pub fn from_env() -> Self {
+        match std::env::var("KEEL_MCP_CATALOG_PROFILE")
+            .ok()
+            .as_deref()
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            Some("full") | Some("all") => Self::Full,
+            _ => Self::Tiered,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ToolsListContextSnapshot {
+    pub tool_count: usize,
+    pub eager_tool_count: usize,
+    pub deferred_tool_count: usize,
+    pub catalog_tokens: usize,
+}
+
+pub(crate) fn tools_list_context_snapshot() -> ToolsListContextSnapshot {
+    let profile = McpCatalogProfile::from_env();
     let list = tools::handle_tools_list();
-    let tool_count = list
-        .get("tools")
-        .and_then(Value::as_array)
-        .map(Vec::len)
-        .unwrap_or(0);
+    let eager_tool_count = match profile {
+        McpCatalogProfile::Tiered => tools::EAGER_MCP_TOOL_NAMES.len(),
+        McpCatalogProfile::Full => tools::MCP_TOOL_NAMES.len(),
+    };
+    let deferred_tool_count = match profile {
+        McpCatalogProfile::Tiered => tools::DEFERRED_MCP_TOOL_NAMES.len(),
+        McpCatalogProfile::Full => 0,
+    };
     let serialized = serde_json::to_string(&list).unwrap_or_default();
-    (
-        tool_count,
-        crate::proxy::token_meter::TokenMeter::count_text(&serialized),
-    )
+    ToolsListContextSnapshot {
+        tool_count: tools::MCP_TOOL_NAMES.len(),
+        eager_tool_count,
+        deferred_tool_count,
+        catalog_tokens: crate::proxy::token_meter::TokenMeter::count_text(&serialized),
+    }
 }
 
 /// Maximum bytes accepted for a single newline-delimited JSON-RPC frame. A peer
@@ -1387,7 +1422,7 @@ mod tests {
     }
 
     #[test]
-    fn tools_list_advertises_all_tools() {
+    fn tools_list_advertises_eager_tools_in_default_profile() {
         let request = json!({
             "jsonrpc": "2.0",
             "id": 7,
@@ -1399,38 +1434,15 @@ mod tests {
             .iter()
             .filter_map(|entry| entry.get("name").and_then(Value::as_str))
             .collect();
-        for expected in [
-            "recall",
-            "system_map",
-            "run_command",
-            "recall_status",
-            "skill_route",
-            "skill_get",
-            "skill_list",
-            "memory_status",
-            "brief_list",
-            "brief_get",
-            "brief_create",
-            "system_map_refresh",
-            "context_brief",
-            "cli",
-            "anvil",
-            "review",
-            "git_workflow",
-            "memory",
-            "gain",
-            "raw",
-            "config_audit",
-            "skill_lint",
-            "telemetry",
-            "session",
-            "doctor",
-            "code_search",
-            "flow",
-            "code_graph",
-            "learn",
-        ] {
-            assert!(names.contains(&expected), "missing {expected}: {names:?}");
+        assert_eq!(names.len(), tools::EAGER_MCP_TOOL_NAMES.len());
+        for expected in tools::EAGER_MCP_TOOL_NAMES {
+            assert!(names.contains(expected), "missing {expected}: {names:?}");
+        }
+        for deferred in tools::DEFERRED_MCP_TOOL_NAMES {
+            assert!(
+                !names.contains(deferred),
+                "deferred tool {deferred} should not be in default tools/list"
+            );
         }
         assert!(
             !names.is_empty()

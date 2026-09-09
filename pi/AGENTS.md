@@ -1,6 +1,9 @@
+<!--
+Explicit Reason: Pi coding agent does not support @AGENTS.md imports and discovers instructions from ~/.pi/agent/AGENTS.md globally or ./AGENTS.md locally. When running in a workspace containing AGENTS.md, AGENTS.md is the canonical instruction source. This file provides the standalone bootstrap contract for Pi environments where the repository AGENTS.md is not directly loaded.
+-->
 # keel Iron Law for Pi Agent
 
-You are running with keel discipline. These rules are non-negotiable.
+You are running with keel discipline. These rules are non-negotiable. When running in a repository with `AGENTS.md`, defer to `AGENTS.md` as the canonical instruction source.
 
 ## Iron Law -- follow on every turn
 
@@ -40,7 +43,7 @@ When a native keel command owns the job, use it instead of recreating the behavi
 
 ## MCP Tool Surface
 
-The keel MCP server provides these tools. Use them via the `mcp` proxy tool or directly if registered as direct tools.
+The keel MCP server provides tools for awareness, search, compaction, memory, and skills. Use them via the `mcp` proxy tool or directly if registered as direct tools.
 
 | Tool | Description |
 |---|---|
@@ -60,66 +63,7 @@ The keel MCP server provides these tools. Use them via the `mcp` proxy tool or d
 | `cli` | Run any keel CLI subcommand (review, git-workflow, anvil, memory, etc.) |
 | `anvil` | Drive the Anvil delivery loop (compile/cast/sieve/stamp/run --dry-run in-process; loop/live run background via command_output) |
 
-## Skill Catalog
+## Skills and Reference Guidance
 
-Invoke any skill below by routing through the MCP `skill_route` and `skill_get` tools.
-
-### Security & Review
-- **adversarial-security-review** -- Red-team / blue-team / adjudicator pass for auth, secrets, input handling, permissions. Use for "security review", "threat model this", "can this be exploited".
-- **security-and-compliance-auditor** -- Threat modeling, exploitability analysis, SOC2/GDPR compliance evidence.
-- **reviewer** -- Production readiness review after implementation. Returns Pass/Conditional Pass/Fail with file:line evidence.
-- **receiving-code-review** -- Evaluate review feedback as the author. Fix root causes, push back with evidence on wrong points.
-- **requesting-code-review** -- Alias for reviewer. Use after implementation is complete.
-
-### API & Backend
-- **api-contract-design** -- REST, GraphQL, gRPC, OpenAPI, JSON Schema contracts with versioning, idempotency, and backwards-compatibility.
-- **authentication-and-identity** -- OAuth2, OIDC, SSO, SAML, JWT, MFA, passkeys, WebAuthn, session management, password hashing.
-- **backend-and-data-architecture** -- Backend systems, API design, database schemas, caching, messaging, event-driven patterns.
-- **stripe-integration** -- Stripe Checkout, Payment Intents, Subscriptions, Webhooks, Connect, refunds, disputes.
-- **websocket-realtime-design** -- WebSocket, Socket.IO, SSE, WebRTC data channels with reconnection, backpressure, presence.
-
-### Infrastructure & DevOps
-- **cloud-and-devops-expert** -- IaC (Terraform, Helm, Kustomize), CI/CD, container orchestration, IAM, secrets, progressive delivery.
-- **cloud-cost-and-finops** -- Cost estimation, rightsizing, commitments, allocation, budgets, unit economics, Infracost.
-- **observability-and-incident-response** -- Metrics, logs, traces via OpenTelemetry, SLO/SLI, alerting, runbooks, blameless postmortems.
-
-### Data & ML
-- **data-and-ml-engineering** -- ETL/ELT pipelines, Kafka, Spark, dbt, warehouse modeling, Airflow/Dagster, ML lifecycle, model serving.
-- **postgres-migration-safety** -- PostgreSQL migrations with lock analysis, expand-and-contract, backfill strategy, rollback boundaries.
-
-### Frontend & Mobile
-- **ui-design-systems-and-responsive-interfaces** -- Design-system tokens, responsive layouts, accessibility (WCAG 2.2 AA), visual hierarchy.
-- **react-performance-audit** -- Render storms, memoization, bundle size, hydration mismatches, Core Web Vitals.
-- **web-development-life-cycle** -- Web architecture, rendering strategy, performance, accessibility, SEO, cross-browser behavior.
-- **mobile-development-life-cycle** -- Android/iOS lifecycle, permissions, offline sync, secure storage, store-readiness.
-- **ux-research-and-experience-strategy** -- User research, journey friction, decision architecture, funnel analysis, usability.
-
-### Quality & Testing
-- **qa-and-automation-engineer** -- Test strategy, automated coverage, release gates, mandatory release ladder.
-- **test-driven-development** -- RED-GREEN-REFACTOR loop. Write failing test first, make it pass, refactor.
-- **systematic-debugging** -- Root-cause-first debugging. Reproduce, trace end-to-end, fix source of truth, prove with regression test.
-
-### Architecture & Planning
-- **software-development-life-cycle** -- Cross-domain delivery planning, architecture choices, work sequencing, release framing.
-- **brainstorming** -- Socratic design exploration before implementation. Restates request, confirms user story, produces agreed design.
-- **writing-plans** -- Turn agreed design into verifiable implementation plan with ordered steps and checks.
-- **executing-plans** -- Execute a plan step by step, verifying each step before the next.
-
-### Delivery & Git
-- **finishing-a-development-branch** -- Verify, review, then present merge/PR options. Never force-push, never merge to main unilaterally.
-- **git-expert** -- Safe Git workflows: branching, commits, PRs, merges, conflict resolution, history repair.
-- **using-git-worktrees** -- Isolate feature work in its own checkout to prevent collisions with parallel work.
-- **running-anvil** -- Single delivery loop (compile → cast → sieve → stamp → loop).
-- **dispatching-parallel-agents** -- Fan out independent work to concurrent subagents. Apply the four-condition independence test first.
-- **subagent-driven-development** -- Delegate self-contained tasks to fresh-context subagents to preserve controller context.
-- **designing-agent-teams** -- Decompose large tasks into coordinated specialist agents with clean handoffs.
-
-### Code Quality & Dependencies
-- **preserve-existing-flow** -- Trace ownership and current behavior in brownfield code before any edit.
-- **dependency-and-supply-chain** -- Dependency upgrades, lockfile hygiene, semver risk, SBOM, provenance, typosquatting checks.
-- **compounding-knowledge** -- Capture solved problems as durable, discoverable knowledge artifacts.
-- **writing-skills** -- Author and revise skills with TDD on the instructions themselves.
-- **memory-status-reporter** -- Human-style memory health and learning reports.
-- **compression-discipline** -- Per-turn output-compression when context is filling.
-- **output-economy** -- Per-response output-token economy. Cut verbosity without dropping signal.
-- **internationalization-and-localization** -- i18n/l10n message catalogs, ICU MessageFormat, locale-aware formatting, RTL/bidi.
+Discover and load specialist skills dynamically using `skill_route` and `skill_get`.
+Detailed domain procedures, testing standards, and architecture doctrine live in the canonical references under `AGENTS/references/` in workspaces containing Keel.

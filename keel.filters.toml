@@ -2,6 +2,14 @@
 # Place this file in your project root or at .keel/filters.toml
 # Behavior: these declarative filters are loaded and applied by the proxy filter pipeline (rust/crates/keel/src/proxy/filters.rs)
 
+[verification]
+commands = [
+  "flutter analyze --fatal-infos --fatal-warnings",
+  "dart analyze --format=machine",
+  "flutter test",
+  "cargo clippy --all-targets -- -D warnings"
+]
+
 # Example: compact cargo test output to failures and summary only
 [[filter]]
 name = "cargo-test"

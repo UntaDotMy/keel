@@ -1,0 +1,4 @@
+gate=pass blocking=0 warnings=0
+  rust_tests=pass blocking=true details=cargo test --workspace passed
+  flow_check=pass blocking=true details=no existing source modified; brownfield gate not applicable
+  completeness_check=pass blocking=true details=no source files changed; completeness gate not applicable

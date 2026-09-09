@@ -12,12 +12,27 @@ use crate::proxy::adapter::{CommandAdapter, CompactResult};
 use crate::proxy::command_ast::CommandAst;
 use crate::proxy::raw_store::RunMeta;
 use serde::Deserialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct FilterConfig {
     #[serde(default)]
     pub filter: Vec<DeclarativeFilter>,
+    #[serde(default)]
+    pub verification: VerificationConfig,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct VerificationConfig {
+    #[serde(default)]
+    pub commands: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerificationReport {
+    pub projects: usize,
+    pub commands: Vec<String>,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -375,11 +390,122 @@ pub fn load_project_filter_adapters() -> Vec<Box<dyn CommandAdapter>> {
     adapters
 }
 
+pub fn verification_report(repository_root: &Path) -> Result<VerificationReport, String> {
+    let mut commands = Vec::new();
+    for path in filter_paths_at(repository_root) {
+        if !path.is_file() {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path)
+            .map_err(|error| format!("read verification config {}: {error}", path.display()))?;
+        let config: FilterConfig = toml::from_str(&text)
+            .map_err(|error| format!("parse verification config {}: {error}", path.display()))?;
+        commands.extend(config.verification.commands);
+    }
+    commands.sort();
+    commands.dedup();
+
+    let projects = discover_dart_projects(repository_root)?;
+    let mut warnings = Vec::new();
+    for (path, is_flutter) in &projects {
+        if *is_flutter {
+            if !commands
+                .iter()
+                .any(|command| strict_flutter_command(command))
+            {
+                warnings.push(format!(
+                    "{}: Flutter project lacks strict analyzer verification; add `flutter analyze --fatal-infos --fatal-warnings` to [verification].commands in keel.filters.toml",
+                    path.display()
+                ));
+            }
+        } else if !commands.iter().any(|command| strict_dart_command(command)) {
+            warnings.push(format!(
+                "{}: Dart project lacks machine analyzer verification; add `dart analyze --format=machine` to [verification].commands in keel.filters.toml",
+                path.display()
+            ));
+        }
+    }
+    Ok(VerificationReport {
+        projects: projects.len(),
+        commands,
+        warnings,
+    })
+}
+
+fn strict_flutter_command(command: &str) -> bool {
+    let normalized = command.split_whitespace().collect::<Vec<_>>().join(" ");
+    let normalized = normalized.to_ascii_lowercase();
+    normalized.contains("flutter analyze")
+        && normalized.contains("--fatal-infos")
+        && normalized.contains("--fatal-warnings")
+}
+
+fn strict_dart_command(command: &str) -> bool {
+    let normalized = command.split_whitespace().collect::<Vec<_>>().join(" ");
+    let normalized = normalized.to_ascii_lowercase();
+    normalized.contains("dart analyze")
+        && (normalized.contains("--format=machine") || normalized.contains("--format machine"))
+}
+
+fn discover_dart_projects(repository_root: &Path) -> Result<Vec<(PathBuf, bool)>, String> {
+    fn visit(
+        directory: &Path,
+        depth: usize,
+        projects: &mut Vec<(PathBuf, bool)>,
+    ) -> Result<(), String> {
+        if depth > 5 || projects.len() >= 128 {
+            return Ok(());
+        }
+        let entries = std::fs::read_dir(directory)
+            .map_err(|error| format!("scan project directory {}: {error}", directory.display()))?;
+        for entry in entries {
+            let entry = entry.map_err(|error| format!("read project entry: {error}"))?;
+            let file_type = entry
+                .file_type()
+                .map_err(|error| format!("read project entry type: {error}"))?;
+            let path = entry.path();
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if file_type.is_file() && name == "pubspec.yaml" {
+                let metadata = entry.metadata().map_err(|error| {
+                    format!("read pubspec metadata {}: {error}", path.display())
+                })?;
+                if metadata.len() > 1_048_576 {
+                    return Err(format!("pubspec {} exceeds 1048576 bytes", path.display()));
+                }
+                let body = std::fs::read_to_string(&path)
+                    .map_err(|error| format!("read pubspec {}: {error}", path.display()))?;
+                let lower = body.to_ascii_lowercase();
+                let is_flutter = lower.contains("sdk: flutter")
+                    || lower.lines().any(|line| line.trim() == "flutter:");
+                projects.push((path, is_flutter));
+            } else if file_type.is_dir()
+                && !matches!(
+                    name.as_ref(),
+                    ".git" | ".dart_tool" | "build" | "node_modules" | "target" | ".keel"
+                )
+            {
+                visit(&path, depth + 1, projects)?;
+            }
+        }
+        Ok(())
+    }
+
+    let mut projects = Vec::new();
+    visit(repository_root, 0, &mut projects)?;
+    projects.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(projects)
+}
+
 fn filter_paths() -> Vec<PathBuf> {
     let cwd = std::env::current_dir().unwrap_or_default();
+    filter_paths_at(&cwd)
+}
+
+fn filter_paths_at(root: &Path) -> Vec<PathBuf> {
     vec![
-        cwd.join(".keel").join("filters.toml"),
-        cwd.join("keel.filters.toml"),
+        root.join(".keel").join("filters.toml"),
+        root.join("keel.filters.toml"),
     ]
 }
 
@@ -783,5 +909,78 @@ tail = 5
         assert!(result.compacted);
         assert!(result.stdout.contains("<str>"));
         assert!(result.stdout.contains("<num>"));
+    }
+
+    #[test]
+    fn verification_section_parses_declared_commands() {
+        let config: FilterConfig = toml::from_str(
+            r#"
+[verification]
+commands = [
+  "flutter analyze --fatal-infos --fatal-warnings",
+  "dart analyze --format=machine"
+]
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.verification.commands.len(), 2);
+    }
+
+    #[test]
+    fn flutter_project_reports_missing_strict_analyzer_without_rewriting_config() {
+        let root = std::env::temp_dir().join(format!(
+            "keel-filter-flutter-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("pubspec.yaml"),
+            "name: warning_fixture\ndependencies:\n  flutter:\n    sdk: flutter\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("keel.filters.toml"),
+            "[verification]\ncommands = [\"flutter test\"]\n",
+        )
+        .unwrap();
+        let original = std::fs::read_to_string(root.join("keel.filters.toml")).unwrap();
+        let report = verification_report(&root).unwrap();
+        assert_eq!(report.projects, 1);
+        assert_eq!(report.warnings.len(), 1);
+        assert!(report.warnings[0].contains("--fatal-infos --fatal-warnings"));
+        assert_eq!(
+            std::fs::read_to_string(root.join("keel.filters.toml")).unwrap(),
+            original,
+            "inspection must never rewrite the owner's command policy"
+        );
+        std::fs::write(
+            root.join("keel.filters.toml"),
+            "[verification]\ncommands = [\"flutter analyze --fatal-infos --fatal-warnings\"]\n",
+        )
+        .unwrap();
+        assert!(verification_report(&root).unwrap().warnings.is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn dart_project_requires_machine_analyzer_command() {
+        let root = std::env::temp_dir().join(format!(
+            "keel-filter-dart-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("pubspec.yaml"), "name: dart_fixture\n").unwrap();
+        let report = verification_report(&root).unwrap();
+        assert_eq!(report.warnings.len(), 1);
+        assert!(report.warnings[0].contains("dart analyze --format=machine"));
+        let _ = std::fs::remove_dir_all(root);
     }
 }

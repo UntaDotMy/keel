@@ -1,0 +1,9 @@
+gate=pass blocking=0 warnings=0
+  cargo_fmt=pass blocking=true details=cargo fmt --check passed
+  cargo_clippy=pass blocking=true details=cargo clippy --all-targets -- -D warnings passed
+  cargo_test=pass blocking=true details=cargo test --workspace passed
+  comment_style=pass blocking=false details=no added-comment style issues
+  prose_style=pass blocking=false details=no prose-style issues in added markdown/doc lines
+  slop_detector=pass blocking=false details=no AI-slop patterns detected
+  flow_check=pass blocking=true details=no existing source modified; brownfield gate not applicable
+  completeness_check=pass blocking=true details=no source files changed; completeness gate not applicable

@@ -33,19 +33,29 @@ keel memory working-brief list
 
 Hold onto the brief id; the completion gate at closeout checks against it.
 
-### 3. Carry the change through the Anvil delivery loop
+### 3. Compile current research and carry the change through Anvil
 
 ```bash
+keel plan specify --request "Compare the current repo, fix the biggest gap, and carry the branch to closure"
+keel plan research --plan <plan-id> <current-source-flags>
+# Complete the generated architecture.md note.
+keel plan design --plan <plan-id>
+keel plan tasks --plan <plan-id>
+keel plan check --rtm --plan <plan-id>
 keel anvil compile --goal "deliver the scoped change" --bar "cargo test --workspace --locked" --files "<owned files csv>"
 keel anvil run
 ```
 
-Anvil is the only core delivery-loop surface: frozen prompt prefix, evidence-ranked stamp, bounded loop. `keel anvil cast`, `anvil sieve`, `anvil stamp`, and `anvil prefix-check` cover the supporting steps.
+Use the source fields documented in `docs/planner.md`. On a host without web
+research, `plan research` uses the local index and visibly records `local-only`.
+Anvil is the only core delivery-loop surface: frozen prompt prefix,
+evidence-ranked stamp, bounded loop. `keel anvil cast`, `anvil sieve`, `anvil
+stamp`, and `anvil prefix-check` cover the supporting steps.
 
 ### 4. Turn local work into proof before you call it done
 
 ```bash
-keel review pre-pr --base-ref origin/main
+keel review pre-pr --base-ref origin/main --plan <plan-id>
 keel git-workflow preflight --repo-root . --base-ref origin/main
 ```
 

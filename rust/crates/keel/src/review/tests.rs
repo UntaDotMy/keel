@@ -70,6 +70,54 @@ fn review_pass_clears_gate_only_on_passing_real_surface() {
     assert!(!review_pass_clears_gate("init", 0));
 }
 
+#[test]
+fn warnings_gate_blocks_open_diagnostics_but_not_baseline() {
+    let root = crate::test_support::unique_temp_dir("keel-review-warnings");
+    let home = root.join("home");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let ast = crate::proxy::CommandAst::new(
+        "dart".to_string(),
+        vec!["analyze".to_string(), "--format=machine".to_string()],
+        workspace.clone(),
+    );
+    crate::proxy::warnings::reconcile_capture(
+        &home,
+        &workspace,
+        &ast,
+        b"INFO|LINT|AVOID_PRINT|lib/old.dart|4|3|5|Old warning.\n",
+        &[],
+        0,
+        "dart analyze --format=machine",
+        "2026-09-09T00:00:00Z",
+        "raw-1",
+    )
+    .unwrap();
+    let home_text = home.to_string_lossy();
+    let baseline = warnings_gate(&workspace, &home_text);
+    assert_eq!(baseline.status, GateStatus::Warn);
+    assert!(!baseline.blocking);
+    assert!(baseline.details.unwrap().contains("baseline=1"));
+
+    crate::proxy::warnings::reconcile_capture(
+        &home,
+        &workspace,
+        &ast,
+        b"INFO|LINT|AVOID_PRINT|lib/old.dart|4|3|5|Old warning.\nINFO|LINT|DEAD_CODE|lib/new.dart|8|2|4|Dead code.\n",
+        &[],
+        0,
+        "dart analyze --format=machine",
+        "2026-09-09T00:01:00Z",
+        "raw-2",
+    )
+    .unwrap();
+    let open = warnings_gate(&workspace, &home_text);
+    assert_eq!(open.status, GateStatus::Fail);
+    assert!(open.blocking);
+    assert!(open.details.unwrap().contains("open=1"));
+    let _ = std::fs::remove_dir_all(root);
+}
+
 // ---- brownfield flow gate classification (offline; no git invocation) ----
 
 /// Modifying established source is what the gate exists to catch.
@@ -122,6 +170,351 @@ fn brownfield_gate_exempts_added_docs_and_generated_paths() {
             "{path} should be exempt"
         );
     }
+}
+
+#[test]
+fn research_gate_requires_a_named_plan_for_uncommitted_brownfield_work() {
+    let repository = init_research_gate_repo("missing-plan");
+    let gate = research_traceability_gate(&repository, "main", "pre-pr", "", "");
+    assert!(gate.blocking);
+    assert_eq!(gate.status, GateStatus::Fail);
+    assert!(gate
+        .details
+        .as_deref()
+        .unwrap_or_default()
+        .contains("--plan"));
+    let _ = std::fs::remove_dir_all(repository);
+}
+
+#[test]
+fn research_gate_lists_untraced_claims_from_the_named_plan() {
+    let repository = init_research_gate_repo("untraced-claim");
+    let keel_home = crate::test_support::unique_temp_dir("keel-research-gate-home");
+    let (plan_id, research_path) = create_researched_plan(&repository, &keel_home);
+    let passing = research_traceability_gate(
+        &repository,
+        "main",
+        "pre-pr",
+        &plan_id,
+        keel_home.to_str().expect("UTF-8 Keel home"),
+    );
+    assert_eq!(passing.status, GateStatus::Pass);
+    let mut research: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&research_path).expect("read research artifact"),
+    )
+    .expect("parse research artifact");
+    research["claims"][0]["usedBy"] = serde_json::json!([]);
+    std::fs::write(
+        &research_path,
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&research).expect("render research artifact")
+        ),
+    )
+    .expect("write untraced research artifact");
+
+    let gate = research_traceability_gate(
+        &repository,
+        "main",
+        "pre-pr",
+        &plan_id,
+        keel_home.to_str().expect("UTF-8 Keel home"),
+    );
+    assert_eq!(gate.status, GateStatus::Fail);
+    assert!(gate
+        .details
+        .as_deref()
+        .unwrap_or_default()
+        .contains("CLM-001 has no usedBy IDs"));
+    let _ = std::fs::remove_dir_all(repository);
+    let _ = std::fs::remove_dir_all(keel_home);
+}
+
+#[test]
+fn architecture_gate_blocks_incomplete_design_and_passes_complete_design() {
+    let repository = init_research_gate_repo("architecture-design");
+    let keel_home = crate::test_support::unique_temp_dir("keel-architecture-gate-home");
+    let (plan_id, research_path) = create_researched_plan(&repository, &keel_home);
+    let architecture_path = research_path
+        .parent()
+        .expect("research artifact has a plan directory")
+        .join("architecture.md");
+    let complete = complete_review_architecture(&plan_id);
+    std::fs::write(
+        &architecture_path,
+        complete.replacen("Rollback: Revert", "Rollback-missing: Revert", 1),
+    )
+    .expect("write incomplete architecture");
+    let blocked = architecture_design_gate(
+        &repository,
+        "main",
+        "pre-pr",
+        &plan_id,
+        keel_home.to_str().expect("UTF-8 Keel home"),
+    );
+    assert_eq!(blocked.name, "architecture_design");
+    assert_eq!(blocked.status, GateStatus::Fail);
+    assert!(blocked
+        .details
+        .as_deref()
+        .unwrap_or_default()
+        .contains("Rollback"));
+
+    std::fs::write(&architecture_path, complete).expect("write complete architecture");
+    let design = [
+        "design".to_string(),
+        "--plan".to_string(),
+        plan_id.clone(),
+        "--workspace-root".to_string(),
+        repository.to_string_lossy().into_owned(),
+        "--claude-home".to_string(),
+        keel_home.to_string_lossy().into_owned(),
+    ];
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    assert_eq!(
+        crate::utility::plan::run_plan_command(&design, &mut stdout, &mut stderr),
+        0,
+        "design failed: {}",
+        String::from_utf8_lossy(&stderr)
+    );
+    let passing = architecture_design_gate(
+        &repository,
+        "main",
+        "pre-pr",
+        &plan_id,
+        keel_home.to_str().expect("UTF-8 Keel home"),
+    );
+    assert_eq!(passing.status, GateStatus::Pass);
+    let _ = std::fs::remove_dir_all(repository);
+    let _ = std::fs::remove_dir_all(keel_home);
+}
+
+#[test]
+fn task_evidence_gate_rejects_unjustified_status_and_tampered_evidence() {
+    let repository = init_research_gate_repo("task-evidence");
+    let keel_home = crate::test_support::unique_temp_dir("keel-task-evidence-gate-home");
+    let (plan_id, research_path) = create_researched_plan(&repository, &keel_home);
+    let plan_path = research_path.parent().expect("plan directory");
+    std::fs::write(
+        plan_path.join("architecture.md"),
+        complete_review_architecture(&plan_id),
+    )
+    .expect("write complete architecture");
+    for action in ["design", "tasks"] {
+        let arguments = [
+            action.to_string(),
+            "--plan".to_string(),
+            plan_id.clone(),
+            "--workspace-root".to_string(),
+            repository.to_string_lossy().into_owned(),
+            "--claude-home".to_string(),
+            keel_home.to_string_lossy().into_owned(),
+        ];
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        assert_eq!(
+            crate::utility::plan::run_plan_command(&arguments, &mut stdout, &mut stderr),
+            0,
+            "{action} failed: {}",
+            String::from_utf8_lossy(&stderr)
+        );
+    }
+
+    let ticket_path = plan_path.join("task-001.json");
+    let mut ticket: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&ticket_path).expect("read task ticket"))
+            .expect("parse task ticket");
+    let original = ticket.clone();
+    ticket["layers"]["docs"][0]["status"] = serde_json::Value::String("not_applicable".to_string());
+    std::fs::write(
+        &ticket_path,
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&ticket).expect("render task ticket")
+        ),
+    )
+    .expect("write unjustified ticket");
+    let keel_home_text = keel_home.to_str().expect("UTF-8 Keel home");
+    let unjustified = task_evidence_gate(&repository, "main", "pre-pr", &plan_id, keel_home_text);
+    assert_eq!(unjustified.status, GateStatus::Fail);
+    assert!(unjustified
+        .details
+        .as_deref()
+        .unwrap_or_default()
+        .contains("requires a non-empty reason"));
+
+    ticket = original;
+    let subtask_id = ticket["layers"]["tests"][0]["id"]
+        .as_str()
+        .expect("tests subtask id")
+        .to_string();
+    let recorded_at = "2026-09-09T00:00:00Z";
+    let evidence = serde_json::json!({
+        "schema_version": 1,
+        "artifact": "task_evidence",
+        "plan_id": plan_id,
+        "task_id": "TASK-001",
+        "subtask_id": subtask_id,
+        "evidence_type": "named_test",
+        "recorded_at": recorded_at,
+        "test_name": "review task evidence",
+        "result": "pass",
+        "output_hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    });
+    let evidence_body = format!(
+        "{}\n",
+        serde_json::to_string_pretty(&evidence).expect("render evidence")
+    );
+    std::fs::create_dir_all(plan_path.join("evidence")).expect("create evidence directory");
+    std::fs::write(plan_path.join("evidence/tests.json"), &evidence_body).expect("write evidence");
+    ticket["layers"]["tests"][0]["status"] = serde_json::Value::String("done".to_string());
+    ticket["layers"]["tests"][0]["verification_timestamp"] =
+        serde_json::Value::String(recorded_at.to_string());
+    ticket["layers"]["tests"][0]["evidence_ref"] = serde_json::json!({
+        "path": "evidence/tests.json",
+        "content_hash": format!(
+            "fnv1a64:{}",
+            crate::utility::hashing::fnv1a64_hex(&evidence_body)
+        )
+    });
+    std::fs::write(
+        &ticket_path,
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&ticket).expect("render evidence ticket")
+        ),
+    )
+    .expect("write evidence ticket");
+    let task_refresh = [
+        "tasks".to_string(),
+        "--plan".to_string(),
+        plan_id.clone(),
+        "--workspace-root".to_string(),
+        repository.to_string_lossy().into_owned(),
+        "--claude-home".to_string(),
+        keel_home.to_string_lossy().into_owned(),
+    ];
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    assert_eq!(
+        crate::utility::plan::run_plan_command(&task_refresh, &mut stdout, &mut stderr),
+        0,
+        "task refresh failed: {}",
+        String::from_utf8_lossy(&stderr)
+    );
+    assert_eq!(
+        task_evidence_gate(&repository, "main", "pre-pr", &plan_id, keel_home_text,).status,
+        GateStatus::Pass
+    );
+
+    let mut tampered = evidence;
+    tampered["result"] = serde_json::Value::String("fail".to_string());
+    std::fs::write(
+        plan_path.join("evidence/tests.json"),
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&tampered).expect("render tampered evidence")
+        ),
+    )
+    .expect("tamper evidence");
+    let tampered_gate = task_evidence_gate(&repository, "main", "pre-pr", &plan_id, keel_home_text);
+    assert_eq!(tampered_gate.status, GateStatus::Fail);
+    assert!(tampered_gate
+        .details
+        .as_deref()
+        .unwrap_or_default()
+        .contains("content_hash does not match evidence artifact"));
+    let _ = std::fs::remove_dir_all(repository);
+    let _ = std::fs::remove_dir_all(keel_home);
+}
+
+fn init_research_gate_repo(label: &str) -> crate::test_support::TestTempDir {
+    let repository = crate::test_support::unique_temp_dir(&format!("keel-research-{label}"));
+    std::fs::create_dir_all(repository.join("src")).expect("create source directory");
+    git_in(&repository, &["init", "-q"]);
+    git_in(&repository, &["config", "user.email", "test@example.com"]);
+    git_in(&repository, &["config", "user.name", "Test"]);
+    git_in(&repository, &["checkout", "-q", "-B", "main"]);
+    std::fs::write(
+        repository.join("src/lib.rs"),
+        "pub fn value() -> u8 { 1 }\n",
+    )
+    .expect("write baseline source");
+    git_in(&repository, &["add", "."]);
+    git_in(&repository, &["commit", "-q", "-m", "base"]);
+    std::fs::write(
+        repository.join("src/lib.rs"),
+        "pub fn value() -> u8 { 2 }\n",
+    )
+    .expect("modify established source");
+    repository
+}
+
+fn create_researched_plan(
+    repository: &std::path::Path,
+    keel_home: &std::path::Path,
+) -> (String, std::path::PathBuf) {
+    let common = [
+        "--workspace-root".to_string(),
+        repository.to_string_lossy().into_owned(),
+        "--claude-home".to_string(),
+        keel_home.to_string_lossy().into_owned(),
+        "--json".to_string(),
+    ];
+    let mut specify = vec![
+        "specify".to_string(),
+        "--request".to_string(),
+        "Change the established src/lib.rs value function while preserving its callers."
+            .to_string(),
+    ];
+    specify.extend(common.clone());
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    assert_eq!(
+        crate::utility::plan::run_plan_command(&specify, &mut stdout, &mut stderr),
+        0,
+        "specify failed: {}",
+        String::from_utf8_lossy(&stderr)
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&stdout).expect("parse specify JSON");
+    let plan_id = payload["planId"].as_str().expect("plan id").to_string();
+    let plan_path = std::path::PathBuf::from(payload["planPath"].as_str().expect("plan path"));
+    let mut research = vec![
+        "research".to_string(),
+        "--plan".to_string(),
+        plan_id.clone(),
+        "--claim".to_string(),
+        "Chrono parses RFC3339 timestamps.".to_string(),
+        "--source-url".to_string(),
+        "https://docs.rs/chrono/0.4.45/chrono/struct.DateTime.html".to_string(),
+        "--source-type".to_string(),
+        "official-doc".to_string(),
+        "--retrieved-at".to_string(),
+        chrono::Utc::now().to_rfc3339(),
+        "--support".to_string(),
+        "The current crate documentation exposes DateTime::parse_from_rfc3339.".to_string(),
+        "--freshness".to_string(),
+        "fresh".to_string(),
+        "--used-by".to_string(),
+        "REQ-001,AC-001".to_string(),
+    ];
+    research.extend(common);
+    stdout.clear();
+    stderr.clear();
+    assert_eq!(
+        crate::utility::plan::run_plan_command(&research, &mut stdout, &mut stderr),
+        0,
+        "research failed: {}",
+        String::from_utf8_lossy(&stderr)
+    );
+    (plan_id, plan_path.join("research.json"))
+}
+
+fn complete_review_architecture(plan_id: &str) -> String {
+    format!(
+        "---\nschema_version: 1\nartifact: architecture\nplan_id: {plan_id}\n---\n\nStatus: complete\n\n# Architecture Note\n\n## 1. Current architecture relevant to scope\n\n[verified: CLM-001] The established source owner was read.\n\n## 2. Proposed architecture\n\n[derived: CLM-002] Change only the existing owner path.\n\nInput bound: One bounded plan artifact.\n\nPolicy owner: The existing planner remains the lifecycle owner.\n\n## 3. Components/files/interfaces changed\n\n- Component: established source owner | Requirements: REQ-001 | Acceptance: AC-001\n\n## 4. Data/control flow\n\nThe command updates the established owner and existing callers observe the result.\n\n## 5. Alternatives considered\n\nAlternative: Add a second owner.\n\nTradeoff: A second owner duplicates existing policy.\n\n## 6. Why the chosen option fits requirements\n\nChosen option: Extend the established owner.\n\nInfrastructure reuse: Reuse the planner and review gate infrastructure.\n\nConstraint fit: The design maps only REQ-001 and AC-001.\n\n## 7. Risks and mitigations\n\nRisk: A stale design could reach review.\n\nMitigation: Pre-PR review validates the named plan architecture.\n\n## 8. Backward compatibility\n\nCompatibility: Existing fields and behavior remain available.\n\nHost impact: none; host contracts remain unchanged.\n\n## 9. Error handling and fallback semantics\n\nFailure status: Invalid architecture blocks pre-PR review.\n\nFallback: none; repair the canonical architecture note.\n\nVisibility: reviewer output lists the design defect.\n\n## 10. Security/privacy implications\n\nSecurity/privacy: The gate reads one local artifact and no credentials.\n\n## 11. Performance/token impact\n\nToken impact: Architecture input stays bounded.\n\nMeasurement plan: Run the fixed-context budget test.\n\n## 12. Test strategy\n\nVerification: Run review unit tests and planner integration tests.\n\nAcceptance references: AC-001\n\n## 13. Rollback strategy\n\nRollback: Revert the implementation commit.\n\n## 14. Requirement and research references\n\nRequirement references: REQ-001\n\nAcceptance references: AC-001\n\nClaim references: CLM-001, CLM-002\n"
+    )
 }
 
 /// Renaming while editing still changes established behavior. Verified against
@@ -1416,4 +1809,365 @@ fn compact_gate_output_includes_actionable_details() {
     assert!(rendered.contains("rust_tests=fail"));
     assert!(rendered.contains("cargo test failed"));
     assert!(rendered.contains("rerun cargo test"));
+}
+
+#[test]
+fn gate_status_honest_semantics_and_serialization() {
+    let variants = [
+        (GateStatus::Pass, "pass", "[PASS]", true, false),
+        (GateStatus::Fail, "fail", "[FAIL]", false, true),
+        (GateStatus::Warn, "warn", "[WARN]", false, false),
+        (GateStatus::Skipped, "skipped", "[SKIP]", false, true),
+        (
+            GateStatus::NotApplicable,
+            "not_applicable",
+            "[N/A]",
+            false,
+            false,
+        ),
+        (
+            GateStatus::NeedsHuman,
+            "needs_human",
+            "[HUMAN]",
+            false,
+            true,
+        ),
+        (GateStatus::Unclear, "unclear", "[UNCLEAR]", false, true),
+        (GateStatus::Blocked, "blocked", "[BLK]", false, true),
+    ];
+    for (status, name, icon, is_pass, is_blocking) in variants {
+        assert_eq!(status.as_str(), name);
+        assert_eq!(status.icon(), icon);
+        assert_eq!(status.is_pass(), is_pass);
+        assert_eq!(status.is_blocking(), is_blocking);
+        let json = serde_json::to_string(&status).expect("serialize status");
+        assert_eq!(json, format!("\"{name}\""));
+        let deserialized: GateStatus = serde_json::from_str(&json).expect("deserialize status");
+        assert_eq!(deserialized, status);
+    }
+}
+
+#[test]
+fn tally_gate_results_honest_counts() {
+    let results = vec![
+        GateResult {
+            name: "pass_gate".to_string(),
+            status: GateStatus::Pass,
+            blocking: false,
+            details: None,
+        },
+        GateResult {
+            name: "fail_gate".to_string(),
+            status: GateStatus::Fail,
+            blocking: true,
+            details: None,
+        },
+        GateResult {
+            name: "warn_gate".to_string(),
+            status: GateStatus::Warn,
+            blocking: false,
+            details: None,
+        },
+        GateResult {
+            name: "human_gate".to_string(),
+            status: GateStatus::NeedsHuman,
+            blocking: true,
+            details: None,
+        },
+        GateResult {
+            name: "unclear_gate".to_string(),
+            status: GateStatus::Unclear,
+            blocking: true,
+            details: None,
+        },
+        GateResult {
+            name: "skipped_gate".to_string(),
+            status: GateStatus::Skipped,
+            blocking: true,
+            details: None,
+        },
+        GateResult {
+            name: "na_gate".to_string(),
+            status: GateStatus::NotApplicable,
+            blocking: false,
+            details: None,
+        },
+        GateResult {
+            name: "blocked_gate".to_string(),
+            status: GateStatus::Blocked,
+            blocking: true,
+            details: None,
+        },
+    ];
+    let (blocking, warnings) = tally_gate_results(&results);
+    assert_eq!(blocking, 5);
+    assert_eq!(warnings, 1);
+}
+
+#[test]
+fn gate_status_rendering_all_formats() {
+    let results = vec![
+        GateResult {
+            name: "gate_human".to_string(),
+            status: GateStatus::NeedsHuman,
+            blocking: true,
+            details: Some("visual check needed".to_string()),
+        },
+        GateResult {
+            name: "gate_na".to_string(),
+            status: GateStatus::NotApplicable,
+            blocking: false,
+            details: Some("not applicable".to_string()),
+        },
+        GateResult {
+            name: "gate_unclear".to_string(),
+            status: GateStatus::Unclear,
+            blocking: true,
+            details: Some("ambiguous result".to_string()),
+        },
+    ];
+
+    let mut json_out = Vec::new();
+    render_gate_results(&results, 2, 0, "json", &mut json_out);
+    let json_str = String::from_utf8(json_out).expect("utf8 json");
+    assert!(json_str.contains("\"needs_human\""));
+    assert!(json_str.contains("\"not_applicable\""));
+    assert!(json_str.contains("\"unclear\""));
+
+    let mut md_out = Vec::new();
+    render_gate_results(&results, 2, 0, "markdown", &mut md_out);
+    let md_str = String::from_utf8(md_out).expect("utf8 md");
+    assert!(md_str.contains("[HUMAN]"));
+    assert!(md_str.contains("[N/A]"));
+    assert!(md_str.contains("[UNCLEAR]"));
+
+    let mut compact_out = Vec::new();
+    render_gate_results(&results, 2, 0, "compact", &mut compact_out);
+    let compact_str = String::from_utf8(compact_out).expect("utf8 compact");
+    assert!(compact_str.contains("gate_human=needs_human"));
+    assert!(compact_str.contains("gate_na=not_applicable"));
+    assert!(compact_str.contains("gate_unclear=unclear"));
+}
+
+fn check_precommit_impact(repo: &Path) -> GateResult {
+    impact_gate(repo, "main", "pre-commit")
+}
+
+fn assert_non_blocking_gate(result: &GateResult, expected: GateStatus) {
+    assert_eq!(result.status, expected);
+    assert!(!result.blocking);
+}
+
+#[test]
+fn impact_gate_unresolvable_diff_returns_warn() {
+    let temp = crate::test_support::unique_temp_dir("keel-impact-unresolvable");
+    let result = impact_gate(&temp, "HEAD~1", "pre-commit");
+    assert_non_blocking_gate(&result, GateStatus::Warn);
+    assert!(result
+        .details
+        .unwrap_or_default()
+        .contains("could not resolve diff range"));
+}
+
+#[test]
+fn impact_gate_empty_touched_returns_not_applicable() {
+    let repository = crate::test_support::unique_temp_dir("keel-impact-empty");
+    git_in(&repository, &["init", "-q"]);
+    git_in(&repository, &["config", "user.email", "test@example.com"]);
+    git_in(&repository, &["config", "user.name", "Test"]);
+    git_in(&repository, &["checkout", "-q", "-B", "main"]);
+    std::fs::write(repository.join("README.md"), "# Clean\n").expect("write readme");
+    git_in(&repository, &["add", "."]);
+    git_in(&repository, &["commit", "-q", "-m", "init"]);
+
+    let clean_result = check_precommit_impact(&repository);
+    assert_non_blocking_gate(&clean_result, GateStatus::NotApplicable);
+    assert!(clean_result
+        .details
+        .unwrap_or_default()
+        .contains("no existing source modified"));
+}
+
+#[test]
+fn impact_gate_missing_graph_without_flow_blocks() {
+    let _guard = crate::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let repository = init_research_gate_repo("impact-missing-flow");
+    let result = check_precommit_impact(&repository);
+    assert_eq!(result.status, GateStatus::Fail);
+    assert!(result.blocking);
+    let details = result.details.unwrap_or_default();
+    assert!(details.contains("code graph unavailable and flow evidence is missing"));
+    assert!(details.contains("keel code-graph build"));
+}
+
+#[test]
+fn impact_gate_missing_graph_with_valid_flow_warns() {
+    let _guard = crate::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let repository = init_research_gate_repo("impact-valid-flow");
+    let (head, diff_fingerprint) = keel_flow::repository_state(&repository).expect("repo state");
+    let check = keel_flow::Check {
+        version: keel_flow::SCHEMA_VERSION,
+        target_file: "src/lib.rs".to_string(),
+        target_files: vec!["src/lib.rs".to_string()],
+        current_behavior: "Existing behavior remains unchanged.".to_string(),
+        entry_point: "value".to_string(),
+        producer: "value producer".to_string(),
+        source_of_truth: "value owner".to_string(),
+        storage_state_queue_owner: "Not found".to_string(),
+        side_effect_owner: "none".to_string(),
+        consumers: vec!["caller".to_string()],
+        cleanup_recovery_path: "none".to_string(),
+        edit_boundary: "src/lib.rs only".to_string(),
+        validation_needed: vec!["cargo test".to_string()],
+        validation_evidence: vec!["cargo test passed".to_string()],
+        repository_head: head,
+        diff_fingerprint,
+        finalized_at: "2026-09-09T00:00:00Z".to_string(),
+        ..keel_flow::Check::default()
+    };
+    keel_flow::write_check(&repository, keel_flow::DEFAULT_ARTIFACT_PATH, check)
+        .expect("write flow check");
+
+    let valid_result = check_precommit_impact(&repository);
+    assert_non_blocking_gate(&valid_result, GateStatus::Warn);
+    let details = valid_result.details.unwrap_or_default();
+    assert!(details.contains("code graph unavailable; impact check skipped"));
+    assert!(details.contains("keel code-graph build"));
+}
+
+#[test]
+fn acceptance_criteria_evaluation_honest_format() {
+    let repository = init_research_gate_repo("ac-eval-test");
+    let keel_home = crate::test_support::unique_temp_dir("keel-ac-eval-home");
+    let (plan_id, research_path) = create_researched_plan(&repository, &keel_home);
+    let plan_path = research_path.parent().expect("plan directory");
+    std::fs::write(
+        plan_path.join("architecture.md"),
+        complete_review_architecture(&plan_id),
+    )
+    .expect("write complete architecture");
+    for action in ["design", "tasks"] {
+        let arguments = [
+            action.to_string(),
+            "--plan".to_string(),
+            plan_id.clone(),
+            "--workspace-root".to_string(),
+            repository.to_string_lossy().into_owned(),
+            "--claude-home".to_string(),
+            keel_home.to_string_lossy().into_owned(),
+        ];
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        assert_eq!(
+            crate::utility::plan::run_plan_command(&arguments, &mut stdout, &mut stderr),
+            0
+        );
+    }
+    let keel_home_text = keel_home.to_str().expect("UTF-8 Keel home");
+    let eval_ac = || {
+        crate::utility::plan::evaluate_acceptance_criteria(&repository, keel_home_text, &plan_id)
+            .expect("evaluate ac")
+    };
+
+    let (status, summary) = eval_ac();
+    assert_eq!(status, GateStatus::Fail);
+    assert!(summary.contains("AC-001: fail | missing traceability to implementation evidence"));
+
+    let ticket_path = plan_path.join("task-001.json");
+    let mut ticket: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&ticket_path).expect("read ticket"))
+            .expect("parse ticket");
+    let subtask_id = ticket["layers"]["tests"][0]["id"]
+        .as_str()
+        .expect("tests subtask id")
+        .to_string();
+    let evidence = serde_json::json!({
+        "schema_version": 1,
+        "artifact": "task_evidence",
+        "plan_id": plan_id,
+        "task_id": "TASK-001",
+        "subtask_id": subtask_id,
+        "evidence_type": "named_test",
+        "recorded_at": "2026-09-09T00:00:00Z",
+        "test_name": "review task evidence",
+        "result": "pass",
+        "output_hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "raw_store_id": "RAW-12345"
+    });
+    let evidence_body = format!("{}\n", serde_json::to_string_pretty(&evidence).unwrap());
+    std::fs::create_dir_all(plan_path.join("evidence")).unwrap();
+    std::fs::write(plan_path.join("evidence/tests.json"), &evidence_body).unwrap();
+    ticket["layers"]["tests"][0]["status"] = serde_json::Value::String("done".to_string());
+    ticket["layers"]["tests"][0]["verification_timestamp"] =
+        serde_json::Value::String("2026-09-09T00:00:00Z".to_string());
+    ticket["layers"]["tests"][0]["evidence_ref"] = serde_json::json!({
+        "path": "evidence/tests.json",
+        "content_hash": format!("fnv1a64:{}", crate::utility::hashing::fnv1a64_hex(&evidence_body))
+    });
+    std::fs::write(
+        &ticket_path,
+        format!("{}\n", serde_json::to_string_pretty(&ticket).unwrap()),
+    )
+    .unwrap();
+
+    let task_refresh = [
+        "tasks".to_string(),
+        "--plan".to_string(),
+        plan_id.clone(),
+        "--workspace-root".to_string(),
+        repository.to_string_lossy().into_owned(),
+        "--claude-home".to_string(),
+        keel_home.to_string_lossy().into_owned(),
+    ];
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    assert_eq!(
+        crate::utility::plan::run_plan_command(&task_refresh, &mut stdout, &mut stderr),
+        0,
+        "pass task refresh: {}",
+        String::from_utf8_lossy(&stderr)
+    );
+
+    let (pass_status, pass_summary) = eval_ac();
+    assert_eq!(pass_status, GateStatus::Pass);
+    assert!(pass_summary.contains("AC-001: pass | evidence: RAW-12345 | verified by:"));
+
+    let human_evidence = serde_json::json!({
+        "schema_version": 1,
+        "artifact": "task_evidence",
+        "plan_id": plan_id,
+        "task_id": "TASK-001",
+        "subtask_id": subtask_id,
+        "evidence_type": "named_test",
+        "recorded_at": "2026-09-09T00:00:00Z",
+        "test_name": "review ui check",
+        "result": "needs_human",
+        "output_hash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "reason": "layout verification requires visual check",
+        "screenshot": "artifacts/screen.png"
+    });
+    let human_body = format!(
+        "{}\n",
+        serde_json::to_string_pretty(&human_evidence).unwrap()
+    );
+    std::fs::write(plan_path.join("evidence/tests.json"), &human_body).unwrap();
+
+    let (human_status, human_summary) = eval_ac();
+    assert_eq!(human_status, GateStatus::NeedsHuman);
+    assert!(human_summary.contains("AC-001: needs_human | reason: layout verification requires visual check | screenshot: artifacts/screen.png"));
+}
+
+#[test]
+fn parse_gh_checks_handles_tab_delimited_names_with_spaces() {
+    let output = "CI gate\tpass\t3s\thttps://example.com/job/1\nvalidate-linux\tpass\t1m\thttps://example.com/job/2\n";
+    let checks = super::ci::parse_gh_checks(output).expect("parsed checks");
+    assert_eq!(checks.len(), 2);
+    assert_eq!(checks[0].name, "CI gate");
+    assert_eq!(checks[0].state, super::ci::CheckState::Green);
+    assert_eq!(checks[1].name, "validate-linux");
+    assert_eq!(checks[1].state, super::ci::CheckState::Green);
 }

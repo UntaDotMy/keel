@@ -497,12 +497,7 @@ fn now_rfc3339() -> String {
 }
 
 fn gate_status(status: GateStatus) -> &'static str {
-    match status {
-        GateStatus::Pass => "pass",
-        GateStatus::Fail => "fail",
-        GateStatus::Warn => "warn",
-        GateStatus::Blocked => "blocked",
-    }
+    status.as_str()
 }
 
 fn severity_for_text(severity: &str) -> ReviewSeverity {
@@ -580,10 +575,10 @@ fn add_gate_findings(
             blocking: gate.blocking,
             details: Some(details.clone()),
         });
-        if gate.status != GateStatus::Pass {
+        if !gate.status.is_pass() && gate.status != GateStatus::NotApplicable {
             findings.push(finding(
                 format!("gate:{}", gate.name),
-                if gate.blocking && gate.status == GateStatus::Fail {
+                if gate.blocking && gate.status.is_blocking() {
                     ReviewSeverity::Major
                 } else {
                     ReviewSeverity::Minor
@@ -1120,13 +1115,15 @@ pub(crate) fn run_review_closeout_command(
     {
         let _ = writeln!(
             standard_output,
-            "Usage: keel review closeout [--repo-root <path>] [--base-ref <ref>] [--brief-id <id>] [--proof <text>] [--baseline <path>] [--baseline-reviewer <name>] [--baseline-reason <text>] [--baseline-expires <rfc3339>] [--write-baseline] [--format json|markdown|compact] [--strict] [--require-ci]"
+            "Usage: keel review closeout [--repo-root <path>] [--base-ref <ref>] [--plan <id>] [--claude-home <path>] [--brief-id <id>] [--proof <text>] [--baseline <path>] [--baseline-reviewer <name>] [--baseline-reason <text>] [--baseline-expires <rfc3339>] [--write-baseline] [--format json|markdown|compact] [--strict] [--require-ci]"
         );
         return if arguments.is_empty() { 1 } else { 0 };
     }
     let mut flags = FlagSet::new("review closeout");
     flags.string_flag("repo-root", "");
     flags.string_flag("base-ref", "origin/main");
+    flags.string_flag("plan", "");
+    flags.string_flag("claude-home", "");
     flags.string_flag("brief-id", "");
 
     flags.string_flag("review-id", "");
@@ -1322,7 +1319,18 @@ pub(crate) fn run_review_closeout_command(
         &mut current_findings,
         &mut snapshots,
     );
-    let gates = collect_review_gate_results(&repository_root, base_ref, "pre-pr", true, true, true);
+    let gates = collect_review_gate_results(
+        &repository_root,
+        base_ref,
+        "pre-pr",
+        true,
+        true,
+        true,
+        super::diff_gates::PlanEvidenceRef {
+            plan_id: flags.string_value("plan"),
+            claude_home: flags.string_value("claude-home"),
+        },
+    );
     add_gate_findings(&gates, &mut current_findings, &mut snapshots, &head_sha);
     for item in crate::comment_lint::lint_tracked_tree(&repository_root) {
         current_findings.push(finding(

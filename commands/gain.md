@@ -23,6 +23,14 @@ observed commands, compacted vs passthrough counts, exact tokens
 before/after/saved, savings percentage, and per-adapter breakdown. Summarize the
 numbers; do not imply savings for commands that were never wrapped.
 
+Always-on hook, instruction, skill-catalog, pointer, and MCP catalog costs are a
+separate fixed-context axis. `gain` names that exclusion in text and under
+`fixedContextAccounting` in JSON; it does not subtract those costs from command
+compaction or count them as savings. Inspect the full runtime ledger with
+`keel stats --json --workspace-root <repo>`. See
+[`docs/fixed-context-ledger.md`](../docs/fixed-context-ledger.md) for its source
+boundaries and CI budget rules.
+
 To find commands that ran *without* compaction (missed savings), run
 `gain discover --since <window>` — it groups passthrough commands by name with
 the estimated uncompacted tokens they sent to context, so they can be rerouted

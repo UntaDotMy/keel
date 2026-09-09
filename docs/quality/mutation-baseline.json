@@ -1,0 +1,86 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-09-09T04:35:00Z",
+  "suite": "keel-core-high-risk",
+  "tool": "cargo-mutants",
+  "summary": {
+    "totalMutants": 146,
+    "caught": 142,
+    "missed": 4,
+    "timeout": 0,
+    "unviable": 0,
+    "mutationScore": 97.26,
+    "regressionThreshold": 95.0
+  },
+  "subsystems": [
+    {
+      "name": "proxy",
+      "paths": ["rust/crates/keel/src/proxy/**"],
+      "total": 24,
+      "caught": 24,
+      "missed": 0,
+      "score": 100.0
+    },
+    {
+      "name": "mcp",
+      "paths": ["rust/crates/keel/src/mcp/**"],
+      "total": 28,
+      "caught": 27,
+      "missed": 1,
+      "score": 96.43,
+      "waivers": ["harmless timeout fallback in dev client probe"]
+    },
+    {
+      "name": "planner",
+      "paths": ["rust/crates/keel/src/plan.rs"],
+      "total": 22,
+      "caught": 22,
+      "missed": 0,
+      "score": 100.0
+    },
+    {
+      "name": "research",
+      "paths": ["rust/crates/keel/src/research.rs"],
+      "total": 18,
+      "caught": 18,
+      "missed": 0,
+      "score": 100.0
+    },
+    {
+      "name": "tickets",
+      "paths": ["rust/crates/keel/src/ticket.rs"],
+      "total": 16,
+      "caught": 15,
+      "missed": 1,
+      "score": 93.75,
+      "waivers": ["auxiliary display formatting variant in ticket listing"]
+    },
+    {
+      "name": "warnings",
+      "paths": ["rust/crates/keel/src/warning_engine.rs"],
+      "total": 18,
+      "caught": 18,
+      "missed": 0,
+      "score": 100.0
+    },
+    {
+      "name": "gates",
+      "paths": [
+        "rust/crates/keel/src/review.rs",
+        "rust/crates/keel/src/review/**",
+        "rust/crates/keel/src/review_gates.rs"
+      ],
+      "total": 20,
+      "caught": 18,
+      "missed": 2,
+      "score": 90.0,
+      "waivers": ["non-blocking informational warning string formatting"]
+    }
+  ],
+  "operators": [
+    "replace_binary_op",
+    "invert_boolean",
+    "replace_return_val",
+    "delete_statement"
+  ]
+}

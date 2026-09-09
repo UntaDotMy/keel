@@ -1,0 +1,81 @@
+{
+  "tokenizer": "o200k_base",
+  "measurement": "end-to-end: raw stdout+stderr vs rendered compact output",
+  "fixtureCount": 7,
+  "totalTokensRaw": 2218,
+  "totalTokensCompact": 1613,
+  "totalTokensSaved": 605,
+  "overallSavingsPercent": 27.28,
+  "cases": [
+    {
+      "name": "cargo-test-pass",
+      "command": "cargo test --workspace",
+      "adapter": "tests",
+      "compacted": true,
+      "tokensRaw": 405,
+      "tokensCompact": 84,
+      "tokensSaved": 321,
+      "savingsPercent": 79.26
+    },
+    {
+      "name": "cargo-test-fail",
+      "command": "cargo test --workspace",
+      "adapter": "tests",
+      "compacted": true,
+      "tokensRaw": 713,
+      "tokensCompact": 522,
+      "tokensSaved": 191,
+      "savingsPercent": 26.79
+    },
+    {
+      "name": "git-status",
+      "command": "git status",
+      "adapter": "git",
+      "compacted": true,
+      "tokensRaw": 240,
+      "tokensCompact": 223,
+      "tokensSaved": 17,
+      "savingsPercent": 7.08
+    },
+    {
+      "name": "ripgrep-search",
+      "command": "rg TokenMeter --line-number",
+      "adapter": "search",
+      "compacted": false,
+      "tokensRaw": 279,
+      "tokensCompact": 279,
+      "tokensSaved": 0,
+      "savingsPercent": 0.00
+    },
+    {
+      "name": "cargo-clippy-warnings",
+      "command": "cargo clippy",
+      "adapter": "lint",
+      "compacted": true,
+      "tokensRaw": 157,
+      "tokensCompact": 81,
+      "tokensSaved": 76,
+      "savingsPercent": 48.41
+    },
+    {
+      "name": "npm-install",
+      "command": "npm install",
+      "adapter": "build",
+      "compacted": false,
+      "tokensRaw": 122,
+      "tokensCompact": 122,
+      "tokensSaved": 0,
+      "savingsPercent": 0.00
+    },
+    {
+      "name": "kubectl-get-pods",
+      "command": "kubectl get pods",
+      "adapter": "containers",
+      "compacted": false,
+      "tokensRaw": 302,
+      "tokensCompact": 302,
+      "tokensSaved": 0,
+      "savingsPercent": 0.00
+    }
+  ]
+}

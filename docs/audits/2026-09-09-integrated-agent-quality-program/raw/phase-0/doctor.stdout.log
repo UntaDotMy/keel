@@ -1,0 +1,79 @@
+the harness Skill Pack Status
+
+Summary:
+  Manager version: dev
+  Repo version: 63281dd
+  Installed version: dev-63281dd
+  Install source: Rust-native manager
+  Skill pack update status: current
+
+the harness Skills:
+  Source: C:\Users\Administrator\Desktop\dev\studytime\keel\keel
+  Target: C:\Users\Administrator\.claude\skills
+  Platform: windows-amd64
+  Synced skills: 51/51
+  Learned skills: 2
+
+Runtime:
+  implementation: rust
+
+Bridge hosts:
+[ok] shared gateway skill: installed (C:\Users\Administrator\.agents\skills\using-keel\SKILL.md)
+[ok] opencode host: wired (rules + MCP)
+[ok] pi host: wired (rules + MCP)
+[ok] codex host: wired (rules + MCP)
+[ok] codex plugin installation: installed and current
+[ok] codex marketplace entry (C:\Users\Administrator\.agents\plugins\marketplace.json): registered
+[ok] codex plugin enablement (config.toml [plugins."keel@personal-keel"]): enabled
+[ok] codex plugin hook trust records (config.toml [hooks.state]): 8/8 recorded; Codex validates current hashes at runtime
+[ok] codex native MCP (config.toml [mcp_servers.keel]): registered
+[ok] codex AGENTS.md iron law contract: present
+[ok] cursor host: wired (rules + MCP)
+[ok] grok host: wired (Claude-compatible hooks + MCP, no duplicates)
+[ok] omp host: wired (rules + MCP)
+[ok] zcode host: wired (rules + MCP)
+[ok] antigravity host: wired (rules + MCP)
+[ok] antigravity hook runtime (node): available
+Doctor:
+[ok] binary: C:\Users\Administrator\.keel\keel.exe
+[ok] raw store writable: C:\Users\Administrator\.keel\raw-output
+[ok] event log writable: C:\Users\Administrator\.keel\command-compaction-events.jsonl
+[ok] adapters: tests, git, search, files, build, lint, containers, cloud, database, logs, project-filter, generic
+[ok] rewrite: cargo test -> keel run -- cargo test
+[ok] rewrite prefix valid for every shell tool (bash/powershell/pwsh/cmd)
+[warn] claude binary found
+[ok] ~/.claude/settings.json exists
+[ok] PreToolUse Bash matcher installed
+[ok] raw command is transparently rewritten via PreToolUse
+[ok] rerun wrapper command is accepted
+[ok] keel home exists: C:\Users\Administrator\.keel
+[ok] keel binary present: C:\Users\Administrator\.keel\keel.exe
+[warn] 1 stale Keel executable sibling(s) found; run `keel doctor --fix` to remove unlocked leftovers
+  C:\Users\Administrator\.keel\keel.exe.stale-1788813850
+[ok] legacy ~/.claude binary removed
+[ok] PATH includes keel home: C:\Users\Administrator\.keel
+[ok] compaction capture active (agent-session signal present)
+[ok] keel MCP server registered
+[ok] keel MCP tools pinned into context (alwaysLoad)
+[ok] keel MCP launch (registered command starts and responds to initialize)
+Bridge hosts:
+[ok] shared gateway skill: installed (C:\Users\Administrator\.agents\skills\using-keel\SKILL.md)
+[ok] opencode host: wired (rules + MCP)
+[ok] pi host: wired (rules + MCP)
+[ok] codex host: wired (rules + MCP)
+[ok] codex plugin installation: installed and current
+[ok] codex marketplace entry (C:\Users\Administrator\.agents\plugins\marketplace.json): registered
+[ok] codex plugin enablement (config.toml [plugins."keel@personal-keel"]): enabled
+[ok] codex plugin hook trust records (config.toml [hooks.state]): 8/8 recorded; Codex validates current hashes at runtime
+[ok] codex native MCP (config.toml [mcp_servers.keel]): registered
+[ok] codex AGENTS.md iron law contract: present
+[ok] cursor host: wired (rules + MCP)
+[ok] grok host: wired (Claude-compatible hooks + MCP, no duplicates)
+[ok] omp host: wired (rules + MCP)
+[ok] zcode host: wired (rules + MCP)
+[ok] antigravity host: wired (rules + MCP)
+[ok] antigravity hook runtime (node): available
+[ok] shell interception path: PreToolUse rewrite healthy
+[ok] no orphaned keel mcp serve processes
+[info] 2 keel mcp serve processes running (one per host window). For many windows, run one shared `keel mcp serve-http` daemon and point hosts at http://127.0.0.1:3920/mcp instead (see README 'MCP across many windows').
+Run `keel validate --profile smoke` for local proof.

@@ -4,10 +4,9 @@
 //!   It answers "what has keel done, what did it save, what did it catch" in one
 //!   compact read instead of four invocations.
 //! Caller: commands.rs `stats` dispatch, MCP `stats` tool.
-//! Dependencies: the gain, telemetry, recall, sprint, and hook-lifecycle readers.
-//!   Every datum is pulled from a function that already backs another command, so
-//!   `stats` cannot drift from the surfaces it aggregates; it reuses readers, it
-//!   never re-parses.
+//! Dependencies: the gain, telemetry, recall, anvil, hook-lifecycle, and
+//!   fixed-context readers. Every datum comes from its owning reader; `stats`
+//!   renders those values and does not re-parse their storage formats.
 //! Side Effects: read-only. `recall_status_snapshot` lazily syncs the recall
 //!   index; everything else reads files. No writes, no network.
 
@@ -23,6 +22,7 @@ use crate::runner::hook_lifecycle::gate_status_rows;
 use crate::runner::telemetry::{aggregate_rows, read_rows};
 use crate::runtime::{display_path, resolve_claude_home, COMMAND_COMPACTION_EVENTS_FILE_NAME};
 use crate::utility::anvil::job::active_jobs_summary;
+use crate::utility::fixed_context::{self, FixedContextLedger};
 use crate::utility::gain::parse_gain_summary;
 use crate::utility::recall::recall_status_snapshot;
 
@@ -109,6 +109,7 @@ struct StatsSnapshot {
     user_prompt_code_change_context_tokens_now: usize,
     mcp_catalog_tokens_now: usize,
     mcp_tool_count: usize,
+    fixed_context: FixedContextLedger,
     commands_observed: u64,
     commands_compacted: u64,
     top_commands: Vec<(String, u64)>,
@@ -188,14 +189,20 @@ fn collect_snapshot(
     let session_start_context_tokens_now = crate::proxy::token_meter::TokenMeter::count_text(
         &crate::runner::hook_lifecycle::session_start_context(),
     );
-    let user_prompt_base_context_tokens_now = crate::proxy::token_meter::TokenMeter::count_text(
-        &crate::runner::hook_lifecycle::user_prompt_submit_context(""),
-    );
+    let fixed_context = fixed_context::collect(Path::new(workspace_root));
+    let entry_tokens = |surface| {
+        fixed_context
+            .entries
+            .iter()
+            .find(|entry| entry.surface == surface)
+            .map(|entry| entry.actual_tokens)
+            .unwrap_or_default()
+    };
+    let user_prompt_base_context_tokens_now = entry_tokens("hook.user_prompt_submit.simple");
     let user_prompt_code_change_context_tokens_now =
-        crate::proxy::token_meter::TokenMeter::count_text(
-            &crate::runner::hook_lifecycle::user_prompt_submit_context("fix the bug"),
-        );
-    let (mcp_tool_count, mcp_catalog_tokens_now) = crate::mcp::tools_list_context_snapshot();
+        entry_tokens("hook.user_prompt_submit.code_change");
+    let mcp_tool_count = fixed_context.mcp.tool_count;
+    let mcp_catalog_tokens_now = entry_tokens("mcp.tools_list.catalog");
 
     StatsSnapshot {
         tokens_saved: gain.tokens_saved,
@@ -209,6 +216,7 @@ fn collect_snapshot(
         user_prompt_code_change_context_tokens_now,
         mcp_catalog_tokens_now,
         mcp_tool_count,
+        fixed_context,
         commands_observed: gain.commands_observed,
         commands_compacted: gain.commands_compacted,
         top_commands,
@@ -280,6 +288,32 @@ impl StatsSnapshot {
             standard_output,
             "  scope: command savings exclude hook and MCP catalog context; end-to-end net depends on host usage"
         );
+        let _ = writeln!(
+            standard_output,
+            "  fixed context ledger ({}): {} ({} surfaces; rows are not additive)",
+            fixed_context::TOKENIZER,
+            self.fixed_context.status(),
+            self.fixed_context.entries.len()
+        );
+        let _ = writeln!(
+            standard_output,
+            "    MCP tools: {} total, {} eager, {} deferred; skills: {}",
+            self.fixed_context.mcp.tool_count,
+            self.fixed_context.mcp.eager_tool_count,
+            self.fixed_context.mcp.deferred_tool_count,
+            self.fixed_context.skills.skill_count
+        );
+        for entry in &self.fixed_context.entries {
+            let _ = writeln!(
+                standard_output,
+                "    {}: actual={} budget={} status={} reproduce=`{}`",
+                entry.surface,
+                entry.actual_tokens,
+                entry.budget_tokens,
+                entry.status(),
+                fixed_context::REPRODUCTION_COMMAND
+            );
+        }
         let _ = writeln!(
             standard_output,
             "  commands: {} observed, {} compacted",
@@ -361,6 +395,64 @@ impl StatsSnapshot {
                 ])
             })
             .collect::<Vec<_>>();
+        let fixed_context_entries = self
+            .fixed_context
+            .entries
+            .iter()
+            .map(|entry| {
+                Value::Object(vec![
+                    ("surface".into(), Value::String(entry.surface.into())),
+                    (
+                        "actualTokens".into(),
+                        Value::Number(entry.actual_tokens.to_string()),
+                    ),
+                    (
+                        "budgetTokens".into(),
+                        Value::Number(entry.budget_tokens.to_string()),
+                    ),
+                    ("status".into(), Value::String(entry.status().into())),
+                    (
+                        "reproductionCommand".into(),
+                        Value::String(fixed_context::REPRODUCTION_COMMAND.into()),
+                    ),
+                ])
+            })
+            .collect::<Vec<_>>();
+        let fixed_context_ledger = Value::Object(vec![
+            (
+                "tokenizer".into(),
+                Value::String(fixed_context::TOKENIZER.into()),
+            ),
+            (
+                "status".into(),
+                Value::String(self.fixed_context.status().into()),
+            ),
+            ("entries".into(), Value::Array(fixed_context_entries)),
+            (
+                "mcp".into(),
+                Value::Object(vec![
+                    (
+                        "toolCount".into(),
+                        Value::Number(self.fixed_context.mcp.tool_count.to_string()),
+                    ),
+                    (
+                        "eagerToolCount".into(),
+                        Value::Number(self.fixed_context.mcp.eager_tool_count.to_string()),
+                    ),
+                    (
+                        "deferredToolCount".into(),
+                        Value::Number(self.fixed_context.mcp.deferred_tool_count.to_string()),
+                    ),
+                ]),
+            ),
+            (
+                "skills".into(),
+                Value::Object(vec![(
+                    "skillCount".into(),
+                    Value::Number(self.fixed_context.skills.skill_count.to_string()),
+                )]),
+            ),
+        ]);
         // Omit the anvil axis when no jobs are active.
         // Absence is the truthful "nothing was run" signal.
         let mut fields = vec![
@@ -417,6 +509,7 @@ impl StatsSnapshot {
                 "mcpToolCount".into(),
                 Value::Number(self.mcp_tool_count.to_string()),
             ),
+            ("fixedContextLedger".into(), fixed_context_ledger),
             (
                 "measurementScope".into(),
                 Value::String(
@@ -587,6 +680,7 @@ mod tests {
                 "userPromptCodeChangeContextTokensNow",
                 "mcpCatalogTokensNow",
                 "mcpToolCount",
+                "fixedContextLedger",
                 "measurementScope",
                 "commandsObserved",
                 "topCommands",

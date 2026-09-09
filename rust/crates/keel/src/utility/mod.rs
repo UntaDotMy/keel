@@ -4,18 +4,22 @@
 //! Side Effects: None — pure module organization.
 
 pub mod anvil;
+pub mod architecture;
 pub mod code_graph;
 pub mod code_search;
 pub mod config_audit;
 pub mod design_intelligence;
 pub mod eval;
+pub(crate) mod fixed_context;
 pub mod gain;
 pub mod hashing;
 pub mod memory;
 pub mod memory_families;
 pub mod observe;
+pub mod plan;
 pub mod recall;
 pub mod record_store;
+pub mod research_policy;
 pub mod session;
 pub mod skill_eval;
 pub mod skill_lint;
@@ -24,6 +28,8 @@ pub mod skill_usage;
 pub(crate) mod sqlite;
 pub mod stats;
 pub mod system_map;
+pub(crate) mod task_ticket;
+pub mod ui_verify;
 pub mod working_brief;
 pub mod workspace_index;
 
@@ -37,7 +43,9 @@ pub use eval::run_eval_command;
 pub use gain::run_gain_command;
 pub use memory::run_memory_command;
 pub use observe::run_observe_command;
+pub use plan::run_plan_command;
 pub use session::run_session_command;
 pub use skill_eval::run_skill_eval_command;
 pub use skill_lint::run_skill_lint_command;
 pub use stats::run_stats_command;
+pub use ui_verify::run_verify_ui_command;

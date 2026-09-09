@@ -82,6 +82,11 @@ Default behavior (no env var set): Advisory-only reminders that can be ignored. 
 
 See [70-review-quality-gates-and-policies.md](AGENTS/references/70-review-quality-gates-and-policies.md) for full details on review surfaces and gates.
 
+## Instruction Budget and Scope Policy
+
+`AGENTS.md` is the canonical cross-vendor instruction file. To ensure fast, deterministic loading across all AI hosts (Claude Code, Pi, Codex, Cursor, OpenCode, Antigravity, ZCode), `AGENTS.md` is budgeted at <= 2,600 tokens (<= 11 KB). Detailed procedures, technical schemas, and full catalogs live in on-demand references under `AGENTS/references/`, skills, or `docs/`. No fact exists in two host instruction files without explicit justification.
+
 ## Summary
 
 Keep execution simple and focused. Use specialist skills when they add clear value. Prioritize code quality, security, maintainability, and native harness CLI workflow surfaces. Open the matching reference file for depth.
+

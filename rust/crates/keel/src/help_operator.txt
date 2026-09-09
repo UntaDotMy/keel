@@ -10,10 +10,11 @@
   repair [--repo-root <path>] [--claude-home <path>]
   validate [--repo-root <path>] [--profile full|smoke]
   verify [--repo-root <path>] [--claude-home <path>] [<skill-name>]
+  verify ui [--task <task-id>] [--fixture <path>] [--plan <id>] [--adapter <name>] [--json]
   uninstall [--repo-root <path>] [--claude-home <path>]
   menu
-  review init|diff|pre-commit|pre-pr [--repo-root <path>] [--format json|markdown|compact]
-  review closeout [--repo-root <path>] [--base-ref <ref>] [--brief-id <id>] [--proof <text>] [--baseline <path>] [--baseline-reviewer <name>] [--baseline-reason <text>] [--baseline-expires <rfc3339>] [--write-baseline] [--format json|markdown|compact] [--strict] [--require-ci]
+  review init|diff|pre-commit|pre-pr [--repo-root <path>] [--plan <id>] [--claude-home <path>] [--format json|markdown|compact]
+  review closeout [--repo-root <path>] [--base-ref <ref>] [--plan <id>] [--claude-home <path>] [--brief-id <id>] [--proof <text>] [--baseline <path>] [--baseline-reviewer <name>] [--baseline-reason <text>] [--baseline-expires <rfc3339>] [--write-baseline] [--format json|markdown|compact] [--strict] [--require-ci]
   review gates check [--repo-root <path>] [--surface <name>] [--repo-test-policy skip|run] [--format json|markdown|compact]
   review hosted check|comment [--repo-root <path>] [--provider <name>] [--write-payload-file <path>] [--write-body-file <path>] [--format json|markdown|compact]
   review policy show [--format json|markdown|compact]
@@ -25,6 +26,7 @@
   git-workflow pr-body --from-diff [--repo-root <path>] [--base-ref <ref>] [--test-result <text>] [--format json|markdown|compact]
   git-workflow lint-message <file>
   run [--recovery-dir <path>] [--json] [--stream] -- <command...>
+  warn list|waive [--repo-root <path>] [--claude-home <path>]
   rewrite "<command>"
   raw [--path] <raw-id>
   raw list
@@ -45,6 +47,13 @@
   observe [--claude-home <path>] [--workspace-root <path>] [--json]
   stats [--days <N>] [--top <N>] [--claude-home <path>] [--workspace-root <path>] [--json]
   design-intelligence recommend [request...]
+  plan specify --request <text> [--workspace-root <path>] [--claude-home <path>] [--json]
+  plan research --plan <plan-id> [--claim <text> --source-url <url> --source-type <type> --retrieved-at <rfc3339> --support <text> --freshness fresh|historical --used-by <ids>] [--workspace-root <path>] [--claude-home <path>] [--json]
+  plan design --plan <plan-id> [--workspace-root <path>] [--claude-home <path>] [--json]
+  plan tasks --plan <plan-id> [--workspace-root <path>] [--claude-home <path>] [--json]
+  plan check [--rtm] --plan <plan-id> [--workspace-root <path>] [--claude-home <path>] [--json]
+  plan ready --plan <plan-id> [--workspace-root <path>] [--claude-home <path>] [--json]
+  plan done --plan <plan-id> [--workspace-root <path>] [--claude-home <path>] [--json]
   memory scope resolve [--claude-home <path>] [--workspace-root <path>] [--create-missing] [--refresh-system-map] [--format json|compact]
   memory system-map refresh [--claude-home <path>] [--workspace-root <path>] [--format json|compact]
   memory system-map show [--claude-home <path>] [--workspace-root <path>]
