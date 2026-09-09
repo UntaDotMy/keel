@@ -21,9 +21,11 @@ returns an explicit blocked state; it never falls back to raw output.
 
 MCP `tools/call` results use the same firewall. `tools/list` supports `core` and
 `full` profiles, deterministic ordering, opaque pagination cursors, and
-progressive levels (capability index, metadata, full schema). `keel/discover`
-returns ranked compact metadata and `keel/activate` writes a session/workspace
-activation receipt. The default profile is `core`; `full` remains an explicit
+progressive levels (capability index, metadata, full schema). Spec-default
+`tools/list` (`params` omitted or `{}`) returns the compatibility catalog;
+keel's `level` and `cursor` fields are opt-in. `keel/discover` returns ranked
+compact metadata and `keel/activate` writes a session/workspace activation
+receipt. The default profile is `core`; `full` remains an explicit
 compatibility/debug choice.
 
 The current ratified `core` profile advertises 17 stable tools and defers 20

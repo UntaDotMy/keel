@@ -161,14 +161,14 @@ pub(crate) fn handle_tools_list_for_profile_params(
     params: &Value,
 ) -> Result<Value, String> {
     let catalog = handle_tools_list_for_profile(profile);
-    // Preserve the no-params compatibility response; an explicit object opts
-    // into paginated, progressive-disclosure semantics.
-    if params.is_null() {
+    // why: MCP hosts send params: {}; that is spec-default, not keel level opt-in.
+    if is_spec_default_tools_list(params) {
         ensure_catalog_budget(profile, &catalog)?;
         return Ok(catalog);
     }
+    let level_explicit = params.get("level").is_some();
     let level = params.get("level").and_then(Value::as_u64).unwrap_or(2);
-    if level > 2 {
+    if level_explicit && level > 2 {
         return Err("tools/list level must be 0, 1, or 2".to_string());
     }
     let expected = catalog
@@ -193,7 +193,9 @@ pub(crate) fn handle_tools_list_for_profile_params(
         *tools = selected;
     }
     let mut list = slim_tools_list_for_wire(page);
-    apply_disclosure_level(&mut list, level);
+    if level_explicit {
+        apply_disclosure_level(&mut list, level);
+    }
     ensure_catalog_budget(profile, &list)?;
     if end < expected {
         list["nextCursor"] = Value::String(encode_catalog_cursor(end, &fingerprint));
@@ -276,7 +278,19 @@ fn decode_catalog_cursor(cursor: &str, fingerprint: &str) -> Result<usize, Strin
     Ok(offset)
 }
 
+fn is_spec_default_tools_list(params: &Value) -> bool {
+    match params {
+        Value::Null => true,
+        Value::Object(map) => !map.contains_key("cursor") && !map.contains_key("level"),
+        _ => false,
+    }
+}
+
 fn apply_disclosure_level(list: &mut Value, level: u64) {
+    // why: level 2 is full schema; extra fields only replace dropped level 0/1 data.
+    if level >= 2 {
+        return;
+    }
     let Some(tools) = list.get_mut("tools").and_then(Value::as_array_mut) else {
         return;
     };
@@ -4434,6 +4448,60 @@ mod tests {
         )
         .expect_err("invalid cursor must fail closed");
         assert!(error.contains("cursor"), "{error}");
+    }
+
+    #[test]
+    fn spec_default_empty_params_returns_eager_catalog_under_profile_budget() {
+        // why: Antigravity sends params: {}, which must stay under the 1200-token budget.
+        let response =
+            handle_tools_list_for_profile_params(crate::mcp::McpCatalogProfile::Tiered, &json!({}))
+                .expect("spec-default tools/list must succeed");
+        let tools = response["tools"].as_array().expect("tools");
+        assert_eq!(tools.len(), EAGER_MCP_TOOL_NAMES.len());
+        assert!(response.get("nextCursor").is_none());
+        let serialized = serde_json::to_string(&response).expect("serialize");
+        let tokens = crate::proxy::token_meter::TokenMeter::count_text(&serialized);
+        assert!(
+            tokens <= crate::proxy::context::DEFAULT_MAX_TOOL_CATALOG_TOKENS,
+            "empty-params catalog {tokens} exceeds {}",
+            crate::proxy::context::DEFAULT_MAX_TOOL_CATALOG_TOKENS
+        );
+        for tool in tools {
+            assert!(
+                tool.get("category").is_none(),
+                "spec-default tools/list must not inject non-spec category"
+            );
+            assert!(
+                tool.get("schemaVersion").is_none(),
+                "spec-default tools/list must not inject non-spec schemaVersion"
+            );
+            assert_eq!(
+                tool["inputSchema"]["type"],
+                json!("object"),
+                "inputSchema.type must stay object for {:?}",
+                tool.get("name")
+            );
+        }
+
+        let explicit_full = handle_tools_list_for_profile_params(
+            crate::mcp::McpCatalogProfile::Tiered,
+            &json!({ "level": 2 }),
+        )
+        .expect("explicit level 2 is full schema");
+        let explicit_tools = explicit_full["tools"].as_array().expect("level 2 tools");
+        assert!(explicit_full.get("error").is_none());
+        for tool in explicit_tools {
+            assert!(tool.get("category").is_none());
+            assert!(tool.get("schemaVersion").is_none());
+        }
+        let explicit_tokens = crate::proxy::token_meter::TokenMeter::count_text(
+            &serde_json::to_string(&explicit_full).expect("serialize level 2"),
+        );
+        assert!(
+            explicit_tokens <= crate::proxy::context::DEFAULT_MAX_TOOL_CATALOG_TOKENS,
+            "level 2 catalog {explicit_tokens} exceeds {}",
+            crate::proxy::context::DEFAULT_MAX_TOOL_CATALOG_TOKENS
+        );
     }
 
     #[test]

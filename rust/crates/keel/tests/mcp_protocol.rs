@@ -244,6 +244,22 @@ fn mcp_serve_initialize_then_tools_list_round_trip() {
         );
     }
 
+    server.send(&json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tools/list",
+        "params": {}
+    }));
+    let empty_params_response = server.recv();
+    assert!(
+        empty_params_response.get("error").is_none(),
+        "spec-default params {{}} must not fail tools/list: {empty_params_response}"
+    );
+    assert_eq!(
+        empty_params_response["result"]["tools"],
+        tools_response["result"]["tools"]
+    );
+
     server.close();
     let _ = std::fs::remove_dir_all(&claude_home);
 
