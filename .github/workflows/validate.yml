@@ -111,6 +111,7 @@ jobs:
       - validate-macos
       - validate-msrv
       - security-audit
+      - context-gateway
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -127,7 +128,8 @@ jobs:
               "${{ needs.validate-windows.result }}" \
               "${{ needs.validate-macos.result }}" \
               "${{ needs.validate-msrv.result }}" \
-              "${{ needs.security-audit.result }}"; do
+              "${{ needs.security-audit.result }}" \
+              "${{ needs.context-gateway.result }}"; do
               if [ "$result" != "success" ]; then
                 echo "A required product-validation job concluded $result." >&2
                 exit 1
@@ -335,3 +337,43 @@ jobs:
       - name: Skip audit (no dependency changes on PR)
         if: steps.filter.outputs.deps != 'true' && github.event_name == 'pull_request'
         run: echo "No Cargo.toml/Cargo.lock/audit.toml changes — skipping cargo audit on this PR."
+
+  # Context/MCP/raw-store regression gate stays separate from the broad matrix.
+  # This keeps the context-budget contract explicit and reviewable in CI.
+  context-gateway:
+    name: context-gateway
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          cache-on-failure: true
+          key: context-gateway
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Run context gateway and isolation tests
+        run: |
+          cargo test --locked -p keel --test context_gateway_test --test ui_verification_test --test plan_workflow_test
+          cargo test --locked -p keel --lib proxy::raw_store::tests
+          cargo test --locked -p keel --lib mcp::tools::tests
+          cargo test --locked -p keel --lib proxy::execution::tests
+      - name: Measure MCP catalog against ratified budget
+        shell: bash
+        run: |
+          cargo run --quiet --locked -p keel -- stats tools --json > "$RUNNER_TEMP/keel-tools.json"
+          python - "$RUNNER_TEMP/keel-tools.json" <<'PY'
+          import json, pathlib, sys
+          payload = json.loads(pathlib.Path(sys.argv[1]).read_text())
+          if payload.get("catalogTokens", 0) > 1200:
+              raise SystemExit(f"MCP core catalog exceeds 1200-token budget: {payload}")
+          if payload.get("eagerToolCount", 0) >= payload.get("toolCount", 0):
+              raise SystemExit(f"MCP catalog is eager instead of progressive: {payload}")
+          print("MCP catalog budget and progressive-disclosure checks passed")
+          PY
+      - name: Validate dependency metadata and warning policy
+        run: cargo metadata --locked --no-deps --format-version 1 > "$RUNNER_TEMP/keel-metadata.json"

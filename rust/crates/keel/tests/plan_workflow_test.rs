@@ -155,6 +155,36 @@ const SPECIFIC_REQUEST: &str =
     "Add a sample JSON command that exits zero, emits schemaVersion 1, and preserves existing commands.";
 
 #[test]
+fn plan_specify_records_proportional_complexity_classification() {
+    let trivial_tree = isolated_tree("complexity-trivial");
+    let trivial = plan_command(&trivial_tree, &["specify", "--request", "Fix typo"]);
+    assert_success(&trivial, "trivial specify");
+    let trivial_payload = json_output(&trivial);
+    assert_eq!(trivial_payload["complexityClass"], "trivial");
+    assert_eq!(trivial_payload["taskClass"], "trivial");
+    assert_eq!(trivial_payload["planningRequired"], false);
+
+    let risky_tree = isolated_tree("complexity-risky");
+    let risky = plan_command(
+        &risky_tree,
+        &[
+            "specify",
+            "--request",
+            "Rotate production credentials and update the security permission policy",
+        ],
+    );
+    assert_success(&risky, "risky specify");
+    let risky_payload = json_output(&risky);
+    assert_eq!(risky_payload["complexityClass"], "high-risk");
+    assert_eq!(risky_payload["planningRequired"], true);
+    assert!(risky_payload["complexitySignals"]
+        .as_array()
+        .expect("complexity signals")
+        .iter()
+        .any(|signal| signal == "risk:security"));
+}
+
+#[test]
 fn plan_round_trip_writes_versioned_grounded_traceable_artifacts() {
     let tree = isolated_tree("round-trip");
     let (plan_id, plan_path) = advance_to_tasks(&tree, SPECIFIC_REQUEST);

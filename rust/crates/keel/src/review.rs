@@ -18,8 +18,8 @@ mod workflow;
 pub(super) use ci::{resolve_provider, run_git_workflow_await_ci, CiProvider, ProviderResolution};
 
 pub(super) use diff_gates::{
-    collect_review_gate_results, completeness_check_gate, flow_check_gate,
-    run_review_surface_command, FLOW_SOURCE_EXTENSIONS,
+    collect_review_gate_results, completeness_check_gate, context_policy_gate,
+    execution_evidence_gate, flow_check_gate, run_review_surface_command, FLOW_SOURCE_EXTENSIONS,
 };
 
 pub(super) use hosted::{

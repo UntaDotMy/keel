@@ -335,6 +335,7 @@ fn run_specify(flags: FlagSet, streams: &mut CommandStreams<'_>) -> u8 {
     let plan_id = new_plan_id(request);
     let paths = command_or_return!(plan_paths(&context, &plan_id), streams.error);
     let vague_terms = vague_terms(request);
+    let complexity = classify_request(request);
     let clarification_required = !vague_terms.is_empty();
     let created_at = timestamp();
     let artifacts = initial_artifacts(
@@ -342,6 +343,7 @@ fn run_specify(flags: FlagSet, streams: &mut CommandStreams<'_>) -> u8 {
         request,
         context.workspace(),
         &vague_terms,
+        &complexity,
         &created_at,
     );
     command_or_return!(
@@ -355,6 +357,10 @@ fn run_specify(flags: FlagSet, streams: &mut CommandStreams<'_>) -> u8 {
         json!({
             "stage": "specified",
             "clarificationRequired": clarification_required,
+            "complexityClass": complexity.label,
+            "taskClass": complexity.label,
+            "planningRequired": complexity.planning_required,
+            "complexitySignals": complexity.signals,
         }),
     );
     emit_success(
@@ -1268,11 +1274,74 @@ fn vague_terms(request: &str) -> Vec<&'static str> {
         .collect()
 }
 
+#[derive(Debug, Clone)]
+struct ComplexityClassification {
+    label: &'static str,
+    planning_required: bool,
+    signals: Vec<String>,
+}
+
+/// Classify planning effort from explicit, deterministic request signals. This
+/// informs proportional governance; it never bypasses an existing required
+/// lifecycle gate or silently turns a high-risk request into a trivial one.
+fn classify_request(request: &str) -> ComplexityClassification {
+    let normalized = request.to_ascii_lowercase();
+    let words: Vec<&str> = normalized.split_whitespace().collect();
+    let high_risk_terms = [
+        "auth",
+        "security",
+        "secret",
+        "permission",
+        "delete",
+        "migration",
+        "schema",
+        "database",
+        "production",
+        "deploy",
+        "release",
+        "credential",
+        "payment",
+        "policy",
+        "architecture",
+        "dependency",
+        "ci",
+        "workflow",
+    ];
+    let signals: Vec<String> = high_risk_terms
+        .iter()
+        .filter(|term| {
+            normalized
+                .split(|c: char| !c.is_ascii_alphanumeric())
+                .any(|word| word == **term)
+        })
+        .map(|term| format!("risk:{term}"))
+        .collect();
+    let label = if !signals.is_empty() || words.len() > 80 {
+        "high-risk"
+    } else if words.len() <= 12 {
+        "trivial"
+    } else {
+        "standard"
+    };
+    let mut signals = signals;
+    if words.len() > 40 {
+        signals.push("scope:multi-step".to_string());
+    } else if words.len() <= 12 {
+        signals.push("scope:bounded".to_string());
+    }
+    ComplexityClassification {
+        label,
+        planning_required: label != "trivial",
+        signals,
+    }
+}
+
 fn initial_artifacts(
     plan_id: &str,
     request: &str,
     workspace_root: &Path,
     vague_terms: &[&str],
+    complexity: &ComplexityClassification,
     created_at: &str,
 ) -> Vec<(&'static str, String)> {
     let clarification_required = !vague_terms.is_empty();
@@ -1323,6 +1392,10 @@ fn initial_artifacts(
             "workspaceRoot": display_path(workspace_root),
             "stage": "specified",
             "clarificationRequired": clarification_required,
+            "complexityClass": complexity.label,
+            "taskClass": complexity.label,
+            "planningRequired": complexity.planning_required,
+            "complexitySignals": complexity.signals,
             "researchStatus": "pending",
             "architectureStatus": "pending",
             "tasksStatus": "pending",

@@ -4,8 +4,10 @@
 //! Main Functions: RawStore::save, RawStore::save_compact, RawStore::generate_id.
 //! Side Effects: Creates raw-output directories and writes stdout/stderr/metadata/compact logs.
 
+use crate::proxy::execution::ExecutionIdentity;
 use crate::runtime::resolve_claude_home;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 #[cfg(unix)]
@@ -91,6 +93,25 @@ pub struct RawRun {
 
 pub struct RawStore {
     root: PathBuf,
+    namespace: Option<RawNamespace>,
+}
+
+/// Optional owner identity used to scope reads to one workspace/session.
+/// Existing unscoped callers remain compatible; governed callers should use
+/// [`RawStore::with_namespace`] so a raw id cannot be replayed across tenants.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawNamespace {
+    pub workspace_id: String,
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct IntegrityManifest {
+    schema_version: u32,
+    raw_id: String,
+    workspace_id: String,
+    session_id: String,
+    files: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -137,16 +158,46 @@ fn write_private(path: &std::path::Path, bytes: &[u8]) -> io::Result<()> {
     fs::write(path, bytes)
 }
 
+/// Persist UTF-8 metadata through the repository's atomic text writer, then
+/// retain RawStore's private-file permissions on Unix. JSON manifests,
+/// receipts, and compact metadata must not use a truncate-then-write sequence
+/// that can leave readers with a partial file.
+fn write_private_text_atomic(path: &std::path::Path, text: &str) -> io::Result<()> {
+    crate::runtime::write_text(path, text).map_err(io::Error::other)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut permissions = fs::metadata(path)?.permissions();
+        permissions.set_mode(0o600);
+        fs::set_permissions(path, permissions)?;
+    }
+    Ok(())
+}
+
 impl RawStore {
     pub fn new() -> Self {
         let root = resolve_claude_home("")
             .map(|p| p.join("raw-output"))
             .unwrap_or_else(|_| std::env::temp_dir().join("keel-raw-output"));
-        Self { root }
+        Self {
+            root,
+            namespace: None,
+        }
     }
 
     pub fn with_root(root: PathBuf) -> Self {
-        Self { root }
+        Self {
+            root,
+            namespace: None,
+        }
+    }
+
+    pub fn with_namespace(root: PathBuf, namespace: RawNamespace) -> Self {
+        Self {
+            root,
+            namespace: Some(namespace),
+        }
     }
 
     pub fn root(&self) -> &PathBuf {
@@ -154,12 +205,18 @@ impl RawStore {
     }
 
     pub fn save(&self, meta: &mut RunMeta, run: &RawRun) -> std::io::Result<()> {
+        validate_raw_id(&meta.raw_id)?;
+        self.validate_namespace()?;
         let date = chrono::Local::now().format("%Y-%m-%d").to_string();
         let day_dir = self.root.join(date);
         let dir = day_dir.join(&meta.raw_id);
+        reject_path_components(&self.root)?;
+        reject_path_components(&day_dir)?;
         fs::create_dir_all(&day_dir)?;
         restrict_directory(&self.root)?;
         restrict_directory(&day_dir)?;
+        reject_symlink(&self.root)?;
+        reject_symlink(&day_dir)?;
         cleanup_stale_raw_staging(&self.root);
         let staging_dir = day_dir.join(format!(
             ".tmp-{}-{}-{:08x}",
@@ -189,7 +246,13 @@ impl RawStore {
             write_private(&staging_dir.join("stderr.log"), stderr_bytes)?;
             write_private(&staging_dir.join("command.txt"), meta.command.as_bytes())?;
             let meta_json = serde_json::to_string_pretty(meta)?;
-            write_private(&staging_dir.join("meta.json"), meta_json.as_bytes())?;
+            write_private_text_atomic(&staging_dir.join("meta.json"), &meta_json)?;
+            write_integrity_manifest(
+                &staging_dir,
+                &meta.raw_id,
+                &meta.workspace,
+                self.namespace.as_ref(),
+            )?;
             fs::rename(&staging_dir, &dir)
         })();
         if let Err(error) = staged {
@@ -201,15 +264,63 @@ impl RawStore {
     }
 
     pub fn save_compact(&self, meta: &RunMeta, compact_output: &str) -> std::io::Result<()> {
+        validate_raw_id(&meta.raw_id)?;
+        self.validate_namespace()?;
         if meta.raw_path.as_os_str().is_empty() {
             return Ok(());
         }
+        if compact_output.len() > MAX_RAW_WRITE_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "compact artifact exceeds maximum raw artifact size of {MAX_RAW_WRITE_BYTES} bytes"
+                ),
+            ));
+        }
+        let directory = self.find_dir(&meta.raw_id)?;
+        validate_compact_path(&directory, &meta.compact_path)?;
+        reject_path_components(&self.root)?;
+        reject_path_components(&directory)?;
         restrict_directory(&self.root)?;
-        restrict_directory(&meta.raw_path)?;
-        write_private(&meta.compact_path, compact_output.as_bytes())?;
+        restrict_directory(&directory)?;
+        reject_symlink_if_exists(&meta.compact_path)?;
+        write_private_text_atomic(&meta.compact_path, compact_output)?;
         let meta_json = serde_json::to_string_pretty(meta)?;
-        write_private(&meta.raw_path.join("meta.json"), meta_json.as_bytes())?;
+        reject_symlink_if_exists(&directory.join("meta.json"))?;
+        write_private_text_atomic(&directory.join("meta.json"), &meta_json)?;
+        self.refresh_integrity(&meta.raw_id)?;
         Ok(())
+    }
+
+    /// Persist the immutable execution receipt next to the raw artifact. The
+    /// receipt is deliberately a separate schema-versioned file so existing
+    /// `meta.json` consumers remain byte-compatible while every governed run
+    /// gains an auditable identity and interception state.
+    pub fn save_execution_receipt(
+        &self,
+        raw_id: &str,
+        receipt: &ExecutionIdentity,
+    ) -> std::io::Result<PathBuf> {
+        validate_raw_id(raw_id)?;
+        self.validate_namespace()?;
+        let directory = self.find_dir(raw_id)?;
+        restrict_directory(&self.root)?;
+        restrict_directory(&directory)?;
+        let path = directory.join("execution.json");
+        reject_symlink_if_exists(&path)?;
+        let serialized = serde_json::to_string_pretty(receipt)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        write_private_text_atomic(&path, &serialized)?;
+        self.refresh_integrity(raw_id)?;
+        Ok(path)
+    }
+
+    pub fn load_execution_receipt(&self, raw_id: &str) -> io::Result<ExecutionIdentity> {
+        let directory = self.find_dir(raw_id)?;
+        self.verify_integrity(&directory)?;
+        let text = fs::read_to_string(directory.join("execution.json"))?;
+        serde_json::from_str(&text)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
     }
 
     pub fn save_screenshot(
@@ -221,12 +332,26 @@ impl RawStore {
         screenshot_png: &[u8],
         exit_code: i32,
     ) -> std::io::Result<PathBuf> {
+        validate_raw_id(raw_id)?;
+        self.validate_namespace()?;
+        if screenshot_png.len() > MAX_RAW_WRITE_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "screenshot exceeds maximum raw artifact size of {MAX_RAW_WRITE_BYTES} bytes"
+                ),
+            ));
+        }
         let date = chrono::Local::now().format("%Y-%m-%d").to_string();
         let day_dir = self.root.join(date);
         let dir = day_dir.join(raw_id);
+        reject_path_components(&self.root)?;
+        reject_path_components(&day_dir)?;
         fs::create_dir_all(&day_dir)?;
         restrict_directory(&self.root)?;
         restrict_directory(&day_dir)?;
+        reject_symlink(&self.root)?;
+        reject_symlink(&day_dir)?;
         cleanup_stale_raw_staging(&self.root);
         let staging_dir = day_dir.join(format!(
             ".tmp-{}-{}-{:08x}",
@@ -236,6 +361,19 @@ impl RawStore {
         ));
         fs::create_dir(&staging_dir)?;
         restrict_directory(&staging_dir)?;
+
+        // Bound direct callers too; rejected screenshots and text streams use
+        // the same capture cap so no artifact grows without limit.
+        let stdout_bytes = if stdout.len() > MAX_RAW_WRITE_BYTES {
+            &stdout[..MAX_RAW_WRITE_BYTES]
+        } else {
+            stdout
+        };
+        let stderr_bytes = if stderr.len() > MAX_RAW_WRITE_BYTES {
+            &stderr[..MAX_RAW_WRITE_BYTES]
+        } else {
+            stderr
+        };
 
         let now = chrono::Local::now().timestamp_millis() as u64;
         let meta = RunMeta {
@@ -264,14 +402,20 @@ impl RawStore {
         };
 
         let staged = (|| -> std::io::Result<()> {
-            write_private(&staging_dir.join("stdout.log"), stdout)?;
-            write_private(&staging_dir.join("stderr.log"), stderr)?;
+            write_private(&staging_dir.join("stdout.log"), stdout_bytes)?;
+            write_private(&staging_dir.join("stderr.log"), stderr_bytes)?;
             write_private(&staging_dir.join("command.txt"), command.as_bytes())?;
             if !screenshot_png.is_empty() {
                 write_private(&staging_dir.join("screenshot.png"), screenshot_png)?;
             }
             let meta_json = serde_json::to_string_pretty(&meta)?;
-            write_private(&staging_dir.join("meta.json"), meta_json.as_bytes())?;
+            write_private_text_atomic(&staging_dir.join("meta.json"), &meta_json)?;
+            write_integrity_manifest(
+                &staging_dir,
+                raw_id,
+                &meta.workspace,
+                self.namespace.as_ref(),
+            )?;
             fs::rename(&staging_dir, &dir)
         })();
         if let Err(error) = staged {
@@ -288,26 +432,41 @@ impl RawStore {
     }
 
     pub fn find_dir(&self, raw_id: &str) -> io::Result<PathBuf> {
+        validate_raw_id(raw_id)?;
+        self.validate_namespace()?;
         let trimmed = raw_id.trim();
-        if trimmed.is_empty()
-            || trimmed.contains('/')
-            || trimmed.contains('\\')
-            || trimmed == "."
-            || trimmed == ".."
-            || trimmed.contains("..")
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "invalid raw id",
-            ));
-        }
+        // A caller-provided recovery root is part of the trust boundary. Do
+        // not follow a symlinked root or date directory while resolving an id.
+        reject_path_components(&self.root)?;
+        reject_symlink(&self.root)?;
         for day in fs::read_dir(&self.root)? {
             let day = day?;
-            if !day.file_type()?.is_dir() {
+            let day_path = day.path();
+            let day_metadata = fs::symlink_metadata(&day_path)?;
+            if day_metadata.file_type().is_symlink() {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "raw store date directory must not be a symlink",
+                ));
+            }
+            if !day_metadata.file_type().is_dir() {
                 continue;
             }
-            let candidate = day.path().join(trimmed);
-            if candidate.is_dir() {
+            let candidate = day_path.join(trimmed);
+            if fs::symlink_metadata(&candidate)
+                .map(|metadata| metadata.file_type().is_symlink())
+                .unwrap_or(false)
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "raw artifact directory must not be a symlink",
+                ));
+            }
+            if fs::symlink_metadata(&candidate)
+                .map(|metadata| metadata.file_type().is_dir())
+                .unwrap_or(false)
+            {
+                self.enforce_namespace(&candidate)?;
                 return Ok(candidate);
             }
         }
@@ -319,6 +478,7 @@ impl RawStore {
 
     pub fn load_meta(&self, raw_id: &str) -> io::Result<RunMeta> {
         let dir = self.find_dir(raw_id)?;
+        self.verify_integrity(&dir)?;
         let text = fs::read_to_string(dir.join("meta.json"))?;
         serde_json::from_str(&text)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
@@ -326,7 +486,205 @@ impl RawStore {
 
     pub fn read_file(&self, raw_id: &str, file_name: &str) -> io::Result<Vec<u8>> {
         let dir = self.find_dir(raw_id)?;
-        fs::read(dir.join(file_name))
+        validate_file_name(file_name)?;
+        self.verify_integrity(&dir)?;
+        let path = dir.join(file_name);
+        let metadata = fs::symlink_metadata(&path)?;
+        if !metadata.file_type().is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "raw artifact file must not be a symlink or directory",
+            ));
+        }
+        fs::read(path)
+    }
+
+    pub fn load_integrity(&self, raw_id: &str) -> io::Result<serde_json::Value> {
+        let dir = self.find_dir(raw_id)?;
+        self.verify_integrity(&dir)?;
+        let text = fs::read_to_string(dir.join("integrity.json"))?;
+        serde_json::from_str(&text)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+    }
+
+    fn enforce_namespace(&self, directory: &std::path::Path) -> io::Result<()> {
+        let Some(manifest) = self.read_integrity_manifest(directory)? else {
+            if self.namespace.is_some() {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "raw artifact integrity manifest is required for namespaced reads",
+                ));
+            }
+            return Ok(());
+        };
+        self.validate_manifest_owner(directory, &manifest)
+    }
+
+    fn validate_namespace(&self) -> io::Result<()> {
+        let Some(namespace) = &self.namespace else {
+            return Ok(());
+        };
+        if namespace.workspace_id.trim().is_empty()
+            || namespace.session_id.trim().is_empty()
+            || namespace.workspace_id.contains('\0')
+            || namespace.session_id.contains('\0')
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "raw store namespace requires non-empty workspace and session ids",
+            ));
+        }
+        Ok(())
+    }
+
+    fn verify_integrity(&self, directory: &std::path::Path) -> io::Result<()> {
+        let Some(manifest) = self.read_integrity_manifest(directory)? else {
+            // Legacy unscoped artifacts predate manifests; governed namespaced
+            // stores fail closed because `enforce_namespace` requires one.
+            if self.namespace.is_some() {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "raw artifact integrity manifest is required for namespaced reads",
+                ));
+            }
+            return Ok(());
+        };
+        self.validate_manifest_owner(directory, &manifest)?;
+
+        let mut actual_files = BTreeMap::new();
+        for entry in fs::read_dir(directory)? {
+            let entry = entry?;
+            let file_name = entry.file_name().to_string_lossy().to_string();
+            if file_name == "integrity.json" {
+                continue;
+            }
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path)?;
+            if !metadata.file_type().is_file() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("raw artifact entry is not regular: {file_name}"),
+                ));
+            }
+            validate_file_name(&file_name)?;
+            actual_files.insert(file_name, integrity_hash(&fs::read(path)?));
+        }
+
+        if actual_files.keys().ne(manifest.files.keys()) {
+            let extras = actual_files
+                .keys()
+                .filter(|name| !manifest.files.contains_key(*name))
+                .cloned()
+                .collect::<Vec<_>>();
+            let missing = manifest
+                .files
+                .keys()
+                .filter(|name| !actual_files.contains_key(*name))
+                .cloned()
+                .collect::<Vec<_>>();
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "raw artifact integrity manifest file set mismatch (extra={extras:?}, missing={missing:?})"
+                ),
+            ));
+        }
+
+        for (file_name, expected) in manifest.files {
+            validate_file_name(&file_name)?;
+            let path = directory.join(&file_name);
+            let metadata = fs::symlink_metadata(&path)?;
+            if !metadata.file_type().is_file() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("raw artifact file is not regular: {file_name}"),
+                ));
+            }
+            let actual = integrity_hash(&fs::read(path)?);
+            if actual != expected {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("raw artifact integrity mismatch: {file_name}"),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn read_integrity_manifest(
+        &self,
+        directory: &std::path::Path,
+    ) -> io::Result<Option<IntegrityManifest>> {
+        let path = directory.join("integrity.json");
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "raw integrity manifest must be a regular file",
+            ));
+        }
+        let text = fs::read_to_string(path)?;
+        let manifest: IntegrityManifest = serde_json::from_str(&text)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        if manifest.schema_version != 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unsupported raw integrity schema version",
+            ));
+        }
+        Ok(Some(manifest))
+    }
+
+    fn validate_manifest_owner(
+        &self,
+        directory: &std::path::Path,
+        manifest: &IntegrityManifest,
+    ) -> io::Result<()> {
+        let expected_raw_id = directory
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "raw artifact directory has no valid id",
+                )
+            })?;
+        validate_raw_id(expected_raw_id).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("raw artifact directory id is invalid: {error}"),
+            )
+        })?;
+        if manifest.raw_id != expected_raw_id {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "raw integrity manifest id does not match artifact directory",
+            ));
+        }
+        if let Some(namespace) = &self.namespace {
+            if manifest.workspace_id != namespace.workspace_id
+                || manifest.session_id != namespace.session_id
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "raw artifact namespace does not match requested workspace/session",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn refresh_integrity(&self, raw_id: &str) -> io::Result<()> {
+        let directory = self.find_dir(raw_id)?;
+        let meta = fs::read_to_string(directory.join("meta.json"))?;
+        let workspace = serde_json::from_str::<RunMeta>(&meta)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
+            .workspace;
+        write_integrity_manifest(&directory, raw_id, &workspace, self.namespace.as_ref())
     }
 
     pub fn list(&self) -> io::Result<Vec<RawEntry>> {
@@ -334,26 +692,67 @@ impl RawStore {
         if !self.root.exists() {
             return Ok(entries);
         }
+        self.validate_namespace()?;
+        reject_path_components(&self.root)?;
+        reject_symlink(&self.root)?;
         for day in fs::read_dir(&self.root)? {
             let day = day?;
-            if !day.file_type()?.is_dir() {
+            let day_path = day.path();
+            let day_metadata = fs::symlink_metadata(&day_path)?;
+            if day_metadata.file_type().is_symlink() {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "raw store date directory must not be a symlink",
+                ));
+            }
+            if !day_metadata.file_type().is_dir() {
                 continue;
             }
-            for raw in fs::read_dir(day.path())? {
+            for raw in fs::read_dir(day_path)? {
                 let raw = raw?;
-                if !raw.file_type()?.is_dir() {
+                let raw_path = raw.path();
+                let raw_metadata = fs::symlink_metadata(&raw_path)?;
+                if raw_metadata.file_type().is_symlink() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "raw artifact directory must not be a symlink",
+                    ));
+                }
+                if !raw_metadata.file_type().is_dir() {
                     continue;
                 }
                 let raw_id = raw.file_name().to_string_lossy().to_string();
                 if raw_id.starts_with(".tmp-") {
                     continue;
                 }
-                let meta = fs::read_to_string(raw.path().join("meta.json"))
+                validate_raw_id(&raw_id).map_err(|error| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("invalid raw artifact id {raw_id:?}: {error}"),
+                    )
+                })?;
+                if self.namespace.is_some() {
+                    match self.verify_integrity(&raw_path) {
+                        Ok(()) => {}
+                        Err(error)
+                            if matches!(
+                                error.kind(),
+                                io::ErrorKind::PermissionDenied | io::ErrorKind::NotFound
+                            ) =>
+                        {
+                            continue
+                        }
+                        Err(error) => return Err(error),
+                    }
+                } else if self.read_integrity_manifest(&raw_path)?.is_some() {
+                    self.verify_integrity(&raw_path)?;
+                }
+                let meta = fs::read_to_string(raw_path.join("meta.json"))
                     .ok()
                     .and_then(|text| serde_json::from_str::<RunMeta>(&text).ok());
                 entries.push(RawEntry {
                     raw_id,
-                    path: raw.path(),
+                    path: raw_path,
                     meta,
                 });
             }
@@ -442,7 +841,11 @@ impl RawStore {
     }
 
     fn write_prune_stamp(&self) {
-        if fs::create_dir_all(&self.root).is_err() || restrict_directory(&self.root).is_err() {
+        if reject_path_components(&self.root).is_err()
+            || fs::create_dir_all(&self.root).is_err()
+            || restrict_directory(&self.root).is_err()
+            || reject_symlink_if_exists(&self.root.join(".last-auto-prune")).is_err()
+        {
             return;
         }
         let now = SystemTime::now()
@@ -458,6 +861,9 @@ impl RawStore {
 
 fn cleanup_stale_raw_staging(root: &std::path::Path) {
     let stamp = root.join(".last-staging-cleanup");
+    if reject_path_components(root).is_err() || reject_symlink_if_exists(&stamp).is_err() {
+        return;
+    }
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
@@ -508,6 +914,203 @@ fn cleanup_stale_raw_staging(root: &std::path::Path) {
     // The sweep is best-effort; a fresh stamp is written only after the walk,
     // so concurrent disappearance retries on the next save.
     let _ = write_private(&stamp, now.to_string().as_bytes());
+}
+
+fn reject_symlink(path: &std::path::Path) -> io::Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("raw store path must not be a symlink: {}", path.display()),
+        ));
+    }
+    Ok(())
+}
+
+/// Validate the target and, when it does not exist yet, the nearest existing
+/// ancestor before a create/write operation. Calling `create_dir_all` first
+/// would follow a symlinked raw-output root or date directory before the later
+/// point check gets a chance to reject it. Do not walk beyond that ancestor:
+/// macOS exposes `/var` as a symlink to `/private/var`, and benign system
+/// aliases outside the configured raw-store boundary must remain usable.
+fn reject_path_components(path: &std::path::Path) -> io::Result<()> {
+    let mut current = path;
+    loop {
+        match fs::symlink_metadata(current) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        format!(
+                            "raw store path must not be a symlink: {}",
+                            current.display()
+                        ),
+                    ));
+                }
+                return Ok(());
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        current = current.parent().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "raw store path has no existing ancestor: {}",
+                    path.display()
+                ),
+            )
+        })?;
+    }
+}
+
+fn validate_file_name(file_name: &str) -> io::Result<()> {
+    if file_name.is_empty()
+        || file_name == "."
+        || file_name == ".."
+        || file_name.contains('/')
+        || file_name.contains('\\')
+        || file_name.contains("..")
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid raw artifact file name",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_raw_id(raw_id: &str) -> io::Result<()> {
+    let trimmed = raw_id.trim();
+    if trimmed.is_empty()
+        || trimmed == "."
+        || trimmed == ".."
+        || trimmed.contains("..")
+        || trimmed.contains('/')
+        || trimmed.contains('\\')
+        || trimmed.chars().any(char::is_whitespace)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid raw id",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_compact_path(
+    directory: &std::path::Path,
+    compact_path: &std::path::Path,
+) -> io::Result<()> {
+    let file_name = compact_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "compact artifact path must name one file",
+            )
+        })?;
+    validate_file_name(file_name)?;
+    if matches!(file_name, "integrity.json" | "meta.json" | "execution.json") {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "compact artifact path uses a reserved raw artifact file name",
+        ));
+    }
+    let parent = compact_path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "compact artifact path must be inside the raw artifact directory",
+        )
+    })?;
+    let expected = directory.canonicalize()?;
+    let actual = parent.canonicalize()?;
+    if actual != expected {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "compact artifact path escapes the raw artifact directory",
+        ));
+    }
+    Ok(())
+}
+
+fn reject_symlink_if_exists(path: &std::path::Path) -> io::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() {
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!(
+                        "raw artifact target must not be a symlink: {}",
+                        path.display()
+                    ),
+                ))
+            } else if !metadata.file_type().is_file() {
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!(
+                        "raw artifact target must be a regular file: {}",
+                        path.display()
+                    ),
+                ))
+            } else {
+                Ok(())
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn integrity_hash(bytes: &[u8]) -> String {
+    // Use the repository's stable FNV-1a helper without a new dependency; the
+    // manifest detects tampering/corruption, not cryptographic authenticity.
+    let mut hash: u64 = 14695981039346656037;
+    for byte in bytes {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(1099511628211);
+    }
+    format!("fnv1a64:{hash:016x}")
+}
+
+fn write_integrity_manifest(
+    directory: &std::path::Path,
+    raw_id: &str,
+    workspace: &std::path::Path,
+    namespace: Option<&RawNamespace>,
+) -> io::Result<()> {
+    let mut files = BTreeMap::new();
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name == "integrity.json" || name.starts_with('.') {
+            continue;
+        }
+        let metadata = fs::symlink_metadata(entry.path())?;
+        validate_file_name(&name)?;
+        if !metadata.file_type().is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("raw artifact entry must be a regular file: {name}"),
+            ));
+        }
+        files.insert(name, integrity_hash(&fs::read(entry.path())?));
+    }
+    let manifest = IntegrityManifest {
+        schema_version: 1,
+        raw_id: raw_id.to_string(),
+        workspace_id: namespace
+            .map(|value| value.workspace_id.clone())
+            .unwrap_or_else(|| workspace.to_string_lossy().to_string()),
+        session_id: namespace
+            .map(|value| value.session_id.clone())
+            .unwrap_or_default(),
+        files,
+    };
+    let serialized = serde_json::to_string_pretty(&manifest)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    write_private_text_atomic(&directory.join("integrity.json"), &serialized)
 }
 
 /// Resolve an age signal for a raw entry path: parent `YYYY-MM-DD` folder midnight
@@ -562,7 +1165,7 @@ impl Default for RawStore {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_yyyy_mm_dd_midnight_utc, RawRun, RawStore, RunMeta};
+    use super::{parse_yyyy_mm_dd_midnight_utc, RawNamespace, RawRun, RawStore, RunMeta};
     use std::path::PathBuf;
 
     fn sample_meta(raw_id: &str) -> RunMeta {
@@ -830,6 +1433,101 @@ mod tests {
     }
 
     #[test]
+    fn raw_store_save_rejects_traversal_before_creating_directories() {
+        let root = crate::test_support::unique_temp_dir("keel-raw-save-traversal");
+        let store = RawStore::with_root(root.to_path_buf());
+        let mut meta = sample_meta("../escaped");
+        let error = store
+            .save(
+                &mut meta,
+                &RawRun {
+                    stdout: b"must not write".to_vec(),
+                    stderr: Vec::new(),
+                    exit_code: 0,
+                },
+            )
+            .expect_err("save must reject an untrusted raw id");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(!root.join("2026-05-12").exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn raw_store_compact_path_must_stay_inside_the_raw_artifact() {
+        let root = crate::test_support::unique_temp_dir("keel-raw-compact-scope");
+        let store = RawStore::with_root(root.to_path_buf());
+        let raw_id = "20260512-143012-compact0001";
+        let mut meta = sample_meta(raw_id);
+        store
+            .save(
+                &mut meta,
+                &RawRun {
+                    stdout: b"raw".to_vec(),
+                    stderr: Vec::new(),
+                    exit_code: 0,
+                },
+            )
+            .expect("save");
+        meta.compact_path = root.join("outside.txt");
+        let error = store
+            .save_compact(&meta, "must not write")
+            .expect_err("compact path must be scoped");
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(!root.join("outside.txt").exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn screenshot_size_is_bounded_before_publishing_artifact() {
+        let root = crate::test_support::unique_temp_dir("keel-raw-screenshot-cap");
+        let store = RawStore::with_root(root.to_path_buf());
+        let raw_id = "20260512-143012-screenshot0001";
+        let error = store
+            .save_screenshot(
+                raw_id,
+                "keel verify ui",
+                &[],
+                &[],
+                &vec![b'x'; super::MAX_RAW_WRITE_BYTES + 1],
+                0,
+            )
+            .expect_err("oversized screenshot must fail closed");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(!root.join(raw_id).exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn screenshot_text_streams_are_capped_at_the_raw_store_boundary() {
+        let root = crate::test_support::unique_temp_dir("keel-raw-screenshot-stream-cap");
+        let store = RawStore::with_root(root.to_path_buf());
+        let raw_id = "20260512-143012-screenshot0002";
+        let stdout = vec![b'x'; super::MAX_RAW_WRITE_BYTES + 1];
+        let dir = store
+            .save_screenshot(raw_id, "keel verify ui", &stdout, &[], &[], 0)
+            .expect("oversized text stream should be capped");
+        assert_eq!(
+            std::fs::metadata(dir.join("stdout.log"))
+                .expect("stdout metadata")
+                .len() as usize,
+            super::MAX_RAW_WRITE_BYTES
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn compact_save_validates_raw_id_before_empty_path_noop() {
+        let root = crate::test_support::unique_temp_dir("keel-raw-compact-id");
+        let store = RawStore::with_root(root.to_path_buf());
+        let meta = sample_meta("../invalid");
+        let error = store
+            .save_compact(&meta, "compact")
+            .expect_err("invalid raw ids must be rejected even when no path is set");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn prune_older_than_uses_date_folder_not_only_mtime() {
         let root = std::env::temp_dir().join(format!("keel-raw-prune-date-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root); // best-effort pre-clean
@@ -1031,6 +1729,267 @@ mod tests {
             store.auto_prune();
             assert!(!store_root.exists());
         });
+    }
+
+    #[test]
+    fn integrity_manifest_detects_tampering_and_namespace_mismatch() {
+        let root = crate::test_support::unique_temp_dir("keel-raw-integrity");
+        let namespace = RawNamespace {
+            workspace_id: "workspace-a".to_string(),
+            session_id: "session-a".to_string(),
+        };
+        let store = RawStore::with_namespace(root.to_path_buf(), namespace.clone());
+        let raw_id = "20260512-143012-a1b2c3d4";
+        let mut meta = sample_meta(raw_id);
+        meta.workspace = PathBuf::from("workspace-a");
+        store
+            .save(
+                &mut meta,
+                &RawRun {
+                    stdout: b"stable".to_vec(),
+                    stderr: Vec::new(),
+                    exit_code: 0,
+                },
+            )
+            .expect("save");
+        let manifest = store.load_integrity(raw_id).expect("manifest");
+        assert_eq!(manifest["schema_version"], 1);
+        assert_eq!(
+            store
+                .read_file(raw_id, "stdout.log")
+                .expect("authorized read"),
+            b"stable"
+        );
+
+        std::fs::write(meta.raw_path.join("stdout.log"), b"tampered").expect("tamper");
+        let error = store
+            .read_file(raw_id, "stdout.log")
+            .expect_err("tamper must fail closed");
+        assert!(error.to_string().contains("integrity mismatch"));
+
+        let other = RawStore::with_namespace(
+            root.to_path_buf(),
+            RawNamespace {
+                workspace_id: "workspace-b".to_string(),
+                session_id: "session-b".to_string(),
+            },
+        );
+        let error = other.find_dir(raw_id).expect_err("cross namespace read");
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn integrity_manifest_rejects_extra_files_and_directory_id_drift() {
+        let root = crate::test_support::unique_temp_dir("keel-raw-integrity-shape");
+        let store = RawStore::with_root(root.to_path_buf());
+        let raw_id = "20260512-143012-shape0001";
+        let mut meta = sample_meta(raw_id);
+        store
+            .save(
+                &mut meta,
+                &RawRun {
+                    stdout: b"stable".to_vec(),
+                    stderr: Vec::new(),
+                    exit_code: 0,
+                },
+            )
+            .expect("save");
+
+        std::fs::write(meta.raw_path.join("unexpected.log"), b"unlisted").expect("extra file");
+        let error = store
+            .load_meta(raw_id)
+            .expect_err("unlisted files must fail closed");
+        assert!(error.to_string().contains("file set mismatch"));
+        std::fs::remove_file(meta.raw_path.join("unexpected.log")).expect("remove extra");
+
+        let integrity_path = meta.raw_path.join("integrity.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&integrity_path).expect("manifest text"))
+                .expect("manifest json");
+        manifest["raw_id"] = serde_json::Value::String("different-id".to_string());
+        std::fs::write(
+            &integrity_path,
+            serde_json::to_string_pretty(&manifest).expect("serialize manifest"),
+        )
+        .expect("rewrite manifest");
+        let error = store
+            .load_meta(raw_id)
+            .expect_err("manifest id drift must fail closed");
+        assert!(error.to_string().contains("manifest id"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn namespaced_list_does_not_expose_other_session_entries() {
+        let root = crate::test_support::unique_temp_dir("keel-raw-list-namespace");
+        let raw_id = "20260512-143012-list000001";
+        let mut meta = sample_meta(raw_id);
+        meta.workspace = PathBuf::from("workspace-a");
+        RawStore::with_namespace(
+            root.to_path_buf(),
+            RawNamespace {
+                workspace_id: "workspace-a".to_string(),
+                session_id: "session-a".to_string(),
+            },
+        )
+        .save(
+            &mut meta,
+            &RawRun {
+                stdout: b"owned".to_vec(),
+                stderr: Vec::new(),
+                exit_code: 0,
+            },
+        )
+        .expect("save owned entry");
+
+        let other = RawStore::with_namespace(
+            root.to_path_buf(),
+            RawNamespace {
+                workspace_id: "workspace-b".to_string(),
+                session_id: "session-b".to_string(),
+            },
+        );
+        assert!(other.list().expect("list other namespace").is_empty());
+        let owned = RawStore::with_namespace(
+            root.to_path_buf(),
+            RawNamespace {
+                workspace_id: "workspace-a".to_string(),
+                session_id: "session-a".to_string(),
+            },
+        )
+        .list()
+        .expect("list owner namespace");
+        assert_eq!(
+            owned
+                .iter()
+                .map(|entry| entry.raw_id.as_str())
+                .collect::<Vec<_>>(),
+            [raw_id]
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn unscoped_legacy_artifacts_remain_readable_without_a_manifest() {
+        let root = crate::test_support::unique_temp_dir("keel-raw-legacy");
+        let raw_id = "20260512-143012-legacy0001";
+        let directory = root.join("2026-05-12").join(raw_id);
+        std::fs::create_dir_all(&directory).expect("legacy directory");
+        let mut meta = sample_meta(raw_id);
+        meta.raw_path = directory.clone();
+        std::fs::write(
+            directory.join("meta.json"),
+            serde_json::to_string_pretty(&meta).expect("meta json"),
+        )
+        .expect("meta");
+        std::fs::write(directory.join("stdout.log"), b"legacy output").expect("stdout");
+
+        let unscoped = RawStore::with_root(root.to_path_buf());
+        assert_eq!(
+            unscoped.load_meta(raw_id).expect("legacy metadata").raw_id,
+            raw_id
+        );
+        assert_eq!(
+            unscoped
+                .read_file(raw_id, "stdout.log")
+                .expect("legacy output"),
+            b"legacy output"
+        );
+
+        let namespaced = RawStore::with_namespace(
+            root.to_path_buf(),
+            RawNamespace {
+                workspace_id: "workspace".to_string(),
+                session_id: "session".to_string(),
+            },
+        );
+        let error = namespaced
+            .load_meta(raw_id)
+            .expect_err("governed reads must require a manifest");
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn raw_artifact_file_names_are_scoped() {
+        let root = crate::test_support::unique_temp_dir("keel-raw-file-scope");
+        let store = RawStore::with_root(root.to_path_buf());
+        let raw_id = "20260512-143012-a1b2c3d4";
+        let mut meta = sample_meta(raw_id);
+        store
+            .save(
+                &mut meta,
+                &RawRun {
+                    stdout: b"ok".to_vec(),
+                    stderr: Vec::new(),
+                    exit_code: 0,
+                },
+            )
+            .expect("save");
+        for file_name in ["../meta.json", "nested/file", "..\\meta.json"] {
+            let error = store
+                .read_file(raw_id, file_name)
+                .expect_err("path traversal must fail");
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn raw_store_rejects_symlinked_root_and_date_before_writing() {
+        use std::os::unix::fs::symlink;
+
+        let base = crate::test_support::unique_temp_dir("keel-raw-symlink-write");
+        let target = base.join("target");
+        std::fs::create_dir_all(&target).expect("target");
+
+        let root_link = base.join("root-link");
+        symlink(&target, &root_link).expect("root symlink");
+        let store = RawStore::with_root(root_link.clone());
+        let mut meta = sample_meta("symlink-root");
+        let error = store
+            .save(
+                &mut meta,
+                &RawRun {
+                    stdout: b"must not write".to_vec(),
+                    stderr: Vec::new(),
+                    exit_code: 0,
+                },
+            )
+            .expect_err("symlinked root must fail closed");
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            std::fs::read_dir(&target).expect("target entries").count(),
+            0
+        );
+
+        let root = base.join("root");
+        std::fs::create_dir_all(&root).expect("root");
+        let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let date_target = base.join("date-target");
+        std::fs::create_dir_all(&date_target).expect("date target");
+        symlink(&date_target, root.join(&date)).expect("date symlink");
+        let store = RawStore::with_root(root);
+        let mut meta = sample_meta("symlink-date");
+        let error = store
+            .save(
+                &mut meta,
+                &RawRun {
+                    stdout: b"must not write".to_vec(),
+                    stderr: Vec::new(),
+                    exit_code: 0,
+                },
+            )
+            .expect_err("symlinked date directory must fail closed");
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            std::fs::read_dir(&date_target)
+                .expect("date target entries")
+                .count(),
+            0
+        );
     }
 
     #[cfg(windows)]

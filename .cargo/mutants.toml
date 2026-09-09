@@ -9,6 +9,7 @@ examine_globs = [
     "rust/crates/keel/src/proxy/**/*.rs",
     "rust/crates/keel/src/mcp/**/*.rs",
     "rust/crates/keel/src/plan.rs",
+    "rust/crates/keel/src/utility/plan.rs",
     "rust/crates/keel/src/research.rs",
     "rust/crates/keel/src/ticket.rs",
     "rust/crates/keel/src/warning_engine.rs",

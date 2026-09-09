@@ -1,4 +1,6 @@
 use super::*;
+use crate::proxy::execution::ExecutionStatus;
+use crate::proxy::raw_store::RawStore;
 use crate::runner::hook_lifecycle::completeness_marker_record_for_workspace;
 use crate::runtime::resolve_repository_root;
 use std::fs;
@@ -39,6 +41,12 @@ pub(crate) fn collect_review_gate_results(
     gate_results.push(slop_gate(repository_root, base_ref, surface_name, scan_all));
     gate_results.push(flow_check_gate(repository_root, base_ref, surface_name));
     gate_results.push(completeness_check_gate(
+        repository_root,
+        base_ref,
+        surface_name,
+    ));
+    gate_results.push(context_policy_gate(repository_root));
+    gate_results.push(execution_evidence_gate(
         repository_root,
         base_ref,
         surface_name,
@@ -109,6 +117,213 @@ pub(crate) fn warnings_gate(repository_root: &Path, claude_home: &str) -> GateRe
             details: Some(format!("warning ledger unavailable: {error}")),
         },
     }
+}
+
+/// Blocking budget gate for the fixed context surfaces. The ledger is the
+/// measurement owner; review only interprets its status and reports the
+/// offending rows without recomputing token counts.
+pub(crate) fn context_policy_gate(repository_root: &Path) -> GateResult {
+    let ledger = crate::utility::fixed_context::collect(repository_root);
+    let exceeded = ledger
+        .entries
+        .iter()
+        .filter(|entry| entry.status() == "exceeded")
+        .map(|entry| {
+            format!(
+                "{}={} > {}",
+                entry.surface, entry.actual_tokens, entry.budget_tokens
+            )
+        })
+        .collect::<Vec<_>>();
+    let missing = ledger
+        .entries
+        .iter()
+        .filter(|entry| entry.status() == "source_missing")
+        .map(|entry| entry.surface)
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return GateResult {
+            name: "context_policy".to_string(),
+            status: GateStatus::Blocked,
+            blocking: true,
+            details: Some(format!(
+                "fixed context source(s) unavailable: {}; rerun the context inventory before review",
+                missing.join(", ")
+            )),
+        };
+    }
+    if !exceeded.is_empty() {
+        return GateResult {
+            name: "context_policy".to_string(),
+            status: GateStatus::Fail,
+            blocking: true,
+            details: Some(format!(
+                "fixed context budget exceeded: {}; reratify the budget or reduce the surface",
+                exceeded.join(", ")
+            )),
+        };
+    }
+    GateResult {
+        name: "context_policy".to_string(),
+        status: GateStatus::Pass,
+        blocking: true,
+        details: Some(format!(
+            "fixed context ledger within budget ({} surfaces; tokenizer {})",
+            ledger.entries.len(),
+            crate::utility::fixed_context::TOKENIZER
+        )),
+    }
+}
+
+/// Validate execution receipts when a change touches the governed execution
+/// boundary. Historical artifacts written before RawStore integrity manifests
+/// are a compatibility lane, not governed candidates; newly-written artifacts
+/// carry the manifest and must also carry a valid receipt. Explicit
+/// bypass/unknown states block, and a clean set of receipts passes. A change
+/// unrelated to execution is N/A.
+pub(crate) fn execution_evidence_gate(
+    repository_root: &Path,
+    base_ref: &str,
+    surface_name: &str,
+) -> GateResult {
+    let result = |status, blocking, details: String| GateResult {
+        name: "execution_evidence".to_string(),
+        status,
+        blocking,
+        details: Some(details),
+    };
+    if surface_name != "pre-pr" {
+        return result(
+            GateStatus::NotApplicable,
+            false,
+            "execution evidence is required on pre-PR only".to_string(),
+        );
+    }
+    let touched = match reviewed_existing_sources(repository_root, base_ref) {
+        Ok(touched) => touched,
+        Err(error) => return result(GateStatus::Blocked, true, error),
+    };
+    let governs_execution = touched.iter().any(|path| {
+        path.ends_with("proxy/run.rs")
+            || path.ends_with("proxy/execution.rs")
+            || path.ends_with("mcp/http.rs")
+            || path.ends_with("mcp/mod.rs")
+            || path.ends_with("mcp/tools.rs")
+    });
+    if !governs_execution {
+        return result(
+            GateStatus::NotApplicable,
+            false,
+            "no governed execution boundary modified".to_string(),
+        );
+    }
+
+    let workspace_id = canonical_workspace_id(repository_root);
+    let store = RawStore::new();
+    let entries = match store.list() {
+        Ok(entries) => entries,
+        Err(error) => {
+            return result(
+                GateStatus::Blocked,
+                true,
+                format!("raw execution evidence unavailable: {error}"),
+            )
+        }
+    };
+    let mut candidates = 0usize;
+    let mut missing = 0usize;
+    let mut invalid = Vec::new();
+    let mut unprotected = Vec::new();
+    for entry in entries {
+        let Some(meta) = entry.meta else { continue };
+        if !workspace_ids_match(&meta.workspace.to_string_lossy(), &workspace_id) {
+            continue;
+        }
+        // Legacy entries without the new integrity marker cannot prove they
+        // crossed this boundary; do not classify pre-existing history as new.
+        if !entry.path.join("integrity.json").is_file() {
+            continue;
+        }
+        candidates += 1;
+        match store.load_execution_receipt(&entry.raw_id) {
+            Ok(receipt) => {
+                if receipt.workspace_id.trim().is_empty()
+                    || receipt.session_id.trim().is_empty()
+                    || receipt.execution_id.trim().is_empty()
+                    || receipt.raw_artifact_id.as_deref() != Some(entry.raw_id.as_str())
+                {
+                    invalid.push(entry.raw_id.clone());
+                }
+                if receipt.result_state == ExecutionStatus::Bypassed
+                    || receipt.result_state == ExecutionStatus::NotIntercepted
+                    || receipt.result_state == ExecutionStatus::Unknown
+                {
+                    unprotected.push(format!(
+                        "{}={}",
+                        entry.raw_id,
+                        receipt.result_state.as_str()
+                    ));
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                missing += 1;
+            }
+            Err(error) => invalid.push(format!("{} ({error})", entry.raw_id)),
+        }
+    }
+    if !unprotected.is_empty() {
+        return result(
+            GateStatus::Fail,
+            true,
+            format!(
+                "unprotected execution receipt state(s): {}; bypass/unknown must be explicit and repaired",
+                unprotected.iter().take(5).cloned().collect::<Vec<_>>().join(", ")
+            ),
+        );
+    }
+    if !invalid.is_empty() || missing > 0 {
+        return result(
+            GateStatus::Fail,
+            true,
+            format!(
+                "execution evidence incomplete for workspace {}: {} missing receipt(s), invalid receipt(s): {}; run a governed smoke and preserve its receipt",
+                workspace_id,
+                missing,
+                invalid.iter().take(5).cloned().collect::<Vec<_>>().join(", ")
+            ),
+        );
+    }
+    if candidates == 0 {
+        return result(
+            GateStatus::Warn,
+            false,
+            format!(
+                "no raw execution receipt observed for workspace {}; run a governed smoke before delivery",
+                workspace_id
+            ),
+        );
+    }
+    result(
+        GateStatus::Pass,
+        true,
+        format!("{} governed execution receipt(s) validated", candidates),
+    )
+}
+
+fn canonical_workspace_id(path: &Path) -> String {
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let mut value = canonical.to_string_lossy().replace('\\', "/");
+    while value.ends_with('/') && value.len() > 1 {
+        value.pop();
+    }
+    if cfg!(windows) {
+        value.make_ascii_lowercase();
+    }
+    value
+}
+
+fn workspace_ids_match(left: &str, right: &str) -> bool {
+    canonical_workspace_id(Path::new(left)) == canonical_workspace_id(Path::new(right))
 }
 
 pub(crate) fn run_review_surface_command(

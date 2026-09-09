@@ -45,6 +45,13 @@ impl McpCatalogProfile {
             _ => Self::Tiered,
         }
     }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Tiered => "core",
+            Self::Full => "full",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,6 +79,63 @@ pub(crate) fn tools_list_context_snapshot() -> ToolsListContextSnapshot {
         eager_tool_count,
         deferred_tool_count,
         catalog_tokens: crate::proxy::token_meter::TokenMeter::count_text(&serialized),
+    }
+}
+
+pub(crate) fn tools_page_size() -> usize {
+    tools::tools_page_size()
+}
+
+pub(crate) fn tools_discovery_snapshot() -> serde_json::Value {
+    tools::discovery_snapshot()
+}
+
+pub(crate) fn current_mcp_session_id() -> Option<String> {
+    ["CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID"]
+        .iter()
+        .find_map(|name| {
+            env::var(name)
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        })
+}
+
+/// Authoritative identity for one MCP request. HTTP sessions come from the
+/// server-issued `MCP-Session-Id` header; stdio falls back to the host session
+/// environment. The workspace is always the server process cwd. Client
+/// arguments may describe a requested identity, but they never establish it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct McpRequestContext {
+    pub(crate) session_id: String,
+    pub(crate) workspace_id: String,
+    pub(crate) request_id: Option<String>,
+}
+
+impl McpRequestContext {
+    pub(crate) fn authoritative(http_session_id: Option<&str>) -> Self {
+        let session_id = http_session_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .or_else(current_mcp_session_id)
+            .unwrap_or_else(|| "default".to_string());
+        let workspace_id = std::env::current_dir()
+            .ok()
+            .and_then(|path| path.canonicalize().ok().or(Some(path)))
+            .map(|path| path.to_string_lossy().to_string())
+            .unwrap_or_else(|| "unknown-workspace".to_string());
+        Self {
+            session_id,
+            workspace_id,
+            request_id: None,
+        }
+    }
+
+    fn with_request_id(&self, request_id: Option<&Value>) -> Self {
+        let mut scoped = self.clone();
+        scoped.request_id = request_id.map(ToString::to_string);
+        scoped
     }
 }
 
@@ -131,8 +195,39 @@ pub fn run_mcp_command(
     match subcommand {
         // Owned stdin reader thread so responses flush while stdin is blocked
         // waiting for the next frame (true full-duplex on the JSON-RPC pipe).
-        "serve" => serve_stdio_owned_stdin(standard_output, standard_error),
-        "serve-http" => http::serve_http(&arguments[1..], standard_output, standard_error),
+        "serve" | "serve-http" => {
+            let (profile, remaining) = match profile_arguments(&arguments[1..]) {
+                Ok(parsed) => parsed,
+                Err(error) => {
+                    let _ = writeln!(standard_error, "mcp: {error}");
+                    return 1;
+                }
+            };
+            let previous = env::var("KEEL_MCP_CATALOG_PROFILE").ok();
+            if let Some(profile) = profile {
+                env::set_var("KEEL_MCP_CATALOG_PROFILE", profile.as_str());
+            }
+            let result = if subcommand == "serve" {
+                if !remaining.is_empty() {
+                    let _ = writeln!(
+                        standard_error,
+                        "mcp serve: unexpected arguments: {}",
+                        remaining.join(" ")
+                    );
+                    1
+                } else {
+                    serve_stdio_owned_stdin(standard_output, standard_error)
+                }
+            } else {
+                http::serve_http(&remaining, standard_output, standard_error)
+            };
+            match previous {
+                Some(value) => env::set_var("KEEL_MCP_CATALOG_PROFILE", value),
+                None => env::remove_var("KEEL_MCP_CATALOG_PROFILE"),
+            }
+            result
+        }
+        "discover" => run_discover_command(&arguments[1..], standard_output, standard_error),
         "" | "help" | "--help" | "-h" => {
             render_mcp_help(standard_output);
             0
@@ -148,7 +243,15 @@ pub fn run_mcp_command(
 fn render_mcp_help(standard_output: &mut dyn Write) {
     let _ = writeln!(standard_output, "Usage:");
     let _ = writeln!(standard_output, "  keel mcp serve");
-    let _ = writeln!(standard_output, "  keel mcp serve-http [--bind HOST:PORT]");
+    let _ = writeln!(standard_output, "  keel mcp serve [--profile core|full]");
+    let _ = writeln!(
+        standard_output,
+        "  keel mcp serve-http [--bind HOST:PORT] [--profile core|full]"
+    );
+    let _ = writeln!(
+        standard_output,
+        "  keel mcp discover <capability> [--limit N] [--level 0|1|2] [--json]"
+    );
     let _ = writeln!(standard_output);
     let _ = writeln!(
         standard_output,
@@ -204,6 +307,125 @@ fn render_mcp_help(standard_output: &mut dyn Write) {
         standard_output,
         "Resources: {SYSTEM_MAP_RESOURCE_URI}, {RECALL_STATUS_RESOURCE_URI}."
     );
+}
+
+fn profile_arguments(
+    arguments: &[String],
+) -> Result<(Option<McpCatalogProfile>, Vec<String>), String> {
+    let mut profile = None;
+    let mut remaining = Vec::new();
+    let mut index = 0;
+    while index < arguments.len() {
+        match arguments[index].as_str() {
+            "--profile" => {
+                index += 1;
+                let value = arguments
+                    .get(index)
+                    .ok_or_else(|| "--profile requires core or full".to_string())?;
+                profile = Some(match value.trim().to_ascii_lowercase().as_str() {
+                    "core" | "tiered" => McpCatalogProfile::Tiered,
+                    "full" => McpCatalogProfile::Full,
+                    other => {
+                        return Err(format!(
+                            "unsupported profile {other:?}; expected core or full"
+                        ))
+                    }
+                });
+            }
+            other => remaining.push(other.to_string()),
+        }
+        index += 1;
+    }
+    Ok((profile, remaining))
+}
+
+fn run_discover_command(
+    arguments: &[String],
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let mut query = Vec::new();
+    let mut limit = 5usize;
+    let mut level = 1u64;
+    let mut json_output = false;
+    let mut index = 0;
+    while index < arguments.len() {
+        match arguments[index].as_str() {
+            "--json" => json_output = true,
+            "--limit" => {
+                index += 1;
+                let Some(value) = arguments.get(index) else {
+                    let _ = writeln!(standard_error, "mcp discover: --limit requires an integer");
+                    return 1;
+                };
+                match value.parse::<usize>() {
+                    Ok(value) if value > 0 => limit = value.min(20),
+                    _ => {
+                        let _ = writeln!(standard_error, "mcp discover: --limit must be positive");
+                        return 1;
+                    }
+                }
+            }
+            "--level" => {
+                index += 1;
+                let Some(value) = arguments.get(index) else {
+                    let _ = writeln!(standard_error, "mcp discover: --level requires 0, 1, or 2");
+                    return 1;
+                };
+                match value.parse::<u64>() {
+                    Ok(value) if value <= 2 => level = value,
+                    _ => {
+                        let _ =
+                            writeln!(standard_error, "mcp discover: --level must be 0, 1, or 2");
+                        return 1;
+                    }
+                }
+            }
+            value => query.push(value.to_string()),
+        }
+        index += 1;
+    }
+    let query = query.join(" ");
+    let payload = match tools::discover_capabilities(&query, limit, level) {
+        Ok(payload) => payload,
+        Err(error) => {
+            let _ = writeln!(standard_error, "mcp discover: {error}");
+            return 1;
+        }
+    };
+    if json_output {
+        match serde_json::to_string_pretty(&payload) {
+            Ok(text) => {
+                let _ = writeln!(standard_output, "{text}");
+                0
+            }
+            Err(error) => {
+                let _ = writeln!(standard_error, "mcp discover: serialize: {error}");
+                1
+            }
+        }
+    } else {
+        let _ = writeln!(
+            standard_output,
+            "keel mcp discover {:?} (level={}): {} match(es)",
+            query,
+            level,
+            payload["count"].as_u64().unwrap_or(0)
+        );
+        if let Some(capabilities) = payload["capabilities"].as_array() {
+            for capability in capabilities {
+                let _ = writeln!(
+                    standard_output,
+                    "  {} [{}] score={} — {}",
+                    capability["name"].as_str().unwrap_or("unknown"),
+                    capability["category"].as_str().unwrap_or("keel"),
+                    capability["score"].as_str().unwrap_or("0"),
+                    capability["description"].as_str().unwrap_or("")
+                );
+            }
+        }
+        0
+    }
 }
 
 /// Events on the serve loop's multi-producer channel.
@@ -764,11 +986,16 @@ fn run_serve_event_loop(
             let worker_cancellation_key = cancellation_key.clone();
             let worker_cancellation = Arc::clone(&cancellation);
             let request = job.request;
+            let request_context = McpRequestContext::authoritative(None);
             let spawn_result =
                 thread::Builder::new()
                     .name("keel-mcp-req".into())
-                    .spawn(
-                        move || match dispatch_cancellable(&request, &worker_cancellation) {
+                    .spawn(move || {
+                        match dispatch_cancellable_with_context(
+                            &request,
+                            &worker_cancellation,
+                            &request_context,
+                        ) {
                             Some(response) => {
                                 let _ = worker_tx.send(ServeEvent::Response {
                                     value: response,
@@ -784,8 +1011,8 @@ fn run_serve_event_loop(
                                     cancellation: worker_cancellation,
                                 });
                             }
-                        },
-                    );
+                        }
+                    });
             if let Err(error) = spawn_result {
                 in_flight = in_flight.saturating_sub(1);
                 remove_cancellation_registration(
@@ -1037,12 +1264,14 @@ fn write_framed_response(
 /// uses it after framing.
 #[cfg(test)]
 pub fn dispatch(request: &Value) -> Option<Value> {
-    dispatch_cancellable(request, &Arc::new(AtomicBool::new(false)))
+    let context = McpRequestContext::authoritative(None);
+    dispatch_cancellable_with_context(request, &Arc::new(AtomicBool::new(false)), &context)
 }
 
-pub(super) fn dispatch_cancellable(
+pub(super) fn dispatch_cancellable_with_context(
     request: &Value,
     cancellation: &Arc<AtomicBool>,
+    context: &McpRequestContext,
 ) -> Option<Value> {
     if cancellation.load(Ordering::Acquire) {
         return None;
@@ -1081,6 +1310,7 @@ pub(super) fn dispatch_cancellable(
 
     let id = object.get("id").cloned();
     let params = object.get("params").cloned().unwrap_or(Value::Null);
+    let request_context = context.with_request_id(id.as_ref());
 
     // JSON-RPC 2.0 §4.1: a request without `id` is a notification — no
     // An id:null is a valid request and must receive a response.
@@ -1090,13 +1320,13 @@ pub(super) fn dispatch_cancellable(
         // Currently the only meaningful incoming notification is
         // `notifications/initialized`. Other notifications are ignored
         // silently per the spec — they must never produce a response.
-        let _ = handle_method_cancellable(&method, &params, cancellation);
+        let _ = handle_method_cancellable(&method, &params, cancellation, &request_context);
         return None;
     }
 
     let request_id = id.unwrap_or(Value::Null);
     Some(
-        match handle_method_cancellable(&method, &params, cancellation) {
+        match handle_method_cancellable(&method, &params, cancellation, &request_context) {
             Ok(result) => success_response(request_id, result),
             Err(MethodError { code, message }) => error_response(request_id, code, &message),
         },
@@ -1110,17 +1340,65 @@ fn handle_method_cancellable(
     method: &str,
     params: &Value,
     cancellation: &Arc<AtomicBool>,
+    context: &McpRequestContext,
 ) -> Result<Value, MethodError> {
     match method {
         "initialize" => Ok(handle_initialize(params)),
         "notifications/initialized" => Ok(Value::Null),
         "ping" => Ok(json!({})),
-        "tools/list" => Ok(tools::handle_tools_list()),
-        "tools/call" => {
-            tools::handle_tools_call_cancellable(params, Some(Arc::clone(cancellation)))
+        "tools/list" => {
+            tools::handle_tools_list_for_profile_params(McpCatalogProfile::from_env(), params)
+                .map_err(|message| MethodError {
+                    code: JSON_RPC_INVALID_PARAMS,
+                    message,
+                })
+        }
+        "tools/call" => tools::handle_tools_call_cancellable_with_context(
+            params,
+            Some(Arc::clone(cancellation)),
+            context.clone(),
+        ),
+        "keel/discover" => {
+            let query = params
+                .get("query")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let limit = params
+                .get("limit")
+                .and_then(Value::as_u64)
+                .unwrap_or(5)
+                .clamp(1, 20) as usize;
+            let level = params.get("level").and_then(Value::as_u64).unwrap_or(1);
+            let payload = tools::discover_capabilities(query, limit, level).map_err(|message| {
+                MethodError {
+                    code: JSON_RPC_INVALID_PARAMS,
+                    message,
+                }
+            })?;
+            project_protocol_json(
+                payload,
+                "keel/discover",
+                crate::proxy::context::ContextSource::McpTool,
+                context,
+            )
+        }
+        "keel/activate" => {
+            let payload =
+                tools::activate_capability_with_context(params, context).map_err(|message| {
+                    MethodError {
+                        code: JSON_RPC_INVALID_PARAMS,
+                        message,
+                    }
+                })?;
+            project_protocol_json(
+                payload,
+                "keel/activate",
+                crate::proxy::context::ContextSource::McpTool,
+                context,
+            )
         }
         "resources/list" => Ok(handle_resources_list()),
-        "resources/read" => handle_resources_read(params),
+        "resources/read" => handle_resources_read(params, context),
         // Test-only in-process delay — never ships in non-test binaries.
         // Used to prove concurrent workers without spawning OS hang children.
         #[cfg(test)]
@@ -1191,7 +1469,49 @@ fn handle_resources_list() -> Value {
     })
 }
 
-fn handle_resources_read(params: &Value) -> Result<Value, MethodError> {
+fn project_protocol_json(
+    payload: Value,
+    surface: &str,
+    source: crate::proxy::context::ContextSource,
+    context: &McpRequestContext,
+) -> Result<Value, MethodError> {
+    let serialized = serde_json::to_string(&payload).map_err(|error| MethodError {
+        code: JSON_RPC_INTERNAL_ERROR,
+        message: format!("{surface}: serialize result: {error}"),
+    })?;
+    let projection =
+        tools::project_mcp_context(surface, &serialized, source, context).map_err(|message| {
+            MethodError {
+                code: JSON_RPC_INTERNAL_ERROR,
+                message,
+            }
+        })?;
+    let metadata = serde_json::to_value(projection.metadata()).map_err(|error| MethodError {
+        code: JSON_RPC_INTERNAL_ERROR,
+        message: format!("{surface}: serialize context metadata: {error}"),
+    })?;
+
+    // Preserve the established object shape only when the measured content is
+    // unchanged; otherwise return the projection envelope, never raw content.
+    if projection.truncated || projection.summary != serialized {
+        return Ok(json!({
+            "content": [{ "type": "text", "text": projection.summary }],
+            "isError": false,
+            "context": metadata,
+        }));
+    }
+    let mut object = payload.as_object().cloned().ok_or_else(|| MethodError {
+        code: JSON_RPC_INTERNAL_ERROR,
+        message: format!("{surface}: result must be a JSON object"),
+    })?;
+    object.insert("context".to_string(), metadata);
+    Ok(Value::Object(object))
+}
+
+fn handle_resources_read(
+    params: &Value,
+    context: &McpRequestContext,
+) -> Result<Value, MethodError> {
     let object = params.as_object().ok_or_else(|| MethodError {
         code: JSON_RPC_INVALID_PARAMS,
         message: "resources/read params must be an object".to_string(),
@@ -1203,31 +1523,28 @@ fn handle_resources_read(params: &Value) -> Result<Value, MethodError> {
             code: JSON_RPC_INVALID_PARAMS,
             message: "resources/read params.uri is required".to_string(),
         })?;
-    match uri {
+    let (mime_type, text, source, is_error) = match uri {
         SYSTEM_MAP_RESOURCE_URI => {
             // why: Grok auto-reads this resource on session start. A live
             // walk of a large tree, or an untruncated 16KB+ frame, makes the
             // host drop the line and wait out 30–60s. Deadline + truncate.
-            let text = match tools::run_tool_with_deadline(
+            let (text, is_error) = match tools::run_tool_with_deadline(
                 tools::mcp_child_timeout(),
                 "resources/read system_map",
                 || system_map_text(None),
             ) {
-                Ok(text) => tools::truncate_mcp_text(&text),
-                Err(message) => message,
+                Ok(text) => (tools::truncate_mcp_text(&text), false),
+                Err(message) => (message, true),
             };
-            Ok(json!({
-                "contents": [
-                    {
-                        "uri": SYSTEM_MAP_RESOURCE_URI,
-                        "mimeType": "text/markdown",
-                        "text": text,
-                    }
-                ]
-            }))
+            (
+                "text/markdown",
+                text,
+                crate::proxy::context::ContextSource::McpTool,
+                is_error,
+            )
         }
         RECALL_STATUS_RESOURCE_URI => {
-            let text = match tools::run_tool_with_deadline(
+            let (text, is_error) = match tools::run_tool_with_deadline(
                 tools::mcp_child_timeout(),
                 "resources/read recall_status",
                 || {
@@ -1237,24 +1554,51 @@ fn handle_resources_read(params: &Value) -> Result<Value, MethodError> {
                         .map_err(|error| format!("serialize recall status: {error}"))
                 },
             ) {
-                Ok(text) => tools::truncate_mcp_text(&text),
-                Err(message) => message,
+                Ok(text) => (tools::truncate_mcp_text(&text), false),
+                Err(message) => (message, true),
             };
-            Ok(json!({
-                "contents": [
-                    {
-                        "uri": RECALL_STATUS_RESOURCE_URI,
-                        "mimeType": "application/json",
-                        "text": text,
-                    }
-                ]
-            }))
+            (
+                "application/json",
+                text,
+                crate::proxy::context::ContextSource::McpTool,
+                is_error,
+            )
         }
-        other => Err(MethodError {
-            code: JSON_RPC_INVALID_PARAMS,
-            message: format!("Unknown resource URI: {other}"),
-        }),
+        other => {
+            return Err(MethodError {
+                code: JSON_RPC_INVALID_PARAMS,
+                message: format!("Unknown resource URI: {other}"),
+            })
+        }
+    };
+    let projection = tools::project_mcp_context(
+        &format!("resources/read {uri}"),
+        &text,
+        if is_error {
+            crate::proxy::context::ContextSource::Error
+        } else {
+            source
+        },
+        context,
+    )
+    .map_err(|message| MethodError {
+        code: JSON_RPC_INTERNAL_ERROR,
+        message,
+    })?;
+    let mut response = json!({
+        "contents": [
+            {
+                "uri": uri,
+                "mimeType": mime_type,
+                "text": projection.summary,
+            }
+        ],
+        "context": projection.metadata(),
+    });
+    if is_error {
+        response["isError"] = Value::Bool(true);
     }
+    Ok(response)
 }
 
 /// Resolve the indexed workspace map for the `system_map` tool and resource.
@@ -1473,6 +1817,102 @@ mod tests {
         assert!(uris.contains(&SYSTEM_MAP_RESOURCE_URI));
         assert!(uris.contains(&RECALL_STATUS_RESOURCE_URI));
         assert_eq!(uris.len(), 2);
+    }
+
+    #[test]
+    fn dynamic_resource_reads_are_firewalled_and_provenanced() {
+        let mut context = McpRequestContext::authoritative(None);
+        context.session_id = format!("resource-firewall-test-{}", std::process::id());
+        context.request_id = Some("resource-request".to_string());
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": "resource-1",
+            "method": "resources/read",
+            "params": { "uri": RECALL_STATUS_RESOURCE_URI }
+        });
+        let response = dispatch_cancellable_with_context(
+            &request,
+            &std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            &context,
+        )
+        .expect("response present");
+        let result = &response["result"];
+        assert_eq!(result["contents"][0]["uri"], RECALL_STATUS_RESOURCE_URI);
+        assert_eq!(result["context"]["source"], "mcp_tool");
+        assert!(result["context"]["provenance_id"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("prov-fnv1a:")));
+        let text = result["contents"][0]["text"].as_str().unwrap_or("");
+        assert!(
+            crate::proxy::token_meter::TokenMeter::count_text(text)
+                <= crate::proxy::context::DEFAULT_MAX_SINGLE_RESULT_TOKENS
+        );
+    }
+
+    #[test]
+    fn discovery_response_keeps_legacy_fields_with_a_bounded_context_record() {
+        let mut context = McpRequestContext::authoritative(None);
+        context.session_id = format!("discover-firewall-test-{}", std::process::id());
+        context.request_id = Some("discover-request".to_string());
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": "discover-1",
+            "method": "keel/discover",
+            "params": { "query": "flutter testing", "limit": 3, "level": 1 }
+        });
+        let response = dispatch_cancellable_with_context(
+            &request,
+            &std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            &context,
+        )
+        .expect("response present");
+        let result = &response["result"];
+        assert_eq!(result["query"], "flutter testing");
+        assert!(result["capabilities"].is_array());
+        assert_eq!(result["context"]["source"], "mcp_tool");
+        assert!(
+            crate::proxy::token_meter::TokenMeter::count_text(
+                &serde_json::to_string(result).expect("serialize result")
+            ) <= crate::proxy::context::DEFAULT_MAX_DISCOVERY_RESULT_TOKENS + 64
+        );
+    }
+
+    #[test]
+    fn activation_response_is_firewalled_and_uses_authoritative_identity() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let home = crate::test_support::unique_temp_dir("mcp-activation-firewall");
+        let previous = std::env::var("KEEL_HOME").ok();
+        std::env::set_var("KEEL_HOME", &*home);
+
+        let mut context = McpRequestContext::authoritative(None);
+        context.session_id = format!("activation-firewall-test-{}", std::process::id());
+        context.request_id = Some("activation-request".to_string());
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": "activation-1",
+            "method": "keel/activate",
+            "params": { "capability": "stats", "reason": "inspect context metrics" }
+        });
+        let response = dispatch_cancellable_with_context(
+            &request,
+            &std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            &context,
+        )
+        .expect("response present");
+        let result = &response["result"];
+        assert_eq!(result["capabilityId"], "stats");
+        assert_eq!(result["sessionId"], context.session_id);
+        assert_eq!(result["context"]["source"], "mcp_tool");
+        assert!(result["context"]["provenance_id"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("prov-fnv1a:")));
+
+        match previous {
+            Some(value) => std::env::set_var("KEEL_HOME", value),
+            None => std::env::remove_var("KEEL_HOME"),
+        }
     }
 
     #[test]

@@ -1,0 +1,779 @@
+//! Purpose: Gate dynamic data before it becomes model-visible context.
+//! Caller: governed proxy/MCP/memory surfaces that already own execution and storage.
+//! Dependencies: the authoritative o200k_base token meter, injection guard, and
+//! stable Keel hashing helper.
+//! Main Functions: `ContextFirewall::project` and `project_optional`.
+//! Side Effects: None. Raw artifacts are written by their existing owner; this
+//! module only returns a bounded projection and a recoverable pointer.
+
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::fmt;
+use std::sync::{LazyLock, Mutex};
+
+use serde::{Deserialize, Serialize};
+
+use crate::proxy::injection_guard::neutralize_injection;
+use crate::proxy::token_meter::TokenMeter;
+use crate::utility::hashing::fnv1a64_hex;
+
+/// Conservative default for one dynamic model-visible result. Surface-specific
+/// ledgers may ratify a smaller budget; this default is deliberately bounded.
+pub const DEFAULT_MAX_DYNAMIC_TOKENS: usize = 4_000;
+
+/// Maximum input accepted by the firewall before token reduction. This is a
+/// defense-in-depth bound; command capture itself has an independent limit.
+pub const DEFAULT_MAX_INPUT_BYTES: usize = 64 * 1024 * 1024;
+
+/// Safe policy defaults for the fixed/dynamic surfaces that have a smaller
+/// budget than a generic command result. These are policy ceilings, not
+/// observed measurements; the fixed-context ledger measures the actual value
+/// on every run.
+pub const DEFAULT_MAX_TOOL_CATALOG_TOKENS: usize = 1_200;
+pub const DEFAULT_MAX_MEMORY_PROJECTION_TOKENS: usize = 900;
+pub const DEFAULT_MAX_WARNING_POINTER_TOKENS: usize = 30;
+pub const DEFAULT_MAX_DISCOVERY_RESULT_TOKENS: usize = 300;
+pub const DEFAULT_MAX_SINGLE_RESULT_TOKENS: usize = 1_800;
+
+/// The owner that produced a dynamic context payload.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextSource {
+    CommandOutput,
+    McpTool,
+    Memory,
+    Warning,
+    Instruction,
+    Research,
+    Task,
+    UiVerification,
+    Error,
+    Recovery,
+}
+
+impl ContextSource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::CommandOutput => "command_output",
+            Self::McpTool => "mcp_tool",
+            Self::Memory => "memory",
+            Self::Warning => "warning",
+            Self::Instruction => "instruction",
+            Self::Research => "research",
+            Self::Task => "task",
+            Self::UiVerification => "ui_verification",
+            Self::Error => "error",
+            Self::Recovery => "recovery",
+        }
+    }
+
+    /// Return the conservative policy ceiling for a surface. Callers may
+    /// still provide a narrower `ContextPolicy::with_max_tokens` when a
+    /// particular operation has a smaller local budget.
+    pub fn default_budget(&self) -> usize {
+        match self {
+            Self::McpTool => DEFAULT_MAX_SINGLE_RESULT_TOKENS,
+            Self::Memory => DEFAULT_MAX_MEMORY_PROJECTION_TOKENS,
+            Self::Warning => DEFAULT_MAX_WARNING_POINTER_TOKENS,
+            Self::Recovery => DEFAULT_MAX_DISCOVERY_RESULT_TOKENS,
+            _ => DEFAULT_MAX_DYNAMIC_TOKENS,
+        }
+    }
+}
+
+impl fmt::Display for ContextSource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Cache behavior for a projection. Stable prefixes and deterministic ordering
+/// can be cached by a provider; dynamic/volatile values should remain suffixes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheClass {
+    Stable,
+    Session,
+    Dynamic,
+    Volatile,
+}
+
+/// Policy applied by one firewall instance. The existing fixed-context ledger
+/// remains the owner of ratified per-surface budgets; this policy is the
+/// reusable dynamic-result default and can be supplied by a caller.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextPolicy {
+    pub max_tokens: usize,
+    pub max_input_bytes: usize,
+    pub neutralize_injection: bool,
+}
+
+impl ContextPolicy {
+    /// Read optional operator overrides without making environment state the
+    /// source of truth. Invalid values are ignored and the safe defaults stay
+    /// active; a parsed zero is retained so an operator can deliberately fail
+    /// closed while diagnosing a surface.
+    pub fn from_env() -> Self {
+        let mut policy = Self::default();
+        if let Ok(value) = std::env::var("KEEL_CONTEXT_MAX_DYNAMIC_TOKENS") {
+            if let Ok(parsed) = value.trim().parse::<usize>() {
+                policy.max_tokens = parsed;
+            }
+        }
+        if let Ok(value) = std::env::var("KEEL_CONTEXT_MAX_INPUT_BYTES") {
+            if let Ok(parsed) = value.trim().parse::<usize>() {
+                policy.max_input_bytes = parsed;
+            }
+        }
+        policy
+    }
+
+    pub fn with_max_tokens(max_tokens: usize) -> Self {
+        Self {
+            max_tokens,
+            ..Self::default()
+        }
+    }
+
+    pub fn for_surface(max_tokens: usize) -> Self {
+        Self::with_max_tokens(max_tokens)
+    }
+
+    pub fn with_max_input_bytes(mut self, max_input_bytes: usize) -> Self {
+        self.max_input_bytes = max_input_bytes;
+        self
+    }
+
+    pub fn without_injection_neutralization(mut self) -> Self {
+        self.neutralize_injection = false;
+        self
+    }
+}
+
+impl Default for ContextPolicy {
+    fn default() -> Self {
+        Self {
+            max_tokens: DEFAULT_MAX_DYNAMIC_TOKENS,
+            max_input_bytes: DEFAULT_MAX_INPUT_BYTES,
+            neutralize_injection: true,
+        }
+    }
+}
+
+/// Input owned by a producer. The firewall does not write or fetch the raw
+/// artifact; it only validates the pointer and carries it into the projection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectionInput {
+    pub source: ContextSource,
+    pub content: String,
+    pub raw_artifact_id: Option<String>,
+    pub workspace_id: String,
+    pub session_id: String,
+    pub request_id: Option<String>,
+    pub cache_class: CacheClass,
+    pub omitted_items: u32,
+}
+
+impl ProjectionInput {
+    pub fn new(
+        source: ContextSource,
+        content: impl Into<String>,
+        raw_artifact_id: Option<impl Into<String>>,
+        workspace_id: impl Into<String>,
+        session_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            source,
+            content: content.into(),
+            raw_artifact_id: raw_artifact_id.map(Into::into),
+            workspace_id: workspace_id.into(),
+            session_id: session_id.into(),
+            request_id: None,
+            cache_class: CacheClass::Dynamic,
+            omitted_items: 0,
+        }
+    }
+
+    pub fn with_request_id(mut self, request_id: impl Into<String>) -> Self {
+        self.request_id = Some(request_id.into());
+        self
+    }
+
+    pub fn with_cache_class(mut self, cache_class: CacheClass) -> Self {
+        self.cache_class = cache_class;
+        self
+    }
+
+    pub fn with_omitted_items(mut self, omitted_items: u32) -> Self {
+        self.omitted_items = omitted_items;
+        self
+    }
+}
+
+/// The only object returned for normal model-visible dynamic data.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextProjection {
+    pub id: String,
+    pub source: ContextSource,
+    pub summary: String,
+    pub token_count: u32,
+    pub raw_artifact_id: Option<String>,
+    pub provenance_id: String,
+    pub truncated: bool,
+    pub omitted_items: u32,
+    pub cache_class: CacheClass,
+}
+
+/// Wire-safe projection metadata. It intentionally omits `summary` so a
+/// protocol response can carry provenance and accounting without duplicating
+/// the model-visible text in both `content` and an envelope object.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextProjectionMetadata {
+    pub id: String,
+    pub source: ContextSource,
+    pub token_count: u32,
+    pub raw_artifact_id: Option<String>,
+    pub provenance_id: String,
+    pub truncated: bool,
+    pub omitted_items: u32,
+    pub cache_class: CacheClass,
+}
+
+/// Provider-reported cache usage. The provider owns these numbers; Keel never
+/// infers cache accounting when a provider has not supplied it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProviderUsage {
+    pub provider: String,
+    pub cached_input_tokens: Option<usize>,
+    pub uncached_input_tokens: Option<usize>,
+    pub output_tokens: Option<usize>,
+}
+
+/// One measured model-visible surface. Keeping raw and visible counts in the
+/// same record prevents a token-saving claim from being based on a theoretical
+/// reducer estimate alone.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ContextMeasurement {
+    pub surface: String,
+    pub raw_input_tokens: usize,
+    pub model_visible_input_tokens: usize,
+    pub cached_input_tokens: Option<usize>,
+    pub uncached_input_tokens: Option<usize>,
+    pub output_tokens: usize,
+    pub context_peak_tokens: usize,
+    pub reduced_tokens: usize,
+    pub saved_tokens: isize,
+    pub reduction_ratio: f64,
+    pub turn_count: u64,
+    pub tool_count: u64,
+    pub cache_hit_rate: Option<f64>,
+    pub cache_class: CacheClass,
+    pub budget_tokens: usize,
+    pub status: String,
+}
+
+/// Whole-context ledger owned by the firewall/budget engine. It is an
+/// in-memory operator-facing ledger; persistent evidence remains owned by the
+/// existing event/RawStore paths.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ContextLedger {
+    pub measurements: Vec<ContextMeasurement>,
+    pub provider_usage: Vec<ProviderUsage>,
+}
+
+impl ContextLedger {
+    pub fn record(&mut self, measurement: ContextMeasurement) {
+        self.measurements.push(measurement);
+    }
+
+    pub fn record_provider_usage(&mut self, usage: ProviderUsage) {
+        self.provider_usage.push(usage);
+    }
+
+    pub fn status(&self) -> &'static str {
+        if self.measurements.iter().any(|row| row.status == "blocked") {
+            "blocked"
+        } else if self.measurements.iter().any(|row| row.status == "exceeded") {
+            "exceeded"
+        } else {
+            "within_budget"
+        }
+    }
+
+    pub fn totals(&self) -> ContextTotals {
+        let mut totals = ContextTotals::default();
+        for row in &self.measurements {
+            totals.raw_input_tokens = totals.raw_input_tokens.saturating_add(row.raw_input_tokens);
+            totals.model_visible_input_tokens = totals
+                .model_visible_input_tokens
+                .saturating_add(row.model_visible_input_tokens);
+            totals.reduced_tokens = totals.reduced_tokens.saturating_add(row.reduced_tokens);
+            totals.saved_tokens = totals.saved_tokens.saturating_add(row.saved_tokens);
+            totals.output_tokens = totals.output_tokens.saturating_add(row.output_tokens);
+            totals.context_peak_tokens = totals.context_peak_tokens.max(row.context_peak_tokens);
+            totals.turn_count = totals.turn_count.max(row.turn_count);
+            totals.tool_count = totals.tool_count.saturating_add(row.tool_count);
+        }
+        totals
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextTotals {
+    pub raw_input_tokens: usize,
+    pub model_visible_input_tokens: usize,
+    pub reduced_tokens: usize,
+    pub saved_tokens: isize,
+    pub output_tokens: usize,
+    pub context_peak_tokens: usize,
+    pub turn_count: u64,
+    pub tool_count: u64,
+}
+
+impl ContextProjection {
+    pub fn metadata(&self) -> ContextProjectionMetadata {
+        ContextProjectionMetadata {
+            id: self.id.clone(),
+            source: self.source.clone(),
+            token_count: self.token_count,
+            raw_artifact_id: self.raw_artifact_id.clone(),
+            provenance_id: self.provenance_id.clone(),
+            truncated: self.truncated,
+            omitted_items: self.omitted_items,
+            cache_class: self.cache_class,
+        }
+    }
+}
+
+/// A projection's provenance identity. It is deliberately not model-visible by
+/// default; `provenance_id` is enough to correlate the projection with a
+/// producer-side evidence record without inflating context.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextProvenance {
+    pub id: String,
+    pub source: ContextSource,
+    pub workspace_id: String,
+    pub session_id: String,
+    pub request_id: Option<String>,
+    pub content_hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ContextFirewallError {
+    #[error("context projection requires a non-empty workspace identity")]
+    MissingWorkspaceIdentity,
+    #[error("context projection requires a non-empty session identity")]
+    MissingSessionIdentity,
+    #[error("context projection contains an invalid raw artifact id")]
+    InvalidArtifactId,
+    #[error("context payload exceeds the {max_input_bytes}-byte input bound")]
+    InputTooLarge { max_input_bytes: usize },
+    #[error(
+        "context budget exceeded: required {required_tokens} tokens, max {max_tokens}; raw fallback is blocked"
+    )]
+    BudgetExceeded {
+        required_tokens: usize,
+        max_tokens: usize,
+    },
+    #[error("duplicate context projection suppressed")]
+    DuplicateSuppressed,
+}
+
+/// Stateful within one session/workspace: it remembers content fingerprints so
+/// identical memory/tool/output payloads do not get injected twice. Callers may
+/// discard the instance at a session boundary to reset the dedupe set.
+#[derive(Debug, Clone)]
+pub struct ContextFirewall {
+    policy: ContextPolicy,
+    seen: HashSet<String>,
+    ledger: ContextLedger,
+    turn_count: u64,
+}
+
+/// The budget engine and gateway are intentionally aliases of the one
+/// firewall owner, not parallel counters or policy stores. They make the
+/// architectural roles discoverable to callers while keeping one source of
+/// truth for projection decisions.
+pub type ContextBudgetEngine = ContextFirewall;
+pub type ContextGateway = ContextFirewall;
+
+/// Bound process-wide session state so a peer cannot grow the gateway map (or
+/// each session's duplicate set) without limit by inventing identities. Evicted
+/// entries only lose a dedupe optimization; raw artifacts and projections stay
+/// owned by their durable stores.
+const MAX_SESSION_GATEWAYS: usize = 256;
+const MAX_DEDUPE_ENTRIES: usize = 4_096;
+
+#[derive(Default)]
+struct SessionGateways {
+    entries: HashMap<String, ContextFirewall>,
+    order: VecDeque<String>,
+}
+
+static SESSION_GATEWAYS: LazyLock<Mutex<SessionGateways>> =
+    LazyLock::new(|| Mutex::new(SessionGateways::default()));
+
+/// Project through the process-wide session/workspace gateway. Producers keep
+/// ownership of raw artifacts; this shared owner only retains bounded
+/// deduplication and measurement state so two calls in one identity cannot
+/// silently inject the same dynamic payload twice.
+pub fn project_scoped(
+    policy: ContextPolicy,
+    input: ProjectionInput,
+) -> Result<ContextProjection, ContextFirewallError> {
+    let key = format!("{}\0{}", input.workspace_id.trim(), input.session_id.trim());
+    let mut gateways = SESSION_GATEWAYS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if !gateways.entries.contains_key(&key) {
+        while gateways.entries.len() >= MAX_SESSION_GATEWAYS {
+            let Some(evicted) = gateways.order.pop_front() else {
+                break;
+            };
+            gateways.entries.remove(&evicted);
+        }
+        gateways.order.push_back(key.clone());
+        gateways
+            .entries
+            .insert(key.clone(), ContextFirewall::new(policy.clone()));
+    } else {
+        // Keep eviction order deterministic and approximate LRU behavior. The
+        // bounded map is a memory safeguard, not a source of authorization.
+        gateways.order.retain(|existing| existing != &key);
+        gateways.order.push_back(key.clone());
+    }
+    let gateway = gateways
+        .entries
+        .get_mut(&key)
+        .expect("session gateway inserted or already present");
+    // The session gateway owns dedupe and measurement; callers own policy.
+    // Refresh policy per projection so a narrow budget cannot leak across calls.
+    gateway.policy = policy;
+    gateway.project(input)
+}
+
+impl ContextFirewall {
+    pub fn new(policy: ContextPolicy) -> Self {
+        Self {
+            policy,
+            seen: HashSet::new(),
+            ledger: ContextLedger::default(),
+            turn_count: 0,
+        }
+    }
+
+    pub fn policy(&self) -> &ContextPolicy {
+        &self.policy
+    }
+
+    pub fn clear_dedupe(&mut self) {
+        self.seen.clear();
+    }
+
+    pub fn ledger(&self) -> &ContextLedger {
+        &self.ledger
+    }
+
+    pub fn metrics(&self) -> ContextTotals {
+        self.ledger.totals()
+    }
+
+    pub fn record_provider_usage(&mut self, usage: ProviderUsage) {
+        self.ledger.record_provider_usage(usage);
+    }
+
+    /// Advance the logical turn counter used by operator metrics. This is
+    /// intentionally explicit because a firewall can serve several projections
+    /// in one turn and must not guess turn boundaries from call count.
+    pub fn begin_turn(&mut self) {
+        self.turn_count = self.turn_count.saturating_add(1);
+    }
+
+    /// Project a payload through identity, sensitivity, measurement,
+    /// duplicate, reduction, and budget stages. A failure never returns the
+    /// original content, so callers cannot accidentally fall back to raw data.
+    pub fn project(
+        &mut self,
+        input: ProjectionInput,
+    ) -> Result<ContextProjection, ContextFirewallError> {
+        let workspace_id = input.workspace_id.trim();
+        if workspace_id.is_empty() {
+            return Err(ContextFirewallError::MissingWorkspaceIdentity);
+        }
+        let session_id = input.session_id.trim();
+        if session_id.is_empty() {
+            return Err(ContextFirewallError::MissingSessionIdentity);
+        }
+        if let Some(raw_id) = input.raw_artifact_id.as_deref() {
+            validate_artifact_id(raw_id)?;
+        }
+        if input.content.len() > self.policy.max_input_bytes {
+            return Err(ContextFirewallError::InputTooLarge {
+                max_input_bytes: self.policy.max_input_bytes,
+            });
+        }
+
+        let cleaned_content = if self.policy.neutralize_injection {
+            let raw_id = input.raw_artifact_id.as_deref().unwrap_or("unavailable");
+            let (cleaned, _findings) = neutralize_injection(&input.content, raw_id);
+            if input.raw_artifact_id.is_some() {
+                cleaned
+            } else {
+                // Preserve the injection guard marker and state when no raw-store
+                // owner exists, so the missing recovery path stays explicit.
+                cleaned.replace(
+                    "raw available via keel raw unavailable",
+                    "raw artifact unavailable",
+                )
+            }
+        } else {
+            input.content.clone()
+        };
+        let content = cleaned_content.trim().to_string();
+        let normalized = normalize_for_identity(&content);
+        // Request ids identify provenance, not new context. Exclude them so a
+        // fresh transport id cannot re-inject the same payload.
+        let dedupe_material = format!("{}\0{}\0{}", workspace_id, session_id, normalized);
+        let content_hash = fnv1a64_hex(&dedupe_material);
+        // Empty command/tool results carry no context and must not poison
+        // dedupe or make a later empty result look firewall-blocked.
+        let dedupe = !normalized.is_empty();
+        if dedupe && self.seen.contains(&content_hash) {
+            return Err(ContextFirewallError::DuplicateSuppressed);
+        }
+
+        let raw_tokens = TokenMeter::count_text(&content);
+        let budget_tokens = self.policy.max_tokens;
+        let (summary, truncated, omitted_items) = if raw_tokens <= self.policy.max_tokens {
+            (content, false, input.omitted_items)
+        } else {
+            let pointer = recovery_pointer(input.raw_artifact_id.as_deref());
+            let pointer_tokens = TokenMeter::count_text(&pointer);
+            if pointer_tokens >= self.policy.max_tokens {
+                return Err(ContextFirewallError::BudgetExceeded {
+                    required_tokens: pointer_tokens,
+                    max_tokens: self.policy.max_tokens,
+                });
+            }
+            let prefix_budget = self.policy.max_tokens - pointer_tokens;
+            let prefix = truncate_to_tokens(&content, prefix_budget);
+            let summary = format!("{}{}", prefix.trim_end(), pointer);
+            let summary_tokens = TokenMeter::count_text(&summary);
+            if summary_tokens > self.policy.max_tokens {
+                return Err(ContextFirewallError::BudgetExceeded {
+                    required_tokens: summary_tokens,
+                    max_tokens: self.policy.max_tokens,
+                });
+            }
+            let kept_lines = prefix.lines().count();
+            let total_lines = content.lines().count();
+            let omitted = total_lines
+                .saturating_sub(kept_lines)
+                .saturating_add(input.omitted_items as usize)
+                .min(u32::MAX as usize) as u32;
+            (summary, true, omitted)
+        };
+
+        let request_id = input
+            .request_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let provenance_material = format!(
+            "{}\0{}\0{}\0{}\0{}\0{}",
+            workspace_id,
+            session_id,
+            input.source,
+            normalized,
+            request_id.unwrap_or(""),
+            input.raw_artifact_id.as_deref().unwrap_or("")
+        );
+        let provenance_hash = fnv1a64_hex(&provenance_material);
+        let provenance_id = format!("prov-fnv1a:{provenance_hash}");
+        let projection_id = format!("projection-fnv1a:{provenance_hash}");
+        let token_count = TokenMeter::count_text(&summary) as u32;
+
+        if dedupe {
+            if self.seen.len() >= MAX_DEDUPE_ENTRIES {
+                // Duplicate suppression is best-effort; reset only the bounded
+                // set, leaving raw recovery and provenance unaffected.
+                self.seen.clear();
+            }
+            self.seen.insert(content_hash);
+        }
+        let model_visible_tokens = TokenMeter::count_text(&summary);
+        let saved_tokens = raw_tokens as isize - model_visible_tokens as isize;
+        let reduction_ratio = if raw_tokens == 0 {
+            0.0
+        } else {
+            saved_tokens.max(0) as f64 / raw_tokens as f64
+        };
+        self.ledger.record(ContextMeasurement {
+            surface: input.source.as_str().to_string(),
+            raw_input_tokens: raw_tokens,
+            model_visible_input_tokens: model_visible_tokens,
+            cached_input_tokens: match input.cache_class {
+                CacheClass::Stable | CacheClass::Session => Some(model_visible_tokens),
+                CacheClass::Dynamic | CacheClass::Volatile => None,
+            },
+            uncached_input_tokens: match input.cache_class {
+                CacheClass::Stable | CacheClass::Session => None,
+                CacheClass::Dynamic | CacheClass::Volatile => Some(model_visible_tokens),
+            },
+            output_tokens: 0,
+            context_peak_tokens: model_visible_tokens,
+            reduced_tokens: model_visible_tokens,
+            saved_tokens,
+            reduction_ratio,
+            turn_count: self.turn_count,
+            tool_count: u64::from(matches!(input.source, ContextSource::McpTool)),
+            cache_hit_rate: None,
+            cache_class: input.cache_class,
+            budget_tokens,
+            status: if model_visible_tokens <= budget_tokens {
+                "within_budget".to_string()
+            } else {
+                "exceeded".to_string()
+            },
+        });
+        Ok(ContextProjection {
+            id: projection_id,
+            source: input.source,
+            summary,
+            token_count,
+            raw_artifact_id: input.raw_artifact_id,
+            provenance_id,
+            truncated,
+            omitted_items,
+            cache_class: input.cache_class,
+        })
+    }
+
+    /// Same fail-closed projection path, with an explicit `None` for a
+    /// duplicate. Other errors remain visible to the caller.
+    pub fn project_optional(
+        &mut self,
+        input: ProjectionInput,
+    ) -> Result<Option<ContextProjection>, ContextFirewallError> {
+        match self.project(input) {
+            Ok(projection) => Ok(Some(projection)),
+            Err(ContextFirewallError::DuplicateSuppressed) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Convenience wrapper for producers that have no custom `ProjectionInput`
+    /// options yet.
+    pub fn project_text(
+        &mut self,
+        source: ContextSource,
+        content: impl Into<String>,
+        raw_artifact_id: Option<impl Into<String>>,
+        workspace_id: impl Into<String>,
+        session_id: impl Into<String>,
+    ) -> Result<ContextProjection, ContextFirewallError> {
+        self.project(ProjectionInput::new(
+            source,
+            content,
+            raw_artifact_id,
+            workspace_id,
+            session_id,
+        ))
+    }
+}
+
+impl Default for ContextFirewall {
+    fn default() -> Self {
+        Self::new(ContextPolicy::from_env())
+    }
+}
+
+fn validate_artifact_id(raw_id: &str) -> Result<(), ContextFirewallError> {
+    let trimmed = raw_id.trim();
+    if trimmed.is_empty()
+        || trimmed == "."
+        || trimmed == ".."
+        || trimmed.contains("..")
+        || trimmed.contains('/')
+        || trimmed.contains('\\')
+        || trimmed.chars().any(char::is_whitespace)
+    {
+        return Err(ContextFirewallError::InvalidArtifactId);
+    }
+    Ok(())
+}
+
+fn normalize_for_identity(content: &str) -> String {
+    content
+        .replace("\r\n", "\n")
+        .lines()
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn recovery_pointer(raw_artifact_id: Option<&str>) -> String {
+    match raw_artifact_id {
+        Some(raw_id) => {
+            format!("\n[keel] context truncated; recover raw artifact with `keel raw {raw_id}`")
+        }
+        None => "\n[keel] context truncated; raw artifact unavailable".to_string(),
+    }
+}
+
+/// Return the longest UTF-8-safe prefix whose exact tokenizer count is within
+/// `max_tokens`. This is deterministic and avoids a generative summarizer.
+fn truncate_to_tokens(text: &str, max_tokens: usize) -> String {
+    if max_tokens == 0 || text.is_empty() {
+        return String::new();
+    }
+    if TokenMeter::count_text(text) <= max_tokens {
+        return text.to_string();
+    }
+    let mut boundaries = text
+        .char_indices()
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    boundaries.push(text.len());
+    let mut low = 0usize;
+    let mut high = boundaries.len();
+    while low + 1 < high {
+        let middle = (low + high) / 2;
+        if TokenMeter::count_text(&text[..boundaries[middle]]) <= max_tokens {
+            low = middle;
+        } else {
+            high = middle;
+        }
+    }
+    text[..boundaries[low]].to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncation_is_utf8_safe_and_token_bounded() {
+        let text = "こんにちは世界 — diagnostic output";
+        let result = truncate_to_tokens(text, 3);
+        assert!(result.is_char_boundary(result.len()));
+        assert!(TokenMeter::count_text(&result) <= 3);
+    }
+
+    #[test]
+    fn provenance_is_stable_for_the_same_identity() {
+        let mut first = ContextFirewall::new(ContextPolicy::with_max_tokens(50));
+        let mut second = ContextFirewall::new(ContextPolicy::with_max_tokens(50));
+        let input = ProjectionInput::new(
+            ContextSource::Warning,
+            "warning: one",
+            Some("raw-warning"),
+            "workspace",
+            "session",
+        )
+        .with_request_id("request");
+        let left = first.project(input.clone()).expect("first projection");
+        let right = second.project(input).expect("second projection");
+        assert_eq!(left.id, right.id);
+        assert_eq!(left.provenance_id, right.provenance_id);
+    }
+}

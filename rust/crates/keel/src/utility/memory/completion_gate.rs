@@ -10,7 +10,7 @@
 //! working_brief storage APIs; later checks may reuse that persisted proof.
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::args::FlagSet;
 use crate::json::Value;
@@ -18,6 +18,80 @@ use crate::runtime::{resolve_claude_home, resolve_repository_root};
 use crate::utility::working_brief::{list_briefs, read_brief, write_brief};
 
 use super::shared::{is_help_argument, probe_marker, probe_value, render_workflow_json};
+
+#[derive(Debug, Clone)]
+struct PolicyProbe {
+    ok: bool,
+    status: String,
+    detail: String,
+}
+
+fn policy_gate_probe(gate: crate::review::GateResult) -> PolicyProbe {
+    let status = gate.status.as_str().to_string();
+    let detail = gate.details.unwrap_or_else(|| "no detail".to_string());
+    PolicyProbe {
+        ok: !(gate.blocking && gate.status.is_blocking()),
+        status,
+        detail,
+    }
+}
+
+fn not_applicable_policy_probe(detail: &str) -> PolicyProbe {
+    PolicyProbe {
+        ok: true,
+        status: "not_applicable".to_string(),
+        detail: detail.to_string(),
+    }
+}
+
+fn policy_probe_value(probe: &PolicyProbe) -> Value {
+    Value::Object(vec![
+        ("ok".into(), Value::Bool(probe.ok)),
+        ("status".into(), Value::String(probe.status.clone())),
+        ("detail".into(), Value::String(probe.detail.clone())),
+    ])
+}
+
+fn completion_policy_probes(
+    brief_probe: &Result<crate::utility::working_brief::Brief, String>,
+) -> (PolicyProbe, PolicyProbe) {
+    let Ok(brief) = brief_probe else {
+        let detail = "policy probes require a working brief";
+        return (
+            not_applicable_policy_probe(detail),
+            not_applicable_policy_probe(detail),
+        );
+    };
+    let workspace_text = brief.workspace.trim();
+    if workspace_text.is_empty() {
+        let detail = "no workspace recorded on brief";
+        return (
+            not_applicable_policy_probe(detail),
+            not_applicable_policy_probe(detail),
+        );
+    }
+    let workspace = Path::new(workspace_text);
+    let managed_context = workspace.join("AGENTS.md").is_file()
+        && workspace.join("CLAUDE.md").is_file()
+        && workspace.join("WORKFLOW.md").is_file();
+    let context = if managed_context {
+        policy_gate_probe(crate::review::context_policy_gate(workspace))
+    } else {
+        not_applicable_policy_probe(
+            "workspace is not a managed context workspace; fixed-context sources are unavailable",
+        )
+    };
+    let execution = if managed_context && workspace.join(".git").exists() {
+        policy_gate_probe(crate::review::execution_evidence_gate(
+            workspace, "", "pre-pr",
+        ))
+    } else {
+        not_applicable_policy_probe(
+            "workspace is not a managed git repository; execution evidence is not applicable",
+        )
+    };
+    (context, execution)
+}
 
 pub(super) fn run_completion_gate_command(
     command_group: &str,
@@ -235,12 +309,18 @@ fn run_completion_gate_check(
         Err(error) => error.clone(),
     });
 
+    // Managed briefs use review's policy/evidence gates; fixture briefs without
+    // a source tree or git boundary remain explicitly not applicable.
+    let (context_policy_probe, execution_evidence_probe) = completion_policy_probes(&brief_probe);
+
     let all_ok = brief_probe.is_ok()
         && acceptance_probe.is_ok()
         && proof_probe.is_ok()
         && warnings_probe.is_ok()
         && plan_probe.as_ref().map(Result::is_ok).unwrap_or(true)
-        && persisted_probe.as_ref().map(Result::is_ok).unwrap_or(true);
+        && persisted_probe.as_ref().map(Result::is_ok).unwrap_or(true)
+        && context_policy_probe.ok
+        && execution_evidence_probe.ok;
 
     if flag_set.bool_value("json") {
         let mut fields: Vec<(String, Value)> = vec![
@@ -257,6 +337,14 @@ fn run_completion_gate_check(
             (
                 "warnings".into(),
                 probe_value(&warnings_probe, &warnings_status),
+            ),
+            (
+                "contextPolicy".into(),
+                policy_probe_value(&context_policy_probe),
+            ),
+            (
+                "executionEvidence".into(),
+                policy_probe_value(&execution_evidence_probe),
             ),
             ("closureReady".into(), Value::Bool(all_ok)),
         ];
@@ -294,6 +382,28 @@ fn run_completion_gate_check(
         standard_output,
         "  warnings: {} -> {warnings_status}",
         probe_marker(&warnings_probe)
+    );
+    let _ = writeln!(
+        standard_output,
+        "  context-policy: {} -> {} ({})",
+        if context_policy_probe.ok {
+            "ok"
+        } else {
+            "fail"
+        },
+        context_policy_probe.status,
+        context_policy_probe.detail
+    );
+    let _ = writeln!(
+        standard_output,
+        "  execution-evidence: {} -> {} ({})",
+        if execution_evidence_probe.ok {
+            "ok"
+        } else {
+            "fail"
+        },
+        execution_evidence_probe.status,
+        execution_evidence_probe.detail
     );
     if let (Some(probe), Some(status)) = (&plan_probe, &plan_status) {
         let _ = writeln!(
