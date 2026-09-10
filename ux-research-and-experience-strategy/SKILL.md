@@ -68,6 +68,9 @@ Make one next step dominant, group related decisions, explain consequences befor
 
 ## Reference Map
 
+Start with the [UX knowledge map](references/00-ux-knowledge-map.md) to select
+the smallest reference set for the research or journey problem.
+
 | Need | Primary Reference |
 |---|---|
 | Research planning, discovery methods, sampling, ethics | `references/10-ux-research-and-discovery.md` |

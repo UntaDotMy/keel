@@ -97,6 +97,9 @@ Surface defaults (dashboards, marketing, onboarding, collaboration, mobile-first
 
 ## Reference Map
 
+Start with the [UI knowledge map](references/00-ui-knowledge-map.md) to select
+the smallest reference set for the visual or accessibility problem.
+
 | Need | Primary Reference |
 |---|---|
 | Visual hierarchy, layout, spacing, typography, copy defaults | `references/10-visual-design-and-layout.md` |

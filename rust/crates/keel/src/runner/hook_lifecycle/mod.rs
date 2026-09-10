@@ -80,11 +80,12 @@ use settings::{
 };
 use state::{
     claude_hook_event_names, hook_session_id, hook_str, hook_tool_name, increment_counter_file,
-    read_json_stdin_fail_open, read_stdin_text, reset_counter_file, system_map_edit_counter_path,
-    system_map_refresh_threshold, user_config_or_env_u64, user_config_review_strictness,
-    MANAGED_PRE_TOOL_USE_EVENT, MCP_SELF_HEAL_ENV_VAR, OBSERVATION_DEFAULT_RETENTION_DAYS,
-    PLUGIN_MEMORY_RETENTION_DAYS, RAW_OUTPUT_DEFAULT_RETENTION_DAYS, REVIEW_GATE_ENV_VAR,
-    REVIEW_GATE_MAX_BLOCKS_ENV_VAR, SESSION_CAPTURE_ENV_VAR, TIMINGS_DEFAULT_RETENTION_DAYS,
+    increment_counter_file_below_limit, read_json_stdin_fail_open, read_stdin_text,
+    reset_counter_file, system_map_edit_counter_path, system_map_refresh_threshold,
+    user_config_or_env_u64, user_config_review_strictness, MANAGED_PRE_TOOL_USE_EVENT,
+    MCP_SELF_HEAL_ENV_VAR, OBSERVATION_DEFAULT_RETENTION_DAYS, PLUGIN_MEMORY_RETENTION_DAYS,
+    RAW_OUTPUT_DEFAULT_RETENTION_DAYS, REVIEW_GATE_ENV_VAR, REVIEW_GATE_MAX_BLOCKS_ENV_VAR,
+    SESSION_CAPTURE_ENV_VAR, TIMINGS_DEFAULT_RETENTION_DAYS,
 };
 pub(crate) use state::{effective_tool_name, is_edit_class_tool};
 

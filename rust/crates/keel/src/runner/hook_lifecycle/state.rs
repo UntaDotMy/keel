@@ -143,7 +143,11 @@ pub(super) fn hook_tool_name(input: &JsonDocument) -> &str {
 pub(crate) fn effective_tool_name<'a>(tool_name: &'a str, path: &'a str) -> &'a str {
     if tool_name.eq_ignore_ascii_case("write") {
         if let Some(device) = path.strip_prefix("xd://") {
-            if device.starts_with("mcp__keel_")
+            let canonical = device.strip_prefix("mcp__keel__");
+            let legacy = device
+                .strip_prefix("mcp__keel_")
+                .filter(|leaf| !leaf.contains("__"));
+            if canonical.or(legacy).is_some_and(|leaf| !leaf.is_empty())
                 && device
                     .bytes()
                     .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
@@ -374,6 +378,24 @@ fn read_counter_value_locked(path: &Path) -> std::io::Result<u64> {
     }
 }
 
+fn write_counter_value_locked(path: &Path, value: u64) -> std::io::Result<()> {
+    let rendered = value.to_string();
+    let mut write_error = None;
+    for attempt in 0..5 {
+        match crate::runtime::write_text(path, &rendered) {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                write_error = Some(format!("write {}: {error}", display_path(path)));
+                std::thread::sleep(std::time::Duration::from_millis(2 * (attempt + 1)));
+            }
+        }
+    }
+
+    Err(std::io::Error::other(
+        write_error.expect("counter write retries always record an error"),
+    ))
+}
+
 pub(super) fn increment_counter_file(path: &Path) -> std::io::Result<u64> {
     let _gate = counter_in_process_gate();
     if let Some(parent) = path.parent() {
@@ -392,22 +414,41 @@ pub(super) fn increment_counter_file(path: &Path) -> std::io::Result<u64> {
         )
     })?;
     let next = current.saturating_add(1);
-    let next_str = next.to_string();
+    write_counter_value_locked(path, next)?;
+    Ok(next)
+}
 
-    let mut write_err = None;
-    for attempt in 0..5 {
-        match crate::runtime::write_text(path, &next_str) {
-            Ok(()) => return Ok(next),
-            Err(error) => {
-                write_err = Some(format!("write {}: {error}", display_path(path)));
-                std::thread::sleep(std::time::Duration::from_millis(2 * (attempt + 1)));
-            }
-        }
+/// Atomically claim one fire below `limit`, returning the pre-increment value.
+/// The cap check and write share the same cross-process lock, so concurrent hooks
+/// cannot both claim the final slot.
+pub(super) fn increment_counter_file_below_limit(
+    path: &Path,
+    limit: u64,
+) -> std::io::Result<Option<u64>> {
+    if limit == 0 {
+        return Ok(None);
     }
-
-    Err(std::io::Error::other(
-        write_err.expect("counter write retries always record an error"),
-    ))
+    let _gate = counter_in_process_gate();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let _lock = acquire_counter_lock(path).map_err(|error| {
+        std::io::Error::new(
+            error.kind(),
+            format!("lock {}: {error}", display_path(path)),
+        )
+    })?;
+    let current = read_counter_value_locked(path).map_err(|error| {
+        std::io::Error::new(
+            error.kind(),
+            format!("read {}: {error}", display_path(path)),
+        )
+    })?;
+    if current >= limit {
+        return Ok(None);
+    }
+    write_counter_value_locked(path, current + 1)?;
+    Ok(Some(current))
 }
 
 pub(super) fn reset_counter_file(path: &Path) -> std::io::Result<()> {
@@ -465,4 +506,43 @@ pub(super) fn user_config_or_env_u64(plugin_var: &str, operator_var: &str, defau
         .ok()
         .and_then(|value| value.trim().parse::<u64>().ok())
         .unwrap_or(default)
+}
+
+#[cfg(test)]
+mod counter_tests {
+    use super::*;
+    use std::sync::{Arc, Barrier};
+
+    #[test]
+    fn bounded_counter_claim_is_atomic_under_contention() {
+        let root = crate::test_support::unique_temp_dir("keel-gate-counter-claim");
+        let path = root.join("gate.count");
+        let barrier = Arc::new(Barrier::new(16));
+        let mut workers = Vec::new();
+
+        for _ in 0..16 {
+            let path = path.clone();
+            let barrier = Arc::clone(&barrier);
+            workers.push(std::thread::spawn(move || {
+                barrier.wait();
+                increment_counter_file_below_limit(&path, 3).unwrap()
+            }));
+        }
+
+        let mut claims = workers
+            .into_iter()
+            .filter_map(|worker| worker.join().unwrap())
+            .collect::<Vec<_>>();
+        claims.sort_unstable();
+        assert_eq!(claims, vec![0, 1, 2]);
+        assert_eq!(fs::read_to_string(path).unwrap(), "3");
+    }
+
+    #[test]
+    fn effective_tool_name_rejects_lookalike_mcp_server_device() {
+        assert_eq!(
+            effective_tool_name("Write", "xd://mcp__keel_evil__system_map"),
+            "Write"
+        );
+    }
 }
