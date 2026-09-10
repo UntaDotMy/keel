@@ -125,6 +125,65 @@ impl HostCapabilities {
         })
     }
 
+    /// Attach the machine-readable host matrix to the legacy capability
+    /// booleans. The matrix deliberately records unproven surfaces as
+    /// `NOT_PROVEN`/`UNSUPPORTED` instead of inferring support from a host's
+    /// name or from Keel's own MCP server capabilities.
+    pub fn as_json_for_agent(self, agent: &str) -> serde_json::Value {
+        let mut payload = self.as_json();
+        let normalized = agent.trim().to_ascii_lowercase();
+        let mut unsupported_paths = Vec::new();
+        let mut known_limitations = Vec::new();
+        if !self.pre_tool_intercept {
+            unsupported_paths.push("pre-tool interception");
+            known_limitations.push("host does not expose a proven pre-tool interception hook");
+        }
+        if !self.post_tool_reduce {
+            unsupported_paths.push("post-tool reduction");
+            known_limitations.push("host does not expose a proven post-tool reduction hook");
+        }
+        if !self.permission_gate {
+            unsupported_paths.push("permission gate");
+            known_limitations.push("permission decisions remain outside the proven host path");
+        }
+        if !self.context_injection_control {
+            unsupported_paths.push("context rewrite");
+            known_limitations.push("model-visible context rewriting is not proven for this host");
+        }
+        if !self.session_identity {
+            unsupported_paths.push("session identity");
+            known_limitations.push("session identity is unavailable");
+        }
+        if !self.execution_receipt {
+            unsupported_paths.push("execution receipt");
+            known_limitations.push("execution receipts are unavailable");
+        }
+        let mcp_support = if self.dynamic_tool_exposure {
+            "SUPPORTED"
+        } else if self.governance_state() == HostGovernanceState::Unsupported {
+            "UNSUPPORTED"
+        } else {
+            "NOT_PROVEN"
+        };
+        payload["matrix"] = serde_json::json!({
+            "host": normalized,
+            "protocol": "keel-command-proxy",
+            "transport": "host-adapter",
+            "sessionHook": self.session_identity,
+            "preToolInterception": self.pre_tool_intercept,
+            "postToolInterception": self.post_tool_reduce,
+            "contextRewrite": self.context_injection_control,
+            "mcpSupport": mcp_support,
+            "paginationCompatibility": if self.dynamic_tool_exposure { "SUPPORTED" } else { "NOT_PROVEN" },
+            "nativeToolSupport": self.pre_tool_intercept,
+            "skillSupport": self.context_injection_control,
+            "governanceLevel": self.governance_state().as_str(),
+            "unsupportedPaths": unsupported_paths,
+            "knownLimitations": known_limitations,
+        });
+        payload
+    }
+
     pub fn governance_state(self) -> HostGovernanceState {
         if !self.session_identity && !self.execution_receipt {
             return HostGovernanceState::Unsupported;
@@ -255,6 +314,25 @@ mod tests {
             HostCapabilities::for_agent("unregistered-host").governance_state(),
             HostGovernanceState::Unsupported
         );
+    }
+
+    #[test]
+    fn capability_json_exposes_explicit_host_matrix_and_limitations() {
+        let payload = HostCapabilities::for_agent("grok").as_json_for_agent("grok");
+        let matrix = &payload["matrix"];
+        assert_eq!(matrix["host"], "grok");
+        assert_eq!(matrix["protocol"], "keel-command-proxy");
+        assert_eq!(matrix["transport"], "host-adapter");
+        assert_eq!(matrix["governanceLevel"], "PARTIALLY_GOVERNED");
+        assert_eq!(matrix["mcpSupport"], "NOT_PROVEN");
+        assert!(matrix["unsupportedPaths"]
+            .as_array()
+            .is_some_and(|paths| paths.iter().any(|path| path == "permission gate")));
+        assert!(matrix["knownLimitations"].as_array().is_some_and(|items| {
+            items
+                .iter()
+                .any(|item| item.as_str().unwrap_or_default().contains("permission"))
+        }));
     }
 
     #[test]

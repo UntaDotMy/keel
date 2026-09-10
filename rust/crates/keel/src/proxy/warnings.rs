@@ -185,6 +185,7 @@ pub(crate) fn reconcile_capture(
     if exit_code == 0 {
         for warning in current.values().filter(|warning| warning.family == family) {
             if warning.status != WarningStatus::Resolved
+                && warning.status != WarningStatus::Waived
                 && !observed_fingerprints.contains(&warning.diagnostic.fingerprint)
             {
                 appended.push(diagnostic_record(
@@ -1339,6 +1340,20 @@ mod tests {
             waived[0].waiver_reason.as_deref(),
             Some("Accepted until dependency migration")
         );
+        reconcile_capture(
+            &home,
+            &workspace,
+            &command,
+            &[],
+            &[],
+            0,
+            "dart analyze --format=machine",
+            "2026-10-08T00:03:00Z",
+            "raw-3",
+        )
+        .unwrap();
+        let still_waived = current_warnings(&home, &workspace, "2026-10-08T00:04:00Z").unwrap();
+        assert_eq!(still_waived[0].status, WarningStatus::Waived);
         let expired = current_warnings(&home, &workspace, "2026-10-10T00:02:00Z").unwrap();
         assert_eq!(expired[0].status, WarningStatus::Open);
         let _ = std::fs::remove_dir_all(root);

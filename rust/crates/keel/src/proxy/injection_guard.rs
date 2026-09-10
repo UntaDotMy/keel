@@ -27,14 +27,16 @@ impl fmt::Display for InjectionFinding {
 }
 
 /// Scan `text` for prompt-injection-shaped patterns. Each matched region is
-/// replaced with a single neutralized marker line that names the pattern and
-/// the raw_id for recovery. Returns the rewritten text and the list of
-/// findings.
+/// replaced with a single neutralized marker line that names the pattern.
+/// The raw artifact id is intentionally not included in that model-visible
+/// marker: an attacker must not receive a recovery key they can replay into
+/// `keel raw`. Operators still receive the id through the caller's
+/// human-facing diagnostic path. Returns the rewritten text and findings.
 ///
 /// The patterns are conservative: each requires a multi-token signature so
 /// that incidental occurrences of the words "system prompt" inside legitimate
 /// documentation or code do not trip it.
-pub fn neutralize_injection(text: &str, raw_id: &str) -> (String, Vec<InjectionFinding>) {
+pub fn neutralize_injection(text: &str, _raw_id: &str) -> (String, Vec<InjectionFinding>) {
     let lines: Vec<&str> = text.split_inclusive('\n').collect();
     let mut findings = Vec::new();
     let mut output = String::with_capacity(text.len());
@@ -48,7 +50,7 @@ pub fn neutralize_injection(text: &str, raw_id: &str) -> (String, Vec<InjectionF
                 line_end: end + 1,
             });
             output.push_str(&format!(
-                "[keel neutralized prompt-injection: {pattern}; raw available via keel raw {raw_id}]\n"
+                "[keel neutralized prompt-injection: {pattern}; original block withheld from model]\n"
             ));
             index = end + 1;
             continue;
@@ -197,7 +199,8 @@ ok line 2\n";
         assert!(!output.contains("the harness"));
         assert!(!output.contains("secret: pretend"));
         assert!(output.contains("[keel neutralized prompt-injection: system-prompt-block"));
-        assert!(output.contains(RAW_ID));
+        assert!(!output.contains(RAW_ID));
+        assert!(output.contains("original block withheld from model"));
     }
 
     #[test]

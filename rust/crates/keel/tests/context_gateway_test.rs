@@ -26,7 +26,14 @@ fn projection_is_bounded_and_keeps_a_recovery_pointer() {
     assert!(projection.token_count <= 24);
     assert_eq!(projection.raw_artifact_id.as_deref(), Some("20260909-raw"));
     assert!(projection.summary.contains("20260909-raw"));
-    assert!(projection.provenance_id.starts_with("prov-fnv1a:"));
+    let provenance_digest = projection
+        .provenance_id
+        .strip_prefix("prov-fnv1a:")
+        .expect("stable provenance prefix");
+    assert_eq!(provenance_digest.len(), 64);
+    assert!(provenance_digest
+        .chars()
+        .all(|character| character.is_ascii_hexdigit()));
 }
 
 #[test]
@@ -138,6 +145,32 @@ fn budget_failure_never_returns_an_unbounded_raw_fallback() {
     let rendered = error.to_string();
     assert!(rendered.contains("budget"));
     assert!(!rendered.contains("raw tool response"));
+}
+
+#[test]
+fn low_budget_projection_keeps_critical_failure_identity() {
+    let mut firewall = ContextFirewall::new(ContextPolicy::with_max_tokens(32));
+    let content = [
+        "ordinary setup output that should not win priority",
+        "another ordinary line before the failure",
+        "error: critical-test-42 failed at src/lib.rs:40",
+        "exit status: 1",
+    ]
+    .join("\n");
+    let projection = firewall
+        .project(ProjectionInput::new(
+            ContextSource::Error,
+            content,
+            Some("raw-critical-error"),
+            "workspace-critical",
+            "session-critical",
+        ))
+        .expect("critical failure projection should remain bounded");
+
+    assert!(projection.truncated);
+    assert!(projection.summary.contains("critical-test-42"));
+    assert!(projection.summary.contains("failed"));
+    assert!(projection.token_count <= 32);
 }
 
 #[test]
