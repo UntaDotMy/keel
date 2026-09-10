@@ -146,6 +146,37 @@ impl McpRequestContext {
 /// call, well below a DoS). An over-cap frame is refused, not truncated.
 const MAX_FRAME_BYTES: u64 = 8 * 1024 * 1024;
 
+/// The reader and request workers share one bounded event queue. A synchronous
+/// channel applies backpressure to a streaming peer instead of allowing input
+/// frames or completed responses to accumulate without limit.
+const MAX_EVENT_QUEUE: usize = 128;
+
+/// The test-only preload path also needs one slot for EOF/error after the
+/// frames have been read. Production uses the channel directly and therefore
+/// does not need this reserve.
+#[cfg(test)]
+const MAX_PRELOADED_EVENTS: usize = MAX_EVENT_QUEUE - 1;
+
+/// Maximum parsed work waiting for a worker. This is separate from the worker
+/// cap so a batch/input flood cannot turn into an unbounded `VecDeque` or batch
+/// collector even while workers are busy.
+const MAX_PENDING_JOBS: usize = 512;
+
+/// JSON-RPC batches are intentionally bounded before their elements become
+/// pending jobs. HTTP uses the same bound; keeping stdio and HTTP aligned makes
+/// the two transports fail closed in the same way.
+const MAX_STDIO_BATCH_ITEMS: usize = 64;
+
+/// Cancellation registrations are small, transient state, but a client can
+/// keep many requests in flight. Keep this cap above the maximum worker count
+/// while still making the collection finite.
+const MAX_STDIO_CANCELLATIONS: usize = 1_024;
+
+/// JSON-RPC ids are echoed in responses and cancellation notifications. Bound
+/// their serialized key before storing or comparing them so a large string id
+/// cannot turn one transient registration into megabytes of retained state.
+const MAX_CANCELLATION_ID_BYTES: usize = 512;
+
 /// Default max concurrent in-flight JSON-RPC requests per `mcp serve` process.
 /// Hosts may stream multiple `tools/call`s before prior responses return; without
 /// a cap a flood could spawn unbounded OS threads. Override with
@@ -283,7 +314,7 @@ fn render_mcp_help(standard_output: &mut dyn Write) {
     );
     let _ = writeln!(
         standard_output,
-        "  Text size: KEEL_MCP_MAX_TEXT_CHARS (default 12000); stdio frame cap 24KB."
+        "  Text size: KEEL_MCP_MAX_TEXT_CHARS (default 12000); stdio frame cap 8MiB."
     );
     let _ = writeln!(standard_output);
     let _ = writeln!(
@@ -513,7 +544,7 @@ pub fn serve_stdio(
     standard_error: &mut dyn Write,
 ) -> u8 {
     let max_inflight = max_inflight();
-    let (event_tx, event_rx) = mpsc::channel::<ServeEvent>();
+    let (event_tx, event_rx) = mpsc::sync_channel::<ServeEvent>(MAX_EVENT_QUEUE);
 
     let mut reader = BufReader::new(input);
     let mut raw_line: Vec<u8> = Vec::new();
@@ -526,16 +557,37 @@ pub fn serve_stdio(
             .read_until(b'\n', &mut raw_line);
         match read_result {
             Ok(0) => {
+                if preloaded.len() >= MAX_EVENT_QUEUE {
+                    preloaded.clear();
+                    preloaded.push_back(ServeEvent::ReaderError(
+                        "event queue capacity exceeded".to_string(),
+                    ));
+                    break;
+                }
                 preloaded.push_back(ServeEvent::ReaderEof);
                 break;
             }
             Ok(_) => {}
             Err(error) => {
+                if preloaded.len() >= MAX_EVENT_QUEUE {
+                    preloaded.clear();
+                    preloaded.push_back(ServeEvent::ReaderError(
+                        "event queue capacity exceeded".to_string(),
+                    ));
+                    break;
+                }
                 preloaded.push_back(ServeEvent::ReaderError(error.to_string()));
                 break;
             }
         }
         if raw_line.len() as u64 >= MAX_FRAME_BYTES && raw_line.last() != Some(&b'\n') {
+            if preloaded.len() >= MAX_EVENT_QUEUE {
+                preloaded.clear();
+                preloaded.push_back(ServeEvent::ReaderError(
+                    "event queue capacity exceeded".to_string(),
+                ));
+                break;
+            }
             preloaded.push_back(ServeEvent::OversizedFrame);
             break;
         }
@@ -543,6 +595,13 @@ pub fn serve_stdio(
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
+        }
+        if preloaded.len() >= MAX_PRELOADED_EVENTS {
+            preloaded.clear();
+            preloaded.push_back(ServeEvent::ReaderError(
+                "event queue capacity exceeded".to_string(),
+            ));
+            break;
         }
         preloaded.push_back(ServeEvent::Frame(trimmed.to_string()));
     }
@@ -562,7 +621,7 @@ pub fn serve_stdio(
 /// write tool responses while still accepting new frames (true full-duplex).
 fn serve_stdio_owned_stdin(standard_output: &mut dyn Write, standard_error: &mut dyn Write) -> u8 {
     let max_inflight = max_inflight();
-    let (event_tx, event_rx) = mpsc::channel::<ServeEvent>();
+    let (event_tx, event_rx) = mpsc::sync_channel::<ServeEvent>(MAX_EVENT_QUEUE);
     let reader_tx = event_tx.clone();
     let reader_handle = thread::Builder::new()
         .name("keel-mcp-stdin".into())
@@ -678,7 +737,7 @@ fn idle_reap_parent_gone(
     gone
 }
 
-fn read_frames_into(input: &mut dyn Read, event_tx: mpsc::Sender<ServeEvent>) {
+fn read_frames_into(input: &mut dyn Read, event_tx: mpsc::SyncSender<ServeEvent>) {
     let mut reader = BufReader::new(input);
     let mut raw_line: Vec<u8> = Vec::new();
     loop {
@@ -718,7 +777,14 @@ fn read_frames_into(input: &mut dyn Read, event_tx: mpsc::Sender<ServeEvent>) {
 
 pub(super) fn cancellation_key(request_id: &Value) -> Option<String> {
     match request_id {
-        Value::Null | Value::String(_) | Value::Number(_) => serde_json::to_string(request_id).ok(),
+        Value::Null | Value::String(_) | Value::Number(_) => {
+            let Ok(key) = serde_json::to_string(request_id) else {
+                // A scalar id that cannot be serialized is simply not cancellable;
+                // the request still dispatches normally.
+                return None;
+            };
+            (key.len() <= MAX_CANCELLATION_ID_BYTES).then_some(key)
+        }
         _ => None,
     }
 }
@@ -727,18 +793,78 @@ fn new_pending_job(
     request: Value,
     batch: Option<BatchMember>,
     cancellations: &mut HashMap<String, Arc<AtomicBool>>,
-) -> PendingJob {
+) -> Result<PendingJob, PendingJobError> {
     let key = request.get("id").and_then(cancellation_key);
     let cancellation = Arc::new(AtomicBool::new(false));
     if let Some(key) = key.as_ref() {
+        if cancellations.contains_key(key) {
+            return Err(PendingJobError::DuplicateRequestId);
+        }
+        if cancellations.len() >= MAX_STDIO_CANCELLATIONS {
+            return Err(PendingJobError::CancellationRegistryFull);
+        }
         cancellations.insert(key.clone(), Arc::clone(&cancellation));
     }
-    PendingJob {
+    Ok(PendingJob {
         request,
         batch,
         cancellation_key: key,
         cancellation,
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingJobError {
+    DuplicateRequestId,
+    CancellationRegistryFull,
+}
+
+impl PendingJobError {
+    fn code(self) -> i64 {
+        match self {
+            Self::DuplicateRequestId => JSON_RPC_INVALID_REQUEST,
+            Self::CancellationRegistryFull => JSON_RPC_INTERNAL_ERROR,
+        }
     }
+
+    fn message(self) -> &'static str {
+        match self {
+            Self::DuplicateRequestId => "request id is already in use",
+            Self::CancellationRegistryFull => "server busy: cancellation registry is full",
+        }
+    }
+}
+
+fn rejected_request_id(request: &Value) -> Option<Value> {
+    match request {
+        Value::Object(object) => object.get("id").cloned(),
+        // A non-object is an invalid JSON-RPC request, so it receives the required
+        // null id response; an object without an id is a notification.
+        _ => Some(Value::Null),
+    }
+}
+
+fn rejected_request_response(request: &Value, code: i64, message: &str) -> Option<Value> {
+    rejected_request_id(request).map(|id| error_response(id, code, message))
+}
+
+fn rejected_batch_response(items: &[Value], code: i64, message: &str) -> Option<Value> {
+    let responses: Vec<Value> = items
+        .iter()
+        .filter_map(|item| rejected_request_response(item, code, message))
+        .collect();
+    (!responses.is_empty()).then_some(Value::Array(responses))
+}
+
+fn remove_pending_job_registration(
+    cancellations: &mut HashMap<String, Arc<AtomicBool>>,
+    job: &PendingJob,
+) {
+    remove_cancellation_registration(
+        cancellations,
+        job.cancellation_key.as_deref(),
+        &job.cancellation,
+    );
 }
 
 fn apply_cancellation_notifications(frame: &str, cancellations: &HashMap<String, Arc<AtomicBool>>) {
@@ -784,7 +910,7 @@ fn remove_cancellation_registration(
 }
 
 fn run_serve_event_loop(
-    event_tx: mpsc::Sender<ServeEvent>,
+    event_tx: mpsc::SyncSender<ServeEvent>,
     event_rx: mpsc::Receiver<ServeEvent>,
     standard_output: &mut dyn Write,
     standard_error: &mut dyn Write,
@@ -846,12 +972,102 @@ fn run_serve_event_loop(
                 apply_cancellation_notifications(&frame, &cancellations);
                 match parse_frame(&frame) {
                     FrameParse::Single(request) => {
-                        pending.push_back(new_pending_job(request, None, &mut cancellations));
+                        if pending.len() >= MAX_PENDING_JOBS {
+                            if let Some(busy) = rejected_request_response(
+                                &request,
+                                JSON_RPC_INTERNAL_ERROR,
+                                "server busy: pending request queue is full",
+                            ) {
+                                if write_framed_response(standard_output, standard_error, &busy)
+                                    .is_err()
+                                {
+                                    exit_code = 1;
+                                    reader_done = true;
+                                    pending.clear();
+                                    batches.clear();
+                                }
+                            }
+                        } else {
+                            let request_for_error = request.clone();
+                            match new_pending_job(request, None, &mut cancellations) {
+                                Ok(job) => pending.push_back(job),
+                                Err(error) => {
+                                    if let Some(response) = rejected_request_response(
+                                        &request_for_error,
+                                        error.code(),
+                                        error.message(),
+                                    ) {
+                                        if write_framed_response(
+                                            standard_output,
+                                            standard_error,
+                                            &response,
+                                        )
+                                        .is_err()
+                                        {
+                                            exit_code = 1;
+                                            reader_done = true;
+                                            pending.clear();
+                                            batches.clear();
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                     FrameParse::Batch(items) => {
+                        if pending.len().saturating_add(items.len()) > MAX_PENDING_JOBS {
+                            if let Some(busy) = rejected_batch_response(
+                                &items,
+                                JSON_RPC_INTERNAL_ERROR,
+                                "server busy: pending request queue is full",
+                            ) {
+                                if write_framed_response(standard_output, standard_error, &busy)
+                                    .is_err()
+                                {
+                                    exit_code = 1;
+                                    reader_done = true;
+                                    pending.clear();
+                                    batches.clear();
+                                }
+                            }
+                            continue;
+                        }
                         let batch_id = next_batch_id;
-                        next_batch_id = next_batch_id.saturating_add(1);
                         let len = items.len();
+                        let mut jobs = Vec::with_capacity(len);
+                        let mut pending_error = None;
+                        for (index, request) in items.iter().cloned().enumerate() {
+                            match new_pending_job(
+                                request,
+                                Some(BatchMember { batch_id, index }),
+                                &mut cancellations,
+                            ) {
+                                Ok(job) => jobs.push(job),
+                                Err(error) => {
+                                    pending_error = Some(error);
+                                    break;
+                                }
+                            }
+                        }
+                        if let Some(error) = pending_error {
+                            for job in &jobs {
+                                remove_pending_job_registration(&mut cancellations, job);
+                            }
+                            if let Some(response) =
+                                rejected_batch_response(&items, error.code(), error.message())
+                            {
+                                if write_framed_response(standard_output, standard_error, &response)
+                                    .is_err()
+                                {
+                                    exit_code = 1;
+                                    reader_done = true;
+                                    pending.clear();
+                                    batches.clear();
+                                }
+                            }
+                            continue;
+                        }
+                        next_batch_id = next_batch_id.saturating_add(1);
                         batches.insert(
                             batch_id,
                             BatchCollector {
@@ -859,12 +1075,8 @@ fn run_serve_event_loop(
                                 remaining: len,
                             },
                         );
-                        for (index, request) in items.into_iter().enumerate() {
-                            pending.push_back(new_pending_job(
-                                request,
-                                Some(BatchMember { batch_id, index }),
-                                &mut cancellations,
-                            ));
+                        for job in jobs {
+                            pending.push_back(job);
                         }
                     }
                     FrameParse::Immediate(response) => {
@@ -876,6 +1088,7 @@ fn run_serve_event_loop(
                             exit_code = 1;
                             reader_done = true;
                             pending.clear();
+                            batches.clear();
                         }
                     }
                 }
@@ -890,6 +1103,7 @@ fn run_serve_event_loop(
                 exit_code = 1;
                 reader_done = true;
                 pending.clear();
+                batches.clear();
             }
             ServeEvent::ReaderEof => {
                 reader_done = true;
@@ -899,6 +1113,7 @@ fn run_serve_event_loop(
                 exit_code = 1;
                 reader_done = true;
                 pending.clear();
+                batches.clear();
             }
             ServeEvent::Response {
                 value,
@@ -933,6 +1148,7 @@ fn run_serve_event_loop(
                             exit_code = 1;
                             reader_done = true;
                             pending.clear();
+                            batches.clear();
                         }
                     }
                 } else if let Err(write_error) =
@@ -942,6 +1158,7 @@ fn run_serve_event_loop(
                     exit_code = 1;
                     reader_done = true;
                     pending.clear();
+                    batches.clear();
                 }
             }
             ServeEvent::WorkerDone {
@@ -967,6 +1184,7 @@ fn run_serve_event_loop(
                             exit_code = 1;
                             reader_done = true;
                             pending.clear();
+                            batches.clear();
                         }
                     }
                 }
@@ -1036,6 +1254,7 @@ fn run_serve_event_loop(
                             exit_code = 1;
                             reader_done = true;
                             pending.clear();
+                            batches.clear();
                             break;
                         }
                     }
@@ -1119,6 +1338,13 @@ fn parse_frame(frame: &str) -> FrameParse {
                     Value::Null,
                     JSON_RPC_INVALID_REQUEST,
                     "Invalid Request: empty batch",
+                ));
+            }
+            if items.len() > MAX_STDIO_BATCH_ITEMS {
+                return FrameParse::Immediate(error_response(
+                    Value::Null,
+                    JSON_RPC_INVALID_REQUEST,
+                    "Invalid Request: batch exceeds maximum item count",
                 ));
             }
             FrameParse::Batch(items)
@@ -1343,7 +1569,7 @@ fn handle_method_cancellable(
     context: &McpRequestContext,
 ) -> Result<Value, MethodError> {
     match method {
-        "initialize" => Ok(handle_initialize(params)),
+        "initialize" => handle_initialize(params),
         "notifications/initialized" => Ok(Value::Null),
         "ping" => Ok(json!({})),
         "tools/list" => tools::handle_tools_list_for_profile_params_with_context(
@@ -1426,20 +1652,53 @@ fn handle_method_cancellable(
     }
 }
 
-fn handle_initialize(params: &Value) -> Value {
-    let requested = params.get("protocolVersion").and_then(Value::as_str);
-    let negotiated = match requested {
-        Some(version)
-            if matches!(
-                version,
-                MCP_LEGACY_PROTOCOL_VERSION | MCP_PREVIOUS_PROTOCOL_VERSION | MCP_PROTOCOL_VERSION
-            ) =>
+fn handle_initialize(params: &Value) -> Result<Value, MethodError> {
+    let object = params.as_object().ok_or_else(|| MethodError {
+        code: JSON_RPC_INVALID_PARAMS,
+        message: "initialize params must be an object".to_string(),
+    })?;
+    let requested = object
+        .get("protocolVersion")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| MethodError {
+            code: JSON_RPC_INVALID_PARAMS,
+            message: "initialize params.protocolVersion must be a non-empty string".to_string(),
+        })?;
+    if !object.get("capabilities").is_some_and(Value::is_object) {
+        return Err(MethodError {
+            code: JSON_RPC_INVALID_PARAMS,
+            message: "initialize params.capabilities must be an object".to_string(),
+        });
+    }
+    let client_info = object
+        .get("clientInfo")
+        .and_then(Value::as_object)
+        .ok_or_else(|| MethodError {
+            code: JSON_RPC_INVALID_PARAMS,
+            message: "initialize params.clientInfo must be an object".to_string(),
+        })?;
+    for field in ["name", "version"] {
+        if !client_info
+            .get(field)
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty())
         {
-            version
+            return Err(MethodError {
+                code: JSON_RPC_INVALID_PARAMS,
+                message: format!("initialize params.clientInfo.{field} must be a non-empty string"),
+            });
         }
-        _ => MCP_PROTOCOL_VERSION,
+    }
+    let negotiated = if matches!(
+        requested,
+        MCP_LEGACY_PROTOCOL_VERSION | MCP_PREVIOUS_PROTOCOL_VERSION | MCP_PROTOCOL_VERSION
+    ) {
+        requested
+    } else {
+        MCP_PROTOCOL_VERSION
     };
-    json!({
+    Ok(json!({
         "protocolVersion": negotiated,
         "serverInfo": {
             "name": MCP_SERVER_NAME,
@@ -1449,7 +1708,7 @@ fn handle_initialize(params: &Value) -> Value {
             "tools": {},
             "resources": {},
         },
-    })
+    }))
 }
 
 fn handle_resources_list() -> Value {
@@ -1684,7 +1943,11 @@ mod tests {
             "jsonrpc": "2.0",
             "id": 1,
             "method": "initialize",
-            "params": {}
+            "params": {
+                "protocolVersion": MCP_PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": { "name": "mcp-test", "version": "1.0.0" }
+            }
         });
         let response = dispatch(&request).expect("response present");
         assert_eq!(response["jsonrpc"], "2.0");
@@ -1708,7 +1971,11 @@ mod tests {
             "jsonrpc": "2.0",
             "id": 7,
             "method": "initialize",
-            "params": { "protocolVersion": "2024-11-05" }
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": { "name": "mcp-test", "version": "1.0.0" }
+            }
         });
         let response = dispatch(&request).expect("response present");
         assert_eq!(
@@ -1717,33 +1984,77 @@ mod tests {
             "server must echo the client's requested protocol version"
         );
 
-        // A non-string protocolVersion is ignored in favor of the fallback.
+        // A non-string protocolVersion is invalid per InitializeRequestParams.
         let bad = json!({
             "jsonrpc": "2.0",
             "id": 8,
             "method": "initialize",
-            "params": { "protocolVersion": 1234 }
+            "params": {
+                "protocolVersion": 1234,
+                "capabilities": {},
+                "clientInfo": { "name": "mcp-test", "version": "1.0.0" }
+            }
         });
         let bad_response = dispatch(&bad).expect("response present");
         assert_eq!(
-            bad_response["result"]["protocolVersion"],
-            json!(MCP_PROTOCOL_VERSION),
-            "a non-string protocolVersion must fall back to the server default"
+            bad_response["error"]["code"],
+            json!(JSON_RPC_INVALID_PARAMS),
+            "a non-string protocolVersion must be rejected"
         );
 
-        // An explicit null protocolVersion also falls back (as_str on Null → None).
+        // An explicit null protocolVersion is invalid, just like any other
+        // missing or non-string required field.
         let null_version = json!({
             "jsonrpc": "2.0",
             "id": 9,
             "method": "initialize",
-            "params": { "protocolVersion": null }
+            "params": {
+                "protocolVersion": null,
+                "capabilities": {},
+                "clientInfo": { "name": "mcp-test", "version": "1.0.0" }
+            }
         });
         let null_response = dispatch(&null_version).expect("response present");
         assert_eq!(
-            null_response["result"]["protocolVersion"],
-            json!(MCP_PROTOCOL_VERSION),
-            "a null protocolVersion must fall back to the server default"
+            null_response["error"]["code"],
+            json!(JSON_RPC_INVALID_PARAMS),
+            "a null protocolVersion must be rejected"
         );
+    }
+
+    #[test]
+    fn initialize_rejects_missing_required_parameters() {
+        for params in [
+            json!({}),
+            Value::Null,
+            json!({
+                "protocolVersion": MCP_PROTOCOL_VERSION,
+                "capabilities": {}
+            }),
+            json!({
+                "protocolVersion": MCP_PROTOCOL_VERSION,
+                "clientInfo": { "name": "mcp-test", "version": "1.0.0" }
+            }),
+            json!({
+                "protocolVersion": MCP_PROTOCOL_VERSION,
+                "capabilities": [],
+                "clientInfo": { "name": "mcp-test", "version": "1.0.0" }
+            }),
+            json!({
+                "protocolVersion": MCP_PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": { "name": "mcp-test" }
+            }),
+        ] {
+            let response = dispatch(&json!({
+                "jsonrpc": "2.0",
+                "id": "invalid-init",
+                "method": "initialize",
+                "params": params,
+            }))
+            .expect("response present");
+            assert_eq!(response["error"]["code"], json!(JSON_RPC_INVALID_PARAMS));
+        }
     }
 
     #[test]
@@ -1837,6 +2148,41 @@ mod tests {
             "empty-params catalog {tokens} exceeds {}",
             crate::proxy::context::DEFAULT_MAX_TOOL_CATALOG_TOKENS
         );
+    }
+
+    #[test]
+    fn dispatched_tools_list_response_stays_within_page_budget() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous_profile = std::env::var("KEEL_MCP_CATALOG_PROFILE").ok();
+        let previous_budget = std::env::var("KEEL_MCP_PAGE_TOKENS").ok();
+        std::env::set_var("KEEL_MCP_CATALOG_PROFILE", "full");
+        std::env::set_var("KEEL_MCP_PAGE_TOKENS", "1200");
+
+        let response = dispatch(&json!({
+            "jsonrpc": "2.0",
+            "id": "tools-budget",
+            "method": "tools/list",
+            "params": { "level": 2 }
+        }))
+        .expect("response present");
+        assert!(response.get("error").is_none(), "{response}");
+        let result = &response["result"];
+        let measured = tools::measure_tools_list_response(result);
+        assert!(
+            measured <= 1200,
+            "dispatched tools/list page measured {measured} tokens"
+        );
+
+        match previous_profile {
+            Some(value) => std::env::set_var("KEEL_MCP_CATALOG_PROFILE", value),
+            None => std::env::remove_var("KEEL_MCP_CATALOG_PROFILE"),
+        }
+        match previous_budget {
+            Some(value) => std::env::set_var("KEEL_MCP_PAGE_TOKENS", value),
+            None => std::env::remove_var("KEEL_MCP_PAGE_TOKENS"),
+        }
     }
 
     #[test]
@@ -2111,6 +2457,56 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_stdio_request_ids_are_rejected_without_overwriting_owner() {
+        let mut cancellations = HashMap::new();
+        let first = new_pending_job(
+            json!({"jsonrpc":"2.0", "id":"duplicate", "method":"ping"}),
+            None,
+            &mut cancellations,
+        )
+        .expect("first request registers");
+        let first_owner = cancellations
+            .get("\"duplicate\"")
+            .cloned()
+            .expect("first cancellation owner");
+
+        let error = match new_pending_job(
+            json!({"jsonrpc":"2.0", "id":"duplicate", "method":"ping"}),
+            None,
+            &mut cancellations,
+        ) {
+            Ok(_) => panic!("duplicate request id must fail closed"),
+            Err(error) => error,
+        };
+        assert_eq!(error, PendingJobError::DuplicateRequestId);
+        assert!(
+            Arc::ptr_eq(
+                cancellations.get("\"duplicate\"").expect("owner remains"),
+                &first_owner
+            ),
+            "a duplicate must not replace the in-flight cancellation owner"
+        );
+        remove_pending_job_registration(&mut cancellations, &first);
+        assert!(cancellations.is_empty());
+    }
+
+    #[test]
+    fn rejected_stdio_notifications_never_emit_an_id_null_response() {
+        let notification = json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+        });
+        assert!(
+            rejected_request_response(&notification, JSON_RPC_INTERNAL_ERROR, "server busy")
+                .is_none()
+        );
+        assert!(
+            rejected_batch_response(&[notification], JSON_RPC_INTERNAL_ERROR, "server busy")
+                .is_none()
+        );
+    }
+
+    #[test]
     fn parse_frame_empty_batch_is_invalid_request() {
         match parse_frame("[]") {
             FrameParse::Immediate(response) => {
@@ -2120,6 +2516,23 @@ mod tests {
                 panic!("empty batch must not schedule workers")
             }
         }
+    }
+
+    #[test]
+    fn parse_frame_rejects_batches_above_the_stdio_bound() {
+        let batch = serde_json::to_string(
+            &(0..=MAX_STDIO_BATCH_ITEMS)
+                .map(|id| json!({"jsonrpc":"2.0","id":id,"method":"ping"}))
+                .collect::<Vec<_>>(),
+        )
+        .expect("serialize oversized batch");
+        let FrameParse::Immediate(response) = parse_frame(&batch) else {
+            panic!("oversized stdio batch must not schedule all members");
+        };
+        assert_eq!(response["error"]["code"], json!(JSON_RPC_INVALID_REQUEST));
+        assert!(response["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("maximum item count")));
     }
 
     #[test]

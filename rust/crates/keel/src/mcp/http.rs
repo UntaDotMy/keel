@@ -156,9 +156,10 @@ fn authorization_header_matches(header: Option<&str>, expected: &str) -> bool {
     let expected_bytes = expected.as_bytes();
     // Constant-time comparison: iterate through expected_bytes so the loop
     // duration reveals nothing about the provided token's length.
-    let mut difference = (provided_bytes.len() ^ expected_bytes.len()) as u8;
+    let mut difference = provided_bytes.len() ^ expected_bytes.len();
     for (index, &expected_byte) in expected_bytes.iter().enumerate() {
-        difference |= provided_bytes.get(index).copied().unwrap_or_default() ^ expected_byte;
+        difference |=
+            usize::from(provided_bytes.get(index).copied().unwrap_or_default() ^ expected_byte);
     }
     difference == 0
 }
@@ -169,13 +170,63 @@ fn remote_http_authorized(header: Option<&str>) -> bool {
         .unwrap_or(false)
 }
 
+#[derive(Debug, Clone)]
+struct HttpSession {
+    last_seen: Instant,
+    protocol_version: String,
+}
+
+#[derive(Debug, Clone)]
+struct CancellationRegistration {
+    token: Arc<AtomicBool>,
+    registered_at: Instant,
+    expires_at: Instant,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionValidationError {
+    MissingSession,
+    MissingProtocol,
+    Unknown,
+    ProtocolMismatch,
+    UnsupportedProtocol,
+}
+
 #[derive(Default)]
 struct HttpState {
-    sessions: Mutex<HashMap<String, Instant>>,
-    cancellations: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    sessions: Mutex<HashMap<String, HttpSession>>,
+    cancellations: Mutex<HashMap<String, CancellationRegistration>>,
 }
 
 const MAX_HTTP_SESSIONS: usize = 1_000;
+const MAX_HTTP_CANCELLATIONS: usize = 1_024;
+const MAX_HTTP_SESSION_ID_BYTES: usize = 256;
+const MAX_HTTP_CANCELLATION_KEY_BYTES: usize = 1_024;
+
+fn http_cancellation_ttl() -> Duration {
+    env::var("KEEL_MCP_CANCELLATION_TTL_SECONDS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(|value| Duration::from_secs(value.clamp(1, 86_400)))
+        .unwrap_or_else(|| Duration::from_secs(900))
+}
+
+fn cancellation_registration_ttl() -> Duration {
+    // A configured cancellation TTL is the stale-entry policy, not a license to
+    // forget an in-flight request; keep the handle through the owner deadline.
+    http_cancellation_ttl()
+        .max(super::tools::mcp_child_timeout())
+        .max(HTTP_BATCH_WALL_BUDGET)
+}
+
+fn valid_http_session_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_HTTP_SESSION_ID_BYTES
+        && value
+            .as_bytes()
+            .iter()
+            .all(|byte| (0x21..=0x7e).contains(byte))
+}
 
 fn http_session_ttl() -> Duration {
     env::var("KEEL_MCP_SESSION_TTL_SECONDS")
@@ -185,18 +236,26 @@ fn http_session_ttl() -> Duration {
         .unwrap_or_else(|| Duration::from_secs(900))
 }
 
+fn effective_http_session_ttl() -> Duration {
+    // A session must stay valid while a request it owns is cancellable, so
+    // extend short TTLs through the single-tool and batch owner deadlines.
+    http_session_ttl()
+        .max(super::tools::mcp_child_timeout())
+        .max(HTTP_BATCH_WALL_BUDGET)
+}
+
 impl HttpState {
     fn with_live_sessions<T>(
         &self,
-        operation: impl FnOnce(&mut HashMap<String, Instant>, Instant) -> T,
+        operation: impl FnOnce(&mut HashMap<String, HttpSession>, Instant) -> T,
     ) -> T {
         let now = Instant::now();
-        let ttl = http_session_ttl();
+        let ttl = effective_http_session_ttl();
         let mut sessions = self
             .sessions
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        sessions.retain(|_, last_seen| now.saturating_duration_since(*last_seen) < ttl);
+        sessions.retain(|_, session| now.saturating_duration_since(session.last_seen) < ttl);
         operation(&mut sessions, now)
     }
 
@@ -204,37 +263,156 @@ impl HttpState {
         self.with_live_sessions(|_, _| ());
     }
 
+    #[cfg(test)]
     fn touch_session(&self, id: &str) -> bool {
+        self.touch_session_with_protocol(id, None).is_ok()
+    }
+
+    fn touch_session_with_protocol(
+        &self,
+        id: &str,
+        protocol_version: Option<&str>,
+    ) -> Result<(), SessionValidationError> {
         self.with_live_sessions(|sessions, now| {
-            if let Some(last_seen) = sessions.get_mut(id) {
-                *last_seen = now;
-                true
-            } else {
-                false
+            let Some(session) = sessions.get_mut(id) else {
+                return Err(SessionValidationError::Unknown);
+            };
+            if protocol_version.is_some_and(|version| version != session.protocol_version) {
+                return Err(SessionValidationError::ProtocolMismatch);
             }
+            session.last_seen = now;
+            Ok(())
         })
     }
 
-    fn register_session(&self, id: String) {
+    fn register_session(&self, id: String, protocol_version: String) -> bool {
         self.with_live_sessions(|sessions, now| {
-            if sessions.len() >= MAX_HTTP_SESSIONS {
-                if let Some(oldest) = sessions
-                    .iter()
-                    .min_by_key(|(_, last_seen)| *last_seen)
-                    .map(|(id, _)| id.clone())
-                {
-                    sessions.remove(&oldest);
-                }
+            if sessions.len() >= MAX_HTTP_SESSIONS || sessions.contains_key(&id) {
+                return false;
             }
-            sessions.insert(id, now);
-        });
+            sessions.insert(
+                id,
+                HttpSession {
+                    last_seen: now,
+                    protocol_version,
+                },
+            );
+            true
+        })
     }
 
     fn remove_session(&self, id: &str) {
-        if let Ok(mut sessions) = self.sessions.lock() {
-            sessions.remove(id);
-        }
+        self.sessions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(id);
     }
+
+    fn with_live_cancellations<T>(
+        &self,
+        operation: impl FnOnce(&mut HashMap<String, CancellationRegistration>, Instant) -> T,
+    ) -> T {
+        let now = Instant::now();
+        let mut cancellations = self
+            .cancellations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Registrations are process-local cancellation handles, so reap only
+        // after the effective owner deadline; otherwise active work loses its handle.
+        cancellations.retain(|_, registration| now < registration.expires_at);
+        operation(&mut cancellations, now)
+    }
+
+    /// Register one request for cancellation. A bounded registry is fail
+    /// closed: when it is full, the caller rejects a new request instead of
+    /// silently running work that can never be cancelled. Re-registering the
+    /// same token is allowed for a preregistered batch member.
+    fn register_cancellation(&self, key: String, token: Arc<AtomicBool>) -> bool {
+        if key.len() > MAX_HTTP_CANCELLATION_KEY_BYTES {
+            return false;
+        }
+        self.with_live_cancellations(|cancellations, now| {
+            let expires_at = now + cancellation_registration_ttl();
+            if let Some(existing) = cancellations.get_mut(&key) {
+                if Arc::ptr_eq(&existing.token, &token) {
+                    existing.registered_at = now;
+                    existing.expires_at = expires_at;
+                    return true;
+                }
+                return false;
+            }
+            if cancellations.len() >= MAX_HTTP_CANCELLATIONS {
+                return false;
+            }
+            cancellations.insert(
+                key,
+                CancellationRegistration {
+                    token,
+                    registered_at: now,
+                    expires_at,
+                },
+            );
+            true
+        })
+    }
+
+    fn unregister_cancellation(&self, key: &str, token: &Arc<AtomicBool>) {
+        self.with_live_cancellations(|cancellations, _| {
+            if cancellations
+                .get(key)
+                .map(|registered| Arc::ptr_eq(&registered.token, token))
+                .unwrap_or(false)
+            {
+                cancellations.remove(key);
+            }
+        });
+    }
+}
+
+fn validate_http_session(
+    state: &HttpState,
+    session_id: Option<&str>,
+    protocol_version: Option<&str>,
+    require_session: bool,
+) -> Result<(), SessionValidationError> {
+    if protocol_version.is_some_and(|version| !supported_http_protocol_version(version)) {
+        return Err(SessionValidationError::UnsupportedProtocol);
+    }
+    let Some(session_id) = session_id else {
+        if require_session || protocol_version.is_some() {
+            return Err(SessionValidationError::MissingSession);
+        }
+        return Ok(());
+    };
+    let Some(protocol_version) = protocol_version else {
+        return Err(SessionValidationError::MissingProtocol);
+    };
+    state.touch_session_with_protocol(session_id, Some(protocol_version))
+}
+
+fn write_http_session_validation_error(
+    stream: &mut TcpStream,
+    error: SessionValidationError,
+) -> std::io::Result<()> {
+    let (status, body) = match error {
+        SessionValidationError::MissingSession => (
+            400,
+            b"MCP-Session-Id required for subsequent MCP requests".as_slice(),
+        ),
+        SessionValidationError::MissingProtocol => (
+            400,
+            b"MCP-Protocol-Version required for subsequent MCP requests".as_slice(),
+        ),
+        SessionValidationError::Unknown => (404, b"Unknown MCP-Session-Id".as_slice()),
+        SessionValidationError::ProtocolMismatch => (
+            400,
+            b"MCP-Protocol-Version does not match the MCP session".as_slice(),
+        ),
+        SessionValidationError::UnsupportedProtocol => {
+            (400, b"Unsupported MCP-Protocol-Version".as_slice())
+        }
+    };
+    write_http(stream, status, "text/plain; charset=utf-8", None, body)
 }
 
 fn handle_connection(
@@ -452,6 +630,7 @@ struct HttpHeaders {
     authorization: Option<String>,
     protocol_version: Option<String>,
     session_id: Option<String>,
+    singleton_headers_valid: bool,
 }
 
 fn find_header_end(buffer: &[u8]) -> Option<usize> {
@@ -475,13 +654,18 @@ fn parse_headers(text: &str) -> HttpHeaders {
     let mut authorization = None;
     let mut protocol_version = None;
     let mut session_id = None;
+    let mut singleton_headers_valid = true;
     for line in lines {
         if let Some((name, value)) = line.split_once(':') {
             let name = name.trim().to_ascii_lowercase();
             let value = value.trim();
             match name.as_str() {
-                "origin" => origin = Some(value.to_string()),
-                "content-type" => content_type = Some(value.to_string()),
+                "origin" => {
+                    singleton_headers_valid &= origin.replace(value.to_string()).is_none();
+                }
+                "content-type" => {
+                    singleton_headers_valid &= content_type.replace(value.to_string()).is_none();
+                }
                 "content-length" => {
                     if content_length.is_some() {
                         content_length_valid = false;
@@ -492,10 +676,22 @@ fn parse_headers(text: &str) -> HttpHeaders {
                         }
                     }
                 }
-                "accept" => accept = value.to_string(),
-                "authorization" => authorization = Some(value.to_string()),
-                "mcp-protocol-version" => protocol_version = Some(value.to_string()),
-                "mcp-session-id" => session_id = Some(value.to_string()),
+                "accept" => {
+                    if !accept.is_empty() {
+                        accept.push(',');
+                    }
+                    accept.push_str(value);
+                }
+                "authorization" => {
+                    singleton_headers_valid &= authorization.replace(value.to_string()).is_none();
+                }
+                "mcp-protocol-version" => {
+                    singleton_headers_valid &=
+                        protocol_version.replace(value.to_string()).is_none();
+                }
+                "mcp-session-id" => {
+                    singleton_headers_valid &= session_id.replace(value.to_string()).is_none();
+                }
                 _ => {}
             }
         }
@@ -511,20 +707,30 @@ fn parse_headers(text: &str) -> HttpHeaders {
         authorization,
         protocol_version,
         session_id,
+        singleton_headers_valid,
     }
 }
 
+fn media_type_list_contains(header: &str, expected: &str) -> bool {
+    header.split(',').any(|value| {
+        value
+            .trim()
+            .split(';')
+            .next()
+            .is_some_and(|media_type| media_type.trim().eq_ignore_ascii_case(expected))
+    })
+}
+
 fn accepts_streamable_http(accept: &str) -> bool {
-    let mut accepts_json = false;
-    let mut accepts_sse = false;
-    for media_type in accept.split(',') {
-        match media_type.trim().split(';').next().unwrap_or("").trim() {
-            "application/json" => accepts_json = true,
-            "text/event-stream" => accepts_sse = true,
-            _ => {}
-        }
-    }
-    accepts_json && accepts_sse
+    media_type_list_contains(accept, "application/json")
+        && media_type_list_contains(accept, "text/event-stream")
+}
+
+fn is_json_content_type(content_type: &str) -> bool {
+    content_type
+        .split(';')
+        .next()
+        .is_some_and(|media_type| media_type.trim().eq_ignore_ascii_case("application/json"))
 }
 
 fn supported_http_protocol_version(version: &str) -> bool {
@@ -626,13 +832,13 @@ fn respond(
     state: &Arc<HttpState>,
 ) -> std::io::Result<()> {
     state.purge_expired_sessions();
-    if allow_remote_bind() && !remote_http_authorized(headers.authorization.as_deref()) {
+    if !headers.singleton_headers_valid {
         return write_http(
             stream,
-            401,
+            400,
             "text/plain; charset=utf-8",
             None,
-            b"Unauthorized",
+            b"duplicate singleton HTTP header",
         );
     }
     if !origin_allowed(headers.origin.as_deref()) {
@@ -644,6 +850,28 @@ fn respond(
         let bytes = serde_json::to_vec(&err).unwrap_or_default();
         return write_http(stream, 403, "application/json", None, &bytes);
     }
+    if allow_remote_bind() && !remote_http_authorized(headers.authorization.as_deref()) {
+        return write_http(
+            stream,
+            401,
+            "text/plain; charset=utf-8",
+            None,
+            b"Unauthorized",
+        );
+    }
+    if headers
+        .session_id
+        .as_deref()
+        .is_some_and(|id| !valid_http_session_id(id))
+    {
+        return write_http(
+            stream,
+            400,
+            "text/plain; charset=utf-8",
+            None,
+            b"invalid MCP-Session-Id",
+        );
+    }
 
     let path = headers.path.split('?').next().unwrap_or("/");
     if path != "/mcp" && path != "/mcp/" {
@@ -652,8 +880,16 @@ fn respond(
 
     match headers.method.to_ascii_uppercase().as_str() {
         "GET" => {
+            if let Err(error) = validate_http_session(
+                state,
+                headers.session_id.as_deref(),
+                headers.protocol_version.as_deref(),
+                false,
+            ) {
+                return write_http_session_validation_error(stream, error);
+            }
             // Optional SSE listen; we offer a minimal open stream then close.
-            if headers.accept.contains("text/event-stream") {
+            if media_type_list_contains(&headers.accept, "text/event-stream") {
                 let priming = "id: 0\ndata: \n\n";
                 return write_http(
                     stream,
@@ -672,9 +908,18 @@ fn respond(
             )
         }
         "DELETE" => {
-            if let Some(id) = headers.session_id.as_ref() {
-                state.remove_session(id);
+            let Some(id) = headers.session_id.as_deref() else {
+                return write_http_session_validation_error(
+                    stream,
+                    SessionValidationError::MissingSession,
+                );
+            };
+            if let Err(error) =
+                validate_http_session(state, Some(id), headers.protocol_version.as_deref(), true)
+            {
+                return write_http_session_validation_error(stream, error);
             }
+            state.remove_session(id);
             write_http(stream, 200, "text/plain; charset=utf-8", None, b"")
         }
         "POST" => handle_post(stream, headers, body, state),
@@ -694,11 +939,23 @@ fn handle_post(
     body: &[u8],
     state: &Arc<HttpState>,
 ) -> std::io::Result<()> {
+    if headers
+        .session_id
+        .as_deref()
+        .is_some_and(|id| !valid_http_session_id(id))
+    {
+        return write_http(
+            stream,
+            400,
+            "text/plain; charset=utf-8",
+            None,
+            b"invalid MCP-Session-Id",
+        );
+    }
     let valid_content_type = headers
         .content_type
         .as_deref()
-        .map(|ct| ct.to_ascii_lowercase().starts_with("application/json"))
-        .unwrap_or(false);
+        .is_some_and(is_json_content_type);
     if !valid_content_type {
         return write_http(
             stream,
@@ -728,18 +985,6 @@ fn handle_post(
             );
         }
     }
-    if let Some(id) = headers.session_id.as_ref() {
-        if !state.touch_session(id) {
-            return write_http(
-                stream,
-                404,
-                "text/plain; charset=utf-8",
-                None,
-                b"Unknown MCP-Session-Id",
-            );
-        }
-    }
-
     if body.is_empty() {
         return write_http(
             stream,
@@ -764,29 +1009,95 @@ fn handle_post(
         }
     };
 
-    // Client responses posted to the server: accept with 202.
-    if (value.get("result").is_some() || value.get("error").is_some())
-        && value.get("method").is_none()
-    {
-        return write_http(stream, 202, "text/plain; charset=utf-8", None, b"");
-    }
-
     let method = value.get("method").and_then(Value::as_str);
-    if matches!(
-        method,
-        Some("tools/call" | "resources/read" | "keel/discover" | "keel/activate")
-    ) && headers.session_id.is_none()
+    let is_initialize = method == Some("initialize");
+    if value
+        .as_array()
+        .is_some_and(|items| items.iter().any(is_initialize_message))
     {
         return write_http(
             stream,
             400,
             "application/json",
             None,
-            br#"{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"MCP-Session-Id required for dynamic MCP requests"}}"#,
+            br#"{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"initialize must not be part of a JSON-RPC batch"}}"#,
+        );
+    }
+    if is_initialize && is_legacy_http_initialize(&value) {
+        return write_http(
+            stream,
+            400,
+            "application/json",
+            None,
+            br#"{"jsonrpc":"2.0","id":null,"error":{"code":-32602,"message":"protocol 2024-11-05 requires the deprecated HTTP+SSE transport; use Streamable HTTP with 2025-03-26 or 2025-11-25"}}"#,
+        );
+    }
+    if is_initialize && headers.session_id.is_some() {
+        return write_http(
+            stream,
+            400,
+            "application/json",
+            None,
+            br#"{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"initialize must not include MCP-Session-Id"}}"#,
+        );
+    }
+    if is_initialize
+        && !value
+            .get("id")
+            .is_some_and(|id| id.is_string() || id.as_i64().is_some() || id.as_u64().is_some())
+    {
+        return write_http(
+            stream,
+            400,
+            "application/json",
+            None,
+            br#"{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"initialize must be a request with a string or integer id"}}"#,
+        );
+    }
+    if !is_initialize {
+        if let Err(error) = validate_http_session(
+            state,
+            headers.session_id.as_deref(),
+            headers.protocol_version.as_deref(),
+            request_requires_http_session(&value),
+        ) {
+            return write_http_session_validation_error(stream, error);
+        }
+    }
+    if value.is_array() && headers.protocol_version.as_deref() != Some("2025-03-26") {
+        return write_http(
+            stream,
+            400,
+            "application/json",
+            headers.session_id.as_deref(),
+            br#"{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"JSON-RPC batching is not supported by the negotiated MCP protocol version"}}"#,
+        );
+    }
+    if matches!(
+        method,
+        Some("notifications/initialized" | "notifications/cancelled")
+    ) && value.get("id").is_some()
+    {
+        return write_http(
+            stream,
+            400,
+            "application/json",
+            headers.session_id.as_deref(),
+            br#"{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"MCP notifications must not include an id"}}"#,
         );
     }
 
-    let is_initialize = method == Some("initialize");
+    // Client responses are accepted only after the same session/protocol checks
+    // as requests: they still belong to an established MCP session.
+    if (value.get("result").is_some() || value.get("error").is_some())
+        && value.get("method").is_none()
+    {
+        return write_http(stream, 202, "text/plain; charset=utf-8", None, b"");
+    }
+
+    // Cancellation notifications may arrive on a separate connection from the
+    // request they target, so scan every body before dispatching it.
+    apply_http_cancellations(&value, state, headers.session_id.as_deref());
 
     // Batch members stay in the bounded connection worker; per-item threads
     // would multiply the connection limit by the batch-size limit.
@@ -796,22 +1107,45 @@ fn handle_post(
         dispatch_http_value(&value, state, headers.session_id.as_deref())
     };
 
-    let mut new_session: Option<String> = None;
-    if is_initialize {
-        let session = format!("keel-{}", generate_session_token());
-        state.register_session(session.clone());
-        new_session = Some(session);
-    }
-
     match outcome {
         DispatchBodyResult::Accepted => write_http(
             stream,
             202,
             "text/plain; charset=utf-8",
-            new_session.as_deref().or(headers.session_id.as_deref()),
+            headers.session_id.as_deref(),
             b"",
         ),
         DispatchBodyResult::Json(response) => {
+            let new_session = if is_initialize && response.get("error").is_none() {
+                let protocol_version = response
+                    .get("result")
+                    .and_then(|result| result.get("protocolVersion"))
+                    .and_then(Value::as_str)
+                    .unwrap_or(super::MCP_PROTOCOL_VERSION)
+                    .to_string();
+                let Some(token) = generate_session_token() else {
+                    return write_http(
+                        stream,
+                        500,
+                        "text/plain; charset=utf-8",
+                        None,
+                        b"unable to generate a secure MCP session id",
+                    );
+                };
+                let session = format!("keel-{token}");
+                if !state.register_session(session.clone(), protocol_version) {
+                    return write_http(
+                        stream,
+                        503,
+                        "text/plain; charset=utf-8",
+                        None,
+                        b"MCP session capacity reached",
+                    );
+                }
+                Some(session)
+            } else {
+                None
+            };
             let bytes = serde_json::to_vec(&response).unwrap_or_default();
             write_http(
                 stream,
@@ -824,9 +1158,41 @@ fn handle_post(
     }
 }
 
+fn is_initialize_message(value: &Value) -> bool {
+    value.get("method").and_then(Value::as_str) == Some("initialize")
+}
+
+fn is_legacy_http_initialize(value: &Value) -> bool {
+    value
+        .get("params")
+        .and_then(Value::as_object)
+        .and_then(|params| params.get("protocolVersion"))
+        .and_then(Value::as_str)
+        == Some(super::MCP_LEGACY_PROTOCOL_VERSION)
+}
+
+fn request_requires_http_session(value: &Value) -> bool {
+    match value {
+        Value::Array(items) => items.iter().any(request_requires_http_session),
+        Value::Object(object) => {
+            if object.get("method").is_none()
+                && (object.get("result").is_some() || object.get("error").is_some())
+            {
+                return true;
+            }
+            matches!(
+                object.get("method").and_then(Value::as_str),
+                Some(method) if !matches!(method, "initialize" | "ping")
+            )
+        }
+        _ => false,
+    }
+}
+
 fn http_cancellation_key(session_id: Option<&str>, request_id: &Value) -> Option<String> {
-    super::cancellation_key(request_id)
-        .map(|request_key| format!("{}\0{request_key}", session_id.unwrap_or("")))
+    let request_key = super::cancellation_key(request_id)?;
+    let key = format!("{}\0{request_key}", session_id.unwrap_or(""));
+    (key.len() <= MAX_HTTP_CANCELLATION_KEY_BYTES).then_some(key)
 }
 
 fn apply_http_cancellations(value: &Value, state: &HttpState, session_id: Option<&str>) {
@@ -834,25 +1200,23 @@ fn apply_http_cancellations(value: &Value, state: &HttpState, session_id: Option
         Value::Array(items) => items.iter().collect(),
         other => vec![other],
     };
-    let cancellations = state
-        .cancellations
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    for message in messages {
-        if message.get("method").and_then(Value::as_str) != Some("notifications/cancelled") {
-            continue;
+    state.with_live_cancellations(|cancellations, _| {
+        for message in messages {
+            if message.get("method").and_then(Value::as_str) != Some("notifications/cancelled") {
+                continue;
+            }
+            let Some(key) = message
+                .get("params")
+                .and_then(|params| params.get("requestId"))
+                .and_then(|request_id| http_cancellation_key(session_id, request_id))
+            else {
+                continue;
+            };
+            if let Some(cancellation) = cancellations.get(&key) {
+                cancellation.token.store(true, Ordering::Release);
+            }
         }
-        let Some(key) = message
-            .get("params")
-            .and_then(|params| params.get("requestId"))
-            .and_then(|request_id| http_cancellation_key(session_id, request_id))
-        else {
-            continue;
-        };
-        if let Some(cancellation) = cancellations.get(&key) {
-            cancellation.store(true, Ordering::Release);
-        }
-    }
+    });
 }
 
 fn dispatch_http_value(
@@ -874,26 +1238,18 @@ fn dispatch_http_value_with_cancellation(
         .get("id")
         .and_then(|request_id| http_cancellation_key(session_id, request_id));
     if let Some(key) = key.as_ref() {
-        state
-            .cancellations
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(key.clone(), Arc::clone(&cancellation));
+        if !state.register_cancellation(key.clone(), Arc::clone(&cancellation)) {
+            return DispatchBodyResult::Json(super::error_response(
+                value.get("id").cloned().unwrap_or(Value::Null),
+                JSON_RPC_INTERNAL_ERROR,
+                "request cancellation registry is full or request id is already in use",
+            ));
+        }
     }
     let request_context = super::McpRequestContext::authoritative(session_id);
     let response = super::dispatch_cancellable_with_context(value, &cancellation, &request_context);
     if let Some(key) = key.as_ref() {
-        let mut registrations = state
-            .cancellations
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if registrations
-            .get(key)
-            .map(|registered| Arc::ptr_eq(registered, &cancellation))
-            .unwrap_or(false)
-        {
-            registrations.remove(key);
-        }
+        state.unregister_cancellation(key, &cancellation);
     }
     if cancellation.load(Ordering::Acquire) {
         DispatchBodyResult::Accepted
@@ -973,17 +1329,32 @@ fn dispatch_body_with_budget(
         .map(|_| Arc::new(AtomicBool::new(false)))
         .collect();
     {
-        let mut registrations = state
-            .cancellations
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut registration_failure = false;
         for (item, cancellation) in items.iter().zip(&batch_cancellations) {
             if let Some(key) = item
                 .get("id")
                 .and_then(|request_id| http_cancellation_key(session_id, request_id))
             {
-                registrations.insert(key, Arc::clone(cancellation));
+                if !state.register_cancellation(key, Arc::clone(cancellation)) {
+                    registration_failure = true;
+                    break;
+                }
             }
+        }
+        if registration_failure {
+            for (item, cancellation) in items.iter().zip(&batch_cancellations) {
+                if let Some(key) = item
+                    .get("id")
+                    .and_then(|request_id| http_cancellation_key(session_id, request_id))
+                {
+                    state.unregister_cancellation(&key, cancellation);
+                }
+            }
+            return DispatchBodyResult::Json(super::error_response(
+                Value::Null,
+                JSON_RPC_INTERNAL_ERROR,
+                "request cancellation registry is full or request id is already in use",
+            ));
         }
     }
     // The caller scans cancellations before batch registration. Scan once more
@@ -1038,21 +1409,12 @@ fn dispatch_body_with_budget(
     let _ = finished_tx.send(());
     let _ = timer.join();
     {
-        let mut registrations = state
-            .cancellations
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
         for (item, cancellation) in items.iter().zip(&batch_cancellations) {
             if let Some(key) = item
                 .get("id")
                 .and_then(|request_id| http_cancellation_key(session_id, request_id))
             {
-                if registrations
-                    .get(&key)
-                    .is_some_and(|registered| Arc::ptr_eq(registered, cancellation))
-                {
-                    registrations.remove(&key);
-                }
+                state.unregister_cancellation(&key, cancellation);
             }
         }
     }
@@ -1063,13 +1425,16 @@ fn dispatch_body_with_budget(
     }
 }
 
-fn generate_session_token() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    format!("{nanos:x}-{}", std::process::id())
+fn generate_session_token() -> Option<String> {
+    use rand::RngCore;
+
+    let mut bytes = [0u8; 32];
+    rand::rngs::OsRng.try_fill_bytes(&mut bytes).ok()?;
+    let token = bytes
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    Some(token)
 }
 
 fn write_http(
@@ -1089,7 +1454,9 @@ fn write_http(
         405 => "Method Not Allowed",
         406 => "Not Acceptable",
         413 => "Payload Too Large",
+        415 => "Unsupported Media Type",
         431 => "Request Header Fields Too Large",
+        500 => "Internal Server Error",
         503 => "Service Unavailable",
         _ => "Error",
     };
@@ -1140,6 +1507,37 @@ mod tests {
         String::from_utf8_lossy(&response).into_owned()
     }
 
+    fn http_round_trip(state: Arc<HttpState>, request: &[u8]) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            handle_connection(stream, state, Arc::new(InflightGuard::new(8))).expect("handle");
+        });
+        let mut client = TcpStream::connect(addr).expect("connect");
+        client.write_all(request).expect("write request");
+        client.flush().expect("flush request");
+        let response = read_http_response(&mut client);
+        server.join().expect("server worker");
+        response
+    }
+
+    /// Build one complete POST /mcp request so a test can vary only the body
+    /// and the headers it means to exercise.
+    fn http_post_request(body: &[u8], extra_headers: &[(&str, &str)]) -> Vec<u8> {
+        let mut request = String::from(
+            "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n\
+             Accept: application/json, text/event-stream\r\n",
+        );
+        for (name, value) in extra_headers {
+            request.push_str(&format!("{name}: {value}\r\n"));
+        }
+        request.push_str(&format!("Content-Length: {}\r\n\r\n", body.len()));
+        let mut bytes = request.into_bytes();
+        bytes.extend_from_slice(body);
+        bytes
+    }
+
     #[test]
     fn streamable_http_header_contract_is_explicit() {
         assert!(accepts_streamable_http(
@@ -1151,6 +1549,13 @@ mod tests {
         assert!(!accepts_streamable_http("application/json"));
         assert!(!accepts_streamable_http("text/event-stream"));
         assert!(!accepts_streamable_http(""));
+        assert!(accepts_streamable_http(
+            "Application/JSON, TEXT/EVENT-STREAM"
+        ));
+        assert!(is_json_content_type("application/json"));
+        assert!(is_json_content_type("Application/JSON; charset=utf-8"));
+        assert!(!is_json_content_type("application/json-seq"));
+        assert!(!is_json_content_type("application/jsonp"));
         assert!(supported_http_protocol_version("2025-03-26"));
         assert!(supported_http_protocol_version("2025-11-25"));
         assert!(!supported_http_protocol_version("2099-01-01"));
@@ -1169,6 +1574,11 @@ mod tests {
         ));
         assert!(!authorization_header_matches(
             Some("Bearer other"),
+            "secret"
+        ));
+        let length_wrapped = format!("Bearer secret{}", "x".repeat(256));
+        assert!(!authorization_header_matches(
+            Some(&length_wrapped),
             "secret"
         ));
         assert!(authorization_header_matches(
@@ -1192,59 +1602,61 @@ mod tests {
     }
 
     #[test]
-    fn http_post_ping_roundtrip() {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
-        let addr = listener.local_addr().expect("addr");
-        let state = Arc::new(HttpState::default());
-        let state_accept = Arc::clone(&state);
-        let server = thread::spawn(move || {
-            let (stream, _) = listener.accept().expect("accept");
-            handle_connection(stream, state_accept, Arc::new(InflightGuard::new(8)))
-                .expect("handle");
-        });
-
-        thread::sleep(Duration::from_millis(20));
-        let mut client = TcpStream::connect(addr).expect("connect");
-        let body = br#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
-        let request = format!(
-            "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nOrigin: http://127.0.0.1\r\nAccept: application/json, text/event-stream\r\n\r\n",
-            body.len()
+    fn duplicate_singleton_headers_are_rejected() {
+        let headers = parse_headers(
+            "POST /mcp HTTP/1.1\r\nOrigin: null\r\nOrigin: http://localhost\r\n\
+             Content-Type: application/json\r\nContent-Type: application/json\r\n\
+             Authorization: Bearer first\r\nAuthorization: Bearer second\r\n\
+             MCP-Protocol-Version: 2025-11-25\r\nMCP-Protocol-Version: 2025-03-26\r\n\
+             MCP-Session-Id: first\r\nMCP-Session-Id: second\r\n\r\n",
         );
-        client.write_all(request.as_bytes()).expect("write head");
-        client.write_all(body).expect("write body");
-        client.flush().expect("flush");
+        assert!(!headers.singleton_headers_valid);
 
-        let text = read_http_response(&mut client);
+        let repeated_accept = parse_headers(
+            "POST /mcp HTTP/1.1\r\nAccept: application/json\r\n\
+             Accept: text/event-stream\r\n\r\n",
+        );
+        assert!(repeated_accept.singleton_headers_valid);
+        assert!(accepts_streamable_http(&repeated_accept.accept));
+    }
+
+    #[test]
+    fn origin_null_and_non_json_media_type_fail_at_the_http_boundary() {
+        let body = br#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
+        let null_origin = http_post_request(body, &[("Origin", "null")]);
+        let response = http_round_trip(Arc::new(HttpState::default()), &null_origin);
+        assert!(response.starts_with("HTTP/1.1 403"), "{response}");
+
+        let mut json_prefix = String::from(
+            "POST /mcp HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json-seq\r\n\
+             Accept: application/json, text/event-stream\r\n",
+        );
+        json_prefix.push_str(&format!("Content-Length: {}\r\n\r\n", body.len()));
+        json_prefix.push_str(&String::from_utf8_lossy(body));
+        let response = http_round_trip(Arc::new(HttpState::default()), json_prefix.as_bytes());
+        assert!(
+            response.starts_with("HTTP/1.1 415 Unsupported Media Type"),
+            "{response}"
+        );
+    }
+
+    #[test]
+    fn http_post_ping_roundtrip() {
+        let body = br#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
+        let request = http_post_request(body, &[("Origin", "http://127.0.0.1")]);
+        let text = http_round_trip(Arc::new(HttpState::default()), &request);
         assert!(
             text.contains("200") && text.contains("\"id\":1"),
             "response={text}"
         );
-        let _ = server.join();
     }
 
     #[test]
     fn foreign_origin_is_forbidden() {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
-        let addr = listener.local_addr().expect("addr");
-        let state = Arc::new(HttpState::default());
-        let state_accept = Arc::clone(&state);
-        let server = thread::spawn(move || {
-            let (stream, _) = listener.accept().expect("accept");
-            handle_connection(stream, state_accept, Arc::new(InflightGuard::new(8)))
-                .expect("handle");
-        });
-        thread::sleep(Duration::from_millis(20));
-        let mut client = TcpStream::connect(addr).expect("connect");
         let body = br#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
-        let request = format!(
-            "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nOrigin: https://evil.example\r\nAccept: application/json\r\n\r\n",
-            body.len()
-        );
-        client.write_all(request.as_bytes()).expect("write");
-        client.write_all(body).expect("body");
-        let text = read_http_response(&mut client);
+        let request = http_post_request(body, &[("Origin", "https://evil.example")]);
+        let text = http_round_trip(Arc::new(HttpState::default()), &request);
         assert!(text.contains("403"), "response={text}");
-        let _ = server.join();
     }
 
     #[test]
@@ -1253,7 +1665,11 @@ mod tests {
             "jsonrpc": "2.0",
             "id": 1,
             "method": "initialize",
-            "params": { "protocolVersion": super::super::MCP_PROTOCOL_VERSION }
+            "params": {
+                "protocolVersion": super::super::MCP_PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": { "name": "http-test", "version": "1.0.0" }
+            }
         }))
         .expect("response");
         assert_eq!(
@@ -1326,15 +1742,304 @@ mod tests {
             let mut sessions = state.sessions.lock().expect("session lock");
             sessions.insert(
                 "expired".to_string(),
-                Instant::now() - Duration::from_secs(901),
+                HttpSession {
+                    last_seen: Instant::now() - Duration::from_secs(901),
+                    protocol_version: super::super::MCP_PROTOCOL_VERSION.to_string(),
+                },
             );
         }
         state.purge_expired_sessions();
         assert!(!state.touch_session("expired"));
 
-        state.register_session("live".to_string());
+        assert!(state.register_session(
+            "live".to_string(),
+            super::super::MCP_PROTOCOL_VERSION.to_string(),
+        ));
         assert!(state.touch_session("live"));
         assert_eq!(state.sessions.lock().expect("session lock").len(), 1);
+    }
+
+    #[test]
+    fn http_session_binds_the_negotiated_protocol_version() {
+        let state = HttpState::default();
+        assert!(state.register_session("bound".to_string(), "2025-03-26".to_string()));
+        assert!(!state.register_session("bound".to_string(), "2025-11-25".to_string()));
+        assert_eq!(
+            state.touch_session_with_protocol("bound", Some("2025-03-26")),
+            Ok(())
+        );
+        assert_eq!(
+            state.touch_session_with_protocol("bound", Some("2025-11-25")),
+            Err(SessionValidationError::ProtocolMismatch)
+        );
+        assert_eq!(
+            state.touch_session_with_protocol("missing", Some("2025-03-26")),
+            Err(SessionValidationError::Unknown)
+        );
+    }
+
+    #[test]
+    fn http_session_capacity_refuses_new_sessions_without_evicting_live_ones() {
+        let state = HttpState::default();
+        for index in 0..MAX_HTTP_SESSIONS {
+            assert!(state.register_session(format!("session-{index}"), "2025-11-25".to_string()));
+        }
+        assert!(!state.register_session("overflow".to_string(), "2025-11-25".to_string()));
+        assert!(!state.register_session("session-0".to_string(), "2025-11-25".to_string()));
+        assert!(state.touch_session("session-0"));
+        assert_eq!(
+            state.sessions.lock().expect("session lock").len(),
+            MAX_HTTP_SESSIONS
+        );
+    }
+
+    #[test]
+    fn cancellation_registry_is_bounded_and_expirable() {
+        let state = HttpState::default();
+        let token = Arc::new(AtomicBool::new(false));
+        for index in 0..MAX_HTTP_CANCELLATIONS {
+            assert!(state.register_cancellation(
+                format!("session\0{index}"),
+                Arc::new(AtomicBool::new(false)),
+            ));
+        }
+        assert!(
+            !state.register_cancellation("session\0overflow".to_string(), token.clone()),
+            "a saturated cancellation registry must reject new work"
+        );
+
+        {
+            let mut registrations = state.cancellations.lock().expect("cancellation lock");
+            registrations.insert(
+                "session\0expired".to_string(),
+                CancellationRegistration {
+                    token,
+                    registered_at: Instant::now() - Duration::from_secs(901),
+                    expires_at: Instant::now() - Duration::from_secs(1),
+                },
+            );
+        }
+        state.with_live_cancellations(|registrations, _| {
+            assert!(
+                !registrations.contains_key("session\0expired"),
+                "expired cancellation must be purged before use"
+            );
+        });
+        assert_eq!(
+            state.cancellations.lock().expect("cancellation lock").len(),
+            MAX_HTTP_CANCELLATIONS
+        );
+    }
+
+    #[test]
+    fn active_cancellation_survives_ttl_until_worker_unregisters() {
+        let state = HttpState::default();
+        let token = Arc::new(AtomicBool::new(false));
+        {
+            let mut registrations = state.cancellations.lock().expect("cancellation lock");
+            registrations.insert(
+                "session\0long-running".to_string(),
+                CancellationRegistration {
+                    token: Arc::clone(&token),
+                    registered_at: Instant::now() - Duration::from_secs(901),
+                    expires_at: Instant::now() + Duration::from_secs(1),
+                },
+            );
+        }
+
+        state.with_live_cancellations(|registrations, _| {
+            assert!(
+                registrations.contains_key("session\0long-running"),
+                "an active request must remain cancellable until its owner deadline"
+            );
+        });
+        state.unregister_cancellation("session\0long-running", &token);
+        assert!(state
+            .cancellations
+            .lock()
+            .expect("cancellation lock")
+            .is_empty());
+    }
+
+    #[test]
+    fn cancellation_registration_ttl_covers_request_owner_deadlines() {
+        let state = HttpState::default();
+        let started = Instant::now();
+        let token = Arc::new(AtomicBool::new(false));
+        assert!(state.register_cancellation("session\0deadline".to_string(), token));
+        let registrations = state.cancellations.lock().expect("cancellation lock");
+        let registration = registrations
+            .get("session\0deadline")
+            .expect("registration");
+        let minimum_expiry =
+            started + cancellation_registration_ttl().saturating_sub(Duration::from_millis(1));
+        assert!(
+            registration.expires_at >= minimum_expiry,
+            "registration expiry must cover the configured and owner deadlines"
+        );
+        assert!(cancellation_registration_ttl() >= HTTP_BATCH_WALL_BUDGET);
+        assert!(cancellation_registration_ttl() >= super::super::tools::mcp_child_timeout());
+    }
+
+    #[test]
+    fn session_and_cancellation_identity_values_are_bounded() {
+        assert!(valid_http_session_id("keel-session"));
+        assert!(!valid_http_session_id(
+            &"x".repeat(MAX_HTTP_SESSION_ID_BYTES + 1)
+        ));
+        assert!(!valid_http_session_id("session\r\nX-Injected: yes"));
+        assert!(http_cancellation_key(Some("session"), &json!("short")).is_some());
+        assert!(http_cancellation_key(
+            Some("session"),
+            &json!("x".repeat(super::super::MAX_CANCELLATION_ID_BYTES + 1)),
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn stateful_http_request_detection_covers_tools_list_and_batches() {
+        assert!(request_requires_http_session(&json!({
+            "jsonrpc": "2.0",
+            "method": "tools/list"
+        })));
+        assert!(request_requires_http_session(&json!([
+            {"jsonrpc": "2.0", "method": "ping"},
+            {"jsonrpc": "2.0", "method": "tools/list"}
+        ])));
+        assert!(request_requires_http_session(&json!({
+            "jsonrpc": "2.0",
+            "method": "resources/list"
+        })));
+        assert!(!request_requires_http_session(&json!({
+            "jsonrpc": "2.0",
+            "method": "ping"
+        })));
+    }
+
+    #[test]
+    fn initialize_requires_a_request_id() {
+        let body = br#"{"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}"#;
+        let state = Arc::new(HttpState::default());
+        let response = http_round_trip(Arc::clone(&state), &http_post_request(body, &[]));
+        assert!(response.starts_with("HTTP/1.1 400"), "{response}");
+        assert!(
+            response.contains("initialize must be a request"),
+            "{response}"
+        );
+        assert!(state.sessions.lock().expect("session lock").is_empty());
+    }
+
+    #[test]
+    fn initialized_notification_rejects_a_request_id() {
+        let state = Arc::new(HttpState::default());
+        assert!(state.register_session("initialized-session".to_string(), "2025-11-25".to_string()));
+        let body = br#"{"jsonrpc":"2.0","id":1,"method":"notifications/initialized"}"#;
+        let request = http_post_request(
+            body,
+            &[
+                ("MCP-Session-Id", "initialized-session"),
+                ("MCP-Protocol-Version", "2025-11-25"),
+            ],
+        );
+        let response = http_round_trip(state, &request);
+        assert!(response.starts_with("HTTP/1.1 400"), "{response}");
+        assert!(
+            response.contains("notifications must not include an id"),
+            "{response}"
+        );
+    }
+
+    #[test]
+    fn negotiated_protocol_controls_http_batch_support() {
+        let body = br#"[{"jsonrpc":"2.0","id":1,"method":"ping"},{"jsonrpc":"2.0","id":2,"method":"ping"}]"#;
+        for (version, expected_status) in [("2025-11-25", 400), ("2025-03-26", 200)] {
+            let state = Arc::new(HttpState::default());
+            assert!(state.register_session("batch-session".to_string(), version.to_string()));
+            let request = http_post_request(
+                body,
+                &[
+                    ("MCP-Session-Id", "batch-session"),
+                    ("MCP-Protocol-Version", version),
+                ],
+            );
+            let response = http_round_trip(state, &request);
+            assert!(
+                response.starts_with(&format!("HTTP/1.1 {expected_status}")),
+                "version={version} response={response}"
+            );
+        }
+    }
+
+    #[test]
+    fn http_tools_list_without_session_is_rejected_before_dispatch() {
+        let body = br#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
+        let text = http_round_trip(
+            Arc::new(HttpState::default()),
+            &http_post_request(body, &[]),
+        );
+        assert!(text.contains("400"), "response={text}");
+        assert!(text.contains("MCP-Session-Id required"), "response={text}");
+    }
+
+    #[test]
+    fn http_client_response_without_session_is_rejected_before_accept() {
+        let body = br#"{"jsonrpc":"2.0","id":1,"result":{}}"#;
+        let text = http_round_trip(
+            Arc::new(HttpState::default()),
+            &http_post_request(body, &[]),
+        );
+        assert!(text.contains("400"), "response={text}");
+        assert!(text.contains("MCP-Session-Id required"), "response={text}");
+    }
+
+    #[test]
+    fn http_initialize_batch_is_rejected_before_dispatch() {
+        let state = Arc::new(HttpState::default());
+        let body = serde_json::to_vec(&json!([{
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": super::super::MCP_PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": { "name": "http-test", "version": "1.0.0" }
+            }
+        }]))
+        .expect("serialize body");
+        let text = http_round_trip(Arc::clone(&state), &http_post_request(&body, &[]));
+        assert!(text.contains("400"), "response={text}");
+        assert!(
+            text.contains("initialize must not be part of a JSON-RPC batch"),
+            "response={text}"
+        );
+        assert!(
+            state.sessions.lock().expect("session lock").is_empty(),
+            "a rejected initialize batch must not create a session"
+        );
+    }
+
+    #[test]
+    fn http_legacy_initialize_is_rejected_for_streamable_http() {
+        let state = Arc::new(HttpState::default());
+        let body = serde_json::to_vec(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": super::super::MCP_LEGACY_PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": { "name": "http-test", "version": "1.0.0" }
+            }
+        }))
+        .expect("serialize body");
+        let text = http_round_trip(Arc::clone(&state), &http_post_request(&body, &[]));
+        assert!(text.contains("400"), "response={text}");
+        assert!(text.contains("2024-11-05"), "response={text}");
+        assert!(text.contains("HTTP+SSE transport"), "response={text}");
+        assert!(
+            state.sessions.lock().expect("session lock").is_empty(),
+            "a rejected legacy initialize must not create a session"
+        );
     }
 
     #[test]
@@ -1553,6 +2258,7 @@ mod tests {
             .unwrap()
             .get("session-a\0\"http-slow\"")
             .unwrap()
+            .token
             .load(Ordering::Acquire));
 
         apply_http_cancellations(
