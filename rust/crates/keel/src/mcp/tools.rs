@@ -5823,13 +5823,22 @@ mod tests {
         let home = std::env::temp_dir().join(format!("keel-mcp-iron-law-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(&home).expect("temp claude home");
+        // Keep this smoke test on a tiny workspace so the 25-second MCP deadline
+        // stays stable on slower hosted runners while exercising the production path.
+        let workspace = home.join("workspace");
+        std::fs::create_dir_all(&workspace).expect("temp workspace");
+        std::fs::write(workspace.join("README.md"), "# MCP test workspace\n")
+            .expect("temp workspace readme");
         let previous = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
         std::env::set_var("CLAUDE_TARGET_OVERRIDE", &home);
 
         // Shipped handle_tools_call path — protocol envelope isError:false.
         for (name, args) in [
             ("context_brief", json!({})),
-            ("system_map", json!({})),
+            (
+                "system_map",
+                json!({ "workspace_root": workspace.to_string_lossy().into_owned() }),
+            ),
             ("recall_status", json!({})),
             (
                 "skill_route",
