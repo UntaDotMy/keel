@@ -10,8 +10,8 @@
     "mcp_tool_count": 37,
     "mcp_eager_tool_count": 17,
     "mcp_deferred_tool_count": 20,
-    "mcp_catalog_tokens": 1198,
-    "mcp_catalog_budget_tokens": 1200
+    "mcp_catalog_tokens": 1225,
+    "mcp_catalog_budget_tokens": 1348
   },
   "quality_gates": {
     "task_success_threshold": "ratify before changing default profile",

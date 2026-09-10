@@ -1346,13 +1346,15 @@ fn handle_method_cancellable(
         "initialize" => Ok(handle_initialize(params)),
         "notifications/initialized" => Ok(Value::Null),
         "ping" => Ok(json!({})),
-        "tools/list" => {
-            tools::handle_tools_list_for_profile_params(McpCatalogProfile::from_env(), params)
-                .map_err(|message| MethodError {
-                    code: JSON_RPC_INVALID_PARAMS,
-                    message,
-                })
-        }
+        "tools/list" => tools::handle_tools_list_for_profile_params_with_context(
+            McpCatalogProfile::from_env(),
+            params,
+            context,
+        )
+        .map_err(|message| MethodError {
+            code: JSON_RPC_INVALID_PARAMS,
+            message,
+        }),
         "tools/call" => tools::handle_tools_call_cancellable_with_context(
             params,
             Some(Arc::clone(cancellation)),
@@ -1767,6 +1769,9 @@ mod tests {
 
     #[test]
     fn tools_list_advertises_eager_tools_in_default_profile() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let request = json!({
             "jsonrpc": "2.0",
             "id": 7,
@@ -1778,9 +1783,15 @@ mod tests {
             .iter()
             .filter_map(|entry| entry.get("name").and_then(Value::as_str))
             .collect();
-        assert_eq!(names.len(), tools::EAGER_MCP_TOOL_NAMES.len());
-        for expected in tools::EAGER_MCP_TOOL_NAMES {
-            assert!(names.contains(expected), "missing {expected}: {names:?}");
+        assert!(!names.is_empty());
+        assert!(names.len() <= tools::EAGER_MCP_TOOL_NAMES.len());
+        assert_eq!(
+            response["result"].get("nextCursor").is_some(),
+            names.len() < tools::EAGER_MCP_TOOL_NAMES.len(),
+            "bounded first page must advertise continuation when tools remain"
+        );
+        for expected in names.iter() {
+            assert!(tools::EAGER_MCP_TOOL_NAMES.contains(expected));
         }
         for deferred in tools::DEFERRED_MCP_TOOL_NAMES {
             assert!(
@@ -1801,6 +1812,9 @@ mod tests {
 
     #[test]
     fn tools_list_empty_params_object_matches_omitted_params() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let omitted = dispatch(&json!({
             "jsonrpc": "2.0",
             "id": 7,

@@ -18,18 +18,18 @@
         "total_tools": 37,
         "eager_tools": 37,
         "deferred_tools": 0,
-        "catalog_tokens": 2902,
-        "ratified_budget": 3193
+        "catalog_tokens": 2929,
+        "ratified_budget": 3222
       },
       {
         "profile": "tiered",
         "total_tools": 37,
         "eager_tools": 17,
         "deferred_tools": 20,
-        "catalog_tokens": 1198,
-        "ratified_budget": 1318,
+        "catalog_tokens": 1225,
+        "ratified_budget": 1348,
         "token_reduction": 1704,
-        "reduction_percent": 58.72
+        "reduction_percent": 58.18
       }
     ],
     "dispatch_parity": "All 37 tools (eager + deferred) remain directly dispatchable in tools/call regardless of active catalog profile."
@@ -112,5 +112,28 @@
       "competitor_regex_tokens": 302,
       "diagnostic_integrity": "Break-even guard engaged for cluster pods table; format and columns preserved verbatim."
     }
-  ]
+  ],
+  "skill_selection_benchmark": {
+    "artifact": "skill-selection-benchmark.json",
+    "command": "cargo run --locked -p keel -- skill-eval --benchmark --json",
+    "runs_per_task": 3,
+    "profiles": [
+      "all-skills-eager",
+      "metadata-only",
+      "metadata+selective-activation",
+      "metadata+cost-aware-selection"
+    ],
+    "measured_fields": [
+      "selection_accuracy",
+      "activation_precision",
+      "activation_recall",
+      "input_tokens",
+      "cached_input_tokens",
+      "turns",
+      "latency",
+      "task_success",
+      "wrong_skill_activations",
+      "conflict_rate"
+    ]
+  }
 }

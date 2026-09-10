@@ -22,6 +22,10 @@ fn usage_file(claude_home: &Path, skill_name: &str) -> PathBuf {
     usage_directory(claude_home).join(format!("{skill_name}.count"))
 }
 
+fn outcome_file(claude_home: &Path, skill_name: &str, outcome: &str) -> PathBuf {
+    usage_directory(claude_home).join(format!("{skill_name}.{outcome}"))
+}
+
 /// Increment the match counter for `skill_name` by one. Called when the matcher
 /// selects the skill. Fail-open: a write error is swallowed (telemetry must
 /// never break the match path), returning the best-effort new value.
@@ -46,6 +50,36 @@ pub fn skill_use_count(claude_home: &Path, skill_name: &str) -> u64 {
         .ok()
         .and_then(|text| text.trim().parse::<u64>().ok())
         .unwrap_or(0)
+}
+
+/// Record a known activation outcome for future cost-aware routing.
+#[allow(dead_code)]
+pub fn record_skill_outcome(claude_home: &Path, skill_name: &str, success: bool) -> u64 {
+    let outcome = if success { "success" } else { "failure" };
+    let path = outcome_file(claude_home, skill_name, outcome);
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let current = fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| text.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+    let next = current.saturating_add(1);
+    let _ = fs::write(path, next.to_string());
+    next
+}
+
+/// Return a Laplace-smoothed success rate; unseen skills use a neutral prior.
+pub fn skill_success_rate(claude_home: &Path, skill_name: &str) -> f64 {
+    let read = |outcome| {
+        fs::read_to_string(outcome_file(claude_home, skill_name, outcome))
+            .ok()
+            .and_then(|text| text.trim().parse::<u64>().ok())
+            .unwrap_or(0)
+    };
+    let success = read("success") as f64;
+    let failure = read("failure") as f64;
+    (success + 1.0) / (success + failure + 2.0)
 }
 
 #[cfg(test)]
@@ -79,5 +113,15 @@ mod tests {
         record_skill_match(&home, "git-expert");
         assert_eq!(skill_use_count(&home, "reviewer"), 2);
         assert_eq!(skill_use_count(&home, "git-expert"), 1);
+    }
+
+    #[test]
+    fn success_rate_uses_neutral_prior_and_outcomes() {
+        let home = temp_home("outcome");
+        assert!((skill_success_rate(&home, "reviewer") - 0.5).abs() < f64::EPSILON);
+        record_skill_outcome(&home, "reviewer", true);
+        record_skill_outcome(&home, "reviewer", true);
+        record_skill_outcome(&home, "reviewer", false);
+        assert!((skill_success_rate(&home, "reviewer") - 0.6).abs() < f64::EPSILON);
     }
 }

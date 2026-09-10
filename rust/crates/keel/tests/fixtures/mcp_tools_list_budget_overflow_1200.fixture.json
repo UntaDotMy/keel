@@ -1,0 +1,13 @@
+{
+  "name": "mcp_tools_list_budget_overflow_1200",
+  "profile": "core",
+  "full_catalog_tokens": 1352,
+  "page_budget_tokens": 1200,
+  "expected": {
+    "status": "success",
+    "bounded_first_page": true,
+    "next_cursor_when_tools_remain": true,
+    "valid_mcp_tools": true,
+    "no_internal_budget_error": true
+  }
+}

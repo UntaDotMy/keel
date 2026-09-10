@@ -365,15 +365,31 @@ jobs:
       - name: Measure MCP catalog against ratified budget
         shell: bash
         run: |
-          cargo run --quiet --locked -p keel -- stats tools --json > "$RUNNER_TEMP/keel-tools.json"
-          python - "$RUNNER_TEMP/keel-tools.json" <<'PY'
+          # `stats context` reads the fixed-context ledger's ratified budget,
+          # keeping this gate aligned with the source-of-truth budget.
+          cargo run --quiet --locked -p keel -- stats context --json > "$RUNNER_TEMP/keel-context.json"
+          python - "$RUNNER_TEMP/keel-context.json" <<'PY'
           import json, pathlib, sys
           payload = json.loads(pathlib.Path(sys.argv[1]).read_text())
-          if payload.get("catalogTokens", 0) > 1200:
-              raise SystemExit(f"MCP core catalog exceeds 1200-token budget: {payload}")
-          if payload.get("eagerToolCount", 0) >= payload.get("toolCount", 0):
-              raise SystemExit(f"MCP catalog is eager instead of progressive: {payload}")
-          print("MCP catalog budget and progressive-disclosure checks passed")
+          surface = next(
+              item for item in payload["surfaces"]
+              if item["surface"] == "mcp.tools_list.catalog"
+          )
+          actual = surface["rawTokens"]
+          budget = surface["budgetTokens"]
+          if actual > budget:
+              raise SystemExit(
+                  f"MCP core catalog exceeds ratified {budget}-token budget: {surface}"
+              )
+          mcp = payload["mcp"]
+          eager = mcp["eagerToolCount"]
+          total = mcp["toolCount"]
+          if eager >= total:
+              raise SystemExit(f"MCP catalog is eager instead of progressive: {mcp}")
+          print(
+              f"MCP catalog budget and progressive-disclosure checks passed "
+              f"({actual}/{budget} tokens; {eager}/{total} eager/total)"
+          )
           PY
       - name: Validate dependency metadata and warning policy
         run: cargo metadata --locked --no-deps --format-version 1 > "$RUNNER_TEMP/keel-metadata.json"

@@ -33,19 +33,22 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Condvar, LazyLock, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::proxy::context::{ContextPolicy, ContextSource, ProjectionInput};
+use crate::proxy::token_meter::TokenMeter;
 use crate::runtime::{display_path, resolve_claude_home, safe_path_segment};
 use crate::utility::memory::refresh_system_map_with_status;
 use crate::utility::memory_families::family_counts;
 use crate::utility::recall::{collapse_dashes, search_recall_index, RecallSearchResult};
 use crate::utility::record_store::{current_timestamp_millis, format_timestamp_iso8601};
 use crate::utility::skill_match::{
-    installed_skill_path, match_skill_for_prompt, skill_catalog, skill_full_body,
-    skill_inline_brief,
+    frontmatter_field, installed_skill_path, match_skill_for_prompt_with_details, skill_catalog,
+    skill_core_projection, skill_full_body, skill_inline_brief, skill_resource_projection,
+    split_frontmatter, SKILL_CATALOG_DEFAULT_TOKENS, SKILL_S1_HARD_TOKENS, SKILL_S2_HARD_TOKENS,
 };
 use crate::utility::working_brief::{create_brief, list_briefs, read_brief, write_brief, Brief};
 
@@ -89,6 +92,8 @@ const MAX_SKILL_BODY_CHARS: usize = 10_000;
 /// Cap for each skill_list description / when_to_use field so a large catalog
 /// cannot blow the wire budget (full catalog was ~33KB pretty-printed).
 const MAX_SKILL_LIST_FIELD_CHARS: usize = 240;
+/// Cursor input is untrusted and must be bounded before MAC/JSON work.
+const MAX_CURSOR_CHARS: usize = 4096;
 
 /// Cap for each tool's top-level description on the wire `tools/list` frame.
 /// Full prose stays in source; hosts only need a short trigger line.
@@ -139,6 +144,10 @@ pub(super) fn handle_tools_list() -> Value {
 }
 
 pub(crate) fn handle_tools_list_for_profile(profile: super::McpCatalogProfile) -> Value {
+    slim_tools_list_for_wire(canonical_tools_list_for_profile(profile))
+}
+
+fn canonical_tools_list_for_profile(profile: super::McpCatalogProfile) -> Value {
     let mut catalog = tools_list_catalog();
     if profile == super::McpCatalogProfile::Tiered {
         if let Some(tools) = catalog.get_mut("tools").and_then(Value::as_array_mut) {
@@ -150,178 +159,506 @@ pub(crate) fn handle_tools_list_for_profile(profile: super::McpCatalogProfile) -
         }
     }
     sort_tools_catalog(&mut catalog);
-    slim_tools_list_for_wire(catalog)
+    catalog
 }
 
 /// Apply MCP's opaque-cursor pagination and progressive disclosure levels to
 /// the canonical catalog. Invalid cursors fail closed; they never trigger a
 /// full-catalog fallback that could violate the context budget.
+#[allow(dead_code)]
 pub(crate) fn handle_tools_list_for_profile_params(
     profile: super::McpCatalogProfile,
     params: &Value,
 ) -> Result<Value, String> {
-    let catalog = handle_tools_list_for_profile(profile);
-    // why: MCP hosts send params: {}; that is spec-default, not keel level opt-in.
-    if is_spec_default_tools_list(params) {
-        ensure_catalog_budget(profile, &catalog)?;
-        return Ok(catalog);
-    }
-    let level_explicit = params.get("level").is_some();
-    let level = params.get("level").and_then(Value::as_u64).unwrap_or(2);
-    if level_explicit && level > 2 {
-        return Err("tools/list level must be 0, 1, or 2".to_string());
-    }
-    let expected = catalog
+    let context = super::McpRequestContext::authoritative(None);
+    handle_tools_list_for_profile_params_with_context(profile, params, &context)
+}
+
+/// Apply deterministic, token-aware pagination to the canonical catalog. The
+/// normal MCP handshake uses this path too: a full catalog larger than one
+/// page is a packing problem, never a protocol error.
+pub(crate) fn handle_tools_list_for_profile_params_with_context(
+    profile: super::McpCatalogProfile,
+    params: &Value,
+    context: &super::McpRequestContext,
+) -> Result<Value, String> {
+    let object = match params {
+        Value::Null => None,
+        Value::Object(map) => Some(map),
+        _ => return Err("tools/list params must be an object".to_string()),
+    };
+    let has_cursor = object.is_some_and(|map| map.contains_key("cursor"));
+    let has_explicit_level = object.is_some_and(|map| map.contains_key("level"));
+    let spec_default = !has_cursor && !has_explicit_level;
+    let requested_level = match object.and_then(|map| map.get("level")) {
+        None => 2,
+        Some(Value::Number(value)) => value
+            .as_u64()
+            .filter(|value| *value <= 2)
+            .ok_or_else(|| "tools/list level must be 0, 1, or 2".to_string())?,
+        Some(_) => return Err("tools/list level must be 0, 1, or 2".to_string()),
+    };
+    let budget = mcp_tools_list_budget(profile);
+    let cursor = match object.and_then(|map| map.get("cursor")) {
+        None => None,
+        Some(Value::String(value)) => Some(value.as_str()),
+        Some(_) => return Err("tools/list cursor must be an opaque string".to_string()),
+    };
+    // Cursor-only page requests recover authenticated level/representation state;
+    // avoid rebuilding a different catalog snapshot for page two.
+    let cursor_hint = cursor
+        .filter(|_| !has_explicit_level)
+        .map(peek_catalog_cursor)
+        .transpose()?;
+    let level = cursor_hint
+        .as_ref()
+        .map(|claims| u64::from(claims.level))
+        .unwrap_or(requested_level);
+    let compact_default = cursor_hint
+        .as_ref()
+        .map(|claims| claims.compact)
+        .unwrap_or(spec_default);
+    // No-params handshakes use minimum valid schemas; explicit levels retain
+    // canonical schemas and let the packer downgrade each candidate as needed.
+    let catalog = if compact_default {
+        let mut catalog = canonical_tools_list_for_profile(profile);
+        if let Some(tools) = catalog.get_mut("tools").and_then(Value::as_array_mut) {
+            *tools = tools
+                .iter()
+                .map(|tool| tool_representation(tool, 0))
+                .collect();
+        }
+        catalog
+    } else {
+        canonical_tools_list_for_profile(profile)
+    };
+    let all_tools = catalog
         .get("tools")
         .and_then(Value::as_array)
-        .map(Vec::len)
-        .unwrap_or(0);
-    let fingerprint = catalog_fingerprint(profile, level, expected);
-    let cursor = params.get("cursor").and_then(Value::as_str);
+        .cloned()
+        .unwrap_or_default();
+    let expected = all_tools.len();
+    // Preserve complete-profile compatibility when it fits; paginate only when
+    // the emitted catalog exceeds its hard page budget.
+    if spec_default && measure_tools_list_response(&catalog) <= budget {
+        return Ok(catalog);
+    }
+    let fingerprint = catalog_snapshot_fingerprint(profile, &all_tools, level, budget);
     let start = match cursor {
-        Some(value) => decode_catalog_cursor(value, &fingerprint)?,
+        Some(value) => decode_catalog_cursor(
+            value,
+            profile,
+            level,
+            budget,
+            &fingerprint,
+            context,
+            compact_default,
+        )?,
         None => 0,
     };
     if start > expected {
-        return Err("tools/list cursor is outside the active catalog".to_string());
+        return Err("tools/list cursor is invalid for the active catalog".to_string());
     }
-    let page_size = tools_page_size();
-    let end = start.saturating_add(page_size).min(expected);
-    let mut page = catalog;
-    if let Some(tools) = page.get_mut("tools").and_then(Value::as_array_mut) {
-        let selected = tools.drain(start..end).collect::<Vec<_>>();
-        *tools = selected;
+
+    // Spec-default may return the complete catalog when it fits; explicit
+    // level/cursor requests retain the item cap while token budget is authoritative.
+    let max_items = if spec_default { 64 } else { tools_page_size() };
+    let expiry = now_unix_seconds().saturating_add(mcp_cursor_ttl_seconds());
+    let mut page_tools = Vec::new();
+    let mut offset = start;
+    while offset < expected && page_tools.len() < max_items {
+        let source = &all_tools[offset];
+        let has_more = offset + 1 < expected;
+        let mut accepted = None;
+        for representation_level in (0..=level).rev() {
+            let representation = tool_representation(source, representation_level);
+            let mut candidate_tools = page_tools.clone();
+            candidate_tools.push(representation.clone());
+            let next_cursor = has_more.then(|| {
+                encode_catalog_cursor(
+                    offset + 1,
+                    profile,
+                    level,
+                    budget,
+                    &fingerprint,
+                    context,
+                    expiry,
+                    compact_default,
+                )
+            });
+            let candidate = tools_list_page(&candidate_tools, next_cursor.as_deref());
+            if measure_tools_list_response(&candidate) <= budget {
+                accepted = Some(representation);
+                break;
+            }
+        }
+        match accepted {
+            Some(representation) => {
+                page_tools.push(representation);
+                offset += 1;
+            }
+            None if page_tools.is_empty() => {
+                return Err(format!(
+                    "tools/list minimum tool representation cannot fit the configured {budget}-token page budget"
+                ));
+            }
+            None => break,
+        }
     }
-    let mut list = slim_tools_list_for_wire(page);
-    if level_explicit {
-        apply_disclosure_level(&mut list, level);
+
+    let next_cursor = (offset < expected).then(|| {
+        encode_catalog_cursor(
+            offset,
+            profile,
+            level,
+            budget,
+            &fingerprint,
+            context,
+            expiry,
+            compact_default,
+        )
+    });
+    let page = tools_list_page(&page_tools, next_cursor.as_deref());
+    let measured = measure_tools_list_response(&page);
+    if measured > budget {
+        // Every candidate includes cursor overhead; retain a typed protocol error
+        // if a future serializer or envelope changes after packing.
+        return Err(format!(
+            "tools/list response exceeded its configured {budget}-token page budget after final recount ({measured})"
+        ));
     }
-    ensure_catalog_budget(profile, &list)?;
-    if end < expected {
-        list["nextCursor"] = Value::String(encode_catalog_cursor(end, &fingerprint));
-    }
-    debug_assert_eq!(
-        list.get("tools")
-            .and_then(Value::as_array)
-            .map(std::vec::Vec::len)
-            .unwrap_or(0),
-        end.saturating_sub(start),
-        "tools/list count must match requested page"
-    );
-    Ok(list)
+    debug_assert_eq!(page_tools.len(), offset.saturating_sub(start));
+    Ok(page)
 }
 
-fn ensure_catalog_budget(profile: super::McpCatalogProfile, payload: &Value) -> Result<(), String> {
-    let budget = match profile {
-        // Core is the fixed-context default; full is explicit opt-in with the
-        // generic dynamic ceiling for compatibility clients.
+/// One authoritative exact measurement for the emitted `tools/list` response.
+pub(crate) fn measure_tools_list_response(payload: &Value) -> usize {
+    serde_json::to_string(payload)
+        .map(|serialized| crate::proxy::token_meter::TokenMeter::count_text(&serialized))
+        .unwrap_or(usize::MAX)
+}
+
+fn tools_list_page(tools: &[Value], next_cursor: Option<&str>) -> Value {
+    let mut page = json!({ "tools": tools });
+    if let Some(cursor) = next_cursor {
+        page["nextCursor"] = Value::String(cursor.to_string());
+    }
+    page
+}
+
+fn mcp_tools_list_budget(profile: super::McpCatalogProfile) -> usize {
+    let default = match profile {
         super::McpCatalogProfile::Tiered => crate::proxy::context::DEFAULT_MAX_TOOL_CATALOG_TOKENS,
         super::McpCatalogProfile::Full => crate::proxy::context::DEFAULT_MAX_DYNAMIC_TOKENS,
     };
-    let serialized = serde_json::to_string(payload)
-        .map_err(|error| format!("tools/list: serialize for budget: {error}"))?;
-    let tokens = crate::proxy::token_meter::TokenMeter::count_text(&serialized);
-    if tokens > budget {
-        return Err(format!(
-            "tools/list catalog exceeds the {budget}-token profile budget ({tokens}); use pagination or level 0/1"
-        ));
+    ["KEEL_MCP_PAGE_TOKENS", "KEEL_MCP_PAGE_BUDGET"]
+        .iter()
+        .find_map(|name| {
+            env::var(name)
+                .ok()
+                .and_then(|value| value.trim().parse::<usize>().ok())
+                .map(|value| value.min(1_000_000))
+        })
+        .unwrap_or(default)
+}
+
+fn tool_representation(tool: &Value, level: u64) -> Value {
+    let Some(object) = tool.as_object() else {
+        return json!({
+            "name": "unknown",
+            "description": "Tool schema unavailable; use discovery before invocation.",
+            "inputSchema": { "type": "object" }
+        });
+    };
+    let name = object
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    match level {
+        2 => tool.clone(),
+        1 => {
+            let description = object
+                .get("description")
+                .and_then(Value::as_str)
+                .map(|value| truncate_chars(value, 96).0)
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| {
+                    "Use the compact schema; full details are available on demand.".to_string()
+                });
+            json!({
+                "name": name,
+                "description": description,
+                "inputSchema": compact_input_schema(object.get("inputSchema").unwrap_or(&Value::Null))
+            })
+        }
+        _ => {
+            let description = object
+                .get("description")
+                .and_then(Value::as_str)
+                .map(|value| truncate_chars(value, 72).0)
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "Tool schema is available through discovery.".to_string());
+            json!({
+                "name": name,
+                "description": format!("{description} Full schema available through tools/list level 2."),
+                "inputSchema": { "type": "object" }
+            })
+        }
     }
-    Ok(())
+}
+
+fn compact_input_schema(schema: &Value) -> Value {
+    let Some(object) = schema.as_object() else {
+        return json!({ "type": "object" });
+    };
+    let mut compact = serde_json::Map::new();
+    for key in [
+        "type",
+        "enum",
+        "const",
+        "required",
+        "properties",
+        "items",
+        "additionalProperties",
+        "minimum",
+        "maximum",
+        "minItems",
+        "maxItems",
+        "pattern",
+    ] {
+        let Some(value) = object.get(key) else {
+            continue;
+        };
+        let value = if key == "properties" {
+            let mut properties = serde_json::Map::new();
+            if let Some(entries) = value.as_object() {
+                for (name, property) in entries {
+                    properties.insert(name.clone(), compact_input_schema(property));
+                }
+            }
+            Value::Object(properties)
+        } else if key == "items" {
+            compact_input_schema(value)
+        } else {
+            value.clone()
+        };
+        compact.insert(key.to_string(), value);
+    }
+    if !compact.contains_key("type") {
+        compact.insert("type".to_string(), Value::String("object".to_string()));
+    }
+    Value::Object(compact)
 }
 
 fn sort_tools_catalog(catalog: &mut Value) {
     if let Some(tools) = catalog.get_mut("tools").and_then(Value::as_array_mut) {
         tools.sort_by(|left, right| {
-            left.get("name")
+            let left_name = left.get("name").and_then(Value::as_str).unwrap_or_default();
+            let right_name = right
+                .get("name")
                 .and_then(Value::as_str)
-                .unwrap_or_default()
-                .cmp(
-                    right
-                        .get("name")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default(),
-                )
+                .unwrap_or_default();
+            let left_rank = MCP_TOOL_NAMES
+                .iter()
+                .position(|name| *name == left_name)
+                .unwrap_or(usize::MAX);
+            let right_rank = MCP_TOOL_NAMES
+                .iter()
+                .position(|name| *name == right_name)
+                .unwrap_or(usize::MAX);
+            left_rank
+                .cmp(&right_rank)
+                .then_with(|| left_name.cmp(right_name))
         });
     }
 }
 
-fn catalog_fingerprint(profile: super::McpCatalogProfile, level: u64, expected: usize) -> String {
-    let names = match profile {
-        super::McpCatalogProfile::Tiered => EAGER_MCP_TOOL_NAMES,
-        super::McpCatalogProfile::Full => MCP_TOOL_NAMES,
+fn catalog_snapshot_fingerprint(
+    profile: super::McpCatalogProfile,
+    tools: &[Value],
+    level: u64,
+    budget: usize,
+) -> String {
+    let serialized = serde_json::to_string(tools).unwrap_or_default();
+    crate::utility::hashing::sha256_hex(
+        format!(
+            "{}\0{}\0{}\0{}",
+            profile.as_str(),
+            level,
+            budget,
+            serialized
+        )
+        .as_bytes(),
+    )
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CatalogCursorClaims {
+    v: u8,
+    profile: String,
+    level: u8,
+    budget: usize,
+    snapshot: String,
+    offset: usize,
+    expires_at: u64,
+    workspace_id: String,
+    session_id: String,
+    compact: bool,
+}
+
+static CURSOR_SECRET: LazyLock<String> = LazyLock::new(|| {
+    env::var("KEEL_MCP_CURSOR_SECRET")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| {
+            format!(
+                "keel-cursor-{}-{:032x}",
+                std::process::id(),
+                rand::random::<u128>()
+            )
+        })
+});
+
+#[allow(clippy::too_many_arguments)]
+fn encode_catalog_cursor(
+    offset: usize,
+    profile: super::McpCatalogProfile,
+    level: u64,
+    budget: usize,
+    fingerprint: &str,
+    context: &super::McpRequestContext,
+    expires_at: u64,
+    compact: bool,
+) -> String {
+    let claims = CatalogCursorClaims {
+        v: 1,
+        profile: profile.as_str().to_string(),
+        level: level as u8,
+        budget,
+        snapshot: fingerprint.to_string(),
+        offset,
+        expires_at,
+        workspace_id: context.workspace_id.clone(),
+        session_id: context.session_id.clone(),
+        compact,
     };
-    crate::utility::hashing::fnv1a64_hex(&format!(
-        "{}\0{}\0{}",
-        profile.as_str(),
-        level,
-        names.join("\0")
-    )) + &format!("-{expected}")
+    let serialized = serde_json::to_string(&claims).unwrap_or_default();
+    let encoded = hex_encode(serialized.as_bytes());
+    let mac = cursor_mac(&encoded);
+    format!("keel1:{encoded}:{mac}")
 }
 
-fn encode_catalog_cursor(offset: usize, fingerprint: &str) -> String {
-    format!("keel1:{offset}:{fingerprint}")
-}
-
-fn decode_catalog_cursor(cursor: &str, fingerprint: &str) -> Result<usize, String> {
+/// Authenticate and decode just enough cursor state to rebuild the same
+/// representation mode when a client sends the normal cursor-only page-two
+/// request. Full snapshot/profile/workspace validation remains in
+/// [`decode_catalog_cursor`].
+fn peek_catalog_cursor(cursor: &str) -> Result<CatalogCursorClaims, String> {
+    if cursor.len() > MAX_CURSOR_CHARS {
+        return Err("tools/list cursor is invalid".to_string());
+    }
     let mut parts = cursor.split(':');
     if parts.next() != Some("keel1") {
         return Err("tools/list cursor is invalid".to_string());
     }
-    let offset = parts
+    let encoded = parts
         .next()
-        .ok_or_else(|| "tools/list cursor is invalid".to_string())?
-        .parse::<usize>()
-        .map_err(|_| "tools/list cursor is invalid".to_string())?;
-    if parts.next() != Some(fingerprint) || parts.next().is_some() {
+        .ok_or_else(|| "tools/list cursor is invalid".to_string())?;
+    let mac = parts
+        .next()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "tools/list cursor is invalid".to_string())?;
+    if parts.next().is_some() || !constant_time_equal(mac, &cursor_mac(encoded)) {
+        return Err("tools/list cursor is invalid".to_string());
+    }
+    let decoded = hex_decode(encoded).ok_or_else(|| "tools/list cursor is invalid".to_string())?;
+    serde_json::from_slice(&decoded).map_err(|_| "tools/list cursor is invalid".to_string())
+}
+
+fn decode_catalog_cursor(
+    cursor: &str,
+    profile: super::McpCatalogProfile,
+    level: u64,
+    budget: usize,
+    fingerprint: &str,
+    context: &super::McpRequestContext,
+    compact: bool,
+) -> Result<usize, String> {
+    let claims = peek_catalog_cursor(cursor)?;
+    if claims.v != 1
+        || claims.profile != profile.as_str()
+        || claims.level != level as u8
+        || claims.budget != budget
+        || claims.snapshot != fingerprint
+        || claims.workspace_id != context.workspace_id
+        || claims.session_id != context.session_id
+        || claims.compact != compact
+    {
         return Err("tools/list cursor is stale or invalid for this catalog".to_string());
     }
-    Ok(offset)
+    if claims.expires_at <= now_unix_seconds() {
+        return Err("tools/list cursor has expired; restart pagination".to_string());
+    }
+    Ok(claims.offset)
 }
 
-fn is_spec_default_tools_list(params: &Value) -> bool {
-    match params {
-        Value::Null => true,
-        Value::Object(map) => !map.contains_key("cursor") && !map.contains_key("level"),
-        _ => false,
-    }
+fn cursor_mac(encoded_payload: &str) -> String {
+    crate::utility::hashing::sha256_hex(
+        format!(
+            "keel-mcp-cursor-v1\0{encoded_payload}\0{}",
+            CURSOR_SECRET.as_str()
+        )
+        .as_bytes(),
+    )
 }
 
-fn apply_disclosure_level(list: &mut Value, level: u64) {
-    // why: level 2 is full schema; extra fields only replace dropped level 0/1 data.
-    if level >= 2 {
-        return;
+fn constant_time_equal(left: &str, right: &str) -> bool {
+    let mut difference = left.len() ^ right.len();
+    for index in 0..left.len().max(right.len()) {
+        difference |= usize::from(
+            left.as_bytes().get(index).copied().unwrap_or_default()
+                ^ right.as_bytes().get(index).copied().unwrap_or_default(),
+        );
     }
-    let Some(tools) = list.get_mut("tools").and_then(Value::as_array_mut) else {
-        return;
-    };
-    for tool in tools {
-        if let Some(object) = tool.as_object_mut() {
-            object.insert(
-                "category".to_string(),
-                Value::String(
-                    tool_category(
-                        object
-                            .get("name")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default(),
-                    )
-                    .to_string(),
-                ),
-            );
-            object.insert("schemaVersion".to_string(), json!(1));
-            if level == 0 {
-                object.remove("inputSchema");
-                object.remove("description");
-            } else if level == 1 {
-                if let Some(schema) = object.get_mut("inputSchema") {
-                    if let Some(schema_object) = schema.as_object_mut() {
-                        schema_object.remove("required");
-                        schema_object.remove("properties");
-                    }
-                }
-            }
-        }
+    difference == 0
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn hex_decode(value: &str) -> Option<Vec<u8>> {
+    if value.is_empty()
+        || value.len() > MAX_CURSOR_CHARS
+        || !value.is_ascii()
+        || value.len() % 2 != 0
+    {
+        return None;
     }
+    value
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let high = (pair[0] as char).to_digit(16)? as u8;
+            let low = (pair[1] as char).to_digit(16)? as u8;
+            Some((high << 4) | low)
+        })
+        .collect()
+}
+
+fn now_unix_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+fn mcp_cursor_ttl_seconds() -> u64 {
+    env::var("KEEL_MCP_CURSOR_TTL_SECONDS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(|value| value.clamp(1, 86_400))
+        .unwrap_or(900)
 }
 
 fn tool_category(name: &str) -> &'static str {
@@ -430,21 +767,26 @@ fn tools_list_catalog() -> Value {
             },
             {
                 "name": "skill_get",
-                "description": "Load an installed skill's SKILL.md by name (frontmatter included). Size-capped for MCP hosts: large skills may set truncated=true and include path so you can Read the file for the remainder. Prefer skill_route when a brief is enough.",
+                "description": "Load one installed skill progressively: level 0 returns metadata, level 1 returns bounded core instructions, and level 2 returns one explicitly requested reference/resource. The legacy no-level call returns a bounded SKILL.md body.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "name": { "type": "string", "description": "Installed skill directory name, e.g. \"reviewer\" or \"systematic-debugging\"." }
+                        "name": { "type": "string", "description": "Installed skill directory name, e.g. \"reviewer\" or \"systematic-debugging\"." },
+                        "level": { "type": "integer", "enum": [0, 1, 2], "description": "0=metadata, 1=core instructions, 2=one requested resource." },
+                        "resource": { "type": "string", "description": "S2 relative resource path such as references/10-safe-ops.md; required for level 2." }
                     },
                     "required": ["name"]
                 }
             },
             {
                 "name": "skill_list",
-                "description": "List every installed keel skill with its name, description, and when_to_use. Prefer skill_route(prompt) when you already have a task — it is smaller and faster. Use skill_list only for discovery. Results are size-capped and compact so the MCP call cannot hang or blow host frame limits.",
+                "description": "List installed skill metadata under an independent token budget. The catalog is metadata-only and may return an opaque cursor when more entries remain; use skill_route(prompt) when a task is already known.",
                 "inputSchema": {
                     "type": "object",
-                    "properties": {}
+                    "properties": {
+                        "cursor": { "type": "string", "description": "Opaque cursor returned when the catalog is larger than the budget." },
+                        "budget": { "type": "integer", "minimum": 1, "description": "Optional skill-catalog token budget; defaults to KEEL_SKILL_CATALOG_TOKENS or 1200." }
+                    }
                 }
             },
             {
@@ -869,6 +1211,33 @@ pub(super) fn handle_tools_call_cancellable_with_context(
     cancellation: Option<Arc<AtomicBool>>,
     request_context: super::McpRequestContext,
 ) -> Result<Value, MethodError> {
+    handle_tools_call_cancellable_with_context_and_executor(
+        params,
+        cancellation,
+        request_context,
+        &TOOL_EXECUTOR,
+    )
+}
+
+#[cfg(test)]
+fn handle_tools_call_with_executor(
+    params: &Value,
+    executor: &ToolExecutor,
+) -> Result<Value, MethodError> {
+    let mut context = super::McpRequestContext::authoritative(None);
+    context.request_id = Some(format!(
+        "test-request-{}",
+        TEST_REQUEST_IDS.fetch_add(1, Ordering::Relaxed)
+    ));
+    handle_tools_call_cancellable_with_context_and_executor(params, None, context, executor)
+}
+
+fn handle_tools_call_cancellable_with_context_and_executor(
+    params: &Value,
+    cancellation: Option<Arc<AtomicBool>>,
+    request_context: super::McpRequestContext,
+    executor: &ToolExecutor,
+) -> Result<Value, MethodError> {
     let object = params.as_object().ok_or_else(|| MethodError {
         code: JSON_RPC_INVALID_PARAMS,
         message: "tools/call params must be an object".to_string(),
@@ -896,7 +1265,7 @@ pub(super) fn handle_tools_call_cancellable_with_context(
     let name = tool_name.to_string();
     let name_for_worker = name.clone();
     let outcome = run_tool_with_executor_cancellation(
-        &TOOL_EXECUTOR,
+        executor,
         mcp_child_timeout(),
         &name,
         cancellation,
@@ -2576,7 +2945,7 @@ fn tool_skill_route(arguments: &Value) -> Result<String, String> {
         return Err("skill_route: missing prompt".to_string());
     }
     let claude_home = tool_claude_home("skill_route")?;
-    let payload = match match_skill_for_prompt(&claude_home, &prompt) {
+    let payload = match match_skill_for_prompt_with_details(&claude_home, &prompt) {
         Some(found) => {
             // Present on disk is mandatory: never return a name the agent cannot
             // open (host Skill() catalog lag → use path + skill_get / Read).
@@ -2596,11 +2965,10 @@ fn tool_skill_route(arguments: &Value) -> Result<String, String> {
             }
             // Surface related skills that are actually installed, so the agent
             // knows adjacent skills exist without a separate skill_list call.
-            let installed: std::collections::BTreeSet<String> = skill_catalog(&claude_home)
-                .into_iter()
-                .map(|entry| entry.name)
-                .collect();
-            let related_installed: Vec<String> = skill_catalog(&claude_home)
+            let catalog = skill_catalog(&claude_home);
+            let installed: std::collections::BTreeSet<String> =
+                catalog.iter().map(|entry| entry.name.clone()).collect();
+            let related_installed: Vec<String> = catalog
                 .into_iter()
                 .find(|entry| entry.name == found.name)
                 .map(|entry| {
@@ -2618,11 +2986,22 @@ fn tool_skill_route(arguments: &Value) -> Result<String, String> {
             json!({
                 "matched": true,
                 "name": found.name,
-                "score": format!("{:.4}", found.score),
+                "score": format!("{:.4}", found.relevance),
                 "path": display_path(&path),
                 "present": true,
                 "brief": brief,
                 "relatedSkills": related_installed,
+                "selection": {
+                    "relevance": format!("{:.4}", found.relevance),
+                    "utility": format!("{:.4}", found.utility),
+                    "confidence": format!("{:.4}", found.confidence),
+                    "estimatedTokens": found.estimated_tokens,
+                    "activationBudgetTokens": found.activation_budget_tokens,
+                    "redundancy": format!("{:.4}", found.redundancy),
+                    "taskCriticality": format!("{:.4}", found.task_criticality),
+                    "historicalSuccess": format!("{:.4}", found.historical_success),
+                    "reason": found.reason,
+                },
                 "note": "If host Skill() says Unknown skill, Read `path` or call skill_get — file is on disk.",
             })
         }
@@ -2649,6 +3028,107 @@ fn tool_skill_get(arguments: &Value) -> Result<String, String> {
         return Err("skill_get: missing name".to_string());
     }
     let claude_home = tool_claude_home("skill_get")?;
+
+    let requested_level = match arguments.get("level") {
+        None | Some(Value::Null) => None,
+        Some(Value::Number(value)) => Some(
+            value
+                .as_u64()
+                .filter(|level| *level <= 2)
+                .ok_or_else(|| "skill_get: level must be 0, 1, or 2".to_string())?,
+        ),
+        Some(_) => return Err("skill_get: level must be 0, 1, or 2".to_string()),
+    };
+
+    if requested_level == Some(0) {
+        let Some(path) = installed_skill_path(&claude_home, &name) else {
+            return Err(format!(
+                "skill_get: no installed skill named {name:?} (or name is unsafe)"
+            ));
+        };
+        let text = std::fs::read_to_string(&path)
+            .map_err(|_| "skill_get: metadata read failed".to_string())?;
+        let frontmatter = split_frontmatter(&text)
+            .ok_or_else(|| "skill_get: invalid SKILL.md frontmatter".to_string())?;
+        let description = frontmatter_field(&frontmatter, "description").unwrap_or_default();
+        let when_to_use = frontmatter_field(&frontmatter, "when_to_use").unwrap_or_default();
+        let catalog_entry = skill_catalog(&claude_home)
+            .into_iter()
+            .find(|entry| entry.name == name);
+        let metadata =
+            format!("name: {name}\ndescription: {description}\nwhen_to_use: {when_to_use}");
+        let metadata_tokens = crate::proxy::token_meter::TokenMeter::count_text(&metadata);
+        return mcp_json_compact(&json!({
+            "name": name,
+            "path": display_path(&path),
+            "level": 0,
+            "description": description,
+            "whenToUse": when_to_use,
+            "metadataTokens": metadata_tokens,
+            "capabilities": catalog_entry
+                .as_ref()
+                .map(|entry| entry.capabilities.clone())
+                .unwrap_or_default(),
+            "version": catalog_entry
+                .as_ref()
+                .map(|entry| entry.version.clone())
+                .unwrap_or_else(|| "unversioned".to_string()),
+        }))
+        .map_err(|error| format!("skill_get: {error}"));
+    }
+
+    if requested_level == Some(1) {
+        let Some((path, body, raw_tokens, visible_tokens, truncated)) =
+            skill_core_projection(&claude_home, &name)
+        else {
+            return Err(format!(
+                "skill_get: no readable skill core for {name:?} (or name is unsafe)"
+            ));
+        };
+        return mcp_json_compact(&json!({
+            "name": name,
+            "path": display_path(&path),
+            "level": 1,
+            "body": body,
+            "rawTokens": raw_tokens,
+            "visibleTokens": visible_tokens,
+            "budgetTokens": SKILL_S1_HARD_TOKENS,
+            "truncated": truncated,
+            "next": "Request level 2 with one resource path when a referenced file is required.",
+        }))
+        .map_err(|error| format!("skill_get: {error}"));
+    }
+
+    if requested_level == Some(2) {
+        let resource = arguments
+            .get("resource")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim();
+        if resource.is_empty() {
+            return Err(
+                "skill_get: level 2 requires one explicit resource path (for example references/10-safe-ops.md)"
+                    .to_string(),
+            );
+        }
+        let (path, body, raw_tokens, visible_tokens, truncated) =
+            skill_resource_projection(&claude_home, &name, resource)?;
+        return mcp_json_compact(&json!({
+            "name": name,
+            "path": display_path(&path),
+            "resource": resource,
+            "level": 2,
+            "body": body,
+            "rawTokens": raw_tokens,
+            "visibleTokens": visible_tokens,
+            "budgetTokens": SKILL_S2_HARD_TOKENS,
+            "truncated": truncated,
+        }))
+        .map_err(|error| format!("skill_get: {error}"));
+    }
+
+    // Omitted level preserves the bounded complete SKILL.md compatibility path;
+    // new clients should use S0/S1/S2 to avoid loading unrelated references.
     match skill_full_body(&claude_home, &name) {
         Some((path, body)) => {
             // Compact JSON (not pretty): pretty multi-line inner payloads inflate
@@ -2656,11 +3136,15 @@ fn tool_skill_get(arguments: &Value) -> Result<String, String> {
             // failures that surface as 120s MCP tool timeouts.
             let body_chars = body.chars().count();
             let (body_out, truncated) = truncate_chars(&body, MAX_SKILL_BODY_CHARS);
+            let body_tokens = crate::proxy::token_meter::TokenMeter::count_text(&body_out);
             let payload = json!({
                 "name": name,
                 "path": display_path(&path),
+                "level": 1,
                 "body": body_out,
                 "bodyChars": body_chars,
+                "bodyTokens": body_tokens,
+                "budgetTokens": SKILL_S1_HARD_TOKENS,
                 "truncated": truncated,
             });
             mcp_json_compact(&payload).map_err(|error| format!("skill_get: {error}"))
@@ -2671,43 +3155,298 @@ fn tool_skill_get(arguments: &Value) -> Result<String, String> {
     }
 }
 
-fn tool_skill_list(_arguments: &Value) -> Result<String, String> {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SkillCatalogCursorClaims {
+    v: u8,
+    snapshot: String,
+    home: String,
+    offset: usize,
+    budget: usize,
+    expires_at: u64,
+}
+
+fn skill_catalog_budget(arguments: &Value) -> Result<usize, String> {
+    let requested = arguments.get("budget").and_then(Value::as_u64);
+    if arguments
+        .get("budget")
+        .is_some_and(|value| !value.is_null() && requested.is_none())
+    {
+        return Err("skill_list: budget must be a positive integer".to_string());
+    }
+    let budget = requested
+        .map(|value| value as usize)
+        .or_else(|| {
+            env::var("KEEL_SKILL_CATALOG_TOKENS")
+                .ok()
+                .and_then(|value| value.trim().parse::<usize>().ok())
+        })
+        .unwrap_or(SKILL_CATALOG_DEFAULT_TOKENS);
+    if budget == 0 {
+        return Err("skill_list: budget must be a positive integer".to_string());
+    }
+    Ok(budget.min(1_000_000))
+}
+
+fn skill_catalog_snapshot_fingerprint(
+    claude_home: &Path,
+    catalog: &[crate::utility::skill_match::SkillCatalogEntry],
+) -> String {
+    // Exclude usage counters as telemetry so snapshots stay stable and a match
+    // does not invalidate cursors or reorder the name-sorted catalog.
+    let stable = catalog
+        .iter()
+        .map(|entry| {
+            (
+                &entry.name,
+                &entry.description,
+                &entry.when_to_use,
+                &entry.related_skills,
+                &entry.capabilities,
+                &entry.version,
+                &entry.dependencies,
+                entry.activation_cost_tokens,
+                entry.task_criticality,
+            )
+        })
+        .collect::<Vec<_>>();
+    let serialized =
+        serde_json::to_string(&(claude_home.to_string_lossy(), stable)).unwrap_or_default();
+    crate::utility::hashing::sha256_hex(serialized.as_bytes())
+}
+
+fn skill_catalog_cursor_mac(encoded_payload: &str) -> String {
+    crate::utility::hashing::sha256_hex(
+        format!(
+            "keel-skill-cursor-v1\0{encoded_payload}\0{}",
+            CURSOR_SECRET.as_str()
+        )
+        .as_bytes(),
+    )
+}
+
+fn encode_skill_catalog_cursor(
+    offset: usize,
+    budget: usize,
+    snapshot: &str,
+    claude_home: &Path,
+    expires_at: u64,
+) -> String {
+    let claims = SkillCatalogCursorClaims {
+        v: 1,
+        snapshot: snapshot.to_string(),
+        home: claude_home.to_string_lossy().to_string(),
+        offset,
+        budget,
+        expires_at,
+    };
+    let encoded = hex_encode(
+        serde_json::to_string(&claims)
+            .unwrap_or_default()
+            .as_bytes(),
+    );
+    let mac = skill_catalog_cursor_mac(&encoded);
+    format!("keel-skill1:{encoded}:{mac}")
+}
+
+fn decode_skill_catalog_cursor(
+    cursor: &str,
+    budget: usize,
+    snapshot: &str,
+    claude_home: &Path,
+) -> Result<usize, String> {
+    if cursor.len() > MAX_CURSOR_CHARS {
+        return Err("skill_list: cursor is invalid".to_string());
+    }
+    let mut parts = cursor.split(':');
+    if parts.next() != Some("keel-skill1") {
+        return Err("skill_list: cursor is invalid".to_string());
+    }
+    let encoded = parts
+        .next()
+        .ok_or_else(|| "skill_list: cursor is invalid".to_string())?;
+    let mac = parts
+        .next()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "skill_list: cursor is invalid".to_string())?;
+    if parts.next().is_some() || !constant_time_equal(mac, &skill_catalog_cursor_mac(encoded)) {
+        return Err("skill_list: cursor is invalid".to_string());
+    }
+    let decoded = hex_decode(encoded).ok_or_else(|| "skill_list: cursor is invalid".to_string())?;
+    let claims: SkillCatalogCursorClaims = serde_json::from_slice(&decoded)
+        .map_err(|_| "skill_list: cursor is invalid".to_string())?;
+    if claims.v != 1
+        || claims.snapshot != snapshot
+        || claims.home != claude_home.to_string_lossy()
+        || claims.budget != budget
+    {
+        return Err("skill_list: cursor is stale or invalid for this catalog".to_string());
+    }
+    if claims.expires_at <= now_unix_seconds() {
+        return Err("skill_list: cursor has expired; restart pagination".to_string());
+    }
+    Ok(claims.offset)
+}
+
+fn skill_catalog_row(
+    claude_home: &Path,
+    entry: &crate::utility::skill_match::SkillCatalogEntry,
+    installed_names: &std::collections::BTreeSet<String>,
+    compact: bool,
+) -> Option<Value> {
+    let path = installed_skill_path(claude_home, &entry.name)?;
+    let (description, description_truncated) = truncate_chars(
+        &entry.description,
+        if compact {
+            96
+        } else {
+            MAX_SKILL_LIST_FIELD_CHARS
+        },
+    );
+    let (when_to_use, when_truncated) = truncate_chars(
+        &entry.when_to_use,
+        if compact {
+            96
+        } else {
+            MAX_SKILL_LIST_FIELD_CHARS
+        },
+    );
+    if compact {
+        return Some(json!({
+            "name": entry.name,
+            "description": description,
+            "whenToUse": when_to_use,
+            "capabilities": entry.capabilities,
+            "version": entry.version,
+            "present": true,
+            "truncated": description_truncated || when_truncated,
+        }));
+    }
+    let related: Vec<String> = entry
+        .related_skills
+        .iter()
+        .filter(|name| {
+            installed_names.contains(*name) && installed_skill_path(claude_home, name).is_some()
+        })
+        .take(16)
+        .cloned()
+        .collect();
+    Some(json!({
+        "name": entry.name,
+        "path": display_path(&path),
+        "present": true,
+        "description": description,
+        "whenToUse": when_to_use,
+        "capabilities": entry.capabilities,
+        "version": entry.version,
+        "dependencies": entry.dependencies,
+        "activationCostTokens": entry.activation_cost_tokens,
+        "taskCriticality": format!("{:.4}", entry.task_criticality),
+        "historicalSuccess": format!("{:.4}", entry.historical_success),
+        "useCount": entry.use_count,
+        "relatedSkills": related,
+    }))
+}
+
+fn skill_list_payload(
+    total: usize,
+    offset: usize,
+    rows: &[Value],
+    budget: usize,
+    next_cursor: Option<&str>,
+) -> Value {
+    let mut payload = json!({
+        "count": rows.len(),
+        "totalCount": total,
+        "offset": offset,
+        "skills": rows,
+        "budgetTokens": budget,
+        "omitted": total.saturating_sub(offset.saturating_add(rows.len())),
+    });
+    if let Some(cursor) = next_cursor {
+        payload["nextCursor"] = Value::String(cursor.to_string());
+    }
+    payload
+}
+
+fn tool_skill_list(arguments: &Value) -> Result<String, String> {
     let claude_home = tool_claude_home("skill_list")?;
+    let budget = skill_catalog_budget(arguments)?;
     let catalog = skill_catalog(&claude_home);
     let installed_names: std::collections::BTreeSet<String> =
         catalog.iter().map(|entry| entry.name.clone()).collect();
-    let skills: Vec<Value> = catalog
-        .iter()
-        .filter_map(|entry| {
-            // Only list skills with a readable SKILL.md (same gate as skill_get).
-            let path = installed_skill_path(&claude_home, &entry.name)?;
-            let (description, _) = truncate_chars(&entry.description, MAX_SKILL_LIST_FIELD_CHARS);
-            let (when_to_use, _) = truncate_chars(&entry.when_to_use, MAX_SKILL_LIST_FIELD_CHARS);
-            let related: Vec<String> = entry
-                .related_skills
-                .iter()
-                .filter(|name| {
-                    installed_names.contains(*name)
-                        && installed_skill_path(&claude_home, name).is_some()
-                })
-                .cloned()
-                .collect();
-            Some(json!({
-                "name": entry.name,
-                "path": display_path(&path),
-                "present": true,
-                "description": description,
-                "whenToUse": when_to_use,
-                "useCount": entry.use_count,
-                "relatedSkills": related,
-            }))
-        })
-        .collect();
-    let payload = json!({
-        "count": skills.len(),
-        "skills": skills,
-    });
-    // Compact: pretty catalog was ~33KB and blew host MCP frame budgets.
+    let fingerprint = skill_catalog_snapshot_fingerprint(&claude_home, &catalog);
+    let cursor = match arguments.get("cursor") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(value)) => Some(value.as_str()),
+        Some(_) => return Err("skill_list: cursor must be an opaque string".to_string()),
+    };
+    let start = match cursor {
+        Some(value) => decode_skill_catalog_cursor(value, budget, &fingerprint, &claude_home)?,
+        None => 0,
+    };
+    if start > catalog.len() {
+        return Err("skill_list: cursor is invalid for the active catalog".to_string());
+    }
+
+    let expiry = now_unix_seconds().saturating_add(mcp_cursor_ttl_seconds());
+    let max_items = 64;
+    let mut rows = Vec::new();
+    let mut offset = start;
+    while offset < catalog.len() && rows.len() < max_items {
+        let has_more = offset + 1 < catalog.len();
+        let mut accepted = None;
+        for compact in [false, true] {
+            let Some(row) =
+                skill_catalog_row(&claude_home, &catalog[offset], &installed_names, compact)
+            else {
+                offset += 1;
+                accepted = Some(None);
+                break;
+            };
+            let next_cursor = has_more.then(|| {
+                encode_skill_catalog_cursor(offset + 1, budget, &fingerprint, &claude_home, expiry)
+            });
+            let mut candidate_rows = rows.clone();
+            candidate_rows.push(row.clone());
+            let candidate = skill_list_payload(
+                catalog.len(),
+                start,
+                &candidate_rows,
+                budget,
+                next_cursor.as_deref(),
+            );
+            if TokenMeter::count_text(&serde_json::to_string(&candidate).unwrap_or_default())
+                <= budget
+            {
+                accepted = Some(Some(row));
+                break;
+            }
+        }
+        match accepted {
+            Some(Some(row)) => {
+                rows.push(row);
+                offset += 1;
+            }
+            Some(None) => {}
+            None if rows.is_empty() => {
+                return Err(format!(
+                    "skill_list: minimum metadata row cannot fit the configured {budget}-token catalog budget"
+                ));
+            }
+            None => break,
+        }
+    }
+    let next_cursor = (offset < catalog.len())
+        .then(|| encode_skill_catalog_cursor(offset, budget, &fingerprint, &claude_home, expiry));
+    let payload = skill_list_payload(catalog.len(), start, &rows, budget, next_cursor.as_deref());
+    let measured = TokenMeter::count_text(&serde_json::to_string(&payload).unwrap_or_default());
+    if measured > budget {
+        return Err(format!(
+            "skill_list: response exceeded its configured {budget}-token catalog budget after final recount ({measured})"
+        ));
+    }
+    // Compact: the exact payload above is already bounded; keep one-line JSON
+    // for the enclosing tools/call frame.
     mcp_json_compact(&payload).map_err(|error| format!("skill_list: {error}"))
 }
 
@@ -3332,6 +4071,7 @@ pub(crate) fn truncate_mcp_text(text: &str) -> String {
 #[cfg(test)]
 mod mcp_timeout_tests {
     use super::*;
+    use std::fs;
     use std::path::PathBuf;
 
     #[test]
@@ -3382,6 +4122,93 @@ mod mcp_timeout_tests {
             "skill_get payload must be one JSON line"
         );
         assert!(text.contains("\"truncated\":"));
+    }
+
+    #[test]
+    fn skill_list_pages_within_its_independent_budget_and_cursors_are_opaque() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous_home = env::var_os("KEEL_HOME");
+        let suffix = format!(
+            "{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or_default()
+        );
+        let root = env::temp_dir().join(format!("keel-skill-list-{suffix}"));
+        let home = root.join(".keel");
+        // A standard KEEL_HOME resolves harness skills from its sibling
+        // `.claude`, matching the production split-home layout.
+        let skills_dir = root.join(".claude").join("skills");
+        fs::create_dir_all(&skills_dir).expect("skills directory");
+        for index in 0..9 {
+            let skill_dir = skills_dir.join(format!("fixture-skill-{index}"));
+            fs::create_dir_all(&skill_dir).expect("skill directory");
+            fs::write(
+                skill_dir.join("SKILL.md"),
+                format!(
+                    "---\nname: fixture-skill-{index}\ndescription: Use when handling fixture operation {index}.\nwhen_to_use: Use for the fixture skill list budget test.\n---\n# Fixture skill {index}\n\nRun the bounded fixture operation safely.\n"
+                ),
+            )
+            .expect("skill file");
+        }
+        env::set_var("KEEL_HOME", &home);
+
+        let mut cursor = None;
+        let mut names = Vec::new();
+        for _ in 0..16 {
+            let mut arguments = json!({ "budget": 400 });
+            if let Some(value) = cursor.take() {
+                arguments["cursor"] = Value::String(value);
+            }
+            let text = tool_skill_list(&arguments).expect("bounded skill page");
+            let page: Value = serde_json::from_str(&text).expect("skill page JSON");
+            assert!(
+                TokenMeter::count_text(&text) <= 400,
+                "skill page exceeds budget: {}",
+                TokenMeter::count_text(&text)
+            );
+            names.extend(
+                page["skills"]
+                    .as_array()
+                    .expect("skills array")
+                    .iter()
+                    .filter_map(|skill| skill["name"].as_str().map(str::to_string)),
+            );
+            cursor = page["nextCursor"].as_str().map(str::to_string);
+            if cursor.is_none() {
+                break;
+            }
+        }
+        assert_eq!(names.len(), 9);
+        assert_eq!(
+            names
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            names.len(),
+            "skill pages must not duplicate entries"
+        );
+        assert!(
+            tool_skill_list(&json!({ "budget": 400, "cursor": "not-a-keel-cursor" }))
+                .unwrap_err()
+                .contains("cursor")
+        );
+
+        match previous_home {
+            Some(value) => env::set_var("KEEL_HOME", value),
+            None => env::remove_var("KEEL_HOME"),
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn hex_cursor_decode_rejects_unicode_and_oversized_input() {
+        assert!(hex_decode("éé").is_none());
+        assert!(hex_decode(&"aa".repeat(MAX_CURSOR_CHARS / 2 + 1)).is_none());
     }
 
     #[test]
@@ -4417,6 +5244,9 @@ mod tests {
 
     #[test]
     fn paginated_tools_list_uses_an_opaque_cursor_without_catalog_fallback() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let first = handle_tools_list_for_profile_params(
             crate::mcp::McpCatalogProfile::Full,
             &json!({ "level": 1 }),
@@ -4451,14 +5281,19 @@ mod tests {
     }
 
     #[test]
-    fn spec_default_empty_params_returns_eager_catalog_under_profile_budget() {
-        // why: Antigravity sends params: {}, which must stay under the 1200-token budget.
+    fn spec_default_empty_params_returns_bounded_eager_page_under_profile_budget() {
+        // why: Antigravity sends params: {}; the first page must stay bounded
+        // even when the complete eager catalog no longer fits one response.
         let response =
             handle_tools_list_for_profile_params(crate::mcp::McpCatalogProfile::Tiered, &json!({}))
                 .expect("spec-default tools/list must succeed");
         let tools = response["tools"].as_array().expect("tools");
-        assert_eq!(tools.len(), EAGER_MCP_TOOL_NAMES.len());
-        assert!(response.get("nextCursor").is_none());
+        assert!(!tools.is_empty());
+        assert!(tools.len() <= EAGER_MCP_TOOL_NAMES.len());
+        assert_eq!(
+            response.get("nextCursor").is_some(),
+            tools.len() < EAGER_MCP_TOOL_NAMES.len()
+        );
         let serialized = serde_json::to_string(&response).expect("serialize");
         let tokens = crate::proxy::token_meter::TokenMeter::count_text(&serialized);
         assert!(
@@ -4502,6 +5337,161 @@ mod tests {
             "level 2 catalog {explicit_tokens} exceeds {}",
             crate::proxy::context::DEFAULT_MAX_TOOL_CATALOG_TOKENS
         );
+    }
+
+    #[test]
+    fn tools_list_budget_overflow_1200_is_paged_without_duplicates_or_omissions() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous = std::env::var("KEEL_MCP_PAGE_TOKENS").ok();
+        std::env::set_var("KEEL_MCP_PAGE_TOKENS", "1200");
+
+        let mut cursor = None;
+        let mut names = Vec::new();
+        for _ in 0..16 {
+            let mut params = json!({ "level": 2 });
+            if let Some(value) = cursor.take() {
+                params["cursor"] = Value::String(value);
+            }
+            let page =
+                handle_tools_list_for_profile_params(crate::mcp::McpCatalogProfile::Full, &params)
+                    .expect("a valid budget must produce a page");
+            assert!(measure_tools_list_response(&page) <= 1200);
+            names.extend(
+                page["tools"]
+                    .as_array()
+                    .expect("tools array")
+                    .iter()
+                    .filter_map(|tool| tool["name"].as_str().map(str::to_string)),
+            );
+            cursor = page["nextCursor"].as_str().map(str::to_string);
+            if cursor.is_none() {
+                break;
+            }
+        }
+
+        let unique = names
+            .iter()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(unique.len(), names.len(), "paged catalog duplicated a tool");
+        assert_eq!(
+            unique.len(),
+            MCP_TOOL_NAMES.len(),
+            "paged catalog omitted a tool"
+        );
+        for expected in MCP_TOOL_NAMES {
+            assert!(unique.contains(expected), "missing {expected} from pages");
+        }
+
+        match previous {
+            Some(value) => std::env::set_var("KEEL_MCP_PAGE_TOKENS", value),
+            None => std::env::remove_var("KEEL_MCP_PAGE_TOKENS"),
+        }
+    }
+
+    #[test]
+    fn spec_default_cursor_only_continuation_keeps_the_same_compact_snapshot() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous = std::env::var("KEEL_MCP_PAGE_TOKENS").ok();
+        std::env::set_var("KEEL_MCP_PAGE_TOKENS", "500");
+
+        let mut page =
+            handle_tools_list_for_profile_params(crate::mcp::McpCatalogProfile::Tiered, &json!({}))
+                .expect("the no-params first page must be valid");
+        let mut names = Vec::new();
+        for _ in 0..32 {
+            names.extend(
+                page["tools"]
+                    .as_array()
+                    .expect("tools array")
+                    .iter()
+                    .filter_map(|tool| tool["name"].as_str().map(str::to_string)),
+            );
+            let Some(cursor) = page["nextCursor"].as_str() else {
+                break;
+            };
+            // Cursor-only MCP pagination recovers compact representation mode from
+            // authenticated claims instead of invalidating page two.
+            page = handle_tools_list_for_profile_params(
+                crate::mcp::McpCatalogProfile::Tiered,
+                &json!({ "cursor": cursor }),
+            )
+            .expect("cursor-only continuation must remain valid");
+        }
+
+        let unique = names
+            .iter()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(unique.len(), names.len(), "compact pages duplicated a tool");
+        assert_eq!(unique.len(), EAGER_MCP_TOOL_NAMES.len());
+
+        match previous {
+            Some(value) => std::env::set_var("KEEL_MCP_PAGE_TOKENS", value),
+            None => std::env::remove_var("KEEL_MCP_PAGE_TOKENS"),
+        }
+    }
+
+    #[test]
+    fn tools_list_low_budgets_fail_closed_or_emit_valid_bounded_pages() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous = std::env::var("KEEL_MCP_PAGE_TOKENS").ok();
+        for budget in [500usize, 200, 100, 50] {
+            std::env::set_var("KEEL_MCP_PAGE_TOKENS", budget.to_string());
+            let result = handle_tools_list_for_profile_params(
+                crate::mcp::McpCatalogProfile::Full,
+                &json!({ "level": 2 }),
+            );
+            match result {
+                Ok(page) => {
+                    assert!(measure_tools_list_response(&page) <= budget);
+                    for tool in page["tools"].as_array().expect("tools array") {
+                        assert_eq!(tool["inputSchema"]["type"], json!("object"));
+                    }
+                }
+                Err(error) => {
+                    assert!(
+                        error.contains("configured") || error.contains("minimum"),
+                        "unexpected low-budget error: {error}"
+                    );
+                    assert!(!error.contains("catalog exceeds"));
+                }
+            }
+        }
+        match previous {
+            Some(value) => std::env::set_var("KEEL_MCP_PAGE_TOKENS", value),
+            None => std::env::remove_var("KEEL_MCP_PAGE_TOKENS"),
+        }
+    }
+
+    #[test]
+    fn level_zero_always_retains_a_valid_mcp_input_schema() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous = std::env::var("KEEL_MCP_PAGE_TOKENS").ok();
+        std::env::set_var("KEEL_MCP_PAGE_TOKENS", "1200");
+        let page = handle_tools_list_for_profile_params(
+            crate::mcp::McpCatalogProfile::Full,
+            &json!({ "level": 0 }),
+        )
+        .expect("level zero page");
+        assert!(measure_tools_list_response(&page) <= 1200);
+        for tool in page["tools"].as_array().expect("tools array") {
+            assert!(tool["name"].is_string());
+            assert!(tool["description"].is_string());
+            assert_eq!(tool["inputSchema"]["type"], json!("object"));
+        }
+        match previous {
+            Some(value) => std::env::set_var("KEEL_MCP_PAGE_TOKENS", value),
+            None => std::env::remove_var("KEEL_MCP_PAGE_TOKENS"),
+        }
     }
 
     #[test]
@@ -4857,26 +5847,41 @@ mod tests {
         let _env = crate::test_support::ENV_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
+        // Keep this smoke test on a private pool so unrelated long-running tests cannot
+        // occupy shared workers past its deadline; it still exercises dispatch/envelope.
+        let executor = ToolExecutor::new(1, 8);
         let home = std::env::temp_dir().join(format!("keel-mcp-iron-law-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(&home).expect("temp claude home");
+        // Keep this smoke test on a tiny workspace so the 25-second MCP deadline
+        // stays stable on slower hosted runners while exercising the production path.
+        let workspace = home.join("workspace");
+        std::fs::create_dir_all(&workspace).expect("temp workspace");
+        std::fs::write(workspace.join("README.md"), "# MCP test workspace\n")
+            .expect("temp workspace readme");
         let previous = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
         std::env::set_var("CLAUDE_TARGET_OVERRIDE", &home);
 
         // Shipped handle_tools_call path — protocol envelope isError:false.
         for (name, args) in [
             ("context_brief", json!({})),
-            ("system_map", json!({})),
+            (
+                "system_map",
+                json!({ "workspace_root": workspace.to_string_lossy().into_owned() }),
+            ),
             ("recall_status", json!({})),
             (
                 "skill_route",
                 json!({ "prompt": "review this pull request for production readiness" }),
             ),
         ] {
-            let result = handle_tools_call(&json!({
+            let result = handle_tools_call_with_executor(
+                &json!({
                 "name": name,
                 "arguments": args
-            }))
+                }),
+                &executor,
+            )
             .unwrap_or_else(|e| panic!("{name} protocol error: {e:?}"));
             assert_eq!(
                 result["isError"],
@@ -4888,10 +5893,13 @@ mod tests {
             assert!(!text.trim().is_empty(), "{name} empty content");
         }
         // recall needs a query; empty corpus may return zero hits but not isError.
-        let recall = handle_tools_call(&json!({
-            "name": "recall",
-            "arguments": { "query": "iron law system map", "limit": 5 }
-        }))
+        let recall = handle_tools_call_with_executor(
+            &json!({
+                "name": "recall",
+                "arguments": { "query": "iron law system map", "limit": 5 }
+            }),
+            &executor,
+        )
         .expect("recall envelope");
         assert_eq!(
             recall["isError"],

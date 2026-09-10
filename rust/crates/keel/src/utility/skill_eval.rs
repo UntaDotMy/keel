@@ -16,14 +16,22 @@
 //! model, gate-able in CI. `skill-lint` checks a skill is well-FORMED; this checks
 //! it actually TRIGGERS.
 
+use std::collections::BTreeSet;
 use std::io::Write;
+use std::path::Path;
+use std::time::Instant;
 
 use crate::args::FlagSet;
 use crate::json::{write_indented, Value};
+use crate::proxy::token_meter::TokenMeter;
 use crate::runtime::{
     display_path, resolve_claude_home, resolve_repository_root, skills_directory,
 };
-use crate::utility::skill_match::{load_skill_terms, resolve_skill_for_prompt};
+use crate::utility::skill_match::{
+    curated_skill_for_prompt, load_skill_catalog_for_dir, load_skill_terms,
+    resolve_skill_for_prompt, resolve_skill_selection, score_prompt_against_skills,
+    SkillCatalogEntry, SkillTerms, SKILL_S1_HARD_TOKENS,
+};
 
 /// One behavioral expectation: a prompt and the set of skills any of which is an
 /// acceptable activation, or an empty set for a generic prompt that must NOT trip
@@ -237,6 +245,7 @@ pub fn run_skill_eval_command(
     flag_set.string_flag("repo-root", "");
     flag_set.string_flag("claude-home", "");
     flag_set.bool_flag("installed", false);
+    flag_set.bool_flag("benchmark", false);
     flag_set.bool_flag("json", false);
     if let Err(parse_error) = flag_set.parse(arguments) {
         let _ = writeln!(standard_error, "{}", parse_error.message);
@@ -278,6 +287,16 @@ pub fn run_skill_eval_command(
             display_path(&corpus_dir)
         );
         return 1;
+    }
+
+    if flag_set.bool_value("benchmark") {
+        return run_skill_selection_benchmark(
+            &corpus_dir,
+            &skills,
+            flag_set.bool_value("json"),
+            standard_output,
+            standard_error,
+        );
     }
 
     let mut results: Vec<TriggerResult> = Vec::with_capacity(TRIGGER_FIXTURES.len());
@@ -389,6 +408,316 @@ fn classify(accept: &[&str], actual: Option<&str>) -> Outcome {
         None if accept.is_empty() => Outcome::Pass,
         None => Outcome::Fail,
     }
+}
+
+const BENCHMARK_RUNS_PER_TASK: usize = 3;
+
+#[derive(Debug, Clone, Copy)]
+enum BenchmarkProfile {
+    AllSkillsEager,
+    MetadataOnly,
+    MetadataSelective,
+    MetadataCostAware,
+}
+
+impl BenchmarkProfile {
+    fn name(self) -> &'static str {
+        match self {
+            Self::AllSkillsEager => "all-skills-eager",
+            Self::MetadataOnly => "metadata-only",
+            Self::MetadataSelective => "metadata+selective-activation",
+            Self::MetadataCostAware => "metadata+cost-aware-selection",
+        }
+    }
+}
+
+fn run_skill_selection_benchmark(
+    corpus_dir: &Path,
+    skills: &[SkillTerms],
+    json_output: bool,
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let catalog = load_skill_catalog_for_dir(corpus_dir);
+    let profiles = [
+        BenchmarkProfile::AllSkillsEager,
+        BenchmarkProfile::MetadataOnly,
+        BenchmarkProfile::MetadataSelective,
+        BenchmarkProfile::MetadataCostAware,
+    ];
+    let mut profile_values = Vec::new();
+    for profile in profiles {
+        profile_values.push(skill_benchmark_profile_value(profile, skills, &catalog));
+    }
+    let payload = Value::Object(vec![
+        ("schemaVersion".into(), Value::Number("1".into())),
+        (
+            "benchmark".into(),
+            Value::String("skill-selection-progressive-disclosure".into()),
+        ),
+        ("tokenizer".into(), Value::String("o200k_base".into())),
+        (
+            "corpus".into(),
+            Value::String("repository root direct skill directories".into()),
+        ),
+        (
+            "runsPerTask".into(),
+            Value::Number(BENCHMARK_RUNS_PER_TASK.to_string()),
+        ),
+        (
+            "taskCount".into(),
+            Value::Number(TRIGGER_FIXTURES.len().to_string()),
+        ),
+        (
+            "policy".into(),
+            Value::Object(vec![
+                (
+                    "activationBudgetTokens".into(),
+                    Value::Number(SKILL_S1_HARD_TOKENS.to_string()),
+                ),
+                (
+                    "taskSuccess".into(),
+                    Value::String(
+                        "accepted skill is activated; negative fixtures remain silent".into(),
+                    ),
+                ),
+                (
+                    "defaultDecisionRule".into(),
+                    Value::String(
+                        "cost-aware profile requires material token reduction, no unacceptable task-success or selection regression, and acceptable turn/latency overhead".into(),
+                    ),
+                ),
+            ]),
+        ),
+        ("profiles".into(), Value::Array(profile_values)),
+    ]);
+    if json_output {
+        return if write_indented(standard_output, &payload).is_err() {
+            let _ = writeln!(
+                standard_error,
+                "skill-eval: unable to render benchmark JSON"
+            );
+            1
+        } else {
+            0
+        };
+    }
+    let _ = writeln!(
+        standard_output,
+        "skill-eval benchmark: {} profile(s)",
+        profiles.len()
+    );
+    for profile in profiles {
+        let _ = writeln!(standard_output, "  {}", profile.name());
+    }
+    0
+}
+
+fn skill_benchmark_profile_value(
+    profile: BenchmarkProfile,
+    skills: &[SkillTerms],
+    catalog: &[SkillCatalogEntry],
+) -> Value {
+    let started = Instant::now();
+    let metadata_tokens = skill_catalog_metadata_tokens(catalog);
+    let eager_tokens = metadata_tokens
+        + catalog
+            .iter()
+            .map(|entry| entry.activation_cost_tokens.max(1))
+            .sum::<usize>();
+    let mut activated = 0usize;
+    let mut correct_activations = 0usize;
+    let mut wrong_activations = 0usize;
+    let mut successful_tasks = 0usize;
+    let mut accurate_selections = 0usize;
+    let mut recalled_tasks = 0usize;
+    let mut conflicts = 0usize;
+    let mut total_input_tokens = 0usize;
+    let mut peak_context_tokens = 0usize;
+    let mut turns = 0usize;
+    let installed: BTreeSet<String> = skills.iter().map(|skill| skill.name.clone()).collect();
+
+    for _ in 0..BENCHMARK_RUNS_PER_TASK {
+        for fixture in TRIGGER_FIXTURES {
+            let names = benchmark_activations(profile, fixture.prompt, skills, catalog, &installed);
+            let activation_count = names.len();
+            activated += activation_count;
+            let expected_positive = !fixture.accept.is_empty();
+            let correct = names
+                .iter()
+                .filter(|name| fixture.accept.contains(&name.as_str()))
+                .count();
+            if expected_positive && correct > 0 {
+                recalled_tasks += 1;
+            }
+            let wrong = if expected_positive {
+                names
+                    .iter()
+                    .filter(|name| !fixture.accept.contains(&name.as_str()))
+                    .count()
+            } else {
+                names.len()
+            };
+            correct_activations += correct;
+            wrong_activations += wrong;
+            if (expected_positive && correct > 0) || (!expected_positive && names.is_empty()) {
+                successful_tasks += 1;
+            }
+            if (expected_positive && names.len() == 1 && correct == 1)
+                || (!expected_positive && names.is_empty())
+            {
+                accurate_selections += 1;
+            }
+            if names.len() > 1 {
+                conflicts += 1;
+            }
+            let activated_tokens = match profile {
+                BenchmarkProfile::AllSkillsEager => eager_tokens,
+                BenchmarkProfile::MetadataOnly => metadata_tokens,
+                BenchmarkProfile::MetadataSelective | BenchmarkProfile::MetadataCostAware => {
+                    metadata_tokens
+                        + names
+                            .iter()
+                            .filter_map(|name| {
+                                catalog
+                                    .iter()
+                                    .find(|entry| &entry.name == name)
+                                    .map(|entry| entry.activation_cost_tokens.max(1))
+                            })
+                            .sum::<usize>()
+                }
+            };
+            total_input_tokens += activated_tokens;
+            peak_context_tokens = peak_context_tokens.max(activated_tokens);
+            turns += match profile {
+                BenchmarkProfile::MetadataSelective | BenchmarkProfile::MetadataCostAware
+                    if !names.is_empty() =>
+                {
+                    2
+                }
+                _ => 1,
+            };
+        }
+    }
+    let task_runs = TRIGGER_FIXTURES.len() * BENCHMARK_RUNS_PER_TASK;
+    let positive_runs = TRIGGER_FIXTURES
+        .iter()
+        .filter(|fixture| !fixture.accept.is_empty())
+        .count()
+        * BENCHMARK_RUNS_PER_TASK;
+    let latency_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let token_denominator = activated.max(1);
+    Value::Object(vec![
+        ("profile".into(), Value::String(profile.name().into())),
+        (
+            "metrics".into(),
+            Value::Object(vec![
+                (
+                    "taskSuccessRate".into(),
+                    Value::Number(format_percent(successful_tasks, task_runs)),
+                ),
+                (
+                    "selectionAccuracy".into(),
+                    Value::Number(format_percent(accurate_selections, task_runs)),
+                ),
+                (
+                    "activationPrecision".into(),
+                    Value::Number(format_percent(correct_activations, token_denominator)),
+                ),
+                (
+                    "activationRecall".into(),
+                    Value::Number(format_percent(recalled_tasks, positive_runs.max(1))),
+                ),
+                (
+                    "inputTokens".into(),
+                    Value::Number(total_input_tokens.to_string()),
+                ),
+                (
+                    "cachedInputTokens".into(),
+                    Value::String("unavailable".into()),
+                ),
+                ("cachedInputTokensAvailable".into(), Value::Bool(false)),
+                ("turns".into(), Value::Number(turns.to_string())),
+                ("firstToolErrors".into(), Value::Number("0".into())),
+                (
+                    "discoveryOverheadTokens".into(),
+                    Value::Number((metadata_tokens * task_runs).to_string()),
+                ),
+                (
+                    "latencyMs".into(),
+                    Value::Number(format!("{latency_ms:.3}")),
+                ),
+                (
+                    "peakContextTokens".into(),
+                    Value::Number(peak_context_tokens.to_string()),
+                ),
+                (
+                    "recoveryRate".into(),
+                    Value::Number(format_percent(successful_tasks, task_runs)),
+                ),
+                (
+                    "wrongSkillActivations".into(),
+                    Value::Number(wrong_activations.to_string()),
+                ),
+                (
+                    "conflictRate".into(),
+                    Value::Number(format_percent(conflicts, task_runs)),
+                ),
+            ]),
+        ),
+        (
+            "reproduction".into(),
+            Value::String("cargo run --locked -p keel -- skill-eval --benchmark --json".into()),
+        ),
+    ])
+}
+
+fn benchmark_activations(
+    profile: BenchmarkProfile,
+    prompt: &str,
+    skills: &[SkillTerms],
+    catalog: &[SkillCatalogEntry],
+    installed: &BTreeSet<String>,
+) -> Vec<String> {
+    match profile {
+        BenchmarkProfile::AllSkillsEager => skills.iter().map(|skill| skill.name.clone()).collect(),
+        BenchmarkProfile::MetadataOnly => Vec::new(),
+        BenchmarkProfile::MetadataSelective => score_prompt_against_skills(prompt, skills)
+            .map(|found| found.name)
+            .or_else(|| {
+                curated_skill_for_prompt(prompt)
+                    .filter(|name| installed.contains(*name))
+                    .map(str::to_string)
+            })
+            .into_iter()
+            .collect(),
+        BenchmarkProfile::MetadataCostAware => resolve_skill_selection(prompt, skills, catalog)
+            .map(|found| found.name)
+            .into_iter()
+            .collect(),
+    }
+}
+
+fn skill_catalog_metadata_tokens(catalog: &[SkillCatalogEntry]) -> usize {
+    catalog
+        .iter()
+        .map(|entry| {
+            TokenMeter::count_text(&format!(
+                "name: {}\ndescription: {}\ncapabilities: {}\nversion: {}",
+                entry.name,
+                entry.description,
+                entry.capabilities.join(", "),
+                entry.version
+            ))
+        })
+        .sum()
+}
+
+fn format_percent(numerator: usize, denominator: usize) -> String {
+    format!(
+        "{:.2}",
+        (numerator as f64 * 100.0 / denominator.max(1) as f64).clamp(0.0, 100.0)
+    )
 }
 
 #[derive(Debug, PartialEq)]

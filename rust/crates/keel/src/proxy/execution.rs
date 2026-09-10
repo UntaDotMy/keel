@@ -20,6 +20,26 @@ pub enum ExecutionStatus {
     Unknown,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum HostGovernanceState {
+    Governed,
+    PartiallyGoverned,
+    Observed,
+    Unsupported,
+}
+
+impl HostGovernanceState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Governed => "GOVERNED",
+            Self::PartiallyGoverned => "PARTIALLY_GOVERNED",
+            Self::Observed => "OBSERVED",
+            Self::Unsupported => "UNSUPPORTED",
+        }
+    }
+}
+
 impl ExecutionStatus {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -94,6 +114,7 @@ impl HostCapabilities {
 
     pub fn as_json(self) -> serde_json::Value {
         serde_json::json!({
+            "state": self.governance_state().as_str(),
             "preToolIntercept": self.pre_tool_intercept,
             "postToolReduce": self.post_tool_reduce,
             "permissionGate": self.permission_gate,
@@ -102,6 +123,19 @@ impl HostCapabilities {
             "sessionIdentity": self.session_identity,
             "executionReceipt": self.execution_receipt,
         })
+    }
+
+    pub fn governance_state(self) -> HostGovernanceState {
+        if !self.session_identity && !self.execution_receipt {
+            return HostGovernanceState::Unsupported;
+        }
+        if self.pre_tool_intercept && self.post_tool_reduce && self.context_injection_control {
+            HostGovernanceState::Governed
+        } else if self.pre_tool_intercept || self.post_tool_reduce {
+            HostGovernanceState::PartiallyGoverned
+        } else {
+            HostGovernanceState::Observed
+        }
     }
 }
 
@@ -205,6 +239,22 @@ mod tests {
             assert!(!status.is_success());
             assert!(status.is_explicitly_unprotected());
         }
+    }
+
+    #[test]
+    fn host_state_never_claims_unknown_hosts_are_governed() {
+        assert_eq!(
+            HostCapabilities::for_agent("claude").governance_state(),
+            HostGovernanceState::Governed
+        );
+        assert_eq!(
+            HostCapabilities::for_agent("grok").governance_state(),
+            HostGovernanceState::PartiallyGoverned
+        );
+        assert_eq!(
+            HostCapabilities::for_agent("unregistered-host").governance_state(),
+            HostGovernanceState::Unsupported
+        );
     }
 
     #[test]

@@ -29,10 +29,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::proxy::token_meter::TokenMeter;
 use crate::runtime::{safe_path_segment, skills_directory, state_directory};
 
-const SKILL_CATALOG_CACHE_VERSION: u32 = 1;
-const SKILL_CATALOG_CACHE_FILE: &str = "skill-catalog-v1.json";
+const SKILL_CATALOG_CACHE_VERSION: u32 = 2;
+const SKILL_CATALOG_CACHE_FILE: &str = "skill-catalog-v2.json";
 const SKILL_CATALOG_DEFAULT_INTEGRITY_INTERVAL_SECS: u64 = 300;
 
 /// Score floor as a fraction of `ln(corpus_size)`. The floor must scale with
@@ -80,6 +81,21 @@ const NAME_TOKEN_BOOST: f64 = 1.5;
 /// every prompt that distinctively matches.
 const INLINE_BRIEF_MAX_BYTES: usize = 2400;
 
+/// Independent skill-surface budgets. MCP list/page budgets must not silently
+/// govern skill activation or reference loading.
+pub(crate) const SKILL_CATALOG_DEFAULT_TOKENS: usize = 1_200;
+pub(crate) const SKILL_S1_TARGET_TOKENS: usize = 2_500;
+pub(crate) const SKILL_S1_HARD_TOKENS: usize = 5_000;
+pub(crate) const SKILL_S2_DEFAULT_TOKENS: usize = 2_500;
+pub(crate) const SKILL_S2_HARD_TOKENS: usize = 5_000;
+pub(crate) const SKILL_RESOURCE_MAX_BYTES: usize = 2 * 1024 * 1024;
+const DEFAULT_SKILL_ACTIVATION_BUDGET_TOKENS: usize = SKILL_S1_HARD_TOKENS;
+const DEFAULT_SKILL_HISTORICAL_SUCCESS: f64 = 0.5;
+const COST_WEIGHT: f64 = 0.25;
+const REDUNDANCY_WEIGHT: f64 = 0.20;
+const CRITICALITY_WEIGHT: f64 = 0.20;
+const SUCCESS_WEIGHT: f64 = 0.20;
+
 /// Tokenized term model for one installed skill.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SkillTerms {
@@ -97,19 +113,86 @@ pub struct SkillMatch {
     pub score: f64,
 }
 
+/// S0 metadata used by the bounded skill selector and catalog projection.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SkillSelectionMetadata {
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    #[serde(default)]
+    pub version: String,
+    #[serde(default)]
+    pub dependencies: Vec<String>,
+    #[serde(default)]
+    pub activation_cost_tokens: usize,
+    #[serde(default)]
+    pub task_criticality: f64,
+    #[serde(default = "default_historical_success")]
+    pub historical_success: f64,
+}
+
+impl Default for SkillSelectionMetadata {
+    fn default() -> Self {
+        Self {
+            capabilities: Vec::new(),
+            version: "unversioned".to_string(),
+            dependencies: Vec::new(),
+            activation_cost_tokens: 1,
+            task_criticality: 0.5,
+            historical_success: DEFAULT_SKILL_HISTORICAL_SUCCESS,
+        }
+    }
+}
+
+fn default_historical_success() -> f64 {
+    DEFAULT_SKILL_HISTORICAL_SUCCESS
+}
+
+/// Auditable outcome of cost-aware routing. The public `SkillMatch` remains
+/// intentionally small for callers that only need a name and relevance score.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SkillSelectionDecision {
+    pub name: String,
+    pub relevance: f64,
+    pub utility: f64,
+    pub confidence: f64,
+    pub estimated_tokens: usize,
+    pub activation_budget_tokens: usize,
+    pub redundancy: f64,
+    pub task_criticality: f64,
+    pub historical_success: f64,
+    pub reason: String,
+}
+
 /// Resolve the installed skills directory for `claude_home`, load every skill's
 /// term model, and return the single distinctive match for `prompt` — or `None`
 /// when no skill clears the bar. `None` is the common, correct case for
 /// generic prompts; the caller falls back to its generic reminder.
 pub fn match_skill_for_prompt(claude_home: &Path, prompt: &str) -> Option<SkillMatch> {
+    match_skill_for_prompt_with_details(claude_home, prompt).map(|decision| SkillMatch {
+        name: decision.name,
+        score: decision.relevance,
+    })
+}
+
+/// Resolve and record a cost-aware activation decision for an installed corpus.
+/// The returned details are bounded S0 telemetry; skill bodies remain on demand.
+pub fn match_skill_for_prompt_with_details(
+    claude_home: &Path,
+    prompt: &str,
+) -> Option<SkillSelectionDecision> {
     if prompt.trim().is_empty() {
         return None;
     }
-    let skills = load_skill_terms_for_home(claude_home);
-    if skills.is_empty() {
+    let mut corpus = load_skill_corpus_for_home(claude_home);
+    if corpus.terms.is_empty() {
         return None;
     }
-    let resolved = resolve_skill_for_prompt(prompt, &skills);
+    for entry in &mut corpus.catalog {
+        entry.use_count = crate::utility::skill_usage::skill_use_count(claude_home, &entry.name);
+        entry.historical_success =
+            crate::utility::skill_usage::skill_success_rate(claude_home, &entry.name);
+    }
+    let resolved = resolve_skill_selection(prompt, &corpus.terms, &corpus.catalog);
     // Fail closed on a dangling name: never hand the agent a skill that is not
     // a readable SKILL.md on disk (catalog race, partial install, renamed dir).
     let resolved = resolved.and_then(|found| {
@@ -148,26 +231,56 @@ pub fn installed_skill_path(claude_home: &Path, skill_name: &str) -> Option<std:
 /// (`keel skill-eval`) asserts against, so the eval tests the real
 /// activation path rather than a reimplementation of it.
 pub fn resolve_skill_for_prompt(prompt: &str, skills: &[SkillTerms]) -> Option<SkillMatch> {
+    resolve_skill_selection(prompt, skills, &[]).map(|decision| SkillMatch {
+        name: decision.name,
+        score: decision.relevance,
+    })
+}
+
+/// Resolve a prompt using parsed catalog metadata when available. This is the
+/// production path; the legacy resolver above supplies conservative defaults.
+#[allow(dead_code)]
+pub fn resolve_skill_for_prompt_with_catalog(
+    prompt: &str,
+    skills: &[SkillTerms],
+    catalog: &[SkillCatalogEntry],
+) -> Option<SkillMatch> {
+    resolve_skill_selection(prompt, skills, catalog).map(|decision| SkillMatch {
+        name: decision.name,
+        score: decision.relevance,
+    })
+}
+
+/// Return the full cost-aware decision used by production routing and evals.
+pub fn resolve_skill_selection(
+    prompt: &str,
+    skills: &[SkillTerms],
+    catalog: &[SkillCatalogEntry],
+) -> Option<SkillSelectionDecision> {
     if prompt.trim().is_empty() || skills.is_empty() {
         return None;
     }
     if security_audit_override(prompt)
         .is_some_and(|name| skills.iter().any(|skill| skill.name == name))
     {
-        return Some(SkillMatch {
-            name: "security-and-compliance-auditor".to_string(),
-            score: 0.0,
-        });
+        return decision_for_named_skill(
+            "security-and-compliance-auditor",
+            skills,
+            catalog,
+            "explicit security audit operation",
+        );
     }
     if diagnosis_operation_override(prompt)
         .is_some_and(|name| skills.iter().any(|skill| skill.name == name))
     {
-        return Some(SkillMatch {
-            name: "systematic-debugging".to_string(),
-            score: 0.0,
-        });
+        return decision_for_named_skill(
+            "systematic-debugging",
+            skills,
+            catalog,
+            "explicit diagnosis operation",
+        );
     }
-    if let Some(found) = score_prompt_against_skills(prompt, skills) {
+    if let Some(found) = select_cost_aware_skill(prompt, skills, catalog) {
         return Some(found);
     }
     // The IDF matcher stayed silent (no corpus-rare token). Before giving up,
@@ -179,15 +292,249 @@ pub fn resolve_skill_for_prompt(prompt: &str, skills: &[SkillTerms]) -> Option<S
     // missing skill.
     let curated = curated_skill_for_prompt(prompt)?;
     if skills.iter().any(|skill| skill.name == curated) {
-        return Some(SkillMatch {
-            name: curated.to_string(),
-            // Sentinel score: curated matches are keyword-routed, not IDF-scored.
-            // The caller only uses the name, so the exact value is immaterial;
-            // 0.0 documents "did not clear the statistical bar."
-            score: 0.0,
-        });
+        return decision_for_named_skill(curated, skills, catalog, "curated operation trigger");
     }
     None
+}
+
+#[derive(Debug, Clone)]
+struct ScoredSkill {
+    index: usize,
+    relevance: f64,
+    distinctive: bool,
+    utility: f64,
+    redundancy: f64,
+    metadata: SkillSelectionMetadata,
+}
+
+fn select_cost_aware_skill(
+    prompt: &str,
+    skills: &[SkillTerms],
+    catalog: &[SkillCatalogEntry],
+) -> Option<SkillSelectionDecision> {
+    let prompt_tokens = tokenize(prompt);
+    if prompt_tokens.is_empty() {
+        return None;
+    }
+    let candidates: Vec<(usize, &SkillTerms)> = skills
+        .iter()
+        .enumerate()
+        .filter(|(_, skill)| !is_learned_skill(&skill.name))
+        .collect();
+    if candidates.is_empty() {
+        return None;
+    }
+    let document_frequency = document_frequency(&candidates);
+    let corpus_size = candidates.len() as f64;
+    let activation_budget = skill_activation_budget_tokens();
+    let mut scored = Vec::with_capacity(candidates.len());
+    for (index, skill) in &candidates {
+        let metadata = selection_metadata(*index, skill, catalog);
+        let estimated_tokens = metadata
+            .activation_cost_tokens
+            .clamp(1, SKILL_S1_HARD_TOKENS);
+        let critical = metadata.task_criticality.clamp(0.0, 1.0);
+        if estimated_tokens > activation_budget && critical < 0.9 {
+            continue;
+        }
+        let (relevance, distinctive) =
+            skill_relevance(&prompt_tokens, skill, &document_frequency, corpus_size);
+        if relevance <= 0.0 || !distinctive {
+            continue;
+        }
+        let redundancy = candidate_redundancy(*index, &candidates);
+        let cost_ratio = estimated_tokens as f64 / activation_budget.max(1) as f64;
+        let cost_factor = (1.0 - COST_WEIGHT * cost_ratio.min(1.0)).max(0.5);
+        let redundancy_factor = 1.0 - REDUNDANCY_WEIGHT * redundancy;
+        let criticality_factor = 1.0 + CRITICALITY_WEIGHT * (critical - 0.5);
+        let success_factor =
+            1.0 + SUCCESS_WEIGHT * (metadata.historical_success.clamp(0.0, 1.0) - 0.5);
+        let utility =
+            relevance * cost_factor * redundancy_factor * criticality_factor * success_factor;
+        scored.push(ScoredSkill {
+            index: *index,
+            relevance,
+            distinctive,
+            utility,
+            redundancy,
+            metadata,
+        });
+    }
+    scored.sort_by(|left, right| {
+        right
+            .utility
+            .partial_cmp(&left.utility)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                right
+                    .relevance
+                    .partial_cmp(&left.relevance)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| skills[left.index].name.cmp(&skills[right.index].name))
+    });
+    let best = scored.first()?;
+    let min_score = MIN_SCORE_FACTOR * corpus_size.ln();
+    if best.relevance < min_score || !best.distinctive {
+        return None;
+    }
+    let runner_up = scored.get(1).map(|entry| entry.utility).unwrap_or(0.0);
+    if runner_up > 0.0 && best.utility < runner_up * DISTINCTIVENESS_MARGIN {
+        return None;
+    }
+    let confidence = if runner_up > 0.0 {
+        ((best.utility - runner_up) / best.utility.max(f64::EPSILON)).clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+    Some(SkillSelectionDecision {
+        name: skills[best.index].name.clone(),
+        relevance: best.relevance,
+        utility: best.utility,
+        confidence,
+        estimated_tokens: best.metadata.activation_cost_tokens.max(1),
+        activation_budget_tokens: activation_budget,
+        redundancy: best.redundancy,
+        task_criticality: best.metadata.task_criticality.clamp(0.0, 1.0),
+        historical_success: best.metadata.historical_success.clamp(0.0, 1.0),
+        reason: "cost-aware relevance with budget, redundancy, criticality, and historical success"
+            .to_string(),
+    })
+}
+
+fn decision_for_named_skill(
+    name: &str,
+    skills: &[SkillTerms],
+    catalog: &[SkillCatalogEntry],
+    reason: &str,
+) -> Option<SkillSelectionDecision> {
+    let (index, skill) = skills
+        .iter()
+        .enumerate()
+        .find(|(_, skill)| skill.name == name)?;
+    let metadata = selection_metadata(index, skill, catalog);
+    let activation_budget = skill_activation_budget_tokens();
+    let candidates: Vec<(usize, &SkillTerms)> = skills
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| !is_learned_skill(&item.name))
+        .collect();
+    Some(SkillSelectionDecision {
+        name: name.to_string(),
+        relevance: 0.0,
+        utility: 0.0,
+        confidence: 1.0,
+        estimated_tokens: metadata.activation_cost_tokens.max(1),
+        activation_budget_tokens: activation_budget,
+        redundancy: candidate_redundancy(index, &candidates),
+        task_criticality: metadata.task_criticality.clamp(0.0, 1.0),
+        historical_success: metadata.historical_success.clamp(0.0, 1.0),
+        reason: reason.to_string(),
+    })
+}
+
+fn selection_metadata(
+    _index: usize,
+    skill: &SkillTerms,
+    catalog: &[SkillCatalogEntry],
+) -> SkillSelectionMetadata {
+    catalog
+        .iter()
+        .find(|entry| entry.name == skill.name)
+        .map(SkillCatalogEntry::selection_metadata)
+        .unwrap_or_else(|| SkillSelectionMetadata {
+            activation_cost_tokens: skill.all_tokens.len().max(1),
+            task_criticality: default_task_criticality(&skill.name),
+            ..SkillSelectionMetadata::default()
+        })
+}
+
+fn default_task_criticality(name: &str) -> f64 {
+    if matches!(
+        name,
+        "security-and-compliance-auditor"
+            | "preserve-existing-flow"
+            | "systematic-debugging"
+            | "reviewer"
+            | "test-driven-development"
+    ) {
+        1.0
+    } else {
+        0.5
+    }
+}
+
+fn skill_activation_budget_tokens() -> usize {
+    let budget = [
+        "KEEL_SKILL_ACTIVATION_BUDGET_TOKENS",
+        "KEEL_SKILL_ACTIVATION_TOKENS",
+    ]
+    .iter()
+    .find_map(|name| {
+        std::env::var(name)
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .filter(|value| *value > 0)
+    })
+    .unwrap_or(DEFAULT_SKILL_ACTIVATION_BUDGET_TOKENS);
+    budget.min(1_000_000)
+}
+
+fn document_frequency<'a>(candidates: &[(usize, &'a SkillTerms)]) -> HashMap<&'a str, usize> {
+    let mut frequency = HashMap::new();
+    for (_, skill) in candidates {
+        for token in &skill.all_tokens {
+            *frequency.entry(token.as_str()).or_insert(0) += 1;
+        }
+    }
+    frequency
+}
+
+fn skill_relevance(
+    prompt_tokens: &HashSet<String>,
+    skill: &SkillTerms,
+    document_frequency: &HashMap<&str, usize>,
+    corpus_size: f64,
+) -> (f64, bool) {
+    let mut relevance = 0.0;
+    let mut distinctive = false;
+    for token in prompt_tokens {
+        if !skill.all_tokens.contains(token) {
+            continue;
+        }
+        let df = document_frequency.get(token.as_str()).copied().unwrap_or(0);
+        let weight = if skill.name_tokens.contains(token) {
+            corpus_size.ln() * NAME_TOKEN_BOOST
+        } else if df == 0 {
+            0.0
+        } else {
+            (corpus_size / df as f64).ln()
+        };
+        relevance += weight;
+        if skill.name_tokens.contains(token) || (df > 0 && df <= DISTINCTIVE_DF_MAX) {
+            distinctive = true;
+        }
+    }
+    (relevance, distinctive)
+}
+
+fn candidate_redundancy(index: usize, candidates: &[(usize, &SkillTerms)]) -> f64 {
+    let Some((_, skill)) = candidates.iter().find(|(candidate, _)| *candidate == index) else {
+        return 0.0;
+    };
+    candidates
+        .iter()
+        .filter(|(candidate, _)| *candidate != index)
+        .map(|(_, other)| jaccard(&skill.all_tokens, &other.all_tokens))
+        .fold(0.0, f64::max)
+}
+
+fn jaccard(left: &HashSet<String>, right: &HashSet<String>) -> f64 {
+    let union = left.union(right).count();
+    if union == 0 {
+        return 0.0;
+    }
+    left.intersection(right).count() as f64 / union as f64
 }
 
 /// Operation intent outranks protocol vocabulary for security audits. Auth
@@ -787,6 +1134,145 @@ pub fn skill_full_body(
     Some((skill_path, text))
 }
 
+/// Bounded S1 projection returned after a skill is selected. The frontmatter
+/// is intentionally excluded: S0 already carries routing metadata, while S1
+/// should contain actionable core instructions only.
+pub(crate) fn skill_core_projection(
+    claude_home: &Path,
+    skill_name: &str,
+) -> Option<(PathBuf, String, usize, usize, bool)> {
+    let (path, full_body) = skill_full_body(claude_home, skill_name)?;
+    let body = strip_frontmatter_block(&full_body).trim_start();
+    let raw_tokens = TokenMeter::count_text(body);
+    let budget = configured_skill_tokens("KEEL_SKILL_S1_RESPONSE_TOKENS", SKILL_S1_TARGET_TOKENS)
+        .min(SKILL_S1_HARD_TOKENS);
+    let visible = truncate_text_to_tokens(body, budget);
+    let truncated = visible.len() < body.len();
+    let visible_tokens = TokenMeter::count_text(&visible);
+    Some((path, visible, raw_tokens, visible_tokens, truncated))
+}
+
+/// Load one explicitly requested S2 resource. The resolver rejects traversal,
+/// absolute/drive-relative paths, symlinks, and oversized/binary content, so a
+/// failed load becomes a bounded classified error instead of a raw fallback.
+pub(crate) fn skill_resource_projection(
+    claude_home: &Path,
+    skill_name: &str,
+    resource: &str,
+) -> Result<(PathBuf, String, usize, usize, bool), String> {
+    let Some(skill_path) = installed_skill_path(claude_home, skill_name) else {
+        return Err(format!("skill resource: unknown skill {skill_name:?}"));
+    };
+    let skill_root = skill_path
+        .parent()
+        .ok_or_else(|| "skill resource: skill root unavailable".to_string())?;
+    let path = resolve_skill_resource_path(skill_root, resource)
+        .ok_or_else(|| "skill resource: path is unsafe or missing".to_string())?;
+    let metadata = std::fs::symlink_metadata(&path)
+        .map_err(|_| "skill resource: file is missing".to_string())?;
+    if !metadata.file_type().is_file() {
+        return Err("skill resource: path is not a regular file".to_string());
+    }
+    if metadata.len() > SKILL_RESOURCE_MAX_BYTES as u64 {
+        return Err(format!(
+            "skill resource: file exceeds the {}-byte resource limit",
+            SKILL_RESOURCE_MAX_BYTES
+        ));
+    }
+    let bytes = std::fs::read(&path).map_err(|_| "skill resource: read failed".to_string())?;
+    let text = String::from_utf8(bytes)
+        .map_err(|_| "skill resource: binary content requires local Read".to_string())?;
+    let raw_tokens = TokenMeter::count_text(&text);
+    let budget = configured_skill_tokens("KEEL_SKILL_S2_RESPONSE_TOKENS", SKILL_S2_DEFAULT_TOKENS)
+        .min(SKILL_S2_HARD_TOKENS);
+    let visible = truncate_text_to_tokens(&text, budget);
+    let truncated = visible.len() < text.len();
+    let visible_tokens = TokenMeter::count_text(&visible);
+    Ok((path, visible, raw_tokens, visible_tokens, truncated))
+}
+
+fn configured_skill_tokens(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .map(|value| value.min(SKILL_S1_HARD_TOKENS.max(SKILL_S2_HARD_TOKENS)))
+        .unwrap_or(default)
+}
+
+fn truncate_text_to_tokens(text: &str, max_tokens: usize) -> String {
+    if max_tokens == 0 || text.is_empty() {
+        return String::new();
+    }
+    if TokenMeter::count_text(text) <= max_tokens {
+        return text.to_string();
+    }
+    let mut boundaries = text
+        .char_indices()
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    boundaries.push(text.len());
+    let mut low = 0usize;
+    let mut high = boundaries.len();
+    while low + 1 < high {
+        let middle = (low + high) / 2;
+        if TokenMeter::count_text(&text[..boundaries[middle]]) <= max_tokens {
+            low = middle;
+        } else {
+            high = middle;
+        }
+    }
+    let prefix = &text[..boundaries[low]];
+    // A line boundary keeps an instruction from ending in the middle of a
+    // command while the exact token check above remains authoritative.
+    if let Some(cut) = prefix.rfind('\n') {
+        let line_prefix = prefix[..cut].trim_end();
+        if !line_prefix.is_empty() && TokenMeter::count_text(line_prefix) <= max_tokens {
+            return line_prefix.to_string();
+        }
+    }
+    prefix.to_string()
+}
+
+fn resolve_skill_resource_path(skill_root: &Path, resource: &str) -> Option<PathBuf> {
+    let normalized = resource.trim().replace('\\', "/");
+    if normalized.is_empty() || normalized.contains('\0') {
+        return None;
+    }
+    let (base, relative) = if let Some(shared) = normalized.strip_prefix("../_shared/") {
+        (skill_root.parent()?.join("_shared"), shared)
+    } else {
+        if normalized.starts_with('/')
+            || normalized.contains(":/")
+            || normalized
+                .split('/')
+                .any(|part| part.is_empty() || part == "..")
+        {
+            return None;
+        }
+        (skill_root.to_path_buf(), normalized.as_str())
+    };
+    if relative.is_empty()
+        || relative
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return None;
+    }
+    let path = base.join(relative);
+    // Do not follow a symlink at any component of the requested path.
+    let mut current = base;
+    for component in relative.split('/') {
+        current = current.join(component);
+        if std::fs::symlink_metadata(&current)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            return None;
+        }
+    }
+    Some(path)
+}
+
 /// One installed skill's catalog row: its directory name (the resolve key for
 /// `skill_get`/`skill_route`) plus the two frontmatter fields the harness
 /// matcher reads. Backs the MCP `skill_list` tool.
@@ -801,6 +1287,49 @@ pub struct SkillCatalogEntry {
     /// Other installed skill names this skill declares as related (frontmatter
     /// `related_skills`). Surfaced so the matcher can suggest adjacent skills.
     pub related_skills: Vec<String>,
+    /// Compact Agent Skills capability tags for S0 routing.
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    /// Declared skill version, or `unversioned` when absent.
+    #[serde(default)]
+    pub version: String,
+    /// Explicit bounded dependencies requested by this skill.
+    #[serde(default)]
+    pub dependencies: Vec<String>,
+    /// Estimated S1 activation cost measured with the authoritative tokenizer.
+    #[serde(default)]
+    pub activation_cost_tokens: usize,
+    /// Criticality hint in the inclusive range 0..=1.
+    #[serde(default)]
+    pub task_criticality: f64,
+    /// Smoothed success rate from optional outcome counters.
+    #[serde(default = "default_historical_success")]
+    pub historical_success: f64,
+}
+
+impl SkillCatalogEntry {
+    fn selection_metadata(&self) -> SkillSelectionMetadata {
+        SkillSelectionMetadata {
+            capabilities: self.capabilities.clone(),
+            version: if self.version.trim().is_empty() {
+                "unversioned".to_string()
+            } else {
+                self.version.clone()
+            },
+            dependencies: self.dependencies.clone(),
+            activation_cost_tokens: self.activation_cost_tokens.max(1),
+            task_criticality: if self.task_criticality.is_finite() {
+                self.task_criticality.clamp(0.0, 1.0)
+            } else {
+                0.5
+            },
+            historical_success: if self.historical_success.is_finite() {
+                self.historical_success.clamp(0.0, 1.0)
+            } else {
+                DEFAULT_SKILL_HISTORICAL_SUCCESS
+            },
+        }
+    }
 }
 
 /// Enumerate every installed skill under `<claude_home>/skills`, returning the
@@ -809,15 +1338,35 @@ pub struct SkillCatalogEntry {
 /// same traversal `load_skill_terms` uses. Sorted by name for stable output.
 pub fn skill_catalog(claude_home: &Path) -> Vec<SkillCatalogEntry> {
     let skills_dir = skills_directory(claude_home);
-    let mut catalog =
-        load_skill_corpus(&skills_dir, Some(&skill_catalog_cache_path(claude_home))).catalog;
+    let mut catalog = load_skill_catalog_for_dir_with_cache(
+        &skills_dir,
+        Some(&skill_catalog_cache_path(claude_home)),
+    );
     // Read usage counters outside the parsed cache so telemetry is immediately
     // visible without invalidating or rereading every SKILL.md.
     for entry in &mut catalog {
         entry.use_count = crate::utility::skill_usage::skill_use_count(claude_home, &entry.name);
+        entry.historical_success =
+            crate::utility::skill_usage::skill_success_rate(claude_home, &entry.name);
     }
     catalog.sort_by(|left, right| left.name.cmp(&right.name));
     catalog
+}
+
+pub(crate) fn load_skill_catalog_for_dir(skills_dir: &Path) -> Vec<SkillCatalogEntry> {
+    let mut catalog = load_skill_catalog_for_dir_with_cache(
+        skills_dir,
+        Some(&skill_catalog_cache_path_for_dir(skills_dir)),
+    );
+    catalog.sort_by(|left, right| left.name.cmp(&right.name));
+    catalog
+}
+
+fn load_skill_catalog_for_dir_with_cache(
+    skills_dir: &Path,
+    cache_path: Option<&Path>,
+) -> Vec<SkillCatalogEntry> {
+    load_skill_corpus(skills_dir, cache_path).catalog
 }
 
 /// Cache-free fixed-context projections over one stable, parseable skill set.
@@ -956,9 +1505,9 @@ pub fn load_skill_terms(skills_dir: &Path) -> Vec<SkillTerms> {
     .terms
 }
 
-fn load_skill_terms_for_home(claude_home: &Path) -> Vec<SkillTerms> {
+fn load_skill_corpus_for_home(claude_home: &Path) -> LoadedSkillCorpus {
     let skills_dir = skills_directory(claude_home);
-    load_skill_corpus(&skills_dir, Some(&skill_catalog_cache_path(claude_home))).terms
+    load_skill_corpus(&skills_dir, Some(&skill_catalog_cache_path(claude_home)))
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -1198,12 +1747,28 @@ fn parse_skill_catalog_entry(file: &SkillFileMetadata) -> Option<SkillCatalogCac
     let text = fs::read_to_string(&file.path).ok()?;
     let terms = skill_terms_from_source(&file.name, &text)?;
     let frontmatter = split_frontmatter(&text)?;
+    let body = strip_frontmatter_block(&text);
     let catalog = SkillCatalogEntry {
         name: file.name.clone(),
         description: frontmatter_field(&frontmatter, "description").unwrap_or_default(),
         when_to_use: frontmatter_field(&frontmatter, "when_to_use").unwrap_or_default(),
         use_count: 0,
         related_skills: related_skills_list(&frontmatter),
+        capabilities: capability_list(&frontmatter, &file.name),
+        version: frontmatter_field(&frontmatter, "version")
+            .or_else(|| frontmatter_field(&frontmatter, "skill_version"))
+            .map(|value| strip_quotes(value.trim()).to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "unversioned".to_string()),
+        dependencies: dependency_list(&frontmatter),
+        activation_cost_tokens: TokenMeter::count_text(body).clamp(1, SKILL_S1_HARD_TOKENS),
+        task_criticality: frontmatter_number(
+            &frontmatter,
+            &["task_criticality", "task-criticality", "criticality"],
+        )
+        .unwrap_or_else(|| default_task_criticality(&file.name))
+        .clamp(0.0, 1.0),
+        historical_success: DEFAULT_SKILL_HISTORICAL_SUCCESS,
     };
     Some(SkillCatalogCacheEntry {
         name: file.name.clone(),
@@ -1296,6 +1861,7 @@ fn skill_terms_from_source(dir_name: &str, text: &str) -> Option<SkillTerms> {
 /// each skill by the IDF-weighted overlap with the prompt tokens, and returns
 /// the winner only when it clears [`MIN_SCORE`], beats the runner-up by
 /// [`DISTINCTIVENESS_MARGIN`], and shares at least one distinctive token.
+#[allow(dead_code)]
 pub fn score_prompt_against_skills(prompt: &str, skills: &[SkillTerms]) -> Option<SkillMatch> {
     let prompt_tokens = tokenize(prompt);
     if prompt_tokens.is_empty() || skills.is_empty() {
@@ -1454,7 +2020,7 @@ pub(crate) fn split_frontmatter(text: &str) -> Option<String> {
 /// Read a top-level frontmatter field. Delegates to `skill_lint` so YAML 1.2
 /// `|` / `>` block scalars match the lint parser (a `when_to_use: |` value is
 /// the body, not the `|` indicator).
-fn frontmatter_field(frontmatter: &str, key: &str) -> Option<String> {
+pub(crate) fn frontmatter_field(frontmatter: &str, key: &str) -> Option<String> {
     crate::utility::skill_lint::frontmatter_field(frontmatter, key)
 }
 
@@ -1490,6 +2056,46 @@ fn related_skills_list(frontmatter: &str) -> Vec<String> {
         }
     }
     names
+}
+
+fn capability_list(frontmatter: &str, skill_name: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    for key in ["capabilities", "capability", "tags"] {
+        if let Some(value) = frontmatter_field(frontmatter, key) {
+            values.extend(split_related_value(&value));
+            if !values.is_empty() {
+                break;
+            }
+        }
+    }
+    if values.is_empty() {
+        values = skill_name
+            .split('-')
+            .filter(|part| part.len() >= 3)
+            .map(str::to_string)
+            .collect();
+    }
+    values
+        .into_iter()
+        .map(|value| strip_quotes(value.trim()).to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+        .take(8)
+        .collect()
+}
+
+fn dependency_list(frontmatter: &str) -> Vec<String> {
+    ["dependencies", "depends_on", "depends-on"]
+        .iter()
+        .find_map(|key| frontmatter_field(frontmatter, key))
+        .map(|value| split_related_value(&value))
+        .unwrap_or_default()
+}
+
+fn frontmatter_number(frontmatter: &str, keys: &[&str]) -> Option<f64> {
+    keys.iter().find_map(|key| {
+        frontmatter_field(frontmatter, key)
+            .and_then(|value| strip_quotes(value.trim()).parse::<f64>().ok())
+    })
 }
 
 /// Split an inline `related_skills` value (`[a, b]` or `a, b`) into names.
