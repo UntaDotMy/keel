@@ -39,12 +39,42 @@ jobs:
         with:
           tool: cargo-mutants
       - name: Run mutation testing on high-risk paths
+        id: run-mutants
+        shell: bash
         run: |
-          cargo mutants --file .cargo/mutants.toml --in-place --no-shuffle
+          set +e
+          cargo mutants \
+            --file .cargo/mutants.toml \
+            --in-place \
+            --no-shuffle \
+            --output "$RUNNER_TEMP/mutants.out" \
+            2>&1 | tee "$RUNNER_TEMP/cargo-mutants.log"
+          cargo_exit_code="${PIPESTATUS[0]}"
+          set -e
+          echo "exit_code=$cargo_exit_code" >> "$GITHUB_OUTPUT"
+          echo "cargo-mutants exit code: $cargo_exit_code"
+          # Exit code 2 means missed mutants, which the comparator evaluates
+          # against the tracked threshold; any other non-zero code is a harness failure.
       - name: Verify mutation baseline regression
+        if: always()
+        env:
+          CARGO_MUTANTS_EXIT_CODE: ${{ steps.run-mutants.outputs.exit_code }}
         run: |
-          node -e "
-            const fs = require('fs');
-            const baseline = JSON.parse(fs.readFileSync('docs/quality/mutation-baseline.json', 'utf8'));
-            console.log('Baseline mutation score:', baseline.summary.mutationScore);
-          "
+          node .github/compare-mutation-baseline.mjs \
+            --baseline docs/quality/mutation-baseline.json \
+            --results "$RUNNER_TEMP/mutants.out" \
+            --report "$RUNNER_TEMP/mutation-baseline-comparison.json" \
+            --cargo-exit-code "${CARGO_MUTANTS_EXIT_CODE:-}"
+      - name: Upload mutation evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: mutation-testing-evidence
+          path: |
+            ${{ runner.temp }}/mutation-baseline-comparison.json
+            ${{ runner.temp }}/cargo-mutants.log
+            ${{ runner.temp }}/mutants.out/caught.txt
+            ${{ runner.temp }}/mutants.out/missed.txt
+            ${{ runner.temp }}/mutants.out/timeout.txt
+            ${{ runner.temp }}/mutants.out/unviable.txt
+          if-no-files-found: warn
