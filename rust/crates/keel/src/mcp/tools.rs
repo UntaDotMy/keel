@@ -1211,6 +1211,33 @@ pub(super) fn handle_tools_call_cancellable_with_context(
     cancellation: Option<Arc<AtomicBool>>,
     request_context: super::McpRequestContext,
 ) -> Result<Value, MethodError> {
+    handle_tools_call_cancellable_with_context_and_executor(
+        params,
+        cancellation,
+        request_context,
+        &TOOL_EXECUTOR,
+    )
+}
+
+#[cfg(test)]
+fn handle_tools_call_with_executor(
+    params: &Value,
+    executor: &ToolExecutor,
+) -> Result<Value, MethodError> {
+    let mut context = super::McpRequestContext::authoritative(None);
+    context.request_id = Some(format!(
+        "test-request-{}",
+        TEST_REQUEST_IDS.fetch_add(1, Ordering::Relaxed)
+    ));
+    handle_tools_call_cancellable_with_context_and_executor(params, None, context, executor)
+}
+
+fn handle_tools_call_cancellable_with_context_and_executor(
+    params: &Value,
+    cancellation: Option<Arc<AtomicBool>>,
+    request_context: super::McpRequestContext,
+    executor: &ToolExecutor,
+) -> Result<Value, MethodError> {
     let object = params.as_object().ok_or_else(|| MethodError {
         code: JSON_RPC_INVALID_PARAMS,
         message: "tools/call params must be an object".to_string(),
@@ -1238,7 +1265,7 @@ pub(super) fn handle_tools_call_cancellable_with_context(
     let name = tool_name.to_string();
     let name_for_worker = name.clone();
     let outcome = run_tool_with_executor_cancellation(
-        &TOOL_EXECUTOR,
+        executor,
         mcp_child_timeout(),
         &name,
         cancellation,
@@ -5820,6 +5847,9 @@ mod tests {
         let _env = crate::test_support::ENV_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
+        // Keep this smoke test on a private pool so unrelated long-running tests cannot
+        // occupy shared workers past its deadline; it still exercises dispatch/envelope.
+        let executor = ToolExecutor::new(1, 8);
         let home = std::env::temp_dir().join(format!("keel-mcp-iron-law-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(&home).expect("temp claude home");
@@ -5845,10 +5875,13 @@ mod tests {
                 json!({ "prompt": "review this pull request for production readiness" }),
             ),
         ] {
-            let result = handle_tools_call(&json!({
+            let result = handle_tools_call_with_executor(
+                &json!({
                 "name": name,
                 "arguments": args
-            }))
+                }),
+                &executor,
+            )
             .unwrap_or_else(|e| panic!("{name} protocol error: {e:?}"));
             assert_eq!(
                 result["isError"],
@@ -5860,10 +5893,13 @@ mod tests {
             assert!(!text.trim().is_empty(), "{name} empty content");
         }
         // recall needs a query; empty corpus may return zero hits but not isError.
-        let recall = handle_tools_call(&json!({
-            "name": "recall",
-            "arguments": { "query": "iron law system map", "limit": 5 }
-        }))
+        let recall = handle_tools_call_with_executor(
+            &json!({
+                "name": "recall",
+                "arguments": { "query": "iron law system map", "limit": 5 }
+            }),
+            &executor,
+        )
         .expect("recall envelope");
         assert_eq!(
             recall["isError"],
