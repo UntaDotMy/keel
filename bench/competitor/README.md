@@ -44,7 +44,7 @@ cargo run --locked --bin keel -- eval --json
 
 Keel provides 37 Model Context Protocol tools. To prevent large initial discovery payloads from exhausting host context windows and triggering transport timeouts, Keel implements a tiered catalog profile:
 
-- **Tiered Profile (Default)**: Advertises 17 core eager tools in `tools/list`. Consumes **1,225 tokens** (ratified budget: 1,348 tokens).
+- **Tiered Profile (Default)**: Advertises 17 core eager tools in `tools/list`. Consumes **1,240 tokens** (ratified budget: 1,364 tokens).
 - **Full Profile (`KEEL_MCP_CATALOG_PROFILE=full`)**: Advertises all 37 tools in `tools/list`. Consumes **2,929 tokens** (ratified budget: 3,222 tokens).
 - **Token Reduction**: **1,704 tokens saved per session start (58.18% reduction)**.
 - **Execution Parity**: All 37 tools remain registered, valid, and directly dispatchable through `tools/call` in both profiles.

@@ -85,12 +85,12 @@ fn ratified_budget(surface: &str) -> usize {
     // Ratified from the first hermetic Phase 1 runtime measurement as
     // ceil(actual_tokens * 1.10). Actual values remain runtime-computed.
     match surface {
-        "mcp.tools_list.catalog" => 1_348,
+        "mcp.tools_list.catalog" => 1_364,
         "hook.session_start.bootstrap" => 503,
         "hook.user_prompt_submit.simple" => 113,
         "hook.user_prompt_submit.code_change" => 169,
-        "repo.CLAUDE.md" => 1_370,
-        "repo.AGENTS.md" => 2_709,
+        "repo.CLAUDE.md" => 1_448,
+        "repo.AGENTS.md" => 2_781,
         "repo.WORKFLOW.md" => 5_373,
         "generated.claude.CLAUDE.md" => 1_061,
         "generated.codex.AGENTS.md" => 401,
@@ -98,7 +98,7 @@ fn ratified_budget(surface: &str) -> usize {
         "generated.zcode.AGENTS.md" => 143,
         "generated.antigravity.GEMINI.md" => 145,
         "skills.inline_catalog" => 11_161,
-        "skills.full_bodies" => 96_725,
+        "skills.full_bodies" => 96_837,
         "pointer.planner" => 10,
         "pointer.research" => 14,
         "pointer.ticket_checklist" => 13,

@@ -1,7 +1,7 @@
 {
   "comparison_suite": "adaptive_compaction_and_catalog_efficiency",
   "tokenizer": "o200k_base",
-  "generated_at": "2026-09-09T05:22:00Z",
+  "generated_at": "2026-09-10T14:24:55Z",
   "pipeline_eval": {
     "command": "keel eval --json",
     "total_raw_tokens": 2218,
@@ -26,10 +26,10 @@
         "total_tools": 37,
         "eager_tools": 17,
         "deferred_tools": 20,
-        "catalog_tokens": 1225,
-        "ratified_budget": 1348,
-        "token_reduction": 1704,
-        "reduction_percent": 58.18
+        "catalog_tokens": 1240,
+        "ratified_budget": 1364,
+        "token_reduction": 1689,
+        "reduction_percent": 57.66
       }
     ],
     "dispatch_parity": "All 37 tools (eager + deferred) remain directly dispatchable in tools/call regardless of active catalog profile."

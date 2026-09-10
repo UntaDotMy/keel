@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "artifact": "context-gateway-baseline",
-  "generatedAt": "2026-09-09T08:08:14Z",
+  "generatedAt": "2026-09-10T14:24:55Z",
   "status": "baseline_contract",
   "tokenizer": "o200k_base",
   "profile": "core",
@@ -10,8 +10,8 @@
     "mcp_tool_count": 37,
     "mcp_eager_tool_count": 17,
     "mcp_deferred_tool_count": 20,
-    "mcp_catalog_tokens": 1225,
-    "mcp_catalog_budget_tokens": 1348
+    "mcp_catalog_tokens": 1240,
+    "mcp_catalog_budget_tokens": 1364
   },
   "quality_gates": {
     "task_success_threshold": "ratify before changing default profile",

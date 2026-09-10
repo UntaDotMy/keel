@@ -76,7 +76,7 @@ In addition to workflow scenarios, the repository measures token efficiency at r
 - Compaction benchmark report: [`bench/competitor/eval-compaction-report.json`](../bench/competitor/eval-compaction-report.json)
 - Comparative analysis metrics: [`bench/competitor/comparative-compaction.json`](../bench/competitor/comparative-compaction.json)
 - Measured compaction savings across 7 genuine toolchain fixtures: **27.28% overall** (with `cargo test` pass achieving **79.26%** savings).
-- Tiered MCP catalog profile: reduces discovery footprint from 2,929 tokens down to **1,225 tokens** (**58.18% reduction**), while retaining direct dispatchability for all 37 tools.
+- Tiered MCP catalog profile: reduces discovery footprint from 2,929 tokens down to **1,240 tokens** (**57.66% reduction**), while retaining direct dispatchability for all 37 tools.
 
 The current gateway baseline is archived in
 [`docs/benchmarks/context-gateway-baseline.json`](./benchmarks/context-gateway-baseline.json).

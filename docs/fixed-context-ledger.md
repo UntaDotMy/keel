@@ -24,12 +24,12 @@ measurement. Actual values are recomputed on every invocation and in CI.
 
 | Surface | Actual | Budget |
 |---|---:|---:|
-| `mcp.tools_list.catalog` | 1,225 | 1,348 |
+| `mcp.tools_list.catalog` | 1,240 | 1,364 |
 | `hook.session_start.bootstrap` | 457 | 503 |
 | `hook.user_prompt_submit.simple` | 102 | 113 |
 | `hook.user_prompt_submit.code_change` | 153 | 169 |
-| `repo.CLAUDE.md` | 1,245 | 1,370 |
-| `repo.AGENTS.md` | 2,462 | 2,709 |
+| `repo.CLAUDE.md` | 1,316 | 1,448 |
+| `repo.AGENTS.md` | 2,528 | 2,781 |
 | `repo.WORKFLOW.md` | 4,884 | 5,373 |
 | `generated.claude.CLAUDE.md` | 964 | 1,061 |
 | `generated.codex.AGENTS.md` | 364 | 401 |
@@ -37,7 +37,7 @@ measurement. Actual values are recomputed on every invocation and in CI.
 | `generated.zcode.AGENTS.md` | 130 | 143 |
 | `generated.antigravity.GEMINI.md` | 131 | 145 |
 | `skills.inline_catalog` | 10,146 | 11,161 |
-| `skills.full_bodies` | 87,931 | 96,725 |
+| `skills.full_bodies` | 88,033 | 96,837 |
 | `pointer.planner` | 9 | 10 |
 | `pointer.research` | 12 | 14 |
 | `pointer.ticket_checklist` | 11 | 13 |
