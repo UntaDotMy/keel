@@ -24,17 +24,21 @@
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::args::FlagSet;
 use crate::json::{write_indented, Value};
+use crate::proxy::token_meter::TokenMeter;
 use crate::runtime::{display_path, resolve_claude_home};
+use crate::utility::hashing::{fnv1a64_hex, sha256_hex};
 
 // The recall schema is shared by every build. FTS5 remains the deterministic
 // source-of-truth index; structured workspace indexing lives in its own lane.
-const SCHEMA_VERSION: &str = "5";
+// The on-disk content hash is an integrity value, not a cache key: bump the
+// schema with its algorithm so legacy FNV indexes rebuild instead of load.
+const SCHEMA_VERSION: &str = "6";
 
 /// Top-level subdirectories under `<claude-home>` that recall indexes by default.
 /// Listed explicitly so the indexer never wanders into binaries, hooks, or release
@@ -55,7 +59,62 @@ const DEFAULT_RECALL_ROOTS: &[&str] = &["memory", "memories", "working-briefs", 
 // root stays so a leftover top-level bank is still indexed.
 
 /// Maximum number of FTS5 hits returned when `--limit` is not supplied.
-const DEFAULT_RECALL_LIMIT: usize = 20;
+pub const DEFAULT_RECALL_LIMIT: usize = 20;
+
+/// Hard input bound for every recall owner, including programmatic callers.
+/// Bytes are used instead of characters so malformed or high-density Unicode
+/// cannot expand the FTS expression without passing the admission check.
+pub const MAX_RECALL_QUERY_BYTES: usize = 4 * 1024;
+
+/// Hard result-count bound shared by the CLI, memory-family retrieval, and MCP
+/// callers. Callers may request less, but no caller can make the index return a
+/// larger result set through this module.
+pub const MAX_RECALL_LIMIT: usize = 100;
+
+/// Hard model-visible memory-result bounds. The hit budget is measured from the
+/// exact JSON representation of each hit with a small reserve for the enclosing
+/// response object and array separators.
+pub const MAX_RECALL_RESULT_BYTES: usize = 32 * 1024;
+pub const MAX_RECALL_RESULT_TOKENS: usize = 900;
+
+/// `search_recall_index` builds FTS expressions from a bounded raw query. This
+/// separate bound also protects the public low-level query owner when an
+/// embedder supplies an already-built expression directly.
+const MAX_RECALL_FTS_QUERY_BYTES: usize = 16 * 1024;
+const RECALL_RESULT_OVERHEAD_BYTES: usize = 1024;
+const RECALL_RESULT_OVERHEAD_TOKENS: usize = 64;
+/// Query text is echoed in the model-visible envelope and in the recovery
+/// reference. Keep that echo bounded even when the admitted search query is
+/// near its larger input limit; the full query is represented by its digest.
+const MAX_RECALL_QUERY_PROJECTION_CHARS: usize = 256;
+const MAX_RECALL_HOME_PROJECTION_CHARS: usize = 512;
+const MAX_RECALL_EXCERPT_CHARS: usize = 600;
+/// Direct recall/retrieve calls have their own total wall-clock budget. MCP
+/// callers also have an outer deadline, but the low-level CLI owner must not
+/// become an unbounded filesystem/SQLite scan when called programmatically.
+const DEFAULT_RECALL_DEADLINE_MS: u64 = 5_000;
+const MAX_RECALL_DEADLINE_MS: u64 = 30_000;
+
+fn recall_deadline() -> Instant {
+    let millis = std::env::var("KEEL_RECALL_DEADLINE_MS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_RECALL_DEADLINE_MS)
+        .clamp(1, MAX_RECALL_DEADLINE_MS);
+    Instant::now() + Duration::from_millis(millis)
+}
+
+fn check_recall_deadline(deadline: Option<Instant>) -> Result<(), String> {
+    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        Err("recall retrieval deadline exceeded".to_string())
+    } else {
+        Ok(())
+    }
+}
+
+fn remaining_recall_budget(deadline: Option<Instant>) -> Option<Duration> {
+    deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()))
+}
 
 /// Maximum age of a file-content verification before recall re-hashes an
 /// otherwise unchanged file. Metadata changes are still detected immediately;
@@ -133,6 +192,10 @@ fn render_recall_help(command_group: &str, standard_output: &mut dyn Write) {
         standard_output,
         "The index lives at <claude-home>/recall-index.sqlite3 and is refreshed automatically on every call."
     );
+    let _ = writeln!(
+        standard_output,
+        "Retrieval is wall-clock bounded by KEEL_RECALL_DEADLINE_MS (default 5000ms, maximum 30000ms)."
+    );
 }
 
 fn run_recall_search(
@@ -170,7 +233,13 @@ fn run_recall_search(
         return 2;
     }
     let raw_query = flag_set.positional.join(" ");
-    let trimmed_query = raw_query.trim();
+    let trimmed_query = match validate_recall_query(&raw_query) {
+        Ok(query) => query,
+        Err(error_message) => {
+            let _ = writeln!(standard_error, "{command_group} recall: {error_message}");
+            return 2;
+        }
+    };
     if trimmed_query.is_empty() {
         let _ = writeln!(
             standard_error,
@@ -193,35 +262,6 @@ fn run_recall_search(
         }
     };
 
-    let database_path = recall_database_path(&claude_home);
-    let mut connection = match open_recall_connection(&database_path) {
-        Ok(connection) => connection,
-        Err(error_message) => {
-            let _ = writeln!(
-                standard_error,
-                "{command_group} recall: open index {}: {error_message}",
-                display_path(&database_path)
-            );
-            return 1;
-        }
-    };
-    if let Err(error_message) = sync_recall_index(&mut connection, &claude_home, false) {
-        if !is_lock_contention(&error_message) {
-            let _ = writeln!(
-                standard_error,
-                "{command_group} recall: refresh index: {error_message}"
-            );
-            return 1;
-        }
-        // Another keel process holds the write lock (a reindex in progress).
-        // Searching the existing index is still correct — it only lags one
-        // sync — so warn and continue instead of killing the recall call.
-        let _ = writeln!(
-            standard_error,
-            "{command_group} recall: index busy ({error_message}); searching existing index"
-        );
-    }
-
     // Workspace affinity: boost current-project hits above cross-project.
     // `--workspace` forces a slug; otherwise cwd is slugged like system_map.
     let workspace_slug = {
@@ -234,26 +274,30 @@ fn run_recall_search(
                 .map(|cwd| crate::utility::system_map::sanitize_key(&cwd.to_string_lossy()))
         }
     };
-    let cascade =
-        match cascade_recall_query(&connection, trimmed_query, limit, workspace_slug.as_deref()) {
-            Ok(Some(cascade)) => cascade,
-            Ok(None) => {
-                let _ = writeln!(
-                    standard_error,
-                    "{command_group} recall: query has no searchable terms"
-                );
-                return 1;
-            }
-            Err(error_message) => {
-                let _ = writeln!(
-                    standard_error,
-                    "{command_group} recall: query index: {error_message}"
-                );
-                return 1;
-            }
-        };
-    let mut matches = cascade.hits;
-    let stage = cascade.stage;
+    let search = match search_recall_index(
+        &claude_home,
+        trimmed_query,
+        limit,
+        workspace_slug.as_deref(),
+    ) {
+        Ok(Some(search)) => search,
+        Ok(None) => {
+            let _ = writeln!(
+                standard_error,
+                "{command_group} recall: query has no searchable terms"
+            );
+            return 1;
+        }
+        Err(error_message) => {
+            let _ = writeln!(
+                standard_error,
+                "{command_group} recall: query index: {error_message}"
+            );
+            return 1;
+        }
+    };
+    let mut matches = search.hits;
+    let stage = search.stage;
 
     // `--local-only`: restrict to the current workspace lane (a new project
     // returns empty). Both sides are dash-collapsed (`D:\` -> `D--` vs `D-`).
@@ -267,7 +311,7 @@ fn run_recall_search(
     }
 
     if flag_set.bool_value("json") {
-        let payload = build_search_json(trimmed_query, &claude_home, &matches);
+        let payload = build_search_json(trimmed_query, &claude_home, &matches, limit, stage);
         if let Err(error) = write_indented(standard_output, &payload) {
             let _ = writeln!(standard_error, "{command_group} recall: {error}");
             return 1;
@@ -531,15 +575,16 @@ fn run_recall_status(
 }
 
 /// Deliberate divergence vs `code_search::parse_limit`: recall is error-facing
-/// (bad --limit fails loudly, no cap), while code-search silently caps its
-/// display limit at 50 for search results. Do not unify.
+/// (bad --limit fails loudly), while code-search silently caps its display limit
+/// at 50 for search results. Valid recall limits are hard-capped so a caller
+/// cannot turn a bounded retrieval into an unbounded table scan.
 fn parse_limit(raw_value: &str) -> Result<usize, String> {
     let trimmed = raw_value.trim();
     if trimmed.is_empty() {
         return Ok(DEFAULT_RECALL_LIMIT);
     }
     match trimmed.parse::<usize>() {
-        Ok(parsed) if parsed > 0 => Ok(parsed),
+        Ok(parsed) if parsed > 0 => Ok(parsed.min(MAX_RECALL_LIMIT)),
         Ok(_) => Err(format!(
             "--limit must be a positive integer, got {trimmed:?}"
         )),
@@ -547,6 +592,35 @@ fn parse_limit(raw_value: &str) -> Result<usize, String> {
             "--limit must be a positive integer, got {trimmed:?}"
         )),
     }
+}
+
+pub(crate) fn parse_recall_limit(raw_value: &str) -> Result<usize, String> {
+    parse_limit(raw_value)
+}
+
+/// Validate raw recall input before opening or synchronizing the index. The
+/// bound covers leading/trailing whitespace as well as searchable content so a
+/// large whitespace-only request cannot make the read path do unbounded work.
+pub(crate) fn validate_recall_query(raw_query: &str) -> Result<&str, String> {
+    if raw_query.len() > MAX_RECALL_QUERY_BYTES {
+        return Err(format!(
+            "query is {} bytes, over the {}-byte limit",
+            raw_query.len(),
+            MAX_RECALL_QUERY_BYTES
+        ));
+    }
+    Ok(raw_query.trim())
+}
+
+fn validate_fts_query(fts_query: &str) -> Result<(), String> {
+    if fts_query.len() > MAX_RECALL_FTS_QUERY_BYTES {
+        return Err(format!(
+            "FTS query is {} bytes, over the {}-byte limit",
+            fts_query.len(),
+            MAX_RECALL_FTS_QUERY_BYTES
+        ));
+    }
+    Ok(())
 }
 
 /// Sieve recall's known flags out of the argument vector ahead of FlagSet
@@ -775,22 +849,34 @@ pub fn search_recall_index(
     limit: usize,
     workspace_slug: Option<&str>,
 ) -> Result<Option<RecallSearchResult>, String> {
-    let trimmed_query = raw_query.trim();
+    let trimmed_query = validate_recall_query(raw_query)?;
     if trimmed_query.is_empty() {
         return Ok(None);
     }
+    let deadline = recall_deadline();
+    check_recall_deadline(Some(deadline))?;
+    let limit = limit.min(MAX_RECALL_LIMIT);
     let database_path = recall_database_path(claude_home);
-    let mut connection = open_recall_connection(&database_path)?;
+    let mut connection = open_recall_connection_until(&database_path, Some(deadline))?;
     // Best-effort sync: another keel process may hold the write lock (a reindex
     // in progress). Searching the EXISTING index is always correct — it only
     // lags by one sync — so a lock timeout must degrade to a search, never to
     // a "database is locked" error that kills the MCP tool call.
-    if let Err(sync_error) = sync_recall_index(&mut connection, claude_home, false) {
+    if let Err(sync_error) =
+        sync_recall_index_until(&mut connection, claude_home, false, Some(deadline))
+    {
         if !is_lock_contention(&sync_error) {
             return Err(sync_error);
         }
     }
-    match cascade_recall_query(&connection, trimmed_query, limit, workspace_slug)? {
+    check_recall_deadline(Some(deadline))?;
+    match cascade_recall_query_until(
+        &connection,
+        trimmed_query,
+        limit,
+        workspace_slug,
+        Some(deadline),
+    )? {
         Some(cascade) => Ok(Some(RecallSearchResult {
             fts_query: cascade.query_expression,
             stage: cascade.stage,
@@ -854,6 +940,14 @@ fn recall_now_millis() -> i64 {
 }
 
 fn open_recall_connection(database_path: &Path) -> Result<Connection, String> {
+    open_recall_connection_until(database_path, None)
+}
+
+fn open_recall_connection_until(
+    database_path: &Path,
+    deadline: Option<Instant>,
+) -> Result<Connection, String> {
+    check_recall_deadline(deadline)?;
     crate::utility::sqlite::create_parent_directory(database_path).map_err(|io_error| {
         format!(
             "create {}: {io_error}",
@@ -864,6 +958,7 @@ fn open_recall_connection(database_path: &Path) -> Result<Connection, String> {
         crate::utility::sqlite::open_connection(database_path).map_err(|database_error| {
             recall_open_error_hint(database_path, &format!("open sqlite: {database_error}"))
         })?;
+    check_recall_deadline(deadline)?;
     connection
         .pragma_update(None, "journal_mode", "WAL")
         .map_err(|database_error| {
@@ -883,11 +978,14 @@ fn open_recall_connection(database_path: &Path) -> Result<Connection, String> {
     // and downstream `context_brief` timeouts — whenever two keel processes raced
     // the index. 5s absorbs normal contention; an orphaned writer still fails in
     // bounded time. Override `KEEL_RECALL_BUSY_TIMEOUT_MS`.
-    let busy_ms = std::env::var("KEEL_RECALL_BUSY_TIMEOUT_MS")
+    let configured_busy_ms = std::env::var("KEEL_RECALL_BUSY_TIMEOUT_MS")
         .ok()
         .and_then(|raw| raw.trim().parse::<u64>().ok())
         .unwrap_or(5_000)
         .clamp(0, 30_000);
+    let busy_ms = remaining_recall_budget(deadline)
+        .map(|remaining| configured_busy_ms.min(remaining.as_millis().min(u64::MAX as u128) as u64))
+        .unwrap_or(configured_busy_ms);
     connection
         .busy_timeout(std::time::Duration::from_millis(busy_ms))
         .map_err(|database_error| {
@@ -896,8 +994,10 @@ fn open_recall_connection(database_path: &Path) -> Result<Connection, String> {
                 &format!("set busy_timeout: {database_error}"),
             )
         })?;
+    check_recall_deadline(deadline)?;
     ensure_recall_schema(&connection)
         .map_err(|schema_error| recall_open_error_hint(database_path, &schema_error))?;
+    check_recall_deadline(deadline)?;
     Ok(connection)
 }
 
@@ -1047,6 +1147,16 @@ pub fn sync_recall_index(
     claude_home: &Path,
     force_full_rescan: bool,
 ) -> Result<SyncReport, String> {
+    sync_recall_index_until(connection, claude_home, force_full_rescan, None)
+}
+
+fn sync_recall_index_until(
+    connection: &mut Connection,
+    claude_home: &Path,
+    force_full_rescan: bool,
+    deadline: Option<Instant>,
+) -> Result<SyncReport, String> {
+    check_recall_deadline(deadline)?;
     let mut report = SyncReport::default();
     let now_millis = recall_now_millis();
     let integrity_interval_millis = recall_integrity_interval_millis();
@@ -1073,6 +1183,7 @@ pub fn sync_recall_index(
             })
             .map_err(|database_error| format!("query existing: {database_error}"))?;
         for row_result in row_iterator {
+            check_recall_deadline(deadline)?;
             let (path, metadata) =
                 row_result.map_err(|database_error| format!("read row: {database_error}"))?;
             existing_rows.insert(path, metadata);
@@ -1081,10 +1192,11 @@ pub fn sync_recall_index(
 
     let mut on_disk: Vec<DocumentRecord> = Vec::new();
     for root_directory in default_search_roots(claude_home) {
+        check_recall_deadline(deadline)?;
         if !root_directory.is_dir() {
             continue;
         }
-        collect_indexable_files(&root_directory, &mut on_disk)?;
+        collect_indexable_files_until(&root_directory, &mut on_disk, deadline)?;
     }
 
     let mut on_disk_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -1100,6 +1212,7 @@ pub fn sync_recall_index(
     let mut pending: Vec<PendingDocument> = Vec::new();
     let mut verified_paths: Vec<String> = Vec::new();
     for document in &on_disk {
+        check_recall_deadline(deadline)?;
         on_disk_paths.insert(document.absolute_path.clone());
         let should_verify = match existing_rows.get(&document.absolute_path) {
             Some((stored_modified_at, stored_size, _stored_hash, last_verified_at)) => {
@@ -1125,6 +1238,7 @@ pub fn sync_recall_index(
                 continue;
             }
         };
+        check_recall_deadline(deadline)?;
         let content_hash = stable_fingerprint(&content);
         let content_is_unchanged = existing_rows.get(&document.absolute_path).is_some_and(
             |(stored_modified_at, stored_size, stored_hash, _)| {
@@ -1153,6 +1267,7 @@ pub fn sync_recall_index(
         .transaction()
         .map_err(|database_error| format!("begin transaction: {database_error}"))?;
     for document in &pending {
+        check_recall_deadline(deadline)?;
         transaction
             .execute(
                 "DELETE FROM document_meta WHERE path = ?1",
@@ -1166,6 +1281,7 @@ pub fn sync_recall_index(
             )
             .map_err(|database_error| format!("delete stale rows: {database_error}"))?;
         for (chunk_index, chunk) in document.chunks.iter().enumerate() {
+            check_recall_deadline(deadline)?;
             transaction
                 .execute(
                     "INSERT INTO documents(path, modified_at, size, content) VALUES (?1, ?2, ?3, ?4)",
@@ -1210,6 +1326,7 @@ pub fn sync_recall_index(
     }
 
     for path in &verified_paths {
+        check_recall_deadline(deadline)?;
         transaction
             .execute(
                 "UPDATE file_state SET last_verified_at = ?1 WHERE path = ?2",
@@ -1225,6 +1342,7 @@ pub fn sync_recall_index(
         }
     }
     for path in &paths_to_remove {
+        check_recall_deadline(deadline)?;
         transaction
             .execute("DELETE FROM document_meta WHERE path = ?1", params![path])
             .map_err(|database_error| format!("delete document metadata: {database_error}"))?;
@@ -1305,7 +1423,7 @@ fn split_memory_chunks(content: &str) -> Vec<MemoryChunk> {
 }
 
 fn stable_fingerprint(content: &str) -> String {
-    crate::utility::hashing::fnv1a64_hex(content)
+    format!("sha256:{}", sha256_hex(content.as_bytes()))
 }
 
 fn memory_source_kind(path: &str) -> String {
@@ -1347,12 +1465,18 @@ fn memory_branch() -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
-fn collect_indexable_files(directory: &Path, out: &mut Vec<DocumentRecord>) -> Result<(), String> {
+fn collect_indexable_files_until(
+    directory: &Path,
+    out: &mut Vec<DocumentRecord>,
+    deadline: Option<Instant>,
+) -> Result<(), String> {
+    check_recall_deadline(deadline)?;
     let read_dir = match fs::read_dir(directory) {
         Ok(read_dir) => read_dir,
         Err(_) => return Ok(()),
     };
     for entry_result in read_dir {
+        check_recall_deadline(deadline)?;
         let entry = match entry_result {
             Ok(entry) => entry,
             Err(_) => continue,
@@ -1366,7 +1490,7 @@ fn collect_indexable_files(directory: &Path, out: &mut Vec<DocumentRecord>) -> R
             continue;
         }
         if file_type.is_dir() {
-            collect_indexable_files(&entry_path, out)?;
+            collect_indexable_files_until(&entry_path, out, deadline)?;
             continue;
         }
         if !file_type.is_file() {
@@ -1434,12 +1558,94 @@ pub struct RecallHit {
 const RERANK_CANDIDATE_MULTIPLIER: usize = 4;
 const RERANK_CANDIDATE_CAP: usize = 200;
 
+/// Render the fields that a retrieval caller can expose for one hit. Keeping
+/// this measurement on the same deterministic JSON writer as the CLI avoids a
+/// character-count estimate that could disagree with the bytes actually sent
+/// to a host.
+fn serialized_recall_hit(hit: &RecallHit) -> Vec<u8> {
+    let value = Value::Object(vec![
+        (
+            "absolutePath".into(),
+            Value::String(hit.absolute_path.clone()),
+        ),
+        ("score".into(), Value::Number(format!("{:.4}", hit.score))),
+        ("line".into(), Value::Number(hit.line.to_string())),
+        (
+            "snippet".into(),
+            Value::String(bounded_recall_excerpt(&hit.snippet)),
+        ),
+    ]);
+    let mut rendered = Vec::new();
+    // The in-memory Value is composed only of finite score text and UTF-8
+    // strings, so this writer cannot fail for a Vec<u8> sink.
+    write_indented(&mut rendered, &value).expect("render recall hit into memory");
+    rendered
+}
+
+/// Enforce the count, byte, and exact-token budgets at the canonical low-level
+/// retrieval owner. The reserve leaves room for the enclosing response object,
+/// array delimiters, separators, and a compact truncation/provenance envelope
+/// added by higher-level callers. Oversized individual hits are skipped rather
+/// than returned unbounded; later ranked hits may still fit the budget.
+fn bound_recall_hits(hits: Vec<RecallHit>, requested_limit: usize) -> Vec<RecallHit> {
+    let count_limit = requested_limit.min(MAX_RECALL_LIMIT);
+    let byte_budget = MAX_RECALL_RESULT_BYTES.saturating_sub(RECALL_RESULT_OVERHEAD_BYTES);
+    let token_budget = MAX_RECALL_RESULT_TOKENS.saturating_sub(RECALL_RESULT_OVERHEAD_TOKENS);
+    let mut selected = Vec::new();
+    let mut used_bytes = 0usize;
+    let mut used_tokens = 0usize;
+
+    for hit in hits {
+        if selected.len() >= count_limit {
+            break;
+        }
+        let rendered = serialized_recall_hit(&hit);
+        let hit_bytes = rendered.len();
+        let hit_tokens = TokenMeter::count_bytes(&rendered);
+        if hit_bytes > byte_budget.saturating_sub(used_bytes)
+            || hit_tokens > token_budget.saturating_sub(used_tokens)
+        {
+            continue;
+        }
+        used_bytes = used_bytes.saturating_add(hit_bytes);
+        used_tokens = used_tokens.saturating_add(hit_tokens);
+        selected.push(hit);
+    }
+    selected
+}
+
+fn bounded_recall_excerpt(text: &str) -> String {
+    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.chars().count() <= MAX_RECALL_EXCERPT_CHARS {
+        return compact;
+    }
+    let mut excerpt = compact
+        .chars()
+        .take(MAX_RECALL_EXCERPT_CHARS)
+        .collect::<String>();
+    excerpt.push_str("… [truncated]");
+    excerpt
+}
+
 pub fn query_recall_index(
     connection: &Connection,
     fts_query: &str,
     limit: usize,
     workspace_slug: Option<&str>,
 ) -> Result<Vec<RecallHit>, String> {
+    query_recall_index_until(connection, fts_query, limit, workspace_slug, None)
+}
+
+fn query_recall_index_until(
+    connection: &Connection,
+    fts_query: &str,
+    limit: usize,
+    workspace_slug: Option<&str>,
+    deadline: Option<Instant>,
+) -> Result<Vec<RecallHit>, String> {
+    check_recall_deadline(deadline)?;
+    validate_fts_query(fts_query)?;
+    let limit = limit.min(MAX_RECALL_LIMIT);
     let raw_query_terms = fts_terms(fts_query);
     // Over-fetch BM25 candidates so the relevance re-rank has room to promote a
     // high-coverage match that BM25 alone ranked below a term-frequency match.
@@ -1487,6 +1693,7 @@ pub fn query_recall_index(
         .map_err(|database_error| format!("query: {database_error}"))?;
     let mut candidates: Vec<RerankCandidate> = Vec::new();
     for (rank, row_result) in query_iterator.enumerate() {
+        check_recall_deadline(deadline)?;
         let (absolute_path, snippet_text, content, start_line) =
             row_result.map_err(|database_error| format!("read result row: {database_error}"))?;
         let local_line = locate_first_match_line(&content, &snippet_text);
@@ -1503,11 +1710,10 @@ pub fn query_recall_index(
             bm25_rank: rank,
         });
     }
-    Ok(rerank_by_relevance(
-        candidates,
-        &raw_query_terms,
+    check_recall_deadline(deadline)?;
+    Ok(bound_recall_hits(
+        rerank_by_relevance(candidates, &raw_query_terms, limit, workspace_slug),
         limit,
-        workspace_slug,
     ))
 }
 
@@ -1590,6 +1796,7 @@ fn rerank_by_relevance(
     limit: usize,
     workspace_slug: Option<&str>,
 ) -> Vec<RecallHit> {
+    let limit = limit.min(MAX_RECALL_LIMIT);
     if query_terms.is_empty() {
         candidates.truncate(limit);
         return candidates.into_iter().map(|c| c.hit).collect();
@@ -1690,18 +1897,36 @@ pub struct CascadeResult {
 /// Run the deterministic recall cascade: exact (AND prefix) → relaxed (OR
 /// prefix) → fuzzy (trigram similarity). Each stage only runs when the
 /// previous stage returned no usable results.
+#[cfg(test)]
 fn cascade_recall_query(
     connection: &Connection,
     raw_query: &str,
     limit: usize,
     workspace_slug: Option<&str>,
 ) -> Result<Option<CascadeResult>, String> {
+    cascade_recall_query_until(connection, raw_query, limit, workspace_slug, None)
+}
+
+fn cascade_recall_query_until(
+    connection: &Connection,
+    raw_query: &str,
+    limit: usize,
+    workspace_slug: Option<&str>,
+    deadline: Option<Instant>,
+) -> Result<Option<CascadeResult>, String> {
+    check_recall_deadline(deadline)?;
+    let limit = limit.min(MAX_RECALL_LIMIT);
     let exact = match build_fts_query(raw_query) {
         Some(query) => query,
         None => return Ok(None),
     };
 
-    let exact_hits = query_recall_index(connection, &exact, limit, workspace_slug)?;
+    let exact_hits = match deadline {
+        Some(deadline) => {
+            query_recall_index_until(connection, &exact, limit, workspace_slug, Some(deadline))?
+        }
+        None => query_recall_index(connection, &exact, limit, workspace_slug)?,
+    };
     if !exact_hits.is_empty() {
         return Ok(Some(CascadeResult {
             query_expression: exact,
@@ -1714,7 +1939,16 @@ fn cascade_recall_query(
     // token's OR and AND expressions are identical, so build_relaxed returns
     // None and we skip straight to fuzzy).
     if let Some(relaxed) = build_relaxed_fts_query(raw_query) {
-        let relaxed_hits = query_recall_index(connection, &relaxed, limit, workspace_slug)?;
+        let relaxed_hits = match deadline {
+            Some(deadline) => query_recall_index_until(
+                connection,
+                &relaxed,
+                limit,
+                workspace_slug,
+                Some(deadline),
+            )?,
+            None => query_recall_index(connection, &relaxed, limit, workspace_slug)?,
+        };
         if !relaxed_hits.is_empty() {
             return Ok(Some(CascadeResult {
                 query_expression: relaxed,
@@ -1727,7 +1961,10 @@ fn cascade_recall_query(
     // Stage 3 — fuzzy trigram scan: recovers single-word typos that prefix
     // matching cannot reach (e.g. "webhok" -> "webhook").
     let tokens = clean_query_tokens(raw_query);
-    let fuzzy_hits = query_recall_index_fuzzy(connection, &tokens, limit)?;
+    let fuzzy_hits = bound_recall_hits(
+        query_recall_index_fuzzy_until(connection, &tokens, limit, deadline)?,
+        limit,
+    );
     if !fuzzy_hits.is_empty() {
         return Ok(Some(CascadeResult {
             query_expression: format!("fuzzy({})", tokens.join(" ")),
@@ -1797,11 +2034,14 @@ fn split_words(text: &str) -> impl Iterator<Item = &str> {
 /// returned ranked by descending similarity, with a snippet of the line that
 /// produced the match. This recovers single-word typos ("webhok" -> "webhook")
 /// that prefix matching cannot reach.
-fn query_recall_index_fuzzy(
+fn query_recall_index_fuzzy_until(
     connection: &Connection,
     query_tokens: &[String],
     limit: usize,
+    deadline: Option<Instant>,
 ) -> Result<Vec<RecallHit>, String> {
+    check_recall_deadline(deadline)?;
+    let limit = limit.min(MAX_RECALL_LIMIT);
     if query_tokens.is_empty() {
         return Ok(Vec::new());
     }
@@ -1818,13 +2058,16 @@ fn query_recall_index_fuzzy(
 
     let mut scored: Vec<(f64, RecallHit)> = Vec::new();
     for row_result in row_iterator {
+        check_recall_deadline(deadline)?;
         let (absolute_path, content) =
             row_result.map_err(|database_error| format!("read fuzzy row: {database_error}"))?;
         let mut best_similarity = 0.0f64;
         let mut best_line = 0usize;
         let mut best_word = String::new();
         for (line_index, line) in content.lines().enumerate() {
+            check_recall_deadline(deadline)?;
             for word in split_words(line) {
+                check_recall_deadline(deadline)?;
                 for token in query_tokens {
                     let similarity = trigram_similarity(token, word);
                     if similarity > best_similarity {
@@ -1862,6 +2105,7 @@ fn query_recall_index_fuzzy(
             .partial_cmp(&left.0)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
+    check_recall_deadline(deadline)?;
     scored.truncate(limit);
     Ok(scored.into_iter().map(|(_, hit)| hit).collect())
 }
@@ -1943,34 +2187,197 @@ fn count_documents(connection: &Connection) -> Result<u64, String> {
     Ok(count.max(0) as u64)
 }
 
-fn build_search_json(query: &str, claude_home: &Path, matches: &[RecallHit]) -> Value {
-    let entries: Vec<Value> = matches
+fn build_search_json(
+    query: &str,
+    claude_home: &Path,
+    matches: &[RecallHit],
+    limit: usize,
+    stage: &str,
+) -> Value {
+    let (projected_query, query_truncated) =
+        bounded_projection_text(query, MAX_RECALL_QUERY_PROJECTION_CHARS);
+    let query_digest = sha256_hex(query.as_bytes());
+    let projected_home =
+        bounded_projection_text(&display_path(claude_home), MAX_RECALL_HOME_PROJECTION_CHARS).0;
+    let projection = RecallSearchProjection {
+        query: &projected_query,
+        query_truncated,
+        query_digest: &query_digest,
+        projected_home: &projected_home,
+        claude_home,
+        stage,
+        limit,
+    };
+    let mut selected: Vec<RecallHit> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut dropped = false;
+    for hit in matches {
+        let relative = relativize(claude_home, &PathBuf::from(&hit.absolute_path));
+        let excerpt = bounded_recall_excerpt(&hit.snippet);
+        let dedupe_material = format!(
+            "{}\0{}",
+            relative.to_ascii_lowercase(),
+            excerpt.to_ascii_lowercase()
+        );
+        if !seen.insert(fnv1a64_hex(&dedupe_material)) {
+            dropped = true;
+            continue;
+        }
+        let mut candidate = selected.clone();
+        candidate.push(hit.clone());
+        let candidate_payload = recall_search_payload(
+            &projection,
+            &candidate,
+            dropped || candidate.len() < matches.len(),
+        );
+        if recall_projection_within_budget(&candidate_payload) {
+            selected.push(hit.clone());
+        } else {
+            dropped = true;
+        }
+    }
+    let payload = recall_search_payload(
+        &projection,
+        &selected,
+        dropped || selected.len() < matches.len(),
+    );
+    if recall_projection_within_budget(&payload) {
+        return payload;
+    }
+
+    // Keep a second, stricter fallback so a long home path or unusual Unicode
+    // cannot turn a budget failure into an unbounded/raw response.
+    let minimal_query = bounded_projection_text(&projected_query, 64).0;
+    let minimal_home = bounded_projection_text(&projected_home, 128).0;
+    let fallback_projection = RecallSearchProjection {
+        query: &minimal_query,
+        query_truncated: true,
+        query_digest: &query_digest,
+        projected_home: &minimal_home,
+        claude_home,
+        stage,
+        limit,
+    };
+    recall_search_payload(&fallback_projection, &[], true)
+}
+
+fn recall_search_payload(
+    projection: &RecallSearchProjection<'_>,
+    matches: &[RecallHit],
+    truncated: bool,
+) -> Value {
+    let entries = matches
         .iter()
         .map(|hit| {
-            Value::Object(vec![
-                (
-                    "path".into(),
-                    Value::String(relativize(claude_home, &PathBuf::from(&hit.absolute_path))),
-                ),
-                (
-                    "absolutePath".into(),
-                    Value::String(hit.absolute_path.clone()),
-                ),
-                ("score".into(), Value::Number(format!("{:.4}", hit.score))),
-                ("line".into(), Value::Number(hit.line.to_string())),
-                ("snippet".into(), Value::String(hit.snippet.clone())),
-            ])
+            recall_hit_value(
+                projection.query,
+                projection.limit,
+                hit,
+                projection.claude_home,
+            )
         })
         .collect();
     Value::Object(vec![
-        ("query".into(), Value::String(query.to_string())),
+        ("query".into(), Value::String(projection.query.to_string())),
+        (
+            "queryDigest".into(),
+            Value::String(format!("sha256:{}", projection.query_digest)),
+        ),
+        (
+            "queryTruncated".into(),
+            Value::Bool(projection.query_truncated),
+        ),
+        ("stage".into(), Value::String(projection.stage.to_string())),
         (
             "claudeHome".into(),
-            Value::String(display_path(claude_home)),
+            Value::String(projection.projected_home.to_string()),
+        ),
+        (
+            "limit".into(),
+            Value::Number(projection.limit.min(MAX_RECALL_LIMIT).to_string()),
         ),
         ("count".into(), Value::Number(matches.len().to_string())),
+        ("truncated".into(), Value::Bool(truncated)),
         ("matches".into(), Value::Array(entries)),
     ])
+}
+
+struct RecallSearchProjection<'a> {
+    query: &'a str,
+    query_truncated: bool,
+    query_digest: &'a str,
+    projected_home: &'a str,
+    claude_home: &'a Path,
+    stage: &'a str,
+    limit: usize,
+}
+
+fn recall_hit_value(query: &str, limit: usize, hit: &RecallHit, claude_home: &Path) -> Value {
+    let memory_id = sha256_hex(
+        format!(
+            "recall-memory\0{}\0{}\0{}",
+            hit.absolute_path, hit.line, hit.snippet
+        )
+        .as_bytes(),
+    );
+    let provenance_id = sha256_hex(
+        format!(
+            "recall-provenance\0{}\0{}\0{}",
+            query, hit.absolute_path, hit.line
+        )
+        .as_bytes(),
+    );
+    let relative = relativize(claude_home, &PathBuf::from(&hit.absolute_path));
+    let retrieval_query = query.to_string();
+    let retrieval_limit = limit.clamp(1, MAX_RECALL_LIMIT);
+    let retrieval_ref = format!(
+        "keel memory recall {:?} --limit {retrieval_limit}",
+        retrieval_query
+    );
+    Value::Object(vec![
+        ("path".into(), Value::String(relative)),
+        (
+            "absolutePath".into(),
+            Value::String(hit.absolute_path.clone()),
+        ),
+        ("score".into(), Value::Number(format!("{:.4}", hit.score))),
+        ("line".into(), Value::Number(hit.line.to_string())),
+        (
+            "snippet".into(),
+            Value::String(bounded_recall_excerpt(&hit.snippet)),
+        ),
+        (
+            "memoryId".into(),
+            Value::String(format!("memory-{memory_id}")),
+        ),
+        (
+            "provenanceId".into(),
+            Value::String(format!("prov-sha256:{provenance_id}")),
+        ),
+        ("retrievalRef".into(), Value::String(retrieval_ref)),
+    ])
+}
+
+fn bounded_projection_text(text: &str, max_chars: usize) -> (String, bool) {
+    let mut characters = text.chars();
+    let mut value = characters.by_ref().take(max_chars).collect::<String>();
+    let truncated = characters.next().is_some();
+    if truncated {
+        value.push('…');
+    }
+    (value, truncated)
+}
+
+fn serialized_value(value: &Value) -> Vec<u8> {
+    let mut rendered = Vec::new();
+    write_indented(&mut rendered, value).expect("render recall projection into memory");
+    rendered
+}
+
+fn recall_projection_within_budget(value: &Value) -> bool {
+    let rendered = serialized_value(value);
+    rendered.len() <= MAX_RECALL_RESULT_BYTES
+        && TokenMeter::count_bytes(&rendered) <= MAX_RECALL_RESULT_TOKENS
 }
 
 fn relativize(claude_home: &Path, absolute_path: &Path) -> String {
@@ -2048,6 +2455,149 @@ mod tests {
     #[test]
     fn build_fts_query_returns_none_for_empty_input() {
         assert!(build_fts_query("   ?!  ").is_none());
+    }
+
+    #[test]
+    fn recall_rejects_queries_over_the_hard_byte_bound() {
+        let oversized = "x".repeat(MAX_RECALL_QUERY_BYTES + 1);
+        let error = validate_recall_query(&oversized).expect_err("oversized query must fail");
+        assert!(error.contains("over the"), "error: {error}");
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let exit = run_recall_command("memory", &[oversized], &mut stdout, &mut stderr);
+        assert_eq!(exit, 2, "oversized CLI query must be rejected");
+        assert!(
+            String::from_utf8_lossy(&stderr).contains("byte"),
+            "stderr: {}",
+            String::from_utf8_lossy(&stderr)
+        );
+    }
+
+    #[test]
+    fn recall_limit_is_hard_capped_but_malformed_values_still_fail() {
+        assert_eq!(
+            parse_limit(&(MAX_RECALL_LIMIT + 1).to_string()),
+            Ok(MAX_RECALL_LIMIT)
+        );
+        assert!(parse_limit("0").is_err());
+        assert!(parse_limit("not-a-number").is_err());
+    }
+
+    #[test]
+    fn recall_deadline_fails_closed_when_expired() {
+        let expired = Instant::now() - Duration::from_millis(1);
+        let error = check_recall_deadline(Some(expired)).expect_err("expired deadline");
+        assert!(error.contains("deadline"), "error: {error}");
+    }
+
+    #[test]
+    fn recall_hits_respect_count_byte_and_token_bounds() {
+        let hits = (0..MAX_RECALL_LIMIT + 10)
+            .map(|index| RecallHit {
+                absolute_path: format!("C:/memory/note-{index}.md"),
+                score: 0.5,
+                line: index + 1,
+                snippet: format!("[match] memory result {index}"),
+            })
+            .collect();
+        let bounded = bound_recall_hits(hits, usize::MAX);
+        assert!(bounded.len() <= MAX_RECALL_LIMIT);
+
+        let total_bytes: usize = bounded
+            .iter()
+            .map(|hit| serialized_recall_hit(hit).len())
+            .sum();
+        let total_tokens: usize = bounded
+            .iter()
+            .map(|hit| TokenMeter::count_bytes(&serialized_recall_hit(hit)))
+            .sum();
+        assert!(
+            total_bytes <= MAX_RECALL_RESULT_BYTES.saturating_sub(RECALL_RESULT_OVERHEAD_BYTES),
+            "result bytes exceeded bound: {total_bytes}"
+        );
+        assert!(
+            total_tokens <= MAX_RECALL_RESULT_TOKENS.saturating_sub(RECALL_RESULT_OVERHEAD_TOKENS),
+            "result tokens exceeded bound: {total_tokens}"
+        );
+    }
+
+    #[test]
+    fn recall_json_projection_recounts_complete_envelope_and_keeps_recovery() {
+        let query = "query ".repeat(MAX_RECALL_QUERY_BYTES / 6);
+        let hits = (0..MAX_RECALL_LIMIT)
+            .map(|index| RecallHit {
+                absolute_path: format!("C:/memory/note-{index}.md"),
+                score: 0.5,
+                line: index + 1,
+                snippet: format!("[match] {}", "memory result ".repeat(80)),
+            })
+            .collect::<Vec<_>>();
+        let payload = build_search_json(
+            &query,
+            Path::new("C:/memory"),
+            &hits,
+            MAX_RECALL_LIMIT,
+            "exact",
+        );
+        let rendered = serialized_value(&payload);
+        assert!(
+            rendered.len() <= MAX_RECALL_RESULT_BYTES,
+            "complete recall envelope exceeded byte bound: {}",
+            rendered.len()
+        );
+        assert!(
+            TokenMeter::count_bytes(&rendered) <= MAX_RECALL_RESULT_TOKENS,
+            "complete recall envelope exceeded token bound"
+        );
+        let text = String::from_utf8(rendered).expect("json utf8");
+        assert!(text.contains("provenanceId"), "provenance missing: {text}");
+        assert!(text.contains("retrievalRef"), "recovery missing: {text}");
+        assert!(
+            text.contains("queryTruncated"),
+            "query bound missing: {text}"
+        );
+        assert!(serde_json::from_str::<serde_json::Value>(&text).is_ok());
+    }
+
+    #[test]
+    fn fuzzy_stage_respects_the_same_result_bounds() {
+        run_with_home("keel-recall-fuzzy-bounds", |claude_home| {
+            for index in 0..MAX_RECALL_LIMIT + 10 {
+                write_memory(
+                    claude_home,
+                    &format!("memories/fuzzy-{index}.md"),
+                    "# Webhook incident\nThe webhook signature is verified.\n",
+                );
+            }
+            let database_path = recall_database_path(claude_home);
+            let mut connection = open_recall_connection(&database_path).expect("open recall index");
+            sync_recall_index(&mut connection, claude_home, true).expect("sync recall index");
+            let result = cascade_recall_query(&connection, "webhok", usize::MAX, None)
+                .expect("fuzzy cascade")
+                .expect("fuzzy result");
+            assert_eq!(result.stage, "fuzzy");
+            assert!(result.hits.len() <= MAX_RECALL_LIMIT);
+            let total_bytes: usize = result
+                .hits
+                .iter()
+                .map(|hit| serialized_recall_hit(hit).len())
+                .sum();
+            let total_tokens: usize = result
+                .hits
+                .iter()
+                .map(|hit| TokenMeter::count_bytes(&serialized_recall_hit(hit)))
+                .sum();
+            assert!(
+                total_bytes <= MAX_RECALL_RESULT_BYTES.saturating_sub(RECALL_RESULT_OVERHEAD_BYTES),
+                "fuzzy result bytes exceeded bound: {total_bytes}"
+            );
+            assert!(
+                total_tokens
+                    <= MAX_RECALL_RESULT_TOKENS.saturating_sub(RECALL_RESULT_OVERHEAD_TOKENS),
+                "fuzzy result tokens exceeded bound: {total_tokens}"
+            );
+        });
     }
 
     #[test]

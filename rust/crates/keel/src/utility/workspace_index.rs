@@ -17,7 +17,7 @@ use serde::Serialize;
 use crate::runtime::{display_path, resolve_claude_home};
 
 const SCHEMA_VERSION: &str = "1";
-const MAX_FILES: usize = 20_000;
+pub(crate) const MAX_FILES: usize = 20_000;
 const MAX_FILE_BYTES: u64 = 2_000_000;
 const MAX_CHUNK_BYTES: usize = 32_000;
 const MAX_SEARCH_RESULTS: usize = 50;
@@ -47,7 +47,11 @@ pub struct RefreshReport {
     pub files_skipped_limit: u64,
     pub files_skipped_too_large: u64,
     pub files_skipped_unreadable: u64,
+    /// True when the deterministic file ceiling excluded discovered files.
+    pub truncated: bool,
     pub coverage_complete: bool,
+    /// True when a concurrent writer prevented this refresh from publishing.
+    pub lock_degraded: bool,
     pub files_added: u64,
     pub files_updated: u64,
     pub files_removed: u64,
@@ -73,6 +77,7 @@ pub struct IndexStatus {
     pub files_skipped_limit: u64,
     pub files_skipped_too_large: u64,
     pub files_skipped_unreadable: u64,
+    pub truncated: bool,
     pub coverage_complete: bool,
 }
 
@@ -114,6 +119,7 @@ struct SourcePathCollection {
     discovered: u64,
     skipped_limit: u64,
     skipped_unreadable: u64,
+    unreadable_prefixes: BTreeSet<String>,
 }
 
 #[derive(Debug, Default)]
@@ -121,6 +127,13 @@ struct SnapshotCollection {
     snapshots: Vec<SourceSnapshot>,
     skipped_too_large: u64,
     skipped_unreadable: u64,
+    unreadable_paths: BTreeSet<String>,
+}
+
+#[derive(Debug, Default)]
+struct SourceCollection {
+    sources: Vec<SourceFile>,
+    unreadable_paths: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -162,9 +175,26 @@ pub fn refresh(
     let path = database_path(&root, claude_home_flag)?;
     crate::utility::sqlite::create_parent_directory(&path)
         .map_err(|error| format!("create index directory: {error}"))?;
-    let mut connection = open_connection(&path)?;
-    ensure_schema(&connection)?;
-    let existing = existing_file_metadata(&connection)?;
+    let mut connection = match open_connection(&path) {
+        Ok(connection) => connection,
+        Err(error) if is_lock_error_text(&error) => {
+            return Ok(degraded_refresh_report(&root));
+        }
+        Err(error) => return Err(error),
+    };
+    if let Err(error) = ensure_schema(&connection) {
+        if is_lock_error_text(&error) {
+            return Ok(degraded_refresh_report(&root));
+        }
+        return Err(error);
+    }
+    let existing = match existing_file_metadata(&connection) {
+        Ok(existing) => existing,
+        Err(error) if is_lock_error_text(&error) => {
+            return Ok(degraded_refresh_report(&root));
+        }
+        Err(error) => return Err(error),
+    };
     let previous_commit = meta(&connection, "indexed_commit");
     let indexed_commit = git_head(&root);
     let commit_changed = previous_commit.as_deref() != Some(indexed_commit.as_str());
@@ -173,18 +203,22 @@ pub fn refresh(
         discovered,
         skipped_limit,
         skipped_unreadable: path_unreadable,
+        unreadable_prefixes,
     } = collect_source_paths(&root)?;
     let SnapshotCollection {
         snapshots,
         skipped_too_large,
         skipped_unreadable,
+        unreadable_paths: snapshot_unreadable_paths,
     } = collect_source_snapshots(&root, &source_paths);
+    let mut unreadable_paths = snapshot_unreadable_paths;
     let mut report = RefreshReport {
         files_indexed: snapshots.len() as u64,
         files_discovered: discovered,
         files_skipped_limit: skipped_limit,
         files_skipped_too_large: skipped_too_large,
         files_skipped_unreadable: path_unreadable + skipped_unreadable,
+        truncated: skipped_limit > 0,
         coverage_complete: skipped_limit == 0
             && skipped_too_large == 0
             && path_unreadable == 0
@@ -220,27 +254,50 @@ pub fn refresh(
         })
         .map(|snapshot| root.join(&snapshot.path))
         .collect();
-    let (dirty_sources, dirty_unreadable) = collect_sources_from_paths(&root, dirty_paths)?;
-    report.files_skipped_unreadable += dirty_unreadable;
-    report.coverage_complete = report.coverage_complete && dirty_unreadable == 0;
+    let dirty_collection = collect_sources_from_paths(&root, dirty_paths)?;
+    let dirty_sources = dirty_collection.sources;
+    unreadable_paths.extend(dirty_collection.unreadable_paths);
+    report.files_skipped_unreadable = path_unreadable + unreadable_paths.len() as u64;
+    report.coverage_complete =
+        skipped_limit == 0 && skipped_too_large == 0 && report.files_skipped_unreadable == 0;
     let content_changed = dirty_sources.iter().any(|source| {
         existing
             .get(&source.path)
             .map(|stored| stored.hash != source.hash || stored.size != source.size)
             .unwrap_or(true)
     });
-    let active_paths: BTreeSet<String> = snapshots
+    let mut active_paths: BTreeSet<String> = snapshots
         .iter()
         .map(|snapshot| snapshot.path.clone())
         .collect();
+    active_paths.extend(unreadable_paths.iter().cloned());
+    for existing_path in existing.keys() {
+        if unreadable_prefixes
+            .iter()
+            .any(|prefix| path_is_under_prefix(existing_path, prefix))
+        {
+            active_paths.insert(existing_path.clone());
+        }
+    }
     let has_stale_paths = existing.keys().any(|path| !active_paths.contains(path));
 
     // With no content change or deletion, update metadata in place and preserve
     // symbols/chunks/edges as the incremental fast path.
-    if !force && !commit_changed && !content_changed && !has_stale_paths {
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| format!("begin workspace index metadata refresh: {error}"))?;
+    if !force
+        && !commit_changed
+        && !content_changed
+        && !has_stale_paths
+        && unreadable_paths.is_empty()
+    {
+        let transaction = match connection.transaction_with_behavior(TransactionBehavior::Immediate)
+        {
+            Ok(transaction) => transaction,
+            Err(error) if sqlite_lock_error(&error) => {
+                report.lock_degraded = true;
+                return Ok(report);
+            }
+            Err(error) => return Err(format!("begin workspace index metadata refresh: {error}")),
+        };
         for snapshot in &snapshots {
             transaction
                 .execute(
@@ -261,39 +318,50 @@ pub fn refresh(
                  ('files_skipped_limit', ?3),
                  ('files_skipped_too_large', ?4),
                  ('files_skipped_unreadable', ?5),
-                 ('coverage_complete', ?6)",
+                 ('truncated', ?6),
+                 ('coverage_complete', ?7)",
                 params![
                     now_millis().to_string(),
                     report.files_discovered.to_string(),
                     report.files_skipped_limit.to_string(),
                     report.files_skipped_too_large.to_string(),
                     report.files_skipped_unreadable.to_string(),
+                    report.truncated.to_string(),
                     report.coverage_complete.to_string(),
                 ],
             )
             .map_err(|error| format!("stamp metadata refresh: {error}"))?;
-        transaction
-            .commit()
-            .map_err(|error| format!("commit workspace index metadata refresh: {error}"))?;
+        if let Err(error) = transaction.commit() {
+            if sqlite_lock_error(&error) {
+                report.lock_degraded = true;
+                return Ok(report);
+            }
+            return Err(format!("commit workspace index metadata refresh: {error}"));
+        }
         return Ok(report);
     }
 
     // Content changes require the complete source set for relationship rebuilds;
     // unchanged files remain skipped by the record loop below.
-    let (sources, full_unreadable) =
-        if content_changed || force || commit_changed || has_stale_paths {
-            collect_sources_from_paths(
-                &root,
-                snapshots
-                    .iter()
-                    .map(|snapshot| root.join(&snapshot.path))
-                    .collect(),
-            )?
-        } else {
-            (dirty_sources, 0)
-        };
-    report.files_skipped_unreadable += full_unreadable;
-    report.coverage_complete = report.coverage_complete && full_unreadable == 0;
+    let source_collection = if content_changed || force || commit_changed || has_stale_paths {
+        collect_sources_from_paths(
+            &root,
+            snapshots
+                .iter()
+                .map(|snapshot| root.join(&snapshot.path))
+                .collect(),
+        )?
+    } else {
+        SourceCollection {
+            sources: dirty_sources,
+            unreadable_paths: BTreeSet::new(),
+        }
+    };
+    unreadable_paths.extend(source_collection.unreadable_paths);
+    let sources = source_collection.sources;
+    report.files_skipped_unreadable = path_unreadable + unreadable_paths.len() as u64;
+    report.coverage_complete =
+        skipped_limit == 0 && skipped_too_large == 0 && report.files_skipped_unreadable == 0;
     let files_changed = sources.iter().any(|source| {
         existing
             .get(&source.path)
@@ -305,9 +373,14 @@ pub fn refresh(
         return Ok(report);
     }
 
-    let transaction = connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|error| format!("begin workspace index refresh: {error}"))?;
+    let transaction = match connection.transaction_with_behavior(TransactionBehavior::Immediate) {
+        Ok(transaction) => transaction,
+        Err(error) if sqlite_lock_error(&error) => {
+            report.lock_degraded = true;
+            return Ok(report);
+        }
+        Err(error) => return Err(format!("begin workspace index refresh: {error}")),
+    };
     for source in &sources {
         let unchanged = existing
             .get(&source.path)
@@ -450,12 +523,15 @@ pub fn refresh(
         report.files_removed += 1;
     }
 
-    if force || files_changed {
+    // An incomplete walk must not discard relationships for files hidden by an
+    // unreadable path; rebuild the full edge set only after a complete walk.
+    if (force || files_changed) && unreadable_paths.is_empty() && unreadable_prefixes.is_empty() {
         transaction
             .execute("DELETE FROM edges", [])
             .map_err(|error| format!("clear workspace edges: {error}"))?;
     }
-    let path_set: BTreeSet<String> = sources.iter().map(|source| source.path.clone()).collect();
+    let mut path_set: BTreeSet<String> = sources.iter().map(|source| source.path.clone()).collect();
+    path_set.extend(active_paths.iter().cloned());
     for source in &sources {
         for import in &source.imports {
             if let Some(target) = resolve_import(&source.path, import, &path_set) {
@@ -562,7 +638,8 @@ pub fn refresh(
              ('files_skipped_limit', ?6),
              ('files_skipped_too_large', ?7),
              ('files_skipped_unreadable', ?8),
-             ('coverage_complete', ?9)",
+             ('truncated', ?9),
+             ('coverage_complete', ?10)",
             params![
                 generation.to_string(),
                 indexed_commit,
@@ -572,13 +649,18 @@ pub fn refresh(
                 report.files_skipped_limit.to_string(),
                 report.files_skipped_too_large.to_string(),
                 report.files_skipped_unreadable.to_string(),
+                report.truncated.to_string(),
                 report.coverage_complete.to_string(),
             ],
         )
         .map_err(|error| format!("stamp workspace index: {error}"))?;
-    transaction
-        .commit()
-        .map_err(|error| format!("commit workspace index: {error}"))?;
+    if let Err(error) = transaction.commit() {
+        if sqlite_lock_error(&error) {
+            report.lock_degraded = true;
+            return Ok(report);
+        }
+        return Err(format!("commit workspace index: {error}"));
+    }
     report.files_indexed = sources.len() as u64;
     report.generation = generation;
     report.indexed_commit = indexed_commit;
@@ -696,6 +778,9 @@ pub fn status(workspace_root: &Path, claude_home_flag: &str) -> Result<IndexStat
     let coverage_complete = meta(&connection, "coverage_complete")
         .map(|value| value == "true")
         .unwrap_or(false);
+    let truncated = meta(&connection, "truncated")
+        .map(|value| value == "true")
+        .unwrap_or(false);
     Ok(IndexStatus {
         database_path: path,
         workspace_root: root.clone(),
@@ -718,6 +803,7 @@ pub fn status(workspace_root: &Path, claude_home_flag: &str) -> Result<IndexStat
         files_skipped_unreadable: meta(&connection, "files_skipped_unreadable")
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or(0),
+        truncated,
         coverage_complete,
     })
 }
@@ -745,6 +831,9 @@ pub fn render_map(workspace_root: &Path, claude_home_flag: &str) -> Result<Strin
     let coverage_complete = meta(&connection, "coverage_complete")
         .map(|value| value == "true")
         .unwrap_or(false);
+    let truncated = meta(&connection, "truncated")
+        .map(|value| value == "true")
+        .unwrap_or(false);
     let mut lines = vec![
         "# SYSTEM_MAP".to_string(),
         String::new(),
@@ -761,8 +850,9 @@ pub fn render_map(workspace_root: &Path, claude_home_flag: &str) -> Result<Strin
         String::new(),
         "## Index Coverage".to_string(),
         format!(
-            "- coverage_complete: {} (discovered={}, indexed={}, skipped_limit={}, skipped_too_large={}, skipped_unreadable={})",
+            "- coverage_complete: {} (truncated={}, discovered={}, indexed={}, skipped_limit={}, skipped_too_large={}, skipped_unreadable={})",
             coverage_complete,
+            truncated,
             files_discovered,
             file_count,
             files_skipped_limit,
@@ -993,13 +1083,31 @@ fn open_connection(path: &Path) -> Result<Connection, String> {
             Err(error) if sqlite_lock_error(&error) && attempt < 19 => {
                 std::thread::sleep(std::time::Duration::from_millis(25));
             }
+            Err(error) if sqlite_lock_error(&error) => break,
             Err(error) => return Err(format!("configure workspace index: {error}")),
         }
     }
     connection
-        .busy_timeout(std::time::Duration::from_secs(10))
+        .busy_timeout(std::time::Duration::from_secs(1))
         .map_err(|error| format!("set workspace index transaction timeout: {error}"))?;
     Ok(connection)
+}
+
+fn is_lock_error_text(message: &str) -> bool {
+    let lowered = message.to_ascii_lowercase();
+    lowered.contains("database is locked")
+        || lowered.contains("database is busy")
+        || lowered.contains("database table is locked")
+        || lowered.contains("busy")
+}
+
+fn degraded_refresh_report(root: &Path) -> RefreshReport {
+    RefreshReport {
+        indexed_commit: git_head(root),
+        coverage_complete: false,
+        lock_degraded: true,
+        ..RefreshReport::default()
+    }
 }
 
 fn sqlite_lock_error(error: &rusqlite::Error) -> bool {
@@ -1334,13 +1442,24 @@ fn collect_source_paths(root: &Path) -> Result<SourcePathCollection, String> {
     let mut collection = SourcePathCollection::default();
     let mut stack = vec![root.to_path_buf()];
     while let Some(directory) = stack.pop() {
-        let entries = fs::read_dir(&directory)
-            .map_err(|error| format!("read {}: {error}", display_path(&directory)))?;
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(_) => {
+                collection.skipped_unreadable += 1;
+                collection
+                    .unreadable_prefixes
+                    .insert(relative_source_path(root, &directory));
+                continue;
+            }
+        };
         for entry in entries {
             let entry = match entry {
                 Ok(entry) => entry,
                 Err(_) => {
                     collection.skipped_unreadable += 1;
+                    collection
+                        .unreadable_prefixes
+                        .insert(relative_source_path(root, &directory));
                     continue;
                 }
             };
@@ -1353,6 +1472,9 @@ fn collect_source_paths(root: &Path) -> Result<SourcePathCollection, String> {
                 Ok(file_type) => file_type,
                 Err(_) => {
                     collection.skipped_unreadable += 1;
+                    collection
+                        .unreadable_prefixes
+                        .insert(relative_source_path(root, &path));
                     continue;
                 }
             };
@@ -1363,15 +1485,15 @@ fn collect_source_paths(root: &Path) -> Result<SourcePathCollection, String> {
                 stack.push(path);
             } else if file_type.is_file() && is_indexable_file(&path) {
                 collection.discovered += 1;
-                if collection.paths.len() >= MAX_FILES {
-                    collection.skipped_limit += 1;
-                } else {
-                    collection.paths.push(path);
-                }
+                collection.paths.push(path);
             }
         }
     }
     collection.paths.sort();
+    if collection.paths.len() > MAX_FILES {
+        collection.skipped_limit = (collection.paths.len() - MAX_FILES) as u64;
+        collection.paths.truncate(MAX_FILES);
+    }
     Ok(collection)
 }
 
@@ -1380,8 +1502,13 @@ fn collect_source_snapshots(root: &Path, paths: &[PathBuf]) -> SnapshotCollectio
     for absolute_path in paths {
         let metadata = match fs::metadata(absolute_path) {
             Ok(metadata) => metadata,
-            Err(_) => {
-                collection.skipped_unreadable += 1;
+            Err(error) => {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    collection.skipped_unreadable += 1;
+                    collection
+                        .unreadable_paths
+                        .insert(relative_source_path(root, absolute_path));
+                }
                 continue;
             }
         };
@@ -1410,14 +1537,16 @@ fn collect_source_snapshots(root: &Path, paths: &[PathBuf]) -> SnapshotCollectio
 fn collect_sources_from_paths(
     root: &Path,
     paths: Vec<PathBuf>,
-) -> Result<(Vec<SourceFile>, u64), String> {
+) -> Result<SourceCollection, String> {
     let mut sources = Vec::new();
-    let mut skipped_unreadable = 0;
+    let mut unreadable_paths = BTreeSet::new();
     for absolute_path in paths {
         let metadata = match fs::metadata(&absolute_path) {
             Ok(meta) => meta,
-            Err(_) => {
-                skipped_unreadable += 1;
+            Err(error) => {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    unreadable_paths.insert(relative_source_path(root, &absolute_path));
+                }
                 continue;
             }
         };
@@ -1426,16 +1555,14 @@ fn collect_sources_from_paths(
         }
         let content = match fs::read_to_string(&absolute_path) {
             Ok(c) => c,
-            Err(_) => {
-                skipped_unreadable += 1;
+            Err(error) => {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    unreadable_paths.insert(relative_source_path(root, &absolute_path));
+                }
                 continue;
             }
         };
-        let relative = absolute_path
-            .strip_prefix(root)
-            .unwrap_or(&absolute_path)
-            .to_string_lossy()
-            .replace('\\', "/");
+        let relative = relative_source_path(root, &absolute_path);
         let language = language_for(&absolute_path).to_string();
         let imports = extract_imports(&language, &content);
         let symbols = extract_symbols(&language, &content);
@@ -1455,7 +1582,22 @@ fn collect_sources_from_paths(
             symbols,
         });
     }
-    Ok((sources, skipped_unreadable))
+    Ok(SourceCollection {
+        sources,
+        unreadable_paths,
+    })
+}
+
+fn relative_source_path(root: &Path, absolute_path: &Path) -> String {
+    absolute_path
+        .strip_prefix(root)
+        .unwrap_or(absolute_path)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+fn path_is_under_prefix(path: &str, prefix: &str) -> bool {
+    prefix.is_empty() || path == prefix || path.starts_with(&format!("{prefix}/"))
 }
 
 fn extract_symbols(language: &str, content: &str) -> Vec<ParsedSymbol> {

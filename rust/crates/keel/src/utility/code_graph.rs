@@ -36,7 +36,6 @@ use crate::runtime::{
     display_path, resolve_claude_home, resolve_repository_root, safe_path_segment, write_text,
 };
 use crate::utility::hashing::fnv1a64_hex;
-use rusqlite::Connection;
 
 /// Schema version of the emitted artifact. Bump when the JSON shape changes so a
 /// reader can refuse an incompatible graph rather than misparse it.
@@ -88,10 +87,6 @@ fn workspace_slug(raw: &str) -> String {
     safe_path_segment(&bounded).unwrap_or_else(|| "workspace".to_string())
 }
 
-/// Upper bound on files scanned, matching `code-search`'s ceiling so a pathological
-/// tree cannot make the command run unbounded.
-const MAX_FILES: usize = 10_000;
-
 /// Keep the direct/test builder's discovery boundary aligned with the shared
 /// workspace index, which is the production extraction owner.
 const MAX_SOURCE_FILE_BYTES: u64 = 2_000_000;
@@ -123,6 +118,31 @@ pub struct CodeGraph {
     source_fingerprint: String,
     nodes: Vec<Node>,
     edges: Vec<Edge>,
+}
+
+struct FnvFingerprint {
+    hash: u64,
+}
+
+impl Default for FnvFingerprint {
+    fn default() -> Self {
+        Self {
+            hash: 14695981039346656037,
+        }
+    }
+}
+
+impl FnvFingerprint {
+    fn update(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.hash ^= *byte as u64;
+            self.hash = self.hash.wrapping_mul(1099511628211);
+        }
+    }
+
+    fn finish(self) -> String {
+        format!("{:016x}", self.hash)
+    }
 }
 
 /// CLI: `keel code-graph [build|impact] [flags]`.
@@ -382,7 +402,7 @@ pub fn build_graph(root: &Path) -> CodeGraph {
     let mut path_set: BTreeSet<String> = BTreeSet::new();
     let mut nodes: Vec<Node> = Vec::new();
     let mut raw_imports: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    let mut source_material = String::new();
+    let mut source_fingerprint = FnvFingerprint::default();
 
     for absolute in &files {
         let relative = match absolute.strip_prefix(root) {
@@ -398,12 +418,12 @@ pub fn build_graph(root: &Path) -> CodeGraph {
         };
         // Keep the fingerprint independent of line formatting while retaining
         // the workspace index identity for `from_json_file` validation.
-        source_material.push_str(&format!(
-            "{}:{}:{}\n",
-            relative,
-            text.len(),
-            fnv1a64_hex(&text)
-        ));
+        source_fingerprint.update(relative.as_bytes());
+        source_fingerprint.update(b":");
+        source_fingerprint.update(text.len().to_string().as_bytes());
+        source_fingerprint.update(b":");
+        source_fingerprint.update(fnv1a64_hex(&text).as_bytes());
+        source_fingerprint.update(b"\n");
         let mut defines = extract_definitions(lang, &text);
         defines.sort();
         defines.dedup();
@@ -449,7 +469,7 @@ pub fn build_graph(root: &Path) -> CodeGraph {
 
     CodeGraph {
         root: root.to_path_buf(),
-        source_fingerprint: fnv1a64_hex(&source_material),
+        source_fingerprint: source_fingerprint.finish(),
         nodes,
         edges,
     }
@@ -466,10 +486,10 @@ pub(crate) fn build_graph_from_workspace_index(
 ) -> Result<CodeGraph, String> {
     crate::utility::workspace_index::refresh(root, claude_home_flag, false)?;
     let database_path = crate::utility::workspace_index::database_path(root, claude_home_flag)?;
-    let connection = Connection::open(&database_path)
+    let connection = crate::utility::sqlite::open_connection(&database_path)
         .map_err(|error| format!("open {}: {error}", display_path(&database_path)))?;
 
-    let mut source_material = String::new();
+    let mut source_fingerprint = FnvFingerprint::default();
     let mut nodes_by_path: BTreeMap<String, Node> = BTreeMap::new();
     let mut file_statement = connection
         .prepare(
@@ -492,7 +512,12 @@ pub(crate) fn build_graph_from_workspace_index(
     for row in file_rows {
         let (path, language, hash, size, imports) =
             row.map_err(|error| format!("read indexed file row: {error}"))?;
-        source_material.push_str(&format!("{path}:{size}:{hash}\n"));
+        source_fingerprint.update(path.as_bytes());
+        source_fingerprint.update(b":");
+        source_fingerprint.update(size.to_string().as_bytes());
+        source_fingerprint.update(b":");
+        source_fingerprint.update(hash.as_bytes());
+        source_fingerprint.update(b"\n");
         let imports = imports
             .lines()
             .map(str::trim)
@@ -571,7 +596,7 @@ pub(crate) fn build_graph_from_workspace_index(
     let nodes = nodes_by_path.into_values().collect();
     Ok(CodeGraph {
         root: root.to_path_buf(),
-        source_fingerprint: fnv1a64_hex(&source_material),
+        source_fingerprint: source_fingerprint.finish(),
         nodes,
         edges,
     })
@@ -1089,9 +1114,6 @@ fn join_rel(dir: &str, rel: &str) -> String {
 fn collect_source_files(root: &Path, files: &mut Vec<PathBuf>) {
     let mut stack = vec![root.to_path_buf()];
     while let Some(current) = stack.pop() {
-        if files.len() >= MAX_FILES {
-            return;
-        }
         let entries = match fs::read_dir(&current) {
             Ok(entries) => entries,
             Err(_) => continue,
@@ -1122,6 +1144,8 @@ fn collect_source_files(root: &Path, files: &mut Vec<PathBuf>) {
             }
         }
     }
+    files.sort();
+    files.truncate(crate::utility::workspace_index::MAX_FILES);
 }
 
 fn should_skip_entry(name: &str, path: &Path) -> bool {
