@@ -126,12 +126,16 @@ remains green (13 pass).
 
 ## Remaining known limitations
 
-1. **MCP `2026-07-28` is not implemented.** That revision removes protocol-level sessions,
-   the `Mcp-Session-Id` header, and the `initialize` handshake, requires `server/discover`
-   and `resultType`, and requires `ttlMs` plus `cacheScope` on list results. Keel
-   implements `2025-11-25` plus the legacy `2024-11-05` initialize, which it rejects on
-   Streamable HTTP with an explicit migration message rather than mis-serving it.
-   Recorded as verified research `CLM-002` in the plan evidence.
+1. **Keel is a legacy-era MCP server, not a dual-era one.** The current MCP
+   revision (`2026-07-28`) names three implementation eras: *modern* (per-request
+   `_meta` version, `server/discover`, `resultType`, and `ttlMs`/`cacheScope` on
+   list results), *legacy* (`initialize` handshake, `2025-11-25` and earlier), and
+   *dual-era* (both). Keel implements `2025-11-25` plus the earlier `2024-11-05`,
+   which it rejects on Streamable HTTP with an explicit migration message rather
+   than mis-serving. Per that revision's own compatibility matrix, a legacy client
+   interoperates with Keel and a modern `2026-07-28` client does not. Becoming
+   dual-era is a scoped feature, not a defect fix; it is recorded as verified
+   research `CLM-007` in the plan evidence.
 2. **The fixed-context ledger measures the complete catalog, not the emitted handshake.**
    `mcp.tools_list.catalog` reports 1240 tokens against a ratified 1364 budget, while the
    default handshake a client actually receives measures 671 tokens. Both numbers are now
