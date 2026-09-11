@@ -55,6 +55,7 @@
   plan research --plan <plan-id> [--claim <text> --source-url <url> --source-type <type> --retrieved-at <rfc3339> --support <text> --freshness fresh|historical --used-by <ids>] [--workspace-root <path>] [--claude-home <path>] [--json]
   plan design --plan <plan-id> [--workspace-root <path>] [--claude-home <path>] [--json]
   plan tasks --plan <plan-id> [--workspace-root <path>] [--claude-home <path>] [--json]
+  plan update --plan <plan-id> --task <task-id> [--subtask <subtask-id>] --status <status> [--evidence-path <plan-relative-json> --verification-timestamp <rfc3339> | --reason <text>] [--workspace-root <path>] [--claude-home <path>] [--json]
   plan check [--rtm] --plan <plan-id> [--workspace-root <path>] [--claude-home <path>] [--json]
   plan ready --plan <plan-id> [--workspace-root <path>] [--claude-home <path>] [--json]
   plan done --plan <plan-id> [--workspace-root <path>] [--claude-home <path>] [--json]
