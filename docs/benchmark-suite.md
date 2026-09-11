@@ -76,7 +76,21 @@ In addition to workflow scenarios, the repository measures token efficiency at r
 - Compaction benchmark report: [`bench/competitor/eval-compaction-report.json`](../bench/competitor/eval-compaction-report.json)
 - Comparative analysis metrics: [`bench/competitor/comparative-compaction.json`](../bench/competitor/comparative-compaction.json)
 - Measured compaction savings across 7 genuine toolchain fixtures: **27.28% overall** (with `cargo test` pass achieving **79.26%** savings).
+- Reducer reliability over the same fixtures: **100% critical-evidence retention**, **100% failure-evidence retention**, and a **0% reacquisition rate**, so the saving does not cost the model the evidence it needs to act.
 - Tiered MCP catalog profile: reduces discovery footprint from 2,929 tokens down to **1,240 tokens** (**57.66% reduction**), while retaining direct dispatchability for all 37 tools.
+
+`keel eval --json` reports per-case `evidenceRetained`/`evidenceTotal`, `outcomeVisible`,
+`reacquisitionRequired`, and `reduceMicros` alongside the token counts, plus the
+aggregate `evidenceRetentionPercent`, `failureEvidenceRetentionPercent`, and
+`reacquisitionRatePercent`. Reduction is only a win when the saving and the
+evidence retention move together.
+
+The MCP catalog profiles have their own comparison. `keel stats tools --benchmark --json`
+walks `full`, `core`, `core+pagination`, `core+progressive-discovery`, and
+`core+progressive-discovery+compact-schemas` through the canonical packing path, then
+reports the exact first-page cost, pages to traverse, unique tools reached, and
+discovery coverage across twelve representative task families. It fails closed when a
+page exceeds its budget, traversal duplicates or omits a tool, or discovery misses a task.
 
 The current gateway baseline is archived in
 [`docs/benchmarks/context-gateway-baseline.json`](./benchmarks/context-gateway-baseline.json).

@@ -44,6 +44,10 @@ struct EvalFixture {
     /// this before measuring so a classifier regression cannot silently turn
     /// an adapter benchmark into a generic-adapter benchmark.
     expected_adapter: &'static str,
+    /// Evidence that must survive reduction for the visible result to stay
+    /// actionable: exit status, failure identity, counts, denial reasons. A
+    /// dropped entry means the model would have to reacquire the raw artifact.
+    critical_evidence: &'static [&'static str],
 }
 
 /// One fixture's measured result after running the real pipeline.
@@ -60,6 +64,17 @@ pub struct EvalCase {
     pub tokens_compact: usize,
     pub tokens_saved: isize,
     pub savings_pct: f64,
+    /// Critical-evidence entries present in the visible result.
+    pub evidence_retained: usize,
+    /// Critical-evidence entries the visible result dropped.
+    pub evidence_total: usize,
+    /// Whether the visible result still states the command outcome, so the
+    /// model can decide pass/fail without recovering the raw artifact.
+    pub outcome_visible: bool,
+    /// True when reduction dropped evidence the model would need to reacquire.
+    pub reacquisition_required: bool,
+    /// Wall-clock cost of the reduce step, in microseconds.
+    pub reduce_micros: u128,
 }
 
 /// Aggregate measured eval result across all fixtures.
@@ -70,6 +85,40 @@ pub struct EvalReport {
     pub total_tokens_compact: usize,
     pub total_tokens_saved: isize,
     pub overall_savings_pct: f64,
+    pub total_evidence_retained: usize,
+    pub total_evidence: usize,
+    pub cases_requiring_reacquisition: usize,
+    pub failure_cases: usize,
+    pub failure_evidence_retained: usize,
+    pub failure_evidence_total: usize,
+}
+
+impl EvalReport {
+    /// Share of critical evidence that survived reduction, measured over every
+    /// fixture. This is the reliability half of the compression claim: a large
+    /// saving that drops failure identity is not a win.
+    pub fn evidence_retention_pct(&self) -> f64 {
+        if self.total_evidence == 0 {
+            return 100.0;
+        }
+        (self.total_evidence_retained as f64 / self.total_evidence as f64) * 100.0
+    }
+
+    /// Share of failure-path critical evidence that survived reduction.
+    pub fn failure_evidence_retention_pct(&self) -> f64 {
+        if self.failure_evidence_total == 0 {
+            return 100.0;
+        }
+        (self.failure_evidence_retained as f64 / self.failure_evidence_total as f64) * 100.0
+    }
+
+    /// Share of cases that still need the raw artifact before the model can act.
+    pub fn reacquisition_rate_pct(&self) -> f64 {
+        if self.cases.is_empty() {
+            return 0.0;
+        }
+        (self.cases_requiring_reacquisition as f64 / self.cases.len() as f64) * 100.0
+    }
 }
 
 /// Run the compaction eval: for every fixture, drive the REAL pipeline and
@@ -80,6 +129,12 @@ pub fn run_compaction_eval() -> EvalReport {
     let mut cases = Vec::new();
     let mut total_raw = 0usize;
     let mut total_compact = 0usize;
+    let mut total_evidence_retained = 0usize;
+    let mut total_evidence = 0usize;
+    let mut cases_requiring_reacquisition = 0usize;
+    let mut failure_cases = 0usize;
+    let mut failure_evidence_retained = 0usize;
+    let mut failure_evidence_total = 0usize;
 
     for fixture in EVAL_FIXTURES {
         let args: Vec<String> = fixture.command.iter().map(|s| s.to_string()).collect();
@@ -107,7 +162,9 @@ pub fn run_compaction_eval() -> EvalReport {
         // adapter, with the real pre-compaction token count. Only the fields the
         // adapters actually read need real values; the rest are inert defaults.
         let meta = eval_meta(&ast.program, &ast.args, stdout, stderr);
+        let reduce_started = std::time::Instant::now();
         let result = adapter.compact(stdout, stderr, fixture.exit_code, &meta);
+        let reduce_micros = reduce_started.elapsed().as_micros();
 
         // End-to-end honesty, modeling the proxy's break-even guard
         // (`run.rs`): count the tokens the agent ACTUALLY receives. The raw
@@ -132,8 +189,45 @@ pub fn run_compaction_eval() -> EvalReport {
             (tokens_saved.max(0) as f64 / tokens_raw as f64) * 100.0
         };
 
+        // Reduction-induced loss is what matters: passthrough removed nothing.
+        let reduction_applied = compacted;
+        let captured = format!("{}{}", fixture.raw_stdout, fixture.raw_stderr);
+        let visible = if reduction_applied {
+            rendered.as_str()
+        } else {
+            captured.as_str()
+        };
+        let evidence_retained = fixture
+            .critical_evidence
+            .iter()
+            .filter(|needle| visible.contains(*needle))
+            .count();
+        let evidence_total = fixture.critical_evidence.len();
+        // A reduced non-generic result carries an explicit status marker, so a
+        // reader can decide pass/fail without recovering the raw artifact.
+        let carries_status = result.adapter_name == "generic"
+            || result.adapter_name == "errors-only"
+            || if fixture.exit_code == 0 {
+                visible.contains("PASS")
+            } else {
+                visible.contains("FAIL")
+            };
+        let outcome_visible = !reduction_applied || carries_status;
+        let reacquisition_required =
+            reduction_applied && (evidence_retained < evidence_total || !carries_status);
+        if reacquisition_required {
+            cases_requiring_reacquisition += 1;
+        }
+        if fixture.exit_code != 0 {
+            failure_cases += 1;
+            failure_evidence_retained += evidence_retained;
+            failure_evidence_total += evidence_total;
+        }
+
         total_raw += tokens_raw;
         total_compact += tokens_compact;
+        total_evidence_retained += evidence_retained;
+        total_evidence += evidence_total;
         cases.push(EvalCase {
             name: fixture.name.to_string(),
             command: fixture.command.join(" "),
@@ -143,6 +237,11 @@ pub fn run_compaction_eval() -> EvalReport {
             tokens_compact,
             tokens_saved,
             savings_pct,
+            evidence_retained,
+            evidence_total,
+            outcome_visible,
+            reacquisition_required,
+            reduce_micros,
         });
     }
 
@@ -159,6 +258,12 @@ pub fn run_compaction_eval() -> EvalReport {
         total_tokens_compact: total_compact,
         total_tokens_saved: total_saved,
         overall_savings_pct,
+        total_evidence_retained,
+        total_evidence,
+        cases_requiring_reacquisition,
+        failure_cases,
+        failure_evidence_retained,
+        failure_evidence_total,
     }
 }
 
@@ -237,10 +342,28 @@ pub fn run_eval_command(
                         "savingsPercent".into(),
                         Value::Number(format!("{:.2}", case.savings_pct)),
                     ),
+                    (
+                        "evidenceRetained".into(),
+                        Value::Number(case.evidence_retained.to_string()),
+                    ),
+                    (
+                        "evidenceTotal".into(),
+                        Value::Number(case.evidence_total.to_string()),
+                    ),
+                    ("outcomeVisible".into(), Value::Bool(case.outcome_visible)),
+                    (
+                        "reacquisitionRequired".into(),
+                        Value::Bool(case.reacquisition_required),
+                    ),
+                    (
+                        "reduceMicros".into(),
+                        Value::Number(case.reduce_micros.to_string()),
+                    ),
                 ])
             })
             .collect();
         let payload = Value::Object(vec![
+            ("schemaVersion".into(), Value::Number("1".into())),
             ("tokenizer".into(), Value::String("o200k_base".into())),
             (
                 "measurement".into(),
@@ -266,6 +389,26 @@ pub fn run_eval_command(
                 "overallSavingsPercent".into(),
                 Value::Number(format!("{:.2}", report.overall_savings_pct)),
             ),
+            (
+                "evidenceRetentionPercent".into(),
+                Value::Number(format!("{:.2}", report.evidence_retention_pct())),
+            ),
+            (
+                "failureEvidenceRetentionPercent".into(),
+                Value::Number(format!("{:.2}", report.failure_evidence_retention_pct())),
+            ),
+            (
+                "failureCaseCount".into(),
+                Value::Number(report.failure_cases.to_string()),
+            ),
+            (
+                "reacquisitionRatePercent".into(),
+                Value::Number(format!("{:.2}", report.reacquisition_rate_pct())),
+            ),
+            (
+                "casesRequiringReacquisition".into(),
+                Value::Number(report.cases_requiring_reacquisition.to_string()),
+            ),
             ("cases".into(), Value::Array(case_values)),
         ]);
         return write_indented(standard_output, &payload).map_or(1, |_| 0);
@@ -284,6 +427,13 @@ pub fn run_eval_command(
         report.total_tokens_saved,
         report.overall_savings_pct
     );
+    let _ = writeln!(
+        standard_output,
+        "evidence_retention={:.2}% failure_evidence_retention={:.2}% reacquisition_rate={:.2}%",
+        report.evidence_retention_pct(),
+        report.failure_evidence_retention_pct(),
+        report.reacquisition_rate_pct()
+    );
     if flag_set.bool_value("cases") {
         for case in &report.cases {
             // `passthrough` marks a case where the break-even guard kept the raw
@@ -296,13 +446,18 @@ pub fn run_eval_command(
             };
             let _ = writeln!(
                 standard_output,
-                "- {} [{}/{mode}] raw={} compact={} saved={} ({:.1}%)",
+                "- {} [{}/{mode}] raw={} compact={} saved={} ({:.1}%) evidence={}/{} outcome_visible={} reacquisition_required={} reduce_us={}",
                 case.name,
                 case.adapter,
                 case.tokens_raw,
                 case.tokens_compact,
                 case.tokens_saved,
-                case.savings_pct
+                case.savings_pct,
+                case.evidence_retained,
+                case.evidence_total,
+                case.outcome_visible,
+                case.reacquisition_required,
+                case.reduce_micros
             );
         }
     }
@@ -319,6 +474,7 @@ const EVAL_FIXTURES: &[EvalFixture] = &[
         command: &["cargo", "test", "--workspace"],
         expected_adapter: "tests",
         exit_code: 0,
+        critical_evidence: &["48 passed", "0 failed", "finished in 4.80s"],
         raw_stderr: "   Compiling keel v0.1.0\n    Finished test profile in 4.31s\n",
         raw_stdout: "\nrunning 48 tests\ntest adapters::git::tests::status_compacts ... ok\ntest adapters::tests::tests::pass_summary ... ok\ntest adapters::search::tests::groups_by_file ... ok\ntest adapters::build::tests::errors_first ... ok\ntest adapters::lint::tests::warnings_kept ... ok\ntest adapters::cloud::tests::secrets_redacted ... ok\ntest adapters::database::tests::result_table ... ok\ntest adapters::containers::tests::ps_table ... ok\ntest proxy::token_meter::tests::counts_exact ... ok\ntest proxy::classify::tests::routes_cargo_test ... ok\ntest proxy::registry::tests::specific_before_generic ... ok\ntest proxy::render::tests::renders_pass ... ok\ntest utility::recall::tests::indexes_markdown ... ok\ntest utility::recall::tests::json_briefs ... ok\ntest utility::recall::tests::auto_sync ... ok\ntest utility::skill_lint::tests::well_formed_passes ... ok\ntest utility::sprint::tests::review_fails_until_done ... ok\ntest utility::user_story::tests::gherkin_required ... ok\ntest runner::hook_lifecycle::tests::gate_cannot_loop ... ok\ntest runner::learning::tests::recurring_failure_instinct ... ok\ntest mcp::tools::tests::recall_missing_query ... ok\ntest mcp::tools::tests::skill_route_missing_prompt ... ok\ntest review::tests::tally_counts_blocking ... ok\ntest manager::install::tests::stages_shared ... ok\n... 24 more passing tests omitted for brevity in this fixture ...\n\ntest result: ok. 48 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.80s\n",
     },
@@ -327,6 +483,10 @@ const EVAL_FIXTURES: &[EvalFixture] = &[
         command: &["cargo", "test", "--workspace"],
         expected_adapter: "tests",
         exit_code: 101,
+        critical_evidence: &[
+            "runner::hook_lifecycle::tests::stop_is_silent",
+            "test failed",
+        ],
         raw_stderr: "error: test failed, to rerun pass `-p keel --bin keel`\n",
         raw_stdout: "\nrunning 48 tests\ntest adapters::git::tests::status_compacts ... ok\ntest adapters::tests::tests::pass_summary ... ok\ntest adapters::search::tests::groups_by_file ... ok\ntest adapters::build::tests::errors_first ... ok\ntest adapters::lint::tests::warnings_kept ... ok\ntest adapters::cloud::tests::secrets_redacted ... ok\ntest adapters::database::tests::result_table ... ok\ntest adapters::containers::tests::ps_table ... ok\ntest proxy::token_meter::tests::counts_exact ... ok\ntest proxy::classify::tests::routes_cargo_test ... ok\ntest proxy::registry::tests::specific_before_generic ... ok\ntest proxy::render::tests::renders_pass ... ok\ntest utility::recall::tests::indexes_markdown ... ok\ntest utility::recall::tests::json_briefs ... ok\ntest utility::recall::tests::auto_sync ... ok\ntest utility::skill_lint::tests::well_formed_passes ... ok\ntest utility::sprint::tests::review_fails_until_done ... ok\ntest utility::user_story::tests::gherkin_required ... ok\ntest runner::hook_lifecycle::tests::stop_is_silent ... FAILED\ntest runner::learning::tests::recurring_failure_instinct ... ok\ntest mcp::tools::tests::recall_missing_query ... ok\ntest mcp::tools::tests::skill_route_missing_prompt ... ok\ntest review::tests::tally_counts_blocking ... ok\ntest manager::install::tests::stages_shared ... ok\ntest proxy::run::tests::gate_blocks_without_signal ... ok\ntest proxy::run::tests::no_compact_neutralizes ... ok\ntest utility::config_audit::tests::flags_bypass ... ok\ntest utility::code_graph::tests::reverse_deps ... ok\ntest runner::observation::tests::clusters_failures ... ok\ntest utility::memory::tests::route_missing_request ... ok\ntest utility::eval::tests::token_counts_exact ... ok\ntest adapters::logs::tests::dedup_repeats ... ok\ntest adapters::files::tests::head_truncates ... ok\ntest proxy::injection_guard::tests::neutralizes_marker ... ok\n... 13 more tests ...\n\nfailures:\n\n---- runner::hook_lifecycle::tests::stop_is_silent stdout ----\nthread 'runner::hook_lifecycle::tests::stop_is_silent' panicked at hook_lifecycle.rs:7061:13:\nstop must emit no stdout; got: {\"hookSpecificOutput\":{\"additionalContext\":\"Stop closeout: before finalizing, verify that all stated work is actually complete.\"}}\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\nstack backtrace:\n   0: rust_begin_unwind\n   1: core::panicking::panic_fmt\n   2: keel::runner::hook_lifecycle::tests::stop_is_silent\n   3: core::ops::function::FnOnce::call_once\n\nfailures:\n    runner::hook_lifecycle::tests::stop_is_silent\n\ntest result: FAILED. 47 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.90s\n",
     },
@@ -335,6 +495,10 @@ const EVAL_FIXTURES: &[EvalFixture] = &[
         command: &["git", "status"],
         expected_adapter: "git",
         exit_code: 0,
+        critical_evidence: &[
+            "modified:   rust/crates/keel/src/utility/eval.rs",
+            "Untracked files:",
+        ],
         raw_stderr: "",
         raw_stdout: "On branch main\nYour branch is up to date with 'origin/main'.\n\nChanges not staged for commit:\n  (use \"git add <file>...\" to update what will be committed)\n  (use \"git restore <file>...\" to discard changes in working directory)\n\tmodified:   rust/crates/keel/src/utility/eval.rs\n\tmodified:   rust/crates/keel/src/utility/mod.rs\n\tmodified:   rust/crates/keel/src/commands.rs\n\tmodified:   rust/crates/keel/src/utility/recall.rs\n\tmodified:   CLAUDE.md\n\tmodified:   .claude/agents/reviewer.md\n\tmodified:   .claude/agents/git-expert.md\n\tmodified:   .claude/hooks.json\n\nUntracked files:\n  (use \"git add <file>...\" to include in what will be committed)\n\t.understand/\n\trust/crates/keel/tests/doc_parity_test.rs\n\trust/crates/keel/tests/eval_test.rs\n\nno changes added to commit (use \"git add\" and/or \"git commit -a\")\n",
     },
@@ -343,6 +507,7 @@ const EVAL_FIXTURES: &[EvalFixture] = &[
         command: &["rg", "TokenMeter", "--line-number"],
         expected_adapter: "search",
         exit_code: 0,
+        critical_evidence: &["token_meter.rs:15", "adapters/common.rs:9"],
         raw_stderr: "",
         raw_stdout: "rust/crates/keel/src/proxy/token_meter.rs:15:pub struct TokenMeter;\nrust/crates/keel/src/proxy/token_meter.rs:18:    pub fn count_text(text: &str) -> usize {\nrust/crates/keel/src/proxy/token_meter.rs:24:    pub fn count_bytes(bytes: &[u8]) -> usize {\nrust/crates/keel/src/adapters/common.rs:9:use crate::proxy::token_meter::TokenMeter;\nrust/crates/keel/src/adapters/common.rs:23:    let estimated_tokens_after = TokenMeter::estimate(&stdout) + TokenMeter::estimate(&stderr);\nrust/crates/keel/src/proxy/run.rs:189:                estimated_tokens_before: TokenMeter::estimate_bytes(&result.stdout)\nrust/crates/keel/src/proxy/adapter.rs:3:use crate::proxy::token_meter::TokenMeter;\nrust/crates/keel/src/utility/eval.rs:30:use crate::proxy::token_meter::TokenMeter;\nrust/crates/keel/src/utility/eval.rs:97:        let tokens_raw = TokenMeter::count_bytes(stdout) + TokenMeter::count_bytes(stderr);\nrust/crates/keel/src/utility/gain.rs:142:    let before = TokenMeter::count_text(&raw);\n",
     },
@@ -351,6 +516,7 @@ const EVAL_FIXTURES: &[EvalFixture] = &[
         command: &["cargo", "clippy"],
         expected_adapter: "lint",
         exit_code: 0,
+        critical_evidence: &["unused variable: `missing`", "generated 2 warnings"],
         raw_stderr: "warning: unused variable: `missing`\n  --> tests/doc_parity_test.rs:88:9\n   |\n88 |     let missing: Vec<&String> = manifest_skills(&repo_root)\n   |         ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_missing`\n   |\n   = note: `#[warn(unused_variables)]` on by default\n\nwarning: this expression creates a reference which is immediately dereferenced by the compiler\n  --> src/utility/eval.rs:120:33\n   |\n   = note: `#[warn(clippy::needless_borrow)]` on by default\n\nwarning: `keel` (bin) generated 2 warnings\n    Finished dev profile in 3.37s\n",
         raw_stdout: "",
     },
@@ -359,6 +525,7 @@ const EVAL_FIXTURES: &[EvalFixture] = &[
         command: &["npm", "install"],
         expected_adapter: "build",
         exit_code: 0,
+        critical_evidence: &["added 1423 packages", "12 vulnerabilities"],
         raw_stderr: "npm warn deprecated inflight@1.0.6: This module is not supported\nnpm warn deprecated glob@7.2.3: Glob versions prior to v9 are no longer supported\n",
         raw_stdout: "added 1423 packages, and audited 1424 packages in 38s\n\n201 packages are looking for funding\n  run `npm fund` for details\n\n12 vulnerabilities (4 moderate, 6 high, 2 critical)\n\nTo address all issues possible, run:\n  npm audit fix\n\nSome issues need review, and may require choosing\na different dependency.\n\nRun `npm audit` for details.\n",
     },
@@ -367,6 +534,7 @@ const EVAL_FIXTURES: &[EvalFixture] = &[
         command: &["kubectl", "get", "pods"],
         expected_adapter: "containers",
         exit_code: 0,
+        critical_evidence: &["auth-service", "redis-primary-0"],
         raw_stderr: "",
         raw_stdout: "NAME                                READY   STATUS    RESTARTS   AGE\napi-gateway-7d9f8c6b5-2xk4l         1/1     Running   0          4d\napi-gateway-7d9f8c6b5-9wp2m         1/1     Running   0          4d\nauth-service-5c7b9d4f8-jk3n2        1/1     Running   2          12d\nauth-service-5c7b9d4f8-mn8q1        1/1     Running   0          12d\nworker-queue-6f8d9c7b4-pq5r3        1/1     Running   0          2d\nworker-queue-6f8d9c7b4-st6u7        1/1     Running   1          2d\nredis-primary-0                     1/1     Running   0          30d\npostgres-primary-0                  1/1     Running   0          30d\nmetrics-collector-8d7f6c5b9-vw2x4   1/1     Running   0          7d\ningress-nginx-controller-abc123     1/1     Running   0          30d\n",
     },
@@ -547,5 +715,65 @@ mod tests {
                 case.tokens_compact
             );
         }
+    }
+
+    /// Reliability floor: the plan requires that critical failure information
+    /// survives reduction. Failure identity and the failing test name are the
+    /// evidence a model needs to self-correct, so their loss is a regression
+    /// even when the token saving looks better.
+    #[test]
+    fn critical_failure_evidence_survives_reduction() {
+        let report = run_compaction_eval();
+        assert!(
+            report.failure_cases >= 1,
+            "the corpus must exercise at least one failure path"
+        );
+        assert_eq!(
+            report.failure_evidence_retained, report.failure_evidence_total,
+            "failure-path evidence retention regressed: {}/{} entries survived",
+            report.failure_evidence_retained, report.failure_evidence_total
+        );
+        assert!(
+            report.failure_evidence_retention_pct() >= 100.0,
+            "failure evidence retention must stay at 100%; measured {:.2}%",
+            report.failure_evidence_retention_pct()
+        );
+    }
+
+    /// Every case must let a reader decide the outcome from the visible text
+    /// alone. A case that hides pass/fail forces a raw-artifact round trip.
+    #[test]
+    fn every_case_keeps_its_outcome_visible() {
+        for case in &run_compaction_eval().cases {
+            assert!(
+                case.outcome_visible,
+                "fixture {} hid the command outcome from the visible result",
+                case.name
+            );
+        }
+    }
+
+    /// The reported reacquisition rate must agree with the per-case booleans it
+    /// is derived from, so the headline number cannot drift from the evidence.
+    #[test]
+    fn reacquisition_rate_matches_per_case_measurements() {
+        let report = run_compaction_eval();
+        let observed = report
+            .cases
+            .iter()
+            .filter(|case| case.reacquisition_required)
+            .count();
+        assert_eq!(observed, report.cases_requiring_reacquisition);
+        let expected_pct = (observed as f64 / report.cases.len() as f64) * 100.0;
+        assert!(
+            (report.reacquisition_rate_pct() - expected_pct).abs() < 0.005,
+            "reacquisition rate {:.2} disagrees with {observed}/{} cases",
+            report.reacquisition_rate_pct(),
+            report.cases.len()
+        );
+        let retained: usize = report.cases.iter().map(|case| case.evidence_retained).sum();
+        assert_eq!(retained, report.total_evidence_retained);
+        let total: usize = report.cases.iter().map(|case| case.evidence_total).sum();
+        assert_eq!(total, report.total_evidence);
     }
 }
