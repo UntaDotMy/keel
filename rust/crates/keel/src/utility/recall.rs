@@ -2424,6 +2424,7 @@ mod tests {
         let claude_home = temporary_directory.join("claude-home");
         fs::create_dir_all(&claude_home).expect("create claude home");
         let previous_override = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
+        let _home_precedence = crate::test_support::HomePrecedenceGuard::clear_keel_home();
         std::env::set_var("CLAUDE_TARGET_OVERRIDE", &claude_home);
         body(&claude_home);
         if let Some(previous_value) = previous_override {

@@ -205,10 +205,16 @@ change can revisit it with the same evidence.
    interoperates with Keel and a modern `2026-07-28` client does not. Becoming
    dual-era is a scoped feature, not a defect fix; it is recorded as verified
    research `CLM-007` in the plan evidence.
-2. **The fixed-context ledger measures the complete catalog, not the emitted handshake.**
-   `mcp.tools_list.catalog` reports 1240 tokens against a ratified 1364 budget, while the
-   default handshake a client actually receives measures 671 tokens. Both numbers are now
-   labelled for what they measure. Changing the ratified budget is a product decision.
+   Keel does now emit the modern *result* fields (`resultType` on every result and
+   `ttlMs`/`cacheScope` on `tools/list`), so a peer that reads those fields sees the
+   shape it expects. That narrows the gap but does not close it: era membership is
+   decided by the handshake and per-request versioning, neither of which keel has.
+2. **The fixed-context ledger now reports the emitted handshake separately.**
+   `mcp.tools_list.handshake` measures the dispatcher's own default response (687
+   tokens against the packer's 1200-token hard limit), and `mcp.tools_list.catalog`
+   keeps the complete-catalog cost (1240 against its ratified 1364) as its own
+   labelled row. The two are no longer conflated. Changing the ratified catalog
+   budget remains a product decision.
 3. **`record_skill_outcome` has no production caller**, so the historical-success scoring
    input returns its neutral prior until an outcome source exists.
 4. **The skill benchmark treats every positive fixture as needing its bundled resources**,

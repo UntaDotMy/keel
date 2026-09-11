@@ -406,6 +406,7 @@ mod tests {
         }
 
         let root = crate::test_support::unique_temp_dir("keel-runner-raw-integrity");
+        let _home_precedence = crate::test_support::HomePrecedenceGuard::clear_keel_home();
         std::env::set_var("CLAUDE_TARGET_OVERRIDE", root.join("home"));
         std::env::set_var("CLAUDE_SKILLS_HOOK", "test");
         std::env::set_var("CLAUDE_CODE_SESSION_ID", "runner-session-a");

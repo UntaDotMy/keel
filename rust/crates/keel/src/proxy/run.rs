@@ -1382,6 +1382,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&claude_home);
         let _ = std::fs::remove_dir_all(&recovery_dir);
         std::fs::create_dir_all(&claude_home).expect("create isolated claude home");
+        let _home_precedence = crate::test_support::HomePrecedenceGuard::clear_keel_home();
         std::env::set_var("CLAUDE_TARGET_OVERRIDE", &claude_home);
 
         let run_case = |flag: &str, prefix: &str| -> serde_json::Value {
@@ -1517,6 +1518,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&claude_home);
         std::fs::create_dir_all(&claude_home).expect("create test claude home");
         let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
+        let _home_precedence = crate::test_support::HomePrecedenceGuard::clear_keel_home();
         std::env::set_var("CLAUDE_TARGET_OVERRIDE", &claude_home);
 
         let recovery_dir = std::env::temp_dir().join(format!(
@@ -1680,6 +1682,7 @@ mod tests {
         let workspace = root.join("workspace");
         let recovery = root.join("raw");
         std::fs::create_dir_all(&workspace).unwrap();
+        let _home_precedence = crate::test_support::HomePrecedenceGuard::clear_keel_home();
         std::env::set_var("CLAUDE_TARGET_OVERRIDE", &home);
         std::env::set_current_dir(&workspace).unwrap();
 

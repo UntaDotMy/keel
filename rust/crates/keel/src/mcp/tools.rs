@@ -303,10 +303,13 @@ pub(crate) fn handle_tools_list_for_profile_params_with_context(
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    // Preserve complete-profile compatibility when it fits; paginate only when
-    // the emitted catalog exceeds its hard page budget.
-    if spec_default && measure_tools_list_response(&catalog) <= budget {
-        return Ok(catalog);
+    // Preserve full-profile compatibility when it fits, and paginate when the
+    // catalog (including required protocol fields) exceeds its hard page budget.
+    if spec_default {
+        let page = tools_list_page(&all_tools, None);
+        if measure_tools_list_response(&page) <= budget {
+            return Ok(page);
+        }
     }
     pack_catalog_page(
         profile,
@@ -435,8 +438,27 @@ pub(crate) fn measure_tools_list_response(payload: &Value) -> usize {
         .unwrap_or(usize::MAX)
 }
 
+/// The tool catalog is fixed for the process lifetime, so a page stays fresh for
+/// as long as the cursor walk it belongs to is valid: the cursor TTL is the
+/// honest bound, and deriving it keeps one TTL notion in the system.
+fn tools_list_cache_ttl_ms() -> u64 {
+    mcp_cursor_ttl_seconds().saturating_mul(1_000)
+}
+
+/// `tools/list` is identical for every caller; keel exposes no per-caller tool
+/// filtering, so the page holds no caller-specific data and is safe to share.
+const TOOLS_LIST_CACHE_SCOPE: &str = "public";
+
+/// The one owner of the `tools/list` result shape. Every return path builds its
+/// page here, so the required protocol fields are inside the measurement the
+/// packer takes and can never be appended after budgeting.
 fn tools_list_page(tools: &[Value], next_cursor: Option<&str>) -> Value {
-    let mut page = json!({ "tools": tools });
+    let mut page = json!({
+        "resultType": super::MCP_RESULT_TYPE_COMPLETE,
+        "tools": tools,
+        "ttlMs": tools_list_cache_ttl_ms(),
+        "cacheScope": TOOLS_LIST_CACHE_SCOPE,
+    });
     if let Some(cursor) = next_cursor {
         page["nextCursor"] = Value::String(cursor.to_string());
     }
@@ -1403,42 +1425,44 @@ fn handle_tools_call_cancellable_with_context_and_executor(
         },
     );
 
-    match outcome {
+    // §3.2: `resultType` is required on every result. Stamped once here, on the
+    // single tail of this function, so no arm above can return a result without it.
+    Ok(super::mark_result_complete(match outcome {
         Ok(text) => {
             match project_mcp_context(&name, &text, ContextSource::McpTool, &request_context) {
-                Ok(projection) => Ok(json!({
+                Ok(projection) => json!({
                     "content": [
                         { "type": "text", "text": truncate_mcp_text(&projection.summary) }
                     ],
                     "isError": false,
                     "context": projection.metadata(),
-                })),
-                Err(message) => Ok(json!({
+                }),
+                Err(message) => json!({
                     "content": [
                         { "type": "text", "text": message }
                     ],
                     "isError": true,
-                })),
+                }),
             }
         }
         Err(message) => {
             match project_mcp_context(&name, &message, ContextSource::Error, &request_context) {
-                Ok(projection) => Ok(json!({
+                Ok(projection) => json!({
                     "content": [
                         { "type": "text", "text": truncate_mcp_text(&projection.summary) }
                     ],
                     "isError": true,
                     "context": projection.metadata(),
-                })),
-                Err(firewall_error) => Ok(json!({
+                }),
+                Err(firewall_error) => json!({
                     "content": [
                         { "type": "text", "text": firewall_error }
                     ],
                     "isError": true,
-                })),
+                }),
             }
         }
-    }
+    }))
 }
 
 /// Apply the same model-boundary policy to every MCP text result, including
@@ -6819,6 +6843,101 @@ mod tests {
         match previous {
             Some(value) => std::env::set_var("KEEL_MCP_PAGE_TOKENS", value),
             None => std::env::remove_var("KEEL_MCP_PAGE_TOKENS"),
+        }
+    }
+
+    /// §3.2 / §13: `tools/list` results must carry the revision's required fields,
+    /// and they must be inside the payload the packer measured. A field appended
+    /// after budgeting would let a page exceed its own hard limit.
+    #[test]
+    fn tools_list_pages_carry_the_required_protocol_fields() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // why: an absent override is the normal case; only its presence matters.
+        let previous = std::env::var("KEEL_MCP_PAGE_TOKENS").ok();
+        std::env::set_var("KEEL_MCP_PAGE_TOKENS", "600");
+
+        let tools = synthetic_paging_tools("protocol-tool");
+        let context = crate::mcp::McpRequestContext::authoritative(Some("protocol-session"));
+        let mut cursor: Option<String> = None;
+        let mut pages = 0usize;
+        let mut scopes = std::collections::BTreeSet::new();
+
+        for _ in 0..8 {
+            let page = pack_catalog_page(
+                crate::mcp::McpCatalogProfile::Tiered,
+                2,
+                600,
+                cursor.as_deref(),
+                &context,
+                false,
+                false,
+                tools.clone(),
+            )
+            .expect("a valid budget must produce a page");
+            pages += 1;
+
+            assert_eq!(
+                page["resultType"], "complete",
+                "every tools/list result must declare its result type"
+            );
+            let ttl = page["ttlMs"]
+                .as_u64()
+                .expect("ttlMs is required and must be a non-negative integer");
+            assert_eq!(
+                ttl,
+                mcp_cursor_ttl_seconds() * 1_000,
+                "a page is fresh exactly as long as the walk it belongs to is valid"
+            );
+            let scope = page["cacheScope"].as_str().expect("cacheScope is required");
+            assert!(
+                scope == "public" || scope == "private",
+                "cacheScope must be public or private, got {scope:?}"
+            );
+            scopes.insert(scope.to_string());
+
+            // The required fields are inside the measured payload, not bolted on
+            // after the budget decision.
+            assert!(
+                measure_tools_list_response(&page) <= 600,
+                "a page carrying the required fields still exceeded its budget"
+            );
+
+            match page["nextCursor"].as_str() {
+                Some(value) => cursor = Some(value.to_string()),
+                None => break,
+            }
+        }
+
+        assert!(pages > 1, "the fixture must span several pages");
+        assert_eq!(
+            scopes.len(),
+            1,
+            "all pages of one list request must share one cacheScope"
+        );
+
+        match previous {
+            Some(value) => std::env::set_var("KEEL_MCP_PAGE_TOKENS", value),
+            None => std::env::remove_var("KEEL_MCP_PAGE_TOKENS"),
+        }
+    }
+
+    /// The cached paths: a catalog that fits stays a single page, and the default
+    /// handshake still carries the required fields on the no-params route.
+    #[test]
+    fn default_handshake_carries_the_required_protocol_fields() {
+        for profile in [
+            crate::mcp::McpCatalogProfile::Tiered,
+            crate::mcp::McpCatalogProfile::Full,
+        ] {
+            let context = crate::mcp::McpRequestContext::authoritative(None);
+            let page =
+                handle_tools_list_for_profile_params_with_context(profile, &Value::Null, &context)
+                    .expect("the default handshake must produce a page");
+            assert_eq!(page["resultType"], "complete", "{profile:?}");
+            assert!(page["ttlMs"].as_u64().is_some(), "{profile:?}");
+            assert_eq!(page["cacheScope"], "public", "{profile:?}");
         }
     }
 

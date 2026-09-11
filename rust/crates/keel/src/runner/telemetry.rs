@@ -360,6 +360,7 @@ mod tests {
 
         let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
         let previous_effort = std::env::var(EFFORT_ENV_VAR).ok();
+        let _home_precedence = crate::test_support::HomePrecedenceGuard::clear_keel_home();
         std::env::set_var("CLAUDE_TARGET_OVERRIDE", &root);
         std::env::remove_var(EFFORT_ENV_VAR);
 

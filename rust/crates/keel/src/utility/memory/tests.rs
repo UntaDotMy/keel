@@ -98,6 +98,7 @@ fn memory_scope_defaults_to_global_workspace_reference_map() {
     fs::create_dir_all(&workspace_root).expect("create workspace");
     fs::write(workspace_root.join("README.md"), "# Workspace\n").expect("write readme");
     let previous_override = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
+    let _home_precedence = crate::test_support::HomePrecedenceGuard::clear_keel_home();
     std::env::set_var("CLAUDE_TARGET_OVERRIDE", &claude_home);
 
     let mut stdout: Vec<u8> = Vec::new();

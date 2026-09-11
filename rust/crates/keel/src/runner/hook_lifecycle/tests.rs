@@ -1317,6 +1317,7 @@ fn iron_law_gate_denies_without_evidence_and_does_not_ack_on_deny() {
     let claude_home = temp_brief_gate_home("iron-law-deny");
     let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
     let previous_mode = std::env::var(IRON_LAW_GATE_ENV_VAR).ok();
+    let _home_precedence = crate::test_support::HomePrecedenceGuard::clear_keel_home();
     std::env::set_var("CLAUDE_TARGET_OVERRIDE", &claude_home);
     // Explicit Strict: this test exercises Strict behavior (the gate default is
     // Strict, asserted in iron_law_gate_mode_defaults_to_strict).
@@ -1990,8 +1991,19 @@ fn brief_written_this_session_logic() {
     let _ = std::fs::remove_dir_all(&stale_home);
 }
 
+/// Neutralize the global state every `PostToolBatch` gate test must not inherit:
+/// the newer gate switches, and home precedence.
+///
+/// Clearing `KEEL_HOME` is part of the job, not a separate concern. These tests
+/// drive home resolution through `CLAUDE_TARGET_OVERRIDE`, which `KEEL_HOME`
+/// outranks; a leaked `KEEL_HOME` makes the gate resolve a home the test never
+/// seeded, so it reports nothing pending and the assertion fails for a reason
+/// that has nothing to do with the gate. `ENV_LOCK` cannot prevent that alone,
+/// because the test never writes `KEEL_HOME`, only reading whatever is set.
 struct NewGatesSilenced {
     previous: Vec<(&'static str, Option<String>)>,
+    /// Held only for its `Drop`; restoring `KEEL_HOME` is the whole point.
+    _home_precedence: crate::test_support::HomePrecedenceGuard,
 }
 
 impl NewGatesSilenced {
@@ -2009,7 +2021,10 @@ impl NewGatesSilenced {
                 (var, prior)
             })
             .collect();
-        Self { previous }
+        Self {
+            previous,
+            _home_precedence: crate::test_support::HomePrecedenceGuard::clear_keel_home(),
+        }
     }
 }
 
@@ -2021,6 +2036,7 @@ impl Drop for NewGatesSilenced {
                 None => std::env::remove_var(var),
             }
         }
+        // `home_precedence` restores `KEEL_HOME` through its own Drop.
     }
 }
 
@@ -2753,6 +2769,7 @@ fn memory_gate_nudges_when_no_memory_saved_then_satisfied_off_and_capped() {
     let previous_memory = std::env::var(MEMORY_GATE_ENV_VAR).ok();
     let previous_research = std::env::var(RESEARCH_GATE_ENV_VAR).ok();
     let previous_completeness = std::env::var(COMPLETENESS_GATE_ENV_VAR).ok();
+    let _home_precedence = crate::test_support::HomePrecedenceGuard::clear_keel_home();
     std::env::set_var("CLAUDE_TARGET_OVERRIDE", &claude_home);
     std::env::set_var(REVIEW_GATE_ENV_VAR, "off");
     std::env::set_var(BRIEF_GATE_ENV_VAR, "off");
@@ -2858,6 +2875,9 @@ fn learned_skill_gate_nudges_when_pending_then_silent_off_and_capped() {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
 
     let claude_home = temp_brief_gate_home("e2e-learned");
+    // KEEL_HOME outranks CLAUDE_TARGET_OVERRIDE, so clear it or this test can
+    // resolve a home it never seeded and silently find no pending skill.
+    let _home_precedence = crate::test_support::HomePrecedenceGuard::clear_keel_home();
     let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
     let previous_review = std::env::var(REVIEW_GATE_ENV_VAR).ok();
     let previous_brief = std::env::var(BRIEF_GATE_ENV_VAR).ok();
@@ -3262,6 +3282,7 @@ fn workspace_memory_digest_pushes_real_content_and_stays_bounded() {
     std::fs::create_dir_all(&workspace).unwrap();
     let previous_cwd = std::env::current_dir().ok();
     let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
+    let _home_precedence = crate::test_support::HomePrecedenceGuard::clear_keel_home();
     std::env::set_var("CLAUDE_TARGET_OVERRIDE", &claude_home);
     std::env::set_current_dir(&workspace).unwrap();
 
@@ -3526,6 +3547,7 @@ fn session_start_dispatch_self_heals_drifted_mcp_registration() {
 
     let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
     let previous_self_heal = std::env::var(MCP_SELF_HEAL_ENV_VAR).ok();
+    let _home_precedence = crate::test_support::HomePrecedenceGuard::clear_keel_home();
     std::env::set_var("CLAUDE_TARGET_OVERRIDE", &claude_home);
     std::env::remove_var(MCP_SELF_HEAL_ENV_VAR); // default → on
 
@@ -3655,6 +3677,7 @@ fn session_end_dispatch_auto_captures_work_summary_to_memory() {
     // SessionEnd's lifecycle path also runs learning; keep it off so the test
     // is scoped to the capture behavior only.
     let previous_learning = std::env::var("CLAUDE_SKILLS_LEARNING").ok();
+    let _home_precedence = crate::test_support::HomePrecedenceGuard::clear_keel_home();
     std::env::set_var("CLAUDE_TARGET_OVERRIDE", &claude_home);
     std::env::remove_var(SESSION_CAPTURE_ENV_VAR); // default → on
     std::env::set_var("CLAUDE_SKILLS_LEARNING", "off");

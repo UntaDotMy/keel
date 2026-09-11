@@ -2118,11 +2118,36 @@ pub(super) fn recall_status_payload() -> Result<Value, String> {
     Ok(payload)
 }
 
+/// `resultType` value for an ordinary result. Revision `2026-07-28` requires the
+/// field on every result; clients **MUST** treat a missing field from an
+/// earlier-revision server as `complete`, so omitting it would be a defect on
+/// the server side rather than a compatibility choice.
+pub(super) const MCP_RESULT_TYPE_COMPLETE: &str = "complete";
+
+/// Stamp the required `resultType` onto an object result. Applied at the single
+/// envelope owner so no method can forget it. Re-stamping a result that already
+/// carries the field (a measured `tools/list` page, a `tools/call` envelope) is
+/// idempotent, so this cannot widen a payload the budget already measured.
+pub(super) fn mark_result_complete(result: Value) -> Value {
+    match result {
+        Value::Object(mut object) => {
+            object.insert(
+                "resultType".to_string(),
+                Value::String(MCP_RESULT_TYPE_COMPLETE.to_string()),
+            );
+            Value::Object(object)
+        }
+        // MCP results are objects; anything else keeps its shape rather than
+        // gaining a field the schema does not define for it.
+        other => other,
+    }
+}
+
 pub(super) fn success_response(id: Value, result: Value) -> Value {
     json!({
         "jsonrpc": "2.0",
         "id": id,
-        "result": result,
+        "result": mark_result_complete(result),
     })
 }
 
@@ -2291,8 +2316,10 @@ mod tests {
         assert!(dispatch(&request).is_none());
     }
 
+    /// Revision `2026-07-28` requires `resultType` on every result, so a ping
+    /// result is no longer the empty object it was under earlier revisions.
     #[test]
-    fn ping_returns_empty_object_result() {
+    fn ping_result_carries_the_required_result_type() {
         let request = json!({
             "jsonrpc": "2.0",
             "id": "ping-1",
@@ -2300,7 +2327,25 @@ mod tests {
         });
         let response = dispatch(&request).expect("response present");
         assert_eq!(response["id"], json!("ping-1"));
-        assert_eq!(response["result"], json!({}));
+        assert_eq!(response["result"], json!({"resultType": "complete"}));
+    }
+
+    /// The stamp is applied at the single envelope owner, so a result already
+    /// carrying it is not widened or reordered by re-stamping.
+    #[test]
+    fn marking_a_result_complete_is_idempotent() {
+        let once = mark_result_complete(json!({"tools": [], "ttlMs": 900000}));
+        let twice = mark_result_complete(once.clone());
+        assert_eq!(once, twice);
+        assert_eq!(
+            serde_json::to_string(&once).expect("serialize"),
+            serde_json::to_string(&twice).expect("serialize"),
+            "re-stamping must not change the serialized payload"
+        );
+        assert_eq!(
+            mark_result_complete(json!({"resultType": "complete"}))["resultType"],
+            "complete"
+        );
     }
 
     #[test]
@@ -2591,7 +2636,10 @@ mod tests {
         assert_eq!(exit, 0);
         let rendered = String::from_utf8_lossy(&output);
         assert!(rendered.contains("\"id\":1"), "rendered: {rendered}");
-        assert!(rendered.contains("\"result\":{}"), "rendered: {rendered}");
+        assert!(
+            rendered.contains("\"result\":{\"resultType\":\"complete\"}"),
+            "rendered: {rendered}"
+        );
         assert!(rendered.ends_with('\n'), "rendered: {rendered}");
     }
 
@@ -2610,9 +2658,9 @@ mod tests {
             "id must be null as per request"
         );
         assert_eq!(
-            response["result"],
-            json!({}),
-            "ping must return empty object"
+            response["result"]["resultType"],
+            json!("complete"),
+            "every result must carry the required resultType"
         );
     }
 

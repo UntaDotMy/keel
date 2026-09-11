@@ -543,6 +543,11 @@ fn brownfield_gate_flags_renamed_source_using_destination_path() {
 
 #[test]
 fn completeness_touched_sources_includes_working_tree_when_range_is_empty() {
+    // Reads process-global CWD under lock to prevent non-repo temp directory
+    // changes in sibling tests from making git calls fail.
+    let _guard = crate::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let root = std::env::current_dir().expect("cwd");
     let from_head = changed_sources_including_added(&root, &["HEAD".to_string()]);
     let from_empty_range = completeness_touched_sources(&root, &["HEAD...HEAD".to_string()]);
@@ -588,6 +593,7 @@ fn completeness_scan_satisfies_after_marker() {
             .unwrap_or(0)
     ));
     let previous = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
+    let _home_precedence = crate::test_support::HomePrecedenceGuard::clear_keel_home();
     std::env::set_var("CLAUDE_TARGET_OVERRIDE", &home);
     let workspace = home.join("ws");
     std::fs::create_dir_all(&workspace).expect("ws");
@@ -624,6 +630,7 @@ fn completeness_cover_requires_recorded_changed_set() {
             .unwrap_or(0)
     ));
     let previous = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
+    let _home_precedence = crate::test_support::HomePrecedenceGuard::clear_keel_home();
     std::env::set_var("CLAUDE_TARGET_OVERRIDE", &home);
     let workspace = home.join("ws");
     std::fs::create_dir_all(&workspace).expect("ws");
