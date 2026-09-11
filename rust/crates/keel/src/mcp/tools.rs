@@ -6280,6 +6280,157 @@ mod tests {
         }
     }
 
+    /// §29 adversarial cursor cases. A cursor is bound to one catalog snapshot,
+    /// profile, budget, session, and workspace, and expires. Each binding must
+    /// reject independently, so a cursor cannot be replayed into another walk.
+    #[test]
+    fn catalog_cursors_reject_replay_expiry_and_foreign_identity() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous = std::env::var("KEEL_MCP_PAGE_TOKENS").ok();
+        std::env::set_var("KEEL_MCP_PAGE_TOKENS", "600");
+
+        let session = crate::mcp::McpRequestContext::authoritative(Some("cursor-session-a"));
+        let foreign_session =
+            crate::mcp::McpRequestContext::authoritative(Some("cursor-session-b"));
+
+        let tools: Vec<Value> = (0..40)
+            .map(|index| {
+                json!({
+                    "name": format!("cursor-tool-{index:03}"),
+                    "description": "Tool used to exercise cursor binding across pages.",
+                    "inputSchema": { "type": "object", "properties": {} }
+                })
+            })
+            .collect();
+
+        let first = pack_catalog_page(
+            crate::mcp::McpCatalogProfile::Tiered,
+            2,
+            600,
+            None,
+            &session,
+            false,
+            false,
+            tools.clone(),
+        )
+        .expect("first page");
+        let cursor = first["nextCursor"]
+            .as_str()
+            .expect("a 40-tool catalog must page")
+            .to_string();
+
+        // A replayed cursor must continue the same walk deterministically.
+        let replay_a = pack_catalog_page(
+            crate::mcp::McpCatalogProfile::Tiered,
+            2,
+            600,
+            Some(&cursor),
+            &session,
+            false,
+            false,
+            tools.clone(),
+        )
+        .expect("a replayed cursor is valid for the same snapshot");
+        let replay_b = pack_catalog_page(
+            crate::mcp::McpCatalogProfile::Tiered,
+            2,
+            600,
+            Some(&cursor),
+            &session,
+            false,
+            false,
+            tools.clone(),
+        )
+        .expect("replay stays valid");
+        assert_eq!(
+            serde_json::to_string(&replay_a).expect("serialize"),
+            serde_json::to_string(&replay_b).expect("serialize"),
+            "the same cursor over the same snapshot must be deterministic"
+        );
+        assert_eq!(
+            replay_a["tools"][0]["name"], replay_b["tools"][0]["name"],
+            "a replayed cursor must not reshuffle the page"
+        );
+
+        // A cursor from another session must not be accepted.
+        let foreign = pack_catalog_page(
+            crate::mcp::McpCatalogProfile::Tiered,
+            2,
+            600,
+            Some(&cursor),
+            &foreign_session,
+            false,
+            false,
+            tools.clone(),
+        )
+        .expect_err("a cursor from another session must be rejected");
+        assert!(
+            foreign.contains("stale or invalid"),
+            "foreign-session rejection must name the cause: {foreign}"
+        );
+
+        // A catalog that changed after the cursor was issued must not silently
+        // reshuffle the walk: the snapshot fingerprint no longer matches.
+        let mut mutated = tools.clone();
+        mutated.push(json!({
+            "name": "cursor-tool-added-later",
+            "description": "Added after the cursor was issued.",
+            "inputSchema": { "type": "object", "properties": {} }
+        }));
+        let mutated_result = pack_catalog_page(
+            crate::mcp::McpCatalogProfile::Tiered,
+            2,
+            600,
+            Some(&cursor),
+            &session,
+            false,
+            false,
+            mutated,
+        )
+        .expect_err("a cursor must not apply to a mutated catalog");
+        assert!(
+            mutated_result.contains("stale or invalid"),
+            "catalog-mutation rejection must name the cause: {mutated_result}"
+        );
+
+        // An expired cursor must be rejected even with matching identity.
+        let fingerprint =
+            catalog_snapshot_fingerprint(crate::mcp::McpCatalogProfile::Tiered, &tools, 2, 600);
+        let claims = peek_catalog_cursor(&cursor).expect("cursor claims");
+        let expired = encode_catalog_cursor(
+            claims.offset,
+            crate::mcp::McpCatalogProfile::Tiered,
+            2,
+            600,
+            &fingerprint,
+            &session,
+            now_unix_seconds().saturating_sub(1),
+            false,
+        );
+        let expired_result = pack_catalog_page(
+            crate::mcp::McpCatalogProfile::Tiered,
+            2,
+            600,
+            Some(&expired),
+            &session,
+            false,
+            false,
+            tools,
+        )
+        .expect_err("an expired cursor must be rejected");
+        assert!(
+            expired_result.contains("expired"),
+            "expiry rejection must name the cause: {expired_result}"
+        );
+
+        match previous {
+            Some(value) => std::env::set_var("KEEL_MCP_PAGE_TOKENS", value),
+            None => std::env::remove_var("KEEL_MCP_PAGE_TOKENS"),
+        }
+    }
+
     #[test]
     fn tools_list_low_budgets_fail_closed_or_emit_valid_bounded_pages() {
         let _env_guard = crate::test_support::ENV_LOCK
