@@ -8,7 +8,7 @@ use crate::proxy::token_meter::TokenMeter;
 
 pub(crate) const TOKENIZER: &str = "o200k_base";
 pub(crate) const REPRODUCTION_COMMAND: &str = "keel stats --json --workspace-root <repo>";
-pub(crate) const SURFACE_COUNT: usize = 19;
+pub(crate) const SURFACE_COUNT: usize = 20;
 
 pub(crate) const SIMPLE_PROMPT_FIXTURE: &str = "hello";
 pub(crate) const CODE_CHANGE_PROMPT_FIXTURE: &str = "fix the bug";
@@ -85,6 +85,10 @@ fn ratified_budget(surface: &str) -> usize {
     // Ratified from the first hermetic Phase 1 runtime measurement as
     // ceil(actual_tokens * 1.10). Actual values remain runtime-computed.
     match surface {
+        // The surface a client actually receives on the default handshake: its
+        // budget is the packer's own hard limit, not a derived headroom number.
+        "mcp.tools_list.handshake" => crate::proxy::context::DEFAULT_MAX_TOOL_CATALOG_TOKENS,
+        // The complete catalog at full schema, labelled separately from the above.
         "mcp.tools_list.catalog" => 1_364,
         "hook.session_start.bootstrap" => 503,
         "hook.user_prompt_submit.simple" => 113,
@@ -147,6 +151,12 @@ pub(crate) fn collect(workspace_root: &Path) -> FixedContextLedger {
     };
 
     let mut entries = vec![
+        FixedContextEntry {
+            surface: "mcp.tools_list.handshake",
+            actual_tokens: mcp.handshake_tokens,
+            budget_tokens: ratified_budget("mcp.tools_list.handshake"),
+            source_available: true,
+        },
         FixedContextEntry {
             surface: "mcp.tools_list.catalog",
             actual_tokens: mcp.catalog_tokens,
@@ -224,6 +234,42 @@ pub(crate) fn collect(workspace_root: &Path) -> FixedContextLedger {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The ledger must report the surface a client actually receives. The
+    /// handshake entry is derived from the dispatcher's own default response, so
+    /// it can never be the complete-catalog cost presented as the handshake.
+    #[test]
+    fn mcp_ledger_reports_the_emitted_handshake_not_a_nearby_representation() {
+        let profile = crate::mcp::McpCatalogProfile::from_env();
+        let snapshot = crate::mcp::tools_list_context_snapshot();
+        let measured = crate::mcp::measured_handshake_tokens(profile);
+        assert_eq!(
+            snapshot.handshake_tokens, measured,
+            "the ledger handshake number must be the dispatcher's own response"
+        );
+
+        // The two surfaces are distinct costs, and the handshake is the smaller:
+        // the complete catalog carries schemas the packed page does not emit.
+        assert!(
+            snapshot.handshake_tokens < snapshot.catalog_tokens,
+            "handshake {} should be below the complete catalog {}",
+            snapshot.handshake_tokens,
+            snapshot.catalog_tokens
+        );
+
+        let ledger = collect(std::path::Path::new("."));
+        for surface in ["mcp.tools_list.handshake", "mcp.tools_list.catalog"] {
+            let entry = ledger
+                .entries
+                .iter()
+                .find(|entry| entry.surface == surface)
+                .unwrap_or_else(|| panic!("{surface} must be in the ledger"));
+            assert!(
+                entry.actual_tokens <= entry.budget_tokens,
+                "{surface} is over its own budget: {entry:?}"
+            );
+        }
+    }
 
     #[test]
     fn budget_status_distinguishes_missing_and_exceeded_sources() {

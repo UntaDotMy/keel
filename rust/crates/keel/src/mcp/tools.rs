@@ -162,7 +162,59 @@ pub(crate) fn handle_tools_list_for_profile(profile: super::McpCatalogProfile) -
     slim_tools_list_for_wire(canonical_tools_list_for_profile(profile))
 }
 
-fn canonical_tools_list_for_profile(profile: super::McpCatalogProfile) -> Value {
+/// Everything the §31 diagnostics command prints, computed by the packer's own
+/// steps so the report cannot describe a page the server would not serve.
+pub(crate) struct DefaultHandshakeReport {
+    pub first_page_tokens: usize,
+    pub visible_tools: usize,
+    pub has_more: bool,
+    pub snapshot_fingerprint: String,
+    /// Names only: enough to compare two pages without reprinting schemas.
+    pub visible_tool_names: Vec<String>,
+}
+
+pub(crate) fn default_handshake_report(
+    profile: super::McpCatalogProfile,
+) -> Result<DefaultHandshakeReport, String> {
+    let context = super::McpRequestContext::authoritative(None);
+    let page = handle_tools_list_for_profile_params_with_context(profile, &Value::Null, &context)?;
+    // Reproduce the default request's snapshot: the same level-0-compacted
+    // catalog, so the fingerprint matches the cursor a client would receive.
+    let mut catalog = canonical_tools_list_for_profile(profile);
+    if let Some(tools) = catalog.get_mut("tools").and_then(Value::as_array_mut) {
+        *tools = tools
+            .iter()
+            .map(|tool| tool_representation(tool, 0))
+            .collect();
+    }
+    let all_tools = catalog
+        .get("tools")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    Ok(DefaultHandshakeReport {
+        first_page_tokens: measure_tools_list_response(&page),
+        visible_tools: page["tools"].as_array().map_or(0, Vec::len),
+        has_more: page["nextCursor"].is_string(),
+        visible_tool_names: page["tools"]
+            .as_array()
+            .map(|tools| {
+                tools
+                    .iter()
+                    .filter_map(|tool| tool["name"].as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        snapshot_fingerprint: catalog_snapshot_fingerprint(
+            profile,
+            &all_tools,
+            2,
+            mcp_tools_list_budget(profile),
+        ),
+    })
+}
+
+pub(crate) fn canonical_tools_list_for_profile(profile: super::McpCatalogProfile) -> Value {
     let mut catalog = tools_list_catalog();
     if profile == super::McpCatalogProfile::Tiered {
         if let Some(tools) = catalog.get_mut("tools").and_then(Value::as_array_mut) {
@@ -309,6 +361,9 @@ fn pack_catalog_page(
         Some(value) => peek_catalog_cursor(value)?.expires_at,
         None => now_unix_seconds().saturating_add(mcp_cursor_ttl_seconds()),
     };
+    // §34: measure candidates against a fixed deadline. Live deadlines differ only
+    // in digits, which tokenize differently and could pack a different page.
+    let packing_expiry = CATALOG_CURSOR_PACKING_EXPIRY;
     let mut page_tools = Vec::new();
     let mut offset = start;
     while offset < expected && page_tools.len() < max_items {
@@ -327,7 +382,7 @@ fn pack_catalog_page(
                     budget,
                     &fingerprint,
                     context,
-                    expiry,
+                    packing_expiry,
                     compact_default,
                 )
             });
@@ -351,29 +406,34 @@ fn pack_catalog_page(
         }
     }
 
-    let next_cursor = (offset < expected).then(|| {
-        encode_catalog_cursor(
-            offset,
-            profile,
-            level,
-            budget,
-            &fingerprint,
-            context,
-            expiry,
-            compact_default,
-        )
-    });
-    let page = tools_list_page(&page_tools, next_cursor.as_deref());
-    let measured = measure_tools_list_response(&page);
-    if measured > budget {
-        // Every candidate includes cursor overhead; retain a typed protocol error
-        // if a future serializer or envelope changes after packing.
-        return Err(format!(
-            "tools/list response exceeded its configured {budget}-token page budget after final recount ({measured})"
-        ));
+    // The real cursor can measure differently from the placeholder, so shrink
+    // rather than emit an over-budget response.
+    while !page_tools.is_empty() {
+        let cursor = (offset < expected).then(|| {
+            encode_catalog_cursor(
+                offset,
+                profile,
+                level,
+                budget,
+                &fingerprint,
+                context,
+                expiry,
+                compact_default,
+            )
+        });
+        let page = tools_list_page(&page_tools, cursor.as_deref());
+        if measure_tools_list_response(&page) <= budget {
+            debug_assert_eq!(page_tools.len(), offset.saturating_sub(start));
+            return Ok(page);
+        }
+        // Dropping the last tool keeps the walk contiguous: the cursor resumes.
+        page_tools.pop();
+        offset -= 1;
     }
-    debug_assert_eq!(page_tools.len(), offset.saturating_sub(start));
-    Ok(page)
+    // Unreachable for a valid budget; retained so a serializer change fails closed.
+    Err(format!(
+        "tools/list response exceeded its configured {budget}-token page budget after final recount"
+    ))
 }
 
 /// One authoritative exact measurement for the emitted `tools/list` response.
@@ -391,7 +451,7 @@ fn tools_list_page(tools: &[Value], next_cursor: Option<&str>) -> Value {
     page
 }
 
-fn mcp_tools_list_budget(profile: super::McpCatalogProfile) -> usize {
+pub(crate) fn mcp_tools_list_budget(profile: super::McpCatalogProfile) -> usize {
     let default = match profile {
         super::McpCatalogProfile::Tiered => crate::proxy::context::DEFAULT_MAX_TOOL_CATALOG_TOKENS,
         super::McpCatalogProfile::Full => crate::proxy::context::DEFAULT_MAX_DYNAMIC_TOKENS,
@@ -518,7 +578,7 @@ fn sort_tools_catalog(catalog: &mut Value) {
     }
 }
 
-fn catalog_snapshot_fingerprint(
+pub(crate) fn catalog_snapshot_fingerprint(
     profile: super::McpCatalogProfile,
     tools: &[Value],
     level: u64,
@@ -705,6 +765,11 @@ fn mcp_cursor_ttl_seconds() -> u64 {
         .map(|value| value.clamp(1, 86_400))
         .unwrap_or(900)
 }
+
+/// Placeholder deadline used when measuring a candidate page. A real deadline is
+/// a fixed-width 10-digit unix second, so this keeps the candidate the same width
+/// while removing the wall clock from the accept/reject decision (§34).
+const CATALOG_CURSOR_PACKING_EXPIRY: u64 = 9_999_999_999;
 
 fn tool_category(name: &str) -> &'static str {
     match name {
@@ -6584,6 +6649,166 @@ mod tests {
                 }
             }
         }
+        match previous {
+            Some(value) => std::env::set_var("KEEL_MCP_PAGE_TOKENS", value),
+            None => std::env::remove_var("KEEL_MCP_PAGE_TOKENS"),
+        }
+    }
+
+    /// §6.7 mandates this exact ladder. Each value must land on one of two
+    /// well-defined outcomes: valid bounded pages that traverse the whole catalog
+    /// without duplicates or omissions, or an explicit configuration error that
+    /// names its budget. The former catalog-over-budget failure must not return at
+    /// any value, including the exact size that produced it.
+    #[test]
+    fn tools_list_budget_ladder_holds_at_every_mandated_value() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // why: an absent override is the normal case; only its presence matters.
+        let previous = std::env::var("KEEL_MCP_PAGE_TOKENS").ok();
+
+        for budget in [50usize, 100, 200, 500, 1200, 1201, 1320, 1352, 1400, 2400] {
+            std::env::set_var("KEEL_MCP_PAGE_TOKENS", budget.to_string());
+            let mut cursor: Option<String> = None;
+            let mut names: Vec<String> = Vec::new();
+            let mut traversed = false;
+
+            for _ in 0..MCP_TOOL_NAMES.len() + 2 {
+                let mut params = json!({ "level": 2 });
+                if let Some(value) = &cursor {
+                    params["cursor"] = Value::String(value.clone());
+                }
+                let page = match handle_tools_list_for_profile_params(
+                    crate::mcp::McpCatalogProfile::Full,
+                    &params,
+                ) {
+                    Ok(page) => page,
+                    Err(error) => {
+                        assert!(
+                            !error.contains("catalog exceeds"),
+                            "budget {budget} reproduced the former failure: {error}"
+                        );
+                        assert!(
+                            error.contains("configured") || error.contains("minimum"),
+                            "budget {budget} failed without naming its budget: {error}"
+                        );
+                        break;
+                    }
+                };
+                let measured = measure_tools_list_response(&page);
+                assert!(
+                    measured <= budget,
+                    "budget {budget} emitted a {measured}-token page"
+                );
+                for tool in page["tools"].as_array().expect("tools array") {
+                    assert_eq!(
+                        tool["inputSchema"]["type"],
+                        json!("object"),
+                        "budget {budget} emitted a non-MCP tool shape"
+                    );
+                    names.push(tool["name"].as_str().expect("tool name").to_string());
+                }
+                match page["nextCursor"].as_str() {
+                    Some(value) => cursor = Some(value.to_string()),
+                    None => {
+                        traversed = true;
+                        break;
+                    }
+                }
+            }
+
+            if traversed {
+                let unique = names
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<std::collections::BTreeSet<_>>();
+                assert_eq!(
+                    unique.len(),
+                    names.len(),
+                    "budget {budget} duplicated a tool"
+                );
+                assert_eq!(
+                    unique.len(),
+                    MCP_TOOL_NAMES.len(),
+                    "budget {budget} omitted a tool"
+                );
+            }
+        }
+
+        match previous {
+            Some(value) => std::env::set_var("KEEL_MCP_PAGE_TOKENS", value),
+            None => std::env::remove_var("KEEL_MCP_PAGE_TOKENS"),
+        }
+    }
+
+    /// §34: the same catalog, profile, and budget must select the same page. The
+    /// emitted cursor carries a live deadline, so two walks that differ only in
+    /// that deadline must still pack the same tools. Driven through the real
+    /// packer, not a re-implementation of it.
+    #[test]
+    fn packing_selection_is_independent_of_wall_clock_deadline() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // why: an absent override is the normal case; only its presence matters.
+        let previous = std::env::var("KEEL_MCP_PAGE_TOKENS").ok();
+        std::env::set_var("KEEL_MCP_PAGE_TOKENS", "600");
+
+        let profile = crate::mcp::McpCatalogProfile::Tiered;
+        let tools = synthetic_paging_tools("clock-tool");
+        let context = crate::mcp::McpRequestContext::authoritative(Some("clock-session"));
+        let fingerprint = catalog_snapshot_fingerprint(profile, &tools, 2, 600);
+        let names = |page: &Value| {
+            page["tools"]
+                .as_array()
+                .expect("tools array")
+                .iter()
+                .filter_map(|tool| tool["name"].as_str().map(str::to_string))
+                .collect::<Vec<_>>()
+        };
+
+        // A fresh walk mints its own deadline.
+        let fresh = pack_catalog_page(profile, 2, 600, None, &context, false, false, tools.clone())
+            .expect("a valid budget must produce a page");
+
+        // The same walk resumed at offset 0 with a far-future deadline: identical
+        // catalog, identical start, only the clock differs.
+        let skewed_deadline = encode_catalog_cursor(
+            0,
+            profile,
+            2,
+            600,
+            &fingerprint,
+            &context,
+            now_unix_seconds().saturating_add(1_000_000),
+            false,
+        );
+        let skewed = pack_catalog_page(
+            profile,
+            2,
+            600,
+            Some(&skewed_deadline),
+            &context,
+            false,
+            false,
+            tools.clone(),
+        )
+        .expect("a valid budget must produce a page");
+
+        assert_eq!(
+            names(&fresh),
+            names(&skewed),
+            "the deadline changed which tools the page selects"
+        );
+        assert!(!names(&fresh).is_empty(), "the page must select tools");
+        for page in [&fresh, &skewed] {
+            assert!(
+                measure_tools_list_response(page) <= 600,
+                "an emitted page exceeded its hard budget"
+            );
+        }
+
         match previous {
             Some(value) => std::env::set_var("KEEL_MCP_PAGE_TOKENS", value),
             None => std::env::remove_var("KEEL_MCP_PAGE_TOKENS"),

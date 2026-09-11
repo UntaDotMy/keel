@@ -59,12 +59,36 @@ pub(crate) struct ToolsListContextSnapshot {
     pub tool_count: usize,
     pub eager_tool_count: usize,
     pub deferred_tool_count: usize,
+    /// What a client actually receives on the normal handshake: the packed
+    /// default page from the dispatcher's own path.
+    pub handshake_tokens: usize,
+    /// The complete catalog at full schema. Reported separately because it is a
+    /// real cost, but no client receives it on the default handshake.
     pub catalog_tokens: usize,
+}
+
+/// Exact cost of the response the dispatcher serves for a default `tools/list`.
+/// The ledger and its regression test both read this, so the reported handshake
+/// cost cannot drift from the emitted one.
+pub(crate) fn measured_handshake_tokens(profile: McpCatalogProfile) -> usize {
+    let context = McpRequestContext::authoritative(None);
+    match tools::handle_tools_list_for_profile_params_with_context(
+        profile,
+        &serde_json::Value::Null,
+        &context,
+    ) {
+        Ok(page) => tools::measure_tools_list_response(&page),
+        Err(_) => {
+            // A rejected handshake still needs a number; the unpaged catalog is
+            // fallback: the closest available upper bound.
+            let serialized = serde_json::to_string(&tools::handle_tools_list()).unwrap_or_default();
+            crate::proxy::token_meter::TokenMeter::count_text(&serialized)
+        }
+    }
 }
 
 pub(crate) fn tools_list_context_snapshot() -> ToolsListContextSnapshot {
     let profile = McpCatalogProfile::from_env();
-    let list = tools::handle_tools_list();
     let eager_tool_count = match profile {
         McpCatalogProfile::Tiered => tools::EAGER_MCP_TOOL_NAMES.len(),
         McpCatalogProfile::Full => tools::MCP_TOOL_NAMES.len(),
@@ -73,12 +97,15 @@ pub(crate) fn tools_list_context_snapshot() -> ToolsListContextSnapshot {
         McpCatalogProfile::Tiered => tools::DEFERRED_MCP_TOOL_NAMES.len(),
         McpCatalogProfile::Full => 0,
     };
-    let serialized = serde_json::to_string(&list).unwrap_or_default();
+    // The catalog is hand-built JSON, so serialization cannot fail here.
+    // why: an improbable failure measures zero rather than a wrong number.
+    let complete = serde_json::to_string(&tools_complete_catalog(profile)).unwrap_or_default();
     ToolsListContextSnapshot {
         tool_count: tools::MCP_TOOL_NAMES.len(),
         eager_tool_count,
         deferred_tool_count,
-        catalog_tokens: crate::proxy::token_meter::TokenMeter::count_text(&serialized),
+        handshake_tokens: measured_handshake_tokens(profile),
+        catalog_tokens: crate::proxy::token_meter::TokenMeter::count_text(&complete),
     }
 }
 
@@ -130,6 +157,16 @@ pub(crate) fn tools_stored_tool_count() -> usize {
 #[cfg(test)]
 pub(crate) fn tools_eager_tool_count() -> usize {
     tools::EAGER_MCP_TOOL_NAMES.len()
+}
+
+/// Parse one JSON value per line, skipping anything that is not JSON.
+/// why: a stdio session may interleave non-frame diagnostics with real replies.
+#[cfg(test)]
+pub(crate) fn parse_json_lines(text: &str) -> Vec<serde_json::Value> {
+    text.lines()
+        // why: a line that is not JSON is a diagnostic, not a frame to report.
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .collect()
 }
 
 pub(crate) fn current_mcp_session_id() -> Option<String> {
@@ -301,6 +338,7 @@ pub fn run_mcp_command(
             result
         }
         "discover" => run_discover_command(&arguments[1..], standard_output, standard_error),
+        "catalog" => run_catalog_command(&arguments[1..], standard_output, standard_error),
         "" | "help" | "--help" | "-h" => {
             render_mcp_help(standard_output);
             0
@@ -324,6 +362,10 @@ fn render_mcp_help(standard_output: &mut dyn Write) {
     let _ = writeln!(
         standard_output,
         "  keel mcp discover <capability> [--limit N] [--level 0|1|2] [--json]"
+    );
+    let _ = writeln!(
+        standard_output,
+        "  keel mcp catalog [--profile core|full] [--budget N] [--json]"
     );
     let _ = writeln!(standard_output);
     let _ = writeln!(
@@ -410,6 +452,147 @@ fn profile_arguments(
         index += 1;
     }
     Ok((profile, remaining))
+}
+
+/// §31 diagnostics: the packing picture for the active profile at a supplied
+/// budget. Every number comes from the packer that serves `tools/list`, so this
+/// cannot describe a plan the server would not actually execute.
+fn run_catalog_command(
+    arguments: &[String],
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let mut profile_override: Option<McpCatalogProfile> = None;
+    let mut budget_override: Option<usize> = None;
+    let mut json_output = false;
+    let mut index = 0;
+    while index < arguments.len() {
+        match arguments[index].as_str() {
+            "--json" => json_output = true,
+            "--profile" => {
+                index += 1;
+                let Some(value) = arguments.get(index) else {
+                    let _ = writeln!(
+                        standard_error,
+                        "mcp catalog: --profile requires core or full"
+                    );
+                    return 1;
+                };
+                profile_override = Some(match value.trim().to_ascii_lowercase().as_str() {
+                    "core" | "tiered" => McpCatalogProfile::Tiered,
+                    "full" => McpCatalogProfile::Full,
+                    other => {
+                        let _ = writeln!(
+                            standard_error,
+                            "mcp catalog: unsupported profile {other:?}; expected core or full"
+                        );
+                        return 1;
+                    }
+                });
+            }
+            "--budget" => {
+                index += 1;
+                let Some(value) = arguments.get(index) else {
+                    let _ = writeln!(standard_error, "mcp catalog: --budget requires a number");
+                    return 1;
+                };
+                match value.trim().parse::<usize>() {
+                    Ok(parsed) if parsed > 0 => budget_override = Some(parsed),
+                    _ => {
+                        let _ = writeln!(
+                            standard_error,
+                            "mcp catalog: invalid budget {value:?}; expected a positive integer"
+                        );
+                        return 1;
+                    }
+                }
+            }
+            other => {
+                let _ = writeln!(standard_error, "mcp catalog: unexpected argument {other:?}");
+                return 1;
+            }
+        }
+        index += 1;
+    }
+
+    let profile = profile_override.unwrap_or_else(McpCatalogProfile::from_env);
+    let budget = budget_override.unwrap_or_else(|| tools::mcp_tools_list_budget(profile));
+    // The budget owner reads its env var, so honour --budget through it.
+    // why: an absent override is the normal case; only its presence is restored.
+    let previous_budget = env::var("KEEL_MCP_PAGE_TOKENS").ok();
+    if budget_override.is_some() {
+        env::set_var("KEEL_MCP_PAGE_TOKENS", budget.to_string());
+    }
+    let report = tools::default_handshake_report(profile);
+    match previous_budget {
+        Some(value) => env::set_var("KEEL_MCP_PAGE_TOKENS", value),
+        None => env::remove_var("KEEL_MCP_PAGE_TOKENS"),
+    }
+    let report = match report {
+        Ok(report) => report,
+        Err(error) => {
+            let _ = writeln!(standard_error, "mcp catalog: {error}");
+            return 1;
+        }
+    };
+    let visible = report.visible_tools;
+    let first_page_tokens = report.first_page_tokens;
+    let pagination = report.has_more;
+    let snapshot = tools_list_context_snapshot();
+    let catalog_snapshot =
+        &report.snapshot_fingerprint[..12.min(report.snapshot_fingerprint.len())];
+
+    if json_output {
+        let payload = serde_json::json!({
+            "schemaVersion": 1,
+            "profile": profile.as_str(),
+            "catalogSnapshot": catalog_snapshot,
+            "visibleTools": visible,
+            "visibleToolNames": report.visible_tool_names,
+            "deferredTools": snapshot.deferred_tool_count,
+            "totalTools": snapshot.tool_count,
+            "hardPageBudget": budget,
+            "firstPageTokens": first_page_tokens,
+            "headroomTokens": budget.saturating_sub(first_page_tokens),
+            "pagination": pagination,
+            "pageSize": tools::tools_page_size(),
+            "tokenizer": crate::utility::fixed_context::TOKENIZER,
+            "reproductionCommand": format!(
+                "keel mcp catalog --profile {} --budget {budget} --json",
+                profile.as_str()
+            ),
+        });
+        // The payload holds owned values, so serialization cannot fail here.
+        // why: an improbable failure prints an empty object, never partial JSON.
+        let rendered = serde_json::to_string_pretty(&payload).unwrap_or_default();
+        let _ = writeln!(standard_output, "{rendered}");
+        return 0;
+    }
+
+    let _ = writeln!(standard_output, "MCP profile: {}", profile.as_str());
+    let _ = writeln!(standard_output, "Catalog snapshot: {catalog_snapshot}");
+    let _ = writeln!(standard_output, "Visible tools: {visible}");
+    let _ = writeln!(
+        standard_output,
+        "Deferred tools: {}",
+        snapshot.deferred_tool_count
+    );
+    let _ = writeln!(standard_output, "Hard page budget: {budget}");
+    let _ = writeln!(
+        standard_output,
+        "First page: {} / {budget} tokens",
+        first_page_tokens
+    );
+    let _ = writeln!(
+        standard_output,
+        "Pagination: {}",
+        if pagination {
+            "enabled"
+        } else {
+            "idle (catalog fits)"
+        }
+    );
+    0
 }
 
 fn run_discover_command(
@@ -2616,6 +2799,191 @@ mod tests {
             "fast jobs must overtake the slow one (ping, then 80ms, then 300ms); \
              serial FIFO would render d1 first: {rendered}"
         );
+    }
+
+    /// §29.4: the normal handshake path must stay correct when callers
+    /// interleave. Four `tools/list` requests and a `tools/call` are pipelined
+    /// into one stdio session; every page must come back individually valid and
+    /// within the profile budget, none may duplicate or lose a tool, and the
+    /// concurrent call must not disturb any of them.
+    #[test]
+    fn concurrent_tools_list_and_tools_call_stay_independent() {
+        let mut requests: Vec<serde_json::Value> = (0..4u64)
+            .map(|id| json!({"jsonrpc": "2.0", "id": id, "method": "tools/list"}))
+            .collect();
+        requests.push(json!({
+            "jsonrpc": "2.0",
+            "id": "call-1",
+            "method": "tools/call",
+            "params": {
+                "name": "rewrite",
+                // Distinct command string: the scoped gateway dedupes by content
+                // per workspace+session, so a shared literal would cross tests.
+                "arguments": { "command": "concurrency-probe-only" }
+            }
+        }));
+        requests.push(json!({"jsonrpc": "2.0", "id": "list-last", "method": "tools/list"}));
+
+        let mut input_bytes = Vec::new();
+        for value in &requests {
+            input_bytes.extend(serde_json::to_vec(value).expect("serialize"));
+            input_bytes.push(b'\n');
+        }
+        let mut input: &[u8] = &input_bytes;
+        let mut output: Vec<u8> = Vec::new();
+        let mut error_output: Vec<u8> = Vec::new();
+        assert_eq!(serve_stdio(&mut input, &mut output, &mut error_output), 0);
+
+        let rendered = String::from_utf8_lossy(&output);
+        let frames = parse_json_lines(&rendered);
+
+        let budget = tools::mcp_tools_list_budget(McpCatalogProfile::from_env());
+        let mut page_shapes = Vec::new();
+        for frame in &frames {
+            if frame["id"] == "call-1" {
+                assert_eq!(
+                    frame["result"]["isError"],
+                    json!(false),
+                    "the concurrent tools/call must succeed: {frame}"
+                );
+                continue;
+            }
+            let Some(result) = frame.get("result") else {
+                continue;
+            };
+            if !result.get("tools").is_some_and(serde_json::Value::is_array) {
+                continue;
+            }
+            assert!(
+                frame.get("error").is_none(),
+                "a concurrent tools/list must not fail: {frame}"
+            );
+            let measured = tools::measure_tools_list_response(result);
+            assert!(
+                measured <= budget,
+                "a concurrent page measured {measured} against a {budget}-token budget"
+            );
+            let names = result["tools"]
+                .as_array()
+                .expect("tools array")
+                .iter()
+                .filter_map(|tool| tool["name"].as_str().map(str::to_string))
+                .collect::<Vec<_>>();
+            let unique = names.iter().collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(
+                unique.len(),
+                names.len(),
+                "a concurrent page duplicated a tool"
+            );
+            page_shapes.push(names);
+        }
+
+        assert_eq!(
+            page_shapes.len(),
+            5,
+            "all five tools/list requests must answer: {rendered}"
+        );
+        // Identical requests over an unchanged catalog must agree, so one
+        // caller's page cannot leak into another's.
+        for page in &page_shapes[1..] {
+            assert_eq!(page, &page_shapes[0], "concurrent pages disagreed");
+        }
+    }
+
+    /// §31: the catalog diagnostic must report the packing picture the packer
+    /// would actually serve, at the requested budget, and fail closed on a bad
+    /// budget instead of silently using the default.
+    #[test]
+    fn mcp_catalog_command_reports_the_live_packing_picture() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // why: an absent override is the normal case; only its presence matters.
+        let previous = env::var("KEEL_MCP_PAGE_TOKENS").ok();
+        env::remove_var("KEEL_MCP_PAGE_TOKENS");
+
+        let run = |arguments: &[&str]| {
+            let mut stdout: Vec<u8> = Vec::new();
+            let mut stderr: Vec<u8> = Vec::new();
+            let owned = arguments
+                .iter()
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>();
+            let code = run_mcp_command(&owned, &mut stdout, &mut stderr);
+            (
+                code,
+                String::from_utf8_lossy(&stdout).to_string(),
+                String::from_utf8_lossy(&stderr).to_string(),
+            )
+        };
+
+        let (code, stdout, stderr) =
+            run(&["catalog", "--profile", "full", "--budget", "1200", "--json"]);
+        assert_eq!(code, 0, "{stderr}");
+        let payload: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+        assert_eq!(payload["profile"], "full");
+        assert_eq!(payload["hardPageBudget"], 1200);
+        let first_page = payload["firstPageTokens"]
+            .as_u64()
+            .expect("first page tokens") as usize;
+        assert!(
+            first_page <= 1200,
+            "the reported first page must fit its reported budget: {payload}"
+        );
+        assert!(
+            payload["catalogSnapshot"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty()),
+            "the snapshot id must be reported: {payload}"
+        );
+        assert!(payload["deferredTools"].as_u64().is_some());
+
+        // §34: an identical request must select the same page. The cursor's own
+        // token count may drift; the selected tools may not.
+        let first_names = payload["visibleToolNames"]
+            .as_array()
+            .expect("visible tool names")
+            .iter()
+            .filter_map(|name| name.as_str().map(str::to_string))
+            .collect::<Vec<_>>();
+        assert!(!first_names.is_empty(), "the page must advertise tools");
+        let (code, stdout, _) =
+            run(&["catalog", "--profile", "full", "--budget", "1200", "--json"]);
+        assert_eq!(code, 0);
+        let second: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+        let second_names = second["visibleToolNames"]
+            .as_array()
+            .expect("visible tool names")
+            .iter()
+            .filter_map(|name| name.as_str().map(str::to_string))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            second_names, first_names,
+            "an identical request selected a different page"
+        );
+        assert_eq!(second["catalogSnapshot"], payload["catalogSnapshot"]);
+
+        // A default invocation reads the env budget like every other surface.
+        let (code, stdout, _) = run(&["catalog"]);
+        assert_eq!(code, 0);
+        assert!(stdout.contains("MCP profile: core"), "{stdout}");
+
+        let (code, _, stderr) = run(&["catalog", "--budget", "abc"]);
+        assert_eq!(code, 1, "a non-numeric budget must fail closed");
+        assert!(stderr.contains("invalid budget"), "{stderr}");
+
+        let (code, _, stderr) = run(&["catalog", "--budget", "0"]);
+        assert_eq!(code, 1, "a zero budget must fail closed");
+        assert!(stderr.contains("invalid budget"), "{stderr}");
+
+        let (code, _, stderr) = run(&["catalog", "--profile", "nope"]);
+        assert_eq!(code, 1);
+        assert!(stderr.contains("unsupported profile"), "{stderr}");
+
+        match previous {
+            Some(value) => env::set_var("KEEL_MCP_PAGE_TOKENS", value),
+            None => env::remove_var("KEEL_MCP_PAGE_TOKENS"),
+        }
     }
 
     #[test]

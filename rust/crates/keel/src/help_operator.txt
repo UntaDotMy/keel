@@ -1,6 +1,7 @@
   help [advanced]
   version [--json]
   platform [--json]
+  host matrix [--host <name>] [--json]
   bootstrap-info [--json] [--claude-home <path>] [--repository-slug <owner/repo>] [--repo-root <path>] [--version <build-version>]
   all [--repo-root <path>] [--claude-home <path>] [--profile full|smoke]
   install [--repo-root <path>] [--claude-home <path>] [--with <hosts>] [--without <hosts>] [--interactive] [--purge-stale|--no-purge]

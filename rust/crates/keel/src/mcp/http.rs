@@ -1759,6 +1759,68 @@ mod tests {
         assert_eq!(state.sessions.lock().expect("session lock").len(), 1);
     }
 
+    /// §29.4 session-expiry-during-call: a TTL shorter than the tool deadline
+    /// must not expire a session that still owns a cancellable request. The
+    /// effective TTL is stretched through the owner deadlines instead.
+    #[test]
+    fn session_ttl_outlives_an_inflight_call() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        env::set_var("KEEL_MCP_SESSION_TTL_SECONDS", "1");
+        // why: an absent override is the normal case; only its presence matters.
+        let previous = env::var("KEEL_MCP_SESSION_TTL_SECONDS").ok();
+
+        let effective = effective_http_session_ttl();
+        assert!(
+            effective >= crate::mcp::tools::mcp_child_timeout(),
+            "a session must outlive its own tool call: {effective:?}"
+        );
+        assert!(effective >= HTTP_BATCH_WALL_BUDGET, "{effective:?}");
+
+        // A session idle just past the configured TTL but still inside the
+        // stretched window must survive, so its in-flight call stays cancellable.
+        let state = HttpState::default();
+        {
+            let mut sessions = state.sessions.lock().expect("session lock");
+            sessions.insert(
+                "inflight".to_string(),
+                HttpSession {
+                    last_seen: Instant::now() - Duration::from_secs(2),
+                    protocol_version: super::super::MCP_PROTOCOL_VERSION.to_string(),
+                },
+            );
+        }
+        state.purge_expired_sessions();
+        assert!(
+            state.touch_session("inflight"),
+            "a session inside its stretched TTL must not be reaped"
+        );
+
+        // A session idle past the stretched window is still reaped: the bound
+        // is extended, never removed.
+        {
+            let mut sessions = state.sessions.lock().expect("session lock");
+            sessions.insert(
+                "abandoned".to_string(),
+                HttpSession {
+                    last_seen: Instant::now() - effective - Duration::from_secs(5),
+                    protocol_version: super::super::MCP_PROTOCOL_VERSION.to_string(),
+                },
+            );
+        }
+        state.purge_expired_sessions();
+        assert!(
+            !state.touch_session("abandoned"),
+            "stale state must not linger"
+        );
+
+        match previous {
+            Some(value) => env::set_var("KEEL_MCP_SESSION_TTL_SECONDS", value),
+            None => env::remove_var("KEEL_MCP_SESSION_TTL_SECONDS"),
+        }
+    }
+
     #[test]
     fn http_session_binds_the_negotiated_protocol_version() {
         let state = HttpState::default();

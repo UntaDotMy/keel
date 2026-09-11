@@ -144,22 +144,25 @@ fn run_context_stats(
         .entries
         .iter()
         .map(|entry| {
-            let cache_class = if entry.surface.starts_with("repo.")
-                || entry.surface.starts_with("generated.")
-                || entry.surface.starts_with("skills.")
-            {
-                "stable"
-            } else {
-                "dynamic"
-            };
+            let cache_class =
+                crate::proxy::context::ProjectionInput::cache_class_for_surface(entry.surface);
+            let (cached_tokens, uncached_tokens) =
+                crate::proxy::context::ProjectionInput::cache_split(
+                    cache_class,
+                    entry.actual_tokens,
+                );
             let headroom = entry.budget_tokens.saturating_sub(entry.actual_tokens);
             json!({
                 "surface": entry.surface,
                 "rawTokens": entry.actual_tokens,
                 "visibleTokens": entry.actual_tokens,
+                // Exactly one of these is set, by the firewall's own cache rule,
+                // so a model-visible cost is never counted as both.
+                "cachedTokens": cached_tokens,
+                "uncachedTokens": uncached_tokens,
                 "budgetTokens": entry.budget_tokens,
                 "headroomTokens": headroom,
-                "cacheClass": cache_class,
+                "cacheClass": cache_class.as_str(),
                 "sourceAvailable": entry.source_available,
                 "status": entry.status(),
                 "reproductionCommand": fixed_context::REPRODUCTION_COMMAND,
@@ -199,14 +202,8 @@ fn run_context_stats(
         workspace_root
     );
     for entry in &ledger.entries {
-        let cache_class = if entry.surface.starts_with("repo.")
-            || entry.surface.starts_with("generated.")
-            || entry.surface.starts_with("skills.")
-        {
-            "stable"
-        } else {
-            "dynamic"
-        };
+        let cache_class =
+            crate::proxy::context::ProjectionInput::cache_class_for_surface(entry.surface);
         let headroom = entry.budget_tokens.saturating_sub(entry.actual_tokens);
         let _ = writeln!(
             standard_output,
@@ -216,7 +213,7 @@ fn run_context_stats(
             entry.actual_tokens,
             entry.budget_tokens,
             headroom,
-            cache_class,
+            cache_class.as_str(),
             entry.status()
         );
     }

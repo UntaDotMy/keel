@@ -98,6 +98,17 @@ pub enum CacheClass {
     Volatile,
 }
 
+impl CacheClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Stable => "stable",
+            Self::Session => "session",
+            Self::Dynamic => "dynamic",
+            Self::Volatile => "volatile",
+        }
+    }
+}
+
 /// Bounded lifecycle state for a dynamic context object. The projection path
 /// emits `visible`, `compressed`, or `masked`; archived/expired are reserved
 /// for durable/reaper owners and are never used as a raw-content fallback.
@@ -189,6 +200,31 @@ pub struct ProjectionInput {
 }
 
 impl ProjectionInput {
+    /// Which of a surface's model-visible tokens a provider can reuse. Stable and
+    /// session content is cacheable; dynamic and volatile content is not. One
+    /// owner for the rule, so a ledger cannot disagree with the firewall about
+    /// which bucket a measurement belongs in.
+    pub fn cache_split(
+        cache_class: CacheClass,
+        visible_tokens: usize,
+    ) -> (Option<usize>, Option<usize>) {
+        match cache_class {
+            CacheClass::Stable | CacheClass::Session => (Some(visible_tokens), None),
+            CacheClass::Dynamic | CacheClass::Volatile => (None, Some(visible_tokens)),
+        }
+    }
+
+    pub fn cache_class_for_surface(surface: &str) -> CacheClass {
+        if surface.starts_with("repo.")
+            || surface.starts_with("generated.")
+            || surface.starts_with("skills.")
+        {
+            CacheClass::Stable
+        } else {
+            CacheClass::Dynamic
+        }
+    }
+
     pub fn new(
         source: ContextSource,
         content: impl Into<String>,
@@ -752,18 +788,14 @@ impl ContextFirewall {
         } else {
             saved_tokens.max(0) as f64 / raw_tokens as f64
         };
+        let (cached_input_tokens, uncached_input_tokens) =
+            ProjectionInput::cache_split(input.cache_class, model_visible_tokens);
         self.ledger.record(ContextMeasurement {
             surface: input.source.as_str().to_string(),
             raw_input_tokens: raw_tokens,
             model_visible_input_tokens: model_visible_tokens,
-            cached_input_tokens: match input.cache_class {
-                CacheClass::Stable | CacheClass::Session => Some(model_visible_tokens),
-                CacheClass::Dynamic | CacheClass::Volatile => None,
-            },
-            uncached_input_tokens: match input.cache_class {
-                CacheClass::Stable | CacheClass::Session => None,
-                CacheClass::Dynamic | CacheClass::Volatile => Some(model_visible_tokens),
-            },
+            cached_input_tokens,
+            uncached_input_tokens,
             output_tokens: 0,
             context_peak_tokens: model_visible_tokens,
             reduced_tokens: model_visible_tokens,
@@ -1067,6 +1099,83 @@ mod tests {
         let right = second.project(input).expect("second projection");
         assert_eq!(left.id, right.id);
         assert_eq!(left.provenance_id, right.provenance_id);
+    }
+
+    /// §27 cache accounting: every measurement must land its model-visible tokens
+    /// in exactly one of the cached/uncached buckets, chosen by the firewall's own
+    /// cache rule. A token counted as both, or as neither, would make a saving
+    /// claim unauditable.
+    #[test]
+    fn cache_accounting_puts_each_measurement_in_exactly_one_bucket() {
+        for cache_class in [
+            CacheClass::Stable,
+            CacheClass::Session,
+            CacheClass::Dynamic,
+            CacheClass::Volatile,
+        ] {
+            let (cached, uncached) = ProjectionInput::cache_split(cache_class, 100);
+            assert!(
+                cached.is_some() ^ uncached.is_some(),
+                "{cache_class:?} must fill exactly one bucket"
+            );
+            assert_eq!(
+                cached.unwrap_or(0) + uncached.unwrap_or(0),
+                100,
+                "{cache_class:?} must account for every visible token"
+            );
+            let cacheable = matches!(cache_class, CacheClass::Stable | CacheClass::Session);
+            assert_eq!(
+                cached.is_some(),
+                cacheable,
+                "{cache_class:?} was bucketed against its cache semantics"
+            );
+        }
+        assert_eq!(CacheClass::Stable.as_str(), "stable");
+        assert_eq!(CacheClass::Volatile.as_str(), "volatile");
+
+        // The firewall and the ledger must agree about a surface's class.
+        assert_eq!(
+            ProjectionInput::cache_class_for_surface("repo.AGENTS.md"),
+            CacheClass::Stable
+        );
+        assert_eq!(
+            ProjectionInput::cache_class_for_surface("generated.claude.CLAUDE.md"),
+            CacheClass::Stable
+        );
+        assert_eq!(
+            ProjectionInput::cache_class_for_surface("skills.inline_catalog"),
+            CacheClass::Stable
+        );
+        assert_eq!(
+            ProjectionInput::cache_class_for_surface("mcp.tools_list.handshake"),
+            CacheClass::Dynamic
+        );
+        assert_eq!(
+            ProjectionInput::cache_class_for_surface("hook.session_start.bootstrap"),
+            CacheClass::Dynamic
+        );
+
+        // The recorded measurement carries the split, not just the total.
+        let mut firewall = ContextFirewall::new(ContextPolicy::with_max_tokens(50));
+        let input = ProjectionInput::new(
+            ContextSource::Warning,
+            "warning: one",
+            None::<String>,
+            "workspace",
+            "session",
+        )
+        .with_cache_class(CacheClass::Stable);
+        firewall.project(input).expect("projection");
+        let recorded = firewall
+            .ledger
+            .measurements
+            .last()
+            .expect("one measurement");
+        assert_eq!(
+            recorded.cached_input_tokens,
+            Some(recorded.model_visible_input_tokens)
+        );
+        assert_eq!(recorded.uncached_input_tokens, None);
     }
 
     #[test]
