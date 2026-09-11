@@ -109,6 +109,31 @@ It rejects deleted derived layers, missing or duplicate ticket links, dangling
 RTM links, criteria without evidence-producing subtasks, unjustified statuses,
 and `done` subtasks without resolvable evidence.
 
+## Honest gate status semantics
+
+Every review gate reports one of twelve states. Only `pass` is a pass, and no
+aggregate may collapse a non-pass state into one.
+
+| State | Wire name | Blocks closeout | Meaning |
+| --- | --- | --- | --- |
+| Pass | `pass` | no | The gate ran and succeeded. |
+| Fail | `fail` | yes | The gate ran and found a real defect. |
+| Warn | `warn` | no | Advisory finding that does not by itself stop delivery. |
+| Skipped | `skipped` | yes | The gate was skipped and needs a stated reason. |
+| NotApplicable | `not_applicable` | no | The gate does not apply to this change, with a reason. |
+| NeedsHuman | `needs_human` | yes | A human must decide; the machine cannot. |
+| Unclear | `unclear` | yes | The result could not be read confidently. |
+| Blocked | `blocked` | yes | An upstream dependency prevented the gate from running. |
+| Expired | `expired` | yes | The gate ran but its result is past the validity window. |
+| NotRun | `not_run` | yes | The gate was required but never executed. |
+| Indeterminate | `indeterminate` | yes | The gate ran and cannot decide from the available evidence. |
+| PolicyViolation | `policy_violation` | yes | An explicit policy rule was broken. |
+
+`skipped`, `warn`, `unclear`, `not_run`, `indeterminate`, `blocked`, `expired`,
+and `policy_violation` are all distinct from `pass`. The regression test
+`review::tests::no_gate_status_can_be_read_as_a_pass` fails if a future state is
+added that is neither a pass nor recognizably non-blocking.
+
 ## Architecture gate
 
 `plan research` writes a pending `architecture.md` scaffold. Complete that

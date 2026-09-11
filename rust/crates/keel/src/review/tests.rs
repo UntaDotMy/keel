@@ -1834,6 +1834,22 @@ fn gate_status_honest_semantics_and_serialization() {
         ),
         (GateStatus::Unclear, "unclear", "[UNCLEAR]", false, true),
         (GateStatus::Blocked, "blocked", "[BLK]", false, true),
+        (GateStatus::Expired, "expired", "[EXPIRED]", false, true),
+        (GateStatus::NotRun, "not_run", "[NOTRUN]", false, true),
+        (
+            GateStatus::Indeterminate,
+            "indeterminate",
+            "[INDET]",
+            false,
+            true,
+        ),
+        (
+            GateStatus::PolicyViolation,
+            "policy_violation",
+            "[POLICY]",
+            false,
+            true,
+        ),
     ];
     for (status, name, icon, is_pass, is_blocking) in variants {
         assert_eq!(status.as_str(), name);
@@ -1844,6 +1860,46 @@ fn gate_status_honest_semantics_and_serialization() {
         assert_eq!(json, format!("\"{name}\""));
         let deserialized: GateStatus = serde_json::from_str(&json).expect("deserialize status");
         assert_eq!(deserialized, status);
+    }
+}
+
+/// The plan's honesty rule: no aggregate may collapse a non-pass state to pass.
+/// Exactly one variant is a pass, and every other variant is either blocking or
+/// an explicitly non-blocking `Warn`/`NotApplicable`, so a caller that asks
+/// `is_pass()` or `is_blocking()` can never read uncertainty as success.
+#[test]
+fn no_gate_status_can_be_read_as_a_pass() {
+    let variants = [
+        GateStatus::Pass,
+        GateStatus::Fail,
+        GateStatus::Warn,
+        GateStatus::Skipped,
+        GateStatus::NotApplicable,
+        GateStatus::NeedsHuman,
+        GateStatus::Unclear,
+        GateStatus::Blocked,
+        GateStatus::Expired,
+        GateStatus::NotRun,
+        GateStatus::Indeterminate,
+        GateStatus::PolicyViolation,
+    ];
+    let passes = variants.iter().filter(|status| status.is_pass()).count();
+    assert_eq!(passes, 1, "only one status may report as a pass");
+
+    let names: Vec<&str> = variants.iter().map(|status| status.as_str()).collect();
+    let unique: std::collections::BTreeSet<&str> = names.iter().copied().collect();
+    assert_eq!(unique.len(), names.len(), "status names must be unique");
+
+    for status in &variants {
+        if status.is_pass() {
+            continue;
+        }
+        let non_blocking = !status.is_blocking();
+        assert!(
+            !non_blocking || matches!(status, GateStatus::Warn | GateStatus::NotApplicable),
+            "{} is non-pass and non-blocking, so an aggregate could read it as success",
+            status.as_str()
+        );
     }
 }
 

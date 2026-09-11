@@ -177,23 +177,21 @@ pub fn refresh(
         .map_err(|error| format!("create index directory: {error}"))?;
     let mut connection = match open_connection(&path) {
         Ok(connection) => connection,
-        Err(error) if is_lock_error_text(&error) => {
+        Err(IndexAccessError::Locked) => {
             return Ok(degraded_refresh_report(&root));
         }
-        Err(error) => return Err(error),
+        Err(error) => return Err(error.to_string()),
     };
     if let Err(error) = ensure_schema(&connection) {
-        if is_lock_error_text(&error) {
+        if matches!(error, IndexAccessError::Locked) {
             return Ok(degraded_refresh_report(&root));
         }
-        return Err(error);
+        return Err(error.to_string());
     }
     let existing = match existing_file_metadata(&connection) {
         Ok(existing) => existing,
-        Err(error) if is_lock_error_text(&error) => {
-            return Ok(degraded_refresh_report(&root));
-        }
-        Err(error) => return Err(error),
+        Err(IndexAccessError::Locked) => return Ok(degraded_refresh_report(&root)),
+        Err(error) => return Err(error.to_string()),
     };
     let previous_commit = meta(&connection, "indexed_commit");
     let indexed_commit = git_head(&root);
@@ -963,7 +961,7 @@ pub fn render_map(workspace_root: &Path, claude_home_flag: &str) -> Result<Strin
     Ok(lines.join("\n"))
 }
 
-fn ensure_schema(connection: &Connection) -> Result<(), String> {
+fn ensure_schema(connection: &Connection) -> Result<(), IndexAccessError> {
     connection
         .execute_batch(
             "CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -1027,10 +1025,12 @@ fn ensure_schema(connection: &Connection) -> Result<(), String> {
              );
              INSERT OR IGNORE INTO meta(key, value) VALUES('schema_version', '1');",
         )
-        .map_err(|error| format!("ensure workspace index schema: {error}"))?;
+        .map_err(|error| index_access_error("ensure workspace index schema", &error))?;
     let version = meta(connection, "schema_version").unwrap_or_default();
     if version != SCHEMA_VERSION {
-        return Err(format!("unsupported workspace index schema {version:?}"));
+        return Err(IndexAccessError::Other(format!(
+            "unsupported workspace index schema {version:?}"
+        )));
     }
     // Older indexes used `calls` for unresolved name matches. Preserve those
     // derived edges but make their uncertainty explicit after upgrading.
@@ -1049,44 +1049,79 @@ fn ensure_schema(connection: &Connection) -> Result<(), String> {
                )",
             [],
         )
-        .map_err(|error| format!("migrate duplicate candidate edges: {error}"))?;
+        .map_err(|error| index_access_error("migrate duplicate candidate edges", &error))?;
     connection
         .execute(
             "UPDATE edges SET relation = 'calls-candidate' WHERE relation = 'calls'",
             [],
         )
-        .map_err(|error| format!("migrate candidate edge labels: {error}"))?;
+        .map_err(|error| index_access_error("migrate candidate edge labels", &error))?;
     Ok(())
 }
 
-fn open_connection(path: &Path) -> Result<Connection, String> {
-    let connection = crate::utility::sqlite::open_connection(path)
-        .map_err(|error| format!("open {}: {error}", display_path(path)))?;
+/// Why a workspace-index access failed. The lock condition stays typed all the
+/// way to the degrade-versus-error decision, so a message that merely mentions
+/// "busy" can never silently downgrade a real failure into a degraded report.
+#[derive(Debug)]
+pub(crate) enum IndexAccessError {
+    /// Another process holds the SQLite write lock.
+    Locked,
+    /// Any other failure, already rendered for the operator.
+    Other(String),
+}
+
+impl std::fmt::Display for IndexAccessError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Locked => write!(formatter, "workspace index is locked by another writer"),
+            Self::Other(message) => write!(formatter, "{message}"),
+        }
+    }
+}
+
+impl From<IndexAccessError> for String {
+    fn from(error: IndexAccessError) -> Self {
+        error.to_string()
+    }
+}
+
+/// Classify one rusqlite failure from its typed code, never its message.
+fn index_access_error(context: &str, error: &rusqlite::Error) -> IndexAccessError {
+    if sqlite_lock_error(error) {
+        IndexAccessError::Locked
+    } else {
+        IndexAccessError::Other(format!("{context}: {error}"))
+    }
+}
+
+fn open_connection(path: &Path) -> Result<Connection, IndexAccessError> {
+    let connection = crate::utility::sqlite::open_connection(path).map_err(|error| {
+        IndexAccessError::Other(format!("open {}: {error}", display_path(path)))
+    })?;
     connection
         .busy_timeout(std::time::Duration::from_millis(250))
-        .map_err(|error| format!("set workspace index busy timeout: {error}"))?;
+        .map_err(|error| index_access_error("set workspace index busy timeout", &error))?;
     for attempt in 0..20 {
         match connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;") {
             Ok(()) => break,
-            Err(error) if sqlite_lock_error(&error) && attempt < 19 => {
-                std::thread::sleep(std::time::Duration::from_millis(25));
+            // Retry a held lock, then report it as a lock rather than returning
+            // a half-configured connection the caller would fail on later.
+            Err(error) if sqlite_lock_error(&error) => {
+                if attempt < 19 {
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                } else {
+                    return Err(IndexAccessError::Locked);
+                }
             }
-            Err(error) if sqlite_lock_error(&error) => break,
-            Err(error) => return Err(format!("configure workspace index: {error}")),
+            Err(error) => {
+                return Err(index_access_error("configure workspace index", &error));
+            }
         }
     }
     connection
         .busy_timeout(std::time::Duration::from_secs(1))
-        .map_err(|error| format!("set workspace index transaction timeout: {error}"))?;
+        .map_err(|error| index_access_error("set workspace index transaction timeout", &error))?;
     Ok(connection)
-}
-
-fn is_lock_error_text(message: &str) -> bool {
-    let lowered = message.to_ascii_lowercase();
-    lowered.contains("database is locked")
-        || lowered.contains("database is busy")
-        || lowered.contains("database table is locked")
-        || lowered.contains("busy")
 }
 
 fn degraded_refresh_report(root: &Path) -> RefreshReport {
@@ -1111,10 +1146,10 @@ fn sqlite_lock_error(error: &rusqlite::Error) -> bool {
 
 fn existing_file_metadata(
     connection: &Connection,
-) -> Result<HashMap<String, StoredFileMetadata>, String> {
+) -> Result<HashMap<String, StoredFileMetadata>, IndexAccessError> {
     let mut statement = connection
         .prepare("SELECT path, hash, modified_at, size FROM files")
-        .map_err(|error| format!("prepare existing workspace files: {error}"))?;
+        .map_err(|error| index_access_error("prepare existing workspace files", &error))?;
     let rows = statement
         .query_map([], |row| {
             Ok((
@@ -1124,11 +1159,11 @@ fn existing_file_metadata(
                 row.get::<_, i64>(3)?,
             ))
         })
-        .map_err(|error| format!("read existing workspace files: {error}"))?;
+        .map_err(|error| index_access_error("read existing workspace files", &error))?;
     let mut result = HashMap::new();
     for row in rows {
         let (path, hash, modified_at, size) =
-            row.map_err(|error| format!("read existing workspace file: {error}"))?;
+            row.map_err(|error| index_access_error("read existing workspace file", &error))?;
         result.insert(
             path,
             StoredFileMetadata {
@@ -2196,6 +2231,81 @@ mod tests {
         fs::create_dir_all(root.join("src")).expect("workspace");
         fs::create_dir_all(&home).expect("home");
         (root, home)
+    }
+
+    /// The degrade-versus-error decision must come from the typed SQLite code.
+    /// A message that merely contains "busy" is not a lock, so classifying by
+    /// message text would silently downgrade a real failure.
+    #[test]
+    fn lock_classification_uses_the_typed_code_not_the_message_text() {
+        let busy = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+            Some("database is locked".to_string()),
+        );
+        assert!(matches!(
+            index_access_error("ctx", &busy),
+            IndexAccessError::Locked
+        ));
+
+        let locked = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_LOCKED),
+            None,
+        );
+        assert!(matches!(
+            index_access_error("ctx", &locked),
+            IndexAccessError::Locked
+        ));
+
+        // Non-lock failures must stay errors even when the text mentions "busy".
+        let misleading = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
+            Some("the writer is busy rebuilding this index".to_string()),
+        );
+        match index_access_error("ctx", &misleading) {
+            IndexAccessError::Locked => panic!("a non-lock failure must not degrade as a lock"),
+            IndexAccessError::Other(message) => assert!(message.contains("busy rebuilding")),
+        }
+    }
+
+    /// §17/§29 concurrency: a second refresh while a writer holds the index lock
+    /// must report a degraded, non-authoritative index rather than either
+    /// succeeding silently or failing the caller.
+    #[test]
+    fn concurrent_refresh_degrades_instead_of_failing_while_a_writer_holds_the_lock() {
+        let (root, home) = temp_workspace("lock-degrade");
+        fs::write(root.join("src/main.rs"), "pub fn only() {}\n").expect("source");
+        let home_flag = home.to_string_lossy().to_string();
+        let first = refresh(&root, &home_flag, true).expect("initial refresh");
+        assert!(first.coverage_complete);
+
+        // Hold the write lock from an independent connection for the assertion
+        // window, exactly as a concurrent reindex would.
+        let index_path = database_path(&root, &home_flag).expect("index path");
+        let holder = crate::utility::sqlite::open_connection(&index_path).expect("holder open");
+        holder
+            .busy_timeout(std::time::Duration::from_millis(50))
+            .expect("holder busy timeout");
+        holder
+            .execute_batch("BEGIN IMMEDIATE")
+            .expect("holder takes the write lock");
+
+        let contended = refresh(&root, &home_flag, false).expect("contended refresh must not fail");
+
+        holder.execute_batch("ROLLBACK").expect("holder releases");
+
+        assert!(
+            contended.lock_degraded,
+            "a contended refresh must report the degraded lock state: {contended:?}"
+        );
+        assert!(
+            !contended.coverage_complete,
+            "a degraded refresh must not claim complete coverage: {contended:?}"
+        );
+
+        // The index stays usable and a later uncontended refresh recovers fully.
+        let recovered = refresh(&root, &home_flag, false).expect("recovered refresh");
+        assert!(!recovered.lock_degraded);
+        assert!(recovered.coverage_complete);
     }
 
     #[test]

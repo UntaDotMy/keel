@@ -182,6 +182,14 @@ pub(crate) enum GateStatus {
     NeedsHuman,
     Unclear,
     Blocked,
+    /// The gate ran but its result is past its validity window.
+    Expired,
+    /// The gate was required but never executed.
+    NotRun,
+    /// The gate ran and cannot decide from the evidence available.
+    Indeterminate,
+    /// The gate found an explicit policy violation.
+    PolicyViolation,
 }
 
 impl GateStatus {
@@ -195,6 +203,10 @@ impl GateStatus {
             Self::NeedsHuman => "needs_human",
             Self::Unclear => "unclear",
             Self::Blocked => "blocked",
+            Self::Expired => "expired",
+            Self::NotRun => "not_run",
+            Self::Indeterminate => "indeterminate",
+            Self::PolicyViolation => "policy_violation",
         }
     }
 
@@ -208,18 +220,23 @@ impl GateStatus {
             Self::NeedsHuman => "[HUMAN]",
             Self::Unclear => "[UNCLEAR]",
             Self::Blocked => "[BLK]",
+            Self::Expired => "[EXPIRED]",
+            Self::NotRun => "[NOTRUN]",
+            Self::Indeterminate => "[INDET]",
+            Self::PolicyViolation => "[POLICY]",
         }
     }
 
+    /// Only `Pass` is a pass. Every other state is explicitly not.
     pub(crate) fn is_pass(self) -> bool {
         matches!(self, Self::Pass)
     }
 
+    /// Blocking means a required closeout cannot proceed on this result alone.
+    /// Everything except a genuine pass, a waived `Warn`, and an explicit
+    /// `NotApplicable` blocks, so no non-pass state can be read as success.
     pub(crate) fn is_blocking(self) -> bool {
-        matches!(
-            self,
-            Self::Fail | Self::Blocked | Self::NeedsHuman | Self::Unclear | Self::Skipped
-        )
+        !matches!(self, Self::Pass | Self::Warn | Self::NotApplicable)
     }
 }
 
