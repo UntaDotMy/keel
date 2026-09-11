@@ -146,6 +146,35 @@ remains green (13 pass).
   `reacquisitionCalls`, `resourceCostTokensMeasured`, `localRoutingCpuMs`,
   `wrongActivationRate`, and `missedActivationRate`.
 
+## Module-size decision (plan §26)
+
+The plan names a candidate `mcp/` split (`catalog.rs`, `profiles.rs`, `pagination.rs`,
+`discovery.rs`, `activation.rs`, `dispatch.rs`, `transport.rs`) and also says not to
+split files merely for aesthetics. Measured state:
+
+| File | Production lines | Test lines | Structure |
+|---|---:|---:|---|
+| `mcp/tools.rs` | 4,717 | 3,311 | 37 independent `tool_*` handlers, then catalog, cursor, and discovery helpers |
+| `mcp/http.rs` | ~1,500 | ~900 | Transport boundary plus its own conformance tests |
+| `mcp/mod.rs` | ~1,900 | ~800 | JSON-RPC framing, serve loop, dispatch, `resources/*` |
+| `proxy/context.rs` | ~1,100 | ~600 | Firewall, budget, reducers, recovery |
+
+Decision: **not split in this pass.** The reasoning is the plan's own:
+
+- The 4,717 production lines are 37 independent tool handlers, each a thin wrapper over
+  a function that already backs a CLI command. That is breadth, not tangled complexity;
+  a handler can be found and changed without reading its neighbours.
+- The plan's split target would move catalog, cursor, and discovery helpers out of
+  `tools.rs` while leaving the handlers in place, which relocates code without reducing
+  coupling between the parts that actually call each other.
+- The plan explicitly warns against splitting for aesthetics, and this pass already
+  carries a verified determinism fix in the cursor path. A 1,000+ line mechanical move
+  would put a green, packaged-verified build at risk for a structural gain the plan does
+  not list as a completion criterion.
+
+Recorded instead of done, with the reasoning and the measurements above, so the next
+change can revisit it with the same evidence.
+
 ## Remaining known limitations
 
 1. **Keel is a legacy-era MCP server, not a dual-era one.** The current MCP
