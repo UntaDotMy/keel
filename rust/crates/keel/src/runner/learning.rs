@@ -160,7 +160,7 @@ pub fn run_learning_cycle(
             return report;
         }
     };
-    if observations.is_empty() {
+    if options.window_days == 0 {
         return report;
     }
 
@@ -1218,13 +1218,14 @@ fn write_instinct(
 ) -> Result<(), String> {
     // Respect provenance: never rewrite a manually-authored instinct that
     // happens to share this id. The loop only owns records it marked observed.
-    if let Some(existing) = store.read_record(id)? {
-        let source = field(&existing, "source").unwrap_or("");
+    let mut record = store.read_record(id)?.unwrap_or_default();
+    if !record.is_empty() {
+        let source = field(&record, "source").unwrap_or("");
         if source != SOURCE_OBSERVED {
             return Ok(());
         }
     }
-    let record: Record = vec![
+    let refreshed: Record = vec![
         ("id".into(), id.to_string()),
         ("trigger".into(), cluster.signature.clone()),
         ("guidance".into(), guidance_for(cluster)),
@@ -1234,7 +1235,25 @@ fn write_instinct(
         ("project".into(), cluster.project.clone()),
         ("source".into(), SOURCE_OBSERVED.to_string()),
         ("sample".into(), cluster.sample_detail.clone()),
+        ("scope".into(), "workspace".into()),
+        ("measurement".into(), "observed_frequency".into()),
+        (
+            "lifecycle".into(),
+            if is_trusted_habit(confidence, cluster.distinct_sessions) {
+                "promoted"
+            } else {
+                "candidate"
+            }
+            .into(),
+        ),
     ];
+    for (key, value) in refreshed {
+        if let Some(slot) = record.iter_mut().find(|(name, _)| name == &key) {
+            slot.1 = value;
+        } else {
+            record.push((key, value));
+        }
+    }
     store.write_record(id, &record)?;
     Ok(())
 }
@@ -1267,10 +1286,17 @@ fn decay_and_prune_instincts(
         if live_ids.contains(&id) {
             continue; // refreshed this cycle by write_instinct
         }
+        let now = chrono::Utc::now();
+        if field(&record, "lastDecayedAt")
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+            .is_some_and(|previous| now.signed_duration_since(previous) < chrono::Duration::days(1))
+        {
+            continue;
+        }
         let confidence: i64 = field(&record, "confidence")
             .and_then(|value| value.parse().ok())
             .unwrap_or(0);
-        let decayed = confidence - 1;
+        let decayed = confidence.saturating_sub(1);
         if decayed <= INSTINCT_PRUNE_FLOOR {
             match store.delete_record(&id) {
                 Ok(_) => pruned += 1,
@@ -1279,6 +1305,16 @@ fn decay_and_prune_instincts(
                 }
             }
         } else {
+            for (key, value) in [
+                ("lastDecayedAt", now.to_rfc3339()),
+                ("lifecycle", "demoted".to_string()),
+            ] {
+                if let Some(slot) = record.iter_mut().find(|(name, _)| name == key) {
+                    slot.1 = value;
+                } else {
+                    record.push((key.to_string(), value));
+                }
+            }
             if let Some(slot) = record.iter_mut().find(|(key, _)| key == "confidence") {
                 slot.1 = decayed.to_string();
             } else {
@@ -2019,6 +2055,37 @@ mod tests {
             let mut log = Vec::new();
             let report = run_learning_cycle(root, &CycleOptions::default(), &mut log);
             assert_eq!(report.instincts_recorded, 0);
+        });
+    }
+
+    #[test]
+    fn empty_window_decays_once_per_day_and_refresh_preserves_metadata() {
+        isolated_home("bounded-lifecycle", |root| {
+            let store = RecordStore::new(root, INSTINCT_GROUP);
+            let id = instinct_id("quiet", "cargo test");
+            store
+                .write_record(
+                    &id,
+                    &vec![
+                        ("id".into(), id.clone()),
+                        ("source".into(), SOURCE_OBSERVED.into()),
+                        ("confidence".into(), "5".into()),
+                        ("lessonEvidence".into(), "raw://proof".into()),
+                    ],
+                )
+                .expect("seed");
+            let mut log = Vec::new();
+            run_learning_cycle(root, &CycleOptions::default(), &mut log);
+            run_learning_cycle(root, &CycleOptions::default(), &mut log);
+            let record = store.read_record(&id).unwrap().unwrap();
+            assert_eq!(field(&record, "confidence"), Some("4"));
+            assert_eq!(field(&record, "lifecycle"), Some("demoted"));
+            seed_bash("quiet", "cargo test", 6, 2);
+            run_learning_cycle(root, &CycleOptions::default(), &mut log);
+            let record = store.read_record(&id).unwrap().unwrap();
+            assert_eq!(field(&record, "lessonEvidence"), Some("raw://proof"));
+            assert_eq!(field(&record, "lifecycle"), Some("promoted"));
+            assert_eq!(field(&record, "measurement"), Some("observed_frequency"));
         });
     }
 

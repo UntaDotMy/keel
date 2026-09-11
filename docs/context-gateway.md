@@ -86,12 +86,12 @@ adapters still expose only the capabilities they can prove; unsupported host
 boundaries remain explicitly unprotected rather than being represented as a
 successful governed path.
 
-Protocol era is stated the same way. The MCP revision in force (`2026-07-28`)
-distinguishes *modern* servers (per-request `_meta` version, `server/discover`,
-`resultType`, `ttlMs`/`cacheScope` on list results), *legacy* servers
-(`initialize` handshake), and *dual-era* servers that serve both. Keel is a
-legacy-era server speaking `2025-11-25`, and it rejects the older `2024-11-05`
-initialize on Streamable HTTP with an explicit migration message instead of
-mis-serving it. A legacy client therefore interoperates and a modern one does
-not; no request silently mixes the two eras. Cleanup status and the full
-limitation list are in [`gateway-cleanup-report.md`](gateway-cleanup-report.md).
+Protocol era is enforced at one owner. Keel targets MCP `2026-07-28`: every
+request with an id must carry the version and client-capability metadata, HTTP
+requests must carry matching routing headers, `server/discover` is handshake-free,
+and results expose the required completion/cache fields. The retired
+`initialize` handshake, `MCP-Session-Id`, SSE state, and silent protocol
+downgrade are not accepted; unsupported revisions receive an explicit error.
+Stdio and HTTP share the same dispatcher and context firewall, while HTTP
+remains stateless per request. The broader cleanup status and remaining
+limitations are in [`gateway-cleanup-report.md`](gateway-cleanup-report.md).

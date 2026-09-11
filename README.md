@@ -66,7 +66,7 @@ keel code-search search --query "run_recall_search"
 | Review gates | `review pre-pr` / `review pre-commit`, review strictness via plugin `userConfig.review_strictness`, and CI-ready artifacts so non-trivial code never self-reviews. |
 | Memory | Working briefs, completion ledgers, scoped `SYSTEM_MAP.md`, and durable recovery state under `~/.keel/memories/` (with `~/.claude/memories/` legacy fallback). |
 | Command compaction | `keel run -- <cmd>` produces compact output for noisy test/build/lint/log/search commands without dropping diagnostic signal. |
-| MCP server | `keel mcp serve` (stdio) and `keel mcp serve-http` (Streamable HTTP on loopback). The manifest exposes the current Rust-native tools: `recall`, `system_map`, `run_command`, `command_output`, `command_kill`, `recall_status`, `skill_route`, `skill_get`, `skill_list`, `memory_status`, `brief_list`, `brief_get`, `brief_create`, `system_map_refresh`, `context_brief`, `cli`, `anvil`, `review`, `git_workflow`, `memory`, `gain`, `raw`, `config_audit`, `skill_lint`, `telemetry`, `session`, `doctor`, `code_search`, `code_index`, `flow`, `code_graph`, `learn`, `observe`, `rewrite`, `skill_eval`, `design_intelligence`, and `stats`, plus `keel://system-map` and `keel://recall/status` resources. |
+| MCP server | `keel mcp serve` (stdio) and `keel mcp serve-http` (stateless Streamable HTTP on loopback, MCP `2026-07-28`). The manifest exposes the current Rust-native tools: `recall`, `system_map`, `run_command`, `command_output`, `command_kill`, `recall_status`, `skill_route`, `skill_get`, `skill_list`, `memory_status`, `brief_list`, `brief_get`, `brief_create`, `system_map_refresh`, `context_brief`, `cli`, `anvil`, `review`, `git_workflow`, `memory`, `gain`, `raw`, `config_audit`, `skill_lint`, `telemetry`, `session`, `doctor`, `code_search`, `code_index`, `flow`, `code_graph`, `learn`, `observe`, `rewrite`, `skill_eval`, `design_intelligence`, and `stats`, plus `keel://system-map` and `keel://recall/status` resources. |
 | Slash commands | `/keel:anvil`, `/keel:review`, `/keel:recall`, `/keel:gain` — discoverable `/`-menu wrappers over implemented CLI surfaces. Shipped via the plugin manifest `commands` key. |
 | Specialist skills | Manifest-driven specialist profiles synced into `~/.claude/agent-profiles/*.toml`, invokable via the Skill tool. Run `keel skill-lint` for the live verified count. |
 
@@ -732,8 +732,14 @@ The native CLI is the primary surface. The unified `memory` family verbs (`resea
 | Runtime guardrails and memory protocols | [./docs/runtime-guardrails-and-memory-protocols.md](./docs/runtime-guardrails-and-memory-protocols.md) |
 | Open-source memory patterns | [./docs/open-source-memory-patterns.md](./docs/open-source-memory-patterns.md) |
 | Context efficiency playbook | [./docs/context-efficiency-playbook.md](./docs/context-efficiency-playbook.md) |
+| Final operating-system plan traceability | [./docs/plan-traceability.md](./docs/plan-traceability.md). Phase-by-phase evidence and explicit gaps against the attached production plan |
 
 Public claims stay source-backed. A durable audit artifact required before numeric security or governance claims are upgraded, and [./docs/security-audit-status.md](./docs/security-audit-status.md) defines the boundary between published artifacts and unproven claims. [./docs/release-proof-bundle.md](./docs/release-proof-bundle.md) is the durable proof artifact published with notable releases.
+
+The attached Final Agent Operating System plan is an implementation target, not
+a completion badge. The current repository ships substantial slices of it, but
+the modern-MCP-only target remains open; see the [plan traceability map](./docs/plan-traceability.md)
+for the evidence-backed phase and definition-of-done status.
 
 [./docs/audits/2026-04-09-competitive-apples-to-apples/audit-summary.md](./docs/audits/2026-04-09-competitive-apples-to-apples/audit-summary.md) is the current published source-backed competitive audit bundle for workflow, memory, and indexing peers.
 

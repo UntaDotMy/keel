@@ -200,18 +200,13 @@ pub struct ProjectionInput {
 }
 
 impl ProjectionInput {
-    /// Which of a surface's model-visible tokens a provider can reuse. Stable and
-    /// session content is cacheable; dynamic and volatile content is not. One
-    /// owner for the rule, so a ledger cannot disagree with the firewall about
-    /// which bucket a measurement belongs in.
+    /// Cache eligibility cannot establish a provider cache hit or miss. Actual
+    /// usage is supplied through ProviderUsage; unavailable accounting stays null.
     pub fn cache_split(
-        cache_class: CacheClass,
-        visible_tokens: usize,
+        _cache_class: CacheClass,
+        _visible_tokens: usize,
     ) -> (Option<usize>, Option<usize>) {
-        match cache_class {
-            CacheClass::Stable | CacheClass::Session => (Some(visible_tokens), None),
-            CacheClass::Dynamic | CacheClass::Volatile => (None, Some(visible_tokens)),
-        }
+        (None, None)
     }
 
     pub fn cache_class_for_surface(surface: &str) -> CacheClass {
@@ -265,6 +260,12 @@ impl ProjectionInput {
 pub struct ContextProjection {
     pub id: String,
     pub source: ContextSource,
+    #[serde(default)]
+    pub surface: String,
+    #[serde(default)]
+    pub raw_size: usize,
+    #[serde(default)]
+    pub reducer_version: String,
     pub summary: String,
     pub token_count: u32,
     /// Exact tokenizer count of the cleaned producer payload before reduction.
@@ -298,6 +299,12 @@ pub struct ContextProjection {
 pub struct ContextProjectionMetadata {
     pub id: String,
     pub source: ContextSource,
+    #[serde(default)]
+    pub surface: String,
+    #[serde(default)]
+    pub raw_size: usize,
+    #[serde(default)]
+    pub reducer_version: String,
     pub token_count: u32,
     #[serde(rename = "raw_tokens")]
     pub raw_tokens: u32,
@@ -437,6 +444,9 @@ impl ContextProjection {
         ContextProjectionMetadata {
             id: self.id.clone(),
             source: self.source.clone(),
+            surface: self.surface.clone(),
+            raw_size: self.raw_size,
+            reducer_version: self.reducer_version.clone(),
             token_count: self.token_count,
             raw_tokens: self.raw_tokens,
             visible_tokens: self.visible_tokens,
@@ -819,6 +829,9 @@ impl ContextFirewall {
         });
         Ok(ContextProjection {
             id: projection_id,
+            surface: input.source.as_str().to_string(),
+            raw_size: input.content.len(),
+            reducer_version: reducer.clone(),
             source: input.source,
             summary,
             token_count,
@@ -1101,12 +1114,9 @@ mod tests {
         assert_eq!(left.provenance_id, right.provenance_id);
     }
 
-    /// §27 cache accounting: every measurement must land its model-visible tokens
-    /// in exactly one of the cached/uncached buckets, chosen by the firewall's own
-    /// cache rule. A token counted as both, or as neither, would make a saving
-    /// claim unauditable.
+    /// A cacheable prefix is not proof of a cache hit at any provider.
     #[test]
-    fn cache_accounting_puts_each_measurement_in_exactly_one_bucket() {
+    fn cache_accounting_remains_unknown_without_provider_evidence() {
         for cache_class in [
             CacheClass::Stable,
             CacheClass::Session,
@@ -1114,21 +1124,7 @@ mod tests {
             CacheClass::Volatile,
         ] {
             let (cached, uncached) = ProjectionInput::cache_split(cache_class, 100);
-            assert!(
-                cached.is_some() ^ uncached.is_some(),
-                "{cache_class:?} must fill exactly one bucket"
-            );
-            assert_eq!(
-                cached.unwrap_or(0) + uncached.unwrap_or(0),
-                100,
-                "{cache_class:?} must account for every visible token"
-            );
-            let cacheable = matches!(cache_class, CacheClass::Stable | CacheClass::Session);
-            assert_eq!(
-                cached.is_some(),
-                cacheable,
-                "{cache_class:?} was bucketed against its cache semantics"
-            );
+            assert_eq!((cached, uncached), (None, None), "{cache_class:?}");
         }
         assert_eq!(CacheClass::Stable.as_str(), "stable");
         assert_eq!(CacheClass::Volatile.as_str(), "volatile");
@@ -1171,10 +1167,7 @@ mod tests {
             .measurements
             .last()
             .expect("one measurement");
-        assert_eq!(
-            recorded.cached_input_tokens,
-            Some(recorded.model_visible_input_tokens)
-        );
+        assert_eq!(recorded.cached_input_tokens, None);
         assert_eq!(recorded.uncached_input_tokens, None);
     }
 

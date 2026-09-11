@@ -1112,6 +1112,8 @@ fn join_rel(dir: &str, rel: &str) -> String {
 }
 
 fn collect_source_files(root: &Path, files: &mut Vec<PathBuf>) {
+    let limit = crate::utility::workspace_index::MAX_FILES;
+    let mut candidates: BTreeSet<PathBuf> = files.iter().cloned().collect();
     let mut stack = vec![root.to_path_buf()];
     while let Some(current) = stack.pop() {
         let entries = match fs::read_dir(&current) {
@@ -1140,12 +1142,25 @@ fn collect_source_files(root: &Path, files: &mut Vec<PathBuf>) {
                     .map(|metadata| metadata.len() <= MAX_SOURCE_FILE_BYTES)
                     .unwrap_or(false)
             {
-                files.push(path);
+                insert_bounded_path(&mut candidates, path, limit);
             }
         }
     }
-    files.sort();
-    files.truncate(crate::utility::workspace_index::MAX_FILES);
+    *files = candidates.into_iter().collect();
+}
+
+fn insert_bounded_path(paths: &mut BTreeSet<PathBuf>, path: PathBuf, limit: usize) {
+    if limit == 0 {
+        return;
+    }
+    if paths.len() < limit {
+        paths.insert(path);
+    } else if paths.last().is_some_and(|largest| path < *largest) {
+        if let Some(largest) = paths.iter().next_back().cloned() {
+            paths.remove(&largest);
+            paths.insert(path);
+        }
+    }
 }
 
 fn should_skip_entry(name: &str, path: &Path) -> bool {
@@ -1234,6 +1249,18 @@ mod tests {
         assert!(resolved.ends_with("code-graph.json"));
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn bounded_path_selection_keeps_deterministic_lexicographic_prefix() {
+        let mut paths = BTreeSet::new();
+        for value in ["z.rs", "m.rs", "a.rs", "q.rs"] {
+            insert_bounded_path(&mut paths, PathBuf::from(value), 2);
+        }
+        assert_eq!(
+            paths.into_iter().collect::<Vec<_>>(),
+            vec![PathBuf::from("a.rs"), PathBuf::from("m.rs")]
+        );
     }
 
     #[test]

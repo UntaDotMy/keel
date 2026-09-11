@@ -532,7 +532,7 @@ fn write_doctor_check(standard_output: &mut dyn Write, ok: bool, message: &str) 
 }
 
 /// Spawn the MCP command exactly as registered in `~/.claude.json` and confirm it
-/// answers an `initialize` request. This catches the silent failure mode where the
+/// answers a `server/discover` request. This catches the silent failure mode where the
 /// registered `command` (e.g. the plugin manifest's bare `keel`) does not
 /// resolve on the host's PATH — the harness would then fail to start the server and
 /// all of its always-on tools would be missing with no in-session signal. Reading the
@@ -591,12 +591,12 @@ fn probe_mcp_launch(standard_output: &mut dyn Write, claude_home: &std::path::Pa
             return;
         }
     };
-    let launched = probe_mcp_initialize(&command, &args);
+    let launched = probe_mcp_discover(&command, &args);
     write_doctor_check(
         standard_output,
         launched,
         if launched {
-            "keel MCP launch (registered command starts and responds to initialize)"
+            "keel MCP launch (registered command starts and responds to server/discover)"
         } else {
             "keel MCP launch (registered command did not start — check that it \
              resolves on PATH; run `keel repair` to pin an absolute path)"
@@ -604,18 +604,18 @@ fn probe_mcp_launch(standard_output: &mut dyn Write, claude_home: &std::path::Pa
     );
 }
 
-/// Spawn `command args...`, send a single `initialize` JSON-RPC line, and return
-/// true if the child emits a JSON-RPC response containing `protocolVersion`.
+/// Spawn `command args...`, send a single `server/discover` JSON-RPC line, and return
+/// true only for the supported modern discovery response.
 ///
 /// Bounded by a wall-clock timeout: a registered command that starts but never
 /// answers (a wrong binary, or one that blocks waiting for more input) must not
 /// hang `doctor`. A reader thread captures stdout while the main thread waits on
 /// a channel with a deadline; on timeout the child is killed and reaped.
-fn probe_mcp_initialize(command: &str, args: &[String]) -> bool {
-    probe_mcp_initialize_with_timeout(command, args, std::time::Duration::from_secs(5))
+fn probe_mcp_discover(command: &str, args: &[String]) -> bool {
+    probe_mcp_discover_with_timeout(command, args, std::time::Duration::from_secs(5))
 }
 
-fn probe_mcp_initialize_with_timeout(
+fn probe_mcp_discover_with_timeout(
     command: &str,
     args: &[String],
     timeout: std::time::Duration,
@@ -646,11 +646,12 @@ fn probe_mcp_initialize_with_timeout(
     let request = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,
-        "method": "initialize",
+        "method": "server/discover",
         "params": {
-            "protocolVersion": "2025-11-25",
-            "capabilities": {},
-            "clientInfo": { "name": "doctor", "version": "1.0" }
+            "_meta": {
+                "io.modelcontextprotocol/protocolVersion": crate::mcp::MCP_PROTOCOL_VERSION,
+                "io.modelcontextprotocol/clientCapabilities": {}
+            }
         }
     });
     if let Some(mut stdin) = child.stdin.take() {
@@ -680,7 +681,7 @@ fn probe_mcp_initialize_with_timeout(
     });
 
     let responded = match receiver.recv_timeout(timeout) {
-        Ok(response) => response.contains("protocolVersion") && response.contains("\"result\""),
+        Ok(response) => is_modern_mcp_discovery_response(&response),
         // Timed out (or the reader thread vanished) — treat as no response.
         Err(_) => false,
     };
@@ -695,6 +696,26 @@ fn probe_mcp_initialize_with_timeout(
         let _ = reader.join();
     }
     responded
+}
+
+fn is_modern_mcp_discovery_response(response: &str) -> bool {
+    response.lines().any(|line| {
+        let Ok(message) = serde_json::from_str::<serde_json::Value>(line) else {
+            return false;
+        };
+        message["jsonrpc"] == "2.0"
+            && message["id"] == 1
+            && message.get("error").is_none()
+            && message["result"]["resultType"] == "complete"
+            && message["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"] == "keel"
+            && message["result"]["supportedVersions"]
+                .as_array()
+                .is_some_and(|versions| {
+                    versions
+                        .iter()
+                        .any(|version| version == crate::mcp::MCP_PROTOCOL_VERSION)
+                })
+    })
 }
 
 /// Report the health of the `keel` MCP registration in `~/.claude.json`.
@@ -1444,6 +1465,31 @@ mod tests {
     }
 
     #[test]
+    fn mcp_probe_requires_modern_discovery_shape() {
+        let valid = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1,
+            "result": {
+                "resultType": "complete",
+                "supportedVersions": [crate::mcp::MCP_PROTOCOL_VERSION],
+                "_meta": {"io.modelcontextprotocol/serverInfo": {"name": "keel"}}
+            }
+        });
+        assert!(is_modern_mcp_discovery_response(&valid.to_string()));
+        assert!(!is_modern_mcp_discovery_response(
+            r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25"}}"#
+        ));
+        let mut wrong_id = valid.clone();
+        wrong_id["id"] = serde_json::json!(2);
+        assert!(!is_modern_mcp_discovery_response(&wrong_id.to_string()));
+        let mut missing_type = valid;
+        missing_type["result"]
+            .as_object_mut()
+            .unwrap()
+            .remove("resultType");
+        assert!(!is_modern_mcp_discovery_response(&missing_type.to_string()));
+    }
+
+    #[test]
     fn mcp_probe_timeout_reaps_descendant_held_pipes() {
         let command = crate::test_support::descendant_pipe_fixture_command();
         let program = command.get_program().to_string_lossy().into_owned();
@@ -1452,7 +1498,7 @@ mod tests {
             .map(|argument| argument.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
         let started = std::time::Instant::now();
-        assert!(!probe_mcp_initialize_with_timeout(
+        assert!(!probe_mcp_discover_with_timeout(
             &program,
             &arguments,
             std::time::Duration::from_millis(100),

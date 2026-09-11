@@ -1463,6 +1463,7 @@ fn fuse_candidates_with_status(
 
 fn collect_source_paths(root: &Path) -> Result<SourcePathCollection, String> {
     let mut collection = SourcePathCollection::default();
+    let mut candidate_paths = BTreeSet::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(directory) = stack.pop() {
         let entries = match fs::read_dir(&directory) {
@@ -1508,16 +1509,32 @@ fn collect_source_paths(root: &Path) -> Result<SourcePathCollection, String> {
                 stack.push(path);
             } else if file_type.is_file() && is_indexable_file(&path) {
                 collection.discovered += 1;
-                collection.paths.push(path);
+                insert_bounded_path(&mut candidate_paths, path, MAX_FILES);
             }
         }
     }
-    collection.paths.sort();
-    if collection.paths.len() > MAX_FILES {
-        collection.skipped_limit = (collection.paths.len() - MAX_FILES) as u64;
-        collection.paths.truncate(MAX_FILES);
-    }
+    collection.paths = candidate_paths.into_iter().collect();
+    collection.skipped_limit = collection.discovered.saturating_sub(MAX_FILES as u64);
     Ok(collection)
+}
+
+/// Keep discovery memory bounded while preserving the deterministic first-N
+/// ordering used by the persisted index. The walk still counts every match so
+/// callers can report complete truncation metadata.
+fn insert_bounded_path(paths: &mut BTreeSet<PathBuf>, path: PathBuf, limit: usize) {
+    if limit == 0 {
+        return;
+    }
+    if paths.len() < limit {
+        paths.insert(path);
+        return;
+    }
+    if paths.last().is_some_and(|largest| path < *largest) {
+        if let Some(largest) = paths.iter().next_back().cloned() {
+            paths.remove(&largest);
+            paths.insert(path);
+        }
+    }
 }
 
 fn collect_source_snapshots(root: &Path, paths: &[PathBuf]) -> SnapshotCollection {
@@ -2616,5 +2633,17 @@ mod tests {
                 < map.find("## Indexed Files").expect("files section")
         );
         assert!(map.contains("## Index Coverage"));
+    }
+
+    #[test]
+    fn bounded_path_selection_keeps_deterministic_lexicographic_prefix() {
+        let mut paths = BTreeSet::new();
+        for value in ["z.rs", "m.rs", "a.rs", "q.rs"] {
+            insert_bounded_path(&mut paths, PathBuf::from(value), 2);
+        }
+        assert_eq!(
+            paths.into_iter().collect::<Vec<_>>(),
+            vec![PathBuf::from("a.rs"), PathBuf::from("m.rs")]
+        );
     }
 }

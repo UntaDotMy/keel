@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { createInterface } from "node:readline";
 
-const MCP_PROTOCOL_VERSION = "2025-11-25";
+const MCP_PROTOCOL_VERSION = "2026-07-28";
 const MCP_FRAME_LIMIT_BYTES = 24_000;
 const MCP_TEXT_LIMIT_CHARS = 12_000;
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -56,6 +56,7 @@ class McpSession {
       env: {
         ...process.env,
         CLAUDE_TARGET_OVERRIDE: claudeHome,
+        KEEL_HOME: claudeHome,
         HOME: claudeHome,
         USERPROFILE: claudeHome,
         KEEL_MCP_ALLOW_UNSAFE_COMMANDS: "1",
@@ -113,27 +114,23 @@ class McpSession {
     this.waiters.clear();
   }
 
-  notify(method, params) {
-    if (this.closed) {
-      throw new Error(`cannot notify closed MCP server: ${method}`);
-    }
-    const request = { jsonrpc: "2.0", method };
-    if (params !== undefined) {
-      request.params = params;
-    }
-    this.child.stdin.write(`${JSON.stringify(request)}\n`);
-  }
-
   request(method, params) {
     if (this.closed) {
       return Promise.reject(new Error(`cannot request from closed MCP server: ${method}`));
     }
     const id = this.nextId;
     this.nextId += 1;
-    const request = { jsonrpc: "2.0", id, method };
-    if (params !== undefined) {
-      request.params = params;
-    }
+    const request = {
+      jsonrpc: "2.0", id, method,
+      params: {
+        ...params,
+        _meta: {
+          ...params?._meta,
+          "io.modelcontextprotocol/protocolVersion": MCP_PROTOCOL_VERSION,
+          "io.modelcontextprotocol/clientCapabilities": {},
+        },
+      },
+    };
     return new Promise((resolveResult, rejectResult) => {
       const timer = setTimeout(() => {
         this.waiters.delete(id);
@@ -248,24 +245,32 @@ async function runSmoke(options) {
   try {
     session = new McpSession(options.binary, options.bundleRoot, options.claudeHome);
 
-    await recordCheck(checks, "initialize", async () => {
-      const result = await session.request("initialize", {
-        protocolVersion: MCP_PROTOCOL_VERSION,
-        capabilities: {},
-        clientInfo: { name: "keel-release-smoke", version: "1" },
-      });
-      if (result?.protocolVersion !== MCP_PROTOCOL_VERSION || result?.serverInfo?.name !== "keel") {
-        throw new Error(`unexpected initialize result: ${JSON.stringify(result)}`);
+    await recordCheck(checks, "server-discovery", async () => {
+      const result = await session.request("server/discover", {});
+      if (result?.resultType !== "complete" || !result?.supportedVersions?.includes(MCP_PROTOCOL_VERSION) || result?._meta?.["io.modelcontextprotocol/serverInfo"]?.name !== "keel") {
+        throw new Error(`unexpected discovery result: ${JSON.stringify(result)}`);
       }
-      return { protocolVersion: result.protocolVersion, server: result.serverInfo };
+      return { protocolVersion: MCP_PROTOCOL_VERSION, server: result._meta["io.modelcontextprotocol/serverInfo"] };
     });
-    session.notify("notifications/initialized");
 
     await recordCheck(checks, "tools-list", async () => {
-      const result = await session.request("tools/list", {});
-      const tools = result?.tools;
+      const tools = [];
+      const seen = new Set();
+      let cursor;
+      do {
+        const result = await session.request("tools/list", cursor ? { cursor } : {});
+        if (result?.resultType !== "complete" || !Array.isArray(result.tools)) {
+          throw new Error(`invalid catalog page: ${JSON.stringify(result)}`);
+        }
+        tools.push(...result.tools);
+        cursor = result.nextCursor;
+        if (cursor) {
+          if (seen.has(cursor)) throw new Error("tools/list repeated a cursor");
+          seen.add(cursor);
+        }
+      } while (cursor);
       if (!Array.isArray(tools) || tools.length < 7) {
-        throw new Error(`tools/list returned an unexpectedly small catalog: ${JSON.stringify(result)}`);
+        throw new Error(`tools/list returned an unexpectedly small catalog: ${JSON.stringify(tools)}`);
       }
       const names = new Set(tools.map((tool) => tool?.name));
       for (const required of ["run_command", "skill_route", "skill_get", "memory_status", "brief_create", "recall"]) {
@@ -278,7 +283,7 @@ async function runSmoke(options) {
           throw new Error(`tool ${tool?.name ?? "<unnamed>"} has an invalid inputSchema`);
         }
       }
-      return { toolCount: tools.length, nextCursor: result.nextCursor ?? null };
+      return { toolCount: tools.length, pageCount: seen.size + 1 };
     });
 
     await recordCheck(checks, "memory-write-seed", async () => {
@@ -368,16 +373,11 @@ async function runSmoke(options) {
     await session.close();
     session = new McpSession(options.binary, options.bundleRoot, options.claudeHome);
     await recordCheck(checks, "restart-and-reconnect", async () => {
-      const result = await session.request("initialize", {
-        protocolVersion: MCP_PROTOCOL_VERSION,
-        capabilities: {},
-        clientInfo: { name: "keel-release-smoke-reconnect", version: "1" },
-      });
-      if (result?.protocolVersion !== MCP_PROTOCOL_VERSION || result?.serverInfo?.name !== "keel") {
-        throw new Error(`unexpected reconnect initialize result: ${JSON.stringify(result)}`);
+      const result = await session.request("server/discover", {});
+      if (result?.resultType !== "complete" || !result?.supportedVersions?.includes(MCP_PROTOCOL_VERSION) || result?._meta?.["io.modelcontextprotocol/serverInfo"]?.name !== "keel") {
+        throw new Error(`unexpected reconnect discovery result: ${JSON.stringify(result)}`);
       }
-      session.notify("notifications/initialized");
-      const recalled = await callTool(session, "recall", { query: marker, limit: 1 });
+        const recalled = await callTool(session, "recall", { query: marker, limit: 1 });
       const { value } = parseToolJson(recalled, "reconnect recall");
       const context = requireBoundedContext(recalled, "reconnect recall");
       if (!Array.isArray(value.matches) || value.matches.length < 1) {

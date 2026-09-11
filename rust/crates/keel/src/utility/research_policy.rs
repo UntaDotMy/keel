@@ -136,7 +136,64 @@ pub(crate) fn validate_research_artifact(
     for claim in claims {
         validate_claim(claim, uses, &source_ids, &mut claim_ids, &mut issues);
     }
+    validate_claim_relations(research, claims, &claim_ids, &mut issues);
     issues
+}
+
+fn validate_claim_relations(
+    research: &Value,
+    claims: &[Value],
+    ids: &BTreeSet<&str>,
+    issues: &mut Issues,
+) {
+    for claim in claims {
+        let id = string_field(claim, "claimId").unwrap_or_default();
+        let mut next = string_field(claim, "supersedes");
+        let mut visited = BTreeSet::from([id]);
+        while let Some(previous) = next {
+            if !ids.contains(previous) {
+                issues.push(format!("{id} supersedes unknown claim {previous}"));
+                break;
+            }
+            if !visited.insert(previous) {
+                issues.push(format!("{id} has a supersession cycle"));
+                break;
+            }
+            next = claims
+                .iter()
+                .find(|item| string_field(item, "claimId") == Some(previous))
+                .and_then(|item| string_field(item, "supersedes"));
+        }
+    }
+    let Some(conflicts) = research.get("conflicts") else {
+        return;
+    };
+    let Some(conflicts) = conflicts.as_array() else {
+        issues.push("research conflicts must be an array".into());
+        return;
+    };
+    for conflict in conflicts {
+        let references = string_array(conflict, "claimIds");
+        let distinct: BTreeSet<&str> = references.iter().map(String::as_str).collect();
+        if distinct.len() < 2 || distinct.iter().any(|id| !ids.contains(id)) {
+            issues.push("research conflict requires at least two distinct known claimIds".into());
+        }
+        if string_field(conflict, "status") != Some("resolved") {
+            issues.push("research has an unresolved claim conflict".into());
+            continue;
+        }
+        required_field(conflict, "rationale", "research conflict", issues);
+        let selected = required_field(conflict, "resolvedByClaimId", "research conflict", issues);
+        if !selected.is_some_and(|id| {
+            ids.contains(id)
+                && claims.iter().any(|claim| {
+                    string_field(claim, "claimId") == Some(id)
+                        && string_field(claim, "classification") == Some("verified")
+                })
+        }) {
+            issues.push("research conflict resolution requires a verified claim".into());
+        }
+    }
 }
 
 fn validate_source<'a>(
@@ -163,6 +220,9 @@ fn validate_source<'a>(
 
     let retrieved_at = required_field(source, "retrievedAt", id, issues)
         .and_then(|value| parse_retrieved_at(value, id, issues));
+    if retrieved_at.is_some_and(|retrieved| retrieved > now + chrono::Duration::minutes(5)) {
+        issues.push(format!("{id} retrievedAt is in the future"));
+    }
     if let (Some(kind), Some(url)) = (source_type, source_url) {
         validate_source_location(kind, url, id, issues);
     }
@@ -290,14 +350,31 @@ fn validate_freshness_class(check: FreshnessCheck<'_>, issues: &mut Issues) {
             if let Some(retrieved_at) = check.retrieved_at {
                 let age = check.now.signed_duration_since(retrieved_at);
                 let window_days = check.policy.window_days_for(check.source_type);
-                if age.num_minutes() < -5 {
-                    issues.push(format!("{} retrievedAt is in the future", check.id));
-                } else if age.num_days() > window_days {
+                if age > chrono::Duration::days(window_days) {
                     issues.push(format!(
                         "{} is stale for sourceType {} (older than {} days); re-search required",
                         check.id, check.source_type, window_days
                     ));
                 }
+            }
+        }
+        "version-bound" => {
+            if !matches!(
+                check.source_type,
+                "official-doc" | "standard" | "repository"
+            ) {
+                issues.push(format!(
+                    "{} version-bound evidence requires documentation, standard, or repository",
+                    check.id
+                ));
+            }
+            let version = required_field(check.source, "sourceVersion", check.id, issues);
+            let required = required_field(check.source, "requiredVersion", check.id, issues);
+            if version != required {
+                issues.push(format!(
+                    "{} sourceVersion does not match requiredVersion",
+                    check.id
+                ));
             }
         }
         _ => issues.push(format!(
@@ -374,6 +451,51 @@ fn string_field<'a>(value: &'a Value, field_name: &str) -> Option<&'a str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn research_conflicts_require_a_verified_resolution_and_preserve_supersession() {
+        let mut research =
+            serde_json::json!({"conflicts":[{"claimIds":["A", "B"], "status":"open"}]});
+        let claims = vec![
+            serde_json::json!({"claimId":"A", "classification":"verified"}),
+            serde_json::json!({"claimId":"B", "classification":"verified", "supersedes":"A"}),
+        ];
+        let ids = BTreeSet::from(["A", "B"]);
+        let mut issues = Vec::new();
+        validate_claim_relations(&research, &claims, &ids, &mut issues);
+        assert!(issues.iter().any(|issue| issue.contains("unresolved")));
+        research["conflicts"][0] = serde_json::json!({"claimIds":["A", "B"], "status":"resolved", "resolvedByClaimId":"B", "rationale":"Current official source supersedes historical evidence"});
+        issues.clear();
+        validate_claim_relations(&research, &claims, &ids, &mut issues);
+        assert!(issues.is_empty(), "{issues:?}");
+        let cyclic = vec![
+            serde_json::json!({"claimId":"A", "supersedes":"B"}),
+            claims[1].clone(),
+        ];
+        validate_claim_relations(&research, &cyclic, &ids, &mut issues);
+        assert!(issues
+            .iter()
+            .any(|issue| issue.contains("supersession cycle")));
+    }
+
+    #[test]
+    fn version_bound_sources_require_the_exact_requested_version() {
+        let source = serde_json::json!({"sourceVersion":"1", "requiredVersion":"2"});
+        let mut issues = Vec::new();
+        validate_freshness_class(
+            FreshnessCheck {
+                source_type: "standard",
+                freshness: "version-bound",
+                source: &source,
+                retrieved_at: None,
+                policy: ResearchPolicy::default(),
+                now: Utc::now(),
+                id: "SRC-1",
+            },
+            &mut issues,
+        );
+        assert!(issues.iter().any(|issue| issue.contains("does not match")));
+    }
 
     #[test]
     fn project_freshness_defers_to_the_per_source_type_window() {

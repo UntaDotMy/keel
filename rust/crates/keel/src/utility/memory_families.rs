@@ -2187,8 +2187,16 @@ fn research_cache_record_is_stale(record: &Record, now: &str) -> bool {
             .trim()
             .to_ascii_lowercase()
             .as_str(),
-        "stale" | "expired"
-    ) || research_cache_record_expiry(record).is_some_and(|expires_at| expires_at.as_str() <= now)
+        "stale" | "expired" | "superseded" | "conflicted"
+    ) || research_cache_record_expiry(record).is_some_and(|expires_at| {
+        match (
+            chrono::DateTime::parse_from_rfc3339(&expires_at),
+            chrono::DateTime::parse_from_rfc3339(now),
+        ) {
+            (Ok(expires), Ok(now)) => expires <= now,
+            _ => true,
+        }
+    })
 }
 
 /// Return the stored expiry, or derive one for records written before the
@@ -2379,6 +2387,26 @@ fn show_family_record(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn research_expiry_compares_instants_and_rejects_corrupt_expiry() {
+        let record = |expiry: &str| vec![("expiresAt".into(), expiry.into())];
+        assert!(super::research_cache_record_is_stale(
+            &record("2026-09-12T01:00:00+08:00"),
+            "2026-09-11T18:00:00Z"
+        ));
+        assert!(!super::research_cache_record_is_stale(
+            &record("2026-09-11T12:00:00-08:00"),
+            "2026-09-11T18:00:00Z"
+        ));
+        assert!(super::research_cache_record_is_stale(
+            &record("invalid"),
+            "2026-09-11T18:00:00Z"
+        ));
+        assert!(super::research_cache_record_is_stale(
+            &vec![("state".into(), "conflicted".into())],
+            "2026-09-11T18:00:00Z"
+        ));
+    }
     use super::*;
     use std::path::PathBuf;
 
