@@ -667,18 +667,6 @@ pub fn refresh(
     Ok(report)
 }
 
-/// Compatibility search API retained for library callers while richer callers
-/// use `search_with_metadata`.
-#[allow(dead_code)]
-pub fn search(
-    workspace_root: &Path,
-    claude_home_flag: &str,
-    query: &str,
-    limit: usize,
-) -> Result<Vec<SearchHit>, String> {
-    search_filtered(workspace_root, claude_home_flag, query, limit, None)
-}
-
 pub fn search_with_metadata(
     workspace_root: &Path,
     claude_home_flag: &str,
@@ -2326,7 +2314,8 @@ mod tests {
     fn search_fuses_exact_symbol_path_and_fts_results() {
         let (root, home) = temp_workspace("search");
         fs::write(root.join("src/main.rs"), "pub fn dispatch_request() {}\n").expect("source");
-        let hits = search(&root, &home.to_string_lossy(), "dispatch_request", 10).expect("search");
+        let hits = search_filtered(&root, &home.to_string_lossy(), "dispatch_request", 10, None)
+            .expect("search");
         assert!(!hits.is_empty());
         assert_eq!(hits[0].path, "src/main.rs");
         assert_eq!(hits[0].symbol, "dispatch_request");
@@ -2346,11 +2335,12 @@ mod tests {
         fs::create_dir_all(root.join("zzz")).expect("filtered directory");
         fs::write(root.join("zzz/target.rs"), "// deep_filter_token\n").expect("filtered source");
 
-        let unfiltered = search(
+        let unfiltered = search_filtered(
             &root,
             &home.to_string_lossy(),
             "deep_filter_token",
             MAX_SEARCH_RESULTS,
+            None,
         )
         .expect("unfiltered search");
         assert!(
@@ -2382,7 +2372,8 @@ mod tests {
         let second = refresh(&root, &home.to_string_lossy(), false).expect("second");
         assert_eq!(second.files_removed, 1);
         assert_eq!(second.files_added, 1);
-        let hits = search(&root, &home.to_string_lossy(), "old", 10).expect("search");
+        let hits =
+            search_filtered(&root, &home.to_string_lossy(), "old", 10, None).expect("search");
         assert!(hits.is_empty());
     }
 

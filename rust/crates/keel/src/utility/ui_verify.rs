@@ -100,7 +100,6 @@ impl VisualVerdict {
         }
     }
 
-    #[allow(dead_code)]
     pub fn to_review_status(self) -> &'static str {
         match self {
             Self::Pass => "pass",

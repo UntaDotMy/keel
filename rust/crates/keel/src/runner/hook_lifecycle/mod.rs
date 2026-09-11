@@ -32,7 +32,9 @@ mod session_start;
 mod settings;
 mod state;
 
-pub use dispatch::{run_hook_command, run_hook_command_with_stdin};
+pub use dispatch::run_hook_command;
+#[cfg(test)]
+pub use dispatch::run_hook_command_with_stdin;
 use git_hooks::run_hook_git_hooks;
 #[cfg(test)]
 pub use post_batch::completeness_marker_key;

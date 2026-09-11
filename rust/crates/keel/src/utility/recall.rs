@@ -751,24 +751,15 @@ pub fn recall_database_path(claude_home: &Path) -> PathBuf {
 /// searchable; the "saved memory is not searchable" gap. Calling this at
 /// the end of each write closes the window.
 ///
-/// Best-effort by contract: this opens the index and runs the normal incremental
-/// sync. Callers that know the path they just wrote should use
-/// [`reindex_after_write_paths`] so a same-size/same-mtime replacement cannot be
-/// hidden by the integrity interval without forcing an unrelated corpus-wide
-/// reread. A memory write must never fail because the index could not be opened
-/// or synced. The durable file on disk is the source of truth, and the next
-/// read-path sync will reconcile it anyway. The next-read-path-sync fallback is
-/// exactly why callers can treat an `Err` here as advisory.
-#[allow(dead_code)]
-pub fn reindex_after_write(claude_home: &Path) -> Result<(), String> {
-    reindex_after_write_paths(claude_home, &[])
-}
-
-/// Synchronize the recall index after a durable write, invalidating only the
-/// known changed paths before the incremental scan. The public no-path wrapper
-/// above remains useful for embedders that do not retain the write result; the
-/// built-in memory writers pass their returned path here to avoid rereading all
-/// unchanged memory files.
+/// Best-effort by contract: a memory write must never fail because the index
+/// could not be opened or synced. The durable file on disk is the source of
+/// truth, and the next read-path sync reconciles it anyway, which is why a
+/// caller can treat an `Err` here as advisory.
+///
+/// Invalidate only the known changed paths before the incremental scan, so a
+/// same-size/same-mtime replacement cannot hide behind the integrity interval.
+/// The built-in memory writers pass their returned path; a caller with no
+/// retained path passes an empty slice.
 pub fn reindex_after_write_paths(
     claude_home: &Path,
     changed_paths: &[&Path],
@@ -2685,8 +2676,9 @@ mod tests {
                 "{\n  \"id\": \"rc-42\",\n  \"question\": \"how to defeat blind tool search\",\n  \"answer\": \"push recall content at session start\"\n}\n",
             );
 
-            // The write-time sync the production handlers now call.
-            reindex_after_write(claude_home).expect("reindex_after_write succeeds");
+            // The write-time sync the production handlers now call. This caller
+            // retains no path, so it passes the empty slice.
+            reindex_after_write_paths(claude_home, &[]).expect("reindex_after_write succeeds");
 
             // Query the index directly — NO search_recall_index (no read-path sync).
             let database_path = recall_database_path(claude_home);
@@ -2698,7 +2690,7 @@ mod tests {
             assert!(
                 hits.iter()
                     .any(|hit| hit.absolute_path.contains("rc-42.json")),
-                "reindex_after_write must index the new record so it is found with no read-path sync; hits: {:?}",
+                "reindex_after_write_paths must index the new record so it is found with no read-path sync; hits: {:?}",
                 hits.iter().map(|h| &h.absolute_path).collect::<Vec<_>>()
             );
         });

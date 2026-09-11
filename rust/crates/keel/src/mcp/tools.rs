@@ -180,7 +180,6 @@ fn canonical_tools_list_for_profile(profile: super::McpCatalogProfile) -> Value 
 /// Apply MCP's opaque-cursor pagination and progressive disclosure levels to
 /// the canonical catalog. Invalid cursors fail closed; they never trigger a
 /// full-catalog fallback that could violate the context budget.
-#[allow(dead_code)]
 pub(crate) fn handle_tools_list_for_profile_params(
     profile: super::McpCatalogProfile,
     params: &Value,

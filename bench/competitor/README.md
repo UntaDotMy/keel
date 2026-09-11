@@ -44,14 +44,16 @@ cargo run --locked --bin keel -- eval --json
 
 Keel provides 37 Model Context Protocol tools. To prevent large initial discovery payloads from exhausting host context windows and triggering transport timeouts, Keel implements a tiered catalog profile:
 
-- **Tiered Profile (Default)**: Advertises 17 core eager tools in `tools/list`. Consumes **1,240 tokens** (ratified budget: 1,364 tokens).
-- **Full Profile (`KEEL_MCP_CATALOG_PROFILE=full`)**: Advertises all 37 tools in `tools/list`. Consumes **2,929 tokens** (ratified budget: 3,222 tokens).
-- **Token Reduction**: **1,704 tokens saved per session start (58.18% reduction)**.
+- **Tiered Profile (Default)**: Advertises 17 core eager tools in `tools/list`. The emitted handshake consumes **671 tokens**; the fixed-context ledger ratifies **1,364 tokens** for the complete tiered catalog at full schema depth.
+- **Full Profile (`KEEL_MCP_CATALOG_PROFILE=full`)**: Advertises all 37 tools. The emitted handshake consumes **1,443 tokens**; the ratified budget for the complete full-schema catalog is **3,222 tokens**.
+- **Deferred tools stay reachable**: a client that needs a deferred tool either pages through `nextCursor` or names it through `keel/discover`, which covers all 12 representative task families.
 - **Execution Parity**: All 37 tools remain registered, valid, and directly dispatchable through `tools/call` in both profiles.
+
+The two numbers measure different things on purpose: the emitted handshake is what a client actually receives, while the ledger budget bounds the complete catalog the packer may ever emit. Reproduce the emitted cost per profile with `keel stats tools --benchmark --json`, and the ratified ledger with `keel stats context --json`.
 
 Reproduction command:
 ```powershell
-cargo run --locked --bin keel -- stats --json --workspace-root .
+cargo run --locked --bin keel -- stats tools --benchmark --json
 ```
 
 ## Summary Artifacts
