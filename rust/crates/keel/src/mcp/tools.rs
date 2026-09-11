@@ -7235,6 +7235,9 @@ mod tests {
 
     #[test]
     fn run_command_policy_requires_explicit_unsafe_opt_in() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         assert!(command_requires_confirmation(
             "python",
             &["-c".to_string(), "print(1)".to_string()],
