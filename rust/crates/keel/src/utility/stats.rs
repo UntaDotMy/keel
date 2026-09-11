@@ -45,6 +45,9 @@ pub fn run_stats_command(
                 return run_context_stats(&arguments[1..], standard_output, standard_error)
             }
             "tools" => return run_tools_stats(&arguments[1..], standard_output, standard_error),
+            "latency" => {
+                return run_latency_benchmark(&arguments[1..], standard_output, standard_error)
+            }
             "gain" => {
                 return crate::utility::gain::run_gain_command(
                     &arguments[1..],
@@ -218,6 +221,211 @@ fn run_context_stats(
         );
     }
     0
+}
+
+/// §33 declared latency ceilings, in milliseconds. Declared here (before any
+/// run) and shared by the benchmark and its tests, so a floor cannot drift from
+/// the check that enforces it.
+const LATENCY_STAGE_MAX_MS: f64 = 250.0;
+/// The two stages that read the filesystem are allowed a wider ceiling, because
+/// a cold page cache or a large skill tree legitimately costs more than pure
+/// in-memory work.
+const LATENCY_IO_STAGE_MAX_MS: f64 = 1_500.0;
+
+/// §33: measure the gateway's own pipeline stages, not a synthetic loop. Each
+/// stage calls the owner production calls, and a stage above its declared
+/// ceiling fails the run rather than only printing a number.
+fn run_latency_benchmark(
+    arguments: &[String],
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let mut flag_set = FlagSet::new("stats latency");
+    flag_set.bool_flag("json", false);
+    flag_set.string_flag("workspace-root", "");
+    if let Err(parse_error) = flag_set.parse(arguments) {
+        let _ = writeln!(standard_error, "{}", parse_error.message);
+        return 1;
+    }
+    let workspace_root = stats_workspace_root(&flag_set);
+    let claude_home = match crate::runtime::resolve_claude_home("") {
+        Ok(home) => home,
+        Err(error) => {
+            let _ = writeln!(standard_error, "stats latency: {error}");
+            return 1;
+        }
+    };
+
+    /// Time one call and hand back both the elapsed milliseconds and the value, so
+    /// a measured stage never has to discard its result.
+    fn time<T>(operation: impl FnOnce() -> T) -> (f64, T) {
+        let started = std::time::Instant::now();
+        let value = operation();
+        (started.elapsed().as_secs_f64() * 1_000.0, value)
+    }
+
+    let profile = crate::mcp::McpCatalogProfile::from_env();
+    // Warm every lazily-initialized owner before timing, so one-time tokenizer
+    // or index construction is not charged to a stage that no longer pays it.
+    let _warm_handshake = crate::mcp::measured_handshake_tokens(profile);
+    let _warm_tokens = crate::proxy::token_meter::TokenMeter::count_text("warm");
+    let skills_dir = claude_home.join("skills");
+    let terms = crate::utility::skill_match::load_skill_terms(&skills_dir);
+    let catalog = crate::utility::skill_match::skill_catalog(&claude_home);
+    let mut firewall = crate::proxy::context::ContextFirewall::new(
+        crate::proxy::context::ContextPolicy::with_max_tokens(4_000),
+    );
+    let payload = "latency probe payload repeated for a realistic reduction input ".repeat(40);
+    let projection = |payload: &str| {
+        crate::proxy::context::ProjectionInput::new(
+            crate::proxy::context::ContextSource::McpTool,
+            payload.to_string(),
+            None::<String>,
+            "latency-workspace",
+            "latency-session",
+        )
+    };
+    let _warm_projection = firewall.project(projection("warm-up payload"));
+    let store = crate::proxy::raw_store::RawStore::new();
+    // why: an empty or unreadable store only means there is no recovery pointer to
+    // time; the stage reports zero rather than failing the whole benchmark.
+    let known_raw_id = store
+        .list()
+        .ok()
+        .and_then(|entries| entries.first().map(|entry| entry.raw_id.clone()));
+
+    let (catalog_build_ms, _measured_catalog) =
+        time(|| crate::mcp::tools_complete_catalog(profile));
+    let (page_pack_ms, _measured_page) = time(|| crate::mcp::measured_handshake_tokens(profile));
+    let page = crate::mcp::tools_complete_catalog(profile);
+    let (serialization_ms, serialized_page) = time(|| serde_json::to_string(&page));
+    // why: the page is hand-built JSON, so serialization cannot fail here.
+    let serialized = serialized_page.unwrap_or_default();
+    let (token_count_ms, _serialized_tokens) =
+        time(|| crate::proxy::token_meter::TokenMeter::count_text(&serialized));
+    // Run the firewall twice so the second stage reports the dedupe path rather
+    // than only a cold projection.
+    let (reduction_ms, _reduced) = time(|| firewall.project(projection(&payload)));
+    let (dedupe_ms, _deduped) = time(|| firewall.project(projection(&payload)));
+    let (skill_index_ms, _indexed_terms) =
+        time(|| crate::utility::skill_match::load_skill_terms(&skills_dir));
+    let (skill_routing_ms, _routed) = time(|| {
+        crate::utility::skill_match::resolve_skill_selection(
+            "review this pull request for security problems",
+            &terms,
+            &catalog,
+        )
+    });
+    let (memory_retrieval_ms, _recalled) = time(|| {
+        crate::utility::recall::search_recall_index(&claude_home, "latency probe", 5, None)
+    });
+    // Per-retrieval overhead, not a full-store scan: one recovery lookup on the
+    // request path, which is what a bounded recovery pointer actually costs.
+    let (raw_store_ms, _located) = match &known_raw_id {
+        Some(raw_id) => {
+            let (elapsed, located) = time(|| store.find_dir(raw_id));
+            (elapsed, Some(located))
+        }
+        None => (0.0, None),
+    };
+
+    let stages = vec![
+        ("catalogBuildMs", catalog_build_ms, LATENCY_STAGE_MAX_MS),
+        ("pagePackMs", page_pack_ms, LATENCY_STAGE_MAX_MS),
+        ("serializationMs", serialization_ms, LATENCY_STAGE_MAX_MS),
+        ("tokenCountMs", token_count_ms, LATENCY_STAGE_MAX_MS),
+        ("reductionMs", reduction_ms, LATENCY_STAGE_MAX_MS),
+        ("dedupeMs", dedupe_ms, LATENCY_STAGE_MAX_MS),
+        ("skillIndexMs", skill_index_ms, LATENCY_IO_STAGE_MAX_MS),
+        ("skillRoutingMs", skill_routing_ms, LATENCY_STAGE_MAX_MS),
+        (
+            "memoryRetrievalMs",
+            memory_retrieval_ms,
+            LATENCY_IO_STAGE_MAX_MS,
+        ),
+        ("rawStoreLocateMs", raw_store_ms, LATENCY_IO_STAGE_MAX_MS),
+    ];
+    let failures = stages
+        .iter()
+        .filter_map(|(name, measured, ceiling)| {
+            latency_stage_status(*measured, *ceiling)
+                .1
+                .map(|detail| format!("{name} {detail}"))
+        })
+        .collect::<Vec<_>>();
+    let stages_json = stages
+        .iter()
+        .map(|(name, measured, ceiling)| {
+            let (status, _) = latency_stage_status(*measured, *ceiling);
+            json!({
+                "stage": name,
+                "milliseconds": (measured * 100.0).round() / 100.0,
+                "declaredMaxMs": ceiling,
+                "status": status,
+            })
+        })
+        .collect::<Vec<_>>();
+    let payload = json!({
+        "schemaVersion": 1,
+        "benchmark": "gateway-stage-latency",
+        "workspaceRoot": workspace_root,
+        "measurementScope": "local CPU work; never counted as model-visible tokens",
+        "declaredThresholds": {
+            "stageMaxMs": LATENCY_STAGE_MAX_MS,
+            "ioStageMaxMs": LATENCY_IO_STAGE_MAX_MS,
+        },
+        "stages": stages_json,
+        "failures": failures,
+        "status": if failures.is_empty() { "passed" } else { "failed" },
+        "reproductionCommand": "keel stats latency --json",
+    });
+
+    if flag_set.bool_value("json") {
+        return write_serde_json(standard_output, standard_error, "stats latency", &payload);
+    }
+    let _ = writeln!(
+        standard_output,
+        "keel stats latency workspace={} status={}",
+        payload["workspaceRoot"].as_str().unwrap_or(""),
+        payload["status"].as_str().unwrap_or("")
+    );
+    for stage in payload["stages"].as_array().into_iter().flatten() {
+        let _ = writeln!(
+            standard_output,
+            "  {}={}ms limit={}ms status={}",
+            stage["stage"].as_str().unwrap_or("?"),
+            stage["milliseconds"],
+            stage["declaredMaxMs"],
+            stage["status"].as_str().unwrap_or("?")
+        );
+    }
+    for failure in payload["failures"].as_array().into_iter().flatten() {
+        let _ = writeln!(
+            standard_output,
+            "  FAILED: {}",
+            failure.as_str().unwrap_or("")
+        );
+    }
+    if failures.is_empty() {
+        0
+    } else {
+        1
+    }
+}
+
+/// The pass/fail decision for one measured stage. Extracted so the fail-closed
+/// path is testable without a production knob that could weaken the ceiling.
+fn latency_stage_status(measured_ms: f64, declared_max_ms: f64) -> (&'static str, Option<String>) {
+    if measured_ms <= declared_max_ms {
+        ("within_budget", None)
+    } else {
+        (
+            "exceeded",
+            Some(format!(
+                "took {measured_ms:.1}ms, above the declared {declared_max_ms:.0}ms"
+            )),
+        )
+    }
 }
 
 fn run_tools_stats(
@@ -1012,6 +1220,28 @@ impl StatsSnapshot {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// §33: a stage at or under its ceiling passes; anything above fails closed
+    /// and names the measurement, so a regression cannot pass by only printing.
+    #[test]
+    fn latency_stage_status_fails_closed_above_its_declared_ceiling() {
+        assert_eq!(latency_stage_status(0.0, 250.0).0, "within_budget");
+        assert_eq!(latency_stage_status(250.0, 250.0).0, "within_budget");
+        assert!(latency_stage_status(250.0, 250.0).1.is_none());
+
+        let (status, detail) = latency_stage_status(250.1, 250.0);
+        assert_eq!(status, "exceeded");
+        let detail = detail.expect("an exceeded stage must explain itself");
+        assert!(
+            detail.contains("250.1ms") && detail.contains("250ms"),
+            "{detail}"
+        );
+
+        let (status, detail) = latency_stage_status(9_999.0, 1_500.0);
+        assert_eq!(status, "exceeded");
+        let detail = detail.expect("an exceeded IO stage must explain itself");
+        assert!(detail.contains("9999.0ms"), "{detail}");
+    }
 
     #[test]
     fn mcp_benchmark_profiles_stay_bounded_complete_and_deduplicated() {

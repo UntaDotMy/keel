@@ -340,6 +340,81 @@ fn stats_text_prints_the_full_fixed_context_ledger() {
     }
 }
 
+/// §33: every declared pipeline stage must be measured through its real owner,
+/// and the run must fail when a stage exceeds its declared ceiling rather than
+/// only printing a number.
+#[test]
+fn latency_benchmark_measures_every_declared_stage_and_enforces_its_ceiling() {
+    let home = isolated_home("latency");
+    let root = repository_root();
+    let output = keel_command(&home.0)
+        .args([
+            "stats",
+            "latency",
+            "--json",
+            "--workspace-root",
+            root.to_str().expect("UTF-8 repository root"),
+        ])
+        .output()
+        .expect("run keel stats latency --json");
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("parse stats latency JSON");
+
+    // A stage over its ceiling exits non-zero; the payload must say why.
+    if !output.status.success() {
+        assert_eq!(payload["status"], "failed");
+        panic!(
+            "latency stage exceeded its declared ceiling: {}",
+            payload["failures"]
+        );
+    }
+    assert_eq!(payload["status"], "passed", "{payload}");
+    assert_eq!(payload["failures"].as_array().map(Vec::len), Some(0));
+
+    let stages = payload["stages"].as_array().expect("stages array");
+    let names = stages
+        .iter()
+        .map(|stage| stage["stage"].as_str().expect("stage name"))
+        .collect::<Vec<_>>();
+    for required in [
+        "catalogBuildMs",
+        "pagePackMs",
+        "serializationMs",
+        "tokenCountMs",
+        "reductionMs",
+        "dedupeMs",
+        "skillRoutingMs",
+        "memoryRetrievalMs",
+        "rawStoreLocateMs",
+    ] {
+        assert!(
+            names.contains(&required),
+            "the §33 stage list must include {required}: {names:?}"
+        );
+    }
+    for stage in stages {
+        // Each stage declares its own ceiling, and the reported status must agree
+        // with the measurement rather than being asserted independently.
+        let measured = stage["milliseconds"].as_f64().expect("measured ms");
+        let ceiling = stage["declaredMaxMs"].as_f64().expect("declared ceiling");
+        assert!(measured >= 0.0 && ceiling > 0.0, "{stage}");
+        assert_eq!(
+            stage["status"],
+            if measured <= ceiling {
+                "within_budget"
+            } else {
+                "exceeded"
+            },
+            "{stage}"
+        );
+    }
+    assert!(
+        payload["reproductionCommand"]
+            .as_str()
+            .is_some_and(|command| command.contains("stats latency")),
+        "the benchmark must name its own reproduction command"
+    );
+}
+
 #[test]
 fn gain_separates_fixed_context_from_command_compaction_savings() {
     let home = isolated_home("gain-separation");

@@ -355,15 +355,12 @@ fn pack_catalog_page(
     // Spec-default may return the complete catalog when it fits; explicit
     // level/cursor requests retain the item cap while token budget is authoritative.
     let max_items = if spec_default { 64 } else { tools_page_size() };
-    // One deadline covers the whole walk: a fresh per-page deadline changes the
-    // emitted cursor's token length, which is measured as part of each candidate.
+    // §34: the deadline is part of the measured cursor, so a per-call value would
+    // let the clock change which tools a page packs. One TTL window, one deadline.
     let expiry = match cursor {
         Some(value) => peek_catalog_cursor(value)?.expires_at,
-        None => now_unix_seconds().saturating_add(mcp_cursor_ttl_seconds()),
+        None => catalog_cursor_expiry_at(now_unix_seconds(), mcp_cursor_ttl_seconds()),
     };
-    // §34: measure candidates against a fixed deadline. Live deadlines differ only
-    // in digits, which tokenize differently and could pack a different page.
-    let packing_expiry = CATALOG_CURSOR_PACKING_EXPIRY;
     let mut page_tools = Vec::new();
     let mut offset = start;
     while offset < expected && page_tools.len() < max_items {
@@ -382,7 +379,7 @@ fn pack_catalog_page(
                     budget,
                     &fingerprint,
                     context,
-                    packing_expiry,
+                    expiry,
                     compact_default,
                 )
             });
@@ -406,34 +403,29 @@ fn pack_catalog_page(
         }
     }
 
-    // The real cursor can measure differently from the placeholder, so shrink
-    // rather than emit an over-budget response.
-    while !page_tools.is_empty() {
-        let cursor = (offset < expected).then(|| {
-            encode_catalog_cursor(
-                offset,
-                profile,
-                level,
-                budget,
-                &fingerprint,
-                context,
-                expiry,
-                compact_default,
-            )
-        });
-        let page = tools_list_page(&page_tools, cursor.as_deref());
-        if measure_tools_list_response(&page) <= budget {
-            debug_assert_eq!(page_tools.len(), offset.saturating_sub(start));
-            return Ok(page);
-        }
-        // Dropping the last tool keeps the walk contiguous: the cursor resumes.
-        page_tools.pop();
-        offset -= 1;
+    // Each candidate was measured with the exact cursor this walk emits, so this
+    // recount is the standing typed guard against a serializer change.
+    let next_cursor = (offset < expected).then(|| {
+        encode_catalog_cursor(
+            offset,
+            profile,
+            level,
+            budget,
+            &fingerprint,
+            context,
+            expiry,
+            compact_default,
+        )
+    });
+    let page = tools_list_page(&page_tools, next_cursor.as_deref());
+    let measured = measure_tools_list_response(&page);
+    if measured > budget {
+        return Err(format!(
+            "tools/list response exceeded its configured {budget}-token page budget after final recount ({measured})"
+        ));
     }
-    // Unreachable for a valid budget; retained so a serializer change fails closed.
-    Err(format!(
-        "tools/list response exceeded its configured {budget}-token page budget after final recount"
-    ))
+    debug_assert_eq!(page_tools.len(), offset.saturating_sub(start));
+    Ok(page)
 }
 
 /// One authoritative exact measurement for the emitted `tools/list` response.
@@ -766,10 +758,16 @@ fn mcp_cursor_ttl_seconds() -> u64 {
         .unwrap_or(900)
 }
 
-/// Placeholder deadline used when measuring a candidate page. A real deadline is
-/// a fixed-width 10-digit unix second, so this keeps the candidate the same width
-/// while removing the wall clock from the accept/reject decision (§34).
-const CATALOG_CURSOR_PACKING_EXPIRY: u64 = 9_999_999_999;
+/// The deadline a fresh walk stamps into its cursors, bucketed to the cursor TTL.
+/// The deadline is part of the token-measured cursor, so a per-call value would
+/// let the wall clock change which tools a page packs (§34). Bucketing makes every
+/// request inside one TTL window mint the identical cursor; the deadline always
+/// lands within `(ttl, 2*ttl]` of the request instant, so a cursor is never
+/// shorter-lived than the configured TTL.
+fn catalog_cursor_expiry_at(now: u64, ttl: u64) -> u64 {
+    let ttl = ttl.max(1);
+    ((now / ttl) + 2).saturating_mul(ttl)
+}
 
 fn tool_category(name: &str) -> &'static str {
     match name {
@@ -6742,12 +6740,38 @@ mod tests {
         }
     }
 
-    /// §34: the same catalog, profile, and budget must select the same page. The
-    /// emitted cursor carries a live deadline, so two walks that differ only in
-    /// that deadline must still pack the same tools. Driven through the real
-    /// packer, not a re-implementation of it.
+    /// §34: the fresh deadline is bucketed to the cursor TTL, so two requests in
+    /// the same window mint the identical cursor and therefore the identical page.
+    /// Without this the wall clock is part of the measured payload.
     #[test]
-    fn packing_selection_is_independent_of_wall_clock_deadline() {
+    fn cursor_deadline_is_stable_within_a_ttl_window() {
+        let ttl = 900u64;
+        for offset in [0u64, 1, 7, 899, 5_000] {
+            let now = 1_789_000_000 + offset;
+            let expiry = catalog_cursor_expiry_at(now, ttl);
+            assert_eq!(
+                expiry,
+                catalog_cursor_expiry_at(now + 1, ttl),
+                "two requests one second apart minted different deadlines at now={now}"
+            );
+            assert!(
+                expiry > now + ttl,
+                "a cursor must not be shorter-lived than the TTL: now={now} expiry={expiry}"
+            );
+            assert!(
+                expiry <= now + 2 * ttl,
+                "the bucketed deadline must stay within two TTLs: now={now} expiry={expiry}"
+            );
+        }
+        // A tiny TTL still produces a strictly future, bounded deadline.
+        assert!(catalog_cursor_expiry_at(1_789_000_000, 1) > 1_789_000_000);
+        assert!(catalog_cursor_expiry_at(1_789_000_000, 0) > 1_789_000_000);
+    }
+
+    /// §34 through the real packer: two fresh identical requests must select the
+    /// same tools at the same measured cost, with no allowance for the clock.
+    #[test]
+    fn repeated_identical_requests_pack_the_same_page() {
         let _env_guard = crate::test_support::ENV_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -6756,58 +6780,41 @@ mod tests {
         std::env::set_var("KEEL_MCP_PAGE_TOKENS", "600");
 
         let profile = crate::mcp::McpCatalogProfile::Tiered;
-        let tools = synthetic_paging_tools("clock-tool");
-        let context = crate::mcp::McpRequestContext::authoritative(Some("clock-session"));
-        let fingerprint = catalog_snapshot_fingerprint(profile, &tools, 2, 600);
-        let names = |page: &Value| {
-            page["tools"]
-                .as_array()
-                .expect("tools array")
-                .iter()
-                .filter_map(|tool| tool["name"].as_str().map(str::to_string))
-                .collect::<Vec<_>>()
+        let tools = synthetic_paging_tools("repeat-tool");
+        let context = crate::mcp::McpRequestContext::authoritative(Some("repeat-session"));
+        let pack = || {
+            pack_catalog_page(profile, 2, 600, None, &context, false, false, tools.clone())
+                .expect("a valid budget must produce a page")
         };
 
-        // A fresh walk mints its own deadline.
-        let fresh = pack_catalog_page(profile, 2, 600, None, &context, false, false, tools.clone())
-            .expect("a valid budget must produce a page");
+        let first = pack();
+        let second = pack();
+        let shape = |page: &Value| {
+            (
+                page["tools"]
+                    .as_array()
+                    .expect("tools array")
+                    .iter()
+                    .filter_map(|tool| tool["name"].as_str().map(str::to_string))
+                    .collect::<Vec<_>>(),
+                page["nextCursor"].as_str().map(str::to_string),
+                measure_tools_list_response(page),
+            )
+        };
+        let (first_names, first_cursor, first_tokens) = shape(&first);
+        let (second_names, second_cursor, second_tokens) = shape(&second);
 
-        // The same walk resumed at offset 0 with a far-future deadline: identical
-        // catalog, identical start, only the clock differs.
-        let skewed_deadline = encode_catalog_cursor(
-            0,
-            profile,
-            2,
-            600,
-            &fingerprint,
-            &context,
-            now_unix_seconds().saturating_add(1_000_000),
-            false,
-        );
-        let skewed = pack_catalog_page(
-            profile,
-            2,
-            600,
-            Some(&skewed_deadline),
-            &context,
-            false,
-            false,
-            tools.clone(),
-        )
-        .expect("a valid budget must produce a page");
-
+        assert!(!first_names.is_empty(), "the page must select tools");
+        assert_eq!(first_names, second_names, "the page contents moved");
         assert_eq!(
-            names(&fresh),
-            names(&skewed),
-            "the deadline changed which tools the page selects"
+            first_cursor, second_cursor,
+            "the emitted cursor moved between identical requests"
         );
-        assert!(!names(&fresh).is_empty(), "the page must select tools");
-        for page in [&fresh, &skewed] {
-            assert!(
-                measure_tools_list_response(page) <= 600,
-                "an emitted page exceeded its hard budget"
-            );
-        }
+        assert_eq!(
+            first_tokens, second_tokens,
+            "the measured page cost moved between identical requests"
+        );
+        assert!(first_tokens <= 600, "the page must fit its hard budget");
 
         match previous {
             Some(value) => std::env::set_var("KEEL_MCP_PAGE_TOKENS", value),
