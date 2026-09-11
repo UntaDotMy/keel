@@ -103,9 +103,14 @@ profile transition.
 The skill gateway has a separate benchmark because skill activation and reference
 budgets are independent surfaces. `keel skill-eval --benchmark --json` runs three
 times per deterministic task and compares `all-skills-eager`, `metadata-only`,
-`metadata+selective-activation`, and `metadata+cost-aware-selection`. It reports
-selection accuracy, activation precision/recall, measured tokenizer input, turns,
-latency, peak context, recovery, wrong-skill activations, and conflict rate. The
+`metadata+selective-activation`, `metadata+cost-aware-selection`, and
+`metadata+cost-aware-selection+resource-on-demand`. It reports selection accuracy,
+activation precision/recall, wrong and missed activation rates, measured tokenizer
+input, reacquisition calls, turns, latency, peak context, recovery, and conflict
+rate. Model-visible skill tokens are counted separately from local routing CPU
+time, so cheap local work is never reported as model cost. Bundled resource cost is
+measured from the real files, and the on-demand profile records the extra turn it
+pays to fetch a referenced resource. The
 latest committed local snapshot is [`bench/competitor/skill-selection-benchmark.json`](../bench/competitor/skill-selection-benchmark.json);
 provider cached-input values remain explicitly unavailable for these local fixtures.
 
