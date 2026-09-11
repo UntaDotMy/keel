@@ -53,6 +53,12 @@ pub fn skill_use_count(claude_home: &Path, skill_name: &str) -> u64 {
 }
 
 /// Record a known activation outcome for future cost-aware routing.
+///
+/// Keel has no reliable "did this skill help" signal yet, so nothing in the
+/// production path calls this writer and `skill_success_rate` consequently
+/// returns its neutral prior. The reader, the weights, and this writer are kept
+/// so an outcome source can populate them without a schema change; until then
+/// historical success is inert rather than wrong.
 #[allow(dead_code)]
 pub fn record_skill_outcome(claude_home: &Path, skill_name: &str, success: bool) -> u64 {
     let outcome = if success { "success" } else { "failure" };

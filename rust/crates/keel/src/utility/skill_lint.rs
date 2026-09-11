@@ -4,7 +4,9 @@
 //! Caller: commands.rs `skill-lint` dispatch.
 //! Dependencies: std::fs, std::path, crate::json, crate::runtime::display_path.
 //! Main Functions: run_skill_lint_command, lint_skill, parse_frontmatter.
-//! Side Effects: Reads SKILL.md files and their referenced `references/*.md`; writes a report.
+//! Side Effects: Reads SKILL.md files and their referenced `references/`,
+//!   `scripts/`, `assets/`, and `examples/`; writes a report. It never deletes
+//!   bundled files: statically unreachable resources are reported for review.
 //!
 //! Why this exists: the matcher decides whether to load a skill from its
 //! frontmatter `name` + `description` (and `when_to_use`). A skill that compiles
@@ -65,6 +67,14 @@ struct SkillReport {
     s2_tokens: usize,
     package_bytes: u64,
     resource_count: usize,
+    /// Bundled files that cannot be reached from SKILL.md or another reachable
+    /// text resource. This is advisory: lint reports the finding but never
+    /// removes a user-owned file.
+    unreachable_resources: Vec<String>,
+    /// Directed cycles among text resources. Cycles are advisory because a
+    /// resource may intentionally point back to an index, but the route is
+    /// surfaced so progressive disclosure cannot loop unnoticed.
+    resource_cycles: Vec<Vec<String>>,
     /// Stable, non-cryptographic fingerprint used only for duplicate-content
     /// detection. Persistent integrity claims use SHA-256 elsewhere.
     instruction_fingerprint: String,
@@ -358,6 +368,27 @@ fn report_to_value(report: &SkillReport) -> Value {
             Value::Number(report.resource_count.to_string()),
         ),
         (
+            "unreachableResources".into(),
+            Value::Array(
+                report
+                    .unreachable_resources
+                    .iter()
+                    .cloned()
+                    .map(Value::String)
+                    .collect(),
+            ),
+        ),
+        (
+            "resourceCycles".into(),
+            Value::Array(
+                report
+                    .resource_cycles
+                    .iter()
+                    .map(|cycle| Value::Array(cycle.iter().cloned().map(Value::String).collect()))
+                    .collect(),
+            ),
+        ),
+        (
             "instructionFingerprint".into(),
             Value::String(report.instruction_fingerprint.clone()),
         ),
@@ -581,6 +612,218 @@ fn resource_reference_tokens(body: &str) -> Vec<String> {
     found.into_iter().collect()
 }
 
+fn resource_path_character(character: char) -> bool {
+    character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
+}
+
+/// A bare `references/`/`scripts/`/`assets/` directory mention is an explicit
+/// progressive-disclosure contract for the whole directory. A path followed by
+/// a filename remains an individual reference, so this check does not hide
+/// genuinely unreferenced siblings. Wildcards are handled by the normal path
+/// matcher instead of being treated as an all-directory declaration.
+fn has_generic_resource_directory_reference(body: &str, directory: &str) -> bool {
+    let normalized = body.replace('\\', "/");
+    let needle = format!("{directory}/");
+    let mut search_start = 0usize;
+    while let Some(relative) = normalized[search_start..].find(&needle) {
+        let offset = search_start + relative;
+        let has_boundary = offset == 0
+            || normalized[..offset]
+                .chars()
+                .next_back()
+                .is_some_and(|character| !resource_path_character(character));
+        if has_boundary {
+            let after = &normalized[offset + needle.len()..];
+            let next = after.chars().next();
+            if next.is_none()
+                || next.is_some_and(|character| {
+                    !resource_path_character(character) && !matches!(character, '*' | '?')
+                })
+            {
+                return true;
+            }
+        }
+        search_start = offset + needle.len();
+        if search_start >= normalized.len() {
+            break;
+        }
+    }
+    false
+}
+
+fn resource_matches_reference(resource_path: &str, reference: &str) -> bool {
+    let normalized = reference.replace('\\', "/");
+    if normalized.contains('*') || normalized.contains('?') {
+        wildcard_matches(&normalized, resource_path)
+    } else {
+        normalized.trim_start_matches("./") == resource_path
+    }
+}
+
+fn mark_reachable_resources(
+    reference: &str,
+    resources: &[SkillResource],
+    reachable: &mut BTreeSet<String>,
+    pending: &mut Vec<String>,
+) {
+    if reference.starts_with("../_shared/") {
+        return;
+    }
+    for resource in resources {
+        if resource_matches_reference(&resource.relative_path, reference)
+            && reachable.insert(resource.relative_path.clone())
+        {
+            pending.push(resource.relative_path.clone());
+        }
+    }
+}
+
+/// Return only resources that are safely provable as unreachable. The roots
+/// are explicit file references or an explicit whole-directory mention in
+/// SKILL.md. UTF-8 text resources may add further edges; binary assets cannot
+/// claim reachability for another file, so they remain dead unless a root or
+/// another explicit path names them.
+fn unreachable_skill_resources(
+    skill_root: &Path,
+    body: &str,
+    resources: &[SkillResource],
+) -> Vec<String> {
+    let mut reachable = BTreeSet::new();
+    let mut pending = Vec::new();
+    for directory in RESOURCE_DIRECTORY_NAMES {
+        if has_generic_resource_directory_reference(body, directory) {
+            for resource in resources {
+                if resource.relative_path.starts_with(&format!("{directory}/"))
+                    && reachable.insert(resource.relative_path.clone())
+                {
+                    pending.push(resource.relative_path.clone());
+                }
+            }
+        }
+    }
+    for reference in resource_reference_tokens(body) {
+        mark_reachable_resources(&reference, resources, &mut reachable, &mut pending);
+    }
+
+    let mut cursor = 0usize;
+    while cursor < pending.len() {
+        let relative_path = &pending[cursor];
+        cursor += 1;
+        let path = skill_root.join(relative_path);
+        let Ok(text) = fs::read_to_string(path) else {
+            continue;
+        };
+        for directory in RESOURCE_DIRECTORY_NAMES {
+            if has_generic_resource_directory_reference(&text, directory) {
+                for resource in resources {
+                    if resource.relative_path.starts_with(&format!("{directory}/"))
+                        && reachable.insert(resource.relative_path.clone())
+                    {
+                        pending.push(resource.relative_path.clone());
+                    }
+                }
+            }
+        }
+        for reference in resource_reference_tokens(&text) {
+            mark_reachable_resources(&reference, resources, &mut reachable, &mut pending);
+        }
+    }
+
+    resources
+        .iter()
+        .filter(|resource| !reachable.contains(&resource.relative_path))
+        .map(|resource| resource.relative_path.clone())
+        .collect()
+}
+
+/// Build the resource-reference graph and report deterministic simple cycles.
+/// Only UTF-8 text resources can create edges; binary assets are leaves from
+/// the linter's perspective. Generic whole-directory mentions are intentionally
+/// excluded from the graph because they describe a disclosure policy, not a
+/// directed dependency between individual files.
+fn resource_reference_cycles(skill_root: &Path, resources: &[SkillResource]) -> Vec<Vec<String>> {
+    let mut graph: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for resource in resources {
+        let Ok(text) = fs::read_to_string(skill_root.join(&resource.relative_path)) else {
+            continue;
+        };
+        let mut edges = BTreeSet::new();
+        for reference in resource_reference_tokens(&text) {
+            if reference.starts_with("../_shared/") {
+                continue;
+            }
+            for target in resources {
+                if resource_matches_reference(&target.relative_path, &reference) {
+                    edges.insert(target.relative_path.clone());
+                }
+            }
+        }
+        graph.insert(resource.relative_path.clone(), edges.into_iter().collect());
+    }
+
+    fn canonical_cycle(cycle: &[String]) -> Vec<String> {
+        if cycle.is_empty() {
+            return Vec::new();
+        }
+        let mut best = cycle.to_vec();
+        for offset in 1..cycle.len() {
+            let rotated = cycle[offset..]
+                .iter()
+                .chain(cycle[..offset].iter())
+                .cloned()
+                .collect::<Vec<_>>();
+            if rotated < best {
+                best = rotated;
+            }
+        }
+        best
+    }
+
+    fn visit(
+        node: &str,
+        graph: &BTreeMap<String, Vec<String>>,
+        state: &mut BTreeMap<String, u8>,
+        stack: &mut Vec<String>,
+        cycles: &mut BTreeSet<Vec<String>>,
+    ) {
+        state.insert(node.to_string(), 1);
+        stack.push(node.to_string());
+        if let Some(edges) = graph.get(node) {
+            for next in edges {
+                match state.get(next).copied().unwrap_or(0) {
+                    0 => visit(next, graph, state, stack, cycles),
+                    1 => {
+                        if let Some(start) = stack.iter().position(|item| item == next) {
+                            cycles.insert(canonical_cycle(&stack[start..]));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        stack.pop();
+        state.insert(node.to_string(), 2);
+    }
+
+    let mut state = BTreeMap::new();
+    let mut stack = Vec::new();
+    let mut cycles = BTreeSet::new();
+    for node in graph.keys() {
+        if state.get(node).copied().unwrap_or(0) == 0 {
+            visit(node, &graph, &mut state, &mut stack, &mut cycles);
+        }
+    }
+    cycles
+        .into_iter()
+        .map(|mut cycle| {
+            if let Some(first) = cycle.first().cloned() {
+                cycle.push(first);
+            }
+            cycle
+        })
+        .collect()
+}
+
 /// Resolve only bounded, relative references. A simple `*`/`?` glob is
 /// accepted for the repository's reference-index prose; it must match at least
 /// one regular file. Parent traversal is allowed only for the installed shared
@@ -700,6 +943,8 @@ fn lint_skill(skill_path: &Path) -> SkillReport {
     let (package_bytes, resources) = inspect_skill_package(skill_root);
     report.package_bytes = package_bytes;
     report.resource_count = resources.len();
+    report.unreachable_resources = unreachable_skill_resources(skill_root, &body, &resources);
+    report.resource_cycles = resource_reference_cycles(skill_root, &resources);
     report.instruction_fingerprint = normalized_instruction_fingerprint(&body);
 
     // name: recommended, and must match the directory so the installed path and
@@ -839,6 +1084,19 @@ fn lint_skill(skill_path: &Path) -> SkillReport {
                 .errors
                 .push(format!("references missing file `{referenced}`"));
         }
+    }
+
+    for unreachable in &report.unreachable_resources {
+        report.warnings.push(format!(
+            "dead/unreachable bundled resource `{unreachable}` is not referenced by SKILL.md or a reachable text resource (review before removal)"
+        ));
+    }
+
+    for cycle in &report.resource_cycles {
+        report.warnings.push(format!(
+            "circular resource reference detected: {}",
+            cycle.join(" -> ")
+        ));
     }
 
     // Typo guard: densify/edit scripts that break a line mid-word have produced
@@ -1427,6 +1685,119 @@ mod tests {
         fs::write(references.join("10-present.md"), "content").unwrap();
         let report = lint_skill(&skill_path);
         assert!(report.ok(), "errors: {:?}", report.errors);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn unreachable_resources_are_reported_without_deleting_them() {
+        let (root, skill_path) = temp_skill(
+            "dead-resources",
+            "---\nname: dead-resources\ndescription: Use when checking resource reachability.\nallowed-tools: Read\n---\nRead `references/entry.md` before continuing.\n",
+        );
+        let references = skill_path.parent().unwrap().join("references");
+        fs::create_dir_all(&references).unwrap();
+        fs::write(
+            references.join("entry.md"),
+            "This entry loads `scripts/helper.sh` when needed.\n",
+        )
+        .unwrap();
+        fs::write(references.join("orphan.md"), "No route points here.\n").unwrap();
+        let scripts = skill_path.parent().unwrap().join("scripts");
+        fs::create_dir_all(&scripts).unwrap();
+        fs::write(scripts.join("helper.sh"), "echo helper\n").unwrap();
+        fs::write(scripts.join("orphan.sh"), "echo orphan\n").unwrap();
+
+        let report = lint_skill(&skill_path);
+        assert!(
+            report
+                .unreachable_resources
+                .contains(&"references/orphan.md".to_string()),
+            "orphan reference must be reported: {:?}",
+            report.unreachable_resources
+        );
+        assert!(
+            report
+                .unreachable_resources
+                .contains(&"scripts/orphan.sh".to_string()),
+            "orphan script must be reported: {:?}",
+            report.unreachable_resources
+        );
+        assert!(
+            !report
+                .unreachable_resources
+                .contains(&"references/entry.md".to_string())
+                && !report
+                    .unreachable_resources
+                    .contains(&"scripts/helper.sh".to_string()),
+            "transitively reachable resources must not be reported: {:?}",
+            report.unreachable_resources
+        );
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("dead/unreachable")),
+            "warning must explain the finding: {:?}",
+            report.warnings
+        );
+        assert!(
+            references.join("orphan.md").is_file() && scripts.join("orphan.sh").is_file(),
+            "lint must not delete user files"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn generic_resource_directory_reference_keeps_siblings_reachable() {
+        let (root, skill_path) = temp_skill(
+            "resource-directory",
+            "---\nname: resource-directory\ndescription: Use when loading resource guidance.\nallowed-tools: Read\n---\nLoad the bundled `references/` directory on demand.\n",
+        );
+        let references = skill_path.parent().unwrap().join("references");
+        fs::create_dir_all(&references).unwrap();
+        fs::write(references.join("one.md"), "one\n").unwrap();
+        fs::write(references.join("two.md"), "two\n").unwrap();
+        let report = lint_skill(&skill_path);
+        assert!(
+            report.unreachable_resources.is_empty(),
+            "whole-directory contract must keep all siblings reachable: {:?}",
+            report.unreachable_resources
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn circular_resource_references_are_reported_deterministically() {
+        let (root, skill_path) = temp_skill(
+            "cycle-resources",
+            "---\nname: cycle-resources\ndescription: Use when checking resource cycles.\nallowed-tools: Read\n---\nRead `references/a.md`.\n",
+        );
+        let references = skill_path.parent().unwrap().join("references");
+        fs::create_dir_all(&references).unwrap();
+        fs::write(
+            references.join("a.md"),
+            "Continue with `references/b.md`.\n",
+        )
+        .unwrap();
+        fs::write(references.join("b.md"), "Return to `references/a.md`.\n").unwrap();
+
+        let report = lint_skill(&skill_path);
+        assert_eq!(
+            report.resource_cycles,
+            vec![vec![
+                "references/a.md".to_string(),
+                "references/b.md".to_string(),
+                "references/a.md".to_string(),
+            ]]
+        );
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("circular resource reference")),
+            "cycle warning: {:?}",
+            report.warnings
+        );
         let _ = fs::remove_dir_all(&root);
     }
 

@@ -25,13 +25,14 @@ Every published GitHub release should include:
 
 ## Current release-note posture
 
-The release workflow now prepends a tracked `keel` release-note preamble and then lets GitHub generate the detailed PR and commit notes for the actual release range.
+The release workflow currently asks GitHub to generate the detailed PR and commit notes for the actual release range. It does not prepend a tracked `keel` release-note preamble.
 
-That means each published release note has:
+The generated notes are expected to provide:
 
-- a stable explanation of what `keel` is shipping
-- narrow comparison and documentation links
-- the real GitHub-generated diff summary for that release
+- the release's GitHub-generated diff summary
+
+The tracked documents linked above provide the stable operator context and
+validation evidence separately.
 
 ## Related docs
 

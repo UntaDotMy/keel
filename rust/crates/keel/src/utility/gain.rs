@@ -539,11 +539,14 @@ pub(crate) fn parse_gain_summary(
                 .and_then(serde_json::Value::as_u64)
                 .unwrap_or(0)
         } else {
+            // Passthrough never earns gross savings; keep any recorded after-count
+            // so wrapper overhead stays visible without creating a false saving.
             event
                 .get("tokens_after")
                 .or_else(|| event.get("tokensAfter"))
                 .and_then(serde_json::Value::as_u64)
                 .unwrap_or(before)
+                .max(before)
         };
         let saved = if compacted {
             before.saturating_sub(after)
@@ -797,5 +800,20 @@ mod tests {
         assert_eq!(summary.tokens_overhead, 3);
         assert_eq!(summary.net_tokens_saved, 77);
         assert_eq!(summary.net_savings_percent(), 70.0);
+    }
+
+    #[test]
+    fn passthrough_event_never_contributes_gross_or_net_savings() {
+        let summary = parse_gain_summary(
+            r#"{"timestamp":1000,"command":"echo ok","compacted":false,"tokens_before":100,"tokens_after":0,"tokens_saved":100}"#,
+            None,
+            None,
+        );
+
+        assert_eq!(summary.tokens_before, 100);
+        assert_eq!(summary.tokens_after, 100);
+        assert_eq!(summary.tokens_saved, 0);
+        assert_eq!(summary.tokens_overhead, 0);
+        assert_eq!(summary.net_tokens_saved, 0);
     }
 }

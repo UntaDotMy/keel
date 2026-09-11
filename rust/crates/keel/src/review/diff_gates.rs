@@ -1,6 +1,6 @@
 use super::*;
 use crate::proxy::execution::ExecutionStatus;
-use crate::proxy::raw_store::RawStore;
+use crate::proxy::raw_store::{RawStore, EXECUTION_RECEIPT_INTEGRITY_SCHEMA_VERSION};
 use crate::runner::hook_lifecycle::completeness_marker_record_for_workspace;
 use crate::runtime::resolve_repository_root;
 use std::fs;
@@ -239,9 +239,22 @@ pub(crate) fn execution_evidence_gate(
         if !workspace_ids_match(&meta.workspace.to_string_lossy(), &workspace_id) {
             continue;
         }
-        // Legacy entries without the new integrity marker cannot prove they
-        // crossed this boundary; do not classify pre-existing history as new.
+        // UI-verification manifests predate execution receipts. Keep them
+        // readable, but only receipt-era manifests are governed candidates.
         if !entry.path.join("integrity.json").is_file() {
+            continue;
+        }
+        let integrity_version = match store.load_integrity(&entry.raw_id) {
+            Ok(manifest) => manifest
+                .get("schema_version")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or_default() as u32,
+            Err(error) => {
+                invalid.push(format!("{} ({error})", entry.raw_id));
+                continue;
+            }
+        };
+        if integrity_version < EXECUTION_RECEIPT_INTEGRITY_SCHEMA_VERSION {
             continue;
         }
         candidates += 1;

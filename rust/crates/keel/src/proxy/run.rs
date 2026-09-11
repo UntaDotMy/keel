@@ -5,11 +5,10 @@
 //! Side Effects: Executes child commands, writes raw/compact recovery artifacts, appends gain events, and writes agent-facing output.
 
 use std::io::Write;
-use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
-use std::sync::mpsc;
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::args::FlagSet;
 use crate::proxy::context::{
@@ -20,7 +19,10 @@ use crate::proxy::execution::{now_millis, ExecutionIdentity, ExecutionStatus};
 use crate::proxy::injection_guard::{neutralize_injection, InjectionFinding};
 use crate::proxy::raw_store::{RawNamespace, RawRun, RawStore, RunMeta};
 use crate::proxy::token_meter::TokenMeter;
-use crate::runtime::{display_path, run_command, ProcessResult, MAX_CAPTURED_OUTPUT_BYTES};
+use crate::runtime::{
+    command_timeout, configure_process_group, display_path, own_process_tree, run_command,
+    terminate_owned_process_tree, ProcessResult, MAX_CAPTURED_OUTPUT_BYTES,
+};
 use chrono::{DateTime, SecondsFormat, Utc};
 
 /// Decide whether the proxy should run in capture mode (with compaction, raw
@@ -208,6 +210,15 @@ pub fn run_proxy(
         }
     };
     let executable_ast = adapter.rewrite_args(&ast);
+    let uses_platform_shell =
+        executable_ast.is_none() && ast.has_shell_syntax && !ast.shell_wrapped;
+    if uses_platform_shell && windows_cmd_fallback_is_unavailable() {
+        let _ = writeln!(
+            standard_error,
+            "keel run: refusing shell-syntax execution because neither pwsh nor powershell is available; install PowerShell or pass argv without shell operators"
+        );
+        return 1;
+    }
     let (program, args) = if let Some(executable_ast) = executable_ast {
         (executable_ast.program, executable_ast.args)
     } else if ast.has_shell_syntax && !ast.shell_wrapped {
@@ -226,7 +237,7 @@ pub fn run_proxy(
         .as_secs();
 
     let run_result = if flag_set.bool_value("stream") {
-        run_command_streaming_proxy(&program, &args, standard_error)
+        run_command_streaming_proxy(&program, &args, standard_error, command_timeout())
     } else {
         run_command(&program, &args, None)
     };
@@ -276,21 +287,30 @@ pub fn run_proxy(
                 exit_code: result.code,
             };
 
-            let session_id = ["CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID"]
-                .iter()
-                .find_map(|name| {
-                    std::env::var(name)
-                        .ok()
-                        .map(|value| value.trim().to_string())
-                        .filter(|value| !value.is_empty())
-                })
-                .unwrap_or_else(|| "default".to_string());
+            let session_id = [
+                "KEEL_MCP_SESSION_ID",
+                "CLAUDE_CODE_SESSION_ID",
+                "CODEX_THREAD_ID",
+            ]
+            .iter()
+            .find_map(|name| {
+                std::env::var(name)
+                    .ok()
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty())
+            })
+            .unwrap_or_else(|| "default".to_string());
+            let workspace_id = std::env::var("KEEL_MCP_WORKSPACE_ID")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| meta.workspace.to_string_lossy().to_string());
             let store = if flag_set.string_value("recovery-dir").trim().is_empty() {
                 let base = RawStore::new();
                 RawStore::with_namespace(
                     base.root().clone(),
                     RawNamespace {
-                        workspace_id: meta.workspace.to_string_lossy().to_string(),
+                        workspace_id: workspace_id.clone(),
                         session_id: session_id.clone(),
                     },
                 )
@@ -298,7 +318,7 @@ pub fn run_proxy(
                 RawStore::with_namespace(
                     std::path::PathBuf::from(flag_set.string_value("recovery-dir")),
                     RawNamespace {
-                        workspace_id: meta.workspace.to_string_lossy().to_string(),
+                        workspace_id: workspace_id.clone(),
                         session_id: session_id.clone(),
                     },
                 )
@@ -358,20 +378,30 @@ pub fn run_proxy(
                 neutralize_injection(&String::from_utf8_lossy(&result.stderr), &meta.raw_id);
             raw_findings.extend(stderr_findings);
             let neutralized_raw_output = format!("{clean_stdout}{clean_stderr}");
-            // Enforce the final model boundary after adapter reduction; a
-            // firewall failure is explicit and never falls back to raw output.
+            // A masked result must not carry a model-replayable recovery key, so
+            // report the id on operator stderr and hide it from projections.
+            let model_recovery_allowed =
+                raw_saved && raw_findings.is_empty() && compact_findings.is_empty();
+            let rendered_for_context = if model_recovery_allowed {
+                rendered.clone()
+            } else {
+                redact_recovery_pointer(&rendered, &meta)
+            };
+            // Enforce the final model boundary after adapter reduction: --full and
+            // --no-compact opt out of compaction, never of the context firewall.
             let mut context_projection: Option<ContextProjection> = None;
             let mut context_blocked = false;
-            let context_bypass = flag_set.bool_value("full") || flag_set.bool_value("no-compact");
-            let context_candidate = if compact_result.compacted {
-                rendered.clone()
+            let skip_adapter_compaction =
+                flag_set.bool_value("full") || flag_set.bool_value("no-compact");
+            let context_candidate = if skip_adapter_compaction {
+                neutralized_raw_output.clone()
+            } else if compact_result.compacted {
+                rendered_for_context
             } else {
                 neutralized_raw_output.clone()
             };
-            let rendered = if context_bypass {
-                rendered
-            } else {
-                match project_command_context(&context_candidate, &meta, raw_saved) {
+            let rendered =
+                match project_command_context(&context_candidate, &meta, model_recovery_allowed) {
                     Ok(projection) => {
                         let summary = projection.summary.clone();
                         context_projection = Some(projection);
@@ -381,12 +411,11 @@ pub fn run_proxy(
                         context_blocked = true;
                         let _ = writeln!(
                             standard_error,
-                            "keel context firewall blocked compact output: {error}"
+                            "keel context firewall blocked command output: {error}"
                         );
                         format!("[keel] context blocked: {error}")
                     }
-                }
-            };
+                };
             // Break-even guard: never emit compacted output that is larger than
             // the raw it replaces. On small or already-terse command output the
             // fixed wrapper overhead (the PASS/FAIL prefix + the raw-recovery
@@ -400,7 +429,7 @@ pub fn run_proxy(
             let rendered_tokens = TokenMeter::count_text(&rendered);
             let compaction_reduces_tokens = rendered_tokens < raw_tokens;
             let use_compact_output = !context_blocked
-                && !context_bypass
+                && !skip_adapter_compaction
                 && compact_result.compacted
                 && compaction_reduces_tokens;
 
@@ -408,10 +437,6 @@ pub fn run_proxy(
                 // Without a persisted raw artifact there is no recovery proof;
                 // keep the result visible but mark governance unknown.
                 ExecutionStatus::Unknown
-            } else if context_bypass {
-                // Full/no-compact are explicit compatibility/debug opt-outs;
-                // their model-visible result bypasses the context firewall.
-                ExecutionStatus::Bypassed
             } else if context_blocked {
                 ExecutionStatus::Blocked
             } else if result.code != 0 {
@@ -427,7 +452,7 @@ pub fn run_proxy(
                 .filter(|value| !value.is_empty())
                 .unwrap_or_else(|| meta.raw_id.clone());
             let execution = ExecutionIdentity::new(
-                meta.workspace.to_string_lossy().to_string(),
+                workspace_id_for_context(&meta),
                 session_id,
                 request_id,
                 meta.agent.clone(),
@@ -452,19 +477,12 @@ pub fn run_proxy(
             meta.compacted = use_compact_output;
             meta.compact_path = meta.raw_path.join("compact.txt");
 
-            // Store exactly the bounded projection received by the model; full
-            // and no-compact retain neutralized streams and record a bypass.
-            let (agent_output, output_streams) = if context_bypass && !context_blocked {
-                (
-                    neutralized_raw_output.clone(),
-                    Some((clean_stdout.as_str(), clean_stderr.as_str())),
-                )
-            } else {
-                if compact_result.compacted || context_blocked {
-                    raw_findings.clear();
-                }
-                (rendered.clone(), None)
-            };
+            // Store exactly the bounded projection the model receives; raw streams
+            // stay recoverable from RawStore, never as an unbounded visible path.
+            if compact_result.compacted || context_blocked || skip_adapter_compaction {
+                raw_findings.clear();
+            }
+            let agent_output = rendered.clone();
             let mut all_findings = raw_findings;
             all_findings.extend(compact_findings);
             report_injection_findings(&all_findings, &meta.raw_id, standard_error);
@@ -507,9 +525,9 @@ pub fn run_proxy(
                     "adapter_name": compact_result.adapter_name,
                     "compacted": use_compact_output,
                     "context_blocked": context_blocked,
-                    "raw_id": meta.raw_id,
-                    "raw_path": display_path(&meta.raw_path),
-                    "compact_path": display_path(&meta.compact_path),
+                    "raw_id": if model_recovery_allowed { meta.raw_id.clone() } else { String::new() },
+                    "raw_path": if model_recovery_allowed { display_path(&meta.raw_path) } else { String::new() },
+                    "compact_path": if model_recovery_allowed { display_path(&meta.compact_path) } else { String::new() },
                     "estimated_tokens_before": meta.estimated_tokens_before,
                     "estimated_tokens_after": meta.estimated_tokens_after,
                     "estimated_tokens_saved": meta.estimated_tokens_saved,
@@ -526,7 +544,9 @@ pub fn run_proxy(
                     "execution_id": execution.execution_id,
                     "execution_status": execution.result_state.as_str(),
                     "intercepted": execution.intercepted,
-                    "host_capabilities": execution.capabilities().as_json(),
+                    "host_capabilities": execution
+                        .capabilities()
+                        .as_json_for_agent(&execution.host_adapter),
                 });
                 let _ = writeln!(
                     standard_output,
@@ -534,14 +554,9 @@ pub fn run_proxy(
                     serde_json::to_string_pretty(&json_result).unwrap()
                 );
             } else {
-                if let Some((clean_stdout, clean_stderr)) = output_streams {
-                    // Write the NEUTRALIZED streams, never the raw bytes: this is
-                    // the agent-visible output path the injection guard protects.
-                    let _ = standard_output.write_all(clean_stdout.as_bytes());
-                    let _ = standard_error.write_all(clean_stderr.as_bytes());
-                } else {
-                    let _ = writeln!(standard_output, "{}", rendered);
-                }
+                // `rendered` is always the context-firewall projection, so keep one
+                // final write path and never re-introduce the captured streams.
+                let _ = writeln!(standard_output, "{}", rendered);
             }
 
             match &warning_result {
@@ -573,16 +588,20 @@ fn project_command_context(
     meta: &RunMeta,
     raw_available: bool,
 ) -> Result<ContextProjection, crate::proxy::context::ContextFirewallError> {
-    let session_id = ["CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID"]
-        .iter()
-        .find_map(|name| {
-            std::env::var(name)
-                .ok()
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty())
-        })
-        .unwrap_or_else(|| "default".to_string());
-    let workspace_id = meta.workspace.to_string_lossy().to_string();
+    let session_id = [
+        "KEEL_MCP_SESSION_ID",
+        "CLAUDE_CODE_SESSION_ID",
+        "CODEX_THREAD_ID",
+    ]
+    .iter()
+    .find_map(|name| {
+        std::env::var(name)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    })
+    .unwrap_or_else(|| "default".to_string());
+    let workspace_id = workspace_id_for_context(meta);
     let raw_artifact_id = raw_available.then(|| meta.raw_id.clone());
     project_scoped(
         ContextPolicy::from_env(),
@@ -595,6 +614,29 @@ fn project_command_context(
         )
         .with_request_id(meta.raw_id.clone())
         .with_cache_class(CacheClass::Dynamic),
+    )
+}
+
+fn workspace_id_for_context(meta: &RunMeta) -> String {
+    std::env::var("KEEL_MCP_WORKSPACE_ID")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| meta.workspace.to_string_lossy().to_string())
+}
+
+fn redact_recovery_pointer(rendered: &str, meta: &RunMeta) -> String {
+    let mut redacted = rendered.replace(
+        &format!("keel raw {}", meta.raw_id),
+        "keel raw <id withheld after prompt-injection>",
+    );
+    redacted = redacted.replace(
+        &format!("raw:{}", meta.raw_id),
+        "raw:<id withheld after prompt-injection>",
+    );
+    redacted.replace(
+        &format!("raw_path: {}", display_path(&meta.raw_path)),
+        "raw_path: <withheld after prompt-injection>",
     )
 }
 
@@ -620,6 +662,14 @@ fn warning_workspace_root(cwd: &std::path::Path) -> std::path::PathBuf {
 fn run_proxy_passthrough(command_arguments: &[String], standard_error: &mut dyn Write) -> u8 {
     let needs_shell = crate::proxy::classify::contains_shell_syntax(command_arguments);
 
+    if needs_shell && windows_cmd_fallback_is_unavailable() {
+        let _ = writeln!(
+            standard_error,
+            "keel run: refusing shell-syntax execution because neither pwsh nor powershell is available; install PowerShell or pass argv without shell operators"
+        );
+        return 1;
+    }
+
     let (program, args) = if needs_shell {
         crate::runtime::platform_shell_command_parts(&shell_join(command_arguments))
     } else {
@@ -636,6 +686,15 @@ fn run_proxy_passthrough(command_arguments: &[String], standard_error: &mut dyn 
             1
         }
     }
+}
+
+/// `shell_join` uses PowerShell quoting on Windows. If PowerShell is absent,
+/// `platform_shell_command_parts` falls back to `cmd /C`, where those quotes
+/// are literal and a metacharacter-bearing argument can become executable
+/// syntax. Refuse only the composite-shell path; direct argv execution remains
+/// safe and available on such hosts.
+fn windows_cmd_fallback_is_unavailable() -> bool {
+    cfg!(windows) && crate::runtime::powershell_executable().is_none()
 }
 
 /// Build a compact result that keeps only error/failure-class lines from the
@@ -782,15 +841,27 @@ fn run_command_streaming_proxy(
     program: &str,
     arguments: &[String],
     live_output: &mut dyn Write,
+    timeout: Duration,
 ) -> Result<ProcessResult, String> {
-    let mut child = Command::new(program);
-    child.args(arguments);
-    child.stdin(Stdio::inherit());
-    child.stdout(Stdio::piped());
-    child.stderr(Stdio::piped());
-    let mut child = child
+    let mut command = Command::new(program);
+    command.args(arguments);
+    command.stdin(Stdio::inherit());
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+    // Streaming must own the whole process tree like the capture path, or a hung
+    // grandchild keeps the reader threads alive after the direct child exits.
+    configure_process_group(&mut command);
+    let mut child = command
         .spawn()
         .map_err(|error| format!("execute {program}: {error}"))?;
+    let mut process_guard = match own_process_tree(&mut child) {
+        Ok(guard) => guard,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("execute {program}: process ownership: {error}"));
+        }
+    };
     let stdout = child
         .stdout
         .take()
@@ -814,7 +885,58 @@ fn run_command_streaming_proxy(
     let mut stderr_high_signal = 0usize;
     let mut stdout_capped = false;
     let mut stderr_capped = false;
-    for chunk in receiver {
+    let mut stdout_injection_blocked = false;
+    let mut stderr_injection_blocked = false;
+    let deadline = Instant::now() + timeout;
+    let mut child_status = None;
+    let mut receiver_open = true;
+    let mut drain_deadline = None;
+    let mut drain_timed_out = false;
+
+    while child_status.is_none() || receiver_open {
+        if child_status.is_none() {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    child_status = Some(status);
+                    // A descendant may hold an inherited pipe after the leader exits,
+                    // so close the owned tree immediately and let the readers finish.
+                    let _ = terminate_owned_process_tree(&mut child, &mut process_guard);
+                    drain_deadline = Some(Instant::now() + Duration::from_secs(2));
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    let _ = terminate_owned_process_tree(&mut child, &mut process_guard);
+                    let _ = child.wait();
+                    drop(receiver);
+                    let _ = stdout_handle.join();
+                    let _ = stderr_handle.join();
+                    return Err(format!("execute {program}: wait failed: {error}"));
+                }
+            }
+        }
+
+        let now = Instant::now();
+        let limit = if let Some(drain_deadline) = drain_deadline {
+            if now >= drain_deadline {
+                drain_timed_out = true;
+                break;
+            }
+            (drain_deadline - now).min(Duration::from_millis(50))
+        } else {
+            if now >= deadline {
+                break;
+            }
+            (deadline - now).min(Duration::from_millis(50))
+        };
+
+        let chunk = match receiver.recv_timeout(limit) {
+            Ok(chunk) => chunk,
+            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Disconnected) => {
+                receiver_open = false;
+                continue;
+            }
+        };
         // Always capture the raw bytes for post-run compaction (which neutralizes
         // the captured copy). The captured stream is the source of truth — but
         // cap it at MAX_CAPTURED_OUTPUT_BYTES so a runaway command cannot exhaust
@@ -852,7 +974,12 @@ fn run_command_streaming_proxy(
         // an "error"/"warning" keyword defeats the live cap entirely.
         let show_high_signal = chunk.high_signal && *high_signal_count < STREAM_HIGH_SIGNAL_CAP;
         let should_show = show_high_signal || *live_count < STREAM_LIVE_CAP;
-        if should_show {
+        let injection_blocked = if chunk.label == "stdout" {
+            &mut stdout_injection_blocked
+        } else {
+            &mut stderr_injection_blocked
+        };
+        if should_show && !*injection_blocked {
             if show_high_signal {
                 *high_signal_count += 1;
             } else {
@@ -864,8 +991,13 @@ fn run_command_streaming_proxy(
             }
             // Neutralize prompt-injection before the chunk reaches the live
             // display — the live path is agent-visible just like the captured one.
-            let (clean, _) =
+            let (clean, findings) =
                 neutralize_injection(&String::from_utf8_lossy(&chunk.bytes), "live-stream");
+            if !findings.is_empty() {
+                // A block can span chunks, so stop rendering a stream live once a
+                // finding is seen; the captured copy is neutralized after exit.
+                *injection_blocked = true;
+            }
             let _ = write!(live_output, "[keel stream:{}] ", chunk.label);
             let _ = live_output.write_all(clean.as_bytes());
             if !clean.ends_with('\n') {
@@ -885,7 +1017,22 @@ fn run_command_streaming_proxy(
             stderr_capped = true;
         }
     }
-    let status = child.wait().map_err(|error| format!("wait: {error}"))?;
+    let timed_out = child_status.is_none() || drain_timed_out;
+    if timed_out {
+        let kill_error = terminate_owned_process_tree(&mut child, &mut process_guard).err();
+        let _ = child.wait();
+        drop(receiver);
+        let _ = stdout_handle.join();
+        let _ = stderr_handle.join();
+        let suffix = kill_error
+            .map(|error| format!("; process-tree cleanup failed: {error}"))
+            .unwrap_or_default();
+        return Err(format!(
+            "execute {program}: timed out after {}s{suffix}; retry with a smaller command or increase KEEL_COMMAND_TIMEOUT_SECS",
+            timeout.as_secs()
+        ));
+    }
+    let status = child_status.expect("child status present after streaming loop");
     let _ = stdout_handle.join();
     let _ = stderr_handle.join();
     Ok(ProcessResult {
@@ -902,17 +1049,17 @@ fn read_stream<R: std::io::Read + Send + 'static>(
     reader: R,
     sender: mpsc::Sender<StreamChunk>,
 ) {
-    let mut reader = BufReader::new(reader);
-    let mut line = Vec::new();
-    loop {
-        line.clear();
-        let Ok(read) = reader.read_until(b'\n', &mut line) else {
-            break;
-        };
+    // Read fixed-size chunks rather than `read_until`, so one newline-free line
+    // cannot allocate past the proxy's capture cap.
+    const READ_CHUNK_BYTES: usize = 8 * 1024;
+    let mut reader = reader;
+    let mut buffer = [0u8; READ_CHUNK_BYTES];
+    while let Ok(read) = reader.read(&mut buffer) {
         if read == 0 {
             break;
         }
-        let text = String::from_utf8_lossy(&line);
+        let bytes = buffer[..read].to_vec();
+        let text = String::from_utf8_lossy(&bytes);
         let lower = text.to_ascii_lowercase();
         let high_signal = [
             "error",
@@ -931,7 +1078,7 @@ fn read_stream<R: std::io::Read + Send + 'static>(
         if sender
             .send(StreamChunk {
                 label,
-                bytes: line.clone(),
+                bytes,
                 high_signal,
             })
             .is_err()
@@ -1099,6 +1246,23 @@ mod tests {
         }
     }
     #[test]
+    fn streaming_proxy_enforces_timeout_and_owns_process_tree() {
+        let (program, arguments) = if cfg!(windows) {
+            (
+                "cmd",
+                vec!["/C".to_string(), "ping -n 30 127.0.0.1 >nul".to_string()],
+            )
+        } else {
+            ("sh", vec!["-c".to_string(), "sleep 30".to_string()])
+        };
+        let mut live = Vec::new();
+        let error =
+            run_command_streaming_proxy(program, &arguments, &mut live, Duration::from_millis(250))
+                .expect_err("a hanging streaming command must be terminated");
+        assert!(error.contains("timed out"), "unexpected error: {error}");
+    }
+
+    #[test]
     fn shell_join_quotes_windows_arguments_for_powershell() {
         let rendered = shell_join(&[
             "Get-Content".to_string(),
@@ -1169,8 +1333,148 @@ mod tests {
             !rendered.contains("--- SYSTEM PROMPT ---"),
             "raw injection marker must NOT reach the agent, got: {rendered}"
         );
+        let store = RawStore::with_root(recovery_dir.clone());
+        let entry = store
+            .list()
+            .expect("injection run must persist a raw artifact")
+            .into_iter()
+            .next()
+            .expect("injection run must have one raw artifact");
+        assert!(
+            !rendered.contains(&entry.raw_id),
+            "masked model output must not expose the raw recovery id: {rendered}"
+        );
+        assert!(
+            !rendered.contains("raw_path:"),
+            "masked model output must not expose the raw recovery path: {rendered}"
+        );
 
         let _ = std::fs::remove_dir_all(&recovery_dir);
+        restore_signals(&snapshot);
+    }
+
+    #[test]
+    fn full_and_no_compact_still_project_through_context_firewall() {
+        // `--full` and `--no-compact` are compaction choices, not context-safety
+        // choices: a large result stays bounded and the raw artifact stays available.
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let snapshot = snapshot_signals();
+        clear_signals();
+        std::env::set_var("CLAUDE_SKILLS_HOOK", "test");
+
+        let previous_budget = std::env::var("KEEL_CONTEXT_MAX_DYNAMIC_TOKENS").ok();
+        std::env::set_var("KEEL_CONTEXT_MAX_DYNAMIC_TOKENS", "40");
+        let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        let claude_home = std::env::temp_dir().join(format!(
+            "keel-context-firewall-home-{}-{nanos}",
+            std::process::id()
+        ));
+        let recovery_dir = std::env::temp_dir().join(format!(
+            "keel-context-firewall-recovery-{}-{nanos}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&claude_home);
+        let _ = std::fs::remove_dir_all(&recovery_dir);
+        std::fs::create_dir_all(&claude_home).expect("create isolated claude home");
+        let _home_precedence = crate::test_support::HomePrecedenceGuard::clear_keel_home();
+        std::env::set_var("CLAUDE_TARGET_OVERRIDE", &claude_home);
+
+        let run_case = |flag: &str, prefix: &str| -> serde_json::Value {
+            // Use a distinct prefix for each case: the context gateway
+            // intentionally suppresses identical payloads within a session.
+            let (shell_program, _) = crate::runtime::platform_shell_command_parts("");
+            let generator = if cfg!(windows) {
+                if shell_program == "cmd" {
+                    format!("for /L %i in (1,1,200) do @echo {prefix} line %i")
+                } else {
+                    format!("1..200 | ForEach-Object {{ \"{prefix} line $_\" }}")
+                }
+            } else {
+                format!("for i in {{1..200}}; do echo \"{prefix} line $i\"; done")
+            };
+            let (program, shell_args) = crate::runtime::platform_shell_command_parts(&generator);
+            let mut arguments = vec![
+                "--json".to_string(),
+                flag.to_string(),
+                "--recovery-dir".to_string(),
+                recovery_dir.to_string_lossy().to_string(),
+                "--".to_string(),
+                program,
+            ];
+            arguments.extend(shell_args);
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            assert_eq!(
+                run_proxy(&arguments, &mut stdout, &mut stderr),
+                0,
+                "{flag} generator failed: {}",
+                String::from_utf8_lossy(&stderr)
+            );
+            serde_json::from_slice(&stdout).unwrap_or_else(|error| {
+                panic!(
+                    "{flag} must return JSON: {error}; stdout={}; stderr={}",
+                    String::from_utf8_lossy(&stdout),
+                    String::from_utf8_lossy(&stderr)
+                )
+            })
+        };
+
+        for (flag, prefix) in [("--full", "full"), ("--no-compact", "no-compact")] {
+            let payload = run_case(flag, prefix);
+            let context = payload
+                .get("context")
+                .and_then(serde_json::Value::as_object)
+                .unwrap_or_else(|| panic!("{flag} must return context metadata: {payload}"));
+            let visible_tokens = context
+                .get("visible_tokens")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or_else(|| panic!("{flag} context lacks visible_tokens: {payload}"));
+            assert!(
+                visible_tokens <= 40,
+                "{flag} exceeded the configured context budget: {payload}"
+            );
+            assert_eq!(
+                payload
+                    .get("execution_status")
+                    .and_then(serde_json::Value::as_str),
+                Some("executed"),
+                "{flag} must be governed, not marked bypassed: {payload}"
+            );
+            assert_eq!(
+                payload.get("stdout").and_then(serde_json::Value::as_str),
+                Some(""),
+                "governed JSON must not expose the raw stream: {payload}"
+            );
+            let summary = payload
+                .get("summary")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            assert!(
+                !summary.contains("line 100"),
+                "{flag} summary must be bounded rather than raw passthrough: {summary}"
+            );
+            assert!(
+                summary.contains("recover raw artifact with `keel raw "),
+                "{flag} summary must retain a bounded recovery pointer: {summary}"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&recovery_dir);
+        let _ = std::fs::remove_dir_all(&claude_home);
+        match previous_budget {
+            Some(value) => std::env::set_var("KEEL_CONTEXT_MAX_DYNAMIC_TOKENS", value),
+            None => std::env::remove_var("KEEL_CONTEXT_MAX_DYNAMIC_TOKENS"),
+        }
+        match previous_home {
+            Some(value) => std::env::set_var("CLAUDE_TARGET_OVERRIDE", value),
+            None => std::env::remove_var("CLAUDE_TARGET_OVERRIDE"),
+        }
         restore_signals(&snapshot);
     }
 
@@ -1214,6 +1518,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&claude_home);
         std::fs::create_dir_all(&claude_home).expect("create test claude home");
         let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
+        let _home_precedence = crate::test_support::HomePrecedenceGuard::clear_keel_home();
         std::env::set_var("CLAUDE_TARGET_OVERRIDE", &claude_home);
 
         let recovery_dir = std::env::temp_dir().join(format!(
@@ -1377,6 +1682,7 @@ mod tests {
         let workspace = root.join("workspace");
         let recovery = root.join("raw");
         std::fs::create_dir_all(&workspace).unwrap();
+        let _home_precedence = crate::test_support::HomePrecedenceGuard::clear_keel_home();
         std::env::set_var("CLAUDE_TARGET_OVERRIDE", &home);
         std::env::set_current_dir(&workspace).unwrap();
 

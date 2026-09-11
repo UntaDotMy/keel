@@ -729,6 +729,7 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).expect("create test claude home");
         let previous_home = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
+        let _home_precedence = crate::test_support::HomePrecedenceGuard::clear_keel_home();
         std::env::set_var("CLAUDE_TARGET_OVERRIDE", &root);
         let result = run(&root);
         match previous_home {

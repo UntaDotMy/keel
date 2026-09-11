@@ -28,6 +28,14 @@ as one unbounded response. `keel/discover` returns ranked compact metadata and
 `keel/activate` writes a session/workspace activation receipt. The default profile
 is `core`; `full` remains an explicit compatibility/debug choice.
 
+Every result carries the `resultType` that revision `2026-07-28` requires, and
+`tools/list` pages additionally carry the caching hints that revision requires of
+list results: `ttlMs` (fresh for as long as the cursor walk the page belongs to
+is valid, so there is one TTL notion in the system) and `cacheScope: "public"`
+(the catalog is identical for every caller; keel exposes no per-caller tool
+filtering). Both fields are inside the payload the packer measures, so a page
+that only fits without them is paginated instead of emitted over budget.
+
 The current ratified `core` profile advertises 17 stable tools and defers 20
 specialized tools. The live catalog count and exact `o200k_base` footprint are
 reported by `keel stats tools --json`; the archived baseline records the same
@@ -77,3 +85,13 @@ RawStore, planner classification, and UI verification surfaces above. Host
 adapters still expose only the capabilities they can prove; unsupported host
 boundaries remain explicitly unprotected rather than being represented as a
 successful governed path.
+
+Protocol era is stated the same way. The MCP revision in force (`2026-07-28`)
+distinguishes *modern* servers (per-request `_meta` version, `server/discover`,
+`resultType`, `ttlMs`/`cacheScope` on list results), *legacy* servers
+(`initialize` handshake), and *dual-era* servers that serve both. Keel is a
+legacy-era server speaking `2025-11-25`, and it rejects the older `2024-11-05`
+initialize on Streamable HTTP with an explicit migration message instead of
+mis-serving it. A legacy client therefore interoperates and a modern one does
+not; no request silently mixes the two eras. Cleanup status and the full
+limitation list are in [`gateway-cleanup-report.md`](gateway-cleanup-report.md).

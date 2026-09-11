@@ -237,20 +237,6 @@ pub fn resolve_skill_for_prompt(prompt: &str, skills: &[SkillTerms]) -> Option<S
     })
 }
 
-/// Resolve a prompt using parsed catalog metadata when available. This is the
-/// production path; the legacy resolver above supplies conservative defaults.
-#[allow(dead_code)]
-pub fn resolve_skill_for_prompt_with_catalog(
-    prompt: &str,
-    skills: &[SkillTerms],
-    catalog: &[SkillCatalogEntry],
-) -> Option<SkillMatch> {
-    resolve_skill_selection(prompt, skills, catalog).map(|decision| SkillMatch {
-        name: decision.name,
-        score: decision.relevance,
-    })
-}
-
 /// Return the full cost-aware decision used by production routing and evals.
 pub fn resolve_skill_selection(
     prompt: &str,
@@ -1861,7 +1847,6 @@ fn skill_terms_from_source(dir_name: &str, text: &str) -> Option<SkillTerms> {
 /// each skill by the IDF-weighted overlap with the prompt tokens, and returns
 /// the winner only when it clears [`MIN_SCORE`], beats the runner-up by
 /// [`DISTINCTIVENESS_MARGIN`], and shares at least one distinctive token.
-#[allow(dead_code)]
 pub fn score_prompt_against_skills(prompt: &str, skills: &[SkillTerms]) -> Option<SkillMatch> {
     let prompt_tokens = tokenize(prompt);
     if prompt_tokens.is_empty() || skills.is_empty() {

@@ -174,8 +174,13 @@ function bridgeRewrite(command: string, toolName: string): string {
 let moduleSessionId: string | undefined;
 
 function resolveSessionId(event: PiSessionLikeEvent, ctx?: PiExtensionContext): string {
-  if (event?.sessionId) return String(event.sessionId);
-  if (ctx?.sessionId) return String(ctx.sessionId);
+  const supplied = event?.sessionId || ctx?.sessionId;
+  if (supplied) {
+    // Pi runs one active session per extension, so remember the first host id
+    // and reuse it instead of letting an id-less event move the state key.
+    if (!moduleSessionId) moduleSessionId = String(supplied);
+    return String(supplied);
+  }
   if (!moduleSessionId) {
     moduleSessionId =
       (typeof crypto !== "undefined" && crypto.randomUUID
@@ -389,6 +394,7 @@ function handleSessionShutdown(event: PiSessionLikeEvent, ctx?: PiExtensionConte
     clearStarted(sessionID);
     clearIronLawMarker(sessionID);
     pendingLifecycleContext.delete(sessionID);
+    moduleSessionId = undefined;
   }
 }
 

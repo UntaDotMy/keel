@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::proxy::injection_guard::neutralize_injection;
 use crate::proxy::token_meter::TokenMeter;
-use crate::utility::hashing::fnv1a64_hex;
+use crate::utility::hashing::sha256_hex;
 
 /// Conservative default for one dynamic model-visible result. Surface-specific
 /// ledgers may ratify a smaller budget; this default is deliberately bounded.
@@ -96,6 +96,17 @@ pub enum CacheClass {
     Session,
     Dynamic,
     Volatile,
+}
+
+impl CacheClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Stable => "stable",
+            Self::Session => "session",
+            Self::Dynamic => "dynamic",
+            Self::Volatile => "volatile",
+        }
+    }
 }
 
 /// Bounded lifecycle state for a dynamic context object. The projection path
@@ -189,6 +200,31 @@ pub struct ProjectionInput {
 }
 
 impl ProjectionInput {
+    /// Which of a surface's model-visible tokens a provider can reuse. Stable and
+    /// session content is cacheable; dynamic and volatile content is not. One
+    /// owner for the rule, so a ledger cannot disagree with the firewall about
+    /// which bucket a measurement belongs in.
+    pub fn cache_split(
+        cache_class: CacheClass,
+        visible_tokens: usize,
+    ) -> (Option<usize>, Option<usize>) {
+        match cache_class {
+            CacheClass::Stable | CacheClass::Session => (Some(visible_tokens), None),
+            CacheClass::Dynamic | CacheClass::Volatile => (None, Some(visible_tokens)),
+        }
+    }
+
+    pub fn cache_class_for_surface(surface: &str) -> CacheClass {
+        if surface.starts_with("repo.")
+            || surface.starts_with("generated.")
+            || surface.starts_with("skills.")
+        {
+            CacheClass::Stable
+        } else {
+            CacheClass::Dynamic
+        }
+    }
+
     pub fn new(
         source: ContextSource,
         content: impl Into<String>,
@@ -438,6 +474,8 @@ pub enum ContextFirewallError {
     MissingSessionIdentity,
     #[error("context projection contains an invalid raw artifact id")]
     InvalidArtifactId,
+    #[error("context projection contains an invalid {field} identity")]
+    InvalidIdentity { field: &'static str },
     #[error("context projection {field} identity exceeds the {max_bytes}-byte bound")]
     IdentityTooLarge {
         field: &'static str,
@@ -662,7 +700,7 @@ impl ContextFirewall {
         // Request ids identify provenance, not new context. Exclude them so a
         // fresh transport id cannot re-inject the same payload.
         let dedupe_material = format!("{}\0{}\0{}", workspace_id, session_id, normalized);
-        let content_hash = fnv1a64_hex(&dedupe_material);
+        let content_hash = sha256_hex(dedupe_material.as_bytes());
         // Empty command/tool results carry no context and must not poison
         // dedupe or make a later empty result look firewall-blocked.
         let dedupe = !normalized.is_empty();
@@ -672,12 +710,15 @@ impl ContextFirewall {
 
         let raw_tokens = TokenMeter::count_text(&content);
         let budget_tokens = self.policy.max_tokens;
-        let (summary, truncated, omitted_items, reducer) = if raw_tokens <= self.policy.max_tokens {
+        let (summary, truncated, omitted_items, reducer, summary_tokens) = if raw_tokens
+            <= self.policy.max_tokens
+        {
             (
                 content,
                 false,
                 input.omitted_items,
                 "identity-v1".to_string(),
+                raw_tokens,
             )
         } else {
             let pointer = recovery_pointer(input.raw_artifact_id.as_deref());
@@ -689,7 +730,7 @@ impl ContextFirewall {
                 });
             }
             let prefix_budget = self.policy.max_tokens - pointer_tokens;
-            let prefix = semantic_reduce_to_tokens(&content, prefix_budget);
+            let prefix = semantic_reduce_to_tokens_with_count(&content, prefix_budget, raw_tokens);
             let summary = format!("{}{}", prefix.trim_end(), pointer);
             let summary_tokens = TokenMeter::count_text(&summary);
             if summary_tokens > self.policy.max_tokens {
@@ -704,7 +745,13 @@ impl ContextFirewall {
                 .saturating_sub(kept_lines)
                 .saturating_add(input.omitted_items as usize)
                 .min(u32::MAX as usize) as u32;
-            (summary, true, omitted, "semantic-bounded-v1".to_string())
+            (
+                summary,
+                true,
+                omitted,
+                "semantic-bounded-v1".to_string(),
+                summary_tokens,
+            )
         };
 
         let request_id = input
@@ -721,10 +768,10 @@ impl ContextFirewall {
             request_id.unwrap_or(""),
             input.raw_artifact_id.as_deref().unwrap_or("")
         );
-        let provenance_hash = fnv1a64_hex(&provenance_material);
+        let provenance_hash = sha256_hex(provenance_material.as_bytes());
         let provenance_id = format!("prov-fnv1a:{provenance_hash}");
         let projection_id = format!("projection-fnv1a:{provenance_hash}");
-        let token_count = TokenMeter::count_text(&summary) as u32;
+        let token_count = summary_tokens as u32;
 
         if dedupe {
             if self.seen.len() >= MAX_DEDUPE_ENTRIES {
@@ -734,25 +781,21 @@ impl ContextFirewall {
             }
             self.seen.insert(content_hash);
         }
-        let model_visible_tokens = TokenMeter::count_text(&summary);
+        let model_visible_tokens = summary_tokens;
         let saved_tokens = raw_tokens as isize - model_visible_tokens as isize;
         let reduction_ratio = if raw_tokens == 0 {
             0.0
         } else {
             saved_tokens.max(0) as f64 / raw_tokens as f64
         };
+        let (cached_input_tokens, uncached_input_tokens) =
+            ProjectionInput::cache_split(input.cache_class, model_visible_tokens);
         self.ledger.record(ContextMeasurement {
             surface: input.source.as_str().to_string(),
             raw_input_tokens: raw_tokens,
             model_visible_input_tokens: model_visible_tokens,
-            cached_input_tokens: match input.cache_class {
-                CacheClass::Stable | CacheClass::Session => Some(model_visible_tokens),
-                CacheClass::Dynamic | CacheClass::Volatile => None,
-            },
-            uncached_input_tokens: match input.cache_class {
-                CacheClass::Stable | CacheClass::Session => None,
-                CacheClass::Dynamic | CacheClass::Volatile => Some(model_visible_tokens),
-            },
+            cached_input_tokens,
+            uncached_input_tokens,
             output_tokens: 0,
             context_peak_tokens: model_visible_tokens,
             reduced_tokens: model_visible_tokens,
@@ -857,6 +900,9 @@ fn validate_artifact_id(raw_id: &str) -> Result<(), ContextFirewallError> {
             max_bytes: MAX_ARTIFACT_ID_BYTES,
         });
     }
+    if trimmed.chars().any(|character| character.is_control()) {
+        return Err(ContextFirewallError::InvalidArtifactId);
+    }
     Ok(())
 }
 
@@ -869,6 +915,9 @@ fn validate_identity_component(
             field,
             max_bytes: MAX_CONTEXT_ID_BYTES,
         });
+    }
+    if value.chars().any(|character| character.is_control()) {
+        return Err(ContextFirewallError::InvalidIdentity { field });
     }
     Ok(())
 }
@@ -895,11 +944,21 @@ fn recovery_pointer(raw_artifact_id: Option<&str>) -> String {
 /// status/error/policy lines and a small tail of summary lines, then fills any
 /// remaining space in source order. A single unstructured line falls back to
 /// the exact UTF-8-safe tokenizer cut below.
+#[cfg(test)]
 fn semantic_reduce_to_tokens(text: &str, max_tokens: usize) -> String {
+    let raw_tokens = TokenMeter::count_text(text);
+    semantic_reduce_to_tokens_with_count(text, max_tokens, raw_tokens)
+}
+
+fn semantic_reduce_to_tokens_with_count(
+    text: &str,
+    max_tokens: usize,
+    raw_tokens: usize,
+) -> String {
     if max_tokens == 0 || text.is_empty() {
         return String::new();
     }
-    if TokenMeter::count_text(text) <= max_tokens {
+    if raw_tokens <= max_tokens {
         return text.to_string();
     }
     let lines = text.lines().collect::<Vec<_>>();
@@ -907,15 +966,28 @@ fn semantic_reduce_to_tokens(text: &str, max_tokens: usize) -> String {
         return truncate_to_tokens(text, max_tokens);
     }
 
-    let mut priority = Vec::new();
-    priority.extend(0..lines.len().min(2));
+    let failure_lines = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| is_failure_identity_line(line))
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    if let Some(&index) = failure_lines.first() {
+        let failure_line = lines[index];
+        if TokenMeter::count_text(failure_line) > max_tokens {
+            return truncate_to_tokens(failure_line, max_tokens);
+        }
+    }
+
+    let mut priority = failure_lines;
     priority.extend(
         lines
             .iter()
             .enumerate()
-            .filter(|(_, line)| is_high_signal_line(line))
+            .filter(|(_, line)| is_high_signal_line(line) && !is_failure_identity_line(line))
             .map(|(index, _)| index),
     );
+    priority.extend(0..lines.len().min(2));
     priority.extend(lines.len().saturating_sub(2)..lines.len());
     priority.extend(0..lines.len());
 
@@ -965,31 +1037,38 @@ fn is_high_signal_line(line: &str) -> bool {
     .any(|needle| lower.contains(needle))
 }
 
+fn is_failure_identity_line(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    let starts_with_failure_marker = [
+        "error",
+        "failure",
+        "fatal",
+        "panic",
+        "exception",
+        "denied",
+        "timeout",
+        "blocked",
+    ]
+    .iter()
+    .any(|marker| {
+        lower.strip_prefix(marker).is_some_and(|remainder| {
+            remainder.is_empty()
+                || remainder
+                    .chars()
+                    .next()
+                    .is_some_and(|character| !character.is_ascii_alphanumeric())
+        })
+    });
+    let contains_actionable_failure = ["failed", "timed out", "not found", "assert", "traceback"]
+        .iter()
+        .any(|needle| lower.contains(needle));
+    starts_with_failure_marker || contains_actionable_failure
+}
+
 /// Return the longest UTF-8-safe prefix whose exact tokenizer count is within
 /// `max_tokens`. This is deterministic and avoids a generative summarizer.
 fn truncate_to_tokens(text: &str, max_tokens: usize) -> String {
-    if max_tokens == 0 || text.is_empty() {
-        return String::new();
-    }
-    if TokenMeter::count_text(text) <= max_tokens {
-        return text.to_string();
-    }
-    let mut boundaries = text
-        .char_indices()
-        .map(|(index, _)| index)
-        .collect::<Vec<_>>();
-    boundaries.push(text.len());
-    let mut low = 0usize;
-    let mut high = boundaries.len();
-    while low + 1 < high {
-        let middle = (low + high) / 2;
-        if TokenMeter::count_text(&text[..boundaries[middle]]) <= max_tokens {
-            low = middle;
-        } else {
-            high = middle;
-        }
-    }
-    text[..boundaries[low]].to_string()
+    TokenMeter::prefix_to_token_budget(text, max_tokens)
 }
 
 #[cfg(test)]
@@ -1022,6 +1101,102 @@ mod tests {
         assert_eq!(left.provenance_id, right.provenance_id);
     }
 
+    /// §27 cache accounting: every measurement must land its model-visible tokens
+    /// in exactly one of the cached/uncached buckets, chosen by the firewall's own
+    /// cache rule. A token counted as both, or as neither, would make a saving
+    /// claim unauditable.
+    #[test]
+    fn cache_accounting_puts_each_measurement_in_exactly_one_bucket() {
+        for cache_class in [
+            CacheClass::Stable,
+            CacheClass::Session,
+            CacheClass::Dynamic,
+            CacheClass::Volatile,
+        ] {
+            let (cached, uncached) = ProjectionInput::cache_split(cache_class, 100);
+            assert!(
+                cached.is_some() ^ uncached.is_some(),
+                "{cache_class:?} must fill exactly one bucket"
+            );
+            assert_eq!(
+                cached.unwrap_or(0) + uncached.unwrap_or(0),
+                100,
+                "{cache_class:?} must account for every visible token"
+            );
+            let cacheable = matches!(cache_class, CacheClass::Stable | CacheClass::Session);
+            assert_eq!(
+                cached.is_some(),
+                cacheable,
+                "{cache_class:?} was bucketed against its cache semantics"
+            );
+        }
+        assert_eq!(CacheClass::Stable.as_str(), "stable");
+        assert_eq!(CacheClass::Volatile.as_str(), "volatile");
+
+        // The firewall and the ledger must agree about a surface's class.
+        assert_eq!(
+            ProjectionInput::cache_class_for_surface("repo.AGENTS.md"),
+            CacheClass::Stable
+        );
+        assert_eq!(
+            ProjectionInput::cache_class_for_surface("generated.claude.CLAUDE.md"),
+            CacheClass::Stable
+        );
+        assert_eq!(
+            ProjectionInput::cache_class_for_surface("skills.inline_catalog"),
+            CacheClass::Stable
+        );
+        assert_eq!(
+            ProjectionInput::cache_class_for_surface("mcp.tools_list.handshake"),
+            CacheClass::Dynamic
+        );
+        assert_eq!(
+            ProjectionInput::cache_class_for_surface("hook.session_start.bootstrap"),
+            CacheClass::Dynamic
+        );
+
+        // The recorded measurement carries the split, not just the total.
+        let mut firewall = ContextFirewall::new(ContextPolicy::with_max_tokens(50));
+        let input = ProjectionInput::new(
+            ContextSource::Warning,
+            "warning: one",
+            None::<String>,
+            "workspace",
+            "session",
+        )
+        .with_cache_class(CacheClass::Stable);
+        firewall.project(input).expect("projection");
+        let recorded = firewall
+            .ledger
+            .measurements
+            .last()
+            .expect("one measurement");
+        assert_eq!(
+            recorded.cached_input_tokens,
+            Some(recorded.model_visible_input_tokens)
+        );
+        assert_eq!(recorded.uncached_input_tokens, None);
+    }
+
+    #[test]
+    fn provenance_and_projection_ids_use_sha256_with_legacy_prefixes() {
+        let mut firewall = ContextFirewall::new(ContextPolicy::with_max_tokens(50));
+        let input = ProjectionInput::new(
+            ContextSource::Warning,
+            "warning: one",
+            Some("raw-warning"),
+            "workspace",
+            "session",
+        )
+        .with_request_id("request");
+        let projection = firewall.project(input).expect("projection");
+        let material = "workspace\0session\0warning\0warning: one\0request\0raw-warning";
+        let digest = sha256_hex(material.as_bytes());
+        assert_eq!(projection.provenance_id, format!("prov-fnv1a:{digest}"));
+        assert_eq!(projection.id, format!("projection-fnv1a:{digest}"));
+        assert_eq!(digest.len(), 64);
+    }
+
     #[test]
     fn semantic_reducer_keeps_failure_and_tail_evidence() {
         let mut firewall = ContextFirewall::new(ContextPolicy::with_max_tokens(60));
@@ -1051,6 +1226,31 @@ mod tests {
         assert_eq!(projection.reducer, "semantic-bounded-v1");
         assert!(projection.raw_tokens > projection.visible_tokens);
         assert_eq!(projection.budget, 60);
+    }
+
+    #[test]
+    fn semantic_reducer_prioritizes_failure_identity_at_a_tight_budget() {
+        let failure_line = "error: critical-test-42 failed at src/lib.rs:40";
+        let content = [
+            "setup output that would consume the available reduction budget",
+            "another ordinary line that must not displace the failure identity",
+            failure_line,
+            "exit status: 1",
+        ]
+        .join("\n");
+        let budget = TokenMeter::count_text(failure_line);
+        let reduced = semantic_reduce_to_tokens(&content, budget);
+        assert!(reduced.contains("critical-test-42"), "reduced={reduced:?}");
+        assert!(reduced.contains("failed"), "reduced={reduced:?}");
+        assert!(TokenMeter::count_text(&reduced) <= budget);
+    }
+
+    #[test]
+    fn semantic_reducer_bounds_an_oversized_failure_identity_without_dropping_it() {
+        let content = "error: critical-test-42 failed after a very long diagnostic explanation";
+        let reduced = semantic_reduce_to_tokens(content, 2);
+        assert!(reduced.starts_with("error"), "reduced={reduced:?}");
+        assert!(TokenMeter::count_text(&reduced) <= 2);
     }
 
     #[test]

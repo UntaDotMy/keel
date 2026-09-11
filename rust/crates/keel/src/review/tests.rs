@@ -543,6 +543,11 @@ fn brownfield_gate_flags_renamed_source_using_destination_path() {
 
 #[test]
 fn completeness_touched_sources_includes_working_tree_when_range_is_empty() {
+    // Reads process-global CWD under lock to prevent non-repo temp directory
+    // changes in sibling tests from making git calls fail.
+    let _guard = crate::test_support::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let root = std::env::current_dir().expect("cwd");
     let from_head = changed_sources_including_added(&root, &["HEAD".to_string()]);
     let from_empty_range = completeness_touched_sources(&root, &["HEAD...HEAD".to_string()]);
@@ -588,6 +593,7 @@ fn completeness_scan_satisfies_after_marker() {
             .unwrap_or(0)
     ));
     let previous = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
+    let _home_precedence = crate::test_support::HomePrecedenceGuard::clear_keel_home();
     std::env::set_var("CLAUDE_TARGET_OVERRIDE", &home);
     let workspace = home.join("ws");
     std::fs::create_dir_all(&workspace).expect("ws");
@@ -624,6 +630,7 @@ fn completeness_cover_requires_recorded_changed_set() {
             .unwrap_or(0)
     ));
     let previous = std::env::var("CLAUDE_TARGET_OVERRIDE").ok();
+    let _home_precedence = crate::test_support::HomePrecedenceGuard::clear_keel_home();
     std::env::set_var("CLAUDE_TARGET_OVERRIDE", &home);
     let workspace = home.join("ws");
     std::fs::create_dir_all(&workspace).expect("ws");
@@ -1834,6 +1841,22 @@ fn gate_status_honest_semantics_and_serialization() {
         ),
         (GateStatus::Unclear, "unclear", "[UNCLEAR]", false, true),
         (GateStatus::Blocked, "blocked", "[BLK]", false, true),
+        (GateStatus::Expired, "expired", "[EXPIRED]", false, true),
+        (GateStatus::NotRun, "not_run", "[NOTRUN]", false, true),
+        (
+            GateStatus::Indeterminate,
+            "indeterminate",
+            "[INDET]",
+            false,
+            true,
+        ),
+        (
+            GateStatus::PolicyViolation,
+            "policy_violation",
+            "[POLICY]",
+            false,
+            true,
+        ),
     ];
     for (status, name, icon, is_pass, is_blocking) in variants {
         assert_eq!(status.as_str(), name);
@@ -1844,6 +1867,46 @@ fn gate_status_honest_semantics_and_serialization() {
         assert_eq!(json, format!("\"{name}\""));
         let deserialized: GateStatus = serde_json::from_str(&json).expect("deserialize status");
         assert_eq!(deserialized, status);
+    }
+}
+
+/// The plan's honesty rule: no aggregate may collapse a non-pass state to pass.
+/// Exactly one variant is a pass, and every other variant is either blocking or
+/// an explicitly non-blocking `Warn`/`NotApplicable`, so a caller that asks
+/// `is_pass()` or `is_blocking()` can never read uncertainty as success.
+#[test]
+fn no_gate_status_can_be_read_as_a_pass() {
+    let variants = [
+        GateStatus::Pass,
+        GateStatus::Fail,
+        GateStatus::Warn,
+        GateStatus::Skipped,
+        GateStatus::NotApplicable,
+        GateStatus::NeedsHuman,
+        GateStatus::Unclear,
+        GateStatus::Blocked,
+        GateStatus::Expired,
+        GateStatus::NotRun,
+        GateStatus::Indeterminate,
+        GateStatus::PolicyViolation,
+    ];
+    let passes = variants.iter().filter(|status| status.is_pass()).count();
+    assert_eq!(passes, 1, "only one status may report as a pass");
+
+    let names: Vec<&str> = variants.iter().map(|status| status.as_str()).collect();
+    let unique: std::collections::BTreeSet<&str> = names.iter().copied().collect();
+    assert_eq!(unique.len(), names.len(), "status names must be unique");
+
+    for status in &variants {
+        if status.is_pass() {
+            continue;
+        }
+        let non_blocking = !status.is_blocking();
+        assert!(
+            !non_blocking || matches!(status, GateStatus::Warn | GateStatus::NotApplicable),
+            "{} is non-pass and non-blocking, so an aggregate could read it as success",
+            status.as_str()
+        );
     }
 }
 

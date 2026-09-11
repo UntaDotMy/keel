@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const EXPECTED_SURFACES: &[&str] = &[
+    "mcp.tools_list.handshake",
     "mcp.tools_list.catalog",
     "hook.session_start.bootstrap",
     "hook.user_prompt_submit.simple",
@@ -28,6 +29,38 @@ const EXPECTED_SURFACES: &[&str] = &[
     "pointer.warning_status",
     "pointer.ui_verification",
 ];
+
+/// Surfaces whose ledger budget is the packer's hard page limit rather than the
+/// ratified `ceil(actual × 1.10)` headroom rule. The emitted page is bounded by
+/// this limit at runtime, so reporting a derived headroom number would
+/// understate the constraint the server actually enforces.
+const PACKER_BOUND_SURFACES: &[&str] = &["mcp.tools_list.handshake"];
+
+/// The packer's hard `tools/list` page budget for the default profile, read from
+/// the runtime policy owner rather than restated here.
+fn packer_page_budget() -> u64 {
+    let home = isolated_home("packer-budget");
+    let root = repository_root();
+    let output = keel_command(&home.0)
+        .args([
+            "stats",
+            "context",
+            "--json",
+            "--workspace-root",
+            root.to_str().expect("UTF-8 repository root"),
+        ])
+        .output()
+        .expect("run keel stats context --json");
+    assert!(
+        output.status.success(),
+        "keel stats context --json failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("parse stats context JSON");
+    payload["policy"]["maxToolCatalogTokens"]
+        .as_u64()
+        .expect("stats context policy.maxToolCatalogTokens")
+}
 
 struct TestDirectory(PathBuf);
 
@@ -220,14 +253,24 @@ fn fixed_context_ledger_recomputes_every_ratified_surface() {
             row.reproduction
         );
         assert_within_budget(surface, row.actual, row.budget, row.reproduction);
-        assert_eq!(
-            row.budget,
-            with_ten_percent_headroom(row.actual),
-            "fixed-context budget is not the ratified runtime measurement plus 10% headroom: surface={surface}, actualTokens={}, budgetTokens={}, reproductionCommand={}",
-            row.actual,
-            row.budget,
-            row.reproduction
-        );
+        if PACKER_BOUND_SURFACES.contains(surface) {
+            // §10.1: this row's budget is the hard page limit the packer enforces,
+            // not a derived soft target that would understate the constraint.
+            assert_eq!(
+                row.budget,
+                packer_page_budget(),
+                "packer-bound surface must report the packer's own hard limit: surface={surface}"
+            );
+        } else {
+            assert_eq!(
+                row.budget,
+                with_ten_percent_headroom(row.actual),
+                "fixed-context budget is not the ratified runtime measurement plus 10% headroom: surface={surface}, actualTokens={}, budgetTokens={}, reproductionCommand={}",
+                row.actual,
+                row.budget,
+                row.reproduction
+            );
+        }
         assert_eq!(row.status, "within_budget", "{surface} status");
     }
     assert_eq!(required_str(&ledger, "status"), "within_budget");
@@ -295,6 +338,81 @@ fn stats_text_prints_the_full_fixed_context_ledger() {
     for surface in EXPECTED_SURFACES {
         assert!(stdout.contains(surface), "stats text missing {surface}");
     }
+}
+
+/// §33: every declared pipeline stage must be measured through its real owner,
+/// and the run must fail when a stage exceeds its declared ceiling rather than
+/// only printing a number.
+#[test]
+fn latency_benchmark_measures_every_declared_stage_and_enforces_its_ceiling() {
+    let home = isolated_home("latency");
+    let root = repository_root();
+    let output = keel_command(&home.0)
+        .args([
+            "stats",
+            "latency",
+            "--json",
+            "--workspace-root",
+            root.to_str().expect("UTF-8 repository root"),
+        ])
+        .output()
+        .expect("run keel stats latency --json");
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("parse stats latency JSON");
+
+    // A stage over its ceiling exits non-zero; the payload must say why.
+    if !output.status.success() {
+        assert_eq!(payload["status"], "failed");
+        panic!(
+            "latency stage exceeded its declared ceiling: {}",
+            payload["failures"]
+        );
+    }
+    assert_eq!(payload["status"], "passed", "{payload}");
+    assert_eq!(payload["failures"].as_array().map(Vec::len), Some(0));
+
+    let stages = payload["stages"].as_array().expect("stages array");
+    let names = stages
+        .iter()
+        .map(|stage| stage["stage"].as_str().expect("stage name"))
+        .collect::<Vec<_>>();
+    for required in [
+        "catalogBuildMs",
+        "pagePackMs",
+        "serializationMs",
+        "tokenCountMs",
+        "reductionMs",
+        "dedupeMs",
+        "skillRoutingMs",
+        "memoryRetrievalMs",
+        "rawStoreLocateMs",
+    ] {
+        assert!(
+            names.contains(&required),
+            "the §33 stage list must include {required}: {names:?}"
+        );
+    }
+    for stage in stages {
+        // Each stage declares its own ceiling, and the reported status must agree
+        // with the measurement rather than being asserted independently.
+        let measured = stage["milliseconds"].as_f64().expect("measured ms");
+        let ceiling = stage["declaredMaxMs"].as_f64().expect("declared ceiling");
+        assert!(measured >= 0.0 && ceiling > 0.0, "{stage}");
+        assert_eq!(
+            stage["status"],
+            if measured <= ceiling {
+                "within_budget"
+            } else {
+                "exceeded"
+            },
+            "{stage}"
+        );
+    }
+    assert!(
+        payload["reproductionCommand"]
+            .as_str()
+            .is_some_and(|command| command.contains("stats latency")),
+        "the benchmark must name its own reproduction command"
+    );
 }
 
 #[test]

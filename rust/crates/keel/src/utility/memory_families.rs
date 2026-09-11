@@ -18,8 +18,10 @@ use std::io::Write;
 use std::path::Path;
 
 use crate::args::FlagSet;
-use crate::json::Value;
+use crate::json::{write_indented, Value};
+use crate::proxy::token_meter::TokenMeter;
 use crate::runtime::{display_path, resolve_claude_home};
+use crate::utility::hashing::sha256_hex;
 use crate::utility::memory::shared::{
     is_help_argument as is_help, render_workflow_json as render_json,
 };
@@ -1369,6 +1371,7 @@ fn run_retrieve(
     let label = format!("{command_group} retrieve");
     let mut flags = FlagSet::new(label.clone());
     flags.string_flag("query", "");
+    flags.string_flag("limit", "");
     flags.string_flag("claude-home", "");
     flags.bool_flag("json", false);
     if let Err(error) = flags.parse(arguments) {
@@ -1383,10 +1386,21 @@ fn run_retrieve(
         let _ = writeln!(standard_error, "{label}: --query is required");
         return 1;
     }
+    if let Err(error) = crate::utility::recall::validate_recall_query(&query) {
+        let _ = writeln!(standard_error, "{label}: {error}");
+        return 2;
+    }
+    let limit = match crate::utility::recall::parse_recall_limit(flags.string_value("limit")) {
+        Ok(limit) => limit,
+        Err(error) => {
+            let _ = writeln!(standard_error, "{label}: {error}");
+            return 2;
+        }
+    };
     let Some(home) = resolve_home(flags.string_value("claude-home"), &label, standard_error) else {
         return 1;
     };
-    let result = match crate::utility::recall::search_recall_index(&home, &query, 20, None) {
+    let result = match crate::utility::recall::search_recall_index(&home, &query, limit, None) {
         Ok(Some(result)) => result,
         Ok(None) => {
             let _ = writeln!(standard_error, "{label}: query has no searchable terms");
@@ -1397,45 +1411,243 @@ fn run_retrieve(
             return 1;
         }
     };
+    let stage = result.stage;
+    let bounded_hits = bound_retrieve_hits(&query, limit, result.hits);
+    let (projected_hits, projection) =
+        bounded_retrieve_projection(&query, stage, limit, &bounded_hits);
     if flags.bool_value("json") {
-        let hits = result
-            .hits
-            .iter()
-            .map(|hit| {
-                Value::Object(vec![
-                    ("path".into(), Value::String(hit.absolute_path.clone())),
-                    ("line".into(), Value::Number(hit.line.to_string())),
-                    ("score".into(), Value::Number(format!("{:.4}", hit.score))),
-                    ("snippet".into(), Value::String(hit.snippet.clone())),
-                ])
-            })
-            .collect();
-        return render_json(
-            standard_output,
-            standard_error,
-            &Value::Object(vec![
-                ("query".into(), Value::String(query)),
-                ("stage".into(), Value::String(result.stage.to_string())),
-                ("count".into(), Value::Number(result.hits.len().to_string())),
-                ("hits".into(), Value::Array(hits)),
-            ]),
-        );
+        return render_json(standard_output, standard_error, &projection);
     }
     let _ = writeln!(
         standard_output,
         "{label}: {} hit(s) for \"{}\" stage={}",
-        result.hits.len(),
+        projected_hits.len(),
         query,
-        result.stage
+        stage
     );
-    for hit in &result.hits {
+    for hit in &projected_hits {
+        let provenance_id = retrieve_provenance_id(&query, hit);
+        let retrieval_ref = retrieve_ref(&query, limit);
         let _ = writeln!(
             standard_output,
-            "  {}:{} score={:.4} {} {}",
-            hit.absolute_path, hit.line, hit.score, hit.snippet, result.stage
+            "  {}:{} score={:.4} {} {} provenanceId=prov-sha256:{} retrievalRef={}",
+            hit.absolute_path,
+            hit.line,
+            hit.score,
+            hit.snippet,
+            result.stage,
+            provenance_id,
+            retrieval_ref
         );
     }
     0
+}
+
+const MEMORY_RETRIEVE_RESULT_OVERHEAD_BYTES: usize = 2 * 1024;
+// Includes the enclosing object, array indentation, separators, and the
+// provenance/recovery envelope in addition to the per-hit JSON.
+const MEMORY_RETRIEVE_RESULT_OVERHEAD_TOKENS: usize = 192;
+const MAX_MEMORY_QUERY_PROJECTION_CHARS: usize = 256;
+const MAX_MEMORY_EXCERPT_CHARS: usize = 600;
+
+fn retrieve_hit_value(query: &str, limit: usize, hit: &crate::utility::recall::RecallHit) -> Value {
+    let provenance_id = retrieve_provenance_id(query, hit);
+    Value::Object(vec![
+        ("path".into(), Value::String(hit.absolute_path.clone())),
+        ("line".into(), Value::Number(hit.line.to_string())),
+        ("score".into(), Value::Number(format!("{:.4}", hit.score))),
+        (
+            "snippet".into(),
+            Value::String(bounded_memory_excerpt(&hit.snippet)),
+        ),
+        (
+            "provenanceId".into(),
+            Value::String(format!("prov-sha256:{provenance_id}")),
+        ),
+        (
+            "retrievalRef".into(),
+            Value::String(retrieve_ref(query, limit)),
+        ),
+    ])
+}
+
+fn retrieve_provenance_id(query: &str, hit: &crate::utility::recall::RecallHit) -> String {
+    sha256_hex(
+        format!(
+            "memory-retrieve\0{}\0{}\0{}",
+            query, hit.absolute_path, hit.line
+        )
+        .as_bytes(),
+    )
+}
+
+fn retrieve_ref(query: &str, limit: usize) -> String {
+    format!(
+        "keel memory retrieve --query {:?} --limit {}",
+        query,
+        limit.clamp(1, crate::utility::recall::MAX_RECALL_LIMIT)
+    )
+}
+
+fn bounded_memory_excerpt(text: &str) -> String {
+    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.chars().count() <= MAX_MEMORY_EXCERPT_CHARS {
+        return compact;
+    }
+    let mut excerpt = compact
+        .chars()
+        .take(MAX_MEMORY_EXCERPT_CHARS)
+        .collect::<String>();
+    excerpt.push_str("… [truncated]");
+    excerpt
+}
+
+fn serialized_value(value: &Value) -> Vec<u8> {
+    let mut rendered = Vec::new();
+    write_indented(&mut rendered, value).expect("render memory result into memory");
+    rendered
+}
+
+fn bounded_retrieve_projection(
+    query: &str,
+    stage: &str,
+    limit: usize,
+    hits: &[crate::utility::recall::RecallHit],
+) -> (Vec<crate::utility::recall::RecallHit>, Value) {
+    let (projected_query, query_truncated) =
+        bounded_projection_text(query, MAX_MEMORY_QUERY_PROJECTION_CHARS);
+    let query_digest = sha256_hex(query.as_bytes());
+    let mut selected = Vec::new();
+    let mut dropped = false;
+    for hit in hits {
+        let mut candidate = selected.clone();
+        candidate.push(hit.clone());
+        let payload = retrieve_projection_payload(
+            &projected_query,
+            query_truncated,
+            &query_digest,
+            stage,
+            limit,
+            &candidate,
+            dropped || candidate.len() < hits.len(),
+        );
+        if retrieve_projection_within_budget(&payload) {
+            selected.push(hit.clone());
+        } else {
+            dropped = true;
+        }
+    }
+    let payload = retrieve_projection_payload(
+        &projected_query,
+        query_truncated,
+        &query_digest,
+        stage,
+        limit,
+        &selected,
+        dropped || selected.len() < hits.len(),
+    );
+    if retrieve_projection_within_budget(&payload) {
+        return (selected, payload);
+    }
+    let fallback_query = bounded_projection_text(&projected_query, 64).0;
+    let fallback = retrieve_projection_payload(
+        &fallback_query,
+        true,
+        &query_digest,
+        stage,
+        limit,
+        &[],
+        true,
+    );
+    (Vec::new(), fallback)
+}
+
+fn retrieve_projection_payload(
+    query: &str,
+    query_truncated: bool,
+    query_digest: &str,
+    stage: &str,
+    limit: usize,
+    hits: &[crate::utility::recall::RecallHit],
+    truncated: bool,
+) -> Value {
+    let values = hits
+        .iter()
+        .map(|hit| retrieve_hit_value(query, limit, hit))
+        .collect();
+    Value::Object(vec![
+        ("query".into(), Value::String(query.to_string())),
+        (
+            "queryDigest".into(),
+            Value::String(format!("sha256:{query_digest}")),
+        ),
+        ("queryTruncated".into(), Value::Bool(query_truncated)),
+        ("stage".into(), Value::String(stage.to_string())),
+        (
+            "limit".into(),
+            Value::Number(
+                limit
+                    .min(crate::utility::recall::MAX_RECALL_LIMIT)
+                    .to_string(),
+            ),
+        ),
+        ("count".into(), Value::Number(hits.len().to_string())),
+        ("truncated".into(), Value::Bool(truncated)),
+        ("hits".into(), Value::Array(values)),
+    ])
+}
+
+fn bounded_projection_text(text: &str, max_chars: usize) -> (String, bool) {
+    let mut chars = text.chars();
+    let mut value = chars.by_ref().take(max_chars).collect::<String>();
+    let truncated = chars.next().is_some();
+    if truncated {
+        value.push('…');
+    }
+    (value, truncated)
+}
+
+fn retrieve_projection_within_budget(value: &Value) -> bool {
+    let rendered = serialized_value(value);
+    rendered.len() <= crate::utility::recall::MAX_RECALL_RESULT_BYTES
+        && TokenMeter::count_bytes(&rendered) <= crate::utility::recall::MAX_RECALL_RESULT_TOKENS
+}
+
+/// Keep the memory-family JSON projection inside the same result budgets as
+/// low-level recall, including the extra provenance/recovery fields owned by
+/// this command. The search owner already applies the limit; this second pass
+/// measures the actual family response shape before it reaches stdout.
+fn bound_retrieve_hits(
+    query: &str,
+    limit: usize,
+    hits: Vec<crate::utility::recall::RecallHit>,
+) -> Vec<crate::utility::recall::RecallHit> {
+    let count_limit = limit.min(crate::utility::recall::MAX_RECALL_LIMIT);
+    let byte_budget = crate::utility::recall::MAX_RECALL_RESULT_BYTES
+        .saturating_sub(MEMORY_RETRIEVE_RESULT_OVERHEAD_BYTES);
+    let token_budget = crate::utility::recall::MAX_RECALL_RESULT_TOKENS
+        .saturating_sub(MEMORY_RETRIEVE_RESULT_OVERHEAD_TOKENS);
+    let mut selected = Vec::new();
+    let mut used_bytes = 0usize;
+    let mut used_tokens = 0usize;
+
+    for hit in hits {
+        if selected.len() >= count_limit {
+            break;
+        }
+        let rendered = serialized_value(&retrieve_hit_value(query, limit, &hit));
+        let hit_bytes = rendered.len();
+        let hit_tokens = TokenMeter::count_bytes(&rendered);
+        if hit_bytes > byte_budget.saturating_sub(used_bytes)
+            || hit_tokens > token_budget.saturating_sub(used_tokens)
+        {
+            continue;
+        }
+        used_bytes = used_bytes.saturating_add(hit_bytes);
+        used_tokens = used_tokens.saturating_add(hit_tokens);
+        selected.push(hit);
+    }
+    selected
 }
 
 /// The family names `status` summarizes, in display order. Shared between the
@@ -2568,6 +2780,119 @@ mod tests {
         assert_eq!(code, 0, "stderr: {err}");
         assert!(out.contains("hit(s)"), "stdout: {out}");
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn retrieve_enforces_query_and_limit_bounds_and_keeps_provenance() {
+        let home = temp_home("retr-bounds");
+        let h = home.to_string_lossy().to_string();
+        run(
+            "memory",
+            "research-cache",
+            &[
+                "record",
+                "--question",
+                "bounded recall query",
+                "--answer",
+                "bounded answer",
+                "--claude-home",
+                &h,
+            ],
+        );
+
+        let (code, out, err) = run(
+            "memory",
+            "retrieve",
+            &[
+                "--query",
+                "bounded",
+                "--limit",
+                "1000",
+                "--json",
+                "--claude-home",
+                &h,
+            ],
+        );
+        assert_eq!(code, 0, "stderr: {err}");
+        assert!(
+            out.contains("\"limit\": 100"),
+            "limit must be capped: {out}"
+        );
+        assert!(
+            out.contains("\"provenanceId\": \"prov-"),
+            "provenance: {out}"
+        );
+        assert!(
+            out.contains("\"retrievalRef\""),
+            "recovery reference: {out}"
+        );
+
+        let oversized = "x".repeat(crate::utility::recall::MAX_RECALL_QUERY_BYTES + 1);
+        let (code, _, err) = run("memory", "retrieve", &["--query", &oversized]);
+        assert_eq!(code, 2, "oversized query must be rejected");
+        assert!(err.contains("byte"), "stderr: {err}");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn retrieve_hits_respect_serialized_result_budgets() {
+        let hits = (0..crate::utility::recall::MAX_RECALL_LIMIT + 10)
+            .map(|index| crate::utility::recall::RecallHit {
+                absolute_path: format!("C:/memory/note-{index}.md"),
+                score: 0.5,
+                line: index + 1,
+                snippet: format!("[match] memory result {index}"),
+            })
+            .collect();
+        let bounded = bound_retrieve_hits("memory", usize::MAX, hits);
+        assert!(bounded.len() <= crate::utility::recall::MAX_RECALL_LIMIT);
+        let values = bounded
+            .iter()
+            .map(|hit| retrieve_hit_value("memory", usize::MAX, hit))
+            .collect();
+        let rendered = serialized_value(&Value::Array(values));
+        assert!(
+            rendered.len()
+                <= crate::utility::recall::MAX_RECALL_RESULT_BYTES
+                    .saturating_sub(MEMORY_RETRIEVE_RESULT_OVERHEAD_BYTES),
+            "serialized hits exceeded byte bound: {}",
+            rendered.len()
+        );
+        assert!(
+            TokenMeter::count_bytes(&rendered)
+                <= crate::utility::recall::MAX_RECALL_RESULT_TOKENS
+                    .saturating_sub(MEMORY_RETRIEVE_RESULT_OVERHEAD_TOKENS),
+            "serialized hits exceeded token bound"
+        );
+    }
+
+    #[test]
+    fn retrieve_json_projection_recounts_complete_envelope() {
+        let query = "memory query "
+            .repeat(crate::utility::recall::MAX_RECALL_QUERY_BYTES / "memory query ".len());
+        let hits = (0..crate::utility::recall::MAX_RECALL_LIMIT)
+            .map(|index| crate::utility::recall::RecallHit {
+                absolute_path: format!("C:/memory/note-{index}.md"),
+                score: 0.5,
+                line: index + 1,
+                snippet: "[match] long memory result ".repeat(80),
+            })
+            .collect::<Vec<_>>();
+        let (_, payload) = bounded_retrieve_projection(&query, "exact", usize::MAX, &hits);
+        let rendered = serialized_value(&payload);
+        assert!(
+            rendered.len() <= crate::utility::recall::MAX_RECALL_RESULT_BYTES,
+            "complete retrieve envelope exceeded byte bound: {}",
+            rendered.len()
+        );
+        assert!(
+            TokenMeter::count_bytes(&rendered) <= crate::utility::recall::MAX_RECALL_RESULT_TOKENS,
+            "complete retrieve envelope exceeded token bound"
+        );
+        let text = String::from_utf8(rendered).expect("json utf8");
+        assert!(text.contains("provenanceId"), "provenance missing: {text}");
+        assert!(text.contains("retrievalRef"), "recovery missing: {text}");
+        assert!(serde_json::from_str::<serde_json::Value>(&text).is_ok());
     }
 
     #[test]

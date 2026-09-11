@@ -43,7 +43,7 @@ use crate::proxy::token_meter::TokenMeter;
 use crate::runtime::{display_path, resolve_claude_home, safe_path_segment};
 use crate::utility::memory::refresh_system_map_with_status;
 use crate::utility::memory_families::family_counts;
-use crate::utility::recall::{collapse_dashes, search_recall_index, RecallSearchResult};
+use crate::utility::recall::{collapse_dashes, search_recall_index};
 use crate::utility::record_store::{current_timestamp_millis, format_timestamp_iso8601};
 use crate::utility::skill_match::{
     frontmatter_field, installed_skill_path, match_skill_for_prompt_with_details, skill_catalog,
@@ -125,6 +125,21 @@ pub(crate) fn discovery_snapshot() -> Value {
 const DEFAULT_RECALL_LIMIT: usize = 20;
 const MAX_RECALL_LIMIT: usize = 100;
 
+/// A background command is transient MCP state. Keep the process-local
+/// registry bounded even when a client disappears before polling the final
+/// result. Finished entries are evicted after this window; running entries are
+/// terminated by their reaper when the same lifetime is exceeded.
+const DEFAULT_BACKGROUND_COMMAND_TTL_SECS: u64 = 1_800;
+const MAX_BACKGROUND_COMMANDS: usize = 256;
+
+fn background_command_ttl() -> Duration {
+    env::var("KEEL_MCP_BACKGROUND_TTL_SECONDS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(|value| Duration::from_secs(value.clamp(60, 86_400)))
+        .unwrap_or_else(|| Duration::from_secs(DEFAULT_BACKGROUND_COMMAND_TTL_SECS))
+}
+
 /// Command group whose memory families `memory_status` summarizes and under
 /// which `system_map_refresh` writes. Must match the group string the CLI
 /// dispatches for the plain memory lane — `commands.rs` routes it as the literal
@@ -147,7 +162,59 @@ pub(crate) fn handle_tools_list_for_profile(profile: super::McpCatalogProfile) -
     slim_tools_list_for_wire(canonical_tools_list_for_profile(profile))
 }
 
-fn canonical_tools_list_for_profile(profile: super::McpCatalogProfile) -> Value {
+/// Everything the §31 diagnostics command prints, computed by the packer's own
+/// steps so the report cannot describe a page the server would not serve.
+pub(crate) struct DefaultHandshakeReport {
+    pub first_page_tokens: usize,
+    pub visible_tools: usize,
+    pub has_more: bool,
+    pub snapshot_fingerprint: String,
+    /// Names only: enough to compare two pages without reprinting schemas.
+    pub visible_tool_names: Vec<String>,
+}
+
+pub(crate) fn default_handshake_report(
+    profile: super::McpCatalogProfile,
+) -> Result<DefaultHandshakeReport, String> {
+    let context = super::McpRequestContext::authoritative(None);
+    let page = handle_tools_list_for_profile_params_with_context(profile, &Value::Null, &context)?;
+    // Reproduce the default request's snapshot: the same level-0-compacted
+    // catalog, so the fingerprint matches the cursor a client would receive.
+    let mut catalog = canonical_tools_list_for_profile(profile);
+    if let Some(tools) = catalog.get_mut("tools").and_then(Value::as_array_mut) {
+        *tools = tools
+            .iter()
+            .map(|tool| tool_representation(tool, 0))
+            .collect();
+    }
+    let all_tools = catalog
+        .get("tools")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    Ok(DefaultHandshakeReport {
+        first_page_tokens: measure_tools_list_response(&page),
+        visible_tools: page["tools"].as_array().map_or(0, Vec::len),
+        has_more: page["nextCursor"].is_string(),
+        visible_tool_names: page["tools"]
+            .as_array()
+            .map(|tools| {
+                tools
+                    .iter()
+                    .filter_map(|tool| tool["name"].as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        snapshot_fingerprint: catalog_snapshot_fingerprint(
+            profile,
+            &all_tools,
+            2,
+            mcp_tools_list_budget(profile),
+        ),
+    })
+}
+
+pub(crate) fn canonical_tools_list_for_profile(profile: super::McpCatalogProfile) -> Value {
     let mut catalog = tools_list_catalog();
     if profile == super::McpCatalogProfile::Tiered {
         if let Some(tools) = catalog.get_mut("tools").and_then(Value::as_array_mut) {
@@ -165,7 +232,6 @@ fn canonical_tools_list_for_profile(profile: super::McpCatalogProfile) -> Value 
 /// Apply MCP's opaque-cursor pagination and progressive disclosure levels to
 /// the canonical catalog. Invalid cursors fail closed; they never trigger a
 /// full-catalog fallback that could violate the context budget.
-#[allow(dead_code)]
 pub(crate) fn handle_tools_list_for_profile_params(
     profile: super::McpCatalogProfile,
     params: &Value,
@@ -237,12 +303,41 @@ pub(crate) fn handle_tools_list_for_profile_params_with_context(
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let expected = all_tools.len();
-    // Preserve complete-profile compatibility when it fits; paginate only when
-    // the emitted catalog exceeds its hard page budget.
-    if spec_default && measure_tools_list_response(&catalog) <= budget {
-        return Ok(catalog);
+    // Preserve full-profile compatibility when it fits, and paginate when the
+    // catalog (including required protocol fields) exceeds its hard page budget.
+    if spec_default {
+        let page = tools_list_page(&all_tools, None);
+        if measure_tools_list_response(&page) <= budget {
+            return Ok(page);
+        }
     }
+    pack_catalog_page(
+        profile,
+        level,
+        budget,
+        cursor,
+        context,
+        compact_default,
+        spec_default,
+        all_tools,
+    )
+}
+
+/// Pack one `tools/list` page from an already-resolved tool set. The page cost
+/// is measured on the serialized response before each candidate is accepted, so
+/// the hard budget holds for any catalog the caller supplies.
+#[allow(clippy::too_many_arguments)]
+fn pack_catalog_page(
+    profile: super::McpCatalogProfile,
+    level: u64,
+    budget: usize,
+    cursor: Option<&str>,
+    context: &super::McpRequestContext,
+    compact_default: bool,
+    spec_default: bool,
+    all_tools: Vec<Value>,
+) -> Result<Value, String> {
+    let expected = all_tools.len();
     let fingerprint = catalog_snapshot_fingerprint(profile, &all_tools, level, budget);
     let start = match cursor {
         Some(value) => decode_catalog_cursor(
@@ -263,7 +358,12 @@ pub(crate) fn handle_tools_list_for_profile_params_with_context(
     // Spec-default may return the complete catalog when it fits; explicit
     // level/cursor requests retain the item cap while token budget is authoritative.
     let max_items = if spec_default { 64 } else { tools_page_size() };
-    let expiry = now_unix_seconds().saturating_add(mcp_cursor_ttl_seconds());
+    // §34: the deadline is part of the measured cursor, so a per-call value would
+    // let the clock change which tools a page packs. One TTL window, one deadline.
+    let expiry = match cursor {
+        Some(value) => peek_catalog_cursor(value)?.expires_at,
+        None => catalog_cursor_expiry_at(now_unix_seconds(), mcp_cursor_ttl_seconds()),
+    };
     let mut page_tools = Vec::new();
     let mut offset = start;
     while offset < expected && page_tools.len() < max_items {
@@ -306,6 +406,8 @@ pub(crate) fn handle_tools_list_for_profile_params_with_context(
         }
     }
 
+    // Each candidate was measured with the exact cursor this walk emits, so this
+    // recount is the standing typed guard against a serializer change.
     let next_cursor = (offset < expected).then(|| {
         encode_catalog_cursor(
             offset,
@@ -321,8 +423,6 @@ pub(crate) fn handle_tools_list_for_profile_params_with_context(
     let page = tools_list_page(&page_tools, next_cursor.as_deref());
     let measured = measure_tools_list_response(&page);
     if measured > budget {
-        // Every candidate includes cursor overhead; retain a typed protocol error
-        // if a future serializer or envelope changes after packing.
         return Err(format!(
             "tools/list response exceeded its configured {budget}-token page budget after final recount ({measured})"
         ));
@@ -338,15 +438,34 @@ pub(crate) fn measure_tools_list_response(payload: &Value) -> usize {
         .unwrap_or(usize::MAX)
 }
 
+/// The tool catalog is fixed for the process lifetime, so a page stays fresh for
+/// as long as the cursor walk it belongs to is valid: the cursor TTL is the
+/// honest bound, and deriving it keeps one TTL notion in the system.
+fn tools_list_cache_ttl_ms() -> u64 {
+    mcp_cursor_ttl_seconds().saturating_mul(1_000)
+}
+
+/// `tools/list` is identical for every caller; keel exposes no per-caller tool
+/// filtering, so the page holds no caller-specific data and is safe to share.
+const TOOLS_LIST_CACHE_SCOPE: &str = "public";
+
+/// The one owner of the `tools/list` result shape. Every return path builds its
+/// page here, so the required protocol fields are inside the measurement the
+/// packer takes and can never be appended after budgeting.
 fn tools_list_page(tools: &[Value], next_cursor: Option<&str>) -> Value {
-    let mut page = json!({ "tools": tools });
+    let mut page = json!({
+        "resultType": super::MCP_RESULT_TYPE_COMPLETE,
+        "tools": tools,
+        "ttlMs": tools_list_cache_ttl_ms(),
+        "cacheScope": TOOLS_LIST_CACHE_SCOPE,
+    });
     if let Some(cursor) = next_cursor {
         page["nextCursor"] = Value::String(cursor.to_string());
     }
     page
 }
 
-fn mcp_tools_list_budget(profile: super::McpCatalogProfile) -> usize {
+pub(crate) fn mcp_tools_list_budget(profile: super::McpCatalogProfile) -> usize {
     let default = match profile {
         super::McpCatalogProfile::Tiered => crate::proxy::context::DEFAULT_MAX_TOOL_CATALOG_TOKENS,
         super::McpCatalogProfile::Full => crate::proxy::context::DEFAULT_MAX_DYNAMIC_TOKENS,
@@ -473,7 +592,7 @@ fn sort_tools_catalog(catalog: &mut Value) {
     }
 }
 
-fn catalog_snapshot_fingerprint(
+pub(crate) fn catalog_snapshot_fingerprint(
     profile: super::McpCatalogProfile,
     tools: &[Value],
     level: u64,
@@ -661,6 +780,17 @@ fn mcp_cursor_ttl_seconds() -> u64 {
         .unwrap_or(900)
 }
 
+/// The deadline a fresh walk stamps into its cursors, bucketed to the cursor TTL.
+/// The deadline is part of the token-measured cursor, so a per-call value would
+/// let the wall clock change which tools a page packs (§34). Bucketing makes every
+/// request inside one TTL window mint the identical cursor; the deadline always
+/// lands within `(ttl, 2*ttl]` of the request instant, so a cursor is never
+/// shorter-lived than the configured TTL.
+fn catalog_cursor_expiry_at(now: u64, ttl: u64) -> u64 {
+    let ttl = ttl.max(1);
+    ((now / ttl) + 2).saturating_mul(ttl)
+}
+
 fn tool_category(name: &str) -> &'static str {
     match name {
         "recall" | "recall_status" | "memory" | "memory_status" => "memory",
@@ -843,10 +973,13 @@ fn tools_list_catalog() -> Value {
             },
             {
                 "name": "context_brief",
-                "description": "Call this FIRST when starting a session or task — one call that makes you aware of what this toolkit offers, even when no skill loaded automatically. Returns the iron law, the full installed skill catalog (name + when_to_use), durable-memory health, and the newest working brief. After reading it, use skill_route to pick a skill, skill_get to load one, recall for memory, and cli for any other keel surface. Read-only. Time-budgeted and size-capped so it cannot hang the MCP stdio loop.",
+                "description": "Call this FIRST when starting a session or task — one call that makes you aware of what this toolkit offers, even when no skill loaded automatically. Returns the iron law and installed skill catalog; memory health and the newest working brief stay deferred unless include_memory/include_brief is true. After reading it, use skill_route to pick a skill, skill_get to load one, recall for memory, and cli for any other keel surface. Read-only. Time-budgeted and size-capped so it cannot hang the MCP stdio loop.",
                 "inputSchema": {
                     "type": "object",
-                    "properties": {}
+                    "properties": {
+                        "include_memory": { "type": "boolean", "description": "Opt in to the recall index and family counts; omitted by default so startup does not inject memory." },
+                        "include_brief": { "type": "boolean", "description": "Opt in to reading the newest workspace working brief; omitted by default so startup does not inject task state." }
+                    }
                 }
             },
             {
@@ -1184,8 +1317,23 @@ fn mcp_json_compact(payload: &Value) -> Result<String, String> {
 
 fn mcp_payload_exceeds_budget(payload: &Value) -> bool {
     mcp_json_compact(payload)
-        .map(|text| text.chars().count() > max_mcp_text_chars())
+        .map(|text| {
+            text.chars().count() > max_mcp_text_chars()
+                || TokenMeter::count_text(&text) > context_brief_payload_budget()
+        })
         .unwrap_or(false)
+}
+
+/// Leave a small deterministic reserve between the JSON returned by the
+/// context-brief owner and the projection wrapper that carries it through the
+/// MCP tool boundary. The wrapper normally projects the owner text verbatim,
+/// but tokenizer cleanup/injection normalization can add one token at the
+/// exact edge; an under-budget payload is safer than a one-token rejection.
+const CONTEXT_BRIEF_TOKEN_RESERVE: usize = 32;
+
+fn context_brief_payload_budget() -> usize {
+    crate::proxy::context::DEFAULT_MAX_SINGLE_RESULT_TOKENS
+        .saturating_sub(CONTEXT_BRIEF_TOKEN_RESERVE)
 }
 
 #[cfg(test)]
@@ -1264,50 +1412,57 @@ fn handle_tools_call_cancellable_with_context_and_executor(
     // Child-spawning tools also apply an inner kill timeout (same budget).
     let name = tool_name.to_string();
     let name_for_worker = name.clone();
+    let context_for_worker = request_context.clone();
     let outcome = run_tool_with_executor_cancellation(
         executor,
         mcp_child_timeout(),
         &name,
         cancellation,
-        move || dispatch_mcp_tool(&name_for_worker, &arguments),
+        move || {
+            with_mcp_request_context(context_for_worker, || {
+                dispatch_mcp_tool(&name_for_worker, &arguments)
+            })
+        },
     );
 
-    match outcome {
+    // §3.2: `resultType` is required on every result. Stamped once here, on the
+    // single tail of this function, so no arm above can return a result without it.
+    Ok(super::mark_result_complete(match outcome {
         Ok(text) => {
             match project_mcp_context(&name, &text, ContextSource::McpTool, &request_context) {
-                Ok(projection) => Ok(json!({
+                Ok(projection) => json!({
                     "content": [
                         { "type": "text", "text": truncate_mcp_text(&projection.summary) }
                     ],
                     "isError": false,
                     "context": projection.metadata(),
-                })),
-                Err(message) => Ok(json!({
+                }),
+                Err(message) => json!({
                     "content": [
                         { "type": "text", "text": message }
                     ],
                     "isError": true,
-                })),
+                }),
             }
         }
         Err(message) => {
             match project_mcp_context(&name, &message, ContextSource::Error, &request_context) {
-                Ok(projection) => Ok(json!({
+                Ok(projection) => json!({
                     "content": [
                         { "type": "text", "text": truncate_mcp_text(&projection.summary) }
                     ],
                     "isError": true,
                     "context": projection.metadata(),
-                })),
-                Err(firewall_error) => Ok(json!({
+                }),
+                Err(firewall_error) => json!({
                     "content": [
                         { "type": "text", "text": firewall_error }
                     ],
                     "isError": true,
-                })),
+                }),
             }
         }
-    }
+    }))
 }
 
 /// Apply the same model-boundary policy to every MCP text result, including
@@ -1922,102 +2077,218 @@ fn tool_recall(arguments: &Value) -> Result<String, String> {
         });
     let result = search_recall_index(&claude_home, &query, limit, workspace_slug.as_deref())
         .map_err(|error| format!("recall: {error}"))?;
-    let mut payload = render_recall_payload(&claude_home, &query, limit, result);
+    let (stage, fts_query, mut hits) = match result {
+        Some(result) => (result.stage, result.fts_query, result.hits),
+        None => ("exact", String::new(), Vec::new()),
+    };
     // `local_only`: restrict to the current workspace's lane only (a new
     // project returns empty instead of flooding with cross-project hits).
     if Some(true) == optional_bool_arg(arguments, "local_only") {
         if let Some(slug) = &workspace_slug {
             let slug_norm = collapse_dashes(&slug.to_ascii_lowercase());
-            if let Some(matches) = payload.get_mut("matches").and_then(|m| m.as_array_mut()) {
-                matches.retain(|hit| {
-                    hit.get("path")
-                        .and_then(|p| p.as_str())
-                        .map(|p| collapse_dashes(&p.to_ascii_lowercase()).contains(&slug_norm))
-                        .unwrap_or(false)
-                });
-            }
+            hits.retain(|hit| {
+                collapse_dashes(&relative_to_home(
+                    &claude_home,
+                    Path::new(&hit.absolute_path),
+                ))
+                .to_ascii_lowercase()
+                .contains(&slug_norm)
+            });
         }
     }
+    // Build a valid bounded envelope before the outer context projection, or a
+    // large one-line JSON string loses provenance and its recovery reference.
+    let payload = bounded_recall_payload(&claude_home, &query, &fts_query, limit, stage, &hits);
     mcp_json_compact(&payload).map_err(|error| format!("recall: {error}"))
 }
 
-fn render_recall_payload(
+const MCP_RECALL_QUERY_CHARS: usize = 256;
+const MCP_RECALL_HOME_CHARS: usize = 512;
+const MCP_RECALL_FTS_CHARS: usize = 512;
+const MCP_RECALL_EXCERPT_CHARS: usize = 600;
+const MCP_RECALL_MAX_BYTES: usize = crate::utility::recall::MAX_RECALL_RESULT_BYTES;
+const MCP_RECALL_MAX_TOKENS: usize = crate::utility::recall::MAX_RECALL_RESULT_TOKENS;
+
+/// Build the model-visible recall envelope after all filtering. Every
+/// candidate is measured as the complete serialized response, not only as a
+/// snippet, so paths, provenance, recovery references, and truncation flags
+/// share one hard budget.
+fn bounded_recall_payload(
     claude_home: &Path,
     query: &str,
+    fts_query: &str,
     limit: usize,
-    result: Option<RecallSearchResult>,
+    stage: &str,
+    hits: &[crate::utility::recall::RecallHit],
 ) -> Value {
-    let (fts_query, stage, hits) = match result {
-        Some(search_result) => (
-            search_result.fts_query,
-            search_result.stage,
-            search_result.hits,
-        ),
-        None => (String::new(), "exact", Vec::new()),
+    let (projected_query, query_truncated) = bounded_mcp_text(query, MCP_RECALL_QUERY_CHARS);
+    let projected_home = bounded_mcp_text(&display_path(claude_home), MCP_RECALL_HOME_CHARS).0;
+    let projected_fts = bounded_mcp_text(fts_query, MCP_RECALL_FTS_CHARS).0;
+    let query_digest = crate::utility::hashing::sha256_hex(query.as_bytes());
+    let projection = McpRecallProjection {
+        query: &projected_query,
+        query_truncated,
+        query_digest: &query_digest,
+        fts_query: &projected_fts,
+        claude_home: &projected_home,
+        stage,
+        limit,
+        home_path: claude_home,
     };
-    // Recall stays pull-based: return one bounded excerpt per identity/content
-    // key; the complete document remains recoverable through the recall CLI.
+    let mut selected: Vec<(&crate::utility::recall::RecallHit, String)> = Vec::new();
     let mut seen = HashSet::new();
+    let mut truncated = false;
+    for hit in hits.iter().take(limit.min(MAX_RECALL_LIMIT)) {
+        let relative = relative_to_home(claude_home, Path::new(&hit.absolute_path));
+        let excerpt = bounded_mcp_excerpt(&hit.snippet);
+        let dedupe_material = format!(
+            "{}\0{}",
+            relative.to_ascii_lowercase(),
+            excerpt.to_ascii_lowercase()
+        );
+        let dedupe_key = crate::utility::hashing::sha256_hex(dedupe_material.as_bytes());
+        if !seen.insert(dedupe_key.clone()) {
+            truncated = true;
+            continue;
+        }
+        let mut candidate = selected.clone();
+        candidate.push((hit, dedupe_key));
+        let payload = mcp_recall_envelope(
+            &projection,
+            &candidate,
+            truncated || candidate.len() < hits.len(),
+        );
+        if mcp_recall_within_budget(&payload) {
+            selected = candidate;
+        } else {
+            truncated = true;
+        }
+    }
+    let payload = mcp_recall_envelope(
+        &projection,
+        &selected,
+        truncated || selected.len() < hits.len(),
+    );
+    if mcp_recall_within_budget(&payload) {
+        payload
+    } else {
+        // Unusual Unicode must not turn a budget failure into an outer reducer
+        // prefix, so emit a valid metadata-only envelope with the query digest.
+        let minimal_query = bounded_mcp_text(&projected_query, 64).0;
+        let minimal_home = bounded_mcp_text(&projected_home, 128).0;
+        let fallback_projection = McpRecallProjection {
+            query: &minimal_query,
+            query_truncated: true,
+            query_digest: &query_digest,
+            fts_query: &projected_fts,
+            claude_home: &minimal_home,
+            stage,
+            limit,
+            home_path: claude_home,
+        };
+        mcp_recall_envelope(&fallback_projection, &[], true)
+    }
+}
+
+fn mcp_recall_envelope(
+    projection: &McpRecallProjection<'_>,
+    hits: &[(&crate::utility::recall::RecallHit, String)],
+    truncated: bool,
+) -> Value {
     let matches: Vec<Value> = hits
         .iter()
-        .filter_map(|hit| {
-            let relative = relative_to_home(claude_home, Path::new(&hit.absolute_path));
-            let excerpt = bounded_memory_excerpt(&hit.snippet);
-            let dedupe_material = format!(
-                "{}\0{}",
-                relative.to_ascii_lowercase(),
-                excerpt
-                    .to_ascii_lowercase()
-                    .split_whitespace()
-                    .collect::<Vec<_>>()
-                    .join(" ")
+        .map(|(hit, dedupe_key)| {
+            let relative = relative_to_home(projection.home_path, Path::new(&hit.absolute_path));
+            let bounded_absolute = bounded_mcp_text(&hit.absolute_path, 1024).0;
+            let excerpt = bounded_mcp_excerpt(&hit.snippet);
+            let memory_id = crate::utility::hashing::sha256_hex(
+                format!(
+                    "recall-memory\0{}\0{}\0{}",
+                    hit.absolute_path, hit.line, hit.snippet
+                )
+                .as_bytes(),
             );
-            let dedupe_key = crate::utility::hashing::fnv1a64_hex(&dedupe_material);
-            if !seen.insert(dedupe_key.clone()) {
-                return None;
-            }
-            let memory_id = crate::utility::hashing::fnv1a64_hex(&format!(
-                "{}\0{}\0{}",
-                hit.absolute_path, hit.line, hit.snippet
-            ));
-            let provenance_id = crate::utility::hashing::fnv1a64_hex(&format!(
-                "recall\0{}\0{}\0{}",
-                query, hit.absolute_path, hit.line
-            ));
-            Some(json!({
-                "path": relative,
-                "absolutePath": hit.absolute_path,
+            let provenance_id = crate::utility::hashing::sha256_hex(
+                format!(
+                    "recall-provenance\0{}\0{}\0{}",
+                    projection.query, hit.absolute_path, hit.line
+                )
+                .as_bytes(),
+            );
+            let retrieval_ref = format!(
+                "keel memory recall --query {:?} --limit {}",
+                projection.query,
+                projection.limit.clamp(1, MAX_RECALL_LIMIT)
+            );
+            json!({
+                "path": bounded_mcp_text(&relative, 512).0,
+                "absolutePath": bounded_absolute,
                 "score": format!("{:.4}", hit.score),
                 "line": hit.line,
                 "snippet": excerpt,
-                "excerpt": bounded_memory_excerpt(&hit.snippet),
+                "excerpt": bounded_mcp_excerpt(&hit.snippet),
                 "memoryId": format!("memory-{memory_id}"),
-                "provenanceId": format!("prov-{provenance_id}"),
+                "provenanceId": format!("prov-sha256:{provenance_id}"),
                 "dedupeKey": format!("memory-{dedupe_key}"),
-                "retrievalRef": format!("keel recall --query {:?} --limit 1", query),
-            }))
+                "retrievalRef": retrieval_ref,
+            })
         })
         .collect();
     json!({
-        "query": query,
-        "ftsQuery": fts_query,
-        "stage": stage,
-        "limit": limit,
-        "claudeHome": display_path(claude_home),
+        "query": projection.query,
+        "queryDigest": format!("sha256:{}", projection.query_digest),
+        "queryTruncated": projection.query_truncated,
+        "ftsQuery": projection.fts_query,
+        "stage": projection.stage,
+        "limit": projection.limit.min(MAX_RECALL_LIMIT),
+        "claudeHome": projection.claude_home,
         "count": matches.len(),
+        "truncated": truncated,
         "matches": matches,
     })
 }
 
-fn bounded_memory_excerpt(text: &str) -> String {
-    const MAX_EXCERPT_CHARS: usize = 600;
-    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if compact.chars().count() <= MAX_EXCERPT_CHARS {
-        return compact;
+struct McpRecallProjection<'a> {
+    query: &'a str,
+    query_truncated: bool,
+    query_digest: &'a str,
+    fts_query: &'a str,
+    claude_home: &'a str,
+    stage: &'a str,
+    limit: usize,
+    home_path: &'a Path,
+}
+
+fn bounded_mcp_text(text: &str, max_chars: usize) -> (String, bool) {
+    let mut chars = text.chars();
+    let mut value = chars.by_ref().take(max_chars).collect::<String>();
+    let truncated = chars.next().is_some();
+    if truncated {
+        value.push('…');
     }
-    let mut excerpt = compact.chars().take(MAX_EXCERPT_CHARS).collect::<String>();
-    excerpt.push_str("… [truncated]");
-    excerpt
+    (value, truncated)
+}
+
+fn bounded_mcp_excerpt(text: &str) -> String {
+    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.chars().count() <= MCP_RECALL_EXCERPT_CHARS {
+        compact
+    } else {
+        let mut excerpt = compact
+            .chars()
+            .take(MCP_RECALL_EXCERPT_CHARS)
+            .collect::<String>();
+        excerpt.push_str("… [truncated]");
+        excerpt
+    }
+}
+
+fn mcp_recall_within_budget(payload: &Value) -> bool {
+    let Ok(rendered) = serde_json::to_string(payload) else {
+        return false;
+    };
+    rendered.len() <= MCP_RECALL_MAX_BYTES
+        && TokenMeter::count_text(&rendered) <= MCP_RECALL_MAX_TOKENS
 }
 
 fn relative_to_home(claude_home: &Path, absolute_path: &Path) -> String {
@@ -2110,8 +2381,167 @@ fn command_base_name(program: &str) -> String {
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or(program)
-        .trim_end_matches(".exe")
         .to_ascii_lowercase()
+        .trim_end_matches(".exe")
+        .to_string()
+}
+
+fn push_trusted_command_root(roots: &mut Vec<PathBuf>, root: PathBuf) {
+    if let Ok(canonical) = root.canonicalize() {
+        if !roots.contains(&canonical) {
+            roots.push(canonical);
+        }
+    }
+}
+
+fn trusted_command_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    for root in [
+        "/bin",
+        "/usr/bin",
+        "/usr/local/bin",
+        "/usr/local",
+        "/opt/homebrew",
+        "/opt/homebrew/bin",
+        "/snap/bin",
+        "/Library/Developer/CommandLineTools",
+        "/Applications/Xcode.app/Contents/Developer",
+        "/home/linuxbrew/.linuxbrew",
+    ] {
+        push_trusted_command_root(&mut roots, PathBuf::from(root));
+    }
+    for variable in [
+        "WINDIR",
+        "ProgramFiles",
+        "ProgramFiles(x86)",
+        "ProgramW6432",
+        "ChocolateyInstall",
+    ] {
+        if let Some(root) = env::var_os(variable) {
+            push_trusted_command_root(&mut roots, PathBuf::from(root));
+        }
+    }
+    if let Some(home) = env::var_os("USERPROFILE").or_else(|| env::var_os("HOME")) {
+        let home = PathBuf::from(home);
+        for suffix in [
+            ".cargo",
+            ".cargo/bin",
+            ".rustup",
+            ".keel",
+            ".local",
+            ".local/bin",
+            "scoop/shims",
+            ".linuxbrew",
+            ".linuxbrew/bin",
+        ] {
+            push_trusted_command_root(&mut roots, home.join(suffix));
+        }
+    }
+    if let Some(root) = env::var_os("CARGO_HOME") {
+        let root = PathBuf::from(root);
+        push_trusted_command_root(&mut roots, root.clone());
+        push_trusted_command_root(&mut roots, root.join("bin"));
+    }
+    if let Some(root) = env::var_os("RUSTUP_HOME") {
+        let root = PathBuf::from(root);
+        push_trusted_command_root(&mut roots, root.clone());
+        push_trusted_command_root(&mut roots, root.join("bin"));
+    }
+    if let Some(root) = env::var_os("KEEL_HOME") {
+        push_trusted_command_root(&mut roots, PathBuf::from(root));
+    }
+    if let Some(root) = env::var_os("LOCALAPPDATA") {
+        let root = PathBuf::from(root);
+        push_trusted_command_root(
+            &mut roots,
+            root.join("Microsoft").join("WinGet").join("Packages"),
+        );
+        push_trusted_command_root(
+            &mut roots,
+            root.join("Microsoft").join("WinGet").join("Links"),
+        );
+    }
+    roots
+}
+
+/// Resolve argv[0] before granting a no-confirm exemption. A basename alone is
+/// not identity: an attacker-controlled PATH entry or `./git` could otherwise
+/// inherit the policy for the real Git binary. Canonicalization also makes a
+/// symlink into an untrusted directory fail closed.
+fn trusted_command_base_name(program: &str) -> Option<String> {
+    let resolved = which::which(program).ok()?;
+    let canonical = resolved.canonicalize().ok()?;
+    if !canonical.is_file() {
+        return None;
+    }
+    // Trust the exact running executable (internal MCP helpers invoke it), even
+    // below `target/`; every other binary needs an explicit trusted root.
+    if env::current_exe()
+        .ok()
+        .and_then(|path| path.canonicalize().ok())
+        .is_some_and(|current| current == canonical)
+    {
+        return Some("keel".to_string());
+    }
+    if !trusted_command_roots()
+        .iter()
+        .any(|root| canonical.starts_with(root))
+    {
+        return None;
+    }
+    Some(command_base_name(resolved.to_str()?))
+}
+
+fn env_wrapped_command(arguments: &[String]) -> Option<(&str, &[String])> {
+    let mut index = 0;
+    while index < arguments.len() {
+        let argument = arguments[index].as_str();
+        if argument == "--" {
+            index += 1;
+            break;
+        }
+        if matches!(argument, "-u" | "--unset" | "-C" | "--chdir") {
+            index = index.saturating_add(2);
+            continue;
+        }
+        if argument.starts_with('-') || argument.contains('=') {
+            index += 1;
+            continue;
+        }
+        break;
+    }
+    arguments
+        .get(index)
+        .map(|program| (program.as_str(), &arguments[index + 1..]))
+}
+
+fn git_subcommand(arguments: &[String]) -> Option<&str> {
+    let mut index = 0;
+    while index < arguments.len() {
+        let argument = arguments[index].as_str();
+        if argument == "--" {
+            index += 1;
+            break;
+        }
+        if matches!(
+            argument,
+            "-C" | "-c"
+                | "--git-dir"
+                | "--work-tree"
+                | "--namespace"
+                | "--super-prefix"
+                | "--config-env"
+        ) {
+            index = index.saturating_add(2);
+            continue;
+        }
+        if argument.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        break;
+    }
+    arguments.get(index).map(String::as_str)
 }
 
 fn command_requires_confirmation(
@@ -2120,7 +2550,20 @@ fn command_requires_confirmation(
     label: &str,
     shell_form: bool,
 ) -> bool {
+    command_requires_confirmation_depth(program, arguments, label, shell_form, 0)
+}
+
+fn command_requires_confirmation_depth(
+    program: &str,
+    arguments: &[String],
+    label: &str,
+    shell_form: bool,
+    depth: usize,
+) -> bool {
     if shell_form {
+        return true;
+    }
+    if depth >= 4 {
         return true;
     }
     let mut fields = Vec::with_capacity(arguments.len() + 1);
@@ -2132,29 +2575,127 @@ fn command_requires_confirmation(
         return true;
     }
 
-    // Unwrap `env` wrappers (e.g. `env -i FOO=bar bash -c ...`)
-    let (real_prog, real_args) = if command_base_name(program) == "env" {
-        let mut iter = arguments.iter();
-        let mut next_prog = None;
-        let mut rem_args = Vec::new();
-        while let Some(arg) = iter.next() {
-            if arg.starts_with('-') || arg.contains('=') {
-                continue;
-            }
-            next_prog = Some(arg.as_str());
-            rem_args.extend(iter.cloned());
-            break;
-        }
-        if let Some(np) = next_prog {
-            (np, rem_args)
-        } else {
-            (program, arguments.to_vec())
-        }
-    } else {
-        (program, arguments.to_vec())
+    let Some(base) = trusted_command_base_name(program) else {
+        return true;
     };
+    if base == "env" {
+        let Some((wrapped_program, wrapped_arguments)) = env_wrapped_command(arguments) else {
+            return true;
+        };
+        return command_requires_confirmation_depth(
+            wrapped_program,
+            wrapped_arguments,
+            &wrapped_arguments.join(" "),
+            false,
+            depth + 1,
+        );
+    }
 
-    let base = command_base_name(real_prog);
+    if base == "keel" {
+        let subcommand = arguments.first().map(String::as_str).unwrap_or("");
+        if CLI_CONFIRM_SUBCOMMANDS.contains(&subcommand)
+            || (subcommand == "hook"
+                && matches!(
+                    arguments.get(1).map(String::as_str),
+                    Some("install" | "uninstall")
+                ))
+        {
+            return true;
+        }
+        if subcommand == "run" {
+            let Some(separator) = arguments.iter().position(|argument| argument == "--") else {
+                return true;
+            };
+            let wrapped = &arguments[separator + 1..];
+            let Some(wrapped_program) = wrapped.first() else {
+                return true;
+            };
+            return command_requires_confirmation_depth(
+                wrapped_program,
+                &wrapped[1..],
+                &wrapped.join(" "),
+                false,
+                depth + 1,
+            );
+        }
+    }
+
+    if base == "git" {
+        if arguments.iter().any(|argument| {
+            argument == "--ext-diff"
+                || argument == "--textconv"
+                || argument.starts_with("--open-files-in-pager")
+                || argument.starts_with("--config-env")
+        }) || arguments
+            .windows(2)
+            .any(|pair| pair[0] == "-c" && pair[1].to_ascii_lowercase().starts_with("alias."))
+        {
+            return true;
+        }
+        return !matches!(
+            git_subcommand(arguments),
+            None | Some(
+                "status"
+                    | "diff"
+                    | "log"
+                    | "show"
+                    | "rev-parse"
+                    | "merge-base"
+                    | "ls-files"
+                    | "grep"
+                    | "cat-file"
+                    | "for-each-ref"
+                    | "name-rev"
+                    | "describe"
+                    | "shortlog"
+                    | "blame"
+            )
+        );
+    }
+
+    if base == "cargo" {
+        if arguments
+            .iter()
+            .any(|argument| argument == "--config" || argument.starts_with("--config="))
+        {
+            return true;
+        }
+        let subcommand = arguments
+            .iter()
+            .find(|argument| !argument.starts_with('-'))
+            .map(String::as_str);
+        return !matches!(
+            subcommand,
+            None | Some(
+                "build"
+                    | "check"
+                    | "clippy"
+                    | "doc"
+                    | "fmt"
+                    | "help"
+                    | "metadata"
+                    | "test"
+                    | "tree"
+                    | "version"
+            )
+        );
+    }
+
+    if base == "rg"
+        && arguments
+            .iter()
+            .any(|argument| argument == "--pre" || argument.starts_with("--pre="))
+    {
+        return true;
+    }
+    if base == "find"
+        && arguments
+            .iter()
+            .any(|argument| matches!(argument.as_str(), "-exec" | "-execdir" | "-ok" | "-okdir"))
+    {
+        return true;
+    }
+
     let is_interpreter_or_shell = matches!(
         base.as_str(),
         "bash"
@@ -2197,13 +2738,7 @@ fn command_requires_confirmation(
         return true;
     }
 
-    if base == "git" && real_args.first().map(String::as_str) == Some("push") {
-        return true;
-    }
-
     let is_known_safe_tool = base == "keel"
-        || base.starts_with("keel-")
-        || base.starts_with("keel_")
         || matches!(
             base.as_str(),
             "cargo"
@@ -2336,8 +2871,6 @@ fn tool_run_command(arguments: &Value) -> Result<String, String> {
         );
     }
 
-    enforce_run_command_policy(&program, &shell_args, &label, !direct_argv, confirm)?;
-
     // Sync wait inherits the ~25s host budget. Long keel jobs (anvil loop,
     // live anvil run, git-workflow await-ci) must not block this call — either
     // refuse, or the caller already chose wait:false (handle + poll).
@@ -2357,6 +2890,8 @@ fn tool_run_command(arguments: &Value) -> Result<String, String> {
         }
     }
 
+    enforce_run_command_policy(&program, &shell_args, &label, !direct_argv, confirm)?;
+
     // Every command runs in a child process. This keeps timeout and process-tree
     // cleanup authoritative; in-process execution could outlive the MCP worker.
     let executable =
@@ -2370,6 +2905,11 @@ fn tool_run_command(arguments: &Value) -> Result<String, String> {
     }
     child.current_dir(&cwd);
     child.env("CLAUDE_SKILLS_HOOK", "mcp");
+    let request_owner = active_mcp_request_context();
+    // Carry the authoritative MCP identity across the child boundary so a later
+    // `raw` recovery call cannot fall back to the process-wide default session.
+    child.env("KEEL_MCP_SESSION_ID", &request_owner.session_id);
+    child.env("KEEL_MCP_WORKSPACE_ID", &request_owner.workspace_id);
     child.stdin(Stdio::null());
     child.stdout(Stdio::piped());
     child.stderr(Stdio::piped());
@@ -2425,6 +2965,11 @@ type ReaderState = Arc<(Mutex<usize>, Condvar)>;
 
 struct BackgroundCommand {
     label: String,
+    /// Authoritative MCP owner. Command ids are process-local, but the HTTP
+    /// daemon is shared by multiple sessions; every poll/kill must stay inside
+    /// the session and workspace that created the command.
+    owner_session_id: String,
+    owner_workspace_id: String,
     started_at_millis: u128,
     completed_at_millis: Arc<Mutex<Option<u128>>>,
     pid: Option<u32>,
@@ -2441,6 +2986,55 @@ struct BackgroundCommand {
     _lifetime_pipe: Mutex<Option<std::process::ChildStdin>>,
 }
 
+thread_local! {
+    /// Tool handlers retain the request context without widening every legacy
+    /// handler signature. The value is set only around a dispatched MCP tool
+    /// call and restored on return; direct unit-test calls use the authoritative
+    /// process fallback.
+    static ACTIVE_MCP_REQUEST_CONTEXT: std::cell::RefCell<Option<super::McpRequestContext>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn with_mcp_request_context<F, T>(context: super::McpRequestContext, work: F) -> T
+where
+    F: FnOnce() -> T,
+{
+    ACTIVE_MCP_REQUEST_CONTEXT.with(|active| {
+        let previous = active.replace(Some(context));
+        let result = work();
+        active.replace(previous);
+        result
+    })
+}
+
+fn active_mcp_request_context() -> super::McpRequestContext {
+    ACTIVE_MCP_REQUEST_CONTEXT
+        .with(|active| active.borrow().clone())
+        .unwrap_or_else(|| super::McpRequestContext::authoritative(None))
+}
+
+fn background_owner_matches(entry: &BackgroundCommand) -> bool {
+    let context = active_mcp_request_context();
+    entry.owner_session_id == context.session_id && entry.owner_workspace_id == context.workspace_id
+}
+
+fn prune_background_registry() {
+    let ttl_millis = background_command_ttl().as_millis();
+    let now = current_timestamp_millis();
+    let mut registry = background_registry()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    registry.retain(|_, entry| {
+        let completed_at = *entry
+            .completed_at_millis
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        completed_at
+            .map(|finished| now.saturating_sub(finished) < ttl_millis)
+            .unwrap_or(true)
+    });
+}
+
 fn background_registry() -> &'static Mutex<std::collections::HashMap<String, Arc<BackgroundCommand>>>
 {
     use std::sync::LazyLock;
@@ -2453,7 +3047,15 @@ fn next_background_id() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::LazyLock;
     static COUNTER: LazyLock<AtomicU64> = LazyLock::new(|| AtomicU64::new(1));
-    format!("c{}", COUNTER.fetch_add(1, Ordering::Relaxed))
+    // Do not expose a predictable process-global sequence to other HTTP
+    // sessions; ownership is enforced by the entry's session/workspace fields.
+    let sequence = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let now = current_timestamp_millis();
+    let material = format!("{}\0{}\0{}", std::process::id(), now, sequence);
+    format!(
+        "c-{}",
+        crate::utility::hashing::sha256_hex(material.as_bytes())
+    )
 }
 
 /// Spawn `child` in the background and register it under a fresh command id.
@@ -2461,6 +3063,10 @@ fn next_background_id() -> String {
 /// `kill_process_tree` can reach every descendant via `kill(-pid, SIGKILL)`.
 /// On Windows a kill-on-close Job Object owns descendants for crash cleanup.
 fn spawn_background_command(mut child: Command, label: &str) -> Result<String, String> {
+    prune_background_registry();
+    let owner = active_mcp_request_context();
+    child.env("KEEL_MCP_SESSION_ID", &owner.session_id);
+    child.env("KEEL_MCP_WORKSPACE_ID", &owner.workspace_id);
     #[cfg(unix)]
     {
         child = unix_background_supervisor(&child);
@@ -2503,6 +3109,8 @@ fn spawn_background_command(mut child: Command, label: &str) -> Result<String, S
 
     let entry = Arc::new(BackgroundCommand {
         label: label.to_string(),
+        owner_session_id: owner.session_id,
+        owner_workspace_id: owner.workspace_id,
         started_at_millis: current_timestamp_millis(),
         completed_at_millis: Arc::new(Mutex::new(None)),
         pid: Some(pid),
@@ -2515,6 +3123,38 @@ fn spawn_background_command(mut child: Command, label: &str) -> Result<String, S
         _lifetime_pipe: Mutex::new(lifetime_pipe),
     });
     let command_id = next_background_id();
+
+    // Re-check after the child exists so concurrent callers cannot race the
+    // registry limit; a rejected spawn must not leak its process tree.
+    {
+        let registry = background_registry()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if registry.len() >= MAX_BACKGROUND_COMMANDS {
+            drop(registry);
+            if let Some(mut child) = entry
+                .child
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take()
+            {
+                if let Some(mut guard) = entry
+                    .process_guard
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .take()
+                {
+                    let _ = crate::runtime::terminate_owned_process_tree(&mut child, &mut guard);
+                } else {
+                    let _ = child.kill();
+                }
+                let _ = child.wait();
+            }
+            return Err(format!(
+                "run_command: background registry limit reached ({MAX_BACKGROUND_COMMANDS})"
+            ));
+        }
+    }
 
     background_reader_thread(
         Arc::clone(&entry.stdout),
@@ -2531,9 +3171,50 @@ fn spawn_background_command(mut child: Command, label: &str) -> Result<String, S
     // record the exit code. Consistent with run_command_with_timeout_stdin's
     // poll loop — no platform-specific signals needed.
     let reaper_entry = Arc::clone(&entry);
+    let lifetime = background_command_ttl();
     let _ = std::thread::Builder::new()
         .name(format!("keel-bg-reaper-{command_id}"))
         .spawn(move || loop {
+            // A client that vanishes after wait:false must not leave an owned process
+            // alive forever; the reaper ends it at the registry TTL.
+            let expired = current_timestamp_millis().saturating_sub(reaper_entry.started_at_millis)
+                >= lifetime.as_millis();
+            if expired {
+                let maybe_child = reaper_entry
+                    .child
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .take();
+                if let Some(mut child) = maybe_child {
+                    if let Some(mut guard) = reaper_entry
+                        .process_guard
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .take()
+                    {
+                        let _ =
+                            crate::runtime::terminate_owned_process_tree(&mut child, &mut guard);
+                    } else {
+                        let _ = child.kill();
+                    }
+                    let code = child
+                        .wait()
+                        .ok()
+                        .and_then(|status| status.code())
+                        .unwrap_or(-1);
+                    wait_for_background_readers(&reaper_entry.readers_done);
+                    *reaper_entry
+                        .exit
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(code);
+                    *reaper_entry
+                        .completed_at_millis
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                        Some(current_timestamp_millis());
+                }
+                break;
+            }
             let outcome = {
                 let mut guard = reaper_entry
                     .child
@@ -2581,6 +3262,32 @@ fn spawn_background_command(mut child: Command, label: &str) -> Result<String, S
     let mut registry = background_registry()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if registry.len() >= MAX_BACKGROUND_COMMANDS {
+        drop(registry);
+        // The second check above normally catches this; this final check closes
+        // the race with another inserter between the check and registration.
+        if let Some(mut child) = entry
+            .child
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+        {
+            if let Some(mut guard) = entry
+                .process_guard
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take()
+            {
+                let _ = crate::runtime::terminate_owned_process_tree(&mut child, &mut guard);
+            } else {
+                let _ = child.kill();
+            }
+            let _ = child.wait();
+        }
+        return Err(format!(
+            "run_command: background registry limit reached ({MAX_BACKGROUND_COMMANDS})"
+        ));
+    }
     registry.insert(command_id.clone(), entry);
     Ok(command_id)
 }
@@ -2721,14 +3428,19 @@ fn tool_command_output(arguments: &Value) -> Result<String, String> {
         return Err("command_output: missing command_id".to_string());
     }
 
+    prune_background_registry();
     let entry = {
         let registry = background_registry()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        registry
+        let entry = registry
             .get(&command_id)
             .cloned()
-            .ok_or_else(|| format!("command_output: unknown command_id {command_id:?}"))?
+            .ok_or_else(|| format!("command_output: unknown command_id {command_id:?}"))?;
+        if !background_owner_matches(&entry) {
+            return Err(format!("command_output: unknown command_id {command_id:?}"));
+        }
+        entry
     };
 
     let exit_code = *entry
@@ -2800,14 +3512,19 @@ fn tool_command_kill(arguments: &Value) -> Result<String, String> {
         return Err("command_kill: missing command_id".to_string());
     }
 
+    prune_background_registry();
     let entry = {
         let registry = background_registry()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        registry
+        let entry = registry
             .get(&command_id)
             .cloned()
-            .ok_or_else(|| format!("command_kill: unknown command_id {command_id:?}"))?
+            .ok_or_else(|| format!("command_kill: unknown command_id {command_id:?}"))?;
+        if !background_owner_matches(&entry) {
+            return Err(format!("command_kill: unknown command_id {command_id:?}"));
+        }
+        entry
     };
 
     // Take the child out of the registry entry so the reaper stops polling it,
@@ -3580,11 +4297,10 @@ fn tool_system_map_refresh(arguments: &Value) -> Result<String, String> {
     mcp_json_compact(&payload).map_err(|error| format!("system_map_refresh: {error}"))
 }
 
-/// One-call awareness payload: the iron law, the installed skill catalog,
-/// durable-memory health, and the newest working brief. The point is that an
-/// agent reaching the MCP surface with no skill auto-loaded can call this once
-/// and know what exists. Read-only; every section fails open to an empty/marker
-/// value rather than erroring the whole call, so partial state still informs.
+/// One-call awareness payload: the iron law and installed skill catalog. Memory
+/// health and working-brief state are opt-in because orientation must not inject
+/// task data before the caller explicitly asks for it. Read-only; optional
+/// sections fail open to a marker rather than erroring the whole call.
 fn tool_context_brief(arguments: &Value) -> Result<String, String> {
     let claude_home = tool_claude_home("context_brief")?;
     let workspace_root = workspace_root_arg(arguments)
@@ -3605,32 +4321,51 @@ fn tool_context_brief(arguments: &Value) -> Result<String, String> {
         .take(64)
         .collect();
 
-    // Memory health: reuse the recall-status snapshot, tolerate failure.
-    let memory = match recall_status_payload() {
-        Ok(index) => json!({
-            "index": index,
-            "families": family_counts(&claude_home, DEFAULT_MEMORY_GROUP)
-                .iter()
-                .map(|(family, count)| json!({ "family": family, "records": count }))
-                .collect::<Vec<Value>>(),
-        }),
-        Err(message) => json!({ "unavailable": message }),
+    let include_memory = arguments
+        .get("include_memory")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let include_brief = arguments
+        .get("include_brief")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    // Memory health is opt-in: orientation must not sync the recall index or
+    // inject family records when the caller only asked what the toolkit offers.
+    let memory = if include_memory {
+        match recall_status_payload() {
+            Ok(index) => json!({
+                "index": index,
+                "families": family_counts(&claude_home, DEFAULT_MEMORY_GROUP)
+                    .iter()
+                    .map(|(family, count)| json!({ "family": family, "records": count }))
+                    .collect::<Vec<Value>>(),
+            }),
+            Err(message) => json!({ "unavailable": message }),
+        }
+    } else {
+        json!({ "deferred": true, "use": "recall or memory_status" })
     };
 
-    // Newest working brief, if any. list_briefs is oldest-first → take the last.
-    let newest_brief = match list_briefs(&claude_home) {
-        Ok(briefs) => briefs
-            .iter()
-            .filter(|brief| {
-                brief.workspace.is_empty()
-                    || workspace_display
-                        .as_deref()
-                        .is_some_and(|workspace| brief.workspace == workspace)
-            })
-            .max_by(|left, right| left.created_at.cmp(&right.created_at))
-            .map(brief_to_json)
-            .unwrap_or(Value::Null),
-        Err(_) => Value::Null,
+    // Reading the newest working brief is also opt-in: a brief is task state,
+    // not generic session orientation. list_briefs is oldest-first → take last.
+    let newest_brief = if include_brief {
+        match list_briefs(&claude_home) {
+            Ok(briefs) => briefs
+                .iter()
+                .filter(|brief| {
+                    brief.workspace.is_empty()
+                        || workspace_display
+                            .as_deref()
+                            .is_some_and(|workspace| brief.workspace == workspace)
+                })
+                .max_by(|left, right| left.created_at.cmp(&right.created_at))
+                .map(brief_to_json)
+                .unwrap_or(Value::Null),
+            Err(_) => Value::Null,
+        }
+    } else {
+        Value::Null
     };
 
     let mut payload = json!({
@@ -3640,6 +4375,8 @@ fn tool_context_brief(arguments: &Value) -> Result<String, String> {
         "skills": skills,
         "memory": memory,
         "newestBrief": newest_brief,
+        "memoryDeferred": !include_memory,
+        "briefDeferred": !include_brief,
         "next": "For any code change call anvil (compile then run --dry-run). Use skill_route/skill_get for domain skills, recall for memory.",
     });
     // Keep JSON valid under the MCP text budget by shedding least-specific entries before serialization.
@@ -3666,6 +4403,27 @@ fn tool_context_brief(arguments: &Value) -> Result<String, String> {
     }
     if skills_truncated {
         payload["skillsTruncated"] = Value::Bool(true);
+    }
+    // The marker is part of the wire payload, so recount after adding it and
+    // shed optional entries before the context firewall measures the value.
+    while mcp_payload_exceeds_budget(&payload) {
+        let Some(skills) = payload.get_mut("skills").and_then(Value::as_array_mut) else {
+            break;
+        };
+        if skills.pop().is_none() {
+            break;
+        }
+        payload["skillsTruncated"] = Value::Bool(true);
+    }
+    // Keep a final minimal orientation if even the fixed envelope exceeds the
+    // reserved budget, never a raw value for the outer firewall to cut.
+    if mcp_payload_exceeds_budget(&payload) {
+        payload["skills"] = Value::Array(Vec::new());
+        payload["skillsTruncated"] = Value::Bool(true);
+        payload["memory"] = json!({ "deferred": true, "use": "recall or memory_status" });
+        payload["newestBrief"] = Value::Null;
+        payload["ironLaw"] = Value::String("Read and trace before editing.".into());
+        payload["next"] = Value::String("Use skill_route and focused verification.".into());
     }
     // Compact JSON: pretty context_brief was multi-line and near frame limits.
     mcp_json_compact(&payload).map_err(|error| format!("context_brief: {error}"))
@@ -4063,9 +4821,13 @@ pub(crate) fn truncate_mcp_text(text: &str) -> String {
     // why: never insert raw newlines into tool text — if a host ever treats the
     // content as a bare frame (or mis-buffers), interior newlines desync
     // newline-delimited JSON-RPC and surface as transport decode timeouts.
-    format!(
-        "{kept} … truncated for MCP (>{max_chars} chars). Prefer skill_route over skill_list; Read the skill path from skill_get when truncated=true; CLI for full output."
-    )
+    let marker = format!(
+        " … truncated for MCP (>{max_chars} chars). Prefer skill_route over skill_list; Read the skill path from skill_get when truncated=true; CLI for full output."
+    );
+    let marker_chars = marker.chars().count();
+    let kept_chars = max_chars.saturating_sub(marker_chars);
+    let kept_prefix: String = kept.chars().take(kept_chars).collect();
+    format!("{kept_prefix}{marker}")
 }
 
 #[cfg(test)]
@@ -4090,6 +4852,10 @@ mod mcp_timeout_tests {
         assert!(
             !out.contains('\n'),
             "truncated tool text must not insert raw newlines (breaks NDJSON framing if mishandled)"
+        );
+        assert!(
+            out.chars().count() <= max_chars,
+            "truncated tool text must include its marker within the advertised character cap"
         );
     }
 
@@ -4741,7 +5507,14 @@ fn tool_raw(arguments: &Value) -> Result<String, String> {
     if action.is_none() && raw_id.is_none() {
         all_args = vec!["list"];
     }
-    run_keel_subcommand("raw", &all_args)
+    let context = active_mcp_request_context();
+    crate::runner::with_raw_namespace(
+        crate::proxy::raw_store::RawNamespace {
+            workspace_id: context.workspace_id,
+            session_id: context.session_id,
+        },
+        || run_keel_subcommand("raw", &all_args),
+    )
 }
 
 fn tool_config_audit(arguments: &Value) -> Result<String, String> {
@@ -5184,6 +5957,7 @@ fn string_list_arg(arguments: &Value, key: &str) -> Vec<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::fs;
 
     #[test]
     fn tools_list_advertises_all_tools_in_full_profile() {
@@ -5436,6 +6210,467 @@ mod tests {
         }
     }
 
+    /// §29 adversarial: a catalog far larger than one page must stay fully
+    /// traversable and duplicate-free, and every page must respect its budget.
+    /// This is the packing invariant under an adversarial catalog size rather
+    /// than the repository's own 37 tools.
+    #[test]
+    fn tools_list_traversal_is_complete_for_a_catalog_of_hundreds_of_tools() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous = std::env::var("KEEL_MCP_PAGE_TOKENS").ok();
+        std::env::set_var("KEEL_MCP_PAGE_TOKENS", "600");
+
+        // Build an adversarial catalog: hundreds of tools, each with a long
+        // name, a long description, and a nested object schema.
+        let tools: Vec<Value> = (0..300)
+            .map(|index| {
+                json!({
+                    "name": format!("synthetic-tool-with-a-deliberately-long-name-{index:04}"),
+                    "description": "Compaction quality depends on preserving the schema information that the model needs to invoke this tool correctly, so this description is long on purpose.".repeat(2),
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "nested": {
+                                "type": "object",
+                                "properties": {
+                                    "deep": { "type": "string", "enum": ["alpha", "beta", "gamma"] }
+                                },
+                                "required": ["deep"]
+                            }
+                        },
+                        "required": ["nested"]
+                    }
+                })
+            })
+            .collect();
+        let expected: std::collections::BTreeSet<String> = tools
+            .iter()
+            .filter_map(|tool| tool["name"].as_str().map(str::to_string))
+            .collect();
+        assert_eq!(expected.len(), 300);
+
+        // Walk the synthetic catalog through the canonical packer, which is the
+        // same code a client's page request drives.
+        let mut names: Vec<String> = Vec::new();
+        let mut cursor: Option<String> = None;
+        for _ in 0..128 {
+            let page = pack_catalog_page(
+                crate::mcp::McpCatalogProfile::Tiered,
+                0,
+                600,
+                cursor.as_deref(),
+                &crate::mcp::McpRequestContext::authoritative(None),
+                true,
+                false,
+                tools.clone(),
+            )
+            .expect("a large catalog must page, not fail");
+            let measured = measure_tools_list_response(&page);
+            assert!(
+                measured <= 600,
+                "page measured {measured} tokens against a 600-token budget"
+            );
+            assert_eq!(
+                page["tools"][0]["inputSchema"]["type"], "object",
+                "every emitted page must keep a valid object-root inputSchema"
+            );
+            names.extend(
+                page["tools"]
+                    .as_array()
+                    .expect("tools array")
+                    .iter()
+                    .filter_map(|tool| tool["name"].as_str().map(str::to_string)),
+            );
+            cursor = page["nextCursor"].as_str().map(str::to_string);
+            if cursor.is_none() {
+                break;
+            }
+        }
+
+        let unique: std::collections::BTreeSet<String> = names.iter().cloned().collect();
+        assert_eq!(
+            names.len(),
+            unique.len(),
+            "traversal duplicated a tool across pages"
+        );
+        assert_eq!(
+            unique, expected,
+            "traversal must reach every tool in the synthetic catalog"
+        );
+
+        match previous {
+            Some(value) => std::env::set_var("KEEL_MCP_PAGE_TOKENS", value),
+            None => std::env::remove_var("KEEL_MCP_PAGE_TOKENS"),
+        }
+    }
+
+    /// §6.6 impossible-budget semantics for a single tool. Two distinct cases
+    /// must stay distinct: a tool that is only too large at its *full* depth must
+    /// be emitted at a reduced representation instead of rejected, while a tool
+    /// that cannot fit even the minimum representation must fail closed with an
+    /// explicit budget error rather than emitting an oversized response.
+    #[test]
+    fn tools_list_reduces_representation_before_it_fails_closed() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous = std::env::var("KEEL_MCP_PAGE_TOKENS").ok();
+
+        let giant = json!({
+            "name": "enormous",
+            "description": "x".repeat(6000),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "wide": {
+                        "type": "object",
+                        "properties": { "deep": { "type": "string" } },
+                        "description": "y".repeat(4000)
+                    }
+                }
+            }
+        });
+        let context = crate::mcp::McpRequestContext::authoritative(None);
+
+        // A budget that only the reduced representations can satisfy: the tool
+        // must be emitted, downgraded, and still valid MCP.
+        std::env::set_var("KEEL_MCP_PAGE_TOKENS", "200");
+        let page = pack_catalog_page(
+            crate::mcp::McpCatalogProfile::Tiered,
+            2,
+            200,
+            None,
+            &context,
+            false,
+            false,
+            vec![giant.clone()],
+        )
+        .expect("a tool that fits at a lower representation must be emitted");
+        let measured = measure_tools_list_response(&page);
+        assert!(
+            measured <= 200,
+            "the reduced representation must respect the budget: {measured}"
+        );
+        let emitted = &page["tools"][0];
+        assert_eq!(emitted["name"], "enormous");
+        assert_eq!(
+            emitted["inputSchema"]["type"], "object",
+            "a reduced representation must keep a valid object-root inputSchema"
+        );
+        assert!(
+            emitted["description"].as_str().unwrap_or_default().len() < 6000,
+            "the full-depth description cannot have survived a 200-token budget"
+        );
+        // A reduced representation must stay invocable: the root schema and every
+        // declared parameter survive, so the model can still call the tool.
+        assert!(
+            emitted["inputSchema"]["properties"]["wide"].is_object(),
+            "a reduced representation must not drop invocation-critical parameters: {emitted}"
+        );
+
+        // A budget nothing can satisfy: fail closed with an explicit reason and
+        // never emit the oversized tool.
+        let impossible = 5usize;
+        std::env::set_var("KEEL_MCP_PAGE_TOKENS", impossible.to_string());
+        let error = pack_catalog_page(
+            crate::mcp::McpCatalogProfile::Tiered,
+            2,
+            impossible,
+            None,
+            &context,
+            false,
+            false,
+            vec![giant],
+        )
+        .expect_err("an impossible budget must not produce a page");
+        assert!(
+            error.contains("minimum") || error.contains("configured"),
+            "the failure must name the configured budget: {error}"
+        );
+        assert!(
+            !error.contains("catalog exceeds"),
+            "the legacy catalog-over-budget wording must not return: {error}"
+        );
+
+        match previous {
+            Some(value) => std::env::set_var("KEEL_MCP_PAGE_TOKENS", value),
+            None => std::env::remove_var("KEEL_MCP_PAGE_TOKENS"),
+        }
+    }
+
+    /// §29 adversarial cursor cases. A cursor is bound to one catalog snapshot,
+    /// profile, budget, session, and workspace, and expires. Each binding must
+    /// reject independently, so a cursor cannot be replayed into another walk.
+    #[test]
+    fn catalog_cursors_reject_replay_expiry_and_foreign_identity() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous = std::env::var("KEEL_MCP_PAGE_TOKENS").ok();
+        std::env::set_var("KEEL_MCP_PAGE_TOKENS", "600");
+
+        let session = crate::mcp::McpRequestContext::authoritative(Some("cursor-session-a"));
+        let foreign_session =
+            crate::mcp::McpRequestContext::authoritative(Some("cursor-session-b"));
+
+        let tools: Vec<Value> = synthetic_paging_tools("cursor-tool");
+
+        let first = pack_catalog_page(
+            crate::mcp::McpCatalogProfile::Tiered,
+            2,
+            600,
+            None,
+            &session,
+            false,
+            false,
+            tools.clone(),
+        )
+        .expect("first page");
+        let cursor = first["nextCursor"]
+            .as_str()
+            .expect("a 40-tool catalog must page")
+            .to_string();
+
+        // A replayed cursor must continue the same walk deterministically.
+        let replay_a = pack_catalog_page(
+            crate::mcp::McpCatalogProfile::Tiered,
+            2,
+            600,
+            Some(&cursor),
+            &session,
+            false,
+            false,
+            tools.clone(),
+        )
+        .expect("a replayed cursor is valid for the same snapshot");
+        let replay_b = pack_catalog_page(
+            crate::mcp::McpCatalogProfile::Tiered,
+            2,
+            600,
+            Some(&cursor),
+            &session,
+            false,
+            false,
+            tools.clone(),
+        )
+        .expect("replay stays valid");
+        assert_eq!(
+            serde_json::to_string(&replay_a).expect("serialize"),
+            serde_json::to_string(&replay_b).expect("serialize"),
+            "the same cursor over the same snapshot must be deterministic"
+        );
+        assert_eq!(
+            replay_a["tools"][0]["name"], replay_b["tools"][0]["name"],
+            "a replayed cursor must not reshuffle the page"
+        );
+        // The emitted cursor keeps the incoming deadline, so the page cannot
+        // change shape between two calls that straddle a clock tick.
+        let incoming_expiry = peek_catalog_cursor(&cursor).expect("claims").expires_at;
+        let outgoing_expiry = peek_catalog_cursor(
+            replay_a["nextCursor"]
+                .as_str()
+                .expect("page two carries a cursor"),
+        )
+        .expect("outgoing claims")
+        .expires_at;
+        assert_eq!(
+            outgoing_expiry, incoming_expiry,
+            "a walk must keep one deadline, or replay would not be reproducible"
+        );
+
+        // A cursor from another session must not be accepted.
+        let foreign = pack_catalog_page(
+            crate::mcp::McpCatalogProfile::Tiered,
+            2,
+            600,
+            Some(&cursor),
+            &foreign_session,
+            false,
+            false,
+            tools.clone(),
+        )
+        .expect_err("a cursor from another session must be rejected");
+        assert!(
+            foreign.contains("stale or invalid"),
+            "foreign-session rejection must name the cause: {foreign}"
+        );
+
+        // A catalog that changed after the cursor was issued must not silently
+        // reshuffle the walk: the snapshot fingerprint no longer matches.
+        let mut mutated = tools.clone();
+        mutated.push(json!({
+            "name": "cursor-tool-added-later",
+            "description": "Added after the cursor was issued.",
+            "inputSchema": { "type": "object", "properties": {} }
+        }));
+        let mutated_result = pack_catalog_page(
+            crate::mcp::McpCatalogProfile::Tiered,
+            2,
+            600,
+            Some(&cursor),
+            &session,
+            false,
+            false,
+            mutated,
+        )
+        .expect_err("a cursor must not apply to a mutated catalog");
+        assert!(
+            mutated_result.contains("stale or invalid"),
+            "catalog-mutation rejection must name the cause: {mutated_result}"
+        );
+
+        // An expired cursor must be rejected even with matching identity.
+        let fingerprint =
+            catalog_snapshot_fingerprint(crate::mcp::McpCatalogProfile::Tiered, &tools, 2, 600);
+        let claims = peek_catalog_cursor(&cursor).expect("cursor claims");
+        let expired = encode_catalog_cursor(
+            claims.offset,
+            crate::mcp::McpCatalogProfile::Tiered,
+            2,
+            600,
+            &fingerprint,
+            &session,
+            now_unix_seconds().saturating_sub(1),
+            false,
+        );
+        let expired_result = pack_catalog_page(
+            crate::mcp::McpCatalogProfile::Tiered,
+            2,
+            600,
+            Some(&expired),
+            &session,
+            false,
+            false,
+            tools,
+        )
+        .expect_err("an expired cursor must be rejected");
+        assert!(
+            expired_result.contains("expired"),
+            "expiry rejection must name the cause: {expired_result}"
+        );
+
+        match previous {
+            Some(value) => std::env::set_var("KEEL_MCP_PAGE_TOKENS", value),
+            None => std::env::remove_var("KEEL_MCP_PAGE_TOKENS"),
+        }
+    }
+
+    /// A uniformly shaped catalog large enough to require several pages at the
+    /// budgets the cursor tests use.
+    fn synthetic_paging_tools(name_prefix: &str) -> Vec<Value> {
+        (0..40)
+            .map(|index| {
+                json!({
+                    "name": format!("{name_prefix}-{index:03}"),
+                    "description": "Tool used to exercise page traversal and cursor binding.",
+                    "inputSchema": { "type": "object", "properties": {} }
+                })
+            })
+            .collect()
+    }
+
+    /// §42 stop condition: a cursor must not cross sessions OR workspaces. The
+    /// workspace half is the one identity that could otherwise be spoofed by a
+    /// client that shares a session id, so it is asserted independently.
+    #[test]
+    fn catalog_cursors_cannot_cross_workspaces() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous = std::env::var("KEEL_MCP_PAGE_TOKENS").ok();
+        std::env::set_var("KEEL_MCP_PAGE_TOKENS", "600");
+
+        let mut owner = crate::mcp::McpRequestContext::authoritative(Some("shared-session"));
+        owner.workspace_id = "C:/workspace/alpha".to_string();
+        let mut foreign = owner.clone();
+        foreign.workspace_id = "C:/workspace/beta".to_string();
+
+        let tools: Vec<Value> = synthetic_paging_tools("workspace-tool");
+
+        let first = pack_catalog_page(
+            crate::mcp::McpCatalogProfile::Tiered,
+            2,
+            600,
+            None,
+            &owner,
+            false,
+            false,
+            tools.clone(),
+        )
+        .expect("first page");
+        let cursor = first["nextCursor"]
+            .as_str()
+            .expect("a 40-tool catalog must page")
+            .to_string();
+
+        // Same session, different workspace: must be rejected.
+        let error = pack_catalog_page(
+            crate::mcp::McpCatalogProfile::Tiered,
+            2,
+            600,
+            Some(&cursor),
+            &foreign,
+            false,
+            false,
+            tools,
+        )
+        .expect_err("a cursor must not cross workspaces");
+        assert!(
+            error.contains("stale or invalid"),
+            "cross-workspace rejection must name the cause: {error}"
+        );
+
+        match previous {
+            Some(value) => std::env::set_var("KEEL_MCP_PAGE_TOKENS", value),
+            None => std::env::remove_var("KEEL_MCP_PAGE_TOKENS"),
+        }
+    }
+
+    /// §29 adversarial: a catalog where every tool is too large to represent
+    /// must fail closed once, with an explicit budget error, rather than
+    /// emitting an oversized page or looping.
+    #[test]
+    fn tools_list_fails_closed_when_every_tool_is_oversized() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous = std::env::var("KEEL_MCP_PAGE_TOKENS").ok();
+        std::env::set_var("KEEL_MCP_PAGE_TOKENS", "30");
+
+        let oversized: Vec<Value> = (0..5)
+            .map(|index| {
+                json!({
+                    "name": format!("oversized-{index}"),
+                    "description": "z".repeat(4_000),
+                    "inputSchema": { "type": "object", "properties": {} }
+                })
+            })
+            .collect();
+
+        let error = pack_catalog_page(
+            crate::mcp::McpCatalogProfile::Tiered,
+            2,
+            30,
+            None,
+            &crate::mcp::McpRequestContext::authoritative(None),
+            false,
+            false,
+            oversized,
+        )
+        .expect_err("an all-oversized catalog must fail closed");
+        assert!(
+            error.contains("minimum") || error.contains("configured"),
+            "the failure must name the configured budget: {error}"
+        );
+
+        match previous {
+            Some(value) => std::env::set_var("KEEL_MCP_PAGE_TOKENS", value),
+            None => std::env::remove_var("KEEL_MCP_PAGE_TOKENS"),
+        }
+    }
+
     #[test]
     fn tools_list_low_budgets_fail_closed_or_emit_valid_bounded_pages() {
         let _env_guard = crate::test_support::ENV_LOCK
@@ -5467,6 +6702,270 @@ mod tests {
         match previous {
             Some(value) => std::env::set_var("KEEL_MCP_PAGE_TOKENS", value),
             None => std::env::remove_var("KEEL_MCP_PAGE_TOKENS"),
+        }
+    }
+
+    /// §6.7 mandates this exact ladder. Each value must land on one of two
+    /// well-defined outcomes: valid bounded pages that traverse the whole catalog
+    /// without duplicates or omissions, or an explicit configuration error that
+    /// names its budget. The former catalog-over-budget failure must not return at
+    /// any value, including the exact size that produced it.
+    #[test]
+    fn tools_list_budget_ladder_holds_at_every_mandated_value() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // why: an absent override is the normal case; only its presence matters.
+        let previous = std::env::var("KEEL_MCP_PAGE_TOKENS").ok();
+
+        for budget in [50usize, 100, 200, 500, 1200, 1201, 1320, 1352, 1400, 2400] {
+            std::env::set_var("KEEL_MCP_PAGE_TOKENS", budget.to_string());
+            let mut cursor: Option<String> = None;
+            let mut names: Vec<String> = Vec::new();
+            let mut traversed = false;
+
+            for _ in 0..MCP_TOOL_NAMES.len() + 2 {
+                let mut params = json!({ "level": 2 });
+                if let Some(value) = &cursor {
+                    params["cursor"] = Value::String(value.clone());
+                }
+                let page = match handle_tools_list_for_profile_params(
+                    crate::mcp::McpCatalogProfile::Full,
+                    &params,
+                ) {
+                    Ok(page) => page,
+                    Err(error) => {
+                        assert!(
+                            !error.contains("catalog exceeds"),
+                            "budget {budget} reproduced the former failure: {error}"
+                        );
+                        assert!(
+                            error.contains("configured") || error.contains("minimum"),
+                            "budget {budget} failed without naming its budget: {error}"
+                        );
+                        break;
+                    }
+                };
+                let measured = measure_tools_list_response(&page);
+                assert!(
+                    measured <= budget,
+                    "budget {budget} emitted a {measured}-token page"
+                );
+                for tool in page["tools"].as_array().expect("tools array") {
+                    assert_eq!(
+                        tool["inputSchema"]["type"],
+                        json!("object"),
+                        "budget {budget} emitted a non-MCP tool shape"
+                    );
+                    names.push(tool["name"].as_str().expect("tool name").to_string());
+                }
+                match page["nextCursor"].as_str() {
+                    Some(value) => cursor = Some(value.to_string()),
+                    None => {
+                        traversed = true;
+                        break;
+                    }
+                }
+            }
+
+            if traversed {
+                let unique = names
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<std::collections::BTreeSet<_>>();
+                assert_eq!(
+                    unique.len(),
+                    names.len(),
+                    "budget {budget} duplicated a tool"
+                );
+                assert_eq!(
+                    unique.len(),
+                    MCP_TOOL_NAMES.len(),
+                    "budget {budget} omitted a tool"
+                );
+            }
+        }
+
+        match previous {
+            Some(value) => std::env::set_var("KEEL_MCP_PAGE_TOKENS", value),
+            None => std::env::remove_var("KEEL_MCP_PAGE_TOKENS"),
+        }
+    }
+
+    /// §34: the fresh deadline is bucketed to the cursor TTL, so two requests in
+    /// the same window mint the identical cursor and therefore the identical page.
+    /// Without this the wall clock is part of the measured payload.
+    #[test]
+    fn cursor_deadline_is_stable_within_a_ttl_window() {
+        let ttl = 900u64;
+        for offset in [0u64, 1, 7, 899, 5_000] {
+            let now = 1_789_000_000 + offset;
+            let expiry = catalog_cursor_expiry_at(now, ttl);
+            assert_eq!(
+                expiry,
+                catalog_cursor_expiry_at(now + 1, ttl),
+                "two requests one second apart minted different deadlines at now={now}"
+            );
+            assert!(
+                expiry > now + ttl,
+                "a cursor must not be shorter-lived than the TTL: now={now} expiry={expiry}"
+            );
+            assert!(
+                expiry <= now + 2 * ttl,
+                "the bucketed deadline must stay within two TTLs: now={now} expiry={expiry}"
+            );
+        }
+        // A tiny TTL still produces a strictly future, bounded deadline.
+        assert!(catalog_cursor_expiry_at(1_789_000_000, 1) > 1_789_000_000);
+        assert!(catalog_cursor_expiry_at(1_789_000_000, 0) > 1_789_000_000);
+    }
+
+    /// §34 through the real packer: two fresh identical requests must select the
+    /// same tools at the same measured cost, with no allowance for the clock.
+    #[test]
+    fn repeated_identical_requests_pack_the_same_page() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // why: an absent override is the normal case; only its presence matters.
+        let previous = std::env::var("KEEL_MCP_PAGE_TOKENS").ok();
+        std::env::set_var("KEEL_MCP_PAGE_TOKENS", "600");
+
+        let profile = crate::mcp::McpCatalogProfile::Tiered;
+        let tools = synthetic_paging_tools("repeat-tool");
+        let context = crate::mcp::McpRequestContext::authoritative(Some("repeat-session"));
+        let pack = || {
+            pack_catalog_page(profile, 2, 600, None, &context, false, false, tools.clone())
+                .expect("a valid budget must produce a page")
+        };
+
+        let first = pack();
+        let second = pack();
+        let shape = |page: &Value| {
+            (
+                page["tools"]
+                    .as_array()
+                    .expect("tools array")
+                    .iter()
+                    .filter_map(|tool| tool["name"].as_str().map(str::to_string))
+                    .collect::<Vec<_>>(),
+                page["nextCursor"].as_str().map(str::to_string),
+                measure_tools_list_response(page),
+            )
+        };
+        let (first_names, first_cursor, first_tokens) = shape(&first);
+        let (second_names, second_cursor, second_tokens) = shape(&second);
+
+        assert!(!first_names.is_empty(), "the page must select tools");
+        assert_eq!(first_names, second_names, "the page contents moved");
+        assert_eq!(
+            first_cursor, second_cursor,
+            "the emitted cursor moved between identical requests"
+        );
+        assert_eq!(
+            first_tokens, second_tokens,
+            "the measured page cost moved between identical requests"
+        );
+        assert!(first_tokens <= 600, "the page must fit its hard budget");
+
+        match previous {
+            Some(value) => std::env::set_var("KEEL_MCP_PAGE_TOKENS", value),
+            None => std::env::remove_var("KEEL_MCP_PAGE_TOKENS"),
+        }
+    }
+
+    /// §3.2 / §13: `tools/list` results must carry the revision's required fields,
+    /// and they must be inside the payload the packer measured. A field appended
+    /// after budgeting would let a page exceed its own hard limit.
+    #[test]
+    fn tools_list_pages_carry_the_required_protocol_fields() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // why: an absent override is the normal case; only its presence matters.
+        let previous = std::env::var("KEEL_MCP_PAGE_TOKENS").ok();
+        std::env::set_var("KEEL_MCP_PAGE_TOKENS", "600");
+
+        let tools = synthetic_paging_tools("protocol-tool");
+        let context = crate::mcp::McpRequestContext::authoritative(Some("protocol-session"));
+        let mut cursor: Option<String> = None;
+        let mut pages = 0usize;
+        let mut scopes = std::collections::BTreeSet::new();
+
+        for _ in 0..8 {
+            let page = pack_catalog_page(
+                crate::mcp::McpCatalogProfile::Tiered,
+                2,
+                600,
+                cursor.as_deref(),
+                &context,
+                false,
+                false,
+                tools.clone(),
+            )
+            .expect("a valid budget must produce a page");
+            pages += 1;
+
+            assert_eq!(
+                page["resultType"], "complete",
+                "every tools/list result must declare its result type"
+            );
+            let ttl = page["ttlMs"]
+                .as_u64()
+                .expect("ttlMs is required and must be a non-negative integer");
+            assert_eq!(
+                ttl,
+                mcp_cursor_ttl_seconds() * 1_000,
+                "a page is fresh exactly as long as the walk it belongs to is valid"
+            );
+            let scope = page["cacheScope"].as_str().expect("cacheScope is required");
+            assert!(
+                scope == "public" || scope == "private",
+                "cacheScope must be public or private, got {scope:?}"
+            );
+            scopes.insert(scope.to_string());
+
+            // The required fields are inside the measured payload, not bolted on
+            // after the budget decision.
+            assert!(
+                measure_tools_list_response(&page) <= 600,
+                "a page carrying the required fields still exceeded its budget"
+            );
+
+            match page["nextCursor"].as_str() {
+                Some(value) => cursor = Some(value.to_string()),
+                None => break,
+            }
+        }
+
+        assert!(pages > 1, "the fixture must span several pages");
+        assert_eq!(
+            scopes.len(),
+            1,
+            "all pages of one list request must share one cacheScope"
+        );
+
+        match previous {
+            Some(value) => std::env::set_var("KEEL_MCP_PAGE_TOKENS", value),
+            None => std::env::remove_var("KEEL_MCP_PAGE_TOKENS"),
+        }
+    }
+
+    /// The cached paths: a catalog that fits stays a single page, and the default
+    /// handshake still carries the required fields on the no-params route.
+    #[test]
+    fn default_handshake_carries_the_required_protocol_fields() {
+        for profile in [
+            crate::mcp::McpCatalogProfile::Tiered,
+            crate::mcp::McpCatalogProfile::Full,
+        ] {
+            let context = crate::mcp::McpRequestContext::authoritative(None);
+            let page =
+                handle_tools_list_for_profile_params_with_context(profile, &Value::Null, &context)
+                    .expect("the default handshake must produce a page");
+            assert_eq!(page["resultType"], "complete", "{profile:?}");
+            assert!(page["ttlMs"].as_u64().is_some(), "{profile:?}");
+            assert_eq!(page["cacheScope"], "public", "{profile:?}");
         }
     }
 
@@ -5758,6 +7257,9 @@ mod tests {
 
     #[test]
     fn run_command_policy_requires_explicit_unsafe_opt_in() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         assert!(command_requires_confirmation(
             "python",
             &["-c".to_string(), "print(1)".to_string()],
@@ -5788,12 +7290,56 @@ mod tests {
             "[bash] echo ok",
             true
         ));
-        assert!(!command_requires_confirmation(
-            "cargo",
-            &["test".to_string()],
-            "cargo test",
-            false
-        ));
+        if which::which("cargo").is_ok() {
+            assert!(!command_requires_confirmation(
+                "cargo",
+                &["test".to_string()],
+                "cargo test",
+                false
+            ));
+        }
+        for (program, arguments) in [
+            ("keel", vec!["install"]),
+            ("keel", vec!["hook", "install"]),
+            ("git", vec!["clean", "-fdx"]),
+            ("git", vec!["-c", "alias.pwn=!echo pwn", "pwn"]),
+            ("cargo", vec!["run"]),
+            ("cargo", vec!["clean"]),
+            (
+                "cargo",
+                vec!["--config", "build.rustc-wrapper=tool", "test"],
+            ),
+            ("rg", vec!["--pre", "processor", "pattern"]),
+            ("find", vec![".", "-exec", "sh", "-c", "echo pwn", ";"]),
+        ] {
+            let arguments = arguments
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            assert!(
+                command_requires_confirmation(program, &arguments, &arguments.join(" "), false),
+                "{program} {arguments:?} must require confirmation"
+            );
+        }
+        for (program, arguments) in [
+            ("git", vec!["status"]),
+            ("git", vec!["-C", ".", "diff"]),
+            ("cargo", vec!["check"]),
+            ("rg", vec!["pattern", "."]),
+            ("find", vec!["needle.txt"]),
+        ] {
+            if which::which(program).is_err() {
+                continue;
+            }
+            let arguments = arguments
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            assert!(
+                !command_requires_confirmation(program, &arguments, &arguments.join(" "), false),
+                "{program} {arguments:?} should stay on the read-only direct-argv path"
+            );
+        }
         let error = enforce_run_command_policy(
             "python",
             &["-c".to_string(), "print(1)".to_string()],
@@ -5803,6 +7349,66 @@ mod tests {
         )
         .expect_err("unsafe command should require environment opt-in");
         assert!(error.contains("KEEL_MCP_ALLOW_UNSAFE_COMMANDS"));
+    }
+
+    #[test]
+    fn run_command_policy_does_not_trust_argv_zero_basename_or_path_shadow() {
+        assert!(command_requires_confirmation(
+            "/tmp/evil/git",
+            &["status".to_string()],
+            "/tmp/evil/git status",
+            false,
+        ));
+        assert!(command_requires_confirmation(
+            "./echo",
+            &["safe-looking".to_string()],
+            "./echo safe-looking",
+            false,
+        ));
+
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let directory = crate::test_support::unique_temp_dir("keel-mcp-path-shadow");
+        let executable = directory.join(if cfg!(windows) { "git.exe" } else { "git" });
+        fs::write(&executable, b"not the trusted git executable").expect("write shadow executable");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(&executable)
+                .expect("shadow metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&executable, permissions).expect("make shadow executable");
+        }
+
+        let previous_path = env::var_os("PATH");
+        let mut paths = vec![directory.to_path_buf()];
+        if let Some(previous) = previous_path.as_deref() {
+            paths.extend(env::split_paths(previous));
+        }
+        let shadow_path = env::join_paths(paths).expect("join shadow PATH");
+        env::set_var("PATH", shadow_path);
+        let resolved_into_shadow = which::which("git")
+            .ok()
+            .and_then(|path| path.canonicalize().ok())
+            .zip(directory.canonicalize().ok())
+            .is_some_and(|(path, root)| path.starts_with(root));
+        let requires_confirmation =
+            command_requires_confirmation("git", &["status".to_string()], "git status", false);
+        match previous_path {
+            Some(path) => env::set_var("PATH", path),
+            None => env::remove_var("PATH"),
+        }
+
+        assert!(
+            resolved_into_shadow,
+            "test PATH must resolve the shadow first"
+        );
+        assert!(
+            requires_confirmation,
+            "an untrusted PATH shadow must not inherit Git's read-only exemption"
+        );
     }
 
     #[test]
@@ -5891,6 +7497,13 @@ mod tests {
             );
             let text = result["content"][0]["text"].as_str().unwrap_or("");
             assert!(!text.trim().is_empty(), "{name} empty content");
+            if name == "context_brief" {
+                assert!(
+                    TokenMeter::count_text(text) <= context_brief_payload_budget(),
+                    "context_brief owner payload must include its final marker in the budget: {} tokens",
+                    TokenMeter::count_text(text)
+                );
+            }
         }
         // recall needs a query; empty corpus may return zero hits but not isError.
         let recall = handle_tools_call_with_executor(
@@ -5913,6 +7526,33 @@ mod tests {
             None => std::env::remove_var("CLAUDE_TARGET_OVERRIDE"),
         }
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn recall_projection_is_valid_bounded_and_recoverable() {
+        let hits = (0..MAX_RECALL_LIMIT)
+            .map(|index| crate::utility::recall::RecallHit {
+                absolute_path: format!("C:/memory/note-{index}.md"),
+                score: 0.5,
+                line: index + 1,
+                snippet: format!("[match] {}", "memory result ".repeat(80)),
+            })
+            .collect::<Vec<_>>();
+        let payload = bounded_recall_payload(
+            Path::new("C:/memory"),
+            "a query with enough detail to keep the recovery reference useful",
+            "\"query\"*",
+            MAX_RECALL_LIMIT,
+            "exact",
+            &hits,
+        );
+        let rendered = serde_json::to_string(&payload).expect("serialize bounded recall");
+        assert!(rendered.len() <= MCP_RECALL_MAX_BYTES);
+        assert!(TokenMeter::count_text(&rendered) <= MCP_RECALL_MAX_TOKENS);
+        assert!(rendered.contains("provenanceId"));
+        assert!(rendered.contains("retrievalRef"));
+        assert!(rendered.contains("prov-sha256:"));
+        assert!(serde_json::from_str::<Value>(&rendered).is_ok());
     }
 
     #[test]
@@ -6683,6 +8323,53 @@ mod tests {
         assert!(error.contains("unknown command_id"), "got: {error}");
         let error = tool_command_output(&json!({ "command_id": "nope" })).expect_err("unknown");
         assert!(error.contains("unknown command_id"), "got: {error}");
+    }
+
+    #[test]
+    fn background_command_isolation_rejects_cross_session_poll_and_kill() {
+        let mut child = if cfg!(windows) {
+            let mut command = Command::new("cmd");
+            command.args(["/C", "ping -n 60 127.0.0.1 >nul"]);
+            command
+        } else {
+            let mut command = Command::new("bash");
+            command.args(["-c", "sleep 60"]);
+            command
+        };
+        child.stdin(Stdio::null());
+        child.stdout(Stdio::piped());
+        child.stderr(Stdio::piped());
+
+        let owner = crate::mcp::McpRequestContext::authoritative(Some("background-owner"));
+        let id = with_mcp_request_context(owner.clone(), || {
+            spawn_background_command(child, "cross-session-isolation")
+        })
+        .expect("spawn");
+        let foreign = crate::mcp::McpRequestContext::authoritative(Some("background-foreign"));
+        let poll_error = with_mcp_request_context(foreign.clone(), || {
+            tool_command_output(&json!({ "command_id": id }))
+        })
+        .expect_err("foreign session must not poll another session's command");
+        assert!(
+            poll_error.contains("unknown command_id"),
+            "got: {poll_error}"
+        );
+        let kill_error =
+            with_mcp_request_context(foreign, || tool_command_kill(&json!({ "command_id": id })))
+                .expect_err("foreign session must not kill another session's command");
+        assert!(
+            kill_error.contains("unknown command_id"),
+            "got: {kill_error}"
+        );
+
+        let killed =
+            with_mcp_request_context(owner, || tool_command_kill(&json!({ "command_id": id })))
+                .expect("owner can kill command");
+        assert!(killed.contains("\"killed\":true"), "got: {killed}");
+        let _ = with_mcp_request_context(
+            crate::mcp::McpRequestContext::authoritative(Some("background-owner")),
+            || tool_command_output(&json!({ "command_id": id })),
+        );
     }
 
     #[cfg(unix)]

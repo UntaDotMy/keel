@@ -77,6 +77,49 @@ pub struct HostCapabilities {
 }
 
 impl HostCapabilities {
+    /// Hosts keel claims a governance story for. Kept beside the table so the
+    /// matrix can never describe a host the installer does not wire, and so an
+    /// unregistered name stays distinguishable from a registered-but-ungoverned
+    /// one. `tests::every_claimed_host_has_explicit_metadata` holds this against
+    /// the installer's own platform list.
+    pub const CLAIMED_HOSTS: &'static [&'static str] = &[
+        "claude",
+        "codex",
+        "opencode",
+        "pi",
+        "omp",
+        "cursor",
+        "cowork",
+        "commandcode",
+        "grok",
+        "zcode",
+        "antigravity",
+    ];
+
+    /// No proven interception surface at all. Unknown names resolve here too;
+    /// [`Self::is_claimed_host`] is what tells the two apart.
+    const fn ungoverned() -> Self {
+        Self {
+            pre_tool_intercept: false,
+            post_tool_reduce: false,
+            permission_gate: false,
+            dynamic_tool_exposure: false,
+            context_injection_control: false,
+            session_identity: false,
+            execution_receipt: false,
+        }
+    }
+
+    pub fn is_claimed_host(agent: &str) -> bool {
+        let normalized = agent.trim().to_ascii_lowercase();
+        Self::CLAIMED_HOSTS.iter().any(|host| {
+            normalized == *host
+                || normalized
+                    .strip_prefix(host)
+                    .is_some_and(|rest| rest.starts_with('-') || rest.starts_with('_'))
+        })
+    }
+
     pub fn for_agent(agent: &str) -> Self {
         let normalized = agent.trim().to_ascii_lowercase();
         match normalized.as_str() {
@@ -91,7 +134,20 @@ impl HostCapabilities {
                     execution_receipt: true,
                 }
             }
-            "zcode" | "antigravity" | "grok" | "opencode" | "pi" | "commandcode" => Self {
+            // Cursor's hooks (`cursor/hooks/hooks.json`) return permission
+            // decisions, so interception and the gate are proven; rewrite is not.
+            "cursor" => Self {
+                pre_tool_intercept: true,
+                post_tool_reduce: true,
+                permission_gate: true,
+                dynamic_tool_exposure: false,
+                context_injection_control: false,
+                session_identity: true,
+                execution_receipt: true,
+            },
+            // OMP is wired at its own `~/.omp/agent` tree through the same
+            // `keel-pi.ts` extension seam as Pi, so it shares Pi's proven surface.
+            "zcode" | "antigravity" | "grok" | "opencode" | "pi" | "omp" | "commandcode" => Self {
                 pre_tool_intercept: true,
                 post_tool_reduce: true,
                 permission_gate: false,
@@ -100,15 +156,10 @@ impl HostCapabilities {
                 session_identity: true,
                 execution_receipt: true,
             },
-            _ => Self {
-                pre_tool_intercept: false,
-                post_tool_reduce: false,
-                permission_gate: false,
-                dynamic_tool_exposure: false,
-                context_injection_control: false,
-                session_identity: false,
-                execution_receipt: false,
-            },
+            // Claude Desktop has no hook system or plugin API, so keel registers
+            // MCP only and every interception surface stays unproven.
+            "cowork" | "desktop" => Self::ungoverned(),
+            _ => Self::ungoverned(),
         }
     }
 
@@ -122,6 +173,86 @@ impl HostCapabilities {
             "contextInjectionControl": self.context_injection_control,
             "sessionIdentity": self.session_identity,
             "executionReceipt": self.execution_receipt,
+        })
+    }
+
+    /// Attach the machine-readable host matrix to the legacy capability
+    /// booleans. The matrix deliberately records unproven surfaces as
+    /// `NOT_PROVEN`/`UNSUPPORTED` instead of inferring support from a host's
+    /// name or from Keel's own MCP server capabilities.
+    pub fn as_json_for_agent(self, agent: &str) -> serde_json::Value {
+        let mut payload = self.as_json();
+        let normalized = agent.trim().to_ascii_lowercase();
+        let mut unsupported_paths = Vec::new();
+        let mut known_limitations = Vec::new();
+        if !self.pre_tool_intercept {
+            unsupported_paths.push("pre-tool interception");
+            known_limitations.push("host does not expose a proven pre-tool interception hook");
+        }
+        if !self.post_tool_reduce {
+            unsupported_paths.push("post-tool reduction");
+            known_limitations.push("host does not expose a proven post-tool reduction hook");
+        }
+        if !self.permission_gate {
+            unsupported_paths.push("permission gate");
+            known_limitations.push("permission decisions remain outside the proven host path");
+        }
+        if !self.context_injection_control {
+            unsupported_paths.push("context rewrite");
+            known_limitations.push("model-visible context rewriting is not proven for this host");
+        }
+        if !self.session_identity {
+            unsupported_paths.push("session identity");
+            known_limitations.push("session identity is unavailable");
+        }
+        if !self.execution_receipt {
+            unsupported_paths.push("execution receipt");
+            known_limitations.push("execution receipts are unavailable");
+        }
+        let mcp_support = if self.dynamic_tool_exposure {
+            "SUPPORTED"
+        } else if self.governance_state() == HostGovernanceState::Unsupported {
+            "UNSUPPORTED"
+        } else {
+            "NOT_PROVEN"
+        };
+        payload["matrix"] = serde_json::json!({
+            "host": normalized,
+            // A name keel has never wired must not read the same as a wired host
+            // whose interception surface is genuinely absent.
+            "hostRegistered": Self::is_claimed_host(&normalized),
+            "protocol": "keel-command-proxy",
+            "transport": "host-adapter",
+            "sessionHook": self.session_identity,
+            "preToolInterception": self.pre_tool_intercept,
+            "postToolInterception": self.post_tool_reduce,
+            "permissionGate": self.permission_gate,
+            "contextRewrite": self.context_injection_control,
+            "mcpSupport": mcp_support,
+            "paginationCompatibility": if self.dynamic_tool_exposure { "SUPPORTED" } else { "NOT_PROVEN" },
+            "nativeToolSupport": self.pre_tool_intercept,
+            "skillSupport": self.context_injection_control,
+            "governanceLevel": self.governance_state().as_str(),
+            "unsupportedPaths": unsupported_paths,
+            "knownLimitations": known_limitations,
+        });
+        payload
+    }
+
+    /// The whole matrix for every claimed host, in a stable order. This is the
+    /// machine-readable form §18 requires and the only place the full set is
+    /// enumerated, so a host cannot be added to the installer and silently keep
+    /// the unknown-host default here.
+    pub fn claimed_matrix() -> serde_json::Value {
+        let hosts = Self::CLAIMED_HOSTS
+            .iter()
+            .map(|host| Self::for_agent(host).as_json_for_agent(host)["matrix"].clone())
+            .collect::<Vec<_>>();
+        serde_json::json!({
+            "schemaVersion": 1,
+            "protocol": "keel-command-proxy",
+            "transport": "host-adapter",
+            "hosts": hosts,
         })
     }
 
@@ -255,6 +386,103 @@ mod tests {
             HostCapabilities::for_agent("unregistered-host").governance_state(),
             HostGovernanceState::Unsupported
         );
+    }
+
+    #[test]
+    fn capability_json_exposes_explicit_host_matrix_and_limitations() {
+        let payload = HostCapabilities::for_agent("grok").as_json_for_agent("grok");
+        let matrix = &payload["matrix"];
+        assert_eq!(matrix["host"], "grok");
+        assert_eq!(matrix["protocol"], "keel-command-proxy");
+        assert_eq!(matrix["transport"], "host-adapter");
+        assert_eq!(matrix["governanceLevel"], "PARTIALLY_GOVERNED");
+        assert_eq!(matrix["mcpSupport"], "NOT_PROVEN");
+        assert_eq!(matrix["hostRegistered"], true);
+        assert!(matrix["unsupportedPaths"]
+            .as_array()
+            .is_some_and(|paths| paths.iter().any(|path| path == "permission gate")));
+        assert!(matrix["knownLimitations"].as_array().is_some_and(|items| {
+            items
+                .iter()
+                .any(|item| item.as_str().unwrap_or_default().contains("permission"))
+        }));
+    }
+
+    /// The installer's platform list and this table must describe the same set.
+    /// A host added to one and not the other would silently report the unknown
+    /// default, which is the failure §18 forbids.
+    #[test]
+    fn every_installer_platform_has_explicit_host_metadata() {
+        for platform in [
+            "opencode",
+            "codex",
+            "pi",
+            "cursor",
+            "cowork",
+            "commandcode",
+            "grok",
+            "omp",
+            "zcode",
+            "antigravity",
+        ] {
+            assert!(
+                HostCapabilities::is_claimed_host(platform),
+                "{platform} is wired by the installer but missing from CLAIMED_HOSTS"
+            );
+            let matrix = HostCapabilities::for_agent(platform).as_json_for_agent(platform);
+            assert_eq!(matrix["matrix"]["hostRegistered"], true, "{platform}");
+            assert_eq!(matrix["matrix"]["host"], platform, "{platform}");
+        }
+    }
+
+    /// Every claimed host answers from its own entry, never the fall-through.
+    #[test]
+    fn claimed_hosts_never_resolve_through_the_unknown_default() {
+        for host in HostCapabilities::CLAIMED_HOSTS {
+            assert!(
+                HostCapabilities::is_claimed_host(host),
+                "{host} is listed but not recognised"
+            );
+        }
+        assert!(!HostCapabilities::is_claimed_host("unregistered-host"));
+        let unknown =
+            HostCapabilities::for_agent("unregistered-host").as_json_for_agent("unregistered-host");
+        assert_eq!(unknown["matrix"]["hostRegistered"], false);
+        assert_eq!(unknown["matrix"]["governanceLevel"], "UNSUPPORTED");
+
+        // Cursor ships hook files that return permission decisions, so it must
+        // not share the unknown-host default it used to fall through to.
+        let cursor = HostCapabilities::for_agent("cursor").as_json_for_agent("cursor");
+        assert_eq!(cursor["matrix"]["preToolInterception"], true);
+        assert_eq!(cursor["matrix"]["hostRegistered"], true);
+        assert_eq!(cursor["matrix"]["governanceLevel"], "PARTIALLY_GOVERNED");
+
+        // Claude Desktop has no lifecycle hooks; it stays unproven rather than
+        // inheriting the Claude Code surface through the shared substring.
+        let cowork = HostCapabilities::for_agent("cowork").as_json_for_agent("cowork");
+        assert_eq!(cowork["matrix"]["preToolInterception"], false);
+        assert_eq!(cowork["matrix"]["hostRegistered"], true);
+        assert_eq!(cowork["matrix"]["governanceLevel"], "UNSUPPORTED");
+    }
+
+    #[test]
+    fn claimed_matrix_enumerates_every_host_once() {
+        let matrix = HostCapabilities::claimed_matrix();
+        let hosts = matrix["hosts"].as_array().expect("hosts array");
+        assert_eq!(hosts.len(), HostCapabilities::CLAIMED_HOSTS.len());
+        let names = hosts
+            .iter()
+            .map(|host| host["host"].as_str().expect("host name").to_string())
+            .collect::<Vec<_>>();
+        let unique = names.iter().collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(unique.len(), names.len(), "a host was enumerated twice");
+        for host in hosts {
+            assert_eq!(host["hostRegistered"], true);
+            assert!(
+                host["governanceLevel"].is_string(),
+                "every host needs an explicit governance level"
+            );
+        }
     }
 
     #[test]

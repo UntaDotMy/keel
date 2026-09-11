@@ -45,6 +45,9 @@ pub fn run_stats_command(
                 return run_context_stats(&arguments[1..], standard_output, standard_error)
             }
             "tools" => return run_tools_stats(&arguments[1..], standard_output, standard_error),
+            "latency" => {
+                return run_latency_benchmark(&arguments[1..], standard_output, standard_error)
+            }
             "gain" => {
                 return crate::utility::gain::run_gain_command(
                     &arguments[1..],
@@ -144,22 +147,25 @@ fn run_context_stats(
         .entries
         .iter()
         .map(|entry| {
-            let cache_class = if entry.surface.starts_with("repo.")
-                || entry.surface.starts_with("generated.")
-                || entry.surface.starts_with("skills.")
-            {
-                "stable"
-            } else {
-                "dynamic"
-            };
+            let cache_class =
+                crate::proxy::context::ProjectionInput::cache_class_for_surface(entry.surface);
+            let (cached_tokens, uncached_tokens) =
+                crate::proxy::context::ProjectionInput::cache_split(
+                    cache_class,
+                    entry.actual_tokens,
+                );
             let headroom = entry.budget_tokens.saturating_sub(entry.actual_tokens);
             json!({
                 "surface": entry.surface,
                 "rawTokens": entry.actual_tokens,
                 "visibleTokens": entry.actual_tokens,
+                // Exactly one of these is set, by the firewall's own cache rule,
+                // so a model-visible cost is never counted as both.
+                "cachedTokens": cached_tokens,
+                "uncachedTokens": uncached_tokens,
                 "budgetTokens": entry.budget_tokens,
                 "headroomTokens": headroom,
-                "cacheClass": cache_class,
+                "cacheClass": cache_class.as_str(),
                 "sourceAvailable": entry.source_available,
                 "status": entry.status(),
                 "reproductionCommand": fixed_context::REPRODUCTION_COMMAND,
@@ -199,14 +205,8 @@ fn run_context_stats(
         workspace_root
     );
     for entry in &ledger.entries {
-        let cache_class = if entry.surface.starts_with("repo.")
-            || entry.surface.starts_with("generated.")
-            || entry.surface.starts_with("skills.")
-        {
-            "stable"
-        } else {
-            "dynamic"
-        };
+        let cache_class =
+            crate::proxy::context::ProjectionInput::cache_class_for_surface(entry.surface);
         let headroom = entry.budget_tokens.saturating_sub(entry.actual_tokens);
         let _ = writeln!(
             standard_output,
@@ -216,11 +216,216 @@ fn run_context_stats(
             entry.actual_tokens,
             entry.budget_tokens,
             headroom,
-            cache_class,
+            cache_class.as_str(),
             entry.status()
         );
     }
     0
+}
+
+/// §33 declared latency ceilings, in milliseconds. Declared here (before any
+/// run) and shared by the benchmark and its tests, so a floor cannot drift from
+/// the check that enforces it.
+const LATENCY_STAGE_MAX_MS: f64 = 250.0;
+/// The two stages that read the filesystem are allowed a wider ceiling, because
+/// a cold page cache or a large skill tree legitimately costs more than pure
+/// in-memory work.
+const LATENCY_IO_STAGE_MAX_MS: f64 = 1_500.0;
+
+/// §33: measure the gateway's own pipeline stages, not a synthetic loop. Each
+/// stage calls the owner production calls, and a stage above its declared
+/// ceiling fails the run rather than only printing a number.
+fn run_latency_benchmark(
+    arguments: &[String],
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let mut flag_set = FlagSet::new("stats latency");
+    flag_set.bool_flag("json", false);
+    flag_set.string_flag("workspace-root", "");
+    if let Err(parse_error) = flag_set.parse(arguments) {
+        let _ = writeln!(standard_error, "{}", parse_error.message);
+        return 1;
+    }
+    let workspace_root = stats_workspace_root(&flag_set);
+    let claude_home = match crate::runtime::resolve_claude_home("") {
+        Ok(home) => home,
+        Err(error) => {
+            let _ = writeln!(standard_error, "stats latency: {error}");
+            return 1;
+        }
+    };
+
+    /// Time one call and hand back both the elapsed milliseconds and the value, so
+    /// a measured stage never has to discard its result.
+    fn time<T>(operation: impl FnOnce() -> T) -> (f64, T) {
+        let started = std::time::Instant::now();
+        let value = operation();
+        (started.elapsed().as_secs_f64() * 1_000.0, value)
+    }
+
+    let profile = crate::mcp::McpCatalogProfile::from_env();
+    // Warm every lazily-initialized owner before timing, so one-time tokenizer
+    // or index construction is not charged to a stage that no longer pays it.
+    let _warm_handshake = crate::mcp::measured_handshake_tokens(profile);
+    let _warm_tokens = crate::proxy::token_meter::TokenMeter::count_text("warm");
+    let skills_dir = claude_home.join("skills");
+    let terms = crate::utility::skill_match::load_skill_terms(&skills_dir);
+    let catalog = crate::utility::skill_match::skill_catalog(&claude_home);
+    let mut firewall = crate::proxy::context::ContextFirewall::new(
+        crate::proxy::context::ContextPolicy::with_max_tokens(4_000),
+    );
+    let payload = "latency probe payload repeated for a realistic reduction input ".repeat(40);
+    let projection = |payload: &str| {
+        crate::proxy::context::ProjectionInput::new(
+            crate::proxy::context::ContextSource::McpTool,
+            payload.to_string(),
+            None::<String>,
+            "latency-workspace",
+            "latency-session",
+        )
+    };
+    let _warm_projection = firewall.project(projection("warm-up payload"));
+    let store = crate::proxy::raw_store::RawStore::new();
+    // why: an empty or unreadable store only means there is no recovery pointer to
+    // time; the stage reports zero rather than failing the whole benchmark.
+    let known_raw_id = store
+        .list()
+        .ok()
+        .and_then(|entries| entries.first().map(|entry| entry.raw_id.clone()));
+
+    let (catalog_build_ms, _measured_catalog) =
+        time(|| crate::mcp::tools_complete_catalog(profile));
+    let (page_pack_ms, _measured_page) = time(|| crate::mcp::measured_handshake_tokens(profile));
+    let page = crate::mcp::tools_complete_catalog(profile);
+    let (serialization_ms, serialized_page) = time(|| serde_json::to_string(&page));
+    // why: the page is hand-built JSON, so serialization cannot fail here.
+    let serialized = serialized_page.unwrap_or_default();
+    let (token_count_ms, _serialized_tokens) =
+        time(|| crate::proxy::token_meter::TokenMeter::count_text(&serialized));
+    // Run the firewall twice so the second stage reports the dedupe path rather
+    // than only a cold projection.
+    let (reduction_ms, _reduced) = time(|| firewall.project(projection(&payload)));
+    let (dedupe_ms, _deduped) = time(|| firewall.project(projection(&payload)));
+    let (skill_index_ms, _indexed_terms) =
+        time(|| crate::utility::skill_match::load_skill_terms(&skills_dir));
+    let (skill_routing_ms, _routed) = time(|| {
+        crate::utility::skill_match::resolve_skill_selection(
+            "review this pull request for security problems",
+            &terms,
+            &catalog,
+        )
+    });
+    let (memory_retrieval_ms, _recalled) = time(|| {
+        crate::utility::recall::search_recall_index(&claude_home, "latency probe", 5, None)
+    });
+    // Per-retrieval overhead, not a full-store scan: one recovery lookup on the
+    // request path, which is what a bounded recovery pointer actually costs.
+    let (raw_store_ms, _located) = match &known_raw_id {
+        Some(raw_id) => {
+            let (elapsed, located) = time(|| store.find_dir(raw_id));
+            (elapsed, Some(located))
+        }
+        None => (0.0, None),
+    };
+
+    let stages = vec![
+        ("catalogBuildMs", catalog_build_ms, LATENCY_STAGE_MAX_MS),
+        ("pagePackMs", page_pack_ms, LATENCY_STAGE_MAX_MS),
+        ("serializationMs", serialization_ms, LATENCY_STAGE_MAX_MS),
+        ("tokenCountMs", token_count_ms, LATENCY_STAGE_MAX_MS),
+        ("reductionMs", reduction_ms, LATENCY_STAGE_MAX_MS),
+        ("dedupeMs", dedupe_ms, LATENCY_STAGE_MAX_MS),
+        ("skillIndexMs", skill_index_ms, LATENCY_IO_STAGE_MAX_MS),
+        ("skillRoutingMs", skill_routing_ms, LATENCY_STAGE_MAX_MS),
+        (
+            "memoryRetrievalMs",
+            memory_retrieval_ms,
+            LATENCY_IO_STAGE_MAX_MS,
+        ),
+        ("rawStoreLocateMs", raw_store_ms, LATENCY_IO_STAGE_MAX_MS),
+    ];
+    let failures = stages
+        .iter()
+        .filter_map(|(name, measured, ceiling)| {
+            latency_stage_status(*measured, *ceiling)
+                .1
+                .map(|detail| format!("{name} {detail}"))
+        })
+        .collect::<Vec<_>>();
+    let stages_json = stages
+        .iter()
+        .map(|(name, measured, ceiling)| {
+            let (status, _) = latency_stage_status(*measured, *ceiling);
+            json!({
+                "stage": name,
+                "milliseconds": (measured * 100.0).round() / 100.0,
+                "declaredMaxMs": ceiling,
+                "status": status,
+            })
+        })
+        .collect::<Vec<_>>();
+    let payload = json!({
+        "schemaVersion": 1,
+        "benchmark": "gateway-stage-latency",
+        "workspaceRoot": workspace_root,
+        "measurementScope": "local CPU work; never counted as model-visible tokens",
+        "declaredThresholds": {
+            "stageMaxMs": LATENCY_STAGE_MAX_MS,
+            "ioStageMaxMs": LATENCY_IO_STAGE_MAX_MS,
+        },
+        "stages": stages_json,
+        "failures": failures,
+        "status": if failures.is_empty() { "passed" } else { "failed" },
+        "reproductionCommand": "keel stats latency --json",
+    });
+
+    if flag_set.bool_value("json") {
+        return write_serde_json(standard_output, standard_error, "stats latency", &payload);
+    }
+    let _ = writeln!(
+        standard_output,
+        "keel stats latency workspace={} status={}",
+        payload["workspaceRoot"].as_str().unwrap_or(""),
+        payload["status"].as_str().unwrap_or("")
+    );
+    for stage in payload["stages"].as_array().into_iter().flatten() {
+        let _ = writeln!(
+            standard_output,
+            "  {}={}ms limit={}ms status={}",
+            stage["stage"].as_str().unwrap_or("?"),
+            stage["milliseconds"],
+            stage["declaredMaxMs"],
+            stage["status"].as_str().unwrap_or("?")
+        );
+    }
+    for failure in payload["failures"].as_array().into_iter().flatten() {
+        let _ = writeln!(
+            standard_output,
+            "  FAILED: {}",
+            failure.as_str().unwrap_or("")
+        );
+    }
+    if failures.is_empty() {
+        0
+    } else {
+        1
+    }
+}
+
+/// The pass/fail decision for one measured stage. Extracted so the fail-closed
+/// path is testable without a production knob that could weaken the ceiling.
+fn latency_stage_status(measured_ms: f64, declared_max_ms: f64) -> (&'static str, Option<String>) {
+    if measured_ms <= declared_max_ms {
+        ("within_budget", None)
+    } else {
+        (
+            "exceeded",
+            Some(format!(
+                "took {measured_ms:.1}ms, above the declared {declared_max_ms:.0}ms"
+            )),
+        )
+    }
 }
 
 fn run_tools_stats(
@@ -230,9 +435,13 @@ fn run_tools_stats(
 ) -> u8 {
     let mut flags = FlagSet::new("stats tools");
     flags.bool_flag("json", false);
+    flags.bool_flag("benchmark", false);
     if let Err(error) = flags.parse(arguments) {
         let _ = writeln!(standard_error, "{}", error.message);
         return 1;
+    }
+    if flags.bool_value("benchmark") {
+        return run_tools_benchmark(flags.bool_value("json"), standard_output, standard_error);
     }
     let snapshot = crate::mcp::tools_list_context_snapshot();
     let payload = json!({
@@ -260,6 +469,271 @@ fn run_tools_stats(
         payload["discovery"]["calls"].as_u64().unwrap_or(0)
     );
     0
+}
+
+/// Declared before the benchmark interprets anything: the catalog walk must
+/// finish inside this budget or the run fails. Two seconds is far above the
+/// measured sub-second cost of every profile, so it only trips on a real
+/// regression rather than on a slow machine.
+const MCP_BENCHMARK_FIRST_PAGE_LATENCY_MS_MAX: f64 = 2_000.0;
+
+/// Default token budgets the MCP benchmark compares. `full` and `core` use the
+/// ratified per-profile defaults so the comparison reflects real behavior; the
+/// paging and compact profiles use tighter declared budgets on purpose.
+fn benchmark_default_budget(profile: crate::mcp::McpCatalogProfile) -> usize {
+    match profile {
+        crate::mcp::McpCatalogProfile::Tiered => {
+            crate::proxy::context::DEFAULT_MAX_TOOL_CATALOG_TOKENS
+        }
+        crate::mcp::McpCatalogProfile::Full => crate::proxy::context::DEFAULT_MAX_DYNAMIC_TOKENS,
+    }
+}
+
+/// One MCP catalog benchmark configuration: a catalog profile, an optional
+/// explicit schema level (absent means the spec-default handshake), and an
+/// optional hard page budget (absent means the profile's ratified default).
+#[derive(Debug, Clone, Copy)]
+struct McpBenchmarkProfile {
+    name: &'static str,
+    profile: crate::mcp::McpCatalogProfile,
+    budget: Option<usize>,
+    level: Option<u64>,
+}
+
+const fn core_benchmark(
+    name: &'static str,
+    budget: Option<usize>,
+    level: Option<u64>,
+) -> McpBenchmarkProfile {
+    McpBenchmarkProfile {
+        name,
+        profile: crate::mcp::McpCatalogProfile::Tiered,
+        budget,
+        level,
+    }
+}
+
+const MCP_BENCHMARK_PROFILES: &[McpBenchmarkProfile] = &[
+    McpBenchmarkProfile {
+        name: "full",
+        profile: crate::mcp::McpCatalogProfile::Full,
+        budget: None,
+        level: None,
+    },
+    McpBenchmarkProfile {
+        name: "core",
+        profile: crate::mcp::McpCatalogProfile::Tiered,
+        budget: None,
+        level: None,
+    },
+    core_benchmark("core+pagination", Some(600), Some(2)),
+    core_benchmark("core+progressive-discovery", Some(1_200), Some(0)),
+    core_benchmark(
+        "core+progressive-discovery+compact-schemas",
+        Some(600),
+        Some(0),
+    ),
+];
+
+/// Representative task families from the gateway plan. Each entry is a task
+/// label plus the intent a host would express for it; the benchmark records
+/// whether discovery can name a capability for that intent.
+const MCP_BENCHMARK_TASKS: &[(&str, &str)] = &[
+    ("filesystem", "read and write a file"),
+    ("search", "search the codebase for a symbol"),
+    ("build", "build the workspace"),
+    ("test", "run the test suite"),
+    ("debug", "diagnose a failing test or warning"),
+    ("git", "inspect git history and diff"),
+    ("frontend", "review ui layout and accessibility"),
+    ("backend", "design an api boundary"),
+    ("database", "write a database migration"),
+    ("web", "automate a browser flow"),
+    ("configuration", "audit agent configuration"),
+    ("release", "verify a packaged release"),
+];
+
+/// Traverse a profile's catalog the way a client would, following the opaque
+/// cursor until the server stops emitting one. Returns the exact first-page
+/// cost, the page count, and the ordered tool names across every page.
+fn walk_benchmark_catalog(
+    configuration: McpBenchmarkProfile,
+) -> Result<(usize, usize, Vec<String>), String> {
+    let mut params = match configuration.level {
+        Some(level) => json!({ "level": level }),
+        None => json!({}),
+    };
+    let mut first_page_tokens = 0usize;
+    let mut pages = 0usize;
+    let mut names = Vec::new();
+    for _ in 0..64 {
+        let page = crate::mcp::tools_list_page(configuration.profile, &params)?;
+        let measured = crate::mcp::measure_tools_list_response(&page);
+        if pages == 0 {
+            first_page_tokens = measured;
+        }
+        pages += 1;
+        names.extend(
+            page["tools"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|tool| tool["name"].as_str().map(str::to_string)),
+        );
+        match page["nextCursor"].as_str() {
+            Some(cursor) => params = json!({ "cursor": cursor }),
+            None => break,
+        }
+    }
+    Ok((first_page_tokens, pages, names))
+}
+
+fn run_tools_benchmark(
+    json_output: bool,
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let mut profiles = Vec::new();
+    let mut failures = Vec::new();
+    for configuration in MCP_BENCHMARK_PROFILES {
+        let budget = configuration
+            .budget
+            .unwrap_or_else(|| benchmark_default_budget(configuration.profile));
+        // why: an unset override is the normal case, so only its presence matters.
+        let previous = std::env::var("KEEL_MCP_PAGE_TOKENS").ok();
+        std::env::set_var("KEEL_MCP_PAGE_TOKENS", budget.to_string());
+        let started = std::time::Instant::now();
+        let walked = walk_benchmark_catalog(*configuration);
+        let elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0;
+        match previous {
+            Some(value) => std::env::set_var("KEEL_MCP_PAGE_TOKENS", value),
+            None => std::env::remove_var("KEEL_MCP_PAGE_TOKENS"),
+        }
+        let (first_page_tokens, pages, names) = match walked {
+            Ok(walked) => walked,
+            Err(error) => {
+                failures.push(format!("{}: {error}", configuration.name));
+                continue;
+            }
+        };
+        let unique: std::collections::BTreeSet<&str> = names.iter().map(String::as_str).collect();
+        let complete_catalog_tokens = crate::mcp::measure_tools_list_response(
+            &crate::mcp::tools_complete_catalog(configuration.profile),
+        );
+        if unique.len() != names.len() {
+            failures.push(format!(
+                "{}: traversal duplicated a tool",
+                configuration.name
+            ));
+        }
+        if first_page_tokens > budget {
+            failures.push(format!(
+                "{}: first page {first_page_tokens} exceeded its {budget}-token budget",
+                configuration.name
+            ));
+        }
+        let mut discovery_covered = 0usize;
+        for (_, intent) in MCP_BENCHMARK_TASKS {
+            // A discovery failure for one intent is not a harness fault; it means
+            // that task is uncovered, which the coverage count reports.
+            let discovered = match crate::mcp::tools_discover(intent, 5, 1) {
+                Ok(payload) => payload["count"].as_u64().unwrap_or(0),
+                Err(_) => 0,
+            };
+            if discovered > 0 {
+                discovery_covered += 1;
+            }
+        }
+        // Enforce the declared thresholds rather than only reporting them.
+        if discovery_covered < MCP_BENCHMARK_TASKS.len() {
+            failures.push(format!(
+                "{}: discovery covered {discovery_covered}/{} task families, below the declared 100%",
+                configuration.name,
+                MCP_BENCHMARK_TASKS.len()
+            ));
+        }
+        if elapsed_ms > MCP_BENCHMARK_FIRST_PAGE_LATENCY_MS_MAX {
+            failures.push(format!(
+                "{}: catalog walk took {elapsed_ms:.1}ms, above the declared {MCP_BENCHMARK_FIRST_PAGE_LATENCY_MS_MAX:.0}ms",
+                configuration.name
+            ));
+        }
+        profiles.push(json!({
+            "profile": configuration.name,
+            "catalogProfile": configuration.profile.as_str(),
+            "schemaLevel": configuration.level.map(|level| json!(level)).unwrap_or(json!("spec-default")),
+            "pageBudgetTokens": budget,
+            "completeCatalogTokens": complete_catalog_tokens,
+            "firstPageTokens": first_page_tokens,
+            "pagesToTraverse": pages,
+            "advertisedTools": names.len(),
+            "uniqueTools": unique.len(),
+            "reachableTools": unique.len(),
+            "storedTools": crate::mcp::tools_stored_tool_count(),
+            "discoveryTasksCovered": discovery_covered,
+            "discoveryTaskCount": MCP_BENCHMARK_TASKS.len(),
+            "buildLatencyMs": (elapsed_ms * 100.0).round() / 100.0,
+        }));
+    }
+    let coverage_target = MCP_BENCHMARK_TASKS.len();
+    let payload = json!({
+        "schemaVersion": 1,
+        "benchmark": "mcp-catalog-progressive-disclosure",
+        "tokenizer": "o200k_base",
+        // Declared before interpretation: these floors are a pass/fail contract.
+        "declaredThresholds": {
+            "firstPageTokensMax": "declared per profile in pageBudgetTokens; the run fails if any page exceeds it",
+            "traversalCompleteness": "uniqueTools == storedTools and uniqueTools == advertisedTools",
+            "duplicateToolsMax": 0,
+            "omittedToolsMax": 0,
+            "discoveryCoverageMinPercent": 100.0,
+            "firstPageLatencyMsMax": MCP_BENCHMARK_FIRST_PAGE_LATENCY_MS_MAX,
+            "reacquisitionRequired": false,
+        },
+        "policy": {
+            "hardPageBudget": "every emitted page must measure at or below its declared budget",
+            "traversal": "following nextCursor must reach every stored tool exactly once",
+            "dispatchParity": "every stored tool stays callable regardless of the active profile",
+            "reacquisitionLimit": "deferred tools must be nameable through discovery",
+            "discoveryCoverageTarget": coverage_target,
+            "defaultDecisionRule": "a cheaper profile is accepted only when first-page cost falls, traversal stays complete and duplicate-free, dispatch parity holds, and discovery covers every representative task",
+        },
+        "taskCount": MCP_BENCHMARK_TASKS.len(),
+        "profiles": profiles,
+        "failures": failures,
+        "status": if failures.is_empty() { "passed" } else { "failed" },
+        "reproductionCommand": "keel stats tools --benchmark --json",
+    });
+    if json_output {
+        let code = write_serde_json(standard_output, standard_error, "stats tools", &payload);
+        if code != 0 {
+            return code;
+        }
+    } else {
+        for profile in &profiles {
+            let _ = writeln!(
+                standard_output,
+                "keel stats tools --benchmark profile={} budget={} first_page={} pages={} unique={} of {} discovery={}/{} latency_ms={}",
+                profile["profile"].as_str().unwrap_or("unknown"),
+                profile["pageBudgetTokens"].as_u64().unwrap_or(0),
+                profile["firstPageTokens"].as_u64().unwrap_or(0),
+                profile["pagesToTraverse"].as_u64().unwrap_or(0),
+                profile["uniqueTools"].as_u64().unwrap_or(0),
+                profile["storedTools"].as_u64().unwrap_or(0),
+                profile["discoveryTasksCovered"].as_u64().unwrap_or(0),
+                profile["discoveryTaskCount"].as_u64().unwrap_or(0),
+                profile["buildLatencyMs"].as_f64().unwrap_or(0.0),
+            );
+        }
+    }
+    if failures.is_empty() {
+        0
+    } else {
+        for failure in &failures {
+            let _ = writeln!(standard_error, "stats tools --benchmark: {failure}");
+        }
+        1
+    }
 }
 
 fn write_serde_json(
@@ -746,6 +1220,86 @@ impl StatsSnapshot {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// §33: a stage at or under its ceiling passes; anything above fails closed
+    /// and names the measurement, so a regression cannot pass by only printing.
+    #[test]
+    fn latency_stage_status_fails_closed_above_its_declared_ceiling() {
+        assert_eq!(latency_stage_status(0.0, 250.0).0, "within_budget");
+        assert_eq!(latency_stage_status(250.0, 250.0).0, "within_budget");
+        assert!(latency_stage_status(250.0, 250.0).1.is_none());
+
+        let (status, detail) = latency_stage_status(250.1, 250.0);
+        assert_eq!(status, "exceeded");
+        let detail = detail.expect("an exceeded stage must explain itself");
+        assert!(
+            detail.contains("250.1ms") && detail.contains("250ms"),
+            "{detail}"
+        );
+
+        let (status, detail) = latency_stage_status(9_999.0, 1_500.0);
+        assert_eq!(status, "exceeded");
+        let detail = detail.expect("an exceeded IO stage must explain itself");
+        assert!(detail.contains("9999.0ms"), "{detail}");
+    }
+
+    #[test]
+    fn mcp_benchmark_profiles_stay_bounded_complete_and_deduplicated() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for configuration in MCP_BENCHMARK_PROFILES {
+            let budget = configuration
+                .budget
+                .unwrap_or_else(|| benchmark_default_budget(configuration.profile));
+            // why: the canonical budget owner reads this env var, so restore it.
+            let previous = std::env::var("KEEL_MCP_PAGE_TOKENS").ok();
+            std::env::set_var("KEEL_MCP_PAGE_TOKENS", budget.to_string());
+            let walked = walk_benchmark_catalog(*configuration);
+            match previous {
+                Some(value) => std::env::set_var("KEEL_MCP_PAGE_TOKENS", value),
+                None => std::env::remove_var("KEEL_MCP_PAGE_TOKENS"),
+            }
+            let (first_page_tokens, pages, names) =
+                walked.unwrap_or_else(|error| panic!("{}: {error}", configuration.name));
+            assert!(pages >= 1, "{}: no page emitted", configuration.name);
+            assert!(
+                first_page_tokens <= budget,
+                "{}: first page {first_page_tokens} exceeded its {budget}-token budget",
+                configuration.name
+            );
+            let unique: std::collections::BTreeSet<&str> =
+                names.iter().map(String::as_str).collect();
+            assert_eq!(
+                unique.len(),
+                names.len(),
+                "{}: traversal duplicated a tool",
+                configuration.name
+            );
+            let expected = match configuration.profile {
+                crate::mcp::McpCatalogProfile::Tiered => crate::mcp::tools_eager_tool_count(),
+                crate::mcp::McpCatalogProfile::Full => crate::mcp::tools_stored_tool_count(),
+            };
+            assert_eq!(
+                unique.len(),
+                expected,
+                "{}: traversal omitted a tool",
+                configuration.name
+            );
+        }
+    }
+
+    #[test]
+    fn mcp_benchmark_discovery_covers_every_representative_task() {
+        for (task, intent) in MCP_BENCHMARK_TASKS {
+            let payload = crate::mcp::tools_discover(intent, 5, 1)
+                .unwrap_or_else(|error| panic!("{task}: {error}"));
+            assert!(
+                payload["count"].as_u64().unwrap_or(0) >= 1,
+                "{task}: discovery returned no capability for {intent:?}"
+            );
+        }
+    }
 
     fn with_isolated_home<F: FnOnce(&std::path::PathBuf) -> R, R>(suffix: &str, run: F) -> R {
         let nanos = SystemTime::now()

@@ -862,7 +862,7 @@ pub fn run_command_inherit(
     }
 }
 
-fn command_timeout() -> std::time::Duration {
+pub(crate) fn command_timeout() -> std::time::Duration {
     let seconds = env::var("KEEL_COMMAND_TIMEOUT_SECS")
         .ok()
         .and_then(|value| value.trim().parse::<u64>().ok())

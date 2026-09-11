@@ -1898,6 +1898,11 @@ mod tests {
     #[test]
     fn default_persist_writes_to_global_lane_not_cwd() {
         // Unqualified --persist must never create design-system/ inside cwd.
+        // Holds process-global lock while mutating process-global home and cwd
+        // to prevent races with concurrent tests resolving their own homes.
+        let _guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let catalog = repo_catalog_path();
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1912,6 +1917,7 @@ mod tests {
         fs::create_dir_all(&cwd).expect("cwd");
         fs::create_dir_all(&home).expect("home");
         let prev = std::env::var_os("CLAUDE_TARGET_OVERRIDE");
+        let _home_precedence = crate::test_support::HomePrecedenceGuard::clear_keel_home();
         std::env::set_var("CLAUDE_TARGET_OVERRIDE", &home);
         let prev_cwd = std::env::current_dir().ok();
         std::env::set_current_dir(&cwd).expect("chdir");

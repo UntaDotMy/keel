@@ -12,14 +12,44 @@ use chrono::{DateTime, NaiveDate, Utc};
 use serde::Deserialize;
 use serde_json::Value;
 
+/// Fallback window for an externally fresh source whose type declares none.
 pub(crate) const DEFAULT_MAX_AGE_DAYS: i64 = 90;
+
+/// Per-source-type freshness windows. The plan forbids one universal window for
+/// every fact: evidence whose subject changes fast must be re-checked sooner
+/// than evidence that describes a released artifact.
+///
+/// - `official-doc`: version-bound. Documentation describes released behavior,
+///   so the window is long enough to cover a release cadence.
+/// - `repository`: live state. A repository's default branch moves continuously,
+///   so a shallow window is used.
+/// - `issue`: rapid. Issue status is the fastest-changing evidence Keel reads.
+fn default_window_days(source_type: &str) -> i64 {
+    match source_type {
+        "official-doc" => 90,
+        "repository" => 30,
+        "issue" => 7,
+        _ => DEFAULT_MAX_AGE_DAYS,
+    }
+}
 
 type Issues = Vec<String>;
 type Uses<'a> = BTreeSet<&'a str>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct ResearchPolicy {
-    pub max_age_days: i64,
+    /// Operator override applied to every externally fresh source. When unset,
+    /// each source type uses its own declared window.
+    pub max_age_days: Option<i64>,
+}
+
+impl ResearchPolicy {
+    /// The freshness window for one source type: the explicit override when the
+    /// operator set one, otherwise the type's declared window.
+    fn window_days_for(&self, source_type: &str) -> i64 {
+        self.max_age_days
+            .unwrap_or_else(|| default_window_days(source_type))
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -53,25 +83,14 @@ impl ResearchPolicy {
             .map_err(|error| format!("read {}: {error}", policy_path.display()))?;
         let project: ProjectPolicyFile = toml::from_str(&body)
             .map_err(|error| format!("parse {}: {error}", policy_path.display()))?;
-        let max_age_days = project
-            .research
-            .max_age_days
-            .unwrap_or(DEFAULT_MAX_AGE_DAYS);
-        if max_age_days <= 0 {
+        let max_age_days = project.research.max_age_days;
+        if max_age_days.is_some_and(|days| days <= 0) {
             return Err(format!(
                 "{} research.max_age_days must be greater than zero; freshness cannot be disabled",
                 policy_path.display()
             ));
         }
         Ok(Self { max_age_days })
-    }
-}
-
-impl Default for ResearchPolicy {
-    fn default() -> Self {
-        Self {
-            max_age_days: DEFAULT_MAX_AGE_DAYS,
-        }
     }
 }
 
@@ -270,12 +289,13 @@ fn validate_freshness_class(check: FreshnessCheck<'_>, issues: &mut Issues) {
             }
             if let Some(retrieved_at) = check.retrieved_at {
                 let age = check.now.signed_duration_since(retrieved_at);
+                let window_days = check.policy.window_days_for(check.source_type);
                 if age.num_minutes() < -5 {
                     issues.push(format!("{} retrievedAt is in the future", check.id));
-                } else if age.num_days() > check.policy.max_age_days {
+                } else if age.num_days() > window_days {
                     issues.push(format!(
-                        "{} is stale (older than {} days); re-search required",
-                        check.id, check.policy.max_age_days
+                        "{} is stale for sourceType {} (older than {} days); re-search required",
+                        check.id, check.source_type, window_days
                     ));
                 }
             }
@@ -356,11 +376,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn project_freshness_defaults_to_ninety_days() {
+    fn project_freshness_defers_to_the_per_source_type_window() {
         let workspace = crate::test_support::unique_temp_dir("research-policy-default");
-        assert_eq!(
-            ResearchPolicy::load(&workspace).expect("load default policy"),
-            ResearchPolicy { max_age_days: 90 }
+        let policy = ResearchPolicy::load(&workspace).expect("load default policy");
+        assert_eq!(policy.max_age_days, None);
+
+        // The plan forbids one universal window: fast-moving evidence is
+        // re-checked sooner than version-bound documentation.
+        assert_eq!(policy.window_days_for("issue"), 7);
+        assert_eq!(policy.window_days_for("repository"), 30);
+        assert_eq!(policy.window_days_for("official-doc"), 90);
+        assert!(
+            policy.window_days_for("issue") < policy.window_days_for("repository"),
+            "issue state changes faster than a repository snapshot"
+        );
+        assert!(
+            policy.window_days_for("repository") < policy.window_days_for("official-doc"),
+            "a live repository moves faster than released documentation"
         );
     }
 
@@ -372,10 +404,13 @@ mod tests {
             "[research]\nmax_age_days = 30\n",
         )
         .expect("write project research policy");
-        assert_eq!(
-            ResearchPolicy::load(&workspace).expect("load configured policy"),
-            ResearchPolicy { max_age_days: 30 }
-        );
+        let configured = ResearchPolicy::load(&workspace).expect("load configured policy");
+        assert_eq!(configured.max_age_days, Some(30));
+        // An explicit override applies to every externally fresh source type.
+        for source_type in ["issue", "repository", "official-doc"] {
+            assert_eq!(configured.window_days_for(source_type), 30);
+        }
+
         fs::write(
             workspace.join("keel.filters.toml"),
             "[research]\nmax_age_days = 0\n",
@@ -384,5 +419,87 @@ mod tests {
         assert!(ResearchPolicy::load(&workspace)
             .expect_err("zero-day policy must fail")
             .contains("cannot be disabled"));
+    }
+
+    /// The window is enforced per source type, so evidence whose subject moves
+    /// fast is rejected sooner than version-bound documentation.
+    #[test]
+    fn per_source_type_windows_reject_fast_moving_evidence_sooner() {
+        let now = DateTime::parse_from_rfc3339("2026-09-11T00:00:00Z")
+            .expect("now")
+            .with_timezone(&Utc);
+        let retrieved_text = "2026-08-20T00:00:00Z";
+        let retrieved = DateTime::parse_from_rfc3339(retrieved_text)
+            .expect("retrieved")
+            .with_timezone(&Utc);
+        let source = |source_type: &str| {
+            serde_json::json!({
+                "sourceId": "SRC-001",
+                "sourceUrl": "https://example.invalid/spec",
+                "sourceType": source_type,
+                "retrievedAt": retrieved_text,
+                "support": "Cited for the freshness window test.",
+                "freshness": "fresh",
+                "usedBy": ["REQ-001"],
+            })
+        };
+        let issue_source = source("issue");
+        let doc_source = source("official-doc");
+        let repo_source = source("repository");
+
+        // 22 days old: past the 7-day issue window, inside the 90-day doc window.
+        let mut issue_issues = Vec::new();
+        validate_freshness_class(
+            FreshnessCheck {
+                source_type: "issue",
+                freshness: "fresh",
+                source: &issue_source,
+                retrieved_at: Some(retrieved),
+                policy: ResearchPolicy::default(),
+                now,
+                id: "SRC-001",
+            },
+            &mut issue_issues,
+        );
+        assert!(
+            issue_issues.iter().any(|issue| issue.contains("stale")),
+            "an issue older than its 7-day window must be stale: {issue_issues:?}"
+        );
+
+        let mut doc_issues = Vec::new();
+        validate_freshness_class(
+            FreshnessCheck {
+                source_type: "official-doc",
+                freshness: "fresh",
+                source: &doc_source,
+                retrieved_at: Some(retrieved),
+                policy: ResearchPolicy::default(),
+                now,
+                id: "SRC-002",
+            },
+            &mut doc_issues,
+        );
+        assert!(
+            doc_issues.is_empty(),
+            "documentation inside its 90-day window stays fresh: {doc_issues:?}"
+        );
+
+        let mut repo_issues = Vec::new();
+        validate_freshness_class(
+            FreshnessCheck {
+                source_type: "repository",
+                freshness: "fresh",
+                source: &repo_source,
+                retrieved_at: Some(retrieved),
+                policy: ResearchPolicy::default(),
+                now,
+                id: "SRC-003",
+            },
+            &mut repo_issues,
+        );
+        assert!(
+            repo_issues.is_empty(),
+            "a repository snapshot inside its 30-day window stays fresh: {repo_issues:?}"
+        );
     }
 }

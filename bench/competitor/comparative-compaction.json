@@ -1,17 +1,74 @@
 {
   "comparison_suite": "adaptive_compaction_and_catalog_efficiency",
   "tokenizer": "o200k_base",
-  "generated_at": "2026-09-09T05:22:00Z",
+  "generated_at": "2026-09-10T14:24:55Z",
   "pipeline_eval": {
     "command": "keel eval --json",
     "total_raw_tokens": 2218,
     "total_compact_tokens": 1613,
     "total_saved_tokens": 605,
     "overall_savings_percent": 27.28,
-    "break_even_guarantee": "Strictly non-negative savings: if compact tokens >= raw tokens, raw output is passed through with 0 tokens inflated."
+    "evidence_retention_percent": 100.0,
+    "failure_evidence_retention_percent": 100.0,
+    "reacquisition_rate_percent": 0.0,
+    "break_even_guarantee": "Strictly non-negative savings: if compact tokens >= raw tokens, raw output is passed through with 0 tokens inflated.",
+    "reliability_guarantee": "Each fixture declares the critical evidence its visible result must keep; a reduction that drops failure identity or hides the outcome counts as a regression even when it saves more tokens."
   },
-  "mcp_catalog_profiles": {
-    "measurement": "TokenMeter::count_text of tools/list JSON-RPC wire frame",
+  "mcp_catalog_profile_benchmark": {
+    "command": "keel stats tools --benchmark --json",
+    "policy": "every emitted page must measure at or below its declared budget, traversal must reach every stored tool exactly once, and discovery must name a capability for each representative task",
+    "task_families": 12,
+    "profiles": [
+      {
+        "profile": "full",
+        "page_budget_tokens": 4000,
+        "first_page_tokens": 1443,
+        "pages_to_traverse": 1,
+        "unique_tools": 37,
+        "stored_tools": 37,
+        "discovery_coverage": "12/12"
+      },
+      {
+        "profile": "core",
+        "page_budget_tokens": 1200,
+        "first_page_tokens": 671,
+        "pages_to_traverse": 1,
+        "unique_tools": 17,
+        "stored_tools": 37,
+        "discovery_coverage": "12/12"
+      },
+      {
+        "profile": "core+pagination",
+        "page_budget_tokens": 600,
+        "first_page_tokens": 599,
+        "pages_to_traverse": 6,
+        "unique_tools": 17,
+        "stored_tools": 37,
+        "discovery_coverage": "12/12"
+      },
+      {
+        "profile": "core+progressive-discovery",
+        "page_budget_tokens": 1200,
+        "first_page_tokens": 671,
+        "pages_to_traverse": 1,
+        "unique_tools": 17,
+        "stored_tools": 37,
+        "discovery_coverage": "12/12"
+      },
+      {
+        "profile": "core+progressive-discovery+compact-schemas",
+        "page_budget_tokens": 600,
+        "first_page_tokens": 583,
+        "pages_to_traverse": 3,
+        "unique_tools": 17,
+        "stored_tools": 37,
+        "discovery_coverage": "12/12"
+      }
+    ]
+  },
+  "mcp_catalog_ledger_surface": {
+    "measurement": "TokenMeter::count_text over the complete catalog a profile would advertise, as the fixed-context ledger ratifies it",
+    "note": "This is the ratified budget surface, not the emitted handshake. The default handshake emits level-0 compact representations and measures 671 tokens; see mcp_catalog_profile_benchmark for the per-profile emitted cost.",
     "profiles": [
       {
         "profile": "full",
@@ -26,10 +83,8 @@
         "total_tools": 37,
         "eager_tools": 17,
         "deferred_tools": 20,
-        "catalog_tokens": 1225,
-        "ratified_budget": 1348,
-        "token_reduction": 1704,
-        "reduction_percent": 58.18
+        "catalog_tokens": 1240,
+        "ratified_budget": 1364
       }
     ],
     "dispatch_parity": "All 37 tools (eager + deferred) remain directly dispatchable in tools/call regardless of active catalog profile."
@@ -121,19 +176,25 @@
       "all-skills-eager",
       "metadata-only",
       "metadata+selective-activation",
-      "metadata+cost-aware-selection"
+      "metadata+cost-aware-selection",
+      "metadata+cost-aware-selection+resource-on-demand"
     ],
     "measured_fields": [
       "selection_accuracy",
       "activation_precision",
       "activation_recall",
+      "wrong_activation_rate",
+      "missed_activation_rate",
       "input_tokens",
       "cached_input_tokens",
+      "reacquisition_calls",
       "turns",
       "latency",
       "task_success",
       "wrong_skill_activations",
       "conflict_rate"
-    ]
+    ],
+    "cost_accounting": "model-visible skill tokens are counted separately from local routing CPU time; bundled resource cost is measured from the real files",
+    "known_limitation": "every positive fixture is modeled as needing its bundled resources, so the on-demand profile ties the eager profile on tokens here and pays extra turns"
   }
 }

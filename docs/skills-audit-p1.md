@@ -84,3 +84,11 @@
 ## Pin + hash (remote)
 
 N/A for current tree (local install only). Future remote skill bodies: require exact pin (URL + version/commit) and sha256 match before load; fail closed on mismatch.
+
+## Lint report fields
+
+`keel skill-lint --json` reports `unreachableResources` for bundled files that
+cannot be reached from `SKILL.md` or a reachable UTF-8 resource. It also reports
+`resourceCycles` as deterministic paths when text resources point back to an
+ancestor. Both findings are warnings: lint does not delete user-owned files,
+and cycles may be intentional indexes that still need human review.

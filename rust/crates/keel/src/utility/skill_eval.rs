@@ -418,6 +418,7 @@ enum BenchmarkProfile {
     MetadataOnly,
     MetadataSelective,
     MetadataCostAware,
+    MetadataCostAwareOnDemand,
 }
 
 impl BenchmarkProfile {
@@ -427,7 +428,24 @@ impl BenchmarkProfile {
             Self::MetadataOnly => "metadata-only",
             Self::MetadataSelective => "metadata+selective-activation",
             Self::MetadataCostAware => "metadata+cost-aware-selection",
+            Self::MetadataCostAwareOnDemand => "metadata+cost-aware-selection+resource-on-demand",
         }
+    }
+
+    /// Whether this profile activates only selected skills (rather than all or
+    /// none), which is what makes activation cost and turn count meaningful.
+    fn selects_skills(self) -> bool {
+        matches!(
+            self,
+            Self::MetadataSelective | Self::MetadataCostAware | Self::MetadataCostAwareOnDemand
+        )
+    }
+
+    /// Whether this profile pulls a skill's referenced resources eagerly with
+    /// the body. On-demand profiles load the body only and fetch a resource in
+    /// a later turn, which is the reacquisition the benchmark must count.
+    fn loads_resources_eagerly(self) -> bool {
+        matches!(self, Self::MetadataSelective | Self::MetadataCostAware)
     }
 }
 
@@ -444,10 +462,17 @@ fn run_skill_selection_benchmark(
         BenchmarkProfile::MetadataOnly,
         BenchmarkProfile::MetadataSelective,
         BenchmarkProfile::MetadataCostAware,
+        BenchmarkProfile::MetadataCostAwareOnDemand,
     ];
     let mut profile_values = Vec::new();
+    let resource_costs = benchmark_resource_costs(corpus_dir, &catalog);
     for profile in profiles {
-        profile_values.push(skill_benchmark_profile_value(profile, skills, &catalog));
+        profile_values.push(skill_benchmark_profile_value(
+            profile,
+            skills,
+            &catalog,
+            &resource_costs,
+        ));
     }
     let payload = Value::Object(vec![
         ("schemaVersion".into(), Value::Number("1".into())),
@@ -482,9 +507,33 @@ fn run_skill_selection_benchmark(
                     ),
                 ),
                 (
+                    "costAccounting".into(),
+                    Value::String(
+                        "model-visible skill tokens only; local routing CPU is reported as latencyMs and never counted as model input".into(),
+                    ),
+                ),
+                (
+                    "resourcePolicy".into(),
+                    Value::String(
+                        "selecting profiles carry the bounded inline brief; eager profiles also preload the measured bundled resources, while the on-demand profile fetches them in a later turn and records a reacquisition call".into(),
+                    ),
+                ),
+                (
+                    "reacquisitionLimit".into(),
+                    Value::String(
+                        "an on-demand default is accepted only when its reacquisition turns stay within the declared turn budget".into(),
+                    ),
+                ),
+                (
                     "defaultDecisionRule".into(),
                     Value::String(
                         "cost-aware profile requires material token reduction, no unacceptable task-success or selection regression, and acceptable turn/latency overhead".into(),
+                    ),
+                ),
+                (
+                    "knownLimitation".into(),
+                    Value::String(
+                        "every positive fixture is modeled as needing its bundled resources, so the on-demand profile ties the eager profile on tokens here and pays extra turns; a corpus with optional resources would show the reduction it can buy".into(),
                     ),
                 ),
             ]),
@@ -517,6 +566,7 @@ fn skill_benchmark_profile_value(
     profile: BenchmarkProfile,
     skills: &[SkillTerms],
     catalog: &[SkillCatalogEntry],
+    resource_costs: &[usize],
 ) -> Value {
     let started = Instant::now();
     let metadata_tokens = skill_catalog_metadata_tokens(catalog);
@@ -532,6 +582,8 @@ fn skill_benchmark_profile_value(
     let mut accurate_selections = 0usize;
     let mut recalled_tasks = 0usize;
     let mut conflicts = 0usize;
+    let mut missed_activations = 0usize;
+    let mut reacquisition_calls = 0usize;
     let mut total_input_tokens = 0usize;
     let mut peak_context_tokens = 0usize;
     let mut turns = 0usize;
@@ -549,6 +601,8 @@ fn skill_benchmark_profile_value(
                 .count();
             if expected_positive && correct > 0 {
                 recalled_tasks += 1;
+            } else if expected_positive {
+                missed_activations += 1;
             }
             let wrong = if expected_positive {
                 names
@@ -574,29 +628,45 @@ fn skill_benchmark_profile_value(
             let activated_tokens = match profile {
                 BenchmarkProfile::AllSkillsEager => eager_tokens,
                 BenchmarkProfile::MetadataOnly => metadata_tokens,
-                BenchmarkProfile::MetadataSelective | BenchmarkProfile::MetadataCostAware => {
-                    metadata_tokens
-                        + names
-                            .iter()
-                            .filter_map(|name| {
-                                catalog
-                                    .iter()
-                                    .find(|entry| &entry.name == name)
-                                    .map(|entry| entry.activation_cost_tokens.max(1))
-                            })
-                            .sum::<usize>()
+                _ => {
+                    let mut selected_tokens = metadata_tokens;
+                    for name in &names {
+                        let Some(index) = catalog.iter().position(|entry| &entry.name == name)
+                        else {
+                            continue;
+                        };
+                        // Selecting profiles carry the inline brief; eager ones
+                        // also preload resources, the on-demand one defers them.
+                        selected_tokens += catalog[index].activation_cost_tokens.max(1);
+                        if profile.loads_resources_eagerly() {
+                            selected_tokens += resource_costs.get(index).copied().unwrap_or(0);
+                        }
+                    }
+                    selected_tokens
                 }
             };
             total_input_tokens += activated_tokens;
             peak_context_tokens = peak_context_tokens.max(activated_tokens);
-            turns += match profile {
-                BenchmarkProfile::MetadataSelective | BenchmarkProfile::MetadataCostAware
-                    if !names.is_empty() =>
-                {
-                    2
+            if profile.selects_skills() && !names.is_empty() {
+                turns += 2;
+                if !profile.loads_resources_eagerly() {
+                    // The deferred resource arrives in its own turn, so the
+                    // context carries the brief plus that one resource.
+                    let deferred = names
+                        .iter()
+                        .filter_map(|name| catalog.iter().position(|entry| &entry.name == name))
+                        .map(|index| resource_costs.get(index).copied().unwrap_or(0))
+                        .sum::<usize>();
+                    if deferred > 0 {
+                        reacquisition_calls += 1;
+                        turns += 1;
+                        total_input_tokens += deferred;
+                        peak_context_tokens = peak_context_tokens.max(activated_tokens + deferred);
+                    }
                 }
-                _ => 1,
-            };
+            } else {
+                turns += 1;
+            }
         }
     }
     let task_runs = TRIGGER_FIXTURES.len() * BENCHMARK_RUNS_PER_TASK;
@@ -660,6 +730,26 @@ fn skill_benchmark_profile_value(
                     Value::Number(wrong_activations.to_string()),
                 ),
                 (
+                    "wrongActivationRate".into(),
+                    Value::Number(format_percent(wrong_activations, task_runs)),
+                ),
+                (
+                    "missedActivationRate".into(),
+                    Value::Number(format_percent(missed_activations, positive_runs.max(1))),
+                ),
+                (
+                    "reacquisitionCalls".into(),
+                    Value::Number(reacquisition_calls.to_string()),
+                ),
+                (
+                    "resourceCostTokensMeasured".into(),
+                    Value::Number(resource_costs.iter().sum::<usize>().to_string()),
+                ),
+                (
+                    "localRoutingCpuMs".into(),
+                    Value::Number(format!("{latency_ms:.3}")),
+                ),
+                (
                     "conflictRate".into(),
                     Value::Number(format_percent(conflicts, task_runs)),
                 ),
@@ -691,10 +781,55 @@ fn benchmark_activations(
             })
             .into_iter()
             .collect(),
-        BenchmarkProfile::MetadataCostAware => resolve_skill_selection(prompt, skills, catalog)
-            .map(|found| found.name)
-            .into_iter()
-            .collect(),
+        BenchmarkProfile::MetadataCostAware | BenchmarkProfile::MetadataCostAwareOnDemand => {
+            resolve_skill_selection(prompt, skills, catalog)
+                .map(|found| found.name)
+                .into_iter()
+                .collect()
+        }
+    }
+}
+
+/// Measure each skill's bundled resource cost with the authoritative
+/// tokenizer. Progressive disclosure loads these only when a body points at
+/// them, so the benchmark needs their real size to price eager preloading
+/// against an on-demand fetch. Unreadable or absent directories cost nothing.
+fn benchmark_resource_costs(corpus_dir: &Path, catalog: &[SkillCatalogEntry]) -> Vec<usize> {
+    catalog
+        .iter()
+        .map(|entry| {
+            ["references", "scripts", "assets", "examples"]
+                .iter()
+                .map(|directory| {
+                    let root = corpus_dir.join(&entry.name).join(directory);
+                    let mut files = Vec::new();
+                    collect_resource_files(&root, &mut files);
+                    files
+                        .iter()
+                        // A binary or unreadable bundled file has no text cost.
+                        .filter_map(|path| std::fs::read_to_string(path).ok())
+                        .map(|text| TokenMeter::count_text(&text))
+                        .sum::<usize>()
+                })
+                .sum()
+        })
+        .collect()
+}
+
+fn collect_resource_files(directory: &Path, out: &mut Vec<std::path::PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_dir() {
+            collect_resource_files(&path, out);
+        } else if file_type.is_file() {
+            out.push(path);
+        }
     }
 }
 
@@ -773,6 +908,75 @@ mod tests {
     use super::*;
     use crate::utility::skill_match::SkillTerms;
     use std::collections::HashSet;
+
+    /// The plan's five disclosure strategies must all be measurable, and the
+    /// on-demand profile must be the only one that pays reacquisition turns.
+    #[test]
+    fn every_benchmark_profile_is_distinct_and_measured() {
+        let names: Vec<&str> = [
+            BenchmarkProfile::AllSkillsEager,
+            BenchmarkProfile::MetadataOnly,
+            BenchmarkProfile::MetadataSelective,
+            BenchmarkProfile::MetadataCostAware,
+            BenchmarkProfile::MetadataCostAwareOnDemand,
+        ]
+        .iter()
+        .map(|profile| profile.name())
+        .collect();
+        let unique: HashSet<&&str> = names.iter().collect();
+        assert_eq!(unique.len(), names.len(), "profile names must be unique");
+        assert_eq!(names.len(), 5, "the plan requires five configurations");
+
+        assert!(!BenchmarkProfile::AllSkillsEager.selects_skills());
+        assert!(!BenchmarkProfile::MetadataOnly.selects_skills());
+        assert!(BenchmarkProfile::MetadataCostAware.selects_skills());
+        assert!(BenchmarkProfile::MetadataCostAwareOnDemand.selects_skills());
+
+        assert!(BenchmarkProfile::MetadataCostAware.loads_resources_eagerly());
+        assert!(!BenchmarkProfile::MetadataCostAwareOnDemand.loads_resources_eagerly());
+    }
+
+    /// Resource cost must be measured from the real bundled files, not assumed,
+    /// so an eager profile cannot appear cheaper than an on-demand one.
+    #[test]
+    fn measured_resource_cost_matches_the_bundled_tree() {
+        let skills_dir = std::env::temp_dir().join(format!(
+            "keel-skill-eval-resource-cost-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&skills_dir);
+        let skill_dir = skills_dir.join("sample-skill");
+        std::fs::create_dir_all(skill_dir.join("references")).expect("create skill references");
+        std::fs::write(
+            skill_dir.join("references/deep.md"),
+            "deep reference guidance for the sample skill\n",
+        )
+        .expect("write reference");
+        let catalog = vec![SkillCatalogEntry {
+            name: "sample-skill".to_string(),
+            description: "Sample".to_string(),
+            when_to_use: "Sample".to_string(),
+            use_count: 0,
+            related_skills: Vec::new(),
+            capabilities: Vec::new(),
+            version: String::new(),
+            dependencies: Vec::new(),
+            activation_cost_tokens: 7,
+            task_criticality: 0.5,
+            historical_success: 0.5,
+        }];
+        let costs = benchmark_resource_costs(&skills_dir, &catalog);
+        assert_eq!(costs.len(), 1);
+        assert!(
+            costs[0] > 0,
+            "bundled reference must contribute measured resource cost"
+        );
+        assert_eq!(
+            costs[0],
+            TokenMeter::count_text("deep reference guidance for the sample skill\n")
+        );
+        let _ = std::fs::remove_dir_all(&skills_dir);
+    }
 
     fn terms(name: &str, words: &[&str]) -> SkillTerms {
         let all: HashSet<String> = words.iter().map(|w| w.to_string()).collect();

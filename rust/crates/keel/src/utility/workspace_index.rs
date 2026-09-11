@@ -17,7 +17,7 @@ use serde::Serialize;
 use crate::runtime::{display_path, resolve_claude_home};
 
 const SCHEMA_VERSION: &str = "1";
-const MAX_FILES: usize = 20_000;
+pub(crate) const MAX_FILES: usize = 20_000;
 const MAX_FILE_BYTES: u64 = 2_000_000;
 const MAX_CHUNK_BYTES: usize = 32_000;
 const MAX_SEARCH_RESULTS: usize = 50;
@@ -47,7 +47,11 @@ pub struct RefreshReport {
     pub files_skipped_limit: u64,
     pub files_skipped_too_large: u64,
     pub files_skipped_unreadable: u64,
+    /// True when the deterministic file ceiling excluded discovered files.
+    pub truncated: bool,
     pub coverage_complete: bool,
+    /// True when a concurrent writer prevented this refresh from publishing.
+    pub lock_degraded: bool,
     pub files_added: u64,
     pub files_updated: u64,
     pub files_removed: u64,
@@ -73,6 +77,7 @@ pub struct IndexStatus {
     pub files_skipped_limit: u64,
     pub files_skipped_too_large: u64,
     pub files_skipped_unreadable: u64,
+    pub truncated: bool,
     pub coverage_complete: bool,
 }
 
@@ -114,6 +119,7 @@ struct SourcePathCollection {
     discovered: u64,
     skipped_limit: u64,
     skipped_unreadable: u64,
+    unreadable_prefixes: BTreeSet<String>,
 }
 
 #[derive(Debug, Default)]
@@ -121,6 +127,13 @@ struct SnapshotCollection {
     snapshots: Vec<SourceSnapshot>,
     skipped_too_large: u64,
     skipped_unreadable: u64,
+    unreadable_paths: BTreeSet<String>,
+}
+
+#[derive(Debug, Default)]
+struct SourceCollection {
+    sources: Vec<SourceFile>,
+    unreadable_paths: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -162,9 +175,24 @@ pub fn refresh(
     let path = database_path(&root, claude_home_flag)?;
     crate::utility::sqlite::create_parent_directory(&path)
         .map_err(|error| format!("create index directory: {error}"))?;
-    let mut connection = open_connection(&path)?;
-    ensure_schema(&connection)?;
-    let existing = existing_file_metadata(&connection)?;
+    let mut connection = match open_connection(&path) {
+        Ok(connection) => connection,
+        Err(IndexAccessError::Locked) => {
+            return Ok(degraded_refresh_report(&root));
+        }
+        Err(error) => return Err(error.to_string()),
+    };
+    if let Err(error) = ensure_schema(&connection) {
+        if matches!(error, IndexAccessError::Locked) {
+            return Ok(degraded_refresh_report(&root));
+        }
+        return Err(error.to_string());
+    }
+    let existing = match existing_file_metadata(&connection) {
+        Ok(existing) => existing,
+        Err(IndexAccessError::Locked) => return Ok(degraded_refresh_report(&root)),
+        Err(error) => return Err(error.to_string()),
+    };
     let previous_commit = meta(&connection, "indexed_commit");
     let indexed_commit = git_head(&root);
     let commit_changed = previous_commit.as_deref() != Some(indexed_commit.as_str());
@@ -173,18 +201,22 @@ pub fn refresh(
         discovered,
         skipped_limit,
         skipped_unreadable: path_unreadable,
+        unreadable_prefixes,
     } = collect_source_paths(&root)?;
     let SnapshotCollection {
         snapshots,
         skipped_too_large,
         skipped_unreadable,
+        unreadable_paths: snapshot_unreadable_paths,
     } = collect_source_snapshots(&root, &source_paths);
+    let mut unreadable_paths = snapshot_unreadable_paths;
     let mut report = RefreshReport {
         files_indexed: snapshots.len() as u64,
         files_discovered: discovered,
         files_skipped_limit: skipped_limit,
         files_skipped_too_large: skipped_too_large,
         files_skipped_unreadable: path_unreadable + skipped_unreadable,
+        truncated: skipped_limit > 0,
         coverage_complete: skipped_limit == 0
             && skipped_too_large == 0
             && path_unreadable == 0
@@ -220,27 +252,50 @@ pub fn refresh(
         })
         .map(|snapshot| root.join(&snapshot.path))
         .collect();
-    let (dirty_sources, dirty_unreadable) = collect_sources_from_paths(&root, dirty_paths)?;
-    report.files_skipped_unreadable += dirty_unreadable;
-    report.coverage_complete = report.coverage_complete && dirty_unreadable == 0;
+    let dirty_collection = collect_sources_from_paths(&root, dirty_paths)?;
+    let dirty_sources = dirty_collection.sources;
+    unreadable_paths.extend(dirty_collection.unreadable_paths);
+    report.files_skipped_unreadable = path_unreadable + unreadable_paths.len() as u64;
+    report.coverage_complete =
+        skipped_limit == 0 && skipped_too_large == 0 && report.files_skipped_unreadable == 0;
     let content_changed = dirty_sources.iter().any(|source| {
         existing
             .get(&source.path)
             .map(|stored| stored.hash != source.hash || stored.size != source.size)
             .unwrap_or(true)
     });
-    let active_paths: BTreeSet<String> = snapshots
+    let mut active_paths: BTreeSet<String> = snapshots
         .iter()
         .map(|snapshot| snapshot.path.clone())
         .collect();
+    active_paths.extend(unreadable_paths.iter().cloned());
+    for existing_path in existing.keys() {
+        if unreadable_prefixes
+            .iter()
+            .any(|prefix| path_is_under_prefix(existing_path, prefix))
+        {
+            active_paths.insert(existing_path.clone());
+        }
+    }
     let has_stale_paths = existing.keys().any(|path| !active_paths.contains(path));
 
     // With no content change or deletion, update metadata in place and preserve
     // symbols/chunks/edges as the incremental fast path.
-    if !force && !commit_changed && !content_changed && !has_stale_paths {
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| format!("begin workspace index metadata refresh: {error}"))?;
+    if !force
+        && !commit_changed
+        && !content_changed
+        && !has_stale_paths
+        && unreadable_paths.is_empty()
+    {
+        let transaction = match connection.transaction_with_behavior(TransactionBehavior::Immediate)
+        {
+            Ok(transaction) => transaction,
+            Err(error) if sqlite_lock_error(&error) => {
+                report.lock_degraded = true;
+                return Ok(report);
+            }
+            Err(error) => return Err(format!("begin workspace index metadata refresh: {error}")),
+        };
         for snapshot in &snapshots {
             transaction
                 .execute(
@@ -261,39 +316,50 @@ pub fn refresh(
                  ('files_skipped_limit', ?3),
                  ('files_skipped_too_large', ?4),
                  ('files_skipped_unreadable', ?5),
-                 ('coverage_complete', ?6)",
+                 ('truncated', ?6),
+                 ('coverage_complete', ?7)",
                 params![
                     now_millis().to_string(),
                     report.files_discovered.to_string(),
                     report.files_skipped_limit.to_string(),
                     report.files_skipped_too_large.to_string(),
                     report.files_skipped_unreadable.to_string(),
+                    report.truncated.to_string(),
                     report.coverage_complete.to_string(),
                 ],
             )
             .map_err(|error| format!("stamp metadata refresh: {error}"))?;
-        transaction
-            .commit()
-            .map_err(|error| format!("commit workspace index metadata refresh: {error}"))?;
+        if let Err(error) = transaction.commit() {
+            if sqlite_lock_error(&error) {
+                report.lock_degraded = true;
+                return Ok(report);
+            }
+            return Err(format!("commit workspace index metadata refresh: {error}"));
+        }
         return Ok(report);
     }
 
     // Content changes require the complete source set for relationship rebuilds;
     // unchanged files remain skipped by the record loop below.
-    let (sources, full_unreadable) =
-        if content_changed || force || commit_changed || has_stale_paths {
-            collect_sources_from_paths(
-                &root,
-                snapshots
-                    .iter()
-                    .map(|snapshot| root.join(&snapshot.path))
-                    .collect(),
-            )?
-        } else {
-            (dirty_sources, 0)
-        };
-    report.files_skipped_unreadable += full_unreadable;
-    report.coverage_complete = report.coverage_complete && full_unreadable == 0;
+    let source_collection = if content_changed || force || commit_changed || has_stale_paths {
+        collect_sources_from_paths(
+            &root,
+            snapshots
+                .iter()
+                .map(|snapshot| root.join(&snapshot.path))
+                .collect(),
+        )?
+    } else {
+        SourceCollection {
+            sources: dirty_sources,
+            unreadable_paths: BTreeSet::new(),
+        }
+    };
+    unreadable_paths.extend(source_collection.unreadable_paths);
+    let sources = source_collection.sources;
+    report.files_skipped_unreadable = path_unreadable + unreadable_paths.len() as u64;
+    report.coverage_complete =
+        skipped_limit == 0 && skipped_too_large == 0 && report.files_skipped_unreadable == 0;
     let files_changed = sources.iter().any(|source| {
         existing
             .get(&source.path)
@@ -305,9 +371,14 @@ pub fn refresh(
         return Ok(report);
     }
 
-    let transaction = connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|error| format!("begin workspace index refresh: {error}"))?;
+    let transaction = match connection.transaction_with_behavior(TransactionBehavior::Immediate) {
+        Ok(transaction) => transaction,
+        Err(error) if sqlite_lock_error(&error) => {
+            report.lock_degraded = true;
+            return Ok(report);
+        }
+        Err(error) => return Err(format!("begin workspace index refresh: {error}")),
+    };
     for source in &sources {
         let unchanged = existing
             .get(&source.path)
@@ -450,12 +521,15 @@ pub fn refresh(
         report.files_removed += 1;
     }
 
-    if force || files_changed {
+    // An incomplete walk must not discard relationships for files hidden by an
+    // unreadable path; rebuild the full edge set only after a complete walk.
+    if (force || files_changed) && unreadable_paths.is_empty() && unreadable_prefixes.is_empty() {
         transaction
             .execute("DELETE FROM edges", [])
             .map_err(|error| format!("clear workspace edges: {error}"))?;
     }
-    let path_set: BTreeSet<String> = sources.iter().map(|source| source.path.clone()).collect();
+    let mut path_set: BTreeSet<String> = sources.iter().map(|source| source.path.clone()).collect();
+    path_set.extend(active_paths.iter().cloned());
     for source in &sources {
         for import in &source.imports {
             if let Some(target) = resolve_import(&source.path, import, &path_set) {
@@ -562,7 +636,8 @@ pub fn refresh(
              ('files_skipped_limit', ?6),
              ('files_skipped_too_large', ?7),
              ('files_skipped_unreadable', ?8),
-             ('coverage_complete', ?9)",
+             ('truncated', ?9),
+             ('coverage_complete', ?10)",
             params![
                 generation.to_string(),
                 indexed_commit,
@@ -572,29 +647,22 @@ pub fn refresh(
                 report.files_skipped_limit.to_string(),
                 report.files_skipped_too_large.to_string(),
                 report.files_skipped_unreadable.to_string(),
+                report.truncated.to_string(),
                 report.coverage_complete.to_string(),
             ],
         )
         .map_err(|error| format!("stamp workspace index: {error}"))?;
-    transaction
-        .commit()
-        .map_err(|error| format!("commit workspace index: {error}"))?;
+    if let Err(error) = transaction.commit() {
+        if sqlite_lock_error(&error) {
+            report.lock_degraded = true;
+            return Ok(report);
+        }
+        return Err(format!("commit workspace index: {error}"));
+    }
     report.files_indexed = sources.len() as u64;
     report.generation = generation;
     report.indexed_commit = indexed_commit;
     Ok(report)
-}
-
-/// Compatibility search API retained for library callers while richer callers
-/// use `search_with_metadata`.
-#[allow(dead_code)]
-pub fn search(
-    workspace_root: &Path,
-    claude_home_flag: &str,
-    query: &str,
-    limit: usize,
-) -> Result<Vec<SearchHit>, String> {
-    search_filtered(workspace_root, claude_home_flag, query, limit, None)
 }
 
 pub fn search_with_metadata(
@@ -696,6 +764,9 @@ pub fn status(workspace_root: &Path, claude_home_flag: &str) -> Result<IndexStat
     let coverage_complete = meta(&connection, "coverage_complete")
         .map(|value| value == "true")
         .unwrap_or(false);
+    let truncated = meta(&connection, "truncated")
+        .map(|value| value == "true")
+        .unwrap_or(false);
     Ok(IndexStatus {
         database_path: path,
         workspace_root: root.clone(),
@@ -718,6 +789,7 @@ pub fn status(workspace_root: &Path, claude_home_flag: &str) -> Result<IndexStat
         files_skipped_unreadable: meta(&connection, "files_skipped_unreadable")
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or(0),
+        truncated,
         coverage_complete,
     })
 }
@@ -745,6 +817,9 @@ pub fn render_map(workspace_root: &Path, claude_home_flag: &str) -> Result<Strin
     let coverage_complete = meta(&connection, "coverage_complete")
         .map(|value| value == "true")
         .unwrap_or(false);
+    let truncated = meta(&connection, "truncated")
+        .map(|value| value == "true")
+        .unwrap_or(false);
     let mut lines = vec![
         "# SYSTEM_MAP".to_string(),
         String::new(),
@@ -761,8 +836,9 @@ pub fn render_map(workspace_root: &Path, claude_home_flag: &str) -> Result<Strin
         String::new(),
         "## Index Coverage".to_string(),
         format!(
-            "- coverage_complete: {} (discovered={}, indexed={}, skipped_limit={}, skipped_too_large={}, skipped_unreadable={})",
+            "- coverage_complete: {} (truncated={}, discovered={}, indexed={}, skipped_limit={}, skipped_too_large={}, skipped_unreadable={})",
             coverage_complete,
+            truncated,
             files_discovered,
             file_count,
             files_skipped_limit,
@@ -885,7 +961,7 @@ pub fn render_map(workspace_root: &Path, claude_home_flag: &str) -> Result<Strin
     Ok(lines.join("\n"))
 }
 
-fn ensure_schema(connection: &Connection) -> Result<(), String> {
+fn ensure_schema(connection: &Connection) -> Result<(), IndexAccessError> {
     connection
         .execute_batch(
             "CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -949,10 +1025,12 @@ fn ensure_schema(connection: &Connection) -> Result<(), String> {
              );
              INSERT OR IGNORE INTO meta(key, value) VALUES('schema_version', '1');",
         )
-        .map_err(|error| format!("ensure workspace index schema: {error}"))?;
+        .map_err(|error| index_access_error("ensure workspace index schema", &error))?;
     let version = meta(connection, "schema_version").unwrap_or_default();
     if version != SCHEMA_VERSION {
-        return Err(format!("unsupported workspace index schema {version:?}"));
+        return Err(IndexAccessError::Other(format!(
+            "unsupported workspace index schema {version:?}"
+        )));
     }
     // Older indexes used `calls` for unresolved name matches. Preserve those
     // derived edges but make their uncertainty explicit after upgrading.
@@ -971,35 +1049,88 @@ fn ensure_schema(connection: &Connection) -> Result<(), String> {
                )",
             [],
         )
-        .map_err(|error| format!("migrate duplicate candidate edges: {error}"))?;
+        .map_err(|error| index_access_error("migrate duplicate candidate edges", &error))?;
     connection
         .execute(
             "UPDATE edges SET relation = 'calls-candidate' WHERE relation = 'calls'",
             [],
         )
-        .map_err(|error| format!("migrate candidate edge labels: {error}"))?;
+        .map_err(|error| index_access_error("migrate candidate edge labels", &error))?;
     Ok(())
 }
 
-fn open_connection(path: &Path) -> Result<Connection, String> {
-    let connection = crate::utility::sqlite::open_connection(path)
-        .map_err(|error| format!("open {}: {error}", display_path(path)))?;
+/// Why a workspace-index access failed. The lock condition stays typed all the
+/// way to the degrade-versus-error decision, so a message that merely mentions
+/// "busy" can never silently downgrade a real failure into a degraded report.
+#[derive(Debug)]
+pub(crate) enum IndexAccessError {
+    /// Another process holds the SQLite write lock.
+    Locked,
+    /// Any other failure, already rendered for the operator.
+    Other(String),
+}
+
+impl std::fmt::Display for IndexAccessError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Locked => write!(formatter, "workspace index is locked by another writer"),
+            Self::Other(message) => write!(formatter, "{message}"),
+        }
+    }
+}
+
+impl From<IndexAccessError> for String {
+    fn from(error: IndexAccessError) -> Self {
+        error.to_string()
+    }
+}
+
+/// Classify one rusqlite failure from its typed code, never its message.
+fn index_access_error(context: &str, error: &rusqlite::Error) -> IndexAccessError {
+    if sqlite_lock_error(error) {
+        IndexAccessError::Locked
+    } else {
+        IndexAccessError::Other(format!("{context}: {error}"))
+    }
+}
+
+fn open_connection(path: &Path) -> Result<Connection, IndexAccessError> {
+    let connection = crate::utility::sqlite::open_connection(path).map_err(|error| {
+        IndexAccessError::Other(format!("open {}: {error}", display_path(path)))
+    })?;
     connection
         .busy_timeout(std::time::Duration::from_millis(250))
-        .map_err(|error| format!("set workspace index busy timeout: {error}"))?;
+        .map_err(|error| index_access_error("set workspace index busy timeout", &error))?;
     for attempt in 0..20 {
         match connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;") {
             Ok(()) => break,
-            Err(error) if sqlite_lock_error(&error) && attempt < 19 => {
-                std::thread::sleep(std::time::Duration::from_millis(25));
+            // Retry a held lock, then report it as a lock rather than returning
+            // a half-configured connection the caller would fail on later.
+            Err(error) if sqlite_lock_error(&error) => {
+                if attempt < 19 {
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                } else {
+                    return Err(IndexAccessError::Locked);
+                }
             }
-            Err(error) => return Err(format!("configure workspace index: {error}")),
+            Err(error) => {
+                return Err(index_access_error("configure workspace index", &error));
+            }
         }
     }
     connection
-        .busy_timeout(std::time::Duration::from_secs(10))
-        .map_err(|error| format!("set workspace index transaction timeout: {error}"))?;
+        .busy_timeout(std::time::Duration::from_secs(1))
+        .map_err(|error| index_access_error("set workspace index transaction timeout", &error))?;
     Ok(connection)
+}
+
+fn degraded_refresh_report(root: &Path) -> RefreshReport {
+    RefreshReport {
+        indexed_commit: git_head(root),
+        coverage_complete: false,
+        lock_degraded: true,
+        ..RefreshReport::default()
+    }
 }
 
 fn sqlite_lock_error(error: &rusqlite::Error) -> bool {
@@ -1015,10 +1146,10 @@ fn sqlite_lock_error(error: &rusqlite::Error) -> bool {
 
 fn existing_file_metadata(
     connection: &Connection,
-) -> Result<HashMap<String, StoredFileMetadata>, String> {
+) -> Result<HashMap<String, StoredFileMetadata>, IndexAccessError> {
     let mut statement = connection
         .prepare("SELECT path, hash, modified_at, size FROM files")
-        .map_err(|error| format!("prepare existing workspace files: {error}"))?;
+        .map_err(|error| index_access_error("prepare existing workspace files", &error))?;
     let rows = statement
         .query_map([], |row| {
             Ok((
@@ -1028,11 +1159,11 @@ fn existing_file_metadata(
                 row.get::<_, i64>(3)?,
             ))
         })
-        .map_err(|error| format!("read existing workspace files: {error}"))?;
+        .map_err(|error| index_access_error("read existing workspace files", &error))?;
     let mut result = HashMap::new();
     for row in rows {
         let (path, hash, modified_at, size) =
-            row.map_err(|error| format!("read existing workspace file: {error}"))?;
+            row.map_err(|error| index_access_error("read existing workspace file", &error))?;
         result.insert(
             path,
             StoredFileMetadata {
@@ -1334,13 +1465,24 @@ fn collect_source_paths(root: &Path) -> Result<SourcePathCollection, String> {
     let mut collection = SourcePathCollection::default();
     let mut stack = vec![root.to_path_buf()];
     while let Some(directory) = stack.pop() {
-        let entries = fs::read_dir(&directory)
-            .map_err(|error| format!("read {}: {error}", display_path(&directory)))?;
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(_) => {
+                collection.skipped_unreadable += 1;
+                collection
+                    .unreadable_prefixes
+                    .insert(relative_source_path(root, &directory));
+                continue;
+            }
+        };
         for entry in entries {
             let entry = match entry {
                 Ok(entry) => entry,
                 Err(_) => {
                     collection.skipped_unreadable += 1;
+                    collection
+                        .unreadable_prefixes
+                        .insert(relative_source_path(root, &directory));
                     continue;
                 }
             };
@@ -1353,6 +1495,9 @@ fn collect_source_paths(root: &Path) -> Result<SourcePathCollection, String> {
                 Ok(file_type) => file_type,
                 Err(_) => {
                     collection.skipped_unreadable += 1;
+                    collection
+                        .unreadable_prefixes
+                        .insert(relative_source_path(root, &path));
                     continue;
                 }
             };
@@ -1363,15 +1508,15 @@ fn collect_source_paths(root: &Path) -> Result<SourcePathCollection, String> {
                 stack.push(path);
             } else if file_type.is_file() && is_indexable_file(&path) {
                 collection.discovered += 1;
-                if collection.paths.len() >= MAX_FILES {
-                    collection.skipped_limit += 1;
-                } else {
-                    collection.paths.push(path);
-                }
+                collection.paths.push(path);
             }
         }
     }
     collection.paths.sort();
+    if collection.paths.len() > MAX_FILES {
+        collection.skipped_limit = (collection.paths.len() - MAX_FILES) as u64;
+        collection.paths.truncate(MAX_FILES);
+    }
     Ok(collection)
 }
 
@@ -1380,8 +1525,13 @@ fn collect_source_snapshots(root: &Path, paths: &[PathBuf]) -> SnapshotCollectio
     for absolute_path in paths {
         let metadata = match fs::metadata(absolute_path) {
             Ok(metadata) => metadata,
-            Err(_) => {
-                collection.skipped_unreadable += 1;
+            Err(error) => {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    collection.skipped_unreadable += 1;
+                    collection
+                        .unreadable_paths
+                        .insert(relative_source_path(root, absolute_path));
+                }
                 continue;
             }
         };
@@ -1410,14 +1560,16 @@ fn collect_source_snapshots(root: &Path, paths: &[PathBuf]) -> SnapshotCollectio
 fn collect_sources_from_paths(
     root: &Path,
     paths: Vec<PathBuf>,
-) -> Result<(Vec<SourceFile>, u64), String> {
+) -> Result<SourceCollection, String> {
     let mut sources = Vec::new();
-    let mut skipped_unreadable = 0;
+    let mut unreadable_paths = BTreeSet::new();
     for absolute_path in paths {
         let metadata = match fs::metadata(&absolute_path) {
             Ok(meta) => meta,
-            Err(_) => {
-                skipped_unreadable += 1;
+            Err(error) => {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    unreadable_paths.insert(relative_source_path(root, &absolute_path));
+                }
                 continue;
             }
         };
@@ -1426,16 +1578,14 @@ fn collect_sources_from_paths(
         }
         let content = match fs::read_to_string(&absolute_path) {
             Ok(c) => c,
-            Err(_) => {
-                skipped_unreadable += 1;
+            Err(error) => {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    unreadable_paths.insert(relative_source_path(root, &absolute_path));
+                }
                 continue;
             }
         };
-        let relative = absolute_path
-            .strip_prefix(root)
-            .unwrap_or(&absolute_path)
-            .to_string_lossy()
-            .replace('\\', "/");
+        let relative = relative_source_path(root, &absolute_path);
         let language = language_for(&absolute_path).to_string();
         let imports = extract_imports(&language, &content);
         let symbols = extract_symbols(&language, &content);
@@ -1455,7 +1605,22 @@ fn collect_sources_from_paths(
             symbols,
         });
     }
-    Ok((sources, skipped_unreadable))
+    Ok(SourceCollection {
+        sources,
+        unreadable_paths,
+    })
+}
+
+fn relative_source_path(root: &Path, absolute_path: &Path) -> String {
+    absolute_path
+        .strip_prefix(root)
+        .unwrap_or(absolute_path)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+fn path_is_under_prefix(path: &str, prefix: &str) -> bool {
+    prefix.is_empty() || path == prefix || path.starts_with(&format!("{prefix}/"))
 }
 
 fn extract_symbols(language: &str, content: &str) -> Vec<ParsedSymbol> {
@@ -2068,6 +2233,81 @@ mod tests {
         (root, home)
     }
 
+    /// The degrade-versus-error decision must come from the typed SQLite code.
+    /// A message that merely contains "busy" is not a lock, so classifying by
+    /// message text would silently downgrade a real failure.
+    #[test]
+    fn lock_classification_uses_the_typed_code_not_the_message_text() {
+        let busy = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+            Some("database is locked".to_string()),
+        );
+        assert!(matches!(
+            index_access_error("ctx", &busy),
+            IndexAccessError::Locked
+        ));
+
+        let locked = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_LOCKED),
+            None,
+        );
+        assert!(matches!(
+            index_access_error("ctx", &locked),
+            IndexAccessError::Locked
+        ));
+
+        // Non-lock failures must stay errors even when the text mentions "busy".
+        let misleading = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
+            Some("the writer is busy rebuilding this index".to_string()),
+        );
+        match index_access_error("ctx", &misleading) {
+            IndexAccessError::Locked => panic!("a non-lock failure must not degrade as a lock"),
+            IndexAccessError::Other(message) => assert!(message.contains("busy rebuilding")),
+        }
+    }
+
+    /// §17/§29 concurrency: a second refresh while a writer holds the index lock
+    /// must report a degraded, non-authoritative index rather than either
+    /// succeeding silently or failing the caller.
+    #[test]
+    fn concurrent_refresh_degrades_instead_of_failing_while_a_writer_holds_the_lock() {
+        let (root, home) = temp_workspace("lock-degrade");
+        fs::write(root.join("src/main.rs"), "pub fn only() {}\n").expect("source");
+        let home_flag = home.to_string_lossy().to_string();
+        let first = refresh(&root, &home_flag, true).expect("initial refresh");
+        assert!(first.coverage_complete);
+
+        // Hold the write lock from an independent connection for the assertion
+        // window, exactly as a concurrent reindex would.
+        let index_path = database_path(&root, &home_flag).expect("index path");
+        let holder = crate::utility::sqlite::open_connection(&index_path).expect("holder open");
+        holder
+            .busy_timeout(std::time::Duration::from_millis(50))
+            .expect("holder busy timeout");
+        holder
+            .execute_batch("BEGIN IMMEDIATE")
+            .expect("holder takes the write lock");
+
+        let contended = refresh(&root, &home_flag, false).expect("contended refresh must not fail");
+
+        holder.execute_batch("ROLLBACK").expect("holder releases");
+
+        assert!(
+            contended.lock_degraded,
+            "a contended refresh must report the degraded lock state: {contended:?}"
+        );
+        assert!(
+            !contended.coverage_complete,
+            "a degraded refresh must not claim complete coverage: {contended:?}"
+        );
+
+        // The index stays usable and a later uncontended refresh recovers fully.
+        let recovered = refresh(&root, &home_flag, false).expect("recovered refresh");
+        assert!(!recovered.lock_degraded);
+        assert!(recovered.coverage_complete);
+    }
+
     #[test]
     fn refresh_indexes_symbols_chunks_and_edges() {
         let (root, home) = temp_workspace("build");
@@ -2184,7 +2424,8 @@ mod tests {
     fn search_fuses_exact_symbol_path_and_fts_results() {
         let (root, home) = temp_workspace("search");
         fs::write(root.join("src/main.rs"), "pub fn dispatch_request() {}\n").expect("source");
-        let hits = search(&root, &home.to_string_lossy(), "dispatch_request", 10).expect("search");
+        let hits = search_filtered(&root, &home.to_string_lossy(), "dispatch_request", 10, None)
+            .expect("search");
         assert!(!hits.is_empty());
         assert_eq!(hits[0].path, "src/main.rs");
         assert_eq!(hits[0].symbol, "dispatch_request");
@@ -2204,11 +2445,12 @@ mod tests {
         fs::create_dir_all(root.join("zzz")).expect("filtered directory");
         fs::write(root.join("zzz/target.rs"), "// deep_filter_token\n").expect("filtered source");
 
-        let unfiltered = search(
+        let unfiltered = search_filtered(
             &root,
             &home.to_string_lossy(),
             "deep_filter_token",
             MAX_SEARCH_RESULTS,
+            None,
         )
         .expect("unfiltered search");
         assert!(
@@ -2240,7 +2482,8 @@ mod tests {
         let second = refresh(&root, &home.to_string_lossy(), false).expect("second");
         assert_eq!(second.files_removed, 1);
         assert_eq!(second.files_added, 1);
-        let hits = search(&root, &home.to_string_lossy(), "old", 10).expect("search");
+        let hits =
+            search_filtered(&root, &home.to_string_lossy(), "old", 10, None).expect("search");
         assert!(hits.is_empty());
     }
 
