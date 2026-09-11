@@ -2396,7 +2396,13 @@ fn push_trusted_command_root(roots: &mut Vec<PathBuf>, root: PathBuf) {
 
 fn trusted_command_roots() -> Vec<PathBuf> {
     let mut roots = Vec::new();
-    for root in ["/bin", "/usr/bin", "/usr/local/bin", "/opt/homebrew/bin"] {
+    for root in [
+        "/bin",
+        "/usr/bin",
+        "/usr/local/bin",
+        "/opt/homebrew/bin",
+        "/snap/bin",
+    ] {
         push_trusted_command_root(&mut roots, PathBuf::from(root));
     }
     for variable in [
@@ -7295,6 +7301,9 @@ mod tests {
             ("rg", vec!["pattern", "."]),
             ("find", vec!["needle.txt"]),
         ] {
+            if which::which(program).is_err() {
+                continue;
+            }
             let arguments = arguments
                 .into_iter()
                 .map(str::to_string)
