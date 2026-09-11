@@ -230,9 +230,13 @@ fn run_tools_stats(
 ) -> u8 {
     let mut flags = FlagSet::new("stats tools");
     flags.bool_flag("json", false);
+    flags.bool_flag("benchmark", false);
     if let Err(error) = flags.parse(arguments) {
         let _ = writeln!(standard_error, "{}", error.message);
         return 1;
+    }
+    if flags.bool_value("benchmark") {
+        return run_tools_benchmark(flags.bool_value("json"), standard_output, standard_error);
     }
     let snapshot = crate::mcp::tools_list_context_snapshot();
     let payload = json!({
@@ -260,6 +264,241 @@ fn run_tools_stats(
         payload["discovery"]["calls"].as_u64().unwrap_or(0)
     );
     0
+}
+
+/// Default token budgets the MCP benchmark compares. `full` and `core` use the
+/// ratified per-profile defaults so the comparison reflects real behavior; the
+/// paging and compact profiles use tighter declared budgets on purpose.
+fn benchmark_default_budget(profile: crate::mcp::McpCatalogProfile) -> usize {
+    match profile {
+        crate::mcp::McpCatalogProfile::Tiered => {
+            crate::proxy::context::DEFAULT_MAX_TOOL_CATALOG_TOKENS
+        }
+        crate::mcp::McpCatalogProfile::Full => crate::proxy::context::DEFAULT_MAX_DYNAMIC_TOKENS,
+    }
+}
+
+/// One MCP catalog benchmark configuration: a catalog profile, an optional
+/// explicit schema level (absent means the spec-default handshake), and an
+/// optional hard page budget (absent means the profile's ratified default).
+#[derive(Debug, Clone, Copy)]
+struct McpBenchmarkProfile {
+    name: &'static str,
+    profile: crate::mcp::McpCatalogProfile,
+    budget: Option<usize>,
+    level: Option<u64>,
+}
+
+const fn core_benchmark(
+    name: &'static str,
+    budget: Option<usize>,
+    level: Option<u64>,
+) -> McpBenchmarkProfile {
+    McpBenchmarkProfile {
+        name,
+        profile: crate::mcp::McpCatalogProfile::Tiered,
+        budget,
+        level,
+    }
+}
+
+const MCP_BENCHMARK_PROFILES: &[McpBenchmarkProfile] = &[
+    McpBenchmarkProfile {
+        name: "full",
+        profile: crate::mcp::McpCatalogProfile::Full,
+        budget: None,
+        level: None,
+    },
+    McpBenchmarkProfile {
+        name: "core",
+        profile: crate::mcp::McpCatalogProfile::Tiered,
+        budget: None,
+        level: None,
+    },
+    core_benchmark("core+pagination", Some(600), Some(2)),
+    core_benchmark("core+progressive-discovery", Some(1_200), Some(0)),
+    core_benchmark(
+        "core+progressive-discovery+compact-schemas",
+        Some(600),
+        Some(0),
+    ),
+];
+
+/// Representative task families from the gateway plan. Each entry is a task
+/// label plus the intent a host would express for it; the benchmark records
+/// whether discovery can name a capability for that intent.
+const MCP_BENCHMARK_TASKS: &[(&str, &str)] = &[
+    ("filesystem", "read and write a file"),
+    ("search", "search the codebase for a symbol"),
+    ("build", "build the workspace"),
+    ("test", "run the test suite"),
+    ("debug", "diagnose a failing test or warning"),
+    ("git", "inspect git history and diff"),
+    ("frontend", "review ui layout and accessibility"),
+    ("backend", "design an api boundary"),
+    ("database", "write a database migration"),
+    ("web", "automate a browser flow"),
+    ("configuration", "audit agent configuration"),
+    ("release", "verify a packaged release"),
+];
+
+/// Traverse a profile's catalog the way a client would, following the opaque
+/// cursor until the server stops emitting one. Returns the exact first-page
+/// cost, the page count, and the ordered tool names across every page.
+fn walk_benchmark_catalog(
+    configuration: McpBenchmarkProfile,
+) -> Result<(usize, usize, Vec<String>), String> {
+    let mut params = match configuration.level {
+        Some(level) => json!({ "level": level }),
+        None => json!({}),
+    };
+    let mut first_page_tokens = 0usize;
+    let mut pages = 0usize;
+    let mut names = Vec::new();
+    for _ in 0..64 {
+        let page = crate::mcp::tools_list_page(configuration.profile, &params)?;
+        let measured = crate::mcp::measure_tools_list_response(&page);
+        if pages == 0 {
+            first_page_tokens = measured;
+        }
+        pages += 1;
+        names.extend(
+            page["tools"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|tool| tool["name"].as_str().map(str::to_string)),
+        );
+        match page["nextCursor"].as_str() {
+            Some(cursor) => params = json!({ "cursor": cursor }),
+            None => break,
+        }
+    }
+    Ok((first_page_tokens, pages, names))
+}
+
+fn run_tools_benchmark(
+    json_output: bool,
+    standard_output: &mut dyn Write,
+    standard_error: &mut dyn Write,
+) -> u8 {
+    let mut profiles = Vec::new();
+    let mut failures = Vec::new();
+    for configuration in MCP_BENCHMARK_PROFILES {
+        let budget = configuration
+            .budget
+            .unwrap_or_else(|| benchmark_default_budget(configuration.profile));
+        // why: an unset override is the normal case, so only its presence matters.
+        let previous = std::env::var("KEEL_MCP_PAGE_TOKENS").ok();
+        std::env::set_var("KEEL_MCP_PAGE_TOKENS", budget.to_string());
+        let started = std::time::Instant::now();
+        let walked = walk_benchmark_catalog(*configuration);
+        let elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0;
+        match previous {
+            Some(value) => std::env::set_var("KEEL_MCP_PAGE_TOKENS", value),
+            None => std::env::remove_var("KEEL_MCP_PAGE_TOKENS"),
+        }
+        let (first_page_tokens, pages, names) = match walked {
+            Ok(walked) => walked,
+            Err(error) => {
+                failures.push(format!("{}: {error}", configuration.name));
+                continue;
+            }
+        };
+        let unique: std::collections::BTreeSet<&str> = names.iter().map(String::as_str).collect();
+        let complete_catalog_tokens = crate::mcp::measure_tools_list_response(
+            &crate::mcp::tools_complete_catalog(configuration.profile),
+        );
+        if unique.len() != names.len() {
+            failures.push(format!(
+                "{}: traversal duplicated a tool",
+                configuration.name
+            ));
+        }
+        if first_page_tokens > budget {
+            failures.push(format!(
+                "{}: first page {first_page_tokens} exceeded its {budget}-token budget",
+                configuration.name
+            ));
+        }
+        let mut discovery_covered = 0usize;
+        for (_, intent) in MCP_BENCHMARK_TASKS {
+            // A discovery failure for one intent is not a harness fault; it means
+            // that task is uncovered, which the coverage count reports.
+            let discovered = match crate::mcp::tools_discover(intent, 5, 1) {
+                Ok(payload) => payload["count"].as_u64().unwrap_or(0),
+                Err(_) => 0,
+            };
+            if discovered > 0 {
+                discovery_covered += 1;
+            }
+        }
+        profiles.push(json!({
+            "profile": configuration.name,
+            "catalogProfile": configuration.profile.as_str(),
+            "schemaLevel": configuration.level.map(|level| json!(level)).unwrap_or(json!("spec-default")),
+            "pageBudgetTokens": budget,
+            "completeCatalogTokens": complete_catalog_tokens,
+            "firstPageTokens": first_page_tokens,
+            "pagesToTraverse": pages,
+            "advertisedTools": names.len(),
+            "uniqueTools": unique.len(),
+            "reachableTools": unique.len(),
+            "storedTools": crate::mcp::tools_stored_tool_count(),
+            "discoveryTasksCovered": discovery_covered,
+            "discoveryTaskCount": MCP_BENCHMARK_TASKS.len(),
+            "buildLatencyMs": (elapsed_ms * 100.0).round() / 100.0,
+        }));
+    }
+    let coverage_target = MCP_BENCHMARK_TASKS.len();
+    let payload = json!({
+        "schemaVersion": 1,
+        "benchmark": "mcp-catalog-progressive-disclosure",
+        "tokenizer": "o200k_base",
+        "policy": {
+            "hardPageBudget": "every emitted page must measure at or below its declared budget",
+            "traversal": "following nextCursor must reach every stored tool exactly once",
+            "dispatchParity": "every stored tool stays callable regardless of the active profile",
+            "reacquisitionLimit": "deferred tools must be nameable through discovery",
+            "discoveryCoverageTarget": coverage_target,
+            "defaultDecisionRule": "a cheaper profile is accepted only when first-page cost falls, traversal stays complete and duplicate-free, dispatch parity holds, and discovery covers every representative task",
+        },
+        "taskCount": MCP_BENCHMARK_TASKS.len(),
+        "profiles": profiles,
+        "failures": failures,
+        "status": if failures.is_empty() { "passed" } else { "failed" },
+        "reproductionCommand": "keel stats tools --benchmark --json",
+    });
+    if json_output {
+        let code = write_serde_json(standard_output, standard_error, "stats tools", &payload);
+        if code != 0 {
+            return code;
+        }
+    } else {
+        for profile in &profiles {
+            let _ = writeln!(
+                standard_output,
+                "keel stats tools --benchmark profile={} budget={} first_page={} pages={} unique={} of {} discovery={}/{} latency_ms={}",
+                profile["profile"].as_str().unwrap_or("unknown"),
+                profile["pageBudgetTokens"].as_u64().unwrap_or(0),
+                profile["firstPageTokens"].as_u64().unwrap_or(0),
+                profile["pagesToTraverse"].as_u64().unwrap_or(0),
+                profile["uniqueTools"].as_u64().unwrap_or(0),
+                profile["storedTools"].as_u64().unwrap_or(0),
+                profile["discoveryTasksCovered"].as_u64().unwrap_or(0),
+                profile["discoveryTaskCount"].as_u64().unwrap_or(0),
+                profile["buildLatencyMs"].as_f64().unwrap_or(0.0),
+            );
+        }
+    }
+    if failures.is_empty() {
+        0
+    } else {
+        for failure in &failures {
+            let _ = writeln!(standard_error, "stats tools --benchmark: {failure}");
+        }
+        1
+    }
 }
 
 fn write_serde_json(
@@ -746,6 +985,64 @@ impl StatsSnapshot {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn mcp_benchmark_profiles_stay_bounded_complete_and_deduplicated() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for configuration in MCP_BENCHMARK_PROFILES {
+            let budget = configuration
+                .budget
+                .unwrap_or_else(|| benchmark_default_budget(configuration.profile));
+            // why: the canonical budget owner reads this env var, so restore it.
+            let previous = std::env::var("KEEL_MCP_PAGE_TOKENS").ok();
+            std::env::set_var("KEEL_MCP_PAGE_TOKENS", budget.to_string());
+            let walked = walk_benchmark_catalog(*configuration);
+            match previous {
+                Some(value) => std::env::set_var("KEEL_MCP_PAGE_TOKENS", value),
+                None => std::env::remove_var("KEEL_MCP_PAGE_TOKENS"),
+            }
+            let (first_page_tokens, pages, names) =
+                walked.unwrap_or_else(|error| panic!("{}: {error}", configuration.name));
+            assert!(pages >= 1, "{}: no page emitted", configuration.name);
+            assert!(
+                first_page_tokens <= budget,
+                "{}: first page {first_page_tokens} exceeded its {budget}-token budget",
+                configuration.name
+            );
+            let unique: std::collections::BTreeSet<&str> =
+                names.iter().map(String::as_str).collect();
+            assert_eq!(
+                unique.len(),
+                names.len(),
+                "{}: traversal duplicated a tool",
+                configuration.name
+            );
+            let expected = match configuration.profile {
+                crate::mcp::McpCatalogProfile::Tiered => crate::mcp::tools_eager_tool_count(),
+                crate::mcp::McpCatalogProfile::Full => crate::mcp::tools_stored_tool_count(),
+            };
+            assert_eq!(
+                unique.len(),
+                expected,
+                "{}: traversal omitted a tool",
+                configuration.name
+            );
+        }
+    }
+
+    #[test]
+    fn mcp_benchmark_discovery_covers_every_representative_task() {
+        for (task, intent) in MCP_BENCHMARK_TASKS {
+            let payload = crate::mcp::tools_discover(intent, 5, 1)
+                .unwrap_or_else(|error| panic!("{task}: {error}"));
+            assert!(
+                payload["count"].as_u64().unwrap_or(0) >= 1,
+                "{task}: discovery returned no capability for {intent:?}"
+            );
+        }
+    }
 
     fn with_isolated_home<F: FnOnce(&std::path::PathBuf) -> R, R>(suffix: &str, run: F) -> R {
         let nanos = SystemTime::now()

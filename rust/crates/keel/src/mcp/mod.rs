@@ -90,6 +90,48 @@ pub(crate) fn tools_discovery_snapshot() -> serde_json::Value {
     tools::discovery_snapshot()
 }
 
+/// Read one page through the canonical packing owner. The `stats tools
+/// --benchmark` harness walks a profile exactly the way a client would, so it
+/// must not build a second catalog path of its own.
+pub(crate) fn tools_list_page(
+    profile: McpCatalogProfile,
+    params: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    tools::handle_tools_list_for_profile_params(profile, params)
+}
+
+/// The authoritative exact measurement for one emitted `tools/list` response.
+pub(crate) fn measure_tools_list_response(payload: &serde_json::Value) -> usize {
+    tools::measure_tools_list_response(payload)
+}
+
+/// The complete, unpaginated catalog for a profile: the comparison point the
+/// benchmark uses for "every tool advertised eagerly".
+pub(crate) fn tools_complete_catalog(profile: McpCatalogProfile) -> serde_json::Value {
+    tools::handle_tools_list_for_profile(profile)
+}
+
+/// Ranked capability discovery, used to check that a deferred tool stays
+/// nameable when it is not advertised on the first page.
+pub(crate) fn tools_discover(
+    query: &str,
+    limit: usize,
+    level: u64,
+) -> Result<serde_json::Value, String> {
+    tools::discover_capabilities(query, limit, level)
+}
+
+pub(crate) fn tools_stored_tool_count() -> usize {
+    tools::MCP_TOOL_NAMES.len()
+}
+
+/// Advertised-tool count for the tiered profile. Only the benchmark regression
+/// test needs the split form; production callers use the profile snapshot.
+#[cfg(test)]
+pub(crate) fn tools_eager_tool_count() -> usize {
+    tools::EAGER_MCP_TOOL_NAMES.len()
+}
+
 pub(crate) fn current_mcp_session_id() -> Option<String> {
     ["CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID"]
         .iter()
