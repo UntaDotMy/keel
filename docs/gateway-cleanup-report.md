@@ -135,16 +135,34 @@ remains green (13 pass).
 | `concurrent_refresh_degrades_instead_of_failing_while_a_writer_holds_the_lock` | `utility/workspace_index.rs` | A contended refresh degrades explicitly and recovers. |
 | `rejected_research_does_not_clobber_the_existing_bundle` | `utility/plan.rs` | A rejected research submission preserves the on-disk bundle. |
 | `per_source_type_windows_reject_fast_moving_evidence_sooner` | `utility/research_policy.rs` | Fast-moving evidence is rejected sooner than version-bound documentation. |
+| `tools_list_budget_ladder_holds_at_every_mandated_value` | `mcp/tools.rs` | Every budget in §6.7's mandated ladder either emits bounded, complete pages or fails with an explicit configuration error. |
+| `cursor_deadline_is_stable_within_a_ttl_window` | `mcp/tools.rs` | A fresh deadline is bucketed to the cursor TTL, stays inside `(ttl, 2*ttl]`, and survives a zero TTL. |
+| `repeated_identical_requests_pack_the_same_page` | `mcp/tools.rs` | Two identical requests select the same tools at the same measured cost, with no clock allowance. |
+| `concurrent_tools_list_and_tools_call_stay_independent` | `mcp/mod.rs` | Five interleaved `tools/list` requests and a `tools/call` over one stdio session each stay individually valid, bounded, and identical. |
+| `session_ttl_outlives_an_inflight_call` | `mcp/http.rs` | A session TTL shorter than the tool deadline cannot reap a session that still owns a cancellable request. |
+| `mcp_catalog_command_reports_the_live_packing_picture` | `mcp/mod.rs` | The catalog diagnostic reports the packer's own measurement and fails closed on a bad budget or profile. |
+| `mcp_ledger_reports_the_emitted_handshake_not_a_nearby_representation` | `utility/fixed_context.rs` | The ledger's handshake number is the dispatcher's own response, not the complete-catalog cost. |
+| `cache_accounting_puts_each_measurement_in_exactly_one_bucket` | `proxy/context.rs` | Every model-visible token lands in exactly one of cached/uncached, by the firewall's own rule. |
+| `every_installer_platform_has_explicit_host_metadata` | `proxy/execution.rs` | Every host the installer wires has explicit capability metadata. |
+| `claimed_hosts_never_resolve_through_the_unknown_default` | `proxy/execution.rs` | A wired host is distinguishable from a host keel has never seen. |
+| `latency_stage_status_fails_closed_above_its_declared_ceiling` | `utility/stats.rs` | A stage over its declared latency ceiling fails the run and names the measurement. |
+| `latency_benchmark_measures_every_declared_stage_and_enforces_its_ceiling` | `tests/fixed_context_budget_test.rs` | All nine §33 stages are measured through their owners and every reported status agrees with its measurement. |
 
 ## New benchmarks
 
 - `keel stats tools --benchmark --json`: five catalog configurations, exact first-page
   cost, pages to traverse, unique tools reached, discovery coverage, and latency.
+- `keel stats latency --json`: the nine §33 pipeline stages measured through their
+  production owners (catalog build, page pack, serialization, token count, reduction,
+  dedupe, skill index, skill routing, memory retrieval, RawStore locate), each against a
+  declared ceiling. A stage over its ceiling fails the run. A documented warm-up keeps
+  one-time tokenizer and index construction out of the reported per-request cost.
 - `keel eval --json`: adds `evidenceRetentionPercent`, `failureEvidenceRetentionPercent`,
   `reacquisitionRatePercent`, and per-case evidence, outcome, and reduce-cost fields.
 - `keel skill-eval --benchmark --json`: adds the on-demand resource profile,
   `reacquisitionCalls`, `resourceCostTokensMeasured`, `localRoutingCpuMs`,
   `wrongActivationRate`, and `missedActivationRate`.
+- `keel host matrix [--host] [--json]`: the §18 machine-readable host capability matrix.
 
 ## Module-size decision (plan §26)
 
