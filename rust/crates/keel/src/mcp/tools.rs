@@ -251,12 +251,38 @@ pub(crate) fn handle_tools_list_for_profile_params_with_context(
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let expected = all_tools.len();
     // Preserve complete-profile compatibility when it fits; paginate only when
     // the emitted catalog exceeds its hard page budget.
     if spec_default && measure_tools_list_response(&catalog) <= budget {
         return Ok(catalog);
     }
+    pack_catalog_page(
+        profile,
+        level,
+        budget,
+        cursor,
+        context,
+        compact_default,
+        spec_default,
+        all_tools,
+    )
+}
+
+/// Pack one `tools/list` page from an already-resolved tool set. The page cost
+/// is measured on the serialized response before each candidate is accepted, so
+/// the hard budget holds for any catalog the caller supplies.
+#[allow(clippy::too_many_arguments)]
+fn pack_catalog_page(
+    profile: super::McpCatalogProfile,
+    level: u64,
+    budget: usize,
+    cursor: Option<&str>,
+    context: &super::McpRequestContext,
+    compact_default: bool,
+    spec_default: bool,
+    all_tools: Vec<Value>,
+) -> Result<Value, String> {
+    let expected = all_tools.len();
     let fingerprint = catalog_snapshot_fingerprint(profile, &all_tools, level, budget);
     let start = match cursor {
         Some(value) => decode_catalog_cursor(
@@ -6057,6 +6083,196 @@ mod tests {
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(unique.len(), names.len(), "compact pages duplicated a tool");
         assert_eq!(unique.len(), EAGER_MCP_TOOL_NAMES.len());
+
+        match previous {
+            Some(value) => std::env::set_var("KEEL_MCP_PAGE_TOKENS", value),
+            None => std::env::remove_var("KEEL_MCP_PAGE_TOKENS"),
+        }
+    }
+
+    /// §29 adversarial: a catalog far larger than one page must stay fully
+    /// traversable and duplicate-free, and every page must respect its budget.
+    /// This is the packing invariant under an adversarial catalog size rather
+    /// than the repository's own 37 tools.
+    #[test]
+    fn tools_list_traversal_is_complete_for_a_catalog_of_hundreds_of_tools() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous = std::env::var("KEEL_MCP_PAGE_TOKENS").ok();
+        std::env::set_var("KEEL_MCP_PAGE_TOKENS", "600");
+
+        // Build an adversarial catalog: hundreds of tools, each with a long
+        // name, a long description, and a nested object schema.
+        let tools: Vec<Value> = (0..300)
+            .map(|index| {
+                json!({
+                    "name": format!("synthetic-tool-with-a-deliberately-long-name-{index:04}"),
+                    "description": "Compaction quality depends on preserving the schema information that the model needs to invoke this tool correctly, so this description is long on purpose.".repeat(2),
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "nested": {
+                                "type": "object",
+                                "properties": {
+                                    "deep": { "type": "string", "enum": ["alpha", "beta", "gamma"] }
+                                },
+                                "required": ["deep"]
+                            }
+                        },
+                        "required": ["nested"]
+                    }
+                })
+            })
+            .collect();
+        let expected: std::collections::BTreeSet<String> = tools
+            .iter()
+            .filter_map(|tool| tool["name"].as_str().map(str::to_string))
+            .collect();
+        assert_eq!(expected.len(), 300);
+
+        // Walk the synthetic catalog through the canonical packer, which is the
+        // same code a client's page request drives.
+        let mut names: Vec<String> = Vec::new();
+        let mut cursor: Option<String> = None;
+        for _ in 0..128 {
+            let page = pack_catalog_page(
+                crate::mcp::McpCatalogProfile::Tiered,
+                0,
+                600,
+                cursor.as_deref(),
+                &crate::mcp::McpRequestContext::authoritative(None),
+                true,
+                false,
+                tools.clone(),
+            )
+            .expect("a large catalog must page, not fail");
+            let measured = measure_tools_list_response(&page);
+            assert!(
+                measured <= 600,
+                "page measured {measured} tokens against a 600-token budget"
+            );
+            assert_eq!(
+                page["tools"][0]["inputSchema"]["type"], "object",
+                "every emitted page must keep a valid object-root inputSchema"
+            );
+            names.extend(
+                page["tools"]
+                    .as_array()
+                    .expect("tools array")
+                    .iter()
+                    .filter_map(|tool| tool["name"].as_str().map(str::to_string)),
+            );
+            cursor = page["nextCursor"].as_str().map(str::to_string);
+            if cursor.is_none() {
+                break;
+            }
+        }
+
+        let unique: std::collections::BTreeSet<String> = names.iter().cloned().collect();
+        assert_eq!(
+            names.len(),
+            unique.len(),
+            "traversal duplicated a tool across pages"
+        );
+        assert_eq!(
+            unique, expected,
+            "traversal must reach every tool in the synthetic catalog"
+        );
+
+        match previous {
+            Some(value) => std::env::set_var("KEEL_MCP_PAGE_TOKENS", value),
+            None => std::env::remove_var("KEEL_MCP_PAGE_TOKENS"),
+        }
+    }
+
+    /// §6.6 impossible-budget semantics for a single tool. Two distinct cases
+    /// must stay distinct: a tool that is only too large at its *full* depth must
+    /// be emitted at a reduced representation instead of rejected, while a tool
+    /// that cannot fit even the minimum representation must fail closed with an
+    /// explicit budget error rather than emitting an oversized response.
+    #[test]
+    fn tools_list_reduces_representation_before_it_fails_closed() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous = std::env::var("KEEL_MCP_PAGE_TOKENS").ok();
+
+        let giant = json!({
+            "name": "enormous",
+            "description": "x".repeat(6000),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "wide": {
+                        "type": "object",
+                        "properties": { "deep": { "type": "string" } },
+                        "description": "y".repeat(4000)
+                    }
+                }
+            }
+        });
+        let context = crate::mcp::McpRequestContext::authoritative(None);
+
+        // A budget that only the reduced representations can satisfy: the tool
+        // must be emitted, downgraded, and still valid MCP.
+        std::env::set_var("KEEL_MCP_PAGE_TOKENS", "200");
+        let page = pack_catalog_page(
+            crate::mcp::McpCatalogProfile::Tiered,
+            2,
+            200,
+            None,
+            &context,
+            false,
+            false,
+            vec![giant.clone()],
+        )
+        .expect("a tool that fits at a lower representation must be emitted");
+        let measured = measure_tools_list_response(&page);
+        assert!(
+            measured <= 200,
+            "the reduced representation must respect the budget: {measured}"
+        );
+        let emitted = &page["tools"][0];
+        assert_eq!(emitted["name"], "enormous");
+        assert_eq!(
+            emitted["inputSchema"]["type"], "object",
+            "a reduced representation must keep a valid object-root inputSchema"
+        );
+        assert!(
+            emitted["description"].as_str().unwrap_or_default().len() < 6000,
+            "the full-depth description cannot have survived a 200-token budget"
+        );
+        // A reduced representation must stay invocable: the root schema and every
+        // declared parameter survive, so the model can still call the tool.
+        assert!(
+            emitted["inputSchema"]["properties"]["wide"].is_object(),
+            "a reduced representation must not drop invocation-critical parameters: {emitted}"
+        );
+
+        // A budget nothing can satisfy: fail closed with an explicit reason and
+        // never emit the oversized tool.
+        let impossible = 5usize;
+        std::env::set_var("KEEL_MCP_PAGE_TOKENS", impossible.to_string());
+        let error = pack_catalog_page(
+            crate::mcp::McpCatalogProfile::Tiered,
+            2,
+            impossible,
+            None,
+            &context,
+            false,
+            false,
+            vec![giant],
+        )
+        .expect_err("an impossible budget must not produce a page");
+        assert!(
+            error.contains("minimum") || error.contains("configured"),
+            "the failure must name the configured budget: {error}"
+        );
+        assert!(
+            !error.contains("catalog exceeds"),
+            "the legacy catalog-over-budget wording must not return: {error}"
+        );
 
         match previous {
             Some(value) => std::env::set_var("KEEL_MCP_PAGE_TOKENS", value),

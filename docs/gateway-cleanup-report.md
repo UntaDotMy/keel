@@ -113,6 +113,11 @@ remains green (13 pass).
 | `reacquisition_rate_matches_per_case_measurements` | `utility/eval.rs` | The headline rate cannot drift from the per-case booleans. |
 | `every_benchmark_profile_is_distinct_and_measured` | `utility/skill_eval.rs` | All five disclosure strategies exist and are measured. |
 | `measured_resource_cost_matches_the_bundled_tree` | `utility/skill_eval.rs` | Resource cost comes from the real files, not an assumption. |
+| `tools_list_traversal_is_complete_for_a_catalog_of_hundreds_of_tools` | `mcp/tools.rs` | A 300-tool adversarial catalog stays bounded, complete, and duplicate-free. |
+| `tools_list_reduces_representation_before_it_fails_closed` | `mcp/tools.rs` | A giant tool is emitted reduced rather than rejected, and an impossible budget fails closed with an explicit reason. |
+| `no_gate_status_can_be_read_as_a_pass` | `review/tests.rs` | No gate state can be aggregated into a false pass. |
+| `lock_classification_uses_the_typed_code_not_the_message_text` | `utility/workspace_index.rs` | A non-lock failure is never downgraded to a lock by its message text. |
+| `concurrent_refresh_degrades_instead_of_failing_while_a_writer_holds_the_lock` | `utility/workspace_index.rs` | A contended refresh degrades explicitly and recovers. |
 
 ## New benchmarks
 
@@ -147,3 +152,20 @@ remains green (13 pass).
    corpus. A corpus with optional resources would show the reduction it can buy.
 5. **Provider cached-input tokens remain unavailable** for the local fixtures, so cache
    behaviour is reported as unknown rather than estimated.
+6. **The adversarial matrix is partially covered.** Covered: catalogs from 37 to 300
+   tools, budgets from 5 to 4000 tokens, an exact-budget regression, a giant single
+   tool at both survivable and impossible budgets, invalid, empty, truncated, and
+   unicode cursors, catalog-snapshot binding, duplicate request ids, transport
+   header and media-type abuse, and contended index writes. Not yet covered as
+   distinct cases: a replayed cursor, a cursor replayed across a different session
+   or workspace, catalog mutation between two pages of the same walk, and an
+   all-tools-oversized catalog. Cursor session and workspace binding is enforced in
+   `decode_catalog_cursor`; the missing piece is the dedicated test.
+7. **Per-host conformance runs are still source-level.** The host capability matrix is
+   machine-readable and the adapter contracts are covered by
+   `tests/host-adapter-contracts.test.ts`, but there is no live conformance run against
+   a host that lacks the interception surface.
+8. **Performance is measured only where a benchmark reports it.** Catalog build latency is
+   recorded per profile, and per-case reduce cost in microseconds is recorded for the
+   reducers. Page-pack, serialization, dedupe, skill-routing, memory-retrieval, RawStore,
+   and HTTP overhead are not separately measured.
