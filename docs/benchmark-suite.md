@@ -85,6 +85,14 @@ aggregate `evidenceRetentionPercent`, `failureEvidenceRetentionPercent`, and
 `reacquisitionRatePercent`. Reduction is only a win when the saving and the
 evidence retention move together.
 
+Both benchmarks declare their thresholds in the artifact before the numbers are
+interpreted, and the regression tests assert against those same constants, so a
+declared floor and its check cannot drift apart. Reducer floors: 100% evidence and
+failure-evidence retention, 20% overall savings, 50% on the high-volume fixture,
+at least three compacted fixtures, and a 0% reacquisition rate. Catalog floors:
+every page within its declared budget, zero duplicate and zero omitted tools,
+100% discovery coverage, and a 2000 ms ceiling on the catalog walk.
+
 The MCP catalog profiles have their own comparison. `keel stats tools --benchmark --json`
 walks `full`, `core`, `core+pagination`, `core+progressive-discovery`, and
 `core+progressive-discovery+compact-schemas` through the canonical packing path, then

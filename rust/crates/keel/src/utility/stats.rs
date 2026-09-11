@@ -266,6 +266,12 @@ fn run_tools_stats(
     0
 }
 
+/// Declared before the benchmark interprets anything: the catalog walk must
+/// finish inside this budget or the run fails. Two seconds is far above the
+/// measured sub-second cost of every profile, so it only trips on a real
+/// regression rather than on a slow machine.
+const MCP_BENCHMARK_FIRST_PAGE_LATENCY_MS_MAX: f64 = 2_000.0;
+
 /// Default token budgets the MCP benchmark compares. `full` and `core` use the
 /// ratified per-profile defaults so the comparison reflects real behavior; the
 /// paging and compact profiles use tighter declared budgets on purpose.
@@ -433,6 +439,20 @@ fn run_tools_benchmark(
                 discovery_covered += 1;
             }
         }
+        // Enforce the declared thresholds rather than only reporting them.
+        if discovery_covered < MCP_BENCHMARK_TASKS.len() {
+            failures.push(format!(
+                "{}: discovery covered {discovery_covered}/{} task families, below the declared 100%",
+                configuration.name,
+                MCP_BENCHMARK_TASKS.len()
+            ));
+        }
+        if elapsed_ms > MCP_BENCHMARK_FIRST_PAGE_LATENCY_MS_MAX {
+            failures.push(format!(
+                "{}: catalog walk took {elapsed_ms:.1}ms, above the declared {MCP_BENCHMARK_FIRST_PAGE_LATENCY_MS_MAX:.0}ms",
+                configuration.name
+            ));
+        }
         profiles.push(json!({
             "profile": configuration.name,
             "catalogProfile": configuration.profile.as_str(),
@@ -455,6 +475,16 @@ fn run_tools_benchmark(
         "schemaVersion": 1,
         "benchmark": "mcp-catalog-progressive-disclosure",
         "tokenizer": "o200k_base",
+        // Declared before interpretation: these floors are a pass/fail contract.
+        "declaredThresholds": {
+            "firstPageTokensMax": "declared per profile in pageBudgetTokens; the run fails if any page exceeds it",
+            "traversalCompleteness": "uniqueTools == storedTools and uniqueTools == advertisedTools",
+            "duplicateToolsMax": 0,
+            "omittedToolsMax": 0,
+            "discoveryCoverageMinPercent": 100.0,
+            "firstPageLatencyMsMax": MCP_BENCHMARK_FIRST_PAGE_LATENCY_MS_MAX,
+            "reacquisitionRequired": false,
+        },
         "policy": {
             "hardPageBudget": "every emitted page must measure at or below its declared budget",
             "traversal": "following nextCursor must reach every stored tool exactly once",

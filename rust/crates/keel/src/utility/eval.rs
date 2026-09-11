@@ -31,6 +31,14 @@ use crate::proxy::raw_store::RunMeta;
 use crate::proxy::render::render_compact_result;
 use crate::proxy::token_meter::TokenMeter;
 
+/// Declared reducer thresholds. These are the contract the corpus must keep
+/// clearing; the CLI reports them and the tests assert against the same
+/// constants, so a declaration and its check cannot drift apart.
+const EVIDENCE_RETENTION_MIN_PERCENT: f64 = 100.0;
+const OVERALL_SAVINGS_MIN_PERCENT: f64 = 20.0;
+const HIGH_VOLUME_SAVINGS_MIN_PERCENT: f64 = 50.0;
+const COMPACTED_FIXTURE_MIN_COUNT: usize = 3;
+
 /// An embedded eval fixture: a real command and a realistic raw output capture.
 /// The eval runs each fixture through the actual reducer pipeline, so the raw
 /// text here is the genuine input the proxy would see in a live session.
@@ -369,6 +377,37 @@ pub fn run_eval_command(
                 "measurement".into(),
                 Value::String("end-to-end: raw stdout+stderr vs rendered compact output".into()),
             ),
+            // Declared before interpretation: the floors below are a pass/fail
+            // contract, not a post-hoc reading of the measured numbers.
+            (
+                "declaredThresholds".into(),
+                Value::Object(vec![
+                    (
+                        "evidenceRetentionMinPercent".into(),
+                        Value::Number(format!("{EVIDENCE_RETENTION_MIN_PERCENT:.0}")),
+                    ),
+                    (
+                        "failureEvidenceRetentionMinPercent".into(),
+                        Value::Number(format!("{EVIDENCE_RETENTION_MIN_PERCENT:.0}")),
+                    ),
+                    (
+                        "overallSavingsMinPercent".into(),
+                        Value::Number(format!("{OVERALL_SAVINGS_MIN_PERCENT:.2}")),
+                    ),
+                    (
+                        "highVolumeSavingsMinPercent".into(),
+                        Value::Number(format!("{HIGH_VOLUME_SAVINGS_MIN_PERCENT:.2}")),
+                    ),
+                    (
+                        "compactedFixtureCountMin".into(),
+                        Value::Number(COMPACTED_FIXTURE_MIN_COUNT.to_string()),
+                    ),
+                    (
+                        "reacquisitionRateMaxPercent".into(),
+                        Value::Number("0".to_string()),
+                    ),
+                ]),
+            ),
             (
                 "fixtureCount".into(),
                 Value::Number(report.cases.len().to_string()),
@@ -600,8 +639,8 @@ mod tests {
             .find(|c| c.name == "cargo-test-pass")
             .expect("cargo-test-pass fixture present");
         assert!(
-            high_volume.savings_pct > 50.0,
-            "high-volume test output must compact heavily; measured {:.2}% (raw={} compact={})",
+            high_volume.savings_pct >= HIGH_VOLUME_SAVINGS_MIN_PERCENT,
+            "high-volume test output must compact heavily; measured {:.2}% against the declared {HIGH_VOLUME_SAVINGS_MIN_PERCENT:.2}% floor (raw={} compact={})",
             high_volume.savings_pct,
             high_volume.tokens_raw,
             high_volume.tokens_compact
@@ -612,8 +651,13 @@ mod tests {
             report.total_tokens_saved
         );
         assert!(
-            report.cases.iter().filter(|c| c.compacted).count() >= 3,
-            "at least 3 fixtures should actually compact; only {} did",
+            report.overall_savings_pct >= OVERALL_SAVINGS_MIN_PERCENT,
+            "corpus must keep clearing the declared {OVERALL_SAVINGS_MIN_PERCENT:.2}% savings floor; measured {:.2}%",
+            report.overall_savings_pct
+        );
+        assert!(
+            report.cases.iter().filter(|c| c.compacted).count() >= COMPACTED_FIXTURE_MIN_COUNT,
+            "at least {COMPACTED_FIXTURE_MIN_COUNT} fixtures should actually compact; only {} did",
             report.cases.iter().filter(|c| c.compacted).count()
         );
     }
@@ -734,8 +778,8 @@ mod tests {
             report.failure_evidence_retained, report.failure_evidence_total
         );
         assert!(
-            report.failure_evidence_retention_pct() >= 100.0,
-            "failure evidence retention must stay at 100%; measured {:.2}%",
+            report.failure_evidence_retention_pct() >= EVIDENCE_RETENTION_MIN_PERCENT,
+            "failure evidence retention must stay at the declared {EVIDENCE_RETENTION_MIN_PERCENT:.0}%; measured {:.2}%",
             report.failure_evidence_retention_pct()
         );
     }
