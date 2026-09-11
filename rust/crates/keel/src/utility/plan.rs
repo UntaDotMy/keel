@@ -425,11 +425,8 @@ fn run_research(flags: FlagSet, streams: &mut CommandStreams<'_>) -> u8 {
         bundle.primary_source.as_deref(),
         &bundle.grounding,
     );
-    command_or_return!(
-        write_json(&paths.research, &research)
-            .and_then(|_| write_text(&paths.architecture, &architecture)),
-        streams.error
-    );
+    // Validate before writing: a rejected submission must not destroy a complete
+    // bundle or its architecture note, though a plan without one still records it.
     let spec = command_or_return!(read_text(&paths.spec, SPEC_FILE), streams.error);
     let (parsed, mut research_issues) = validate_specification(&spec, &plan_id);
     validate_research(
@@ -438,12 +435,27 @@ fn run_research(flags: FlagSet, streams: &mut CommandStreams<'_>) -> u8 {
         context.workspace(),
         &mut research_issues,
     );
-    let stage = if research_issues.is_empty() {
-        "researched"
-    } else {
-        "specified"
-    };
-    let recorded_status = if research_issues.is_empty() {
+    let accepted = research_issues.is_empty() && research_status != "insufficient";
+    let existing_complete = read_text(&paths.research, RESEARCH_FILE)
+        .ok()
+        // An unreadable or absent prior artifact simply means "not complete".
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .and_then(|value| {
+            value
+                .get("status")
+                .and_then(Value::as_str)
+                .map(|status| status == "complete")
+        })
+        .unwrap_or(false);
+    if accepted || !existing_complete {
+        command_or_return!(
+            write_json(&paths.research, &research)
+                .and_then(|_| write_text(&paths.architecture, &architecture)),
+            streams.error
+        );
+    }
+    let stage = if accepted { "researched" } else { "specified" };
+    let recorded_status = if accepted {
         research_status.to_string()
     } else if research_status == "insufficient" {
         "insufficient".to_string()
@@ -3198,5 +3210,132 @@ mod tests {
         };
         let error = plan_paths(&context, "../escape").expect_err("traversal must fail");
         assert!(error.contains("single safe path segment"));
+    }
+
+    /// A rejected research submission must not destroy a complete bundle. The
+    /// validation now runs before the write, so a stale source leaves the
+    /// on-disk research and architecture notes exactly as they were.
+    #[test]
+    fn rejected_research_does_not_clobber_the_existing_bundle() {
+        let root = crate::test_support::unique_temp_dir("keel-plan-research-preserve");
+        let home = root.join("home");
+        let repository = root.join("repo");
+        std::fs::create_dir_all(&home).expect("home");
+        std::fs::create_dir_all(&repository).expect("repo");
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let run = |arguments: &[String], stdout: &mut Vec<u8>, stderr: &mut Vec<u8>| {
+            run_plan_command(arguments, stdout, stderr)
+        };
+        // Every `plan` invocation in this test targets the same isolated tree.
+        let targeting = |action: &str| -> Vec<String> {
+            vec![
+                action.to_string(),
+                "--workspace-root".to_string(),
+                repository.to_string_lossy().into_owned(),
+                "--claude-home".to_string(),
+                home.to_string_lossy().into_owned(),
+            ]
+        };
+
+        // Specify, then record one complete research source.
+        let mut specify = targeting("specify");
+        specify.extend([
+            "--request".to_string(),
+            "Harden the gateway boundary and prove the result.".to_string(),
+            "--json".to_string(),
+        ]);
+        assert_eq!(run(&specify, &mut stdout, &mut stderr), 0);
+        let payload: Value = serde_json::from_slice(&stdout).expect("specify payload is json");
+        let plan_id = payload["planId"].as_str().expect("plan id").to_string();
+
+        let mut accepted = targeting("research");
+        accepted.extend([
+            "--plan".to_string(),
+            plan_id.clone(),
+            "--claim".to_string(),
+            "The boundary is enforced at one owner.".to_string(),
+            "--source-url".to_string(),
+            "https://example.invalid/spec".to_string(),
+            "--source-type".to_string(),
+            "official-doc".to_string(),
+            "--retrieved-at".to_string(),
+            (chrono::Utc::now() - chrono::Duration::days(1)).to_rfc3339(),
+            "--support".to_string(),
+            "Cited for the preservation regression.".to_string(),
+            "--freshness".to_string(),
+            "fresh".to_string(),
+            "--used-by".to_string(),
+            "REQ-001,AC-001".to_string(),
+        ]);
+        assert_eq!(
+            run(&accepted, &mut stdout, &mut stderr),
+            0,
+            "an accepted source must succeed: {}",
+            String::from_utf8_lossy(&stderr)
+        );
+
+        // Resolve the plan directory the same way `planner_context` does.
+        let context = PlannerContext {
+            plans_root: home
+                .join("memories")
+                .join("workspaces")
+                .join(crate::utility::system_map::workspace_key(
+                    &repository.to_string_lossy(),
+                ))
+                .join("plans"),
+            home: home.clone(),
+            workspace_root: repository.clone(),
+        };
+        let paths = plan_paths(&context, &plan_id).expect("plan paths");
+        let research_before = std::fs::read_to_string(&paths.research).expect("research exists");
+        let architecture_before =
+            std::fs::read_to_string(&paths.architecture).expect("architecture exists");
+        let sources_before = value_array(
+            &serde_json::from_str::<Value>(&research_before).expect("research json"),
+            "sources",
+        )
+        .map_or(0, <[Value]>::len);
+        assert_eq!(sources_before, 1, "the accepted bundle has one source");
+
+        // A stale issue source is past its 7-day window, so it is rejected.
+        let mut rejected = targeting("research");
+        rejected.extend([
+            "--plan".to_string(),
+            plan_id.clone(),
+            "--claim".to_string(),
+            "A source that must be rejected as stale.".to_string(),
+            "--source-url".to_string(),
+            "https://example.invalid/stale-issue".to_string(),
+            "--source-type".to_string(),
+            "issue".to_string(),
+            "--retrieved-at".to_string(),
+            (chrono::Utc::now() - chrono::Duration::days(30)).to_rfc3339(),
+            "--support".to_string(),
+            "Cited to prove the freshness rejection.".to_string(),
+            "--freshness".to_string(),
+            "fresh".to_string(),
+            "--used-by".to_string(),
+            "REQ-001,AC-001".to_string(),
+        ]);
+        assert_ne!(
+            run(&rejected, &mut stdout, &mut stderr),
+            0,
+            "a stale submission must be rejected"
+        );
+
+        assert_eq!(
+            std::fs::read_to_string(&paths.research).expect("research still present"),
+            research_before,
+            "a rejected submission must not rewrite research.json"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&paths.architecture).expect("architecture still present"),
+            architecture_before,
+            "a rejected submission must not rewrite architecture.md"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

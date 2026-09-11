@@ -121,6 +121,8 @@ remains green (13 pass).
 | `no_gate_status_can_be_read_as_a_pass` | `review/tests.rs` | No gate state can be aggregated into a false pass. |
 | `lock_classification_uses_the_typed_code_not_the_message_text` | `utility/workspace_index.rs` | A non-lock failure is never downgraded to a lock by its message text. |
 | `concurrent_refresh_degrades_instead_of_failing_while_a_writer_holds_the_lock` | `utility/workspace_index.rs` | A contended refresh degrades explicitly and recovers. |
+| `rejected_research_does_not_clobber_the_existing_bundle` | `utility/plan.rs` | A rejected research submission preserves the on-disk bundle. |
+| `per_source_type_windows_reject_fast_moving_evidence_sooner` | `utility/research_policy.rs` | Fast-moving evidence is rejected sooner than version-bound documentation. |
 
 ## New benchmarks
 
