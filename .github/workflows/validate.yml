@@ -112,6 +112,7 @@ jobs:
       - validate-msrv
       - security-audit
       - context-gateway
+      - host-conformance
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -129,7 +130,8 @@ jobs:
               "${{ needs.validate-macos.result }}" \
               "${{ needs.validate-msrv.result }}" \
               "${{ needs.security-audit.result }}" \
-              "${{ needs.context-gateway.result }}"; do
+              "${{ needs.context-gateway.result }}" \
+              "${{ needs.host-conformance.result }}"; do
               if [ "$result" != "success" ]; then
                 echo "A required product-validation job concluded $result." >&2
                 exit 1
@@ -393,3 +395,43 @@ jobs:
           PY
       - name: Validate dependency metadata and warning policy
         run: cargo metadata --locked --no-deps --format-version 1 > "$RUNNER_TEMP/keel-metadata.json"
+
+  # Exercise the native proxy path with a deterministic adapter fixture; this
+  # does not claim that a third-party host process ran on the runner.
+  host-conformance:
+    name: host-conformance
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          cache-on-failure: true
+          key: host-conformance
+      - name: Run native host-conformance integration test
+        run: cargo test --locked -p keel --test host_conformance
+      - name: Run and fail closed on the machine-readable report
+        shell: bash
+        run: |
+          set -euo pipefail
+          report="$RUNNER_TEMP/keel-host-conformance.json"
+          cargo run --quiet --locked -p keel -- host conformance --json --recovery-dir "$RUNNER_TEMP/keel-host-conformance-recovery" > "$report"
+          python - "$report" <<'PY'
+          import json, pathlib, sys
+          payload = json.loads(pathlib.Path(sys.argv[1]).read_text())
+          reports = payload.get("reports")
+          summary = payload.get("summary", {})
+          if not reports or summary.get("allPass") is not True:
+              raise SystemExit(f"host conformance did not pass: {payload}")
+          for report in reports:
+              if report.get("status") != "pass":
+                  raise SystemExit(f"host report is not pass: {report}")
+              stages = report.get("stages", [])
+              if len(stages) != 8 or any(stage.get("status") != "pass" for stage in stages):
+                  raise SystemExit(f"host report has an incomplete stage chain: {report}")
+          print(f"host conformance passed for {len(reports)} governed host reports")
+          PY

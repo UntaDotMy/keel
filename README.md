@@ -137,6 +137,7 @@ When that happens:
 | Start normal work | `keel anvil compile --goal "..." --bar "<named command>" --files "<owned files csv>"` |
 | Run the delivery loop | `keel anvil run` |
 | Inspect live gates | `keel anvil sieve`, `keel anvil loop` |
+| Verify governed host paths | `keel host matrix --json`, `keel host conformance --json` | Confirms the declared host state and runs the bounded native proxy evidence chain; unsupported host rows fail closed as `not_run`. |
 | Review and close | `keel review pre-pr`, `keel memory completion-gate check` |
 
 The current operator path is `anvil compile -> anvil run -> review pre-pr`.
@@ -333,6 +334,7 @@ Empty stdout means the hook is intentionally silent for that event.
 | Compact noisy commands | `keel rewrite "cargo test --workspace"`, `keel run -- cargo test --workspace` |
 | Run safely | `keel run -- <command>`; bounded by `KEEL_COMMAND_TIMEOUT_SECS` (default 300s) and kills timed-out process trees |
 | Inspect gate blockers | `keel review pre-pr --format compact` prints each gate status, blocking flag, and exact remediation details; `--format markdown|json` preserves full findings |
+| Verify host conformance | `keel host matrix --json`, `keel host conformance --json --recovery-dir <path>` | Matrix rows are explicit; the conformance report passes only when all eight native proxy stages have evidence. It does not claim a live third-party host process. |
 | Refresh memory map | `keel memory scope resolve --create-missing --refresh-system-map` |
 | Inspect learning | `keel learn status`, `keel learn run`, `keel learn dry-run` |
 

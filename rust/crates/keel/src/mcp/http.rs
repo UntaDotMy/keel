@@ -718,6 +718,8 @@ fn handle_post(
     let context = super::McpRequestContext::authoritative(None);
     let response = super::dispatch_cancellable_with_context(&value, &cancellation, &context);
     finished.store(true, Ordering::Release);
+    // why: the watcher only observes cancellation; a join failure cannot
+    // change the already-bounded response and must not leak a panic.
     let _ = watcher.join();
     match response {
         Some(response) => {
@@ -1095,6 +1097,8 @@ mod tests {
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let worker = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
+            // why: the test asserts the follow-up response; connection errors
+            // are intentionally isolated to this worker.
             let _ = handle_connection(stream, Arc::new(HttpState), Arc::new(InflightGuard::new(1)));
             done_tx.send(()).unwrap();
         });

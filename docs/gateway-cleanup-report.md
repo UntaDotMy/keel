@@ -1,7 +1,8 @@
 <!--
 Purpose: Record the repository cleanup performed for the production context gateway work, per the implementation plan's cleanup-report requirement.
 Caller: Operators and reviewers validating that dead and duplicate material was removed rather than documented.
-Dependencies: The gateway implementation commits on task/production-context-gateway-v4.
+Dependencies: The gateway implementation and host-conformance commits on the
+final-agent-operating-system delivery branch.
 Main Functions: None; this file is a report.
 Side Effects: None.
 -->
@@ -99,8 +100,10 @@ One canonical owner per responsibility holds. Verified by inspection, not by ass
 
 ## Updated host adapters
 
-None. No adapter contract changed. `bun test tests/host-adapter-contracts.test.ts`
-remains green (13 pass).
+No adapter contract changed. `bun test tests/host-adapter-contracts.test.ts`
+remains green (13 pass). The native `keel host conformance --json` command now
+exercises every `GOVERNED` matrix row through the shared command-proxy owner;
+it intentionally leaves partial/unsupported rows as `not_run`.
 
 ## Updated docs
 
@@ -163,6 +166,8 @@ remains green (13 pass).
   `reacquisitionCalls`, `resourceCostTokensMeasured`, `localRoutingCpuMs`,
   `wrongActivationRate`, and `missedActivationRate`.
 - `keel host matrix [--host] [--json]`: the §18 machine-readable host capability matrix.
+- `keel host conformance [--host] [--recovery-dir] [--json]`: the native eight-stage
+  evidence-chain check used by the integration test and CI release gate.
 
 ## Module-size decision (plan §26)
 
@@ -224,10 +229,13 @@ change can revisit it with the same evidence.
    cursors, catalog mutation between pages, cursor expiry, duplicate request ids,
    transport header and media-type abuse, and contended index writes. The transport and
    session concurrency matrix beyond those cases is not exhaustively enumerated.
-7. **Per-host conformance runs are still source-level.** The host capability matrix is
-   machine-readable and the adapter contracts are covered by
-   `tests/host-adapter-contracts.test.ts`, but there is no live conformance run against
-   a host that lacks the interception surface.
+7. **Per-host conformance is native-fixture proof, not live host proof.** The host
+   capability matrix is machine-readable; `tests/host-adapter-contracts.test.ts`
+   covers adapter contracts; and `tests/host_conformance.rs` plus CI run the
+   governed command-proxy fixture through all eight evidence stages. There is
+   still no live conformance run against a third-party host process or a host
+   that lacks the interception surface, so those rows remain explicitly
+   `not_run` rather than passing by declaration.
 8. **Performance is measured across ten declared pipeline stages.** Catalog build latency
    is recorded per profile, and per-case reduce cost in microseconds is recorded for the
    reducers. In addition, `keel stats latency --json` separately measures all ten §33

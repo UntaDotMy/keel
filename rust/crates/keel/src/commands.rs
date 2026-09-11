@@ -397,11 +397,19 @@ impl Application {
         // The flag parser stops at the first positional, so the subcommand is
         // peeled here the same way `keel stats <surface>` does it.
         let remaining = match arguments.first().map(String::as_str) {
+            Some(subcommand) if subcommand.eq_ignore_ascii_case("conformance") => {
+                return self.run_host_conformance_command(
+                    &arguments[1..],
+                    standard_output,
+                    standard_error,
+                );
+            }
             Some(subcommand) if subcommand.eq_ignore_ascii_case("matrix") => &arguments[1..],
             _ => {
                 let _ = writeln!(
                     standard_error,
-                    "Usage: keel host matrix [--host <name>] [--json]"
+                    "Usage: keel host matrix [--host <name>] [--json]\n\
+                     Usage: keel host conformance [--host <name>] [--recovery-dir <path>] [--json]"
                 );
                 return 2;
             }
@@ -441,7 +449,8 @@ impl Application {
             });
             // The payload holds owned strings; serialization cannot fail here.
             // why: an improbable failure renders an empty object, never partial JSON.
-            let rendered = serde_json::to_string_pretty(&payload).unwrap_or_default();
+            let rendered = serde_json::to_string_pretty(&payload)
+                .expect("host conformance report contains JSON values only");
             let _ = writeln!(standard_output, "{rendered}");
             return 0;
         }
@@ -462,6 +471,110 @@ impl Application {
             );
         }
         0
+    }
+
+    /// Execute the deterministic native host-conformance fixture and emit its
+    /// stage evidence. Only hosts classified `GOVERNED` may produce a passing
+    /// report; partial/unsupported hosts are returned as `not_run` with a
+    /// non-zero exit code so a release gate cannot mistake a capability matrix
+    /// row for a live host proof.
+    fn run_host_conformance_command(
+        &self,
+        arguments: &[String],
+        standard_output: &mut dyn Write,
+        standard_error: &mut dyn Write,
+    ) -> u8 {
+        let mut flag_set = FlagSet::new("host conformance");
+        flag_set.string_flag("host", "");
+        flag_set.string_flag("recovery-dir", "");
+        flag_set.bool_flag("json", false);
+        if let Err(parse_error) = flag_set.parse(arguments) {
+            let _ = writeln!(standard_error, "{}", parse_error.message);
+            return 2;
+        }
+
+        let requested = flag_set.string_value("host").trim().to_ascii_lowercase();
+        let hosts = if requested.is_empty() {
+            crate::proxy::host_conformance::governed_hosts()
+        } else {
+            if !crate::proxy::execution::HostCapabilities::is_claimed_host(&requested) {
+                let _ = writeln!(
+                    standard_error,
+                    "host conformance: unknown host '{requested}'. Known hosts: {}",
+                    crate::proxy::execution::HostCapabilities::CLAIMED_HOSTS.join(", ")
+                );
+                return 2;
+            }
+            vec![requested.as_str()]
+        };
+        if hosts.is_empty() {
+            let _ = writeln!(
+                standard_error,
+                "host conformance: no governed hosts are configured; refusing a vacuous pass"
+            );
+            return 2;
+        }
+
+        let recovery_dir = (!flag_set.string_value("recovery-dir").trim().is_empty())
+            .then(|| std::path::PathBuf::from(flag_set.string_value("recovery-dir")));
+        let mut reports = Vec::with_capacity(hosts.len());
+        for host in hosts {
+            let report = match crate::proxy::host_conformance::run(host, recovery_dir.as_deref()) {
+                Ok(report) => report,
+                Err(error) => crate::proxy::host_conformance::HostConformanceReport::blocked(
+                    host,
+                    crate::proxy::execution::HostCapabilities::for_agent(host).governance_state(),
+                    &error,
+                ),
+            };
+            reports.push(report);
+        }
+
+        let passing = reports
+            .iter()
+            .filter(|report| report.status.is_pass())
+            .count();
+        let all_pass = passing == reports.len();
+        if flag_set.bool_value("json") {
+            let payload = serde_json::json!({
+                "schemaVersion": crate::proxy::host_conformance::CONFORMANCE_SCHEMA_VERSION,
+                "protocol": "keel-command-proxy",
+                "reports": reports,
+                "summary": {
+                    "total": reports.len(),
+                    "passing": passing,
+                    "allPass": all_pass,
+                },
+            });
+            let rendered = serde_json::to_string_pretty(&payload)
+                .expect("host conformance report contains JSON values only");
+            let _ = writeln!(standard_output, "{rendered}");
+        } else {
+            for report in &reports {
+                let _ = writeln!(
+                    standard_output,
+                    "host={} status={} governance={} stages={}/{} recovery={}",
+                    report.host,
+                    report.status.as_str(),
+                    report.governance_state.as_str(),
+                    report
+                        .stages
+                        .iter()
+                        .filter(|stage| stage.status.is_pass())
+                        .count(),
+                    report.stages.len(),
+                    report.recovery_path.as_deref().unwrap_or("<none>"),
+                );
+                if let Some(reason) = &report.reason {
+                    let _ = writeln!(standard_error, "host={} reason={reason}", report.host);
+                }
+            }
+        }
+        if all_pass {
+            0
+        } else {
+            2
+        }
     }
 
     fn run_platform_command(

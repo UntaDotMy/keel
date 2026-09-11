@@ -49,6 +49,15 @@ Every governed command receives an immutable execution identity and one of
 Host capability declarations are attached to JSON results; an unregistered host
 cannot claim interception.
 
+The operator conformance surface is `keel host conformance --json`. It runs a
+bounded platform fixture through this same proxy owner for each `GOVERNED` row
+in the host matrix and requires all eight stages (`host_action` through
+`bounded_result_returned`) to pass. `PARTIALLY_GOVERNED` and `UNSUPPORTED`
+rows remain `not_run` and return a non-zero exit, so a capability declaration
+cannot be mistaken for live third-party-host proof. The recovery directory and
+raw artifact ids in each report keep the evidence inspectable after the compact
+report is returned.
+
 RawStore entries are atomic, capped, namespace-capable, and contain a versioned
 integrity manifest. Reads reject traversal and symlink artifacts and verify the
 manifest before returning bytes. New manifests use SHA-256 for persistent

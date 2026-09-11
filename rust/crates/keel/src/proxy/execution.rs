@@ -183,6 +183,7 @@ impl HostCapabilities {
     pub fn as_json_for_agent(self, agent: &str) -> serde_json::Value {
         let mut payload = self.as_json();
         let normalized = agent.trim().to_ascii_lowercase();
+        let host_registered = Self::is_claimed_host(&normalized);
         let mut unsupported_paths = Vec::new();
         let mut known_limitations = Vec::new();
         if !self.pre_tool_intercept {
@@ -216,18 +217,42 @@ impl HostCapabilities {
         } else {
             "NOT_PROVEN"
         };
+        let mcp_transport = if host_registered { "stdio" } else { "none" };
+        let skill_wiring = if self.context_injection_control {
+            "SUPPORTED"
+        } else if host_registered {
+            "NOT_PROVEN"
+        } else {
+            "UNSUPPORTED"
+        };
+        let memory_wiring = if self.session_identity && self.execution_receipt {
+            "SUPPORTED"
+        } else if host_registered {
+            "NOT_PROVEN"
+        } else {
+            "UNSUPPORTED"
+        };
         payload["matrix"] = serde_json::json!({
             "host": normalized,
             // A name keel has never wired must not read the same as a wired host
             // whose interception surface is genuinely absent.
-            "hostRegistered": Self::is_claimed_host(&normalized),
+            "hostRegistered": host_registered,
             "protocol": "keel-command-proxy",
             "transport": "host-adapter",
-            "sessionHook": self.session_identity,
+            // Plan §35 fields preserve compatibility aliases while making
+            // unsupported dimensions explicit through status-valued aliases.
+            "requestInterception": self.pre_tool_intercept,
             "preToolInterception": self.pre_tool_intercept,
             "postToolInterception": self.post_tool_reduce,
-            "permissionGate": self.permission_gate,
             "contextRewrite": self.context_injection_control,
+            "mcpTransport": mcp_transport,
+            "mcp20260728Support": mcp_support,
+            "skillWiring": skill_wiring,
+            "memoryWiring": memory_wiring,
+            "knownBypasses": unsupported_paths.clone(),
+            "supportState": self.governance_state().as_str(),
+            "sessionHook": self.session_identity,
+            "permissionGate": self.permission_gate,
             "mcpSupport": mcp_support,
             "paginationCompatibility": if self.dynamic_tool_exposure { "SUPPORTED" } else { "NOT_PROVEN" },
             "nativeToolSupport": self.pre_tool_intercept,
@@ -397,6 +422,10 @@ mod tests {
         assert_eq!(matrix["transport"], "host-adapter");
         assert_eq!(matrix["governanceLevel"], "PARTIALLY_GOVERNED");
         assert_eq!(matrix["mcpSupport"], "NOT_PROVEN");
+        assert_eq!(matrix["mcp20260728Support"], "NOT_PROVEN");
+        assert_eq!(matrix["mcpTransport"], "stdio");
+        assert_eq!(matrix["skillWiring"], "NOT_PROVEN");
+        assert_eq!(matrix["memoryWiring"], "SUPPORTED");
         assert_eq!(matrix["hostRegistered"], true);
         assert!(matrix["unsupportedPaths"]
             .as_array()
@@ -482,6 +511,9 @@ mod tests {
                 host["governanceLevel"].is_string(),
                 "every host needs an explicit governance level"
             );
+            assert!(host["requestInterception"].is_boolean());
+            assert!(host["knownBypasses"].is_array());
+            assert!(host["supportState"].is_string());
         }
     }
 
