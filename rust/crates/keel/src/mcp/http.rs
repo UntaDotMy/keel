@@ -666,14 +666,6 @@ fn handle_post(
             super::unsupported_protocol_response(id, value["params"]["protocolVersion"].as_str()),
         );
     }
-    if let Err(message) = validate_routing_headers(headers, &value) {
-        return write_protocol_error(stream, super::error_response(id, -32020, message));
-    }
-    if value.get("id").is_some() {
-        if let Err(response) = super::validate_request_metadata(&value["params"], &id) {
-            return write_protocol_error(stream, response);
-        }
-    }
     if method.starts_with("notifications/") && value.get("id").is_some() {
         return write_protocol_error(
             stream,
@@ -683,6 +675,18 @@ fn handle_post(
                 "MCP notifications must not include an id",
             ),
         );
+    }
+    // Streamable HTTP does not define the standard routing-header
+    // requirements for notifications. They still pass the HTTP boundary
+    // checks above, but their JSON-RPC body is the complete protocol input.
+    let is_notification = value.get("id").is_none();
+    if !is_notification {
+        if let Err(message) = validate_routing_headers(headers, &value) {
+            return write_protocol_error(stream, super::error_response(id, -32020, message));
+        }
+        if let Err(response) = super::validate_request_metadata(&value["params"], &id) {
+            return write_protocol_error(stream, response);
+        }
     }
     // HTTP cancellation belongs to this response stream, never a reusable
     // client-supplied request id or a protocol session.
@@ -724,13 +728,13 @@ fn handle_post(
     match response {
         Some(response) => {
             let code = response["error"]["code"].as_i64();
-            let status = if matches!(
-                code,
-                Some(-32600 | -32601 | -32602 | -32020 | -32021 | -32022)
-            ) {
-                400
-            } else {
-                200
+            let status = match code {
+                // Streamable HTTP maps an unknown JSON-RPC method to the
+                // resource-style HTTP status while retaining the JSON-RPC
+                // error body for clients that inspect it.
+                Some(-32601) => 404,
+                Some(-32600 | -32602 | -32020 | -32021 | -32022) => 400,
+                _ => 200,
             };
             let bytes = serde_json::to_vec(&response)?;
             write_http(stream, status, "application/json", None, &bytes)
@@ -957,7 +961,7 @@ mod tests {
 
     #[test]
     fn modern_http_discovery_and_catalog_require_no_handshake() {
-        for method in ["ping", "server/discover", "tools/list", "resources/list"] {
+        for method in ["server/discover", "tools/list", "resources/list"] {
             let request = modern_post(method, json!({}));
             let response = http_round_trip(Arc::new(HttpState), &request);
             assert!(response.starts_with("HTTP/1.1 200"), "{response}");
@@ -971,13 +975,23 @@ mod tests {
                     crate::proxy::token_meter::TokenMeter::count_text(&value["result"].to_string())
                         < 300
                 );
+            } else if method == "resources/list" {
+                assert!(value["result"]["ttlMs"].as_u64().is_some());
+                assert_eq!(value["result"]["cacheScope"], "private");
             }
         }
     }
 
     #[test]
+    fn unknown_http_method_uses_not_found_status() {
+        let response = http_round_trip(Arc::new(HttpState), &modern_post("ping", json!({})));
+        assert!(response.starts_with("HTTP/1.1 404"), "{response}");
+        assert_eq!(response_json(&response)["error"]["code"], -32601);
+    }
+
+    #[test]
     fn retired_http_state_is_ignored_and_endpoints_are_closed() {
-        let request = String::from_utf8(modern_post("ping", json!({})))
+        let request = String::from_utf8(modern_post("server/discover", json!({})))
             .unwrap()
             .replace(
             "Host: 127.0.0.1\r\n",
@@ -1003,7 +1017,7 @@ mod tests {
         ))
         .unwrap();
         for changed in [
-            request.replace("Mcp-Method: tools/call", "Mcp-Method: ping"),
+            request.replace("Mcp-Method: tools/call", "Mcp-Method: server/discover"),
             request.replace("Mcp-Name: stats", "Mcp-Name: other"),
             request.replace("Mcp-Name: stats\r\n", ""),
             request.replace("MCP-Protocol-Version: 2026-07-28\r\n", ""),
@@ -1020,7 +1034,7 @@ mod tests {
 
     #[test]
     fn modern_http_rejects_unsupported_versions_with_supported_list() {
-        let request = String::from_utf8(modern_post("ping", json!({})))
+        let request = String::from_utf8(modern_post("server/discover", json!({})))
             .unwrap()
             .replace("2026-07-28", "2025-11-25");
         let response = http_round_trip(Arc::new(HttpState), request.as_bytes());
@@ -1034,13 +1048,13 @@ mod tests {
     #[test]
     fn modern_http_rejects_batches_and_client_responses() {
         for body in [
-            br#"[{"jsonrpc":"2.0","id":1,"method":"ping"}]"#.as_slice(),
+            br#"[{"jsonrpc":"2.0","id":1,"method":"server/discover"}]"#.as_slice(),
             br#"{"jsonrpc":"2.0","id":1,"result":{}}"#.as_slice(),
         ] {
             let response = http_round_trip(Arc::new(HttpState), &http_post_request(body, &[]));
             assert_eq!(response_json(&response)["error"]["code"], -32600);
         }
-        let batch = json!([{"jsonrpc":"2.0", "id":1, "method":"ping", "params":{"_meta":{
+        let batch = json!([{"jsonrpc":"2.0", "id":1, "method":"server/discover", "params":{"_meta":{
             "io.modelcontextprotocol/protocolVersion":"2026-07-28", "io.modelcontextprotocol/clientCapabilities":{}
         }}}]);
         let response = http_round_trip(
@@ -1049,7 +1063,7 @@ mod tests {
                 &serde_json::to_vec(&batch).unwrap(),
                 &[
                     ("MCP-Protocol-Version", "2026-07-28"),
-                    ("Mcp-Method", "ping"),
+                    ("Mcp-Method", "server/discover"),
                 ],
             ),
         );
@@ -1112,8 +1126,22 @@ mod tests {
             .recv_timeout(Duration::from_millis(400))
             .expect("disconnected request must stop before its delay completes");
         worker.join().unwrap();
-        let response = http_round_trip(Arc::new(HttpState), &modern_post("ping", json!({})));
+        let response = http_round_trip(
+            Arc::new(HttpState),
+            &modern_post("server/discover", json!({})),
+        );
         assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    }
+
+    #[test]
+    fn notification_without_routing_headers_returns_accepted() {
+        let body = br#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
+        let response = http_round_trip(Arc::new(HttpState), &http_post_request(body, &[]));
+        assert!(response.starts_with("HTTP/1.1 202"), "{response}");
+        assert!(
+            response.ends_with("\r\n\r\n"),
+            "notification response: {response:?}"
+        );
     }
 
     #[test]
@@ -1177,7 +1205,7 @@ mod tests {
 
     #[test]
     fn origin_null_and_non_json_media_type_fail_at_the_http_boundary() {
-        let body = br#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
+        let body = br#"{"jsonrpc":"2.0","id":1,"method":"server/discover"}"#;
         let null_origin = http_post_request(body, &[("Origin", "null")]);
         let response = http_round_trip(Arc::new(HttpState), &null_origin);
         assert!(response.starts_with("HTTP/1.1 403"), "{response}");
@@ -1197,7 +1225,7 @@ mod tests {
 
     #[test]
     fn foreign_origin_is_forbidden() {
-        let body = br#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
+        let body = br#"{"jsonrpc":"2.0","id":1,"method":"server/discover"}"#;
         let request = http_post_request(body, &[("Origin", "https://evil.example")]);
         let text = http_round_trip(Arc::new(HttpState), &request);
         assert!(text.contains("403"), "response={text}");

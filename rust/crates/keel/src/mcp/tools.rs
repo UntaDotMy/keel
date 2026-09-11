@@ -458,6 +458,12 @@ fn tools_list_page(tools: &[Value], next_cursor: Option<&str>) -> Value {
         "tools": tools,
         "ttlMs": tools_list_cache_ttl_ms(),
         "cacheScope": TOOLS_LIST_CACHE_SCOPE,
+        "_meta": {
+            "io.modelcontextprotocol/serverInfo": {
+                "name": super::MCP_SERVER_NAME,
+                "version": super::MCP_SERVER_VERSION,
+            }
+        },
     });
     if let Some(cursor) = next_cursor {
         page["nextCursor"] = Value::String(cursor.to_string());

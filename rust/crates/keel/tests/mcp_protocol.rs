@@ -442,18 +442,22 @@ fn mcp_serve_parse_error_returns_dash_32700() {
 }
 
 #[test]
-fn mcp_serve_ping_returns_complete_result() {
-    let claude_home = unique_temp_directory("ping");
+fn mcp_serve_discovery_returns_complete_result() {
+    let claude_home = unique_temp_directory("discovery-result");
     let mut server = McpServerProcess::spawn(&claude_home);
 
     server.send(&json!({
         "jsonrpc": "2.0",
-        "id": "ping-token",
-        "method": "ping"
+        "id": "discovery-token",
+        "method": "server/discover"
     }));
     let response = server.recv();
-    assert_eq!(response["id"], json!("ping-token"));
-    assert_eq!(response["result"], json!({"resultType": "complete"}));
+    assert_eq!(response["id"], json!("discovery-token"));
+    assert_eq!(response["result"]["resultType"], "complete");
+    assert_eq!(
+        response["result"]["supportedVersions"],
+        json!([MCP_PROTOCOL_VERSION])
+    );
 
     server.close();
     let _ = std::fs::remove_dir_all(&claude_home);
@@ -468,7 +472,7 @@ fn mcp_serve_request_with_null_id_is_rejected() {
     server.send(&json!({
         "jsonrpc": "2.0",
         "id": Value::Null,
-        "method": "ping"
+        "method": "server/discover"
     }));
     let response = server.recv();
     assert_eq!(response["jsonrpc"], "2.0");
@@ -568,7 +572,7 @@ fn mcp_serve_rejects_legacy_initialize_and_missing_metadata() {
     let mut server = McpServerProcess::spawn(&claude_home);
     server.send_raw(&json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-11-25"}}));
     assert_eq!(server.recv()["error"]["code"], -32022);
-    server.send_raw(&json!({"jsonrpc": "2.0", "id": 2, "method": "ping"}));
+    server.send_raw(&json!({"jsonrpc": "2.0", "id": 2, "method": "server/discover"}));
     assert_eq!(server.recv()["error"]["code"], -32602);
     server.close();
     let _ = std::fs::remove_dir_all(&claude_home);

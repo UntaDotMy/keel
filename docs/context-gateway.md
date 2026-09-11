@@ -28,13 +28,15 @@ as one unbounded response. `keel/discover` returns ranked compact metadata and
 `keel/activate` writes a session/workspace activation receipt. The default profile
 is `core`; `full` remains an explicit compatibility/debug choice.
 
-Every result carries the `resultType` that revision `2026-07-28` requires, and
-`tools/list` pages additionally carry the caching hints that revision requires of
-list results: `ttlMs` (fresh for as long as the cursor walk the page belongs to
-is valid, so there is one TTL notion in the system) and `cacheScope: "public"`
-(the catalog is identical for every caller; keel exposes no per-caller tool
-filtering). Both fields are inside the payload the packer measures, so a page
-that only fits without them is paginated instead of emitted over budget.
+Every modern result carries the `resultType` and server identity metadata that
+revision `2026-07-28` requires. `tools/list` pages additionally carry the
+caching hints required of list results: `ttlMs` (fresh for as long as the cursor
+walk the page belongs to is valid, so there is one TTL notion in the system)
+and `cacheScope: "private"` because cursors are bound to the authoritative
+workspace/session context. Resource list/read results carry bounded private
+cache hints as well. These fields are inside the payload each owner measures,
+so a page that only fits without them is paginated instead of emitted over
+budget.
 
 The current ratified `core` profile advertises 17 stable tools and defers 20
 specialized tools. The live catalog count and exact `o200k_base` footprint are

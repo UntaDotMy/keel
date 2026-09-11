@@ -278,6 +278,12 @@ pub(super) const JSON_RPC_INTERNAL_ERROR: i64 = -32603;
 const SYSTEM_MAP_RESOURCE_URI: &str = "keel://system-map";
 const RECALL_STATUS_RESOURCE_URI: &str = "keel://recall/status";
 
+// Listings describe a fixed workspace surface; reads return live state. Keep
+// both cacheable, but never reusable through a shared intermediary cache.
+const MCP_RESOURCE_LIST_CACHE_TTL_MS: u64 = 300_000;
+const MCP_RESOURCE_READ_CACHE_TTL_MS: u64 = 60_000;
+const MCP_RESOURCE_CACHE_SCOPE: &str = "private";
+
 /// Entry point for `keel mcp <subcommand>`.
 pub fn run_mcp_command(
     arguments: &[String],
@@ -1595,7 +1601,6 @@ fn handle_method_cancellable(
             "ttlMs": 3_600_000,
             "cacheScope": "public"
         })),
-        "ping" => Ok(json!({})),
         "tools/list" => tools::handle_tools_list_for_profile_params_with_context(
             McpCatalogProfile::from_env(),
             params,
@@ -1678,6 +1683,8 @@ fn handle_method_cancellable(
 
 fn handle_resources_list() -> Value {
     json!({
+        "ttlMs": MCP_RESOURCE_LIST_CACHE_TTL_MS,
+        "cacheScope": MCP_RESOURCE_CACHE_SCOPE,
         "resources": [
             {
                 "uri": SYSTEM_MAP_RESOURCE_URI,
@@ -1812,6 +1819,8 @@ fn handle_resources_read(
         message,
     })?;
     let mut response = json!({
+        "ttlMs": MCP_RESOURCE_READ_CACHE_TTL_MS,
+        "cacheScope": MCP_RESOURCE_CACHE_SCOPE,
         "contents": [
             {
                 "uri": uri,
@@ -1864,6 +1873,18 @@ pub(super) fn recall_status_payload() -> Result<Value, String> {
 /// the server side rather than a compatibility choice.
 pub(super) const MCP_RESULT_TYPE_COMPLETE: &str = "complete";
 
+/// Reserved result metadata key carrying the server's self-reported identity
+/// on every modern response. Keep this in the envelope owner so individual
+/// handlers cannot accidentally omit it.
+pub(super) const MCP_SERVER_INFO_META_KEY: &str = "io.modelcontextprotocol/serverInfo";
+
+fn mcp_server_info() -> Value {
+    json!({
+        "name": MCP_SERVER_NAME,
+        "version": MCP_SERVER_VERSION,
+    })
+}
+
 /// Stamp the required `resultType` onto an object result. Applied at the single
 /// envelope owner so no method can forget it. Re-stamping a result that already
 /// carries the field (a measured `tools/list` page, a `tools/call` envelope) is
@@ -1875,6 +1896,23 @@ pub(super) fn mark_result_complete(result: Value) -> Value {
                 "resultType".to_string(),
                 Value::String(MCP_RESULT_TYPE_COMPLETE.to_string()),
             );
+            let metadata = object
+                .entry("_meta".to_string())
+                .or_insert_with(|| Value::Object(serde_json::Map::new()));
+            match metadata {
+                Value::Object(metadata) => {
+                    metadata
+                        .entry(MCP_SERVER_INFO_META_KEY.to_string())
+                        .or_insert_with(mcp_server_info);
+                }
+                // A scalar `_meta` cannot carry reserved identity; replace only
+                // that malformed container while preserving valid handler metadata.
+                malformed => {
+                    let mut fallback = serde_json::Map::new();
+                    fallback.insert(MCP_SERVER_INFO_META_KEY.to_string(), mcp_server_info());
+                    *malformed = Value::Object(fallback);
+                }
+            }
             Value::Object(object)
         }
         // MCP results are objects; anything else keeps its shape rather than
@@ -1932,7 +1970,7 @@ mod tests {
 
     #[test]
     fn modern_requests_validate_metadata_and_supported_versions() {
-        let request = modern_request(json!({"jsonrpc":"2.0", "id":1, "method":"ping"}));
+        let request = modern_request(json!({"jsonrpc":"2.0", "id":1, "method":"server/discover"}));
         assert!(super::dispatch(&request).unwrap().get("result").is_some());
         for field in [
             "io.modelcontextprotocol/protocolVersion",
@@ -1995,7 +2033,7 @@ mod tests {
     fn modern_request_ids_reject_null_float_and_composite_values() {
         for id in [Value::Null, json!(1.5), json!({}), json!([])] {
             let response = super::dispatch(&modern_request(
-                json!({"jsonrpc":"2.0", "id":id, "method":"ping"}),
+                json!({"jsonrpc":"2.0", "id":id, "method":"server/discover"}),
             ))
             .unwrap();
             assert_eq!(response["error"]["code"], -32600);
@@ -2007,9 +2045,9 @@ mod tests {
         let frames = format!(
             "{}\n{}\n",
             json!([modern_request(
-                json!({"jsonrpc":"2.0", "id":1, "method":"ping"})
+                json!({"jsonrpc":"2.0", "id":1, "method":"server/discover"})
             )]),
-            json!({"jsonrpc":"2.0", "id":2, "method":"ping"})
+            json!({"jsonrpc":"2.0", "id":2, "method":"server/discover"})
         );
         let mut input = frames.as_bytes();
         let mut output = Vec::new();
@@ -2050,10 +2088,10 @@ mod tests {
         assert!(dispatch_modern(&request).is_none());
     }
 
-    /// Revision `2026-07-28` requires `resultType` on every result, so a ping
-    /// result is no longer the empty object it was under earlier revisions.
+    /// Revision `2026-07-28` retires the old `ping` method. It must now follow
+    /// the ordinary JSON-RPC method-not-found path.
     #[test]
-    fn ping_result_carries_the_required_result_type() {
+    fn retired_ping_is_not_dispatched() {
         let request = json!({
             "jsonrpc": "2.0",
             "id": "ping-1",
@@ -2061,7 +2099,29 @@ mod tests {
         });
         let response = dispatch_modern(&request).expect("response present");
         assert_eq!(response["id"], json!("ping-1"));
-        assert_eq!(response["result"], json!({"resultType": "complete"}));
+        assert_eq!(response["error"]["code"], json!(JSON_RPC_METHOD_NOT_FOUND));
+    }
+
+    #[test]
+    fn every_success_result_carries_server_identity() {
+        for (method, params) in [
+            ("server/discover", json!({})),
+            ("tools/list", json!({})),
+            ("resources/list", json!({})),
+        ] {
+            let response = dispatch_modern(&json!({
+                "jsonrpc": "2.0",
+                "id": method,
+                "method": method,
+                "params": params,
+            }))
+            .expect("response present");
+            assert_eq!(
+                response["result"]["_meta"][MCP_SERVER_INFO_META_KEY],
+                json!({"name": MCP_SERVER_NAME, "version": MCP_SERVER_VERSION}),
+                "{method} response: {response}"
+            );
+        }
     }
 
     /// The stamp is applied at the single envelope owner, so a result already
@@ -2079,6 +2139,13 @@ mod tests {
         assert_eq!(
             mark_result_complete(json!({"resultType": "complete"}))["resultType"],
             "complete"
+        );
+        let authored = mark_result_complete(json!({
+            "_meta": {MCP_SERVER_INFO_META_KEY: {"name": "custom", "version": "v"}}
+        }));
+        assert_eq!(
+            authored["_meta"][MCP_SERVER_INFO_META_KEY],
+            json!({"name": "custom", "version": "v"})
         );
     }
 
@@ -2200,6 +2267,8 @@ mod tests {
         let resources = response["result"]["resources"]
             .as_array()
             .expect("resources array");
+        assert!(response["result"]["ttlMs"].as_u64().is_some());
+        assert_eq!(response["result"]["cacheScope"], "private");
         let uris: Vec<&str> = resources
             .iter()
             .filter_map(|entry| entry.get("uri").and_then(Value::as_str))
@@ -2230,6 +2299,8 @@ mod tests {
         )
         .expect("response present");
         let result = &response["result"];
+        assert!(result["ttlMs"].as_u64().is_some());
+        assert_eq!(result["cacheScope"], "private");
         assert_eq!(result["contents"][0]["uri"], RECALL_STATUS_RESOURCE_URI);
         assert_eq!(result["context"]["source"], "mcp_tool");
         assert!(result["context"]["provenance_id"]
@@ -2364,7 +2435,7 @@ mod tests {
         let request = serde_json::to_string(&modern_request(json!({
             "jsonrpc": "2.0",
             "id": 1,
-            "method": "ping"
+            "method": "server/discover"
         })))
         .expect("serialize");
         let mut input_bytes = request.into_bytes();
@@ -2377,20 +2448,20 @@ mod tests {
         let rendered = String::from_utf8_lossy(&output);
         assert!(rendered.contains("\"id\":1"), "rendered: {rendered}");
         assert!(
-            rendered.contains("\"result\":{\"resultType\":\"complete\"}"),
+            rendered.contains("\"supportedVersions\":[\"2026-07-28\"]"),
             "rendered: {rendered}"
         );
         assert!(rendered.ends_with('\n'), "rendered: {rendered}");
     }
 
     #[test]
-    fn serve_stdio_handles_many_inflight_pings_without_shell() {
+    fn serve_stdio_handles_many_inflight_discoveries_without_shell() {
         // why: prove multi-request scheduling without spawning OS children.
-        // A previous wall-clock test used hanging `run_command` (ping/sleep) and
+        // A previous wall-clock test used hanging `run_command` (sleep) and
         // could freeze a developer machine under full suite load — do not restore it.
         let mut input_bytes = Vec::new();
         for id in 1u64..=32 {
-            let request = json!({"jsonrpc": "2.0", "id": id, "method": "ping"});
+            let request = json!({"jsonrpc": "2.0", "id": id, "method": "server/discover"});
             input_bytes
                 .extend(serde_json::to_vec(&modern_request(request.clone())).expect("serialize"));
             input_bytes.push(b'\n');
@@ -2407,7 +2478,7 @@ mod tests {
             .count();
         assert_eq!(
             response_lines, 32,
-            "expected 32 ping responses; got: {rendered}"
+            "expected 32 discovery responses; got: {rendered}"
         );
         for id in 1u64..=32 {
             assert!(
@@ -2421,7 +2492,7 @@ mod tests {
     fn duplicate_stdio_request_ids_are_rejected_without_overwriting_owner() {
         let mut cancellations = HashMap::new();
         let first = new_pending_job(
-            json!({"jsonrpc":"2.0", "id":"duplicate", "method":"ping"}),
+            json!({"jsonrpc":"2.0", "id":"duplicate", "method":"server/discover"}),
             &mut cancellations,
         )
         .expect("first request registers");
@@ -2431,7 +2502,7 @@ mod tests {
             .expect("first cancellation owner");
 
         let error = match new_pending_job(
-            json!({"jsonrpc":"2.0", "id":"duplicate", "method":"ping"}),
+            json!({"jsonrpc":"2.0", "id":"duplicate", "method":"server/discover"}),
             &mut cancellations,
         ) {
             Ok(_) => panic!("duplicate request id must fail closed"),
@@ -2475,12 +2546,8 @@ mod tests {
 
     #[test]
     fn serve_stdio_concurrent_in_process_delays_share_wall_clock() {
-        // why: prove workers overlap without OS hang children (user ban 2026-07-15).
-        // Load-proof by COMPLETION ORDER, not wall clock (fixed ceilings flake on
-        // saturated CI/dev boxes): a 300ms delay, an 80ms delay, and a ping.
-        // Serial FIFO execution renders d1, d2, ping; concurrent workers render
-        // ping, d2, d1. Asserting that order proves overlap regardless of how
-        // slow the machine is.
+        // why: completion order proves overlap without process-hang children; wall-clock ceilings flake on saturated CI.
+        // FIFO yields d1,d2,discovery; concurrent workers yield discovery,d2,d1.
         let delay = |id: u64, ms: u64| {
             json!({
                 "jsonrpc": "2.0",
@@ -2489,9 +2556,9 @@ mod tests {
                 "params": { "ms": ms }
             })
         };
-        let ping = json!({"jsonrpc": "2.0", "id": 99, "method": "ping"});
+        let discovery = json!({"jsonrpc": "2.0", "id": 99, "method": "server/discover"});
         let mut input_bytes = Vec::new();
-        for value in [delay(1, 300), delay(2, 80), ping] {
+        for value in [delay(1, 300), delay(2, 80), discovery] {
             input_bytes
                 .extend(serde_json::to_vec(&modern_request(value.clone())).expect("serialize"));
             input_bytes.push(b'\n');
@@ -2505,12 +2572,12 @@ mod tests {
         assert!(rendered.contains("\"id\":1"), "{rendered}");
         assert!(rendered.contains("\"id\":2"), "{rendered}");
         assert!(rendered.contains("\"id\":99"), "{rendered}");
-        let ping_pos = rendered.find("\"id\":99").expect("ping");
+        let discovery_pos = rendered.find("\"id\":99").expect("discovery");
         let d1 = rendered.find("\"id\":1").expect("d1");
         let d2 = rendered.find("\"id\":2").expect("d2");
         assert!(
-            ping_pos < d2 && d2 < d1,
-            "fast jobs must overtake the slow one (ping, then 80ms, then 300ms); \
+            discovery_pos < d2 && d2 < d1,
+            "fast jobs must overtake the slow one (discovery, then 80ms, then 300ms); \
              serial FIFO would render d1 first: {rendered}"
         );
     }
@@ -2719,7 +2786,7 @@ mod tests {
                 "method": "notifications/cancelled",
                 "params": { "requestId": "slow-request", "reason": "test" }
             }),
-            json!({"jsonrpc": "2.0", "id": "still-live", "method": "ping"}),
+            json!({"jsonrpc": "2.0", "id": "still-live", "method": "server/discover"}),
         ] {
             input_bytes
                 .extend(serde_json::to_vec(&modern_request(value.clone())).expect("serialize"));
