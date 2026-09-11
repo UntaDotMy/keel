@@ -233,7 +233,9 @@ change can revisit it with the same evidence.
    machine-readable and the adapter contracts are covered by
    `tests/host-adapter-contracts.test.ts`, but there is no live conformance run against
    a host that lacks the interception surface.
-8. **Performance is measured only where a benchmark reports it.** Catalog build latency is
-   recorded per profile, and per-case reduce cost in microseconds is recorded for the
-   reducers. Page-pack, serialization, dedupe, skill-routing, memory-retrieval, RawStore,
-   and HTTP overhead are not separately measured.
+8. **Performance is measured across ten declared pipeline stages.** Catalog build latency
+   is recorded per profile, and per-case reduce cost in microseconds is recorded for the
+   reducers. In addition, `keel stats latency --json` separately measures all ten §33
+   pipeline stages (catalog build, page pack, serialization, token count, reduction,
+   dedupe, skill index, skill routing, memory retrieval, RawStore locate) against declared
+   ceilings. Only transport-level HTTP socket overhead is not a separate stage.
