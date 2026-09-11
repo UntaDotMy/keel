@@ -303,7 +303,12 @@ fn pack_catalog_page(
     // Spec-default may return the complete catalog when it fits; explicit
     // level/cursor requests retain the item cap while token budget is authoritative.
     let max_items = if spec_default { 64 } else { tools_page_size() };
-    let expiry = now_unix_seconds().saturating_add(mcp_cursor_ttl_seconds());
+    // One deadline covers the whole walk: a fresh per-page deadline changes the
+    // emitted cursor's token length, which is measured as part of each candidate.
+    let expiry = match cursor {
+        Some(value) => peek_catalog_cursor(value)?.expires_at,
+        None => now_unix_seconds().saturating_add(mcp_cursor_ttl_seconds()),
+    };
     let mut page_tools = Vec::new();
     let mut offset = start;
     while offset < expected && page_tools.len() < max_items {
@@ -6344,6 +6349,20 @@ mod tests {
         assert_eq!(
             replay_a["tools"][0]["name"], replay_b["tools"][0]["name"],
             "a replayed cursor must not reshuffle the page"
+        );
+        // The emitted cursor keeps the incoming deadline, so the page cannot
+        // change shape between two calls that straddle a clock tick.
+        let incoming_expiry = peek_catalog_cursor(&cursor).expect("claims").expires_at;
+        let outgoing_expiry = peek_catalog_cursor(
+            replay_a["nextCursor"]
+                .as_str()
+                .expect("page two carries a cursor"),
+        )
+        .expect("outgoing claims")
+        .expires_at;
+        assert_eq!(
+            outgoing_expiry, incoming_expiry,
+            "a walk must keep one deadline, or replay would not be reproducible"
         );
 
         // A cursor from another session must not be accepted.
