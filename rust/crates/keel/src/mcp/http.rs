@@ -676,9 +676,8 @@ fn handle_post(
             ),
         );
     }
-    // Streamable HTTP does not define the standard routing-header
-    // requirements for notifications. They still pass the HTTP boundary
-    // checks above, but their JSON-RPC body is the complete protocol input.
+    // Notifications omit standard routing headers; HTTP boundary checks still apply.
+    // Their JSON-RPC body is the complete protocol input.
     let is_notification = value.get("id").is_none();
     if !is_notification {
         if let Err(message) = validate_routing_headers(headers, &value) {
@@ -729,9 +728,8 @@ fn handle_post(
         Some(response) => {
             let code = response["error"]["code"].as_i64();
             let status = match code {
-                // Streamable HTTP maps an unknown JSON-RPC method to the
-                // resource-style HTTP status while retaining the JSON-RPC
-                // error body for clients that inspect it.
+                // Unknown JSON-RPC methods map to the resource-style HTTP status;
+                // retain the JSON-RPC error body for clients that inspect it.
                 Some(-32601) => 404,
                 Some(-32600 | -32602 | -32020 | -32021 | -32022) => 400,
                 _ => 200,
