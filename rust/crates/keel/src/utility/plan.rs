@@ -436,6 +436,15 @@ fn run_research(flags: FlagSet, streams: &mut CommandStreams<'_>) -> u8 {
         &mut research_issues,
     );
     let accepted = research_issues.is_empty() && research_status != "insufficient";
+    // `invalid` is the honest recorded state when a submitted source is rejected.
+    let recorded_status = if accepted {
+        research_status.to_string()
+    } else if research_status == "insufficient" {
+        "insufficient".to_string()
+    } else {
+        "invalid".to_string()
+    };
+    let proposed_stage = if accepted { "researched" } else { "specified" };
     let existing_complete = read_text(&paths.research, RESEARCH_FILE)
         .ok()
         // An unreadable or absent prior artifact simply means "not complete".
@@ -454,20 +463,46 @@ fn run_research(flags: FlagSet, streams: &mut CommandStreams<'_>) -> u8 {
             streams.error
         );
     }
-    let stage = if accepted { "researched" } else { "specified" };
-    let recorded_status = if accepted {
-        research_status.to_string()
-    } else if research_status == "insufficient" {
-        "insufficient".to_string()
+    // A preserved bundle keeps its downstream statuses: nothing was rewritten, so
+    // the architecture and task evidence are still valid against it.
+    let (stage, architecture_status, tasks_status, written_research_status) = if accepted {
+        (
+            proposed_stage.to_string(),
+            "pending".to_string(),
+            "pending".to_string(),
+            recorded_status,
+        )
+    } else if existing_complete {
+        let preserved_stage = string_field(&status, "stage")
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or("researched")
+            .to_string();
+        let preserved_architecture = string_field(&status, "architectureStatus")
+            .unwrap_or("pending")
+            .to_string();
+        let preserved_tasks = string_field(&status, "tasksStatus")
+            .unwrap_or("pending")
+            .to_string();
+        (
+            preserved_stage,
+            preserved_architecture,
+            preserved_tasks,
+            "complete".to_string(),
+        )
     } else {
-        "invalid".to_string()
+        (
+            proposed_stage.to_string(),
+            "pending".to_string(),
+            "pending".to_string(),
+            recorded_status,
+        )
     };
     update_status(
         &mut status,
-        stage,
-        recorded_status,
-        "pending".to_string(),
-        "pending".to_string(),
+        &stage,
+        written_research_status,
+        architecture_status,
+        tasks_status,
         "pending",
         research_issues.clone(),
     );
@@ -3334,6 +3369,26 @@ mod tests {
             std::fs::read_to_string(&paths.architecture).expect("architecture still present"),
             architecture_before,
             "a rejected submission must not rewrite architecture.md"
+        );
+        let status: Value = serde_json::from_str(
+            &std::fs::read_to_string(&paths.status).expect("status still present"),
+        )
+        .expect("status json");
+        // The preserved bundle keeps the stage and research status it earned, so
+        // a rejected submission cannot walk a researched plan back to specified.
+        assert_eq!(
+            status["researchStatus"], "complete",
+            "a preserved bundle keeps its research status: {status}"
+        );
+        assert_eq!(
+            status["stage"], "researched",
+            "a preserved bundle keeps its stage: {status}"
+        );
+        assert!(
+            status["errors"]
+                .as_array()
+                .is_some_and(|errors| !errors.is_empty()),
+            "the rejection must still be visible to the operator: {status}"
         );
 
         let _ = std::fs::remove_dir_all(&root);

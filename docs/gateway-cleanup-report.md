@@ -38,6 +38,18 @@ None. `cargo test --locked -p keel --test doc_parity_test` keeps
 
 None.
 
+## Defects found and fixed
+
+These were found by the new tests and benchmarks, not by reading and assuming.
+
+| Defect | Evidence | Fix |
+|---|---|---|
+| Two identical cursor requests could pack a different number of tools | `catalog_cursors_reject_replay_expiry_and_foreign_identity` failed in a full run: the same cursor produced a 7-tool page and an 8-tool page | The packer takes the deadline from the incoming cursor, so one walk keeps one deadline and the emitted cursor cannot change the packing decision between calls. |
+| A rejected research submission destroyed a complete bundle | A stale source submission replaced 7 sources with 1 and reset the architecture note | Validation runs before the write; a rejected submission leaves the bundle byte-identical. |
+| A non-lock index failure whose text merely said "busy" was downgraded to a degraded lock state | `lock_classification_uses_the_typed_code_not_the_message_text` | The lock decision reads the typed SQLite error code. |
+| Freshness used one universal 90-day window for every source type | Plan §22 forbids this; `per_source_type_windows_reject_fast_moving_evidence_sooner` | Per-source-type windows: issue 7 days, repository 30 days, official-doc 90 days. |
+| The catalog ledger reported the emitted handshake cost as the full-catalog cost | The default handshake measures 671 tokens while the ledger reported 1240 | Both numbers are now labelled for what each measures. |
+
 ## Removed code
 
 Each removal below had zero non-test consumers, verified by `git grep` before deletion.
@@ -115,7 +127,7 @@ remains green (13 pass).
 | `measured_resource_cost_matches_the_bundled_tree` | `utility/skill_eval.rs` | Resource cost comes from the real files, not an assumption. |
 | `tools_list_traversal_is_complete_for_a_catalog_of_hundreds_of_tools` | `mcp/tools.rs` | A 300-tool adversarial catalog stays bounded, complete, and duplicate-free. |
 | `tools_list_reduces_representation_before_it_fails_closed` | `mcp/tools.rs` | A giant tool is emitted reduced rather than rejected, and an impossible budget fails closed with an explicit reason. |
-| `catalog_cursors_reject_replay_expiry_and_foreign_identity` | `mcp/tools.rs` | A cursor cannot be replayed into another session or a mutated catalog, and expiry is named. |
+| `catalog_cursors_reject_replay_expiry_and_foreign_identity` | `mcp/tools.rs` | A cursor cannot be replayed into another session or a mutated catalog, expiry is named, and one walk keeps one deadline so a replay is reproducible. |
 | `catalog_cursors_cannot_cross_workspaces` | `mcp/tools.rs` | §42 stop condition: a cursor cannot cross a workspace boundary. |
 | `tools_list_fails_closed_when_every_tool_is_oversized` | `mcp/tools.rs` | An all-oversized catalog fails closed once with an explicit budget error. |
 | `no_gate_status_can_be_read_as_a_pass` | `review/tests.rs` | No gate state can be aggregated into a false pass. |
