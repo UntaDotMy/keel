@@ -2400,8 +2400,13 @@ fn trusted_command_roots() -> Vec<PathBuf> {
         "/bin",
         "/usr/bin",
         "/usr/local/bin",
+        "/usr/local",
+        "/opt/homebrew",
         "/opt/homebrew/bin",
         "/snap/bin",
+        "/Library/Developer/CommandLineTools",
+        "/Applications/Xcode.app/Contents/Developer",
+        "/home/linuxbrew/.linuxbrew",
     ] {
         push_trusted_command_root(&mut roots, PathBuf::from(root));
     }
@@ -2418,12 +2423,29 @@ fn trusted_command_roots() -> Vec<PathBuf> {
     }
     if let Some(home) = env::var_os("USERPROFILE").or_else(|| env::var_os("HOME")) {
         let home = PathBuf::from(home);
-        for suffix in [".cargo/bin", ".keel", "scoop/shims", ".linuxbrew/bin"] {
+        for suffix in [
+            ".cargo",
+            ".cargo/bin",
+            ".rustup",
+            ".keel",
+            ".local",
+            ".local/bin",
+            "scoop/shims",
+            ".linuxbrew",
+            ".linuxbrew/bin",
+        ] {
             push_trusted_command_root(&mut roots, home.join(suffix));
         }
     }
     if let Some(root) = env::var_os("CARGO_HOME") {
-        push_trusted_command_root(&mut roots, PathBuf::from(root).join("bin"));
+        let root = PathBuf::from(root);
+        push_trusted_command_root(&mut roots, root.clone());
+        push_trusted_command_root(&mut roots, root.join("bin"));
+    }
+    if let Some(root) = env::var_os("RUSTUP_HOME") {
+        let root = PathBuf::from(root);
+        push_trusted_command_root(&mut roots, root.clone());
+        push_trusted_command_root(&mut roots, root.join("bin"));
     }
     if let Some(root) = env::var_os("KEEL_HOME") {
         push_trusted_command_root(&mut roots, PathBuf::from(root));
@@ -7268,12 +7290,14 @@ mod tests {
             "[bash] echo ok",
             true
         ));
-        assert!(!command_requires_confirmation(
-            "cargo",
-            &["test".to_string()],
-            "cargo test",
-            false
-        ));
+        if which::which("cargo").is_ok() {
+            assert!(!command_requires_confirmation(
+                "cargo",
+                &["test".to_string()],
+                "cargo test",
+                false
+            ));
+        }
         for (program, arguments) in [
             ("keel", vec!["install"]),
             ("keel", vec!["hook", "install"]),
