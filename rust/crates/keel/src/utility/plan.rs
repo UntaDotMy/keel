@@ -714,14 +714,18 @@ fn run_update(flags: FlagSet, streams: &mut CommandStreams<'_>) -> u8 {
     if requested_status.is_empty() {
         return command_error(streams.error, "plan update requires --status");
     }
-    let optional_flag = |name: &str| {
-        let value = flags.string_value(name).trim();
-        (!value.is_empty()).then(|| value.to_string())
-    };
-    let subtask_id = optional_flag("subtask");
-    let evidence_path = optional_flag("evidence-path");
-    let reason = optional_flag("reason");
-    let verification_timestamp = optional_flag("verification-timestamp");
+    let raw_subtask_id = flags.string_value("subtask").trim().to_string();
+    let subtask_id = (!raw_subtask_id.is_empty()).then_some(raw_subtask_id);
+    let raw_evidence_path = flags.string_value("evidence-path").trim().to_string();
+    let evidence_path = (!raw_evidence_path.is_empty()).then_some(raw_evidence_path);
+    let raw_reason = flags.string_value("reason").trim().to_string();
+    let reason = (!raw_reason.is_empty()).then_some(raw_reason);
+    let raw_verification_timestamp = flags
+        .string_value("verification-timestamp")
+        .trim()
+        .to_string();
+    let verification_timestamp =
+        (!raw_verification_timestamp.is_empty()).then_some(raw_verification_timestamp);
 
     let spec = command_or_return!(read_text(&paths.spec, SPEC_FILE), streams.error);
     let (parsed, mut issues) = validate_specification(&spec, &plan_id);
