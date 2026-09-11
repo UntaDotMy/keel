@@ -49,7 +49,7 @@ These were found by the new tests and benchmarks, not by reading and assuming.
 | A rejected research submission destroyed a complete bundle | A stale source submission replaced 7 sources with 1 and reset the architecture note | Validation runs before the write; a rejected submission leaves the bundle byte-identical. |
 | A non-lock index failure whose text merely said "busy" was downgraded to a degraded lock state | `lock_classification_uses_the_typed_code_not_the_message_text` | The lock decision reads the typed SQLite error code. |
 | Freshness used one universal 90-day window for every source type | Plan §22 forbids this; `per_source_type_windows_reject_fast_moving_evidence_sooner` | Per-source-type windows: issue 7 days, repository 30 days, official-doc 90 days. |
-| The catalog ledger reported the emitted handshake cost as the full-catalog cost | The default handshake measures 671 tokens while the ledger reported 1240 | Both numbers are now labelled for what each measures. |
+| The catalog ledger reported the emitted handshake cost as the full-catalog cost | The default handshake measures 711 tokens while the ledger reports 1240 | Both numbers are now labelled for what each measures. |
 
 ## Removed code
 
@@ -210,7 +210,7 @@ change can revisit it with the same evidence.
    `docs/plan-traceability.md` for current behavior and the remaining hosted
    release gates.
 2. **The fixed-context ledger now reports the emitted handshake separately.**
-   `mcp.tools_list.handshake` measures the dispatcher's own default response (687
+   `mcp.tools_list.handshake` measures the dispatcher's own default response (711
    tokens against the packer's 1200-token hard limit), and `mcp.tools_list.catalog`
    keeps the complete-catalog cost (1240 against its ratified 1364) as its own
    labelled row. The two are no longer conflated. Changing the ratified catalog
