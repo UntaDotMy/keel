@@ -6295,15 +6295,7 @@ mod tests {
         let foreign_session =
             crate::mcp::McpRequestContext::authoritative(Some("cursor-session-b"));
 
-        let tools: Vec<Value> = (0..40)
-            .map(|index| {
-                json!({
-                    "name": format!("cursor-tool-{index:03}"),
-                    "description": "Tool used to exercise cursor binding across pages.",
-                    "inputSchema": { "type": "object", "properties": {} }
-                })
-            })
-            .collect();
+        let tools: Vec<Value> = synthetic_paging_tools("cursor-tool");
 
         let first = pack_catalog_page(
             crate::mcp::McpCatalogProfile::Tiered,
@@ -6423,6 +6415,120 @@ mod tests {
         assert!(
             expired_result.contains("expired"),
             "expiry rejection must name the cause: {expired_result}"
+        );
+
+        match previous {
+            Some(value) => std::env::set_var("KEEL_MCP_PAGE_TOKENS", value),
+            None => std::env::remove_var("KEEL_MCP_PAGE_TOKENS"),
+        }
+    }
+
+    /// A uniformly shaped catalog large enough to require several pages at the
+    /// budgets the cursor tests use.
+    fn synthetic_paging_tools(name_prefix: &str) -> Vec<Value> {
+        (0..40)
+            .map(|index| {
+                json!({
+                    "name": format!("{name_prefix}-{index:03}"),
+                    "description": "Tool used to exercise page traversal and cursor binding.",
+                    "inputSchema": { "type": "object", "properties": {} }
+                })
+            })
+            .collect()
+    }
+
+    /// §42 stop condition: a cursor must not cross sessions OR workspaces. The
+    /// workspace half is the one identity that could otherwise be spoofed by a
+    /// client that shares a session id, so it is asserted independently.
+    #[test]
+    fn catalog_cursors_cannot_cross_workspaces() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous = std::env::var("KEEL_MCP_PAGE_TOKENS").ok();
+        std::env::set_var("KEEL_MCP_PAGE_TOKENS", "600");
+
+        let mut owner = crate::mcp::McpRequestContext::authoritative(Some("shared-session"));
+        owner.workspace_id = "C:/workspace/alpha".to_string();
+        let mut foreign = owner.clone();
+        foreign.workspace_id = "C:/workspace/beta".to_string();
+
+        let tools: Vec<Value> = synthetic_paging_tools("workspace-tool");
+
+        let first = pack_catalog_page(
+            crate::mcp::McpCatalogProfile::Tiered,
+            2,
+            600,
+            None,
+            &owner,
+            false,
+            false,
+            tools.clone(),
+        )
+        .expect("first page");
+        let cursor = first["nextCursor"]
+            .as_str()
+            .expect("a 40-tool catalog must page")
+            .to_string();
+
+        // Same session, different workspace: must be rejected.
+        let error = pack_catalog_page(
+            crate::mcp::McpCatalogProfile::Tiered,
+            2,
+            600,
+            Some(&cursor),
+            &foreign,
+            false,
+            false,
+            tools,
+        )
+        .expect_err("a cursor must not cross workspaces");
+        assert!(
+            error.contains("stale or invalid"),
+            "cross-workspace rejection must name the cause: {error}"
+        );
+
+        match previous {
+            Some(value) => std::env::set_var("KEEL_MCP_PAGE_TOKENS", value),
+            None => std::env::remove_var("KEEL_MCP_PAGE_TOKENS"),
+        }
+    }
+
+    /// §29 adversarial: a catalog where every tool is too large to represent
+    /// must fail closed once, with an explicit budget error, rather than
+    /// emitting an oversized page or looping.
+    #[test]
+    fn tools_list_fails_closed_when_every_tool_is_oversized() {
+        let _env_guard = crate::test_support::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous = std::env::var("KEEL_MCP_PAGE_TOKENS").ok();
+        std::env::set_var("KEEL_MCP_PAGE_TOKENS", "30");
+
+        let oversized: Vec<Value> = (0..5)
+            .map(|index| {
+                json!({
+                    "name": format!("oversized-{index}"),
+                    "description": "z".repeat(4_000),
+                    "inputSchema": { "type": "object", "properties": {} }
+                })
+            })
+            .collect();
+
+        let error = pack_catalog_page(
+            crate::mcp::McpCatalogProfile::Tiered,
+            2,
+            30,
+            None,
+            &crate::mcp::McpRequestContext::authoritative(None),
+            false,
+            false,
+            oversized,
+        )
+        .expect_err("an all-oversized catalog must fail closed");
+        assert!(
+            error.contains("minimum") || error.contains("configured"),
+            "the failure must name the configured budget: {error}"
         );
 
         match previous {
