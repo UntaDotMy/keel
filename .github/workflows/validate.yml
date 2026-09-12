@@ -113,6 +113,7 @@ jobs:
       - security-audit
       - context-gateway
       - host-conformance
+      - packaged-smoke
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -131,7 +132,8 @@ jobs:
               "${{ needs.validate-msrv.result }}" \
               "${{ needs.security-audit.result }}" \
               "${{ needs.context-gateway.result }}" \
-              "${{ needs.host-conformance.result }}"; do
+              "${{ needs.host-conformance.result }}" \
+              "${{ needs.packaged-smoke.result }}"; do
               if [ "$result" != "success" ]; then
                 echo "A required product-validation job concluded $result." >&2
                 exit 1
@@ -435,3 +437,58 @@ jobs:
                   raise SystemExit(f"host report has an incomplete stage chain: {report}")
           print(f"host conformance passed for {len(reports)} governed host reports")
           PY
+
+  # Build/exercise a release-binary archive on code PRs; release.yml owns the
+  # complete six-target matrix, while this gate catches packaged regressions.
+  packaged-smoke:
+    name: packaged-smoke
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          cache-on-failure: true
+          key: packaged-smoke
+      - name: Build release binary
+        run: cargo build --release --locked
+      - name: Pack and extract release bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          staging="$RUNNER_TEMP/keel-release-staging"
+          bundle="$RUNNER_TEMP/keel-release-bundle"
+          mkdir -p "$staging" "$bundle"
+          git archive --format=tar HEAD | tar -xf - -C "$staging"
+          cp target/release/keel "$staging/keel"
+          tar czf "$RUNNER_TEMP/keel-release.tar.gz" -C "$staging" .
+          tar xzf "$RUNNER_TEMP/keel-release.tar.gz" -C "$bundle"
+          test -x "$bundle/keel"
+          test -f "$bundle/.github/release-smoke.mjs"
+      - name: Install and exercise packaged MCP smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle="$RUNNER_TEMP/keel-release-bundle"
+          keel_home="$RUNNER_TEMP/keel-home/.keel"
+          mkdir -p "$keel_home"
+          "$bundle/keel" install --repo-root "$bundle" --claude-home "$keel_home" --no-purge
+          "$bundle/keel" verify --repo-root "$bundle" --claude-home "$keel_home"
+          node "$bundle/.github/release-smoke.mjs" \
+            --binary "$bundle/keel" \
+            --bundle-root "$bundle" \
+            --claude-home "$keel_home" \
+            --report "$RUNNER_TEMP/keel-packaged-smoke.json"
+      - name: Upload packaged smoke report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: packaged-mcp-smoke-pr
+          path: ${{ runner.temp }}/keel-packaged-smoke.json
+          if-no-files-found: warn
