@@ -275,6 +275,8 @@ pub fn run_learning_cycle(
 
 const CONTINUOUS_LEARNING_INTERVAL: usize = 3;
 const CONTINUOUS_LEARNING_WINDOW_DAYS: u64 = OBSERVE_WINDOW_DAYS;
+const CONTINUOUS_LEARNING_WATERMARK_FILE: &str = "last-observation-at-ms";
+const CONTINUOUS_LEARNING_COUNT_FILE: &str = "last-observation-count";
 
 /// Run learning from the PostToolUse path after a small batch of new signals.
 ///
@@ -309,7 +311,9 @@ pub fn run_continuous_learning_if_due(claude_home: &Path, log: &mut dyn std::io:
     let state_directory = claude_home.join("state").join("learning");
     // Use an event-time watermark; rolling counts decrease when old rows expire
     // and otherwise delay the next cycle until the window fills again.
-    let marker_path = state_directory.join("last-observation-at-ms");
+    let marker_path = state_directory.join(CONTINUOUS_LEARNING_WATERMARK_FILE);
+    // why: keep the status-facing count marker while the event-time watermark owns scheduling.
+    let count_marker_path = state_directory.join(CONTINUOUS_LEARNING_COUNT_FILE);
     let lock_path = state_directory.join("cycle.lock");
     let previous_observation_at_ms = fs::read_to_string(&marker_path)
         .ok()
@@ -350,6 +354,12 @@ pub fn run_continuous_learning_if_due(claude_home: &Path, log: &mut dyn std::io:
     let report = run_learning_cycle(claude_home, &CycleOptions::default(), log);
     if let Err(error) = write_text(&marker_path, &newest_observation_at_ms.to_string()) {
         let _ = writeln!(log, "keel learn: continuous marker write failed: {error}");
+    }
+    if let Err(error) = write_text(&count_marker_path, &new_observation_count.to_string()) {
+        let _ = writeln!(
+            log,
+            "keel learn: continuous count marker write failed: {error}"
+        );
     }
     drop(lock);
     if let Err(error) = fs::remove_file(&lock_path) {
@@ -825,7 +835,7 @@ fn learn_status(
     let marker_path = claude_home
         .join("state")
         .join("learning")
-        .join("last-observation-count");
+        .join(CONTINUOUS_LEARNING_COUNT_FILE);
     let last_continuous_count = fs::read_to_string(&marker_path)
         .ok()
         .and_then(|value| value.trim().parse::<usize>().ok())
@@ -1903,6 +1913,36 @@ mod tests {
                 fs::read_to_string(&marker).expect("stable continuous marker"),
                 first_marker.to_string()
             );
+        });
+    }
+
+    #[test]
+    fn continuous_cycle_persists_count_for_status_surface() {
+        isolated_home("continuous-status", |root| {
+            seed_bash("status-project", "cargo test", 3, 2);
+            let mut log = Vec::new();
+            run_continuous_learning_if_due(root, &mut log);
+
+            let count_marker = root
+                .join("state")
+                .join("learning")
+                .join(CONTINUOUS_LEARNING_COUNT_FILE);
+            assert_eq!(
+                fs::read_to_string(&count_marker)
+                    .expect("continuous count marker")
+                    .trim(),
+                "3"
+            );
+
+            let mut output = Vec::new();
+            let mut error = Vec::new();
+            assert_eq!(
+                learn_status(root, OBSERVE_WINDOW_DAYS, true, &mut output, &mut error),
+                0
+            );
+            let payload: serde_json::Value = serde_json::from_slice(&output).expect("status JSON");
+            assert_eq!(payload["continuous"]["lastObservationCount"], 3);
+            assert_eq!(payload["continuous"]["marker"], display_path(&count_marker));
         });
     }
 
