@@ -378,7 +378,7 @@ fn validate_freshness_class(check: FreshnessCheck<'_>, issues: &mut Issues) {
             }
         }
         _ => issues.push(format!(
-            "{} has unsupported freshness {:?}; expected fresh, historical, or local-only",
+            "{} has unsupported freshness {:?}; expected fresh, historical, version-bound, or local-only",
             check.id, check.freshness
         )),
     }

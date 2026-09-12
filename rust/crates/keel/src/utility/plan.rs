@@ -238,7 +238,7 @@ pub fn run_plan_command(
 fn usage(standard_error: Output<'_>) -> u8 {
     let _ = writeln!(
         standard_error,
-        "Usage: plan specify --request <text> | research --plan <id> [--claim <text> --source-url <url> --source-type <type> --retrieved-at <rfc3339> --support <text> --freshness <class> --used-by <ids>] | design --plan <id> | tasks --plan <id> | update --plan <id> --task <task-id> [--subtask <subtask-id>] --status <status> [--evidence-path <plan-relative-json> --verification-timestamp <rfc3339> | --reason <text>] | check [--rtm] --plan <id> | ready --plan <id> | done --plan <id>"
+        "Usage: plan specify --request <text> | research --plan <id> [--claim <text> --source-url <url> --source-type <type> [--source-version <version> --required-version <version>] --publication-date <date> --retrieved-at <rfc3339> --support <text> --freshness <class> --used-by <ids>] | design --plan <id> | tasks --plan <id> | update --plan <id> --task <task-id> [--subtask <subtask-id>] --status <status> [--evidence-path <plan-relative-json> --verification-timestamp <rfc3339> | --reason <text>] | check [--rtm] --plan <id> | ready --plan <id> | done --plan <id>"
     );
     1
 }

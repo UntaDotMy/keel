@@ -11,6 +11,8 @@ keel plan research --plan <plan-id> \
   --claim "Exact external fact used by the plan" \
   --source-url "https://vendor.example/current-doc" \
   --source-type official-doc \
+  --source-version "2026-09" \
+  --required-version "2026-09" \
   --retrieved-at "2026-09-09T00:00:00Z" \
   --support "Brief original paraphrase of the supporting passage" \
   --freshness fresh \
@@ -67,6 +69,12 @@ validation rather than being rewritten.
 `plan specify` publishes the initial six-file bundle by directory rename.
 `plan tasks` adds one task ticket per requirement. Later stage updates use
 Keel's atomic text writer and publish `status.json` last.
+
+For released behavior that must match an exact dependency or protocol version,
+set `--freshness version-bound` together with equal `--source-version` and
+`--required-version` values. The planner rejects missing or mismatched version
+metadata; a version-bound source must be an official document, standard, or
+repository record.
 
 ## Task tickets and evidence
 
