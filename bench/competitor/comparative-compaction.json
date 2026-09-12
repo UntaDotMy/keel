@@ -2,6 +2,7 @@
   "comparison_suite": "adaptive_compaction_and_catalog_efficiency",
   "tokenizer": "o200k_base",
   "generated_at": "2026-09-10T14:24:55Z",
+  "snapshot_scope": "Phase 12 comparison snapshot retained for historical comparison; current runtime verification is recorded separately below.",
   "pipeline_eval": {
     "command": "keel eval --json",
     "total_raw_tokens": 2218,
@@ -196,5 +197,100 @@
     ],
     "cost_accounting": "model-visible skill tokens are counted separately from local routing CPU time; bundled resource cost is measured from the real files",
     "known_limitation": "every positive fixture is modeled as needing its bundled resources, so the on-demand profile ties the eager profile on tokens here and pays extra turns"
+  },
+  "current_runtime_verification": {
+    "verified_at": "2026-09-12T00:05:22Z",
+    "source_commit": "30ecfe278b9f5e519e5bcd3a39cff9188973cb82",
+    "binary": "target/debug/keel.exe",
+    "command": "keel stats tools --benchmark --json",
+    "runs": 3,
+    "status": "passed",
+    "profiles": [
+      {
+        "profile": "full",
+        "catalog_profile": "full",
+        "schema_level": "spec-default",
+        "page_budget_tokens": 4000,
+        "complete_catalog_tokens": 2944,
+        "first_page_tokens_observed": [1483],
+        "first_page_tokens_range": [1483, 1483],
+        "pages_to_traverse": 1,
+        "advertised_tools": 37,
+        "unique_tools": 37,
+        "reachable_tools": 37,
+        "stored_tools": 37,
+        "discovery_tasks_covered": 12,
+        "discovery_task_count": 12
+      },
+      {
+        "profile": "core",
+        "catalog_profile": "core",
+        "schema_level": "spec-default",
+        "page_budget_tokens": 1200,
+        "complete_catalog_tokens": 1240,
+        "first_page_tokens_observed": [711],
+        "first_page_tokens_range": [711, 711],
+        "pages_to_traverse": 1,
+        "advertised_tools": 17,
+        "unique_tools": 17,
+        "reachable_tools": 17,
+        "stored_tools": 37,
+        "discovery_tasks_covered": 12,
+        "discovery_task_count": 12
+      },
+      {
+        "profile": "core+pagination",
+        "catalog_profile": "core",
+        "schema_level": 2,
+        "page_budget_tokens": 600,
+        "complete_catalog_tokens": 1240,
+        "first_page_tokens_observed": [582, 587, 585],
+        "first_page_tokens_range": [582, 587],
+        "pages_to_traverse": 8,
+        "advertised_tools": 17,
+        "unique_tools": 17,
+        "reachable_tools": 17,
+        "stored_tools": 37,
+        "discovery_tasks_covered": 12,
+        "discovery_task_count": 12
+      },
+      {
+        "profile": "core+progressive-discovery",
+        "catalog_profile": "core",
+        "schema_level": 0,
+        "page_budget_tokens": 1200,
+        "complete_catalog_tokens": 1240,
+        "first_page_tokens_observed": [711],
+        "first_page_tokens_range": [711, 711],
+        "pages_to_traverse": 1,
+        "advertised_tools": 17,
+        "unique_tools": 17,
+        "reachable_tools": 17,
+        "stored_tools": 37,
+        "discovery_tasks_covered": 12,
+        "discovery_task_count": 12
+      },
+      {
+        "profile": "core+progressive-discovery+compact-schemas",
+        "catalog_profile": "core",
+        "schema_level": 0,
+        "page_budget_tokens": 600,
+        "complete_catalog_tokens": 1240,
+        "first_page_tokens_observed": [598, 565, 599],
+        "first_page_tokens_range": [565, 599],
+        "pages_to_traverse": 4,
+        "advertised_tools": 17,
+        "unique_tools": 17,
+        "reachable_tools": 17,
+        "stored_tools": 37,
+        "discovery_tasks_covered": 12,
+        "discovery_task_count": 12
+      }
+    ],
+    "notes": [
+      "The modern server metadata change increased the current full and tiered measurements; the Phase 12 values above are retained rather than overwritten.",
+      "Paginated first-page token counts include the opaque cursor expiry timestamp, so three consecutive runs report observed samples and a range rather than a falsely fixed value. All samples stayed within their declared page budget.",
+      "Current complete-catalog reduction is 1704 tokens (57.88%), while the emitted default first-page reduction is 772 tokens (52.06%)."
+    ]
   }
 }

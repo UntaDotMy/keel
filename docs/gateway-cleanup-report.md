@@ -8,7 +8,7 @@ Side Effects: None.
 -->
 # Gateway Cleanup Report
 
-Scope: the production context gateway hardening on `task/production-context-gateway-v4`,
+Scope: the production context gateway hardening on `task/final-agent-operating-system`,
 compared against `origin/main`. Everything below was verified by running the named
 command, not by reading and assuming.
 
@@ -105,6 +105,26 @@ remains green (13 pass). The native `keel host conformance --json` command now
 exercises every `GOVERNED` matrix row through the shared command-proxy owner;
 it intentionally leaves partial/unsupported rows as `not_run`.
 
+## Packaged release evidence
+
+Phase 10's packaged-release obligation is **NotRun** for this source snapshot.
+
+- The local verification used `target/debug/keel.exe`; no packaged archive or
+  `target/release/keel(.exe)` smoke result was produced in this audit.
+- `.github/release-smoke.mjs` and the `release-smoke` matrix in
+  `.github/workflows/release.yml` define the six-platform packaged install and
+  MCP restart/recovery checks, but the current PR's exact-head `Validate` run is
+  not a substitute for a terminal `Release` run.
+- The release proof workflow currently snapshots `docs/benchmark-scorecard.json`.
+  That scorecard is the historical workflow suite, so a release must also carry
+  the current gateway benchmark block from
+  `bench/competitor/comparative-compaction.json` (or an equivalent generated
+  artifact) before its benchmark archive can be treated as current.
+
+Do not report the packaged-release or full-release gate as **Pass** until the
+release workflow has completed all six smoke lanes and published the required
+proof bundle.
+
 ## Updated docs
 
 - `docs/benchmark-suite.md`: records the reducer reliability metrics and the MCP catalog
@@ -114,8 +134,13 @@ it intentionally leaves partial/unsupported rows as `not_run`.
 - `bench/competitor/comparative-compaction.json`: adds the reliability metrics, the
   five-profile catalog benchmark, and the fifth skill profile.
 - `bench/competitor/skill-selection-benchmark.json` and
-  `bench/competitor/eval-compaction-report.json`: regenerated from the current binary so
-  the artifacts match the code that produces them.
+  `bench/competitor/eval-compaction-report.json`: retained Phase 12 snapshots;
+  their stable aggregate metrics still match the current `keel eval --json` and
+  `keel skill-eval --benchmark --json` output, while runtime-dependent latency
+  fields are not treated as fixed claims.
+- `bench/competitor/comparative-compaction.json`: retains the Phase 12 snapshot
+  and adds a labelled `current_runtime_verification` block from source commit
+  `30ecfe2`.
 
 ## New tests
 
