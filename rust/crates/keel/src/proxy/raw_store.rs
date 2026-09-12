@@ -705,10 +705,23 @@ impl RawStore {
         self.validate_namespace()?;
         reject_path_components(&self.root)?;
         reject_symlink(&self.root)?;
-        for day in fs::read_dir(&self.root)? {
-            let day = day?;
+        let day_entries = match fs::read_dir(&self.root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(entries),
+            Err(error) => return Err(error),
+        };
+        for day in day_entries {
+            let day = match day {
+                Ok(day) => day,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
             let day_path = day.path();
-            let day_metadata = fs::symlink_metadata(&day_path)?;
+            let day_metadata = match fs::symlink_metadata(&day_path) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
             if day_metadata.file_type().is_symlink() {
                 return Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
@@ -718,10 +731,27 @@ impl RawStore {
             if !day_metadata.file_type().is_dir() {
                 continue;
             }
-            for raw in fs::read_dir(day_path)? {
-                let raw = raw?;
+            let raw_entries = match fs::read_dir(&day_path) {
+                Ok(entries) => entries,
+                // A concurrent prune may remove an empty logical day after
+                // the root enumeration but before its entries are read.
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
+            for raw in raw_entries {
+                let raw = match raw {
+                    Ok(raw) => raw,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                    Err(error) => return Err(error),
+                };
                 let raw_path = raw.path();
-                let raw_metadata = fs::symlink_metadata(&raw_path)?;
+                let raw_metadata = match fs::symlink_metadata(&raw_path) {
+                    Ok(metadata) => metadata,
+                    // A writer can atomically rename a staging directory
+                    // between read_dir and symlink_metadata.
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                    Err(error) => return Err(error),
+                };
                 if raw_metadata.file_type().is_symlink() {
                     return Err(io::Error::new(
                         io::ErrorKind::PermissionDenied,
@@ -754,8 +784,19 @@ impl RawStore {
                         }
                         Err(error) => return Err(error),
                     }
-                } else if self.read_integrity_manifest(&raw_path)?.is_some() {
-                    self.verify_integrity(&raw_path)?;
+                } else {
+                    let has_integrity_manifest = match self.read_integrity_manifest(&raw_path) {
+                        Ok(manifest) => manifest.is_some(),
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                        Err(error) => return Err(error),
+                    };
+                    if has_integrity_manifest {
+                        match self.verify_integrity(&raw_path) {
+                            Ok(()) => {}
+                            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                            Err(error) => return Err(error),
+                        }
+                    }
                 }
                 let meta = fs::read_to_string(raw_path.join("meta.json"))
                     .ok()
@@ -795,9 +836,15 @@ impl RawStore {
             }
         }
         // why: remove empty YYYY-MM-DD shells left after entry prunes.
+        let current_day = chrono::Local::now().format("%Y-%m-%d").to_string();
         if let Ok(days) = fs::read_dir(&self.root) {
             for day in days.flatten() {
                 if !day.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    continue;
+                }
+                // Keep the active day shell so a concurrent save cannot lose
+                // its parent between create_dir_all and staging publication.
+                if day.file_name().to_string_lossy() == current_day {
                     continue;
                 }
                 if fs::read_dir(day.path())
