@@ -1,31 +1,33 @@
 <!--
-Purpose: Present the native keel product surface, install paths, and proof-first workflow.
-Caller: Contributors, operators, and AI agents onboarding to the managed skill pack.
-Dependencies: Native CLI commands, workflow docs, memory surfaces, review gates, and release artifacts.
-Main Functions: Explain what to run first, where to find each surface, and how closure proof works.
-Side Effects: Sets contributor and operator expectations for the repo-managed native experience.
+Purpose: Introduce the native keel CLI and the managed harness pack.
+Caller: Operators, contributors, and agents working from a checkout or install.
+Dependencies: The Rust CLI, the plugin manifest, and the linked operator docs.
+Main Functions: Show the shortest honest path from request to verified proof.
+Side Effects: None; this document only describes repository-owned surfaces.
 -->
 [![Validate](https://github.com/UntaDotMy/keel/actions/workflows/validate.yml/badge.svg)](https://github.com/UntaDotMy/keel/actions/workflows/validate.yml)
 
 # keel
 
-**Discipline as code for the harness.** A single Rust binary that forces the agent to read the codebase before answering, restate the iron law on every prompt, refresh a structural project map across compactions, write a working brief before non-trivial work, and run a reviewer pass before closeout. No Node, no Python, no daemon.
+**Read. Route. Prove.**
 
-## The Iron Law
+Keel is a Rust CLI and installable harness pack for evidence-backed software
+work. It provides the delivery loop, brownfield ownership trace, review gates,
+durable memory, deterministic workspace retrieval, command-output compaction,
+and an MCP server. The repository also ships host adapters, specialist skills,
+subagents, hooks, and slash commands.
 
-Four rules are restated to the agent on every prompt. You cannot skip them.
+Keel is a workflow and evidence boundary. It is not an LLM, a web researcher,
+or a replacement for the host's editor, test runner, CI service, or deployment
+system. Those systems remain responsible for the work they own; Keel records
+and checks the evidence that crosses its boundary.
 
-- **Read first.** Read SYSTEM_MAP, CLAUDE.md, the owning module, and the existing implementation. Do not propose changes against an imagined version of the file.
-- **Understand before building.** Restate what the request actually asks, confirm the user story, and research what is genuinely needed before writing code. No guessing, no assuming, no building against an imagined spec. Correct code that solved the wrong problem still gets thrown away — the research that prevents it is always cheaper than the rebuild.
-- **Invoke relevant skills.** When a skill plausibly matches, check its trigger before loading it; do not auto-load on keyword proximity. Docs-only or formatting-only changes generally need only a narrow proving check.
-- **Find the root cause.** Take the symptom as a starting point, not the spec. The real problem is usually one layer below what was asked. Trace the symptom end-to-end against the running code with file:line evidence before changing anything.
+## Install
 
-## Install in One Paste
-
-Works on macOS, Linux (incl. WSL), and Windows, on x86_64 and arm64 (Apple Silicon, Graviton, Pi). Pick the line for your shell:
+For a released binary, use the installer for the current shell:
 
 ```bash
-# macOS / Linux / WSL
+# macOS, Linux, or WSL
 curl -fsSL https://raw.githubusercontent.com/UntaDotMy/keel/main/install.sh | bash
 ```
 
@@ -34,137 +36,25 @@ curl -fsSL https://raw.githubusercontent.com/UntaDotMy/keel/main/install.sh | ba
 irm https://raw.githubusercontent.com/UntaDotMy/keel/main/install.ps1 | iex
 ```
 
-```bat
-:: Windows CMD
-curl -fsSL https://raw.githubusercontent.com/UntaDotMy/keel/main/install.cmd -o install.cmd && install.cmd && del install.cmd
-```
+The release installer downloads the matching archive, runs the native
+`keel install`, and verifies the result. A release bundle can also be extracted
+and run directly with `./keel install` or `.\keel.exe install`. A Rust
+toolchain is only needed when developing from a source checkout.
 
-The installer detects your OS and architecture, pulls the matching prebuilt binary from [GitHub Releases](https://github.com/UntaDotMy/keel/releases/latest), runs `keel install`, verifies `status`, and cleans up temp downloads only. No Rust toolchain required. Pin a release with `CLAUDE_SKILLS_VERSION=latest` (default) or `CLAUDE_SKILLS_VERSION=bootstrap-<sha>`. Published tags are `latest` or `bootstrap-*`. A `vX.Y.Z` pin is not valid until such a tag is cut.
-
-**Install layout:** keel uses a host-neutral home so every host (Claude, Codex, OpenCode, Cursor, Pi, Cowork, Command Code, Grok, Oh My Pi, ZCode, and Antigravity) shares one install. The binary, data, and state live in `%USERPROFILE%\.keel` / `~/.keel` (override with `KEEL_HOME`); the Claude-harness engagement files (skills, agents, commands, `settings.json`, user `CLAUDE.md`) stay in `%USERPROFILE%\.claude` / `~/.claude` because the harness only reads them there. A small host-neutral gateway skill is also published to `~/.agents/skills/using-keel/` for hosts that discover the shared Agent Skills location. Upgrading from an older install copies keel-owned data from `~/.claude` into `~/.keel`, removes only verified identical legacy duplicates after success, and retains mismatches for recovery. The legacy binary is removed only after the replacement is published. Managed files replaced by an install are snapshotted under `<keel-home>/backups/`. User projects, memories, histories, legacy state, and host caches are not deleted by install or update. Native `keel install` (not `install.sh`, `install.ps1`, or `install.cmd`) is the only PATH writer. It puts the default keel home on PATH for **bash**, **zsh** (including non-interactive `zsh -c` via `.zshenv`), **sh/dash** via `.profile`, **fish** (`set -x PATH` in `env.fish`), and **Windows User PATH**. Unix is rustup-shaped: `$KEEL_HOME/env` plus `$KEEL_HOME/env.fish`, with thin per-shell sources. Windows writes the user Path and broadcasts `WM_SETTINGCHANGE` so **new** consoles and **new** Windows Terminal windows see it. This window will not. Git Bash inherit is not this cycle. A custom `KEEL_HOME` skips PATH; use the explicit binary. See [PATH after install](#path-after-install) and the [compatibility matrix](docs/compatibility-matrix.md). It does **not** touch Grok session data.
-
-**Deterministic indexed retrieval.** The standard binary uses a persistent local
-workspace index for files, symbols, source chunks, paths, and verified import
-relationships. `code-search` and `SYSTEM_MAP.md` refresh the index incrementally;
-retrieval returns ranked file, symbol, line, and provenance evidence without an
-embedded model or runtime network dependency:
+Verify a fresh install in a new shell, or use the explicit installed path when
+PATH has not refreshed:
 
 ```bash
-keel code-index refresh
-keel code-index status
-keel code-search search --query "run_recall_search"
+keel status
+keel doctor
 ```
 
-## What You Get
-
-| Surface | What it gives you |
-| --- | --- |
-| Brownfield gate (unique) | `preserve-existing-flow` requires owner-path evidence before editing established source. Native review commands fail when the flow-check artifact is missing; they do not intercept or roll back the edit itself. No other harness has this. |
-| Iron-law hooks | SessionStart loads the bootstrap skill, UserPromptSubmit restates the four rules, PostToolBatch nudges a reviewer pass, PreCompact refreshes SYSTEM_MAP. |
-| Delivery loop | `keel anvil compile|cast|sieve|stamp|loop|run` — the only delivery loop. |
-| Compiled planner | `keel plan specify|research|design|tasks|check` turns a request into versioned requirements, current source-traceable research, a validated architecture, tasks, and a checked requirement traceability matrix before implementation. Brownfield pre-PR review requires the researched and designed plan. |
-| Review gates | `review pre-pr` / `review pre-commit`, review strictness via plugin `userConfig.review_strictness`, and CI-ready artifacts so non-trivial code never self-reviews. |
-| Memory | Working briefs, completion ledgers, scoped `SYSTEM_MAP.md`, and durable recovery state under `~/.keel/memories/` (with `~/.claude/memories/` legacy fallback). |
-| Command compaction | `keel run -- <cmd>` produces compact output for noisy test/build/lint/log/search commands without dropping diagnostic signal. |
-| MCP server | `keel mcp serve` (stdio) and `keel mcp serve-http` (stateless Streamable HTTP on loopback, MCP `2026-07-28`). The manifest exposes the current Rust-native tools: `recall`, `system_map`, `run_command`, `command_output`, `command_kill`, `recall_status`, `skill_route`, `skill_get`, `skill_list`, `memory_status`, `brief_list`, `brief_get`, `brief_create`, `system_map_refresh`, `context_brief`, `cli`, `anvil`, `review`, `git_workflow`, `memory`, `gain`, `raw`, `config_audit`, `skill_lint`, `telemetry`, `session`, `doctor`, `code_search`, `code_index`, `flow`, `code_graph`, `learn`, `observe`, `rewrite`, `skill_eval`, `design_intelligence`, and `stats`, plus `keel://system-map` and `keel://recall/status` resources. |
-| Slash commands | `/keel:anvil`, `/keel:review`, `/keel:recall`, `/keel:gain` — discoverable `/`-menu wrappers over implemented CLI surfaces. Shipped via the plugin manifest `commands` key. |
-| Specialist skills | Manifest-driven specialist profiles synced into `~/.claude/agent-profiles/*.toml`, invokable via the Skill tool. Run `keel skill-lint` for the live verified count. |
-
-
-### MCP across many windows (shared daemon)
-
-Running several harness windows at once means several keel processes. Two
-surfaces matter at that scale:
-
-- **One daemon instead of one server per window.** Start a single shared
-  server with `keel mcp serve-http` (Streamable HTTP on `127.0.0.1:3920`),
-  then point every host that supports HTTP MCP transports at
-  `http://127.0.0.1:3920/mcp` instead of spawning its own stdio
-  `keel mcp serve`. All windows then share one process, one recall writer
-  (WAL + 5s busy timeout keeps readers unblocked), and one background-command
-  registry.
-- **Background commands.** `run_command` accepts `wait: false` and returns a
-  `commandId`; poll with `command_output`, stop with `command_kill`. Kill
-  reaches the whole process tree (`taskkill /T` on Windows, process-group
-  kill on Unix), so stopping a shell wrapper also stops the work it spawned.
-  Note: a `commandId` lives in the process that started it — with the shared
-  HTTP daemon every window sees every command; with per-window stdio servers
-  only the owning window can poll/kill.
-
-## Use as a harness Plugin
-
-This repo ships a `.claude-plugin/plugin.json` manifest. From inside the harness:
-
-```text
-/plugin marketplace add UntaDotMy/keel
-/plugin install keel@keel
+```powershell
+& "$env:USERPROFILE\.keel\keel.exe" status
+& "$env:USERPROFILE\.keel\keel.exe" doctor
 ```
 
-That mounts the skills, agents, and hooks without running the native installer. Use the one-paste installer above when you want the full `keel` CLI for workflow, memory, and command-compaction surfaces.
-
----
-
-## Native Command Routing — Must Follow First
-
-When a native `keel` command owns the job, use it instead of recreating the behavior with raw shell, generic search, or ad hoc instructions.
-
-**Token-saving rule:** the goal is to prevent noisy raw command output from entering the harness context. Do not run a raw noisy command first and compact afterward; route through `keel run -- <command>` or rely on the hook's transparent rewrite before noisy output is produced.
-
-- **Noisy shell commands:** prefer `keel run -- <command>` for test, build, lint, log, status, search, Docker, Kubernetes, Terraform, package-manager, and CI-style commands. Use `keel rewrite "<command>"` when unsure whether a command has native compaction.
-- **Hook transparent rewrite:** the managed `PreToolUse` hook transparently rewrites supported shell commands to `keel run -- <command>`. Execution proceeds automatically with the wrapped command; no manual rerun is needed.
-- **Repository search:** prefer `keel code-search search --workspace-root "$PWD" --query "<query>"`. After a fix or implement, run `keel code-search siblings` and handle every hit. Use raw `rg`, `grep`, `find`, or `git grep` only after scoped search is insufficient, and pipe noisy raw search through `keel run --`.
-- **Existing-source edits:** run or validate Preserve Existing Flow evidence first. Use `keel flow start`, `keel flow check`, and `keel flow finish`, and record the owner path in `~/.keel/memories/workspaces/<workspace-key>/flow/flow-check.json` before patching.
-- **Commit/PR/final response text:** use `keel git-workflow commit-message --from-diff`, `keel git-workflow pr-body --from-diff`, and `keel git-workflow lint-message <file>` against the templates in `templates/commit-body.md`, `templates/pr-body.md`, `templates/final-response.md`, and `templates/review-summary.md` before submitting. Run `keel review pre-pr` and `keel review gates check` before finalizing.
-
-For agent-facing usage in markdown or JSON, run `keel hook instructions` (see also [`docs/hook-usage.md`](docs/hook-usage.md)).
-
-## Hook Transparent Rewrite Handling
-
-The managed `PreToolUse` hook transparently rewrites supported shell commands into their `keel run --` wrapped equivalents before execution. This is expected behavior, not a failure.
-
-When that happens:
-1. The hook replaces the command with the `keel run --` wrapped version.
-2. Execution proceeds automatically without manual intervention.
-3. Output enters context in compact form, with diagnostic signals preserved.
-4. The full raw stream is recorded in the local raw store for recovery via `keel raw`.
-
-## Start Here
-
-| Need | Run | Why |
-| --- | --- | --- |
-| First install, no Rust required | Download a release, extract it, run `./keel install` or `.\keel.exe install` | Installs the native binary and managed skills into the harness home. |
-| Check the install | `~/.keel/keel status` / `%USERPROFILE%\.keel\keel.exe status`, or `keel status` in a **new** bash, zsh, sh/dash, fish, or Windows console after a default-home install | Confirms the managed harness-home surface. This session, Git Bash inherit, and a custom `KEEL_HOME` are not guaranteed. |
-| Start normal work | `keel anvil compile --goal "..." --bar "<named command>" --files "<owned files csv>"` |
-| Run the delivery loop | `keel anvil run` |
-| Inspect live gates | `keel anvil sieve`, `keel anvil loop` |
-| Verify governed host paths | `keel host matrix --json`, `keel host conformance --json` | Confirms the declared host state and runs the bounded native proxy evidence chain; unsupported host rows fail closed as `not_run`. |
-| Review and close | `keel review pre-pr`, `keel memory completion-gate check` |
-
-The current operator path is `anvil compile -> anvil run -> review pre-pr`.
-
-After install, the preferred global CLI path for agents on supported operating systems is:
-
-- macOS or Linux: `~/.keel/keel`
-- Windows: `~/.keel/keel.exe`
-
-Default-home installs also put this directory on PATH for bash, zsh, sh/dash, fish, and Windows User PATH in **new** sessions. Git Bash inherit and the current Windows console are later. If this session cannot resolve `keel`, use the explicit path above.
-
-This matters because the install metadata remembers the source bundle or checkout so `status`, `update`, `verify`, `doctor`, and `menu` can still work when the installed binary is called from another project. For AI-agent or shell contexts where PATH resolution is not guaranteed, prefer the explicit installed path in the harness home root. `--repo-root <path>` is an advanced override for CI, unusual layouts, or running the binary from a different folder than the extracted release/source checkout.
-
-## Install Details
-
-After running the one-paste installer above, verify with:
-
-```bash
-~/.keel/keel status              # macOS / Linux
-& "$env:USERPROFILE\.keel\keel.exe" status   # Windows PowerShell
-```
-
-### Manual Release Install
-
-Download the archive for your OS from GitHub Releases, extract it, open a terminal in the extracted folder, then run `./keel install` or `.\keel.exe install`. Archives are named like `keel_<version>_<os>_<arch>`. The release bundle includes the native binary plus the managed skill files, so Rust/Cargo is not required for normal install.
-
-### Contributors: install from source
+For source checkout development:
 
 ```bash
 git clone https://github.com/UntaDotMy/keel.git
@@ -173,607 +63,194 @@ cargo run --bin keel -- install
 cargo run --bin keel -- status
 ```
 
-Use `--repo-root <path>` only when you intentionally run `keel install` from outside the extracted release folder or source checkout.
+The Claude Code plugin can be installed separately from the repository
+manifest:
 
-### Native Update
+```text
+/plugin marketplace add UntaDotMy/keel
+/plugin install keel@keel
+```
+
+The plugin path publishes the manifest-owned skills, agents, hooks, commands,
+and MCP registration. The native installer additionally provides the Rust CLI
+and its managed state. See the [compatibility matrix](docs/compatibility-matrix.md)
+for source, installed, hosted, and host-specific entry points.
+
+## First success path
+
+Use this sequence for a non-trivial change. Adapt the named quality command and
+owned files to the actual request.
 
 ```bash
-~/.keel/keel update
-~/.keel/keel verify
-~/.keel/keel status
-```
+# 1. Establish the scoped map and capture the request.
+keel memory scope resolve --create-missing --refresh-system-map
+keel memory working-brief write \
+  --request "Describe the requested change" \
+  --acceptance-criteria "Describe the observable proof"
 
-```powershell
-& "$env:USERPROFILE\.keel\keel.exe" update
-& "$env:USERPROFILE\.keel\keel.exe" verify
-& "$env:USERPROFILE\.keel\keel.exe" status
-```
-
-The Rust manager records a durable source in install metadata. Source installs fast-forward the recorded checkout with `--ff-only`, rebuild, and delta-sync. Packaged installs cache their verification source and `update` reruns the release installer, which verifies the downloaded archive checksum before installation. Both paths preserve unrelated harness-home files.
-
-On Windows, install replaces the running `keel.exe` synchronously via `MoveFileEx(MOVEFILE_REPLACE_EXISTING)` (the same trick rustup uses) instead of a detached `cmd /C copy`. Failures now surface as install errors instead of leaving a stale binary on disk. When the source and the deployed binary are byte-identical, the swap is skipped entirely so a no-op `update` does not touch the executable.
-
-### After Install
-
-Run these once after a fresh install or update:
-
-```bash
-~/.keel/keel verify     # confirms inventory + binary match the source
-~/.keel/keel doctor     # probes hooks end-to-end, reports any drift
-~/.keel/keel status     # installed/source version and sync state
-```
-
-Hooks are wired automatically by `install`. If you want to refresh `~/.claude/settings.json` without a full reinstall:
-
-```bash
-~/.keel/keel hook install
-```
-
-Optional environment variables:
-
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `CLAUDE_SKILLS_RAW_RETENTION_DAYS` | `14` | Days of `~/.keel/raw-output/` runs kept on disk. SessionEnd hook prunes anything older. Set to `0` to disable auto-prune. |
-| `KEEL_HOME` | `~/.keel` | Override the host-neutral keel home (binary, data, state). |
-| `CLAUDE_SKILLS_VERSION` | latest | Pin the bootstrap installer to a GitHub release tag (`latest` or `bootstrap-<sha>`). |
-
-Manual prune (any time):
-
-```bash
-~/.keel/keel raw prune --older-than 30d
-```
-
-### PATH after install
-
-Native `path.rs` (invoked by `keel install`) is the only PATH writer. The downloaders only fetch a release, run `keel install`, and print that PATH was configured by that native step.
-
-**Unix (default `~/.keel` only)**
-
-- Writes rustup-shaped `$KEEL_HOME/env` (POSIX `export PATH` behind a `case` guard) and `$KEEL_HOME/env.fish` (`set -x PATH`, not `export`, not `fish_add_path`).
-- Always creates or updates `~/.profile`, `~/.zshenv`, and `~/.config/fish/conf.d/keel.fish` to source those files.
-- Updates `~/.bashrc`, `~/.bash_profile`, and `~/.zshrc` only when those files already exist.
-- This session may not see `keel`. Open a new terminal, or run `~/.keel/keel status`.
-
-**Windows (default `%USERPROFILE%\.keel` only)**
-
-- Appends the keel home to the User Path (`HKCU\Environment\Path`) and broadcasts `Environment`.
-- No `setx`. No PowerShell profile edits.
-- Open a **new** console or a **new** Windows Terminal window, or run `%USERPROFILE%\.keel\keel.exe status`. The current window is not updated.
-
-**Not this cycle:** Git Bash inherit; the already-open Windows console / WT tab.
-
-**Proof bar:** unit tests under a temp `HOME` and a PathPersist test double. CI cheap-parse of `install.sh` / `install.ps1` / `install.cmd` is syntax only (`bash -n`, PowerShell parser, cmd readability / NUL / `@echo off`). That is not hosted fish, zsh, or CMD install proof.
-
-**Uninstall:** `keel uninstall` at the default home silently reverses those PATH files and the User Path entry, and sweeps old triplicate `export PATH="…:$PATH"` marker pairs. Stdout does not say PATH was restored. Open a new session afterward. A custom `KEEL_HOME` was never written, so uninstall does not touch user PATH files for that home.
-
-## Slash Commands
-
-When installed as a plugin, keel registers four namespaced slash commands
-(see the `commands` key in `.claude-plugin/plugin.json`). Each is a thin,
-discoverable `/`-menu wrapper over an **implemented** `keel` CLI surface
-,  none of them invoke planned-but-unimplemented commands.
-
-| Command | Wraps | Use it for |
-| --- | --- | --- |
-| `/keel:anvil [compile\|cast\|sieve\|stamp\|loop\|run\|prefix-check] <args>` | `anvil` | Only delivery loop (frozen prefix, evidence stamp, bounded loop). |
-| `/keel:review [pre-commit\|pre-pr\|gates] [base-ref]` | `review` gates | Deterministic local quality gate on the diff. |
-| `/keel:recall <terms>` | `memory recall` | FTS5 search over durable memory. |
-| `/keel:gain [since]` | `gain` | Report command-output compaction savings. |
-
-Command files live at the plugin root `commands/`. They ship through the plugin
-install path, and the native `keel install` also syncs them into
-`~/.claude/commands/` via its `sync_commands` arm (alongside `sync_skills` and
-`sync_agents`), so they work whether installed through the plugin path or the
-native installer.
-
-## Statusline (opt-in)
-
-A cross-platform statusline script renders the active model, context usage, and a
-**compaction-savings badge** sourced from `keel gain --json` (the badge
-is omitted when the binary or savings data is unavailable, and the line never
-errors). It is opt-in — keel does not overwrite your `statusLine` setting.
-
-`statusline/statusline-keel.sh` (macOS/Linux) and
-`statusline/statusline-keel.ps1` (Windows). To enable, point your
-`settings.json` `statusLine.command` at the script:
-
-```json
-{
-  "statusLine": {
-    "type": "command",
-    "command": "~/.claude/statusline-keel.sh"
-  }
-}
-```
-
-```json
-{
-  "statusLine": {
-    "type": "command",
-    "command": "powershell -NoProfile -ExecutionPolicy Bypass -File %USERPROFILE%\\.claude\\statusline-keel.ps1"
-  }
-}
-```
-
-Both scripts read the documented statusline session JSON on stdin and print one
-line such as `Opus | ctx 8% | saved 3800 tok`.
-
-
-### Cache Hygiene and Token Economy
-
-The hook lifecycle is tuned to preserve the harness's prompt cache and minimize per-prompt input tokens.
-
-- **What stays cached:** the system prompt, tool definitions, `CLAUDE.md`, and the SessionStart context are read at the cache breakpoint. Reuse costs ~10% of normal input tokens for ~5 minutes after each write.
-- **What gets paid every prompt:** `UserPromptSubmit` injects a short research-first iron-law restatement (~80 tokens) via `additionalContext`. The full bootstrap skill, Red Flags table, and skill catalog ride on `SessionStart` so per-prompt cost stays small while the iron law stays top-of-mind every turn.
-- **What gets paid every turn end / tool call:** `Stop`, `SubagentStop`, `SessionEnd`, and `PostToolUse` are silent. `PostToolBatch` injects a short reviewer-on-close reminder before the next model turn. Earlier versions of the lifecycle emitted ~50 tokens of generic closeout text on every tool call; that overhead is gone.
-- **Why this matters:** the per-prompt and per-batch hooks are sized to carry information the model genuinely uses. The system prompt, tool definitions, `CLAUDE.md`, and `SessionStart` context stay above the cache breakpoint so they reuse cleanly within the 5-minute cache window.
-
-If you customize hooks downstream and want to see exactly what the lifecycle emits for an event:
-
-```bash
-echo '{}' | ~/.keel/keel.exe hook stop
-echo '{}' | ~/.keel/keel.exe hook user-prompt-submit
-```
-
-Empty stdout means the hook is intentionally silent for that event.
-
-## Find Fast
-
-| Job | Commands |
-| --- | --- |
-| Compile a delivery job | `keel anvil compile --goal "<goal>" --bar "<quality command>" --files "<owned files csv>"` |
-| Validate/plan the delivery loop | `keel anvil run --dry-run` (`writes=0 executes=0`) |
-| Run the delivery loop and create evidence | `keel anvil run` |
-| Inspect deterministic gates | `keel anvil sieve` |
-| Compile and check a delivery plan | `keel plan specify --request "..."`, `keel plan research --plan <id> [source flags]`, complete `architecture.md`, `keel plan design --plan <id>`, `keel plan tasks --plan <id>`, `keel plan check --rtm --plan <id>`; see [Compiled Planner](docs/planner.md) |
-| Re-run bounded refinement | `keel anvil loop` |
-| Review locally | `keel review pre-commit`, `keel review pre-pr`, `keel review gates check` |
-| Preserve existing flow | `keel flow start`, `keel flow check`, `keel flow finish` |
-| Refresh code index | `keel code-index refresh`, `keel code-index status`, `keel code-index map` |
-| Locate source evidence | `keel code-search search --query "<symbol or behavior>"`, `keel code-search siblings` |
-| Compact noisy commands | `keel rewrite "cargo test --workspace"`, `keel run -- cargo test --workspace` |
-| Run safely | `keel run -- <command>`; bounded by `KEEL_COMMAND_TIMEOUT_SECS` (default 300s) and kills timed-out process trees |
-| Inspect gate blockers | `keel review pre-pr --format compact` prints each gate status, blocking flag, and exact remediation details; `--format markdown|json` preserves full findings |
-| Verify host conformance | `keel host matrix --json`, `keel host conformance --json --recovery-dir <path>` | Matrix rows are explicit; the conformance report passes only when all eight native proxy stages have evidence. It does not claim a live third-party host process. |
-| Refresh memory map | `keel memory scope resolve --create-missing --refresh-system-map` |
-| Inspect learning | `keel learn status`, `keel learn run`, `keel learn dry-run` |
-
-Anvil is the only delivery loop. It compiles a named quality bar, creates isolated
-cast workspaces, runs deterministic gates, stamps survivors when required, and
-performs bounded refinement only while gates fail. It never commits or pushes.
-Sieve failure output includes the exact gate command, exit code, status, and
-captured diagnostics. Runtime gate execution is timeout-bounded and terminates
-the process tree instead of leaving a hung cast behind.
-
-## Daily Paths
-
-### Feature or maintenance work
-
-```bash
-keel memory working-brief write --request "..." --acceptance-criteria "..."
-keel anvil compile --goal "..." --bar "cargo test --workspace --locked" --files "rust/crates/keel/src/target.rs"
-keel anvil run
-keel code-search siblings
-keel review pre-pr
-```
-
-### Bug fixing
-
-```bash
-keel flow start --target-file rust/crates/keel/src/target.rs --target-function target
+# 2. For established source, trace ownership before editing.
+keel flow start --target-file rust/crates/keel/src/target.rs \
+  --target-function target_function
 keel flow check
-keel anvil compile --goal "reproduce and fix the regression" --bar "cargo test --workspace --locked" --files "rust/crates/keel/src/target.rs"
+
+# 3. Compile and run the bounded delivery loop.
+keel anvil compile \
+  --goal "Describe the bounded change" \
+  --bar "cargo test --workspace --locked" \
+  --files "rust/crates/keel/src/target.rs"
 keel anvil run
-keel review pre-pr
+
+# 4. Reconcile the diff and close with evidence.
+keel code-search siblings
+keel review pre-pr --base-ref origin/main
+keel memory completion-gate check --brief-id <brief-id> \
+  --proof "Named verification command and result"
 ```
 
-### Test-first implementation
+For a plan-driven change, use `keel plan specify`, add current source or
+official research with `keel plan research`, complete the generated design,
+then run `keel plan design`, `keel plan tasks`, and `keel plan check --rtm`
+before Anvil. The [compiled planner guide](docs/planner.md) defines the
+artifacts and evidence contract.
+
+`flow` is the brownfield gate: it records the current owner path and the
+behavior that an edit must preserve. `code-search siblings` is the completeness
+scan after an implementation or fix. `review pre-pr` reports the local gates;
+it does not replace hosted CI or a human decision to publish or merge.
+
+## Core surfaces
+
+| Surface | Use it for | Entry points |
+| --- | --- | --- |
+| Anvil | A frozen, bounded delivery loop with named gates and evidence | `keel anvil compile`, `keel anvil run`, `keel anvil sieve`, `keel anvil loop` |
+| Planner | Versioned requirements, current research, architecture, task tickets, and RTM checks | `keel plan specify|research|design|tasks|check` |
+| Flow | Ownership and behavior trace before editing established source | `keel flow start|check|finish` |
+| Review | Diff, policy, CI, hosted, and closeout gates | `keel review pre-commit`, `keel review pre-pr`, `keel review closeout` |
+| Memory | Scoped maps, working briefs, recall, family records, and completion evidence | `keel memory ...` |
+| Retrieval | Incremental file/symbol index, ranked search, impact graph, and sibling scan | `keel code-index ...`, `keel code-search ...`, `keel code-graph ...` |
+| Command proxy | Bounded execution, compact diagnostics, raw recovery, replay, and savings reports | `keel run -- ...`, `keel rewrite`, `keel raw`, `keel replay`, `keel gain` |
+| Host checks | Declared capability rows and bounded native conformance evidence | `keel host matrix --json`, `keel host conformance --json` |
+| Manager | Install, update, status, diagnostics, verification, repair, and uninstall | `keel install`, `keel update`, `keel status`, `keel doctor`, `keel verify` |
+| MCP | Stdio or loopback Streamable HTTP access to the native tools | `keel mcp serve`, `keel mcp serve-http` |
+
+Run `keel help` for the operator surface and `keel help advanced` for the full
+command inventory. When PATH is uncertain, call the installed binary directly
+from the Keel home or use `cargo run --bin keel -- ...` in a checkout.
+
+## Command proxy and recovery
+
+Route noisy commands through the native proxy:
 
 ```bash
-keel memory working-brief write --request "..." --acceptance-criteria "failing test; fixed behavior; regression proof"
-keel anvil compile --goal "red-green-refactor delivery" --bar "cargo test --workspace --locked" --files "rust/crates/keel/src/target.rs"
-keel anvil run
-keel review pre-pr
-```
-
-### Native guidance tracks
-
-Use the installed specialist skills for brainstorming, planning, debugging, TDD,
-review, security, and platform-specific work. The Rust runtime provides the
-mechanical proof surfaces:
-
-```bash
-keel memory working-brief write --request "..." --acceptance-criteria "..."
-keel flow start --target-file <path> --target-function <name>
-keel anvil compile --goal "..." --bar "<named command>" --files "<owned files csv>"
-keel anvil run
-keel memory completion-gate check
-keel review pre-pr
-```
-
-### Continuous learning
-
-PostToolUse records behavioral observations. After every small batch of new
-signals, the learning owner runs a fail-open cycle against the same keel home,
-refreshing instincts and generated skills when trust thresholds are met.
-SessionEnd remains a final reconciliation point.
-
-```bash
-keel learn status --json
-keel learn dry-run --json
-keel learn run --json
-```
-
-Generated skills are written under the Claude engagement home as
-`skills/learned-*`; manually refined generated skills are never overwritten.
-
-## Proof Rules
-
-The pack is strict on purpose:
-
-- Work is not done just because implementation happened.
-- Work is not done because one test passed or the first rerun turned green after a fix.
-- Finished work must be re-audited against the user story, explicit tasks, and closure evidence.
-- After a fix, rerun the narrow proving checks and the sibling scan.
-- Use runtime-native inspection for CLI, hook, memory, and Anvil behavior.
-
-## Native Review and CI
-
-Review strictness is configured in `.claude-plugin/plugin.json` under `userConfig.review_strictness`. There is no separate `.claude/review.json`.
-
-- keel review pre-commit is the local pre-commit surface.
-- The flow-check artifact keeps the current owner path and validation evidence.
-
-```bash
-keel review pre-commit --format compact
-keel review pre-pr --base-ref origin/feat --format compact
-keel review gates check --surface pre-pr --base-ref origin/feat --format compact
-cargo test --workspace
-```
-
-For heavier Rust validation, run the release build after the workspace test proof.
-
-```bash
-cargo build --release --bin keel
-cargo fmt --all --check
-```
-
-```powershell
-cargo build --release --bin keel
-cargo fmt --all --check
-```
-
-Hosted PR discipline:
-
-1. Run local proof.
-2. Push one cohesive `task/<task>` work branch branched off `feat`. Parallel subtask branches use flat siblings such as `task/<task>-<subtask>`. Never delete the branch after push or merge.
-3. Open the PR against `feat`.
-4. Wait at least 20 seconds for hosted checks to appear. In checklists this is written as: wait at least 20 seconds.
-5. Watch `gh pr checks --watch`.
-6. If a hosted lane fails, inspect the failing logs, fix the root cause on the same PR, push again, and rerun `gh pr checks --watch`.
-
-Branch model: `main` ← `dev` ← `feat` ← `task/<task>` [← `task/<task>-<subtask>`]. Nested refs are not used because Git cannot store a parent ref and a child path together. Never use `feat/<task>` while bare `feat` exists. Fixes stay on the same work branch. Commit subjects: `Add : FEATURE : short information` (capitalized category, uppercase FEATURE, spaces around colons).
-
-Run `keel git-workflow preflight --repo-root . --base-ref origin/feat` before push or merge-request creation (`origin/dev` when promoting `feat` to `dev`; `origin/main` only when promoting `dev` to `main`).
-
-The validate workflow is fail-closed: repo-wide Rust proof, native review artifacts, cross-platform manager loops, and the summary must pass.
-
-## Command Output Compaction
-
-Use the Rust-native command proxy before noisy shell commands when you want `keel` to prevent raw output from entering the agent transcript. The proxy executes the command, captures stdout/stderr outside context, saves raw recovery files under `~/.claude/raw-output/YYYY-MM-DD/<raw_id>/`, runs a command-specific semantic adapter when one matches, falls back to generic high-signal compaction only when needed, preserves the original exit code, and records exact `o200k_base` before/after token savings in the native JSONL event log.
-
-```bash
+keel run -- cargo test --workspace --locked
+keel run --json -- cargo clippy --workspace --all-targets -- -D warnings
 keel rewrite "cargo test --workspace"
-keel run -- cargo test --workspace
-keel run --json -- pytest tests -q
-keel run -- git status
-keel run -- rg "CompactResult" rust
+keel raw list
 keel gain --since today
-keel gain discover --since today
-keel raw <raw_id>
+```
+
+The proxy preserves the requested command's exit status, writes local raw and
+compact artifacts, and returns a bounded summary when a semantic adapter
+matches. `raw <raw-id>` and `replay <raw-id>` recover the original local run.
+Raw output can contain secrets; it stays local and should be pruned according
+to the retention policy for the installed Keel home.
+
+## MCP and host adapters
+
+The native server supports stdio (`keel mcp serve`) and loopback Streamable HTTP
+(`keel mcp serve-http`). `keel mcp discover <capability>` exposes capability
+metadata, while the MCP tools call the same native command owners used by the
+CLI. HTTP binding and unsafe command execution are policy-controlled; consult
+the [security audit status](docs/security-audit-status.md) and
+[compatibility matrix](docs/compatibility-matrix.md) before changing deployment
+defaults.
+
+The canonical MCP tool names are `anvil`, `brief_create`, `brief_get`,
+`brief_list`, `cli`, `code_graph`, `code_index`, `code_search`,
+`command_kill`, `command_output`, `config_audit`, `context_brief`,
+`design_intelligence`, `doctor`, `gain`, `git_workflow`, `learn`, `memory`,
+`memory_status`, `observe`, `raw`, `recall`, `recall_status`, `review`,
+`rewrite`, `run_command`, `session`, `skill_eval`, `skill_get`, `skill_lint`,
+`skill_list`, `skill_route`, `stats`, `system_map`, `system_map_refresh`, and
+`telemetry`.
+
+The repository contains adapter surfaces for Claude Code, Codex CLI, OpenCode,
+Cursor, Pi Agent, Oh My Pi, Command Code, Grok CLI, ZCode, Google Antigravity,
+and Claude Desktop/Cowork. Integration depth is host-specific: some hosts
+provide lifecycle hooks, some provide MCP only, and some require a bundled
+runtime bridge. Use `keel host matrix --json` and `keel doctor` for the current
+declared and installed state; use `keel host conformance` for bounded native
+proxy evidence. A conformance result is not a claim that a live third-party
+host process was exercised.
+
+## Skills, agents, and commands
+
+The `.claude-plugin/plugin.json` manifest is the source of truth for the
+Claude Code plugin's skills, agents, hooks, commands, output styles, and MCP
+server. `using-keel` is the small bootstrap gateway; specialist skills remain
+separate so routing can stay explicit. `requesting-code-review` is retained as
+a manifest-listed compatibility alias for `reviewer`.
+
+Useful checks for the managed pack are:
+
+```bash
+keel skill-lint --repo-root .
+keel skill-eval --repo-root .
+keel config-audit --repo-root .
 keel doctor
 ```
 
-What is implemented today:
+The native install mirrors the managed files into the host locations it owns.
+It preserves unrelated user files and reports host limitations instead of
+turning an unavailable host path into a success claim.
 
-- `run` executes the requested command, saves `stdout.log`, `stderr.log`, `command.txt`, `meta.json`, and `compact.txt`, and returns compact output with `raw: keel raw <raw_id>`.
-- `run --json` returns `command`, `exit_code`, `adapter_name`, `compacted`, `raw_id`, `raw_path`, exact token fields, `summary`, `stdout`, and `stderr`.
-- `run --full` and `run --no-compact` skip adapter compaction while still passing the result through the bounded context firewall and recording recoverable raw metadata; `--adapter <name>`, `--list-adapters`, `--max-lines <n>`, and `--recovery-dir <path>` are available for debugging and control. `--errors-only` keeps only error/failure-class lines from any command (adapter-agnostic). `--ultra` uses a short failure-first body and a compact raw pointer.
-- Built-in adapters cover `tests`, `git`, `search`, `files`, `build`, `lint`, `containers`, `cloud`, `database`, `logs`, and `generic`. Test adapters handle cargo/pytest/go/JS-style failure signals; git/search/files adapters summarize diffs, matches, and large reads; the `containers` adapter compacts docker/kubectl/helm; the `cloud` adapter reduces aws/az/gcloud output (structure-only JSON, secret redaction, failure-first); the `database` adapter reduces psql/mysql/sqlite3/redis-cli/mongosh result sets (header + sampled rows, structure-only JSON, credential redaction).
-- `raw <raw_id>`, `raw --path <raw_id>`, `raw list`, `raw prune --older-than 30d`, and `replay <raw_id>` provide local recovery and retention controls.
-- `rewrite --json "<command>"` returns supported/reason/rewritten-command metadata and preserves direct argv where possible; composite shell syntax uses PowerShell on Windows and Bash on Unix, while explicit MCP scripts never change shells.
-- `hook install` writes the documented global the harness lifecycle hook set, with `PreToolUse` handling transparent rewrite via `toolInputOverride`.
-- `hook instructions` prints the agent-facing hook contract in markdown or JSON.
-- `gain` reads native compaction events from the harness home and reports observed commands, compacted/passthrough counts, exact tokens before/after/saved, savings percentage, adapter breakdowns, and top commands.
-- `gain discover` reports missed-savings opportunities: commands that ran through the proxy but were not compacted (passthrough), grouped by command with the estimated uncompacted tokens that entered context. `gain` reports what was saved; `discover` reports what was left on the table.
-- `doctor` checks the binary, raw store, event log, adapter registry, rewrite behavior, and hook/proxy setup with ok/warn/fix-style output.
-- The runtime never shells out to Go for compaction, hooks, or command dispatch.
-
-Example compact outputs:
+## Repository layout
 
 ```text
-PASS cargo test --workspace
-test result: ok. 42 passed; 0 failed; finished in 0.16s
-
-raw: keel raw 20260512-102221-303d93eb
-saved: 912 tokens exact/o200k_base (91.8%)
+rust/crates/keel          Rust CLI and native runtime surfaces
+rust/crates/keel-*        Supporting Rust crates
+.claude-plugin/           Claude Code plugin manifest
+.claude/                  Plugin-shipped agents and hook source
+commands/                 Namespaced slash-command wrappers
+<host adapter dirs>/      Codex, Cursor, Pi, OpenCode, Cowork, and other bridges
+<skill dirs>/              Specialist skill packs
+AGENTS.md                 Managed operating contract and routing index
+WORKFLOW.md               Branch and delivery rules
+docs/                      User guides, contracts, audits, and release evidence
+tests/                     Cross-host contract fixtures and tests
+bench/                     Benchmark inputs and comparison artifacts
 ```
 
-```text
-FAIL pytest tests -q
-2 failed, 143 passed in 12.8s
+## Validation and contribution
 
-failures:
-tests/api/test_users.py::test_create_user FAILED
-E AssertionError: expected 201, got 500
-tests/api/test_users.py:88
-
-raw: keel raw <raw_id>
-saved: <measured> tokens exact/o200k_base
-```
-
-Limitations and safety:
-
-- Hooks may not intercept every host or shell path; explicit `keel run -- <command>` is the reliable path.
-- Token counts use `tiktoken-rs` with the `o200k_base` tokenizer; compatibility JSON fields may still be named `estimated_tokens_*`, but their values are exact tokenizer counts.
-- Raw output stays local and is not uploaded, but it can contain secrets; manage retention with `keel raw prune --older-than 30d`.
-- Compaction redacts obvious secret-looking lines in compact output, but raw recovery preserves what the command printed locally.
-- Remote `keel mcp serve-http` stays loopback-only by default. Enabling remote binding requires `KEEL_MCP_HTTP_AUTH_TOKEN`; browser origins must be listed in `KEEL_MCP_HTTP_ALLOWED_ORIGINS`.
-- MCP `run_command` is restricted to the current workspace or `KEEL_MCP_ALLOWED_ROOTS`. Shell, interpreter, network, and destructive commands require `confirm: true` plus `KEEL_MCP_ALLOW_UNSAFE_COMMANDS=1`.
-
-### Hook path
-
-The one-line installer refreshes the managed harness hooks automatically, and `keel hook install` can refresh them manually. The hook set is written to `~/.claude/settings.json`. `PermissionRequest` keeps the `Bash` matcher because auto-approval is scoped to shell commands; `PreToolUse` uses an empty matcher so the Iron Law gate and edit-counter fire on every tool call. The other lifecycle events use native lifecycle handlers.
-
-```json
-{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"/path/to/keel\" hook pre-tool-use",
-            "statusMessage": "Checking native command compaction"
-          }
-        ]
-      }
-    ],
-    "SessionStart": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"/path/to/keel\" hook session-start",
-            "statusMessage": "Preparing native session state"
-          }
-        ]
-      }
-    ]
-  }
-}
-```
-
-The hook contract is transparent rewrite via `toolInputOverride` rather than manual rerun. The Rust hook installer manages **19 of the 33** lifecycle events in the `HOOK_EVENTS` table (`rust/crates/keel/src/hooks/claude.rs`), writing them to `~/.claude/settings.json`: `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PostToolBatch`, `PermissionRequest`, `PermissionDenied`, `Notification`, `UserPromptSubmit`, `UserPromptExpansion`, `Stop`, `StopFailure`, `SubagentStart`, `SubagentStop`, `CwdChanged`, `DirectoryAdded`, `PreCompact`, `PostCompact`, `SessionStart`, and `SessionEnd`. `PreToolUse` owns Iron Law edit-gating plus command compaction before noisy output exists. `SessionStart` delivers the bootstrap skill once per session, `UserPromptSubmit` injects a short research-first iron-law restatement per prompt, and `PostToolBatch` injects the reviewer-on-close reminder before each next turn. Fourteen events stay dispatchable but are not auto-installed: reserved no-ops (`TaskCreated`, `TaskCompleted`, `TeammateIdle`, `WorktreeCreate`, `WorktreeRemove`, `Setup`, `InstructionsLoaded`, `ConfigChange`, `Elicitation`, `ElicitationResult`, `PreModelSwitch`, `PostModelSwitch`) and structural opt-outs (`FileChanged`: matcher is the watch list; `MessageDisplay`: would rewrite on-screen text). Ad-hoc invocations like `keel hook file-changed` and `keel hook message-display` still work.
-
-## Preserve Existing Flow — The Brownfield Gate (Unique to keel)
-
-This is keel's headline differentiator: **no other harness in the market requires owner-path evidence before editing established source code.** Before an agent changes an existing file, `preserve-existing-flow` requires tracing who owns the current behavior, what the source of truth is, and what consumers depend on it. The native review gates fail review when the flow-check artifact is missing or incomplete; they do not intercept or roll back the earlier edit.
-
-Docs-only, formatting-only, generated-only, and explicitly greenfield work are exempt; established source behavior needs owner-path evidence before review gates pass.
+The standard local Rust checks are:
 
 ```bash
-keel flow start --target-file rust/crates/keel/src/commands.rs --target-function Application::run
-keel flow check
-keel flow finish
+cargo fmt --all --check
+cargo check --locked --workspace --all-targets
+cargo test --locked --workspace
+cargo clippy --locked --workspace --all-targets -- -D warnings
 ```
 
-The default artifact is `<keel-home>/memories/workspaces/<workspace-slug>/flow/flow-check.json` (typically `~/.keel/memories/...`). It records the target file or function, current behavior to preserve, entry point, producer, source of truth, storage/state/queue owner, side-effect owner, consumers, cleanup/recovery path, edit boundary, validation needed, and validation evidence. The schema is documented in `docs/flow-check-schema.md`. The `flow_check` gate in `keel review pre-commit`, `pre-pr`, and `gates check` is blocking: when the diff modifies established source and the artifact is missing, incomplete, or traces a file you are not editing, review fails and names the files. Added files, non-source extensions, and generated or vendored trees are exempt, so greenfield and docs-only work is never blocked.
+Use `keel run -- ...` when output is noisy. Run the native review gates and the
+relevant host or release checks for the surface being changed. Hosted CI remains
+the authority for hosted proof. Read [CONTRIBUTING.md](CONTRIBUTING.md),
+[WORKFLOW.md](WORKFLOW.md), and [AGENTS.md](AGENTS.md) before opening a change.
 
-## Professional Text Templates
+## Documentation map
 
-Commit bodies, PR bodies, final responses, and review summaries should stay professional, concise, and scoped to the actual diff. Central templates live in `templates/commit-body.md`, `templates/pr-body.md`, `templates/final-response.md`, and `templates/review-summary.md`.
+- [First success path](docs/first-success-path.md): one end-to-end operator run.
+- [Compatibility matrix](docs/compatibility-matrix.md): supported contexts,
+  host adapters, PATH behavior, and conformance boundaries.
+- [Compiled planner](docs/planner.md): research, design, task, and RTM contracts.
+- [Review closeout](docs/review-closeout.md): local reconciliation and evidence.
+- [Flow-check schema](docs/flow-check-schema.md): brownfield ownership artifact.
+- [Memory families](docs/memory-families-usage.md): durable memory surfaces.
+- [Release proof bundle](docs/release-proof-bundle.md): release evidence format.
+- [Security audit status](docs/security-audit-status.md): published security
+  evidence and open boundaries.
+- [Benchmark suite](docs/benchmark-suite.md): scenario and measurement contracts.
+- [Plan traceability](docs/plan-traceability.md): phase status against the
+  attached operating-system plan; it is not a completion badge.
 
-```bash
-keel git-workflow commit-message --from-diff --test-result "cargo test --workspace passed"
-keel git-workflow pr-body --from-diff --test-result "cargo test --workspace passed"
-keel git-workflow lint-message .git/COMMIT_EDITMSG
-```
-
-The linter rejects chatty language, escaped newline PR bodies, unrelated AI/the harness wording, unsupported hype wording, and first-person phrasing. `git-workflow preflight --message-file <path>` and `review pre-pr --pr-body <text>` use the same professional text rules.
-
-## Memory and System Map
-
-### Global project system map
-
-Use the scoped memory path first so the user workspace stays clean:
-
-```bash
-keel memory scope resolve --create-missing --refresh-system-map
-keel memory system-map refresh
-```
-
-The project-scoped global `SYSTEM_MAP.md` target lives under the harness-managed memory, not inside the user repo. Use `keel memory system-map refresh` when the map is missing, stale, or contradicted by current code. The generated map records visible top-level folders, files, direct child structure, applications, entrypoints, main flows, and key ownership hints. Use trace-by-function or trace-by-flow from the relevant entrypoint, mark unknown facts as `Not found`, respect generated artifact trees, handle a monorepo or multi-app workspace by app, and read the target file plus traced function or flow before editing. Modified files should keep file doc headers in the native comment style when the scoped rules require them.
-
-Useful memory commands:
-
-```bash
-keel memory scope resolve --workspace-root "$PWD" --create-missing --refresh-system-map
-keel memory working-brief write --request "Ship the native workflow layer" --constraints "no Go fallback" --acceptance-criteria "tests green"
-keel memory working-brief list
-keel memory completion-gate check --id <entry-id> --proof "tests green"
-```
-
-Advanced memory and search surfaces:
-
-- The unified `keel memory` group implements `scope`, `system-map`, `working-brief`, `completion-gate check`, and `recall`, plus family commands `research-cache` (record/lookup/stale/reward/list), `maintenance` (append-working-buffer/trim/recalibrate), `agent-registry` (register/list), `agent-packets` (build/show/list), `loop-guard` (record/check), `entity` (upsert/list/query), `graph` (add/list/query), `retrieve` (cross-family lexical search), and `status`. Family records live under the unified memory layout (see `docs/memory-families-usage.md`).
-- `memory report` (alias for `status`), `memory index` (rebuilds the recall index), and `instincts` are also implemented. `memory hook` is intentionally not a memory subcommand; it points to `keel hook ...`. `memory working-brief record-summary`, `memory completion-gate record-requirement`, and `consolidate` are also implemented.
-- Code-search details: [./docs/code-search-demo-and-gap-map.md](./docs/code-search-demo-and-gap-map.md).
-
-## Manager and Operator Surfaces
-
-The interactive manager now keeps five clear choices:
-
-- Doctor: run a report-first diagnostic pass that combines manager state with deep verification and recommends the next command to run.
-- Install: sync the managed skill pack into `~/.claude`.
-- Update: refresh an existing install from the current checkout or release source.
-- Verify: prove managed artifact health.
-- Uninstall: remove the managed pack. At the default keel home, PATH files and the Windows User Path entry are reversed silently; open a new session. Stdout does not claim PATH was restored.
-
-Release download overrides are available for controlled environments:
-
-- CLAUDE_NATIVE_CLI_RELEASE_METADATA_URL
-- CLAUDE_NATIVE_CLI_RELEASE_BASE_URL
-
-## Cross-Agent Adapters
-
-keel works with multiple AI coding agents through dedicated adapters. Each adapter injects keel's iron law, skill catalog, and operating instructions into the target agent.
-
-| Agent | Adapter Type | Mechanism | Files |
-| --- | --- | --- | --- |
-| **Claude Code** (native) | Plugin manifest + hooks | `.claude-plugin/plugin.json` + `~/.claude/settings.json` hooks — automatic via `keel install` | `.claude-plugin/` |
-| **Claude Desktop** (Cowork) | MCP server only | Desktop exposes no hook API, so `keel install` merges the `keel` MCP entry into the Desktop config and stops there. No lifecycle bridge, no Iron Law gate, no command compaction on this host. | `cowork/` |
-| **OpenCode** | TypeScript plugin | `opencode/keel.ts` — lifecycle bridge with `bridge` subcommands per event | `opencode/` |
-| **Codex CLI** | Plugin + hooks + agents + script | `codex/.codex-plugin/plugin.json` + `hooks/hooks.json` + `agents/*.toml` + `keel-codex.ts` | `codex/` |
-| **Cursor IDE** | Rules + hooks + MCP | `cursor/.cursorrules` + `cursor/hooks/` + `cursor/mcp.json`: iron law, lifecycle bridge (`keel bridge`), MCP tools. Install with `keel install --with cursor` (Cursor is not always auto-detected) | `cursor/` |
-| **Pi Agent** | Rules + hooks + MCP | `pi/AGENTS.md` + `pi/hooks.json` + `pi/keel-pi.ts` + `pi/.mcp.json`: iron law, lifecycle bridge, MCP tools | `pi/` |
-| **Command Code** (cmdc) | Mod (TypeScript) + MCP | `commandcode/keel-cmdc.ts` — lifecycle bridge (`keel bridge`) via ModApi hooks + `compaction_start`/`compaction_done` events, MCP tools via `commandcode/mcp.json` | `commandcode/` |
-| **Grok CLI** | Hooks + MCP | Reuses the managed `~/.claude/settings.json` hooks while Grok's Claude compatibility is enabled; otherwise installs `$GROK_HOME/hooks/keel.json`. Always registers `[mcp_servers.keel]` in `$GROK_HOME/config.toml` (default `~/.grok`) | `$GROK_HOME/` + `~/.claude/` |
-| **Oh My Pi** (OMP) | TypeScript extension + rules + skills + MCP | Reuses the Pi lifecycle bridge in `~/.omp/agent/extensions/`, publishes its runtime dependency, `AGENTS.md`, `mcp.json`, and the `using-keel` gateway skill | `pi/` + `_shared/` |
-| **ZCode** | Native hooks + rules + skills + MCP | Additively merges Keel into `~/.zcode/cli/config.json`, writes the global `AGENTS.md`, and publishes the gateway skill without replacing user settings | generated from the native CLI |
-| **Google Antigravity** | Plugin + hooks + rules + skills + MCP | Installs a plugin for the IDE (`~/.gemini/config/plugins/keel`) or `agy` CLI (`~/.gemini/antigravity-cli/plugins/keel`) with a camelCase hook adapter, plus a direct global `mcp_config.json` registration so MCP works before plugin enablement | `antigravity/` |
-
-Claude Code is the primary target (native hooks, full lifecycle). OpenCode, Codex, Cursor, Pi, Oh My Pi, Command Code, and Antigravity ship runtime bridges that map host events to `keel bridge`; ZCode uses native hooks plus MCP. Grok reuses those Claude hooks when compatibility is enabled and falls back to native hooks when it is disabled, so events do not fire twice. Cowork is MCP-only because Claude Desktop exposes no hook API. Cursor often needs `--with cursor` because desktop IDEs are not always detected.
-
-`keel install` auto-detects which AI CLIs are installed (via config dirs, env vars, and binary-on-PATH) and wires only the matching adapters. Use `--with <name>` to force an adapter even when not detected (e.g. `--with grok,cursor`), and `--without <name>` to skip a detected adapter (e.g. `--without opencode`). Names: `opencode`, `codex`, `pi`, `cursor`, `cowork`, `commandcode`, `grok`, `omp`, `zcode`, `antigravity`. Grok receives one effective hook source plus `[mcp_servers.keel]` in `$GROK_HOME/config.toml` (default `~/.grok/config.toml`). Manual file copying is no longer required.
-
-## Universal 5-Role Multi-Agent Architecture
-
-For non-trivial tasks across all supported adapters (Codex, Antigravity, Claude Code, OpenCode, Pi, Cursor), Keel structures multi-agent orchestration into five coordinated roles:
-
-1. **`planner`** (read-only, high reasoning): Establishes project context, identifies existing behavior to preserve, and selects best-fit skills. Follows the 6-step human design workflow for interface requests.
-2. **`code_explorer`** (read-only, fast iteration): Traces routes, symbols, callers and callees, API schemas, state owners, and test commands from the Planner handoff without broad full-tree scans.
-3. **Parent Implementation Contract**: The orchestrating parent validates handoffs and specifies goals, boundaries, exact files, disjoint workstreams, and validation commands before dispatching workers.
-4. **`implementer`** (workspace write, token-saving): Parallel instances with disjoint file ownership sets. Halts with `BLOCKED` if an ownership conflict arises.
-5. **`reviewer`** (read-only, deep reasoning gate): Evaluates the combined patch only after the parent integration check passes. Enforces causal defect proof chains (`trigger -> execution path -> violated contract -> observable result`).
-6. **`pusher`** (workspace write, authorization gate): Active only after final Reviewer pass, consolidated change summary, and an explicit affirmative reply to the standalone prompt `Commit and push? (yes/no)`.
-
-### Model Selection
-
-Model choice and reasoning effort belong to the active host and workspace defaults; shared documentation does not pin provider or model names.
-Keel does **not** route models at runtime. See [docs/model-tiers.md](./docs/model-tiers.md) for non-binding frontier/cheap/mid guidance and current provider IDs. Anvil lock keeps `frontier` / `cheap` / `mid`; host CLIs and workspace defaults choose concrete IDs. For multi-agent workflows, map roles to model tiers based on the active provider. In Google Antigravity, `/boost` triggers the multi-agent reasoning pipeline:
-
-| Provider | Light Tasks / Implementers / Explorers | Critics / Architecture / Planners |
-| --- | --- | --- |
-| Google (Antigravity `/boost`) | `gemini-3.7-flash` (high) | `gemini-pro-thinking` (AGI / deep reasoning mode) / `gemini-3.8-flash` (high) |
-| OpenAI (Codex) | `gpt-5.6-luna` (max) | `gpt-6-Astra` (low) |
-| Anthropic (Claude Code) | `claude-haiku-4-5` | `claude-sonnet-5` / `claude-opus-5` / `claude-fable-5-1` |
-| Z.ai | `glm-5.3-flash` | `glm-5.3` |
-
-
-### ClarifyPacket (SUPERHARNESS P1)
-
-When the gate is armed, Keel refuses to write `anvil.lock.json` until `clarify.packet.json` is present, valid, not `hard_block`, drift-clean, and `locked_brief.goal` matches the compile/run `--goal`. Status token: `CLARIFY_BLOCKED`.
-
-- Arm: `keel anvil compile --clarify-required …` (or `anvil run --clarify-required …`), or place `clarify.required` / an existing packet in the anvil bank.
-- AppSec: packet and sentinel must be regular files inside the anvil bank (symlink / out-of-bank refused). Answer text is untrusted; secret-shaped values are redacted on refuse Display paths. Prefer env names in `locked_brief`; do not paste keys/tokens/PEM.
-- Orchestrator owns AskUser adapters; subagents escalate only. Keel does not shell-interpolate answers.
-- Model tiers: [docs/model-tiers.md](./docs/model-tiers.md) (Keel does **not** route models). Skills audit: [docs/skills-audit-p1.md](./docs/skills-audit-p1.md).
-
-### Human 6-Step Design Workflow & Appllama Native Intelligence
-
-For interface design and UI implementation:
-1. **Idea and Concept Definition**: Problem statement, core value proposition, reference benchmarks from top-grossing applications.
-2. **User Flow & Navigation Architecture**: Strict navigation semantics (`push` for hierarchy, `replace` for peer tabs, bottom sheet or drawer for contextual tasks, modal for destructive decision gates).
-3. **Wireframe & Information Architecture**: Content budgeting, responsive grids, visual hierarchy, breakpoint behaviors.
-4. **First Draft & Semantic Design Tokens**: Zero raw hex codes and zero hardcoded numeric literals. Strict semantic tokens with WCAG 2.2 AA contrast verification.
-5. **Iterations & Motion Polish**: Native-thread animations (60/120fps), declarative animation worklets, and frame-by-frame gesture scrubbing.
-6. **Final Production Design**: Tested on real devices, responsive across screen densities, accessible, and maintainable.
-
-## Managed Agent Profiles
-
-The managed install mirrors the specialist lanes (one profile per specialist, roster asserted by `tests/doc_parity_test.rs`) into `~/.claude/agent-profiles/*.toml`:
-
-`api-contract-design`, `authentication-and-identity`, `backend-and-data-architecture`, `cloud-and-devops-expert`, `cloud-cost-and-finops`, `dart-and-flutter-expert`, `data-and-ml-engineering`, `dependency-and-supply-chain`, `git-expert`, `internationalization-and-localization`, `memory-status-reporter`, `mobile-development-life-cycle`, `observability-and-incident-response`, `postgres-migration-safety`, `preserve-existing-flow`, `qa-and-automation-engineer`, `react-performance-audit`, `reviewer`, `security-and-compliance-auditor`, `software-development-life-cycle`, `stripe-integration`, `ui-design-systems-and-responsive-interfaces`, `ux-research-and-experience-strategy`, `web-development-life-cycle`, and `websocket-realtime-design`.
-
-Routine work stays in the main lane. Specialist profiles are for the moments where domain ownership or independent verification is worth the extra context.
-
-## Native Command Surface
-
-The native CLI is the primary surface. The unified `memory` family verbs (`research-cache|maintenance|agent-registry|agent-packets|loop-guard|entity|graph|retrieve|status|instincts`) all work today, as do `memory report` (alias for `status`) and `memory index`. `memory working-brief record-summary`, `memory completion-gate record-requirement`, and `consolidate` are also implemented. `memory hook` points to `keel hook ...`. The full working surface is listed above and in `keel help advanced`.
-
-## Documentation Map
-
-| Topic | Link |
-| --- | --- |
-| First Success Path | [./docs/first-success-path.md](./docs/first-success-path.md) |
-| Review closeout | [./docs/review-closeout.md](./docs/review-closeout.md) |
-| Workflow rules | [./WORKFLOW.md](./WORKFLOW.md) |
-| Agent rules | [./AGENTS.md](./AGENTS.md) |
-| Compatibility matrix | [./docs/compatibility-matrix.md](./docs/compatibility-matrix.md) |
-| Model tiers (provider-aware; no runtime routing) | [./docs/model-tiers.md](./docs/model-tiers.md) |
-| Skills audit (P1 keep/merge/retire) | [./docs/skills-audit-p1.md](./docs/skills-audit-p1.md) |
-| ClarifyPacket (gated anvil lock write) | `clarify.packet.json` under `<keel-home>/memories/workspaces/<slug>/anvil/`; enforced before **every** lock write (`anvil compile` and `anvil run` auto-compile). Arm with `--clarify-required`, `clarify.required`, or an existing packet. See `running-anvil`, [compatibility-matrix](./docs/compatibility-matrix.md), and [RUNBOOK](./docs/RUNBOOK.md) § ClarifyPacket |
-| Why `keel` over native harness, runtime-shell comparator, and workflow-teaching comparator | [./docs/why-keel.md](./docs/why-keel.md) |
-| Competitive gap closure (named comparators + remaining work) | [./docs/competitive-gap-closure.md](./docs/competitive-gap-closure.md) |
-| Release notes | [./docs/release-notes.md](./docs/release-notes.md) |
-| Release proof bundle | [./docs/release-proof-bundle.md](./docs/release-proof-bundle.md) |
-| Audit bundle format | [./docs/audit-bundle-format.md](./docs/audit-bundle-format.md) |
-| Security audit status | [./docs/security-audit-status.md](./docs/security-audit-status.md) |
-| Benchmark suite | [./docs/benchmark-suite.md](./docs/benchmark-suite.md) |
-| Shared benchmark harness | [./docs/shared-benchmark-harness.md](./docs/shared-benchmark-harness.md), the shared benchmark harness contract and common evidence format |
-| Benchmark comparison scorecard | [./docs/benchmark-comparison-scorecard.md](./docs/benchmark-comparison-scorecard.md) |
-| Memory families inventory | [./docs/memory-families-usage.md](./docs/memory-families-usage.md) |
-| Memory recall audit (historical) | [./docs/audits/2026-04-11-memory-recall-benchmark/audit-summary.md](./docs/audits/2026-04-11-memory-recall-benchmark/audit-summary.md) |
-| Benchmark posture audit (historical) | [./docs/audits/2026-04-09-benchmark-posture/audit-summary.md](./docs/audits/2026-04-09-benchmark-posture/audit-summary.md) |
-| Competitive apples-to-apples audit (historical) | [./docs/audits/2026-04-09-competitive-apples-to-apples/audit-summary.md](./docs/audits/2026-04-09-competitive-apples-to-apples/audit-summary.md) |
-| Demo: PR-fix flow | [./docs/demo-pr-fix-flow.md](./docs/demo-pr-fix-flow.md) |
-| Demo: branch-closeout flow | [./docs/demo-branch-closeout-flow.md](./docs/demo-branch-closeout-flow.md) |
-| Runtime guardrails and memory protocols | [./docs/runtime-guardrails-and-memory-protocols.md](./docs/runtime-guardrails-and-memory-protocols.md) |
-| Open-source memory patterns | [./docs/open-source-memory-patterns.md](./docs/open-source-memory-patterns.md) |
-| Context efficiency playbook | [./docs/context-efficiency-playbook.md](./docs/context-efficiency-playbook.md) |
-| Final operating-system plan traceability | [./docs/plan-traceability.md](./docs/plan-traceability.md). Phase-by-phase evidence and explicit gaps against the attached production plan |
-
-Public claims stay source-backed. A durable audit artifact required before numeric security or governance claims are upgraded, and [./docs/security-audit-status.md](./docs/security-audit-status.md) defines the boundary between published artifacts and unproven claims. [./docs/release-proof-bundle.md](./docs/release-proof-bundle.md) is the durable proof artifact published with notable releases.
-
-The attached Final Agent Operating System plan is an implementation target, not
-a completion badge. The current repository ships substantial slices of it, but
-the modern-MCP-only target remains open; see the [plan traceability map](./docs/plan-traceability.md)
-for the evidence-backed phase and definition-of-done status.
-
-[./docs/audits/2026-04-09-competitive-apples-to-apples/audit-summary.md](./docs/audits/2026-04-09-competitive-apples-to-apples/audit-summary.md) is the current published source-backed competitive audit bundle for workflow, memory, and indexing peers.
-
-The benchmark docs track real scenario evidence across 8 flows, including greenfield delivery, stateful fixes, hosted rescue, branch closeout, closure proof, Windows validation, docs governance, and regression hardening.
-
-## Repository Layout
-
-```text
-keel/
-|- rust/crates/keel          Native install, update, hook, review, flow, and compaction surfaces
-|- rust/crates/keel-*        Rust support crates for flow, platform, release assets, and text linting
-|- cowork/                    Claude Desktop (Cowork) reference surface; native install wires MCP only
-|- opencode/                 OpenCode adapter (TypeScript plugin with lifecycle bridge)
-|- codex/                    Codex CLI adapter (plugin + hooks + TypeScript bridge)
-|- cursor/                   Cursor IDE adapter (rules + hooks + MCP)
-|- pi/                       Pi Agent adapter (static AGENTS.md + MCP config)
-|- .claude-plugin/           Native Claude Code plugin manifest
-|- .github/workflows/        Native Rust CI and release pipelines
-|- .claude/agents/           Plugin-shipped subagent definitions
-|- .claude/hooks.json        Hook wiring rendered by `keel hook install`
-|- AGENTS.md                 Agent operating doctrine
-|- WORKFLOW.md               Branch and completion rules
-```
-
-## Summary
-
-Install `keel` when the harness needs a clearer path from request to proof:
-
-- Start delivery with Anvil.
-- Keep durable state in working briefs, memory, and flow evidence.
-- Compact noisy command output before it fills context.
-- Prove the branch locally and on hosted checks.
-- Finish only when the evidence says the scope is actually done.
-
-This repository is licensed under the MIT License. See [`LICENSE`](LICENSE).
+Keel is licensed under the MIT License. See [LICENSE](LICENSE).
